@@ -3,15 +3,18 @@
 use cobre_core::{Stage, temporal::StageLagTransition};
 
 use crate::{
-    indexer::StageIndexer, lp_builder::StageTemplates, scaling_report::ScalingReport,
+    indexer::{StageIndexer, StateLayout},
+    lp_builder::StageTemplates,
+    scaling_report::ScalingReport,
     simulation::EntityCounts,
 };
 
 /// All per-stage and stage-indexed data owned by [`super::StudySetup`].
 ///
-/// Groups the eight fields that describe the study's temporal and stage
-/// structure. Constructed once during [`super::StudySetup::from_broadcast_params`]
-/// and borrowed for hot-path context construction.
+/// Groups the per-stage and stage-indexed fields that describe the study's
+/// temporal and stage structure. Constructed once during
+/// [`super::StudySetup::from_broadcast_params`] and borrowed for hot-path
+/// context construction.
 #[derive(Debug)]
 pub struct StageData {
     /// LP skeleton templates, one per study stage.
@@ -19,6 +22,20 @@ pub struct StageData {
 
     /// Stage indexer: LP column/row offsets and equipment counts.
     pub(crate) indexer: StageIndexer,
+
+    /// Canonical stage-invariant state-vector layout (role (a)): the state /
+    /// cut column ranges and the two layout-derived caches
+    /// (`state_to_lp_column_map`, `nonzero_state_indices`).
+    ///
+    /// Built once in [`super::build_wired_indexer`] from the study dimensions and
+    /// per-hydro effective lag counts. This is the single role-(a) owner: it is
+    /// borrowed into `TrainingContext::state` and resolves every role-(a) read on
+    /// the hot path — the state-fixing patch
+    /// (`PatchBuffer::fill_col_state_patches`), the cut-row build and dual
+    /// extraction (`cut::row`, `cut::dcs`, the delta-cut and `duals_extraction`
+    /// consumers), and the simulation extraction's state columns.
+    /// [`Self::indexer`] carries role-(b) geometry only.
+    pub(crate) state: StateLayout,
 
     /// Study stages (id >= 0) in index order.
     ///

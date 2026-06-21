@@ -78,7 +78,7 @@ fn fill_load_balance_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    let grid = layout.indexer.block_grid();
+    let grid = layout.block_grid();
     for (b_idx, bus) in ctx.buses.iter().enumerate() {
         let mean_mw = ctx
             .load_models
@@ -215,7 +215,7 @@ fn fill_operational_violation_rows(
     //   max-outflow   (<=): LHS - sigma <= max_outflow_m3s
     //   min-turbine   (>=): LHS + sigma >= min_turbined_m3s
     //   min-generation(>=): LHS + sigma >= min_generation_mw
-    let grid = layout.indexer.block_grid();
+    let grid = layout.block_grid();
     for h_idx in 0..layout.n_h {
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         let families = [
@@ -300,10 +300,7 @@ pub(super) fn fill_anticipated_state_out_def_rows(
     let n_stages = ctx.resolved.bounds.n_stages();
     let mut active_pos: usize = 0;
     for local_idx in 0..ctx.n_anticipated {
-        if !layout
-            .indexer
-            .is_anticipated_decision_active(local_idx, stage_idx, n_stages)
-        {
+        if !layout.is_anticipated_decision_active(local_idx, stage_idx, n_stages) {
             continue;
         }
         let row = layout.anticipated.row_anticipated_state_out_def_start + active_pos;

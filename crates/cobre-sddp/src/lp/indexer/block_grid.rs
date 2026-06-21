@@ -240,11 +240,15 @@ mod tests {
     // so addresses computed through it match the indexer's own layout.
     #[test]
     fn block_grid_from_indexer_carries_strides() {
-        use crate::indexer::test_fixtures::{eq, fpha};
+        use crate::indexer::test_fixtures::{eq, evap, fpha};
         // N=1 hydro, L=0, T=2 thermals, L_n=1 line, B=2 buses, K=2 blocks; the
         // `eq` fixture sets max_deficit_segments = 1.
         let counts = eq(1, 0, 2, 1, 2, 2, false);
-        let indexer = StageIndexer::with_equipment(&counts, &fpha(vec![], vec![]));
+        let indexer = StageIndexer::with_equipment_and_evaporation(
+            &counts,
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
         let grid = indexer.block_grid();
         // The grid carries the indexer's stride constants verbatim.
         assert_eq!(grid.n_blks, indexer.n_blks);

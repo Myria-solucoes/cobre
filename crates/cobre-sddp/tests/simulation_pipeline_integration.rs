@@ -32,7 +32,7 @@ use cobre_sddp::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     horizon_mode::HorizonMode,
-    indexer::StageIndexer,
+    indexer::{StageIndexer, StateLayout},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
     simulation::{EntityCounts, SimulationConfig, SimulationOutputSpec},
@@ -40,6 +40,54 @@ use cobre_sddp::{
 };
 
 // ── Stub communicator ────────────────────────────────────────────────────────
+
+/// Build the role-(a) [`StateLayout`] whose `storage_in` / `inflow_lags` /
+/// `anticipated_state` column starts match `indexer`'s identical fields.
+///
+/// Mirrors the gated `indexer::test_fixtures::state_layout_for` body via the
+/// public [`StateLayout::new`] constructor, so this external test crate (which
+/// does not see the parent crate's `#[cfg(test)]` surface) resolves byte-identical
+/// patch columns on the default feature set.
+fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
+    StateLayout::new(
+        hydro_count,
+        max_par_order,
+        0,
+        0,
+        vec![],
+        &vec![max_par_order; hydro_count],
+    )
+}
+
+/// Build a role-(b) `StageIndexer` geometry descriptor (no equipment, no
+/// anticipated thermals) via the public `with_equipment_and_evaporation`
+/// constructor, for the `TrainingContext.indexer` slot.
+fn geom(_hydro_count: usize, _max_par_order: usize) -> StageIndexer {
+    StageIndexer::with_equipment_and_evaporation(
+        &cobre_sddp::indexer::EquipmentCounts {
+            hydro_count: 0,
+            max_par_order: 0,
+            n_thermals: 0,
+            n_lines: 0,
+            n_buses: 0,
+            n_blks: 0,
+            has_inflow_penalty: false,
+            max_deficit_segments: 0,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
+            n_pumping: 0,
+        },
+        &cobre_sddp::indexer::FphaColumnLayout {
+            hydro_indices: vec![],
+            planes_per_hydro: vec![],
+        },
+        &cobre_sddp::indexer::EvapConfig {
+            hydro_indices: vec![],
+        },
+    )
+}
 
 /// Single-rank stub communicator for pipeline tests.
 struct StubComm {
@@ -514,21 +562,14 @@ fn simulate_single_rank_4_scenarios_produces_4_results() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    }; // N=1, L=0; theta=2
+    let indexer = geom(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
     let config = SimulationConfig {
         n_scenarios: 4,
         io_channel_capacity: 16,
     };
+    let state = state_layout_for(1, 0);
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
     };
@@ -569,6 +610,7 @@ fn simulate_single_rank_4_scenarios_produces_4_results() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -642,15 +684,8 @@ fn simulate_infeasible_returns_lp_infeasible_error() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    };
+    let indexer = geom(1, 0);
+    let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
     let config = SimulationConfig {
@@ -698,6 +733,7 @@ fn simulate_infeasible_returns_lp_infeasible_error() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -761,15 +797,8 @@ fn simulate_infeasible_at_scenario2_stage3() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    };
+    let indexer = geom(1, 0);
+    let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
     let config = SimulationConfig {
@@ -817,6 +846,7 @@ fn simulate_infeasible_at_scenario2_stage3() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -877,15 +907,8 @@ fn simulate_channel_closed_returns_error() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    };
+    let indexer = geom(1, 0);
+    let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
     let config = SimulationConfig {
@@ -934,6 +957,7 @@ fn simulate_channel_closed_returns_error() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -991,21 +1015,14 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    }; // theta=2
+    let indexer = geom(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
     let config = SimulationConfig {
         n_scenarios: 2,
         io_channel_capacity: 16,
     };
+    let state = state_layout_for(1, 0);
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
     };
@@ -1053,6 +1070,7 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1113,15 +1131,8 @@ fn simulate_cost_buffer_scenario_ids_match_assigned_range() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    };
+    let indexer = geom(1, 0);
+    let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
     let config = SimulationConfig {
@@ -1169,6 +1180,7 @@ fn simulate_cost_buffer_scenario_ids_match_assigned_range() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1230,15 +1242,8 @@ fn simulate_channel_receives_results_in_scenario_order() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    };
+    let indexer = geom(1, 0);
+    let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
     let config = SimulationConfig {
@@ -1285,6 +1290,7 @@ fn simulate_channel_receives_results_in_scenario_order() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1341,15 +1347,8 @@ fn test_simulation_parallel_cost_determinism() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    };
+    let indexer = geom(1, 0);
+    let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
     let config = SimulationConfig {
@@ -1398,6 +1397,7 @@ fn test_simulation_parallel_cost_determinism() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1481,6 +1481,7 @@ fn test_simulation_parallel_cost_determinism() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1568,15 +1569,8 @@ fn simulate_emits_progress_events() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    };
+    let indexer = geom(1, 0);
+    let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
     let config = SimulationConfig {
@@ -1624,6 +1618,7 @@ fn simulate_emits_progress_events() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1706,15 +1701,8 @@ fn simulate_no_events_when_sender_is_none() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    };
+    let indexer = geom(1, 0);
+    let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
     let config = SimulationConfig {
@@ -1761,6 +1749,7 @@ fn simulate_no_events_when_sender_is_none() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1827,15 +1816,8 @@ fn simulate_progress_events_received_before_return() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    };
+    let indexer = geom(1, 0);
+    let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
     let config = SimulationConfig {
@@ -1883,6 +1865,7 @@ fn simulate_progress_events_received_before_return() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1957,15 +1940,8 @@ fn simulate_progress_scenario_cost_equals_total_cost() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    };
+    let indexer = geom(1, 0);
+    let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
     let config = SimulationConfig {
@@ -2016,6 +1992,7 @@ fn simulate_progress_scenario_cost_equals_total_cost() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2092,15 +2069,8 @@ fn simulate_emits_simulation_finished_as_last_event() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    };
+    let indexer = geom(1, 0);
+    let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
     let config = SimulationConfig {
@@ -2148,6 +2118,7 @@ fn simulate_emits_simulation_finished_as_last_event() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2238,15 +2209,8 @@ fn simulate_progress_scenario_cost_is_finite() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    };
+    let indexer = geom(1, 0);
+    let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
     let config = SimulationConfig {
@@ -2295,6 +2259,7 @@ fn simulate_progress_scenario_cost_is_finite() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2369,15 +2334,8 @@ fn simulate_baked_path_issues_zero_add_rows() {
     let baked: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    };
+    let indexer = geom(1, 0);
+    let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
     let config = SimulationConfig {
@@ -2423,6 +2381,7 @@ fn simulate_baked_path_issues_zero_add_rows() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2500,15 +2459,8 @@ fn simulate_fallback_path_issues_expected_add_rows() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    };
+    let indexer = geom(1, 0);
+    let state = state_layout_for(1, 0);
     // FCF with 0 cuts — cut_batch.num_rows will be 0 for every stage.
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
@@ -2555,6 +2507,7 @@ fn simulate_fallback_path_issues_expected_add_rows() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2622,15 +2575,8 @@ fn simulate_baked_length_mismatch_returns_error() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    };
+    let indexer = geom(1, 0);
+    let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
     let config = SimulationConfig {
@@ -2680,6 +2626,7 @@ fn simulate_baked_length_mismatch_returns_error() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2764,15 +2711,8 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
     let templates: Vec<StageTemplate> = vec![minimal_template_1_0()];
     let base_rows: Vec<usize> = vec![2]; // 2 structural rows in the template
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    };
+    let indexer = geom(1, 0);
+    let state = state_layout_for(1, 0);
 
     // Build an FCF with 3 active cuts at slots 10, 11, 12 for stage 0.
     // warm_start_count=10, forward_passes=1 →
@@ -2853,6 +2793,7 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2963,15 +2904,8 @@ fn simulate_with_empty_stage_bases_cold_starts() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    };
+    let indexer = geom(1, 0);
+    let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
     let config = SimulationConfig {
@@ -3017,6 +2951,7 @@ fn simulate_with_empty_stage_bases_cold_starts() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,

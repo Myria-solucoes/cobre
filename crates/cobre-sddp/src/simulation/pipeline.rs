@@ -434,6 +434,7 @@ fn solve_simulation_stage<S: SolverInterface>(
     // (process_scenario_stages) via the transform_* functions.
     let TrainingContext {
         indexer,
+        state,
         stochastic,
         dcs,
         ..
@@ -463,9 +464,9 @@ fn solve_simulation_stage<S: SolverInterface>(
     // stage's incoming state, and fishing constraints at delivery stages
     // would read stale slot 0 values.
     ws.patch_buf
-        .fill_col_state_patches(indexer, &ws.current_state, &ctx.templates[t].col_scale);
+        .fill_col_state_patches(state, &ws.current_state, &ctx.templates[t].col_scale);
     ws.patch_buf.fill_forward_patches(
-        indexer,
+        state,
         &ws.current_state,
         &ws.scratch.noise_buf,
         ctx.base_rows[t],
@@ -554,7 +555,7 @@ fn solve_simulation_stage<S: SolverInterface>(
             &mut ws.solver,
             &ctx.templates[t],
             &fcf.pools[t],
-            indexer,
+            state,
             col_scale,
             None,
             &ws.backward_accum.dcs_initial_resident,
@@ -622,13 +623,14 @@ fn solve_simulation_stage<S: SolverInterface>(
         ctx,
         output,
         indexer,
+        state,
         ids,
         n_stochastic_ncs,
         lookups,
     );
     // Save incoming lag values before overwriting state.
-    let lag_start = indexer.inflow_lags.start;
-    let lag_len = indexer.hydro_count * indexer.max_par_order;
+    let lag_start = state.inflow_lags.start;
+    let lag_len = state.hydro_count * state.max_par_order;
     ws.scratch.lag_matrix_buf.clear();
     ws.scratch
         .lag_matrix_buf
@@ -637,8 +639,8 @@ fn solve_simulation_stage<S: SolverInterface>(
     // Save incoming anticipated-state slice before overwriting state with primal.
     // Uses the pre-allocated anticipated_state_buf scratch buffer (no allocation).
     // Mirrors the snapshot performed in `run_forward_stage` (forward.rs).
-    let ant_start = indexer.anticipated_state.start;
-    let ant_len = indexer.n_anticipated * indexer.k_max;
+    let ant_start = state.anticipated_state.start;
+    let ant_len = state.n_anticipated * state.k_max;
     ws.scratch.anticipated_state_buf.clear();
     ws.scratch
         .anticipated_state_buf
@@ -646,7 +648,7 @@ fn solve_simulation_stage<S: SolverInterface>(
 
     ws.current_state.clear();
     ws.current_state
-        .extend_from_slice(&ws.scratch.unscaled_primal[..indexer.n_state]);
+        .extend_from_slice(&ws.scratch.unscaled_primal[..state.n_state]);
 
     // Accumulate and shift lag state using stage-level transition weights.
     // For monthly-only studies this degenerates to the previous direct shift.
@@ -675,7 +677,7 @@ fn solve_simulation_stage<S: SolverInterface>(
         &mut ws.current_state,
         &ws.scratch.lag_matrix_buf,
         unscaled_primal_ref,
-        indexer,
+        state,
         &stage_lag,
         &mut crate::noise::LagAccumState {
             accumulator: &mut ws.scratch.lag_accumulator,
@@ -697,6 +699,7 @@ fn solve_simulation_stage<S: SolverInterface>(
         &mut ws.current_state,
         &ws.scratch.anticipated_state_buf,
         unscaled_primal_ref,
+        state,
         indexer,
     );
 
@@ -734,6 +737,7 @@ fn extract_sim_stage_result(
     ctx: &StageContext<'_>,
     output: &SimulationOutputSpec<'_>,
     indexer: &crate::indexer::StageIndexer,
+    state: &crate::indexer::StateLayout,
     ids: &SimStageIds,
     n_stochastic_ncs: usize,
     lookups: &SimLookups,
@@ -742,9 +746,9 @@ fn extract_sim_stage_result(
     let theta_obj_coeff = ctx
         .templates
         .get(t)
-        .and_then(|tmpl| tmpl.objective.get(indexer.theta).copied())
+        .and_then(|tmpl| tmpl.objective.get(state.theta).copied())
         .unwrap_or(1.0);
-    let theta_contribution = unscaled_primal[indexer.theta] * theta_obj_coeff;
+    let theta_contribution = unscaled_primal[state.theta] * theta_obj_coeff;
     let immediate_cost = (view_objective - theta_contribution) * COST_SCALE_FACTOR;
     // Read realized inflow Z_t directly from the LP primal solution.
     // The z_h variables are defined by the z-inflow constraint:
@@ -753,7 +757,7 @@ fn extract_sim_stage_result(
     // and gross of withdrawal.
     inflow_m3s_buf.clear();
     for h in 0..ctx.n_hydros {
-        inflow_m3s_buf.push(unscaled_primal[indexer.z_inflow.start + h]);
+        inflow_m3s_buf.push(unscaled_primal[state.z_inflow.start + h]);
     }
     let blk_hrs = output
         .block_hours_per_stage
@@ -839,6 +843,7 @@ fn extract_sim_stage_result(
         },
         &StageExtractionSpec {
             indexer,
+            state,
             n_blks: stage_n_blks,
             entity_counts: output.entity_counts,
             inflow_m3s_per_hydro: inflow_m3s_buf,
@@ -949,16 +954,14 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
     lookups: &SimLookups,
 ) -> Result<(f64, Vec<SimulationStageResult>), SimulationError> {
     let TrainingContext {
-        indexer,
-        stochastic,
-        ..
+        state, stochastic, ..
     } = training_ctx;
     reset_scenario_state(
         ws,
         ids.sampler,
         ids.global_scenario,
         ids.total_scenarios,
-        indexer.inflow_lags.start,
+        state.inflow_lags.start,
         training_ctx,
     );
     let mut total_cost = 0.0_f64;
@@ -1161,7 +1164,6 @@ mod tests {
         context::{StageContext, TrainingContext},
         cut::FutureCostFunction,
         horizon_mode::HorizonMode,
-        indexer::StageIndexer,
         inflow_method::InflowNonNegativityMethod,
         lp_builder::PatchBuffer,
         simulation::{
@@ -1868,16 +1870,13 @@ mod tests {
 
         let n_load_buses = 1usize;
         let stochastic = make_stochastic_context_1_hydro_1_load_bus_sim(300.0, 30.0);
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        }; // N=1, L=0; theta=2
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
         let config = SimulationConfig {
             n_scenarios: 1,
             io_channel_capacity: 4,
         };
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
@@ -1967,6 +1966,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2078,11 +2078,8 @@ mod tests {
         let base_rows = vec![0usize];
 
         let stochastic = make_stochastic_context(n_stages);
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
         let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
         let config = SimulationConfig {
             n_scenarios: 1,
@@ -2129,6 +2126,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2219,11 +2217,8 @@ mod tests {
 
         let n_load_buses = 1usize;
         let stochastic = make_stochastic_context_1_hydro_1_load_bus_sim(300.0, 30.0);
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
         let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
         let config = SimulationConfig {
             n_scenarios: 1,
@@ -2316,6 +2311,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2636,12 +2632,9 @@ mod tests {
         let base_rows = vec![0_usize];
         let noise_scale = vec![noise_scale_val];
 
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let fcf = FutureCostFunction::new(n_stages, indexer.n_state, 1, 10, &vec![0; n_stages]);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let fcf = FutureCostFunction::new(n_stages, state.n_state, 1, 10, &vec![0; n_stages]);
         let config = SimulationConfig {
             n_scenarios: 4,
             io_channel_capacity: 16,
@@ -2687,6 +2680,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::Truncation,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2764,12 +2758,9 @@ mod tests {
         let base_rows = vec![0_usize];
         let noise_scale = vec![noise_scale_val];
 
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let fcf = FutureCostFunction::new(n_stages, indexer.n_state, 1, 10, &vec![0; n_stages]);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let fcf = FutureCostFunction::new(n_stages, state.n_state, 1, 10, &vec![0; n_stages]);
         let config = SimulationConfig {
             n_scenarios: 4,
             io_channel_capacity: 16,
@@ -2814,6 +2805,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2896,7 +2888,7 @@ mod tests {
         use crate::dcs::DcsParams;
         use crate::energy_conversion::{EnergyConversion, EnergyConversionSet};
         use crate::horizon_mode::HorizonMode;
-        use crate::indexer::StageIndexer;
+
         use crate::inflow_method::InflowNonNegativityMethod;
         use crate::lp_builder::PatchBuffer;
         use crate::simulation::extraction::EntityCounts;
@@ -3039,11 +3031,8 @@ mod tests {
             dcs: Option<DcsParams>,
             baked: &StageTemplate,
         ) -> (f64, SimulationStageResult) {
-            let indexer = {
-                let mut ix = StageIndexer::new(1, 0);
-                ix.finalize_for_test();
-                ix
-            };
+            let indexer = crate::indexer::test_fixtures::geom(1, 0);
+            let state = crate::indexer::test_fixtures::state_layout(1, 0);
             let core = sim_core_template();
             let templates = vec![core.clone()];
             let base_rows = vec![0_usize];
@@ -3102,6 +3091,7 @@ mod tests {
             let training_ctx = TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &[],

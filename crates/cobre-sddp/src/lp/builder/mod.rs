@@ -34,7 +34,7 @@
 //! ### State pinning
 //!
 //! State pinning lives on **incoming-state columns** rather than rows.
-//! Use [`crate::indexer::StageIndexer::state_to_lp_incoming_column`] to
+//! Use [`crate::indexer::StateLayout::state_to_lp_incoming_column`] to
 //! resolve the column index for state vector entry `j`.  Both forward-pass
 //! state pinning (`set_col_bounds(&[col], &[v], &[v])`) and backward-pass
 //! cut-subgradient extraction (`view.reduced_costs[col] * col_scale[col]`)

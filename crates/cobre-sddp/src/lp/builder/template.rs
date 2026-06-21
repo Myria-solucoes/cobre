@@ -266,12 +266,18 @@ pub(super) struct StageBuildOutput {
 /// load-noise patches), the generic constraint row entries, NCS metadata
 /// (column start, count, and active system indices), and pumping metadata
 /// (column start and station count).
+// Rationale: `clippy::similar_names` flags the `state` handle next to `stage`/`stage_idx`;
+// both names are established (the `StageLayout`/`StageData` field is `state`, the per-stage
+// inputs are `stage`/`stage_idx`), so renaming either to satisfy the heuristic would obscure
+// intent rather than clarify it.
+#[allow(clippy::similar_names)]
 pub(super) fn build_single_stage_template(
     ctx: &TemplateBuildCtx<'_>,
+    state: &crate::indexer::StateLayout,
     stage: &Stage,
     stage_idx: usize,
 ) -> StageBuildOutput {
-    let layout = StageLayout::new(ctx, stage, stage_idx);
+    let layout = StageLayout::new(ctx, state, stage, stage_idx);
     let stage_base_row = layout.row_water_balance_start();
     let load_balance_row_start = layout.row_load_balance_start();
 
@@ -533,10 +539,53 @@ pub fn build_stage_templates(
         n_load_buses
     );
 
+    // Build the single canonical role-(a) `StateLayout` once, before the
+    // per-stage loop, so every `StageLayout` borrows the same handle for its
+    // state-region reads (`theta`, `storage_in`, `inflow_lags`, `z_inflow`,
+    // `anticipated_state`/`anticipated_state_out`, `n_state`). The column ranges
+    // and the `state_to_lp_column_map` — the only role-(a) data the per-stage
+    // template build reads through the handle — are pure functions of the state
+    // dimensions, so they match the `StateLayout` setup stores on
+    // `StageData.state` (via `build_wired_indexer`) regardless of the mask.
+    //
+    // `effective_lag_counts` feeds only the `nonzero_state_indices` mask, which
+    // the cut path reads (off `StageData.state`), never the template build. It is
+    // sized to `ctx.n_hydros` (the `StateLayout::new` contract), reading the PAR
+    // effective lag count where the model carries that hydro and falling back to
+    // the dense `max_par_order` stride otherwise — so a test driving
+    // `build_stage_templates` with a hydro-free `PrecomputedPar` still satisfies
+    // the length contract without affecting the produced templates.
+    let effective_lag_counts: Vec<usize> = if ctx.max_par_order > 0 {
+        (0..ctx.n_hydros)
+            .map(|h| {
+                if h < par_lp.n_hydros() {
+                    par_lp.effective_lag_count(h)
+                } else {
+                    ctx.max_par_order
+                }
+            })
+            .collect()
+    } else {
+        vec![0; ctx.n_hydros]
+    };
+    let state_layout = crate::indexer::StateLayout::new(
+        ctx.n_hydros,
+        ctx.max_par_order,
+        ctx.n_anticipated,
+        ctx.k_max,
+        ctx.anticipated_lead_stages.clone(),
+        &effective_lag_counts,
+    );
+
     let n_study = study_stages.len();
     let mut stage_outputs = Vec::with_capacity(n_study);
     for (stage_idx, stage) in study_stages.iter().enumerate() {
-        stage_outputs.push(build_single_stage_template(&ctx, stage, stage_idx));
+        stage_outputs.push(build_single_stage_template(
+            &ctx,
+            &state_layout,
+            stage,
+            stage_idx,
+        ));
     }
 
     Ok(assemble_stage_templates_output(
@@ -844,7 +893,8 @@ fn assemble_stage_templates_output(
     clippy::cast_sign_loss,
     clippy::needless_range_loop,
     clippy::doc_markdown,
-    clippy::doc_overindented_list_items
+    clippy::doc_overindented_list_items,
+    clippy::similar_names
 )]
 mod tests {
     use chrono::NaiveDate;
@@ -862,6 +912,8 @@ mod tests {
     use crate::hydro_models::PrepareHydroModelsResult;
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::resolved_parameters::ResolvedParameters;
+
+    use super::super::test_support::state_layout_for;
 
     // ── Fixtures ─────────────────────────────────────────────────────────────
 
@@ -1306,7 +1358,8 @@ mod tests {
             .iter()
             .find(|s| s.id >= 0)
             .expect("one study stage");
-        let layout = super::super::layout::StageLayout::new(&ctx, stage, 0);
+        let state = state_layout_for(&ctx);
+        let layout = super::super::layout::StageLayout::new(&ctx, &state, stage, 0);
         assert_eq!(
             layout.n_pumping, ctx.n_pumping,
             "StageLayout.n_pumping must equal the ctx-sourced count"
@@ -1356,7 +1409,8 @@ mod tests {
         assert_eq!(templates.pumping_col_starts.len(), study_stages.len());
         assert_eq!(templates.n_pumping_per_stage.len(), study_stages.len());
         for (t, stage) in study_stages.iter().enumerate() {
-            let layout = super::super::layout::StageLayout::new(&ctx, stage, t);
+            let state = state_layout_for(&ctx);
+            let layout = super::super::layout::StageLayout::new(&ctx, &state, stage, t);
             assert_eq!(
                 templates.pumping_col_starts[t], layout.col_pumping_start,
                 "stage {t}: pumping_col_starts must equal layout.col_pumping_start"
@@ -1999,15 +2053,22 @@ mod tests {
         for stage_idx in [0_usize, 2, 3] {
             let stage = study_stages[stage_idx];
 
-            let tpl_a = super::build_single_stage_template(&ctx_a, stage, stage_idx).template;
-            let tpl_b = super::build_single_stage_template(&ctx_b, stage, stage_idx).template;
+            let state_a = state_layout_for(&ctx_a);
+            let state_b = state_layout_for(&ctx_b);
 
-            // Reconstruct the indexer for tpl_a / tpl_b to find the
+            let tpl_a =
+                super::build_single_stage_template(&ctx_a, &state_a, stage, stage_idx).template;
+            let tpl_b =
+                super::build_single_stage_template(&ctx_b, &state_b, stage, stage_idx).template;
+
+            // Reconstruct the layout for tpl_a / tpl_b to find the
             // anticipated_decision / anticipated_state / fishing row offsets.
             // Both templates use the same num_cols/num_rows (the layout depends
             // only on n_anticipated and k_max, both unchanged by the swap).
-            let layout_a = super::super::layout::StageLayout::new(&ctx_a, stage, stage_idx);
-            let layout_b = super::super::layout::StageLayout::new(&ctx_b, stage, stage_idx);
+            let layout_a =
+                super::super::layout::StageLayout::new(&ctx_a, &state_a, stage, stage_idx);
+            let layout_b =
+                super::super::layout::StageLayout::new(&ctx_b, &state_b, stage, stage_idx);
 
             // Layout offsets must be identical (they depend only on counts,
             // not on the contents of the anticipated arrays).

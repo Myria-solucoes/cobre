@@ -10,6 +10,42 @@ use cobre_core::{
     StageStateConfig,
 };
 
+use crate::indexer::StateLayout;
+
+use super::layout::TemplateBuildCtx;
+
+/// Build the canonical role-(a) [`StateLayout`] a `StageLayout` borrows, from a
+/// test [`TemplateBuildCtx`].
+///
+/// Mirrors the production build in `template.rs::build_stage_templates`: the same
+/// state dimensions and the same PAR-derived per-hydro effective lag counts, so
+/// the handle a test passes to `StageLayout::new` is byte-identical to the one
+/// production threads. Tests hold the returned value in a local and pass `&state`
+/// (the borrow outlives the per-stage `StageLayout`, so no clone is forced).
+pub(super) fn state_layout_for(ctx: &TemplateBuildCtx<'_>) -> StateLayout {
+    let effective_lag_counts: Vec<usize> = if ctx.max_par_order > 0 {
+        (0..ctx.n_hydros)
+            .map(|h| {
+                if h < ctx.par_lp.n_hydros() {
+                    ctx.par_lp.effective_lag_count(h)
+                } else {
+                    ctx.max_par_order
+                }
+            })
+            .collect()
+    } else {
+        vec![0; ctx.n_hydros]
+    };
+    StateLayout::new(
+        ctx.n_hydros,
+        ctx.max_par_order,
+        ctx.n_anticipated,
+        ctx.k_max,
+        ctx.anticipated_lead_stages.clone(),
+        &effective_lag_counts,
+    )
+}
+
 /// All-zero hydro penalties: every one of the 16 `HydroPenalties` cost fields is
 /// `0.0`, so no fixture-side penalty cost contaminates the column/objective
 /// assertions in the builder tests.

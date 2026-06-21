@@ -30,7 +30,7 @@ use crate::cut::{CutPool, CutRowMap};
 use crate::cut_selection::CutSelectionStrategy;
 use crate::error::SddpError;
 use crate::gemm::gemm_block;
-use crate::indexer::StageIndexer;
+use crate::indexer::StateLayout;
 use crate::workspace::CapturedBasis;
 
 /// Dynamic Cut Selection hyperparameters.
@@ -217,7 +217,7 @@ impl DcsScoringScratch {
 /// scaling (factor 1.0).
 ///
 /// State index → LP column mapping uses
-/// [`StageIndexer::state_to_lp_column`], identical to the cut-row builder in
+/// [`StateLayout::state_to_lp_column`], identical to the cut-row builder in
 /// `cut::row::build_cut_row_batch_into`, so scoring and row construction
 /// reference the same columns.
 ///
@@ -262,7 +262,7 @@ impl DcsScoringScratch {
 /// [`DcsScoringScratch::reserve`] before the hot loop.
 pub fn score_violated_candidates(
     pool: &CutPool,
-    indexer: &StageIndexer,
+    state: &StateLayout,
     primal: &[f64],
     col_scale: &[f64],
     resident: &CutRowMap,
@@ -271,8 +271,8 @@ pub fn score_violated_candidates(
     scratch: &mut DcsScoringScratch,
     out_selected: &mut Vec<u32>,
 ) -> usize {
-    let n_state = indexer.n_state;
-    let theta = indexer.theta;
+    let n_state = state.n_state;
+    let theta = state.theta;
 
     // `primal.len() >= theta + 1` (i.e. the theta column is in range), written
     // as `> theta` to satisfy clippy::int_plus_one.
@@ -283,7 +283,7 @@ pub fn score_violated_candidates(
     );
     debug_assert_eq!(
         pool.state_dimension, n_state,
-        "score_violated_candidates: pool.state_dimension {} != indexer.n_state {}",
+        "score_violated_candidates: pool.state_dimension {} != state.n_state {}",
         pool.state_dimension, n_state,
     );
     // When scaling is active, `col_scale` is per-column and must cover every LP
@@ -315,7 +315,7 @@ pub fn score_violated_candidates(
     // mirrors `cut::row::build_cut_row_batch_into` exactly.
     scratch.unscaled_state.clear();
     for j in 0..n_state {
-        let c = indexer.state_to_lp_column(j);
+        let c = state.state_to_lp_column(j);
         let x_raw = if col_scale.is_empty() {
             primal[c]
         } else {
@@ -694,7 +694,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
     solver: &mut ProfiledSolver<S>,
     core: &StageTemplate,
     pool: &CutPool,
-    indexer: &StageIndexer,
+    state: &StateLayout,
     col_scale: &[f64],
     stored_basis: Option<&CapturedBasis>,
     initial_resident: &[u32],
@@ -726,7 +726,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
             solver,
             pool,
             initial_resident,
-            indexer,
+            state,
             col_scale,
             &mut scratch.row_map,
             &mut scratch.batch,
@@ -771,7 +771,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
         let t0 = Instant::now();
         let violated = score_violated_candidates(
             pool,
-            indexer,
+            state,
             view.primal,
             col_scale,
             &scratch.row_map,
@@ -800,7 +800,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
             solver,
             pool,
             &scratch.out_selected,
-            indexer,
+            state,
             col_scale,
             &mut scratch.row_map,
             &mut scratch.batch,
@@ -818,7 +818,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
     let t0 = Instant::now();
     let remaining = score_violated_candidates(
         pool,
-        indexer,
+        state,
         view.primal,
         col_scale,
         &scratch.row_map,
@@ -836,7 +836,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
             solver,
             pool,
             &scratch.out_selected,
-            indexer,
+            state,
             col_scale,
             &mut scratch.row_map,
             &mut scratch.batch,
@@ -923,7 +923,7 @@ mod tests {
     };
     use crate::cut::{CutPool, CutRowMap};
     use crate::cut_selection::{CutMetadata, CutSelectionStrategy};
-    use crate::indexer::StageIndexer;
+    use crate::indexer::StateLayout;
 
     #[test]
     fn default_matches_spec() {
@@ -1021,7 +1021,7 @@ mod tests {
     // score_violated_candidates fixtures
     // -----------------------------------------------------------------------
 
-    // All scoring tests use n_state = 2 (StageIndexer::new(2, 0)):
+    // All scoring tests use n_state = 2 (StateLayout::new(2, 0, 0, 0, …)):
     //   - state columns 0, 1 (identity state_to_lp_column for j < hydro_count)
     //   - theta column 6 (= n * (3 + l) with n = 2, l = 0)
     // So `primal` must be at least length 7.
@@ -1029,8 +1029,8 @@ mod tests {
     const THETA_COL: usize = 6;
     const PRIMAL_LEN: usize = THETA_COL + 1;
 
-    fn indexer() -> StageIndexer {
-        StageIndexer::new(2, 0)
+    fn indexer() -> StateLayout {
+        StateLayout::new(2, 0, 0, 0, vec![], &[0, 0])
     }
 
     /// A pool with capacity 16, state_dimension 2, forward_passes 16, no
@@ -1403,7 +1403,7 @@ mod tests {
     #[allow(clippy::cast_possible_truncation)]
     fn per_row_reference(
         pool: &CutPool,
-        idx: &StageIndexer,
+        idx: &StateLayout,
         primal: &[f64],
         col_scale: &[f64],
         resident: &CutRowMap,
@@ -1781,7 +1781,7 @@ mod tests {
     // lazy_solve fixtures
     // -----------------------------------------------------------------------
 
-    // Synthetic LP for StageIndexer::new(1, 0): n_state = 1, theta = col 3.
+    // Synthetic LP for StateLayout::new(1, 0, …): n_state = 1, theta = col 3.
     //   Columns: 0 = state x0 (pinned to 2.0), 1 and 2 fixed to 0, 3 = theta.
     //   No structural rows (num_rows = 0) — cuts are the only rows.
     //   Objective: minimize theta. So at the optimum theta equals the max cut
@@ -1789,8 +1789,8 @@ mod tests {
     const STATE_X0: f64 = 2.0;
     const LAZY_THETA_COL: usize = 3;
 
-    fn lazy_indexer() -> StageIndexer {
-        StageIndexer::new(1, 0)
+    fn lazy_indexer() -> StateLayout {
+        StateLayout::new(1, 0, 0, 0, vec![], &[0])
     }
 
     /// Cut-free core template with x0 pinned to `STATE_X0` and theta free.
@@ -1876,7 +1876,7 @@ mod tests {
     }
 
     /// Reference all-cuts optimum: load core, append every active slot, solve.
-    fn solve_all_cuts(pool: &CutPool, indexer: &StageIndexer) -> (f64, f64) {
+    fn solve_all_cuts(pool: &CutPool, state: &StateLayout) -> (f64, f64) {
         let mut solver = active_profiled();
         let core = core_template();
         solver.load_model(&core);
@@ -1894,7 +1894,7 @@ mod tests {
             &mut solver,
             pool,
             &all_slots,
-            indexer,
+            state,
             &[],
             &mut row_map,
             &mut batch,

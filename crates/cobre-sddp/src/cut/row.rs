@@ -15,15 +15,15 @@
 use cobre_solver::{RowBatch, SolverInterface};
 
 use crate::cut::FutureCostFunction;
-use crate::indexer::StageIndexer;
+use crate::indexer::StateLayout;
 
 /// Push one negated, scaled coefficient entry into the cut row batch.
 ///
 /// Shared per-coefficient emit helper. Used by [`build_cut_row_batch_into`]
-/// (the unified mask-driven path, via [`StageIndexer::lp_column_for_state`]) and
+/// (the unified mask-driven path, via [`StateLayout::lp_column_for_state`]) and
 /// by [`build_delta_cut_row_batch_into`](crate::forward::build_delta_cut_row_batch_into)
-/// / [`push_cut_row`] (which retain their own sparse/dense branching over
-/// [`StageIndexer::state_to_lp_column`]). All three apply the same
+/// / [`push_cut_row`] (which retain their own sparse branching over
+/// [`StateLayout::state_to_lp_column`]). All three apply the same
 /// negate-and-divide-by-scale rule here so it cannot drift apart during
 /// maintenance.
 #[inline]
@@ -50,10 +50,14 @@ pub(crate) fn push_scaled_coefficient(
 /// Append one Benders cut row to `batch` in CSR form.
 ///
 /// Emits the negated-scaled state coefficients (via [`push_scaled_coefficient`],
-/// sparse over `indexer.nonzero_state_indices` when non-empty, else dense over
-/// all state indices), the positive scaled `theta` column entry, and the row
-/// bounds `row_lower = intercept`, `row_upper = +INFINITY` — exactly the layout
-/// [`build_cut_row_batch_into`] and [`append_new_cuts_to_lp`] use.
+/// sparse over `state.nonzero_state_indices`), the positive scaled `theta`
+/// column entry, and the row bounds `row_lower = intercept`,
+/// `row_upper = +INFINITY` — exactly the layout [`build_cut_row_batch_into`] and
+/// [`append_new_cuts_to_lp`] use.
+///
+/// The mask is always finalized: [`StateLayout::new`] populates
+/// `nonzero_state_indices` (storage-only ⇒ `[0, n_state)` ascending;
+/// pure-thermal ⇒ empty with `n_state == 0`), so there is no dense fallback.
 ///
 /// The caller pushes the `row_starts` offset for this row before calling (and
 /// the final terminator / `num_rows` / `add_rows` afterward); this helper only
@@ -65,36 +69,15 @@ pub(crate) fn push_cut_row(
     batch: &mut RowBatch,
     intercept: f64,
     coefficients: &[f64],
-    indexer: &StageIndexer,
+    state: &StateLayout,
     col_scale: &[f64],
 ) {
-    let theta_col = indexer.theta;
-    let mask = &indexer.nonzero_state_indices;
+    let theta_col = state.theta;
+    let mask = &state.nonzero_state_indices;
 
-    if mask.is_empty() {
-        for (j, &c) in coefficients.iter().enumerate() {
-            let lp_col = indexer.state_to_lp_column(j);
-            // Padding-slot invariant: when state_to_lp_column returns j unchanged
-            // and j falls inside the anticipated-state block, the slot is a padding
-            // slot (slot >= k_p for its plant). The INVARIANT comment in
-            // state_to_lp_column explains the 5-step chain that guarantees the
-            // corresponding cut coefficient is 0.0. Assert this in debug builds.
-            debug_assert!(
-                !(lp_col == j
-                    && indexer.n_anticipated > 0
-                    && j >= indexer.anticipated_state.start
-                    && j < indexer.anticipated_state.start + indexer.n_anticipated * indexer.k_max)
-                    || c == 0.0,
-                "padding-slot j={j} has non-zero cut coefficient {c}; \
-                 shift_anticipated_state must have seeded a non-zero into a padding slot"
-            );
-            push_scaled_coefficient(batch, lp_col, c, col_scale);
-        }
-    } else {
-        for &j in mask {
-            let lp_col = indexer.state_to_lp_column(j);
-            push_scaled_coefficient(batch, lp_col, coefficients[j], col_scale);
-        }
+    for &j in mask {
+        let lp_col = state.state_to_lp_column(j);
+        push_scaled_coefficient(batch, lp_col, coefficients[j], col_scale);
     }
 
     debug_assert!(
@@ -126,26 +109,32 @@ pub(crate) fn push_cut_row(
 ///
 /// Panics if the total number of non-zeros exceeds `i32::MAX` (the `HiGHS`
 /// API limit for CSR indices).
+// Rationale: clippy::similar_names flags the role-(a) `state` handle next to the
+// `stage` index. Both names are established — `state` matches `StageData.state` /
+// `TrainingContext.state`, and `stage` is the stage index — so renaming either to
+// satisfy the heuristic would obscure intent (the same exemption `StageLayout::new`
+// takes).
+#[allow(clippy::similar_names)]
 pub fn build_cut_row_batch_into(
     batch: &mut RowBatch,
     fcf: &FutureCostFunction,
     stage: usize,
-    indexer: &StageIndexer,
+    state: &StateLayout,
     col_scale: &[f64],
 ) {
     batch.clear();
 
-    let n_state = indexer.n_state;
-    let theta_col = indexer.theta;
-    let mask = &indexer.nonzero_state_indices;
+    let n_state = state.n_state;
+    let theta_col = state.theta;
+    let mask = &state.nonzero_state_indices;
 
-    // The cut-row loop is mask-driven only. `setup/mod.rs` populates the mask
-    // unconditionally (storage-only → [0, n_state) ascending; pure-thermal →
-    // empty); the precompute map is finalized in the same place. Guard the
-    // missed-finalize regression — correctness is covered by the
-    // `lp_column_for_state` fallback, this catches a setup wiring miss.
+    // The cut-row loop is mask-driven only. `StateLayout::new` finalizes the
+    // mask and the `state_to_lp_column` precompute map unconditionally
+    // (storage-only → [0, n_state) ascending; pure-thermal → empty). Guard the
+    // missed-finalize regression — the constructor always finalizes, so this
+    // catches a malformed test layout, not a production miss.
     debug_assert!(
-        !indexer.state_to_lp_column_map.is_empty() || indexer.n_state == 0,
+        !state.state_to_lp_column_map.is_empty() || state.n_state == 0,
         "state_to_lp_column_map not finalized before build_cut_row_batch_into"
     );
 
@@ -191,7 +180,7 @@ pub fn build_cut_row_batch_into(
         // the slots where `state_to_lp_column` is non-identity), so this loop
         // never visits a padding slot.
         for &j in mask {
-            let lp_col = indexer.lp_column_for_state(j);
+            let lp_col = state.lp_column_for_state(j);
             push_scaled_coefficient(batch, lp_col, coefficients[j], col_scale);
         }
 
@@ -227,11 +216,13 @@ pub fn build_cut_row_batch_into(
 /// Convenience wrapper around [`build_cut_row_batch_into`] that allocates a
 /// new `RowBatch`. For allocation-free usage on the hot path, prefer calling
 /// [`build_cut_row_batch_into`] with a pre-allocated batch.
+// `clippy::similar_names`: role-(a) `state` handle next to the `stage` index.
+#[allow(clippy::similar_names)]
 #[must_use]
 pub fn build_cut_row_batch(
     fcf: &FutureCostFunction,
     stage: usize,
-    indexer: &StageIndexer,
+    state: &StateLayout,
     col_scale: &[f64],
 ) -> RowBatch {
     let mut batch = RowBatch {
@@ -242,7 +233,7 @@ pub fn build_cut_row_batch(
         row_lower: Vec::new(),
         row_upper: Vec::new(),
     };
-    build_cut_row_batch_into(&mut batch, fcf, stage, indexer, col_scale);
+    build_cut_row_batch_into(&mut batch, fcf, stage, state, col_scale);
     batch
 }
 
@@ -276,7 +267,7 @@ pub fn build_cut_row_batch(
 /// - `solver`: the live LP solver instance with a loaded model.
 /// - `fcf`: the Future Cost Function containing all cut pools.
 /// - `stage`: 0-based stage index.
-/// - `indexer`: provides `n_state` and `theta` column index.
+/// - `state`: provides `n_state`, `theta`, and the state→column mapping.
 /// - `col_scale`: column scaling factors (empty slice if no scaling).
 /// - `row_map`: per-stage [`CutRowMap`] to update.
 /// - `batch_buf`: reusable [`RowBatch`] buffer for constructing the new cut rows.
@@ -287,25 +278,23 @@ pub fn build_cut_row_batch(
 /// In debug builds, also panics if `stage >= fcf.pools.len()`.
 ///
 /// [`CutRowMap`]: crate::cut::CutRowMap
+#[allow(clippy::similar_names)] // `state` (role-a handle) vs `stage` index — both established names
 pub fn append_new_cuts_to_lp<S: SolverInterface>(
     solver: &mut S,
     fcf: &FutureCostFunction,
     stage: usize,
-    indexer: &StageIndexer,
+    state: &StateLayout,
     col_scale: &[f64],
     row_map: &mut crate::cut::CutRowMap,
     batch_buf: &mut RowBatch,
 ) -> usize {
     batch_buf.clear();
 
-    let n_state = indexer.n_state;
-    let mask = &indexer.nonzero_state_indices;
-    let is_sparse = !mask.is_empty();
-    let nnz_per_cut = if is_sparse {
-        mask.len() + 1
-    } else {
-        n_state + 1
-    };
+    let n_state = state.n_state;
+    // The mask is always finalized (storage-only ⇒ [0, n_state) ascending;
+    // pure-thermal ⇒ empty with n_state == 0), so `mask.len() + 1` is the NNZ per
+    // cut in every case — no dense fallback.
+    let nnz_per_cut = state.nonzero_state_indices.len() + 1;
 
     let mut new_count = 0usize;
     let mut nz_offset = 0usize;
@@ -330,7 +319,7 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         batch_buf.row_starts.push(nz_offset as i32);
 
-        push_cut_row(batch_buf, intercept, coefficients, indexer, col_scale);
+        push_cut_row(batch_buf, intercept, coefficients, state, col_scale);
 
         row_map.insert(slot);
         new_count += 1;
@@ -369,7 +358,7 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
 /// - `pool`: the cut pool to read intercepts/coefficients/active flags from.
 /// - `slots`: the slot ids to append, in caller order (the LP row order follows
 ///   this order for the appended subset).
-/// - `indexer`: provides `n_state`, `theta`, and the state→column mapping.
+/// - `state`: provides `n_state`, `theta`, and the state→column mapping.
 /// - `col_scale`: column scaling factors (empty slice ⇒ no scaling).
 /// - `row_map`: per-(stage, solve) [`CutRowMap`](crate::cut::CutRowMap) to update.
 /// - `batch_buf`: reusable [`RowBatch`] buffer.
@@ -380,25 +369,22 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
 /// limit), matching [`append_new_cuts_to_lp`].
 ///
 /// [`CutPool`]: crate::cut::CutPool
+#[allow(clippy::similar_names)] // `state` (role-a handle) vs `stage` index — both established names
 pub fn append_slots_to_lp<S: SolverInterface>(
     solver: &mut S,
     pool: &crate::cut::CutPool,
     slots: &[u32],
-    indexer: &StageIndexer,
+    state: &StateLayout,
     col_scale: &[f64],
     row_map: &mut crate::cut::CutRowMap,
     batch_buf: &mut RowBatch,
 ) -> usize {
     batch_buf.clear();
 
-    let n_state = indexer.n_state;
-    let mask = &indexer.nonzero_state_indices;
-    let is_sparse = !mask.is_empty();
-    let nnz_per_cut = if is_sparse {
-        mask.len() + 1
-    } else {
-        n_state + 1
-    };
+    let n_state = state.n_state;
+    // The mask is always finalized, so `mask.len() + 1` is the NNZ per cut in
+    // every case — no dense fallback.
+    let nnz_per_cut = state.nonzero_state_indices.len() + 1;
 
     let mut new_count = 0usize;
     let mut nz_offset = 0usize;
@@ -421,7 +407,7 @@ pub fn append_slots_to_lp<S: SolverInterface>(
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         batch_buf.row_starts.push(nz_offset as i32);
 
-        push_cut_row(batch_buf, intercept, coefficients, indexer, col_scale);
+        push_cut_row(batch_buf, intercept, coefficients, state, col_scale);
 
         row_map.insert(slot_usize);
         new_count += 1;
@@ -450,19 +436,24 @@ mod tests {
 
     use super::{append_new_cuts_to_lp, build_cut_row_batch, build_cut_row_batch_into};
     use crate::cut::FutureCostFunction;
-    use crate::indexer::StageIndexer;
+    use crate::indexer::StateLayout;
+
+    /// Build a finalized storage+lag [`StateLayout`] (no anticipated thermals)
+    /// with the full `max_par_order` lag stride for every hydro — the dense
+    /// coverage production `build_wired_indexer` finalizes for a study with no
+    /// per-hydro AR-order truncation.
+    fn state_layout(hydro_count: usize, max_par_order: usize) -> StateLayout {
+        let lag_counts = vec![max_par_order; hydro_count];
+        StateLayout::new(hydro_count, max_par_order, 0, 0, vec![], &lag_counts)
+    }
 
     // ── Unit tests: build_cut_row_batch ──────────────────────────────────────
 
     #[test]
     fn build_cut_row_batch_empty_cuts_returns_empty_batch() {
         let fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let batch = build_cut_row_batch(&fcf, 0, &indexer, &[]);
+        let state = state_layout(1, 0);
+        let batch = build_cut_row_batch(&fcf, 0, &state, &[]);
 
         assert_eq!(batch.num_rows, 0);
         assert_eq!(batch.row_starts, vec![0]);
@@ -476,12 +467,8 @@ mod tests {
     fn build_cut_row_batch_one_cut_correct_structure() {
         let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
         fcf.add_cut(0, 0, 0, 5.0, &[2.0]);
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let batch = build_cut_row_batch(&fcf, 0, &indexer, &[]);
+        let state = state_layout(1, 0);
+        let batch = build_cut_row_batch(&fcf, 0, &state, &[]);
 
         assert_eq!(batch.num_rows, 1);
         assert_eq!(batch.row_starts, vec![0, 2]);
@@ -496,12 +483,8 @@ mod tests {
         let mut fcf = FutureCostFunction::new(2, 2, 1, 10, &[0; 2]);
         fcf.add_cut(1, 0, 0, 10.0, &[1.0, 3.0]);
         fcf.add_cut(1, 1, 0, 20.0, &[2.0, 4.0]);
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 1);
-            ix.finalize_for_test();
-            ix
-        };
-        let batch = build_cut_row_batch(&fcf, 1, &indexer, &[]);
+        let state = state_layout(1, 1);
+        let batch = build_cut_row_batch(&fcf, 1, &state, &[]);
 
         assert_eq!(batch.num_rows, 2);
         assert_eq!(batch.row_starts, vec![0, 3, 6]);
@@ -526,12 +509,8 @@ mod tests {
     fn build_cut_row_batch_zero_coefficient_state_variable() {
         let mut fcf = FutureCostFunction::new(1, 2, 1, 5, &[0; 1]);
         fcf.add_cut(0, 0, 0, 3.0, &[0.0, 7.0]);
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 1);
-            ix.finalize_for_test();
-            ix
-        };
-        let batch = build_cut_row_batch(&fcf, 0, &indexer, &[]);
+        let state = state_layout(1, 1);
+        let batch = build_cut_row_batch(&fcf, 0, &state, &[]);
 
         assert_eq!(batch.num_rows, 1);
         assert_eq!(batch.col_indices, vec![0, 2, 4]); // lag 0 → z_inflow col 2; theta at 4
@@ -623,11 +602,7 @@ mod tests {
         use crate::cut::CutRowMap;
 
         let fcf = crate::cut::FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-        let indexer = {
-            let mut ix = crate::indexer::StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
+        let state = state_layout(1, 0);
         let mut row_map = CutRowMap::new(10, 5);
         let mut batch_buf = empty_row_batch();
         let mut solver = RecordingMockSolver::new();
@@ -637,7 +612,7 @@ mod tests {
             &mut solver,
             &fcf,
             0,
-            &indexer,
+            &state,
             &[],
             &mut row_map,
             &mut batch_buf,
@@ -654,11 +629,7 @@ mod tests {
         fcf.add_cut(0, 0, 0, 10.0, &[1.0]); // slot 0
         fcf.add_cut(0, 1, 0, 20.0, &[3.0]); // slot 1
 
-        let indexer = {
-            let mut ix = crate::indexer::StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
+        let state = state_layout(1, 0);
         let mut row_map = CutRowMap::new(10, 5);
         let mut batch_buf = empty_row_batch();
         let mut solver = RecordingMockSolver::new();
@@ -667,7 +638,7 @@ mod tests {
             &mut solver,
             &fcf,
             0,
-            &indexer,
+            &state,
             &[],
             &mut row_map,
             &mut batch_buf,
@@ -688,11 +659,7 @@ mod tests {
         fcf.add_cut(0, 0, 0, 10.0, &[1.0]); // slot 0
         fcf.add_cut(0, 1, 0, 20.0, &[3.0]); // slot 1
 
-        let indexer = {
-            let mut ix = crate::indexer::StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
+        let state = state_layout(1, 0);
         let mut row_map = CutRowMap::new(10, 5);
         // Pre-insert slot 0 as if it was already in the LP.
         row_map.insert(0);
@@ -704,7 +671,7 @@ mod tests {
             &mut solver,
             &fcf,
             0,
-            &indexer,
+            &state,
             &[],
             &mut row_map,
             &mut batch_buf,
@@ -725,15 +692,11 @@ mod tests {
         fcf.add_cut(0, 0, 0, 10.0, &[1.0]); // slot 0
         fcf.add_cut(0, 1, 0, 20.0, &[3.0]); // slot 1
 
-        let indexer = {
-            let mut ix = crate::indexer::StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
+        let state = state_layout(1, 0);
 
         // Build via build_cut_row_batch_into.
         let mut expected_batch = empty_row_batch();
-        build_cut_row_batch_into(&mut expected_batch, &fcf, 0, &indexer, &[]);
+        build_cut_row_batch_into(&mut expected_batch, &fcf, 0, &state, &[]);
 
         // Build via append_new_cuts_to_lp (empty row_map, so all cuts are new).
         let mut row_map = CutRowMap::new(10, 5);
@@ -743,7 +706,7 @@ mod tests {
             &mut solver,
             &fcf,
             0,
-            &indexer,
+            &state,
             &[],
             &mut row_map,
             &mut actual_batch,
@@ -765,16 +728,12 @@ mod tests {
         let mut fcf = crate::cut::FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
         fcf.add_cut(0, 0, 0, 10.0, &[1.0]);
 
-        let indexer = {
-            let mut ix = crate::indexer::StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
+        let state = state_layout(1, 0);
         // col_scale must have at least theta+1 = 4 entries.
         let col_scale = vec![0.5, 2.0, 1.0, 0.1];
 
         let mut expected = empty_row_batch();
-        build_cut_row_batch_into(&mut expected, &fcf, 0, &indexer, &col_scale);
+        build_cut_row_batch_into(&mut expected, &fcf, 0, &state, &col_scale);
 
         let mut row_map = CutRowMap::new(10, 5);
         let mut actual = empty_row_batch();
@@ -783,7 +742,7 @@ mod tests {
             &mut solver,
             &fcf,
             0,
-            &indexer,
+            &state,
             &col_scale,
             &mut row_map,
             &mut actual,

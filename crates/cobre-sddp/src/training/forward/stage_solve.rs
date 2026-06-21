@@ -64,6 +64,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     let n_hydros = ctx.n_hydros;
     let n_load_buses = ctx.n_load_buses;
     let indexer = training_ctx.indexer;
+    let state = training_ctx.state;
     let stochastic = training_ctx.stochastic;
     let horizon = training_ctx.horizon;
 
@@ -111,10 +112,13 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         );
     }
 
-    ws.patch_buf
-        .fill_col_state_patches(indexer, &ws.current_state, &ctx.templates[t].col_scale);
+    ws.patch_buf.fill_col_state_patches(
+        training_ctx.state,
+        &ws.current_state,
+        &ctx.templates[t].col_scale,
+    );
     ws.patch_buf.fill_forward_patches(
-        indexer,
+        state,
         &ws.current_state,
         &ws.scratch.noise_buf,
         ctx.base_rows[t],
@@ -203,7 +207,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     // theta from below and their contribution to the objective must remain
     // visible to the solver.
     if horizon.is_terminal(t + 1) && !terminal_has_boundary_cuts {
-        ws.solver.set_col_bounds(&[indexer.theta], &[0.0], &[0.0]);
+        ws.solver.set_col_bounds(&[state.theta], &[0.0], &[0.0]);
     }
 
     let col_scale = &ctx.templates[t].col_scale;
@@ -246,7 +250,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             &mut ws.solver,
             &ctx.templates[t],
             pool,
-            indexer,
+            state,
             col_scale,
             None,
             &ws.backward_accum.dcs_initial_resident,
@@ -288,7 +292,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     };
 
     let d_t = ctx.discount_factors.get(t).copied().unwrap_or(1.0);
-    let stage_cost = (view_objective - d_t * unscaled_primal[indexer.theta]) * COST_SCALE_FACTOR;
+    let stage_cost = (view_objective - d_t * unscaled_primal[state.theta]) * COST_SCALE_FACTOR;
     let rec = &mut worker_records[local_m * num_stages + t];
     // Skip primal storage: only rec.state is consumed downstream; primals
     // are read directly from the solver when needed (simulation).
@@ -300,8 +304,8 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
 
     // Save incoming lag values before overwriting state with primal.
     // Uses the pre-allocated lag_matrix_buf scratch buffer (no allocation).
-    let lag_start = indexer.inflow_lags.start;
-    let lag_len = indexer.hydro_count * indexer.max_par_order;
+    let lag_start = state.inflow_lags.start;
+    let lag_len = state.hydro_count * state.max_par_order;
     ws.scratch.lag_matrix_buf.clear();
     ws.scratch
         .lag_matrix_buf
@@ -309,8 +313,8 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
 
     // Save incoming anticipated-state slice before overwriting state with primal.
     // Uses the pre-allocated anticipated_state_buf scratch buffer (no allocation).
-    let ant_start = indexer.anticipated_state.start;
-    let ant_len = indexer.n_anticipated * indexer.k_max;
+    let ant_start = state.anticipated_state.start;
+    let ant_len = state.n_anticipated * state.k_max;
     ws.scratch.anticipated_state_buf.clear();
     ws.scratch
         .anticipated_state_buf
@@ -319,7 +323,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     // Compute shifted lag state once into ws.current_state, then copy to rec.state.
     ws.current_state.clear();
     ws.current_state
-        .extend_from_slice(&unscaled_primal[..indexer.n_state]);
+        .extend_from_slice(&unscaled_primal[..state.n_state]);
     let stage_lag = ctx.stage_lag_transitions.get(t).copied().unwrap_or(
         cobre_core::temporal::StageLagTransition {
             accumulate_weight: 1.0,
@@ -342,7 +346,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         &mut ws.current_state,
         &ws.scratch.lag_matrix_buf,
         &unscaled_primal,
-        indexer,
+        state,
         &stage_lag,
         &mut crate::noise::LagAccumState {
             accumulator: &mut ws.scratch.lag_accumulator,
@@ -360,6 +364,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         &mut ws.current_state,
         &ws.scratch.anticipated_state_buf,
         &unscaled_primal,
+        state,
         indexer,
     );
     // Restore the scratch buffer so the next stage reuses the warmed allocation.
@@ -382,7 +387,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
                 pool,
                 ctx.templates[t].num_rows,
                 cut_row_count,
-                &ws.current_state[..indexer.n_state],
+                &ws.current_state[..state.n_state],
             );
         } else {
             let mut captured = CapturedBasis::new(
@@ -390,7 +395,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
                 basis_row_capacity,
                 ctx.templates[t].num_rows,
                 cut_row_count,
-                indexer.n_state,
+                state.n_state,
             );
             ws.solver.get_basis(&mut captured.basis);
             write_capture_metadata(
@@ -398,7 +403,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
                 pool,
                 ctx.templates[t].num_rows,
                 cut_row_count,
-                &ws.current_state[..indexer.n_state],
+                &ws.current_state[..state.n_state],
             );
             *basis_slice.get_mut(m, t) = Some(captured);
         }

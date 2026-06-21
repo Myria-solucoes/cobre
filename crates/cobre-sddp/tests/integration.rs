@@ -53,7 +53,7 @@ use cobre_sddp::{
     context::{StageContext, TrainingContext},
     cut::fcf::FutureCostFunction,
     horizon_mode::HorizonMode,
-    indexer::StageIndexer,
+    indexer::{StageIndexer, StateLayout},
     inflow_method::InflowNonNegativityMethod,
     risk_measure::RiskMeasure,
     train,
@@ -62,6 +62,54 @@ use cobre_sddp::{
 // ===========================================================================
 // Shared helpers
 // ===========================================================================
+
+/// Build the role-(a) [`StateLayout`] whose `storage_in` / `inflow_lags` /
+/// `anticipated_state` column starts match `indexer`'s identical fields.
+///
+/// Mirrors the gated `indexer::test_fixtures::state_layout_for` body via the
+/// public [`StateLayout::new`] constructor, so this external test crate (which
+/// does not see the parent crate's `#[cfg(test)]` surface) resolves byte-identical
+/// patch columns on the default feature set.
+fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
+    StateLayout::new(
+        hydro_count,
+        max_par_order,
+        0,
+        0,
+        vec![],
+        &vec![max_par_order; hydro_count],
+    )
+}
+
+/// Build a role-(b) `StageIndexer` geometry descriptor (no equipment, no
+/// anticipated thermals) via the public `with_equipment_and_evaporation`
+/// constructor, for the `TrainingContext.indexer` slot.
+fn geom(_hydro_count: usize, _max_par_order: usize) -> StageIndexer {
+    StageIndexer::with_equipment_and_evaporation(
+        &cobre_sddp::indexer::EquipmentCounts {
+            hydro_count: 0,
+            max_par_order: 0,
+            n_thermals: 0,
+            n_lines: 0,
+            n_buses: 0,
+            n_blks: 0,
+            has_inflow_penalty: false,
+            max_deficit_segments: 0,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
+            n_pumping: 0,
+        },
+        &cobre_sddp::indexer::FphaColumnLayout {
+            hydro_indices: vec![],
+            planes_per_hydro: vec![],
+        },
+        &cobre_sddp::indexer::EvapConfig {
+            hydro_indices: vec![],
+        },
+    )
+}
 
 /// Single-rank communicator that correctly copies data through `allgatherv`
 /// and `allreduce`. Required by the exchange and forward-sync steps so that
@@ -527,6 +575,7 @@ struct Fixture {
     templates: Vec<StageTemplate>,
     base_rows: Vec<usize>,
     indexer: StageIndexer,
+    state: StateLayout,
     initial_state: Vec<f64>,
     stochastic: StochasticContext,
     horizon: HorizonMode,
@@ -537,19 +586,12 @@ const FCF_CAPACITY_ITERATIONS: u64 = 50;
 
 impl Fixture {
     fn new(n_stages: usize) -> Self {
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            // Finalize as production setup does: full-order mask + state→LP-column map.
-            let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-            let anticipated_k = ix.anticipated_lead_stages.clone();
-            ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-            ix.finalize_state_column_map();
-            ix
-        }; // N=1, L=0
+        let indexer = geom(1, 0);
+        let state = state_layout_for(1, 0);
         let templates = vec![minimal_template(); n_stages];
         // base_row = n_dual_relevant + n_hydros = 1 + 1 = 2 (z_inflow rows follow state rows)
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
@@ -561,6 +603,7 @@ impl Fixture {
             templates,
             base_rows,
             indexer,
+            state,
             initial_state,
             stochastic,
             horizon,
@@ -629,6 +672,7 @@ fn run_one_deterministic_pass(
         &TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
+            state: &fx.state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic,
             initial_state: &fx.initial_state,
@@ -713,6 +757,7 @@ fn train_converges_with_mock_solver() {
         &TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
+            state: &fx.state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -827,6 +872,7 @@ fn train_lb_monotonically_nondecreasing() {
         &TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
+            state: &fx.state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -932,6 +978,7 @@ fn train_emits_correct_event_sequence() {
         &TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
+            state: &fx.state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1042,6 +1089,7 @@ fn train_stops_at_iteration_limit() {
         &TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
+            state: &fx.state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1136,6 +1184,7 @@ fn train_stops_on_graceful_shutdown() {
         &TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
+            state: &fx.state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1220,6 +1269,7 @@ fn train_propagates_infeasible_error() {
         &TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
+            state: &fx.state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1331,6 +1381,7 @@ fn d17_level1_cut_selection_convergence() {
         &TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
+            state: &fx.state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1493,6 +1544,7 @@ fn d17_level1_cut_selection_reconstruction() {
         &TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
+            state: &fx.state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1607,6 +1659,7 @@ fn d18_lml1_cut_selection_convergence() {
         &TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
+            state: &fx.state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1849,6 +1902,7 @@ fn baked_backward_pass_smoke_test() {
         &TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
+            state: &fx.state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,

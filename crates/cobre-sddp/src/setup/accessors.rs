@@ -6,7 +6,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     energy_conversion::EnergyConversionSet,
-    indexer::StageIndexer,
+    indexer::{StageIndexer, StateLayout},
     simulation::SimulationConfig,
     workspace::CapturedBasis,
 };
@@ -72,18 +72,34 @@ impl StudySetup {
         &self.simulation_config
     }
 
-    /// Return a reference to the per-stage LP column/row indexer.
+    /// Return a reference to the per-stage role-(b) LP geometry descriptor.
     ///
-    /// Provides LP layout constants — column and row ranges for every entity
-    /// class (storage, thermal, anticipated state, etc.) — so that callers can
-    /// locate specific primal or state-vector entries without hard-coding
-    /// offsets.
+    /// Provides the equipment / slack column and constraint-row ranges for every
+    /// entity class (turbine, spillage, thermal, anticipated decision, deficit,
+    /// …) plus the entity-count scalars and presence flags, so callers can locate
+    /// equipment primal entries without hard-coding offsets. The state-vector
+    /// concern (storage / lag / anticipated-state columns, `theta`, `n_state`)
+    /// lives on [`Self::stage_state`].
     ///
-    /// The same indexer applies to every stage (the layout is uniform across
-    /// stages in a study).
+    /// The same descriptor applies to every stage whose block count equals stage
+    /// 0's; the per-stage layout is the authority where block counts vary.
     #[must_use]
     pub fn stage_indexer(&self) -> &StageIndexer {
         &self.stage_data.indexer
+    }
+
+    /// Return a reference to the stage-invariant role-(a) state-vector layout.
+    ///
+    /// Provides the state-region column ranges (`storage`, `inflow_lags`,
+    /// `storage_in`, `anticipated_state`, `anticipated_state_out`, `z_inflow`),
+    /// the `theta` future-cost column, `n_state`, the state-vector dimension
+    /// scalars (`hydro_count`, `max_par_order`, `n_anticipated`, `k_max`,
+    /// `anticipated_lead_stages`), and the cut resolvers / mask. These offsets are
+    /// pure functions of `(N, L, A, k_max)`, so the single layout resolves onto
+    /// the correct column at every stage regardless of per-stage block counts.
+    #[must_use]
+    pub fn stage_state(&self) -> &StateLayout {
+        &self.stage_data.state
     }
 
     /// Number of stages in the planning horizon.
@@ -131,6 +147,7 @@ impl StudySetup {
         TrainingContext {
             horizon: &self.methodology.horizon,
             indexer: &self.stage_data.indexer,
+            state: &self.stage_data.state,
             inflow_method: &self.methodology.inflow_method,
             stochastic: &self.stochastic,
             initial_state: &self.initial_state,
@@ -198,6 +215,7 @@ impl StudySetup {
         TrainingContext {
             horizon: &self.methodology.horizon,
             indexer: &self.stage_data.indexer,
+            state: &self.stage_data.state,
             inflow_method: &self.methodology.inflow_method,
             stochastic: &self.stochastic,
             initial_state: &self.initial_state,

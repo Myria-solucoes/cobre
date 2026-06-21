@@ -20,8 +20,8 @@
 //! across those plants. When `A == 0` the layout collapses to the
 //! pre-anticipated form: `z_inflow` at `N*(1+L)`, `theta` at `N*(3+L)`.
 //!
-//! When built with [`StageIndexer::with_equipment`], the following equipment
-//! columns follow immediately after `theta`:
+//! When built with [`StageIndexer::with_equipment_and_evaporation`], the following
+//! equipment columns follow immediately after `theta`:
 //!
 //! ```text
 //! [theta+1,                                  theta+1+H*K)                turbine                — turbined flow (m³/s)
@@ -118,32 +118,32 @@
 //!
 //! # Submodule layout
 //!
-//! - `layout` — the [`StageIndexer`] struct, the satellite types
-//!   ([`EvaporationIndices`], [`FphaRowRange`], [`EquipmentCounts`],
+//! - `layout` — the [`StageIndexer`] role-(b) geometry descriptor, the satellite
+//!   types ([`EvaporationIndices`], [`FphaRowRange`], [`EquipmentCounts`],
 //!   [`FphaColumnLayout`], [`EvapConfig`]), the small layout accessors, and the
 //!   compile-time `Send + Sync` assertion.
-//! - `state_mapping` — the state-vector-to-LP-column resolvers
-//!   ([`StageIndexer::state_to_lp_column`], [`StageIndexer::finalize_state_column_map`],
-//!   [`StageIndexer::lp_column_for_state`], and the state-pinning entry point
-//!   [`StageIndexer::state_to_lp_incoming_column`]).
 //! - `block_grid` — the [`BlockGrid`] typed block-stride address primitive and
 //!   its three shape methods ([`BlockGrid::flat`], [`BlockGrid::fpha_plane`],
 //!   [`BlockGrid::deficit`]).
-//! - `anticipated` — the per-stage anticipated-thermal iterators and predicates.
-//! - `sparse_state` — the nonzero-state mask builder `set_nonzero_mask`.
-//! - `constructors` — the three constructors and the private column/row range
-//!   build helpers.
+//! - `state_layout` — the [`StateLayout`] type, the sole owner of the role-(a)
+//!   state-vector concern: the stage-invariant state-vector column ranges, the
+//!   two layout-derived caches, and the resolver / mask methods
+//!   ([`StateLayout::state_to_lp_column`],
+//!   [`StateLayout::state_to_lp_incoming_column`],
+//!   [`StateLayout::lp_column_for_state`], [`StateLayout::set_nonzero_mask`]). It
+//!   finalizes both caches in its single constructor; downstream code threads a
+//!   handle to it.
+//! - `constructors` — the single role-(b) constructor and the private
+//!   column/row range build helpers.
 //!
 //! Every public symbol is re-exported here so both the curated flat surface in
 //! `lib.rs` and the `cobre_sddp::indexer::Symbol` / `crate::indexer::Symbol`
 //! module path resolve to the same item regardless of which submodule owns it.
 
-mod anticipated;
 mod block_grid;
 mod constructors;
 mod layout;
-mod sparse_state;
-mod state_mapping;
+mod state_layout;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_fixtures;
 
@@ -151,3 +151,4 @@ pub use block_grid::BlockGrid;
 pub use layout::{
     EquipmentCounts, EvapConfig, EvaporationIndices, FphaColumnLayout, FphaRowRange, StageIndexer,
 };
+pub use state_layout::StateLayout;

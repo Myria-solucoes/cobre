@@ -500,13 +500,13 @@ fn five_stage_k2_anticipated_state_ring_buffer_evolution() {
     );
 
     // Retrieve the stage indexer to locate the anticipated_state slice.
-    let indexer = setup.stage_indexer();
-    let n_ant = indexer.n_anticipated;
-    let k_max = indexer.k_max;
+    let state = setup.stage_state();
+    let n_ant = state.n_anticipated;
+    let k_max = state.k_max;
     assert_eq!(n_ant, 1, "fixture must have exactly 1 anticipated thermal");
     assert_eq!(k_max, 2, "fixture must have k_max = 2");
 
-    let ant_start = indexer.anticipated_state.start;
+    let ant_start = state.anticipated_state.start;
 
     let basis_cache = &outcome.result.basis_cache;
     assert_eq!(

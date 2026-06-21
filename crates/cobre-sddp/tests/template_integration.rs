@@ -34,7 +34,9 @@ use cobre_sddp::{
         EvaporationModel, EvaporationModelSet, FphaPlane, LinearizedEvaporation,
         PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel,
     },
-    indexer::{BlockGrid, EquipmentCounts, FphaColumnLayout, StageIndexer},
+    indexer::{
+        BlockGrid, EquipmentCounts, EvapConfig, FphaColumnLayout, StageIndexer, StateLayout,
+    },
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
     resolved_parameters::ResolvedParameters,
@@ -596,7 +598,7 @@ fn num_rows_formula_one_hydro_lag_two() {
 
 #[test]
 fn n_state_matches_indexer() {
-    // n_state must equal StageIndexer::new(N, L).n_state
+    // n_state must equal StateLayout::new(N, L, 0, 0, vec![], &vec![L; N]).n_state
     let system = one_hydro_system(1, 2);
     let result = build_stage_templates(
         &system,
@@ -609,7 +611,7 @@ fn n_state_matches_indexer() {
     )
     .expect("constant productivity ok");
     let t = &result.templates[0];
-    let expected = StageIndexer::new(1, 2).n_state;
+    let expected = StateLayout::new(1, 2, 0, 0, vec![], &[2; 1]).n_state;
     assert_eq!(t.n_state, expected, "n_state must match StageIndexer");
 }
 
@@ -747,7 +749,7 @@ fn theta_column_has_unit_objective() {
     )
     .expect("constant productivity ok");
     let t = &result.templates[0];
-    let theta_col = StageIndexer::new(1, lag_order).theta;
+    let theta_col = StateLayout::new(1, lag_order, 0, 0, vec![], &[lag_order; 1]).theta;
     assert_eq!(
         t.objective[theta_col], 1.0,
         "theta column objective must be 1.0 (theta is not scaled by COST_SCALE_FACTOR)"
@@ -8014,7 +8016,7 @@ fn operational_violation_row_col_counts() {
     let result = build_active_violations_template();
     let t = &result.templates[0];
 
-    let indexer = StageIndexer::with_equipment(
+    let indexer = StageIndexer::with_equipment_and_evaporation(
         &EquipmentCounts {
             hydro_count: 1,
             max_par_order: 0,
@@ -8033,6 +8035,9 @@ fn operational_violation_row_col_counts() {
         &FphaColumnLayout {
             hydro_indices: vec![],
             planes_per_hydro: vec![],
+        },
+        &EvapConfig {
+            hydro_indices: vec![],
         },
     );
 
@@ -8065,7 +8070,7 @@ fn min_outflow_active_col_bounds() {
     // When min_outflow > 0, the slack column has lower=0, upper=+inf.
     let result = build_active_violations_template();
     let t = &result.templates[0];
-    let indexer = StageIndexer::with_equipment(
+    let indexer = StageIndexer::with_equipment_and_evaporation(
         &EquipmentCounts {
             hydro_count: 1,
             max_par_order: 0,
@@ -8084,6 +8089,9 @@ fn min_outflow_active_col_bounds() {
         &FphaColumnLayout {
             hydro_indices: vec![],
             planes_per_hydro: vec![],
+        },
+        &EvapConfig {
+            hydro_indices: vec![],
         },
     );
 
@@ -8100,7 +8108,7 @@ fn min_outflow_active_col_bounds() {
 fn max_outflow_active_col_bounds() {
     let result = build_active_violations_template();
     let t = &result.templates[0];
-    let indexer = StageIndexer::with_equipment(
+    let indexer = StageIndexer::with_equipment_and_evaporation(
         &EquipmentCounts {
             hydro_count: 1,
             max_par_order: 0,
@@ -8119,6 +8127,9 @@ fn max_outflow_active_col_bounds() {
         &FphaColumnLayout {
             hydro_indices: vec![],
             planes_per_hydro: vec![],
+        },
+        &EvapConfig {
+            hydro_indices: vec![],
         },
     );
 
@@ -8146,7 +8157,7 @@ fn operational_violation_inactive_pinned() {
     )
     .expect("base ok");
     let t = &result.templates[0];
-    let indexer = StageIndexer::with_equipment(
+    let indexer = StageIndexer::with_equipment_and_evaporation(
         &EquipmentCounts {
             hydro_count: 1,
             max_par_order: 0,
@@ -8165,6 +8176,9 @@ fn operational_violation_inactive_pinned() {
         &FphaColumnLayout {
             hydro_indices: vec![],
             planes_per_hydro: vec![],
+        },
+        &EvapConfig {
+            hydro_indices: vec![],
         },
     );
 
@@ -8189,7 +8203,7 @@ fn operational_violation_objective_costs() {
     let result = build_active_violations_template();
     let t = &result.templates[0];
     let n_blks = 2;
-    let indexer = StageIndexer::with_equipment(
+    let indexer = StageIndexer::with_equipment_and_evaporation(
         &EquipmentCounts {
             hydro_count: 1,
             max_par_order: 0,
@@ -8208,6 +8222,9 @@ fn operational_violation_objective_costs() {
         &FphaColumnLayout {
             hydro_indices: vec![],
             planes_per_hydro: vec![],
+        },
+        &EvapConfig {
+            hydro_indices: vec![],
         },
     );
 
@@ -8239,7 +8256,7 @@ fn min_outflow_row_bounds() {
     let t = &result.templates[0];
     let expected_lower = 50.0; // min_outflow_m3s
 
-    let indexer = StageIndexer::with_equipment(
+    let indexer = StageIndexer::with_equipment_and_evaporation(
         &EquipmentCounts {
             hydro_count: 1,
             max_par_order: 0,
@@ -8258,6 +8275,9 @@ fn min_outflow_row_bounds() {
         &FphaColumnLayout {
             hydro_indices: vec![],
             planes_per_hydro: vec![],
+        },
+        &EvapConfig {
+            hydro_indices: vec![],
         },
     );
 
@@ -8285,7 +8305,7 @@ fn max_outflow_row_bounds() {
     let t = &result.templates[0];
     let expected_upper = 800.0; // max_outflow_m3s
 
-    let indexer = StageIndexer::with_equipment(
+    let indexer = StageIndexer::with_equipment_and_evaporation(
         &EquipmentCounts {
             hydro_count: 1,
             max_par_order: 0,
@@ -8304,6 +8324,9 @@ fn max_outflow_row_bounds() {
         &FphaColumnLayout {
             hydro_indices: vec![],
             planes_per_hydro: vec![],
+        },
+        &EvapConfig {
+            hydro_indices: vec![],
         },
     );
 
@@ -8330,7 +8353,7 @@ fn min_turbine_row_bounds() {
     let t = &result.templates[0];
     let expected_lower = 10.0; // min_turbined_m3s
 
-    let indexer = StageIndexer::with_equipment(
+    let indexer = StageIndexer::with_equipment_and_evaporation(
         &EquipmentCounts {
             hydro_count: 1,
             max_par_order: 0,
@@ -8349,6 +8372,9 @@ fn min_turbine_row_bounds() {
         &FphaColumnLayout {
             hydro_indices: vec![],
             planes_per_hydro: vec![],
+        },
+        &EvapConfig {
+            hydro_indices: vec![],
         },
     );
 
@@ -8375,7 +8401,7 @@ fn min_generation_row_bounds() {
     let t = &result.templates[0];
     let expected_lower = 5.0; // min_generation_mw
 
-    let indexer = StageIndexer::with_equipment(
+    let indexer = StageIndexer::with_equipment_and_evaporation(
         &EquipmentCounts {
             hydro_count: 1,
             max_par_order: 0,
@@ -8394,6 +8420,9 @@ fn min_generation_row_bounds() {
         &FphaColumnLayout {
             hydro_indices: vec![],
             planes_per_hydro: vec![],
+        },
+        &EvapConfig {
+            hydro_indices: vec![],
         },
     );
 
@@ -8420,7 +8449,7 @@ fn min_outflow_matrix_coefficients() {
     let result = build_active_violations_template();
     let t = &result.templates[0];
     let n_blks = 2;
-    let indexer = StageIndexer::with_equipment(
+    let indexer = StageIndexer::with_equipment_and_evaporation(
         &EquipmentCounts {
             hydro_count: 1,
             max_par_order: 0,
@@ -8439,6 +8468,9 @@ fn min_outflow_matrix_coefficients() {
         &FphaColumnLayout {
             hydro_indices: vec![],
             planes_per_hydro: vec![],
+        },
+        &EvapConfig {
+            hydro_indices: vec![],
         },
     );
 
@@ -8478,7 +8510,7 @@ fn max_outflow_matrix_slack_is_negative() {
     let result = build_active_violations_template();
     let t = &result.templates[0];
     let n_blks = 2;
-    let indexer = StageIndexer::with_equipment(
+    let indexer = StageIndexer::with_equipment_and_evaporation(
         &EquipmentCounts {
             hydro_count: 1,
             max_par_order: 0,
@@ -8497,6 +8529,9 @@ fn max_outflow_matrix_slack_is_negative() {
         &FphaColumnLayout {
             hydro_indices: vec![],
             planes_per_hydro: vec![],
+        },
+        &EvapConfig {
+            hydro_indices: vec![],
         },
     );
 
@@ -8518,7 +8553,7 @@ fn min_turbine_matrix_only_turbine_cols() {
     let result = build_active_violations_template();
     let t = &result.templates[0];
     let n_blks = 2;
-    let indexer = StageIndexer::with_equipment(
+    let indexer = StageIndexer::with_equipment_and_evaporation(
         &EquipmentCounts {
             hydro_count: 1,
             max_par_order: 0,
@@ -8537,6 +8572,9 @@ fn min_turbine_matrix_only_turbine_cols() {
         &FphaColumnLayout {
             hydro_indices: vec![],
             planes_per_hydro: vec![],
+        },
+        &EvapConfig {
+            hydro_indices: vec![],
         },
     );
 
@@ -8577,7 +8615,7 @@ fn min_generation_constant_productivity_coefficients() {
     let t = &result.templates[0];
     let n_blks = 2;
     let rho = 0.5;
-    let indexer = StageIndexer::with_equipment(
+    let indexer = StageIndexer::with_equipment_and_evaporation(
         &EquipmentCounts {
             hydro_count: 1,
             max_par_order: 0,
@@ -8596,6 +8634,9 @@ fn min_generation_constant_productivity_coefficients() {
         &FphaColumnLayout {
             hydro_indices: vec![],
             planes_per_hydro: vec![],
+        },
+        &EvapConfig {
+            hydro_indices: vec![],
         },
     );
 
@@ -8625,7 +8666,7 @@ fn turbine_column_lower_bound_is_zero() {
     // turbine column lower bound must be 0.0, not min_turbined_m3s.
     let result = build_active_violations_template();
     let t = &result.templates[0];
-    let indexer = StageIndexer::with_equipment(
+    let indexer = StageIndexer::with_equipment_and_evaporation(
         &EquipmentCounts {
             hydro_count: 1,
             max_par_order: 0,
@@ -8644,6 +8685,9 @@ fn turbine_column_lower_bound_is_zero() {
         &FphaColumnLayout {
             hydro_indices: vec![],
             planes_per_hydro: vec![],
+        },
+        &EvapConfig {
+            hydro_indices: vec![],
         },
     );
 
@@ -8672,7 +8716,7 @@ fn operational_violation_rows_outside_dual_relevant() {
         "n_dual_relevant is always 0 after Phase 1 state-fixing removal"
     );
 
-    let indexer = StageIndexer::with_equipment(
+    let indexer = StageIndexer::with_equipment_and_evaporation(
         &EquipmentCounts {
             hydro_count: 1,
             max_par_order: 0,
@@ -8691,6 +8735,9 @@ fn operational_violation_rows_outside_dual_relevant() {
         &FphaColumnLayout {
             hydro_indices: vec![],
             planes_per_hydro: vec![],
+        },
+        &EvapConfig {
+            hydro_indices: vec![],
         },
     );
 
@@ -8730,7 +8777,7 @@ fn diagnostic_template_operational_violation_correctness() {
     let result = build_active_violations_template();
     let t = &result.templates[0];
 
-    let indexer = StageIndexer::with_equipment(
+    let indexer = StageIndexer::with_equipment_and_evaporation(
         &EquipmentCounts {
             hydro_count: 1,
             max_par_order: 0,
@@ -8749,6 +8796,9 @@ fn diagnostic_template_operational_violation_correctness() {
         &FphaColumnLayout {
             hydro_indices: vec![],
             planes_per_hydro: vec![],
+        },
+        &EvapConfig {
+            hydro_indices: vec![],
         },
     );
 
@@ -9225,7 +9275,6 @@ fn max_par_order_z_inflow_row_has_twelve_lag_entries() {
 #[allow(clippy::cast_precision_loss)] // fixture values are small integers; no precision is lost
 fn parameter_coefficient_persists_across_stage_template_uses() {
     use PatchBuffer;
-    use StageIndexer;
 
     // Realistic-scale system: N=3, L=2, M=2, B_max=3.
     // Phase 1 row capacity = N + M*B_max + N = 3 + 2*3 + 3 = 12.
@@ -9253,7 +9302,13 @@ fn parameter_coefficient_persists_across_stage_template_uses() {
     let base_row: usize = n;
 
     // Category 3 — AR dynamics / noise.
-    buf.fill_forward_patches(&StageIndexer::new(n, l), &state, &noise, base_row, &[]);
+    buf.fill_forward_patches(
+        &StateLayout::new(n, l, 0, 0, vec![], &vec![l; n]),
+        &state,
+        &noise,
+        base_row,
+        &[],
+    );
 
     // Category 4 — 2 load buses, 2 active blocks (< max 3). The per-stage grid
     // carries `b_active`, NOT `b_max`, so the load-balance row stride matches the

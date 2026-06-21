@@ -96,6 +96,7 @@ impl StudySetup {
         let training_ctx = TrainingContext {
             horizon: &self.methodology.horizon,
             indexer: &self.stage_data.indexer,
+            state: &self.stage_data.state,
             inflow_method: &self.methodology.inflow_method,
             stochastic: &self.stochastic,
             initial_state: &self.initial_state,
@@ -240,10 +241,10 @@ impl StudySetup {
         let mut pool = WorkspacePool::try_new(
             rank,
             n_threads,
-            self.stage_data.indexer.n_state,
+            self.stage_data.state.n_state,
             WorkspaceSizing {
-                hydro_count: self.stage_data.indexer.hydro_count,
-                max_par_order: self.stage_data.indexer.max_par_order,
+                hydro_count: self.stage_data.state.hydro_count,
+                max_par_order: self.stage_data.state.max_par_order,
                 n_load_buses: self.stage_data.stage_templates.n_load_buses,
                 max_blocks: self.loop_params.max_blocks,
                 downstream_par_order: self.downstream_par_order,
@@ -252,13 +253,13 @@ impl StudySetup {
                     .max()
                     .unwrap_or(0),
                 initial_pool_capacity: 0,
-                n_state: self.stage_data.indexer.n_state,
+                n_state: self.stage_data.state.n_state,
                 // Simulation-only pool: forward-worker scratch fields unused.
                 max_local_fwd: 0,
                 total_forward_passes: 0,
                 noise_dim: 0,
-                n_anticipated: self.stage_data.indexer.n_anticipated,
-                k_max: self.stage_data.indexer.k_max,
+                n_anticipated: self.stage_data.state.n_anticipated,
+                k_max: self.stage_data.state.k_max,
             },
             solver_factory,
         )?;

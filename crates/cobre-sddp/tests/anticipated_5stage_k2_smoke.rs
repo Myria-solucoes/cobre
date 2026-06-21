@@ -476,9 +476,9 @@ fn test_anticipated_5stage_k2_analytical_lb() {
     );
 
     let result = &outcome.result;
-    let indexer = setup.stage_indexer();
-    let anticipated_state_start = indexer.anticipated_state.start;
-    let n_anticipated = indexer.n_anticipated;
+    let state = setup.stage_state();
+    let anticipated_state_start = state.anticipated_state.start;
+    let n_anticipated = state.n_anticipated;
 
     // Structural assertions — no EXPECTED_LB. Value-correctness coverage
     // lives in anticipated_closed_form_lb_k1_single_thermal.rs (closed-form

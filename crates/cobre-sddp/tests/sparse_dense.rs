@@ -17,8 +17,8 @@
 )]
 
 use cobre_sddp::FutureCostFunction;
-use cobre_sddp::StageIndexer;
 use cobre_sddp::build_cut_row_batch_into;
+use cobre_sddp::indexer::StateLayout;
 use cobre_solver::RowBatch;
 
 /// When the sparse mask is a proper subset (mixed AR orders), the output
@@ -31,14 +31,13 @@ fn sparse_partial_mask_produces_correct_subset() {
     let max_par_order = 2;
     let n_state = n_hydro * (1 + max_par_order); // 9
 
-    // Mixed AR orders: [0, 1, 2] → some lag slots are zero
-    let mut indexer = StageIndexer::new(n_hydro, max_par_order);
-    indexer.set_nonzero_mask(&[0, 1, 2], &[]);
-    // Finalize the state→LP-column precompute map, as production setup does.
-    indexer.finalize_state_column_map();
+    // Mixed AR orders: effective_lag_count = [0, 1, 2] → some lag slots are zero.
+    // `StateLayout::new` finalizes the nonzero-state mask and the
+    // state→LP-column precompute map in its constructor, as production setup does.
+    let state = StateLayout::new(n_hydro, max_par_order, 0, 0, vec![], &[0, 1, 2]);
     // Expected mask: storage [0,1,2] + lag0 for h1,h2 [4,5] + lag1 for h2 [8]
     // = [0, 1, 2, 4, 5, 8]
-    let mask = &indexer.nonzero_state_indices;
+    let mask = &state.nonzero_state_indices;
     assert_eq!(
         mask.len(),
         6,
@@ -60,7 +59,7 @@ fn sparse_partial_mask_produces_correct_subset() {
         row_lower: Vec::new(),
         row_upper: Vec::new(),
     };
-    build_cut_row_batch_into(&mut batch, &fcf, 0, &indexer, &col_scale);
+    build_cut_row_batch_into(&mut batch, &fcf, 0, &state, &col_scale);
 
     // The sparse path should only emit entries for mask indices + theta.
     // NNZ per cut = mask.len() + 1 (theta) = 7
@@ -68,10 +67,10 @@ fn sparse_partial_mask_produces_correct_subset() {
     // col_indices should contain the remapped LP columns plus theta_col.
     // state_to_lp_column maps outgoing-state indices to LP columns:
     // storage → identity; lag 0 → z_inflow; lag l≥1 → incoming lag l−1.
-    let theta_col = indexer.theta;
+    let theta_col = state.theta;
     let expected_cols: Vec<i32> = mask
         .iter()
-        .map(|&j| indexer.state_to_lp_column(j) as i32)
+        .map(|&j| state.state_to_lp_column(j) as i32)
         .chain(std::iter::once(theta_col as i32))
         .collect();
     assert_eq!(

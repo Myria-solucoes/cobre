@@ -22,7 +22,7 @@
 
 use cobre_sddp::cut::{CutPool, CutRowMap};
 use cobre_sddp::dcs::{DcsParams, DcsScoringScratch, score_violated_candidates};
-use cobre_sddp::indexer::StageIndexer;
+use cobre_sddp::indexer::StateLayout;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 
 // --- deterministic PRNG (no external rand dep) ------------------------------
@@ -98,7 +98,7 @@ fn gemm_block(
 #[allow(clippy::too_many_arguments)]
 fn score_per_candidate_baseline(
     pool: &CutPool,
-    indexer: &StageIndexer,
+    state: &StateLayout,
     primal: &[f64],
     col_scale: &[f64],
     resident: &CutRowMap,
@@ -108,8 +108,8 @@ fn score_per_candidate_baseline(
     violations: &mut Vec<(f64, u32)>,
     out_selected: &mut Vec<u32>,
 ) -> usize {
-    let n_state = indexer.n_state;
-    let theta = indexer.theta;
+    let n_state = state.n_state;
+    let theta = state.theta;
 
     out_selected.clear();
     violations.clear();
@@ -122,7 +122,7 @@ fn score_per_candidate_baseline(
 
     unscaled_state.clear();
     for j in 0..n_state {
-        let c = indexer.state_to_lp_column(j);
+        let c = state.state_to_lp_column(j);
         let x_raw = if col_scale.is_empty() {
             primal[c]
         } else {
@@ -187,7 +187,7 @@ fn make_primal(n_state: usize, seed: u64) -> Vec<f64> {
 }
 
 fn bench_one(c: &mut Criterion, k: usize, n_state: usize) {
-    let indexer = StageIndexer::new(n_state, 0);
+    let state = StateLayout::new(n_state, 0, 0, 0, vec![], &vec![0; n_state]);
     let pool = make_candidate_pool(k, n_state, 0xDEAD_BEEF_CAFE_F00D);
     let primal = make_primal(n_state, 0xFEED_FACE_1234_5678);
     let resident = CutRowMap::new(k.max(1), 0); // empty: every cut a candidate
@@ -212,7 +212,7 @@ fn bench_one(c: &mut Criterion, k: usize, n_state: usize) {
             b.iter(|| {
                 let count = score_violated_candidates(
                     black_box(&pool),
-                    black_box(&indexer),
+                    black_box(&state),
                     black_box(&primal),
                     black_box(&[]),
                     black_box(&resident),
@@ -235,7 +235,7 @@ fn bench_one(c: &mut Criterion, k: usize, n_state: usize) {
             b.iter(|| {
                 let count = score_per_candidate_baseline(
                     black_box(&pool),
-                    black_box(&indexer),
+                    black_box(&state),
                     black_box(&primal),
                     black_box(&[]),
                     black_box(&resident),

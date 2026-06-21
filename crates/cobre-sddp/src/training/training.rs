@@ -470,7 +470,6 @@ mod tests {
         cut::fcf::FutureCostFunction,
         error::SddpError,
         horizon_mode::HorizonMode,
-        indexer::StageIndexer,
         inflow_method::InflowNonNegativityMethod,
         risk_measure::RiskMeasure,
         solver_stats::{SolverStatsDelta, SolverStatsLogEntry},
@@ -867,20 +866,17 @@ mod tests {
     #[test]
     fn ac_train_completes_with_iteration_limit() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        }; // N=1, L=0
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let config = TrainingConfig {
             loop_config: LoopConfig {
@@ -936,6 +932,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -972,20 +969,17 @@ mod tests {
     #[test]
     fn ac_train_returns_partial_on_infeasible() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let config = TrainingConfig {
             loop_config: LoopConfig {
@@ -1041,6 +1035,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1094,20 +1089,17 @@ mod tests {
     #[test]
     fn ac_train_emits_correct_event_sequence() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let (tx, rx) = mpsc::channel::<TrainingEvent>();
 
@@ -1165,6 +1157,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1301,20 +1294,17 @@ mod tests {
         use cobre_core::WorkerTimingPhase;
 
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let (tx, rx) = mpsc::channel::<TrainingEvent>();
 
@@ -1372,6 +1362,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1479,20 +1470,17 @@ mod tests {
     #[test]
     fn ac_train_result_fields_populated() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let config = TrainingConfig {
             loop_config: LoopConfig {
@@ -1548,6 +1536,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1582,20 +1571,17 @@ mod tests {
     #[test]
     fn ac_train_with_no_event_sender() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let config = TrainingConfig {
             loop_config: LoopConfig {
@@ -1651,6 +1637,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1682,20 +1669,17 @@ mod tests {
     #[test]
     fn ac_total_time_ms_is_non_negative() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let config = TrainingConfig {
             loop_config: LoopConfig {
@@ -1751,6 +1735,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1788,20 +1773,17 @@ mod tests {
     #[test]
     fn cut_selection_none_skips_step() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let (tx, rx) = mpsc::channel::<TrainingEvent>();
 
@@ -1859,6 +1841,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1903,20 +1886,17 @@ mod tests {
         use crate::cut_selection::CutSelectionStrategy;
 
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let (tx, rx) = mpsc::channel::<TrainingEvent>();
 
@@ -1977,6 +1957,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2031,20 +2012,17 @@ mod tests {
         use crate::cut_selection::CutSelectionStrategy;
 
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let (tx, rx) = mpsc::channel::<TrainingEvent>();
 
@@ -2105,6 +2083,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2175,20 +2154,17 @@ mod tests {
     #[test]
     fn existing_train_tests_pass_with_none() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let config = TrainingConfig {
             loop_config: LoopConfig {
@@ -2244,6 +2220,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2282,20 +2259,17 @@ mod tests {
     #[test]
     fn ac_train_partial_result_on_mid_iteration_failure() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let (tx, rx) = mpsc::channel::<TrainingEvent>();
 
@@ -2357,6 +2331,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2410,20 +2385,17 @@ mod tests {
     #[test]
     fn start_iteration_resumes_from_offset() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let config = TrainingConfig {
             loop_config: LoopConfig {
@@ -2479,6 +2451,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2513,20 +2486,17 @@ mod tests {
     #[test]
     fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let config = TrainingConfig {
             loop_config: LoopConfig {
@@ -2582,6 +2552,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -3244,20 +3215,17 @@ mod tests {
     #[test]
     fn template_bake_event_emitted() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let (tx, rx) = mpsc::channel::<TrainingEvent>();
 
@@ -3316,6 +3284,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,

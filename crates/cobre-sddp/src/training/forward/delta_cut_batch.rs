@@ -8,7 +8,7 @@ use cobre_solver::RowBatch;
 
 use crate::cut::FutureCostFunction;
 use crate::cut::row::push_scaled_coefficient;
-use crate::indexer::StageIndexer;
+use crate::indexer::StateLayout;
 
 /// Fill a pre-allocated [`RowBatch`] with only the Benders cut rows generated
 /// in `current_iteration`.
@@ -31,19 +31,22 @@ use crate::indexer::StageIndexer;
 /// # Panics
 ///
 /// Panics if total non-zeros exceeds `i32::MAX` (`HiGHS` API limit).
+// Rationale: clippy::similar_names flags the role-(a) `state` handle next to the
+// `stage` index; both are established names, so renaming either would obscure intent.
+#[allow(clippy::similar_names)]
 pub fn build_delta_cut_row_batch_into(
     batch: &mut RowBatch,
     fcf: &FutureCostFunction,
     stage: usize,
-    indexer: &StageIndexer,
+    state: &StateLayout,
     col_scale: &[f64],
     current_iteration: u64,
 ) {
     batch.clear();
 
-    let n_state = indexer.n_state;
-    let theta_col = indexer.theta;
-    let mask = &indexer.nonzero_state_indices;
+    let n_state = state.n_state;
+    let theta_col = state.theta;
+    let mask = &state.nonzero_state_indices;
     let is_sparse = !mask.is_empty();
 
     // Count delta cuts with a lightweight scan to avoid double-iteration
@@ -91,12 +94,12 @@ pub fn build_delta_cut_row_batch_into(
         // corresponding LP columns (z_inflow and incoming lag l−1).
         if is_sparse {
             for &j in mask {
-                let lp_col = indexer.state_to_lp_column(j);
+                let lp_col = state.state_to_lp_column(j);
                 push_scaled_coefficient(batch, lp_col, coefficients[j], col_scale);
             }
         } else {
             for (j, &c) in coefficients.iter().enumerate() {
-                let lp_col = indexer.state_to_lp_column(j);
+                let lp_col = state.state_to_lp_column(j);
                 // Padding-slot invariant: when state_to_lp_column returns j unchanged
                 // and j falls inside the anticipated-state block, the slot is a padding
                 // slot (slot >= k_p for its plant). The INVARIANT comment in
@@ -104,10 +107,9 @@ pub fn build_delta_cut_row_batch_into(
                 // corresponding cut coefficient is 0.0. Assert this in debug builds.
                 debug_assert!(
                     !(lp_col == j
-                        && indexer.n_anticipated > 0
-                        && j >= indexer.anticipated_state.start
-                        && j < indexer.anticipated_state.start
-                            + indexer.n_anticipated * indexer.k_max)
+                        && state.n_anticipated > 0
+                        && j >= state.anticipated_state.start
+                        && j < state.anticipated_state.start + state.n_anticipated * state.k_max)
                         || c == 0.0,
                     "padding-slot j={j} has non-zero cut coefficient {c}; \
                      shift_anticipated_state must have seeded a non-zero into a padding slot"

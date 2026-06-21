@@ -58,7 +58,7 @@ use cobre_sddp::{
     energy_conversion::{EnergyConversion, EnergyConversionSet},
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
-    indexer::StageIndexer,
+    indexer::{StageIndexer, StateLayout},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::{PatchBuffer, build_stage_templates},
     risk_measure::RiskMeasure,
@@ -75,6 +75,22 @@ use cobre_stochastic::{
 // ===========================================================================
 // Communicator stub
 // ===========================================================================
+
+/// Build the role-(a) [`StateLayout`] for a non-anticipated storage+lag study via
+/// the public [`StateLayout::new`] constructor (full `max_par_order` lag stride per
+/// hydro, the dense coverage production finalizes). This external test crate does
+/// not see the parent crate's `#[cfg(test)]`/`test-support` surface, so it builds
+/// the layout from explicit dimensions through the public API.
+fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
+    StateLayout::new(
+        hydro_count,
+        max_par_order,
+        0,
+        0,
+        vec![],
+        &vec![max_par_order; hydro_count],
+    )
+}
 
 /// Single-rank communicator that performs identity operations.
 struct StubComm;
@@ -404,6 +420,7 @@ struct Fixture {
     stage_templates: cobre_sddp::StageTemplates,
     stochastic: StochasticContext,
     indexer: StageIndexer,
+    state: StateLayout,
     initial_state: Vec<f64>,
     horizon: HorizonMode,
     risk_measures: Vec<RiskMeasure>,
@@ -448,7 +465,7 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
     let first_tmpl = stage_templates.templates.first().expect("at least 1 stage");
     let n_blks = system.stages().first().map_or(1, |s| s.blocks.len().max(1));
     let has_inflow_penalty = inflow_method.has_slack_columns() && first_tmpl.n_hydro > 0;
-    let mut indexer = StageIndexer::with_equipment(
+    let indexer = StageIndexer::with_equipment_and_evaporation(
         &cobre_sddp::indexer::EquipmentCounts {
             hydro_count: first_tmpl.n_hydro,
             max_par_order: first_tmpl.max_par_order,
@@ -468,18 +485,15 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
             hydro_indices: vec![],
             planes_per_hydro: vec![],
         },
+        &cobre_sddp::indexer::EvapConfig {
+            hydro_indices: vec![],
+        },
     );
-    // Finalize as production setup does: full-order mask + state→LP-column map.
-    {
-        let lag_counts = vec![indexer.max_par_order; indexer.hydro_count];
-        let anticipated_k = indexer.anticipated_lead_stages.clone();
-        indexer.set_nonzero_mask(&lag_counts, &anticipated_k);
-        indexer.finalize_state_column_map();
-    }
     // z-inflow column and row ranges are set by StageIndexer::new at
     // fixed offset N*(1+L), no per-stage wiring needed.
 
-    let initial_state = vec![0.0_f64; indexer.n_state];
+    let state = state_layout_for(first_tmpl.n_hydro, first_tmpl.max_par_order);
+    let initial_state = vec![0.0_f64; state.n_state];
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
     };
@@ -500,6 +514,7 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
         stage_templates,
         stochastic,
         indexer,
+        state,
         initial_state,
         horizon,
         risk_measures,
@@ -517,7 +532,7 @@ fn train_fixture(
     iterations: u64,
 ) -> Result<cobre_sddp::TrainingOutcome, cobre_sddp::SddpError> {
     let n_stages = fx.stage_templates.templates.len();
-    let mut fcf = FutureCostFunction::new(n_stages, fx.indexer.n_state, 1, 20, &vec![0; n_stages]);
+    let mut fcf = FutureCostFunction::new(n_stages, fx.state.n_state, 1, 20, &vec![0; n_stages]);
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
     let comm = StubComm;
 
@@ -582,6 +597,7 @@ fn train_fixture(
         &TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
+            state: &fx.state,
             inflow_method: &fx.inflow_method,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -622,11 +638,11 @@ fn simulate_fixture(
         0,
         0,
         ActiveSolver::new().expect("ActiveSolver::new must succeed"),
-        PatchBuffer::new(fx.indexer.hydro_count, fx.indexer.max_par_order, 0, 0, 0, 0),
-        fx.indexer.n_state,
+        PatchBuffer::new(fx.state.hydro_count, fx.state.max_par_order, 0, 0, 0, 0),
+        fx.state.n_state,
         WorkspaceSizing {
-            hydro_count: fx.indexer.hydro_count,
-            max_par_order: fx.indexer.max_par_order,
+            hydro_count: fx.state.hydro_count,
+            max_par_order: fx.state.max_par_order,
             n_load_buses: 0,
             max_blocks: 0,
             downstream_par_order: 0,
@@ -679,6 +695,7 @@ fn simulate_fixture(
         &TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
+            state: &fx.state,
             inflow_method: &fx.inflow_method,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -759,7 +776,7 @@ fn test_penalty_method_prevents_infeasibility() {
 fn test_penalty_slack_value_matches_negative_inflow() {
     let fx = build_fixture();
     let n_stages = fx.stage_templates.templates.len();
-    let fcf = FutureCostFunction::new(n_stages, fx.indexer.n_state, 1, 20, &vec![0; n_stages]);
+    let fcf = FutureCostFunction::new(n_stages, fx.state.n_state, 1, 20, &vec![0; n_stages]);
 
     train_fixture(&fx, 3).expect("training must succeed before simulation");
     let scenario_results = simulate_fixture(&fx, &fcf).expect("simulate must succeed");
@@ -792,7 +809,7 @@ fn test_penalty_slack_value_matches_negative_inflow() {
 fn test_simulation_slack_output_populated() {
     let fx = build_fixture();
     let n_stages = fx.stage_templates.templates.len();
-    let fcf = FutureCostFunction::new(n_stages, fx.indexer.n_state, 1, 20, &vec![0; n_stages]);
+    let fcf = FutureCostFunction::new(n_stages, fx.state.n_state, 1, 20, &vec![0; n_stages]);
 
     train_fixture(&fx, 3).expect("training must succeed");
     let scenario_results = simulate_fixture(&fx, &fcf).expect("simulate must succeed");
@@ -959,7 +976,7 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
     // The inflow slack columns are at indexer positions. With 2 hydros, PAR(0),
     // and has_penalty=true, the indexer allocates 2 inflow slack columns.
     let n_blks = 1;
-    let mut indexer = StageIndexer::with_equipment(
+    let indexer = StageIndexer::with_equipment_and_evaporation(
         &cobre_sddp::indexer::EquipmentCounts {
             hydro_count: tmpl0.n_hydro,
             max_par_order: tmpl0.max_par_order,
@@ -979,14 +996,10 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
             hydro_indices: vec![],
             planes_per_hydro: vec![],
         },
+        &cobre_sddp::indexer::EvapConfig {
+            hydro_indices: vec![],
+        },
     );
-    // Finalize as production setup does: full-order mask + state→LP-column map.
-    {
-        let lag_counts = vec![indexer.max_par_order; indexer.hydro_count];
-        let anticipated_k = indexer.anticipated_lead_stages.clone();
-        indexer.set_nonzero_mask(&lag_counts, &anticipated_k);
-        indexer.finalize_state_column_map();
-    }
 
     // Inflow slack columns: indexer.inflow_slack.start .. indexer.inflow_slack.end
     assert_eq!(indexer.inflow_slack.len(), N_HYDROS);

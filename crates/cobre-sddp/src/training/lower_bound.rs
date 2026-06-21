@@ -36,7 +36,7 @@ use crate::{
     cut::FutureCostFunction,
     cut::row::build_cut_row_batch_into,
     error::SddpError,
-    indexer::StageIndexer,
+    indexer::{StageIndexer, StateLayout},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::COST_SCALE_FACTOR,
     lp_builder::PatchBuffer,
@@ -254,7 +254,7 @@ fn lb_init_rank0<S: SolverInterface>(
     solver: &mut S,
     fcf: &FutureCostFunction,
     spec: &LbEvalSpec<'_>,
-    indexer: &StageIndexer,
+    state_layout: &StateLayout,
     lb_cut_batch: &mut RowBatch,
     lb_cut_row_map: Option<&mut crate::cut::CutRowMap>,
     scratch: &mut LbEvalScratch,
@@ -307,14 +307,14 @@ fn lb_init_rank0<S: SolverInterface>(
             solver,
             fcf,
             0,
-            indexer,
+            state_layout,
             &spec.template.col_scale,
             row_map,
             lb_cut_batch,
         );
     } else {
         // Test-only path: full rebuild every call.
-        build_cut_row_batch_into(lb_cut_batch, fcf, 0, indexer, &spec.template.col_scale);
+        build_cut_row_batch_into(lb_cut_batch, fcf, 0, state_layout, &spec.template.col_scale);
         solver.load_model(spec.template);
         if lb_cut_batch.num_rows > 0 {
             solver.add_rows(lb_cut_batch);
@@ -344,6 +344,7 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
     patch_buf: &mut PatchBuffer,
     initial_state: &[f64],
     indexer: &StageIndexer,
+    state_layout: &StateLayout,
     scratch: &mut LbEvalScratch,
 ) -> Result<(), SddpError> {
     let n_openings = spec.opening_tree.n_openings(0);
@@ -366,13 +367,13 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
     };
 
     if let Some(par_lp) = truncation_par {
-        let max_order = indexer.max_par_order;
+        let max_order = state_layout.max_par_order;
         let lag_len = max_order * n_hydros;
         scratch.lag_matrix_buf.resize(lag_len, 0.0);
         for h in 0..n_hydros {
             for l in 0..max_order {
                 scratch.lag_matrix_buf[l * n_hydros + h] =
-                    initial_state[indexer.inflow_lags.start + l * n_hydros + h];
+                    initial_state[state_layout.inflow_lags.start + l * n_hydros + h];
             }
         }
 
@@ -443,9 +444,9 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
         // No shift_anticipated_state call here: the lower-bound evaluator
         // solves each stage at a fixed trial point, never advancing the ring
         // buffer.
-        patch_buf.fill_col_state_patches(indexer, initial_state, &spec.template.col_scale);
+        patch_buf.fill_col_state_patches(state_layout, initial_state, &spec.template.col_scale);
         patch_buf.fill_forward_patches(
-            indexer,
+            state_layout,
             initial_state,
             &scratch.noise_buf,
             base_row,
@@ -568,7 +569,7 @@ fn lb_aggregate_and_broadcast<C: Communicator>(
 /// - `solver` — Mutable LP solver instance. Only rank 0 calls `solve`; other
 ///   ranks skip the opening loop entirely.
 /// - `fcf` — Future Cost Function with all accumulated cuts.
-/// - `initial_state` — Known initial state vector `x_0` (length `indexer.n_state`).
+/// - `initial_state` — Known initial state vector `x_0` (length `state.n_state`).
 /// - `indexer` — LP layout map for stage 0.
 /// - `scratch` — Bundled mutable scratch references (patch buffer, cut batch,
 ///   cut row map, and per-evaluation buffers). See [`LbEvalScratchBundle`].
@@ -594,6 +595,7 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
     fcf: &FutureCostFunction,
     initial_state: &[f64],
     indexer: &StageIndexer,
+    state_layout: &StateLayout,
     scratch: &mut LbEvalScratchBundle<'_>,
     spec: &LbEvalSpec<'_>,
     comm: &C,
@@ -611,7 +613,7 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
             solver,
             fcf,
             spec,
-            indexer,
+            state_layout,
             scratch.lb_cut_batch,
             scratch.lb_cut_row_map.as_deref_mut(),
             scratch.lb_scratch,
@@ -624,6 +626,7 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
             scratch.patch_buf,
             initial_state,
             indexer,
+            state_layout,
             scratch.lb_scratch,
         )?;
 
@@ -657,9 +660,8 @@ mod tests {
         LbEvalScratch, LbEvalScratchBundle, LbEvalSpec, evaluate_lower_bound, lb_evaluate_stage_0,
     };
     use crate::{
-        cut::FutureCostFunction, error::SddpError, indexer::StageIndexer,
-        inflow_method::InflowNonNegativityMethod, lp_builder::PatchBuffer,
-        risk_measure::RiskMeasure,
+        cut::FutureCostFunction, error::SddpError, inflow_method::InflowNonNegativityMethod,
+        lp_builder::PatchBuffer, risk_measure::RiskMeasure,
     };
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
     use cobre_solver::{
@@ -726,7 +728,7 @@ mod tests {
     /// `opening_tree.opening(...)`, the tree only needs to have the right shape
     /// (correct stage count and branching factor at stage 0).
     ///
-    /// `dim = 1` throughout (single hydro, `StageIndexer::new(1, 0)`).
+    /// `dim = 1` throughout (single hydro, the N=1, L=0 state layout).
     fn simple_opening_tree(n_openings: usize) -> OpeningTree {
         use chrono::NaiveDate;
         use cobre_core::{
@@ -998,16 +1000,12 @@ mod tests {
     /// AC1: 1 opening, Expectation — LB equals the single LP objective.
     #[test]
     fn one_opening_expectation_lb_equals_single_objective() {
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        }; // n_state=1, hydro_count=1
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
-        let fcf = make_fcf(2, indexer.n_state);
-        let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf =
-            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
+        let fcf = make_fcf(2, state.n_state);
+        let initial_state = vec![0.0_f64; state.n_state];
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1042,6 +1040,7 @@ mod tests {
             &fcf,
             &initial_state,
             &indexer,
+            &state,
             &mut bundle,
             &spec,
             &comm,
@@ -1057,16 +1056,12 @@ mod tests {
     /// AC2: 3 openings, Expectation — LB equals mean of objectives.
     #[test]
     fn three_openings_expectation_lb_equals_mean() {
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
-        let fcf = make_fcf(2, indexer.n_state);
-        let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf =
-            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
+        let fcf = make_fcf(2, state.n_state);
+        let initial_state = vec![0.0_f64; state.n_state];
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(3);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1102,6 +1097,7 @@ mod tests {
             &fcf,
             &initial_state,
             &indexer,
+            &state,
             &mut bundle_lb,
             &spec,
             &comm,
@@ -1118,16 +1114,12 @@ mod tests {
     /// AC3: 2 openings, CVaR(alpha=0.5, lambda=1.0) — pure `CVaR` selects worst.
     #[test]
     fn two_openings_pure_cvar_alpha_half_lb_equals_worst() {
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
-        let fcf = make_fcf(2, indexer.n_state);
-        let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf =
-            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
+        let fcf = make_fcf(2, state.n_state);
+        let initial_state = vec![0.0_f64; state.n_state];
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(2);
         // CVaR(alpha=0.5, lambda=1.0): pure CVaR; upper bound per scenario =
         // p / alpha = 0.5 / 0.5 = 1.0. With 2 equal-probability scenarios the
@@ -1169,6 +1161,7 @@ mod tests {
             &fcf,
             &initial_state,
             &indexer,
+            &state,
             &mut bundle_lb,
             &spec,
             &comm,
@@ -1186,16 +1179,12 @@ mod tests {
     /// AC4 (extra): 2 openings, CVaR(alpha=1.0, lambda=1.0) = Expectation.
     #[test]
     fn two_openings_cvar_alpha_one_equals_expectation() {
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
-        let fcf = make_fcf(2, indexer.n_state);
-        let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf =
-            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
+        let fcf = make_fcf(2, state.n_state);
+        let initial_state = vec![0.0_f64; state.n_state];
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(2);
         let rm = RiskMeasure::CVaR {
             alpha: 1.0,
@@ -1233,6 +1222,7 @@ mod tests {
             &fcf,
             &initial_state,
             &indexer,
+            &state,
             &mut bundle_lb,
             &spec,
             &comm,
@@ -1249,16 +1239,12 @@ mod tests {
     /// AC5: solver returns Infeasible for the first opening — must propagate as `SddpError::Infeasible`.
     #[test]
     fn infeasible_solve_maps_to_sddp_infeasible() {
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
-        let fcf = make_fcf(2, indexer.n_state);
-        let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf =
-            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
+        let fcf = make_fcf(2, state.n_state);
+        let initial_state = vec![0.0_f64; state.n_state];
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1293,6 +1279,7 @@ mod tests {
             &fcf,
             &initial_state,
             &indexer,
+            &state,
             &mut bundle_result,
             &spec,
             &comm,
@@ -1307,16 +1294,12 @@ mod tests {
     /// AC6: broadcast failure maps to `SddpError::Communication`.
     #[test]
     fn broadcast_failure_maps_to_communication_error() {
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
-        let fcf = make_fcf(2, indexer.n_state);
-        let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf =
-            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
+        let fcf = make_fcf(2, state.n_state);
+        let initial_state = vec![0.0_f64; state.n_state];
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let comm = FailingBcastComm;
@@ -1351,6 +1334,7 @@ mod tests {
             &fcf,
             &initial_state,
             &indexer,
+            &state,
             &mut bundle_result,
             &spec,
             &comm,
@@ -1371,17 +1355,13 @@ mod tests {
     /// and `RiskMeasure::Expectation`.
     #[test]
     fn integration_two_openings_local_backend_expectation() {
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
         // Start with 0 cuts (empty FCF).
-        let fcf = make_fcf(2, indexer.n_state);
+        let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![50.0_f64]; // non-zero initial state
-        let mut patch_buf =
-            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(2);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1416,6 +1396,7 @@ mod tests {
             &fcf,
             &initial_state,
             &indexer,
+            &state,
             &mut bundle_lb,
             &spec,
             &comm,
@@ -1436,16 +1417,12 @@ mod tests {
     /// must be >= the first.
     #[test]
     fn integration_monotonicity_more_cuts_yields_higher_or_equal_lb() {
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
-        let fcf = make_fcf(2, indexer.n_state);
+        let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64];
-        let mut patch_buf =
-            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(2);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1481,6 +1458,7 @@ mod tests {
             &fcf,
             &initial_state,
             &indexer,
+            &state,
             &mut bundle_lb1,
             &spec,
             &comm,
@@ -1501,6 +1479,7 @@ mod tests {
             &fcf,
             &initial_state,
             &indexer,
+            &state,
             &mut bundle_lb2,
             &spec,
             &comm,
@@ -1522,16 +1501,12 @@ mod tests {
     /// control flow works correctly when no PAR model is present.
     #[test]
     fn test_lb_none_method_unchanged() {
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
-        let fcf = make_fcf(2, indexer.n_state);
-        let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf =
-            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
+        let fcf = make_fcf(2, state.n_state);
+        let initial_state = vec![0.0_f64; state.n_state];
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(2);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1566,6 +1541,7 @@ mod tests {
             &fcf,
             &initial_state,
             &indexer,
+            &state,
             &mut bundle_lb,
             &spec,
             &comm,
@@ -1586,16 +1562,12 @@ mod tests {
     /// (`needs_truncation` = true, `truncation_par` = `None`) does not panic.
     #[test]
     fn test_lb_truncation_no_crash() {
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
-        let fcf = make_fcf(2, indexer.n_state);
-        let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf =
-            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
+        let fcf = make_fcf(2, state.n_state);
+        let initial_state = vec![0.0_f64; state.n_state];
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1630,6 +1602,7 @@ mod tests {
             &fcf,
             &initial_state,
             &indexer,
+            &state,
             &mut bundle_result,
             &spec,
             &comm,
@@ -1644,16 +1617,12 @@ mod tests {
     /// `TruncationWithPenalty` method does not cause a crash or infeasibility.
     #[test]
     fn test_lb_truncation_with_penalty_no_crash() {
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
-        let fcf = make_fcf(2, indexer.n_state);
-        let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf =
-            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
+        let fcf = make_fcf(2, state.n_state);
+        let initial_state = vec![0.0_f64; state.n_state];
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1688,6 +1657,7 @@ mod tests {
             &fcf,
             &initial_state,
             &indexer,
+            &state,
             &mut bundle_result,
             &spec,
             &comm,
@@ -1715,7 +1685,9 @@ mod tests {
     /// `NcsModel`. The `LbRank0State` is pre-populated to mirror the output of
     /// `lb_init_rank0`. `lb_evaluate_stage_0` is called directly so that we can
     /// inspect the `MockSolver`'s `set_col_bounds_calls` counter afterwards.
-    #[allow(clippy::too_many_lines)]
+    // `clippy::similar_names`: the role-(a) `state` handle reads next to `stage`-
+    // named locals; both are established names.
+    #[allow(clippy::too_many_lines, clippy::similar_names)]
     #[test]
     fn lb_evaluate_stage_0_patches_ncs_bounds_per_opening() {
         use cobre_core::{
@@ -1869,11 +1841,8 @@ mod tests {
             row_scale: Vec::new(),
         };
 
-        let indexer = {
-            let mut ix = StageIndexer::new(0, 0);
-            ix.finalize_for_test();
-            ix
-        };
+        let state = crate::indexer::test_fixtures::state_layout(0, 0);
+        let indexer = crate::indexer::test_fixtures::geom(0, 0);
         let ncs_max_gen = vec![100.0_f64; n_ncs];
         let ncs_allow_curtailment = vec![true; n_ncs];
         // All n_ncs stochastic NCS are active at stage 0, in slot order.
@@ -1923,6 +1892,7 @@ mod tests {
             &mut patch_buf,
             &initial_state,
             &indexer,
+            &state,
             &mut lb_scratch,
         )
         .unwrap();
@@ -1956,16 +1926,12 @@ mod tests {
         // Use n_hydros = 1 so that noise_buf gets populated (capacity grows to 1
         // after the first call). The template must have at least 1 row to avoid
         // index-out-of-bounds in fill_forward_patches when n_hydros = 1.
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
-        let fcf = make_fcf(2, indexer.n_state);
-        let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf =
-            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
+        let fcf = make_fcf(2, state.n_state);
+        let initial_state = vec![0.0_f64; state.n_state];
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -2004,6 +1970,7 @@ mod tests {
                 &fcf,
                 &initial_state,
                 &indexer,
+                &state,
                 &mut bundle,
                 &spec,
                 &comm,
@@ -2032,6 +1999,7 @@ mod tests {
                 &fcf,
                 &initial_state,
                 &indexer,
+                &state,
                 &mut bundle,
                 &spec,
                 &comm,

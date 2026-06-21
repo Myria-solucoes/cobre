@@ -46,7 +46,7 @@ use cobre_sddp::{
     energy_conversion::{EnergyConversion, EnergyConversionSet},
     forward::{ForwardResult, sync_forward},
     horizon_mode::HorizonMode,
-    indexer::StageIndexer,
+    indexer::{StageIndexer, StateLayout},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
     risk_measure::RiskMeasure,
@@ -65,6 +65,54 @@ use cobre_stochastic::{
 // ===========================================================================
 // Shared communicator stub
 // ===========================================================================
+
+/// Build the role-(a) [`StateLayout`] whose `storage_in` / `inflow_lags` /
+/// `anticipated_state` column starts match `indexer`'s identical fields.
+///
+/// Mirrors the gated `indexer::test_fixtures::state_layout_for` body via the
+/// public [`StateLayout::new`] constructor, so this external test crate (which
+/// does not see the parent crate's `#[cfg(test)]` surface) resolves byte-identical
+/// patch columns on the default feature set.
+fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
+    StateLayout::new(
+        hydro_count,
+        max_par_order,
+        0,
+        0,
+        vec![],
+        &vec![max_par_order; hydro_count],
+    )
+}
+
+/// Build a role-(b) `StageIndexer` geometry descriptor (no equipment, no
+/// anticipated thermals) via the public `with_equipment_and_evaporation`
+/// constructor, for the `TrainingContext.indexer` slot.
+fn geom(_hydro_count: usize, _max_par_order: usize) -> StageIndexer {
+    StageIndexer::with_equipment_and_evaporation(
+        &cobre_sddp::indexer::EquipmentCounts {
+            hydro_count: 0,
+            max_par_order: 0,
+            n_thermals: 0,
+            n_lines: 0,
+            n_buses: 0,
+            n_blks: 0,
+            has_inflow_penalty: false,
+            max_deficit_segments: 0,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
+            n_pumping: 0,
+        },
+        &cobre_sddp::indexer::FphaColumnLayout {
+            hydro_indices: vec![],
+            planes_per_hydro: vec![],
+        },
+        &cobre_sddp::indexer::EvapConfig {
+            hydro_indices: vec![],
+        },
+    )
+}
 
 struct StubComm;
 
@@ -122,7 +170,7 @@ impl Communicator for StubComm {
 //   theta        = 9
 //   num_cols     = 10
 //
-// The primal must have 10 entries so `view.primal[indexer.theta]` (index 9)
+// The primal must have 10 entries so `view.primal[state.theta]` (index 9)
 // is valid. The dual must have at least n_dual_relevant = 3 entries so the
 // backward pass can extract dual values for the 3 storage-fixing rows.
 // ===========================================================================
@@ -451,6 +499,7 @@ struct Fixture3H {
     templates: Vec<StageTemplate>,
     base_rows: Vec<usize>,
     indexer: StageIndexer,
+    state: StateLayout,
     initial_state: Vec<f64>,
     stochastic: StochasticContext,
     horizon: HorizonMode,
@@ -468,19 +517,12 @@ impl Fixture3H {
     fn with_branching(branching_factor: usize) -> Self {
         let n_stages = 5;
         // N=3 hydros, L=0 PAR order
-        let indexer = {
-            let mut ix = StageIndexer::new(3, 0);
-            // Finalize as production setup does: full-order mask + state→LP-column map.
-            let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-            let anticipated_k = ix.anticipated_lead_stages.clone();
-            ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-            ix.finalize_state_column_map();
-            ix
-        };
+        let indexer = geom(3, 0);
+        let state = state_layout_for(3, 0);
         let templates = vec![template_3h(); n_stages];
         // base_row: water-balance rows start at row_water_balance_start = n_state + n_hydros = 3 + 3 = 6.
         let base_rows = vec![6usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context_3h_branching(n_stages, branching_factor);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
@@ -492,6 +534,7 @@ impl Fixture3H {
             templates,
             base_rows,
             indexer,
+            state,
             initial_state,
             stochastic,
             horizon,
@@ -588,6 +631,7 @@ fn run_training(
                 &TrainingContext {
                     horizon: &fx.horizon,
                     indexer: &fx.indexer,
+                    state: &fx.state,
                     inflow_method: &InflowNonNegativityMethod::None,
                     stochastic: &fx.stochastic,
                     initial_state: &fx.initial_state,
@@ -661,11 +705,11 @@ fn run_simulation(
                 0,
                 i32::try_from(idx).expect("worker_id fits in i32"),
                 MockSolver3H::new(100.0),
-                PatchBuffer::new(fx.indexer.hydro_count, fx.indexer.max_par_order, 0, 0, 0, 0),
-                fx.indexer.n_state,
+                PatchBuffer::new(fx.state.hydro_count, fx.state.max_par_order, 0, 0, 0, 0),
+                fx.state.n_state,
                 WorkspaceSizing {
-                    hydro_count: fx.indexer.hydro_count,
-                    max_par_order: fx.indexer.max_par_order,
+                    hydro_count: fx.state.hydro_count,
+                    max_par_order: fx.state.max_par_order,
                     n_load_buses: 0,
                     max_blocks: 0,
                     downstream_par_order: 0,
@@ -719,6 +763,7 @@ fn run_simulation(
                 &TrainingContext {
                     horizon: &fx.horizon,
                     indexer: &fx.indexer,
+                    state: &fx.state,
                     inflow_method: &InflowNonNegativityMethod::None,
                     stochastic: &fx.stochastic,
                     initial_state: &fx.initial_state,

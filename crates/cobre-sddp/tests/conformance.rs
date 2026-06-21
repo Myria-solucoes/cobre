@@ -811,7 +811,7 @@ mod lb_conformance {
     //! LB monotonicity conformance: adding cuts can only increase the lower bound.
 
     use cobre_sddp::{
-        indexer::StageIndexer,
+        indexer::{StageIndexer, StateLayout},
         inflow_method::InflowNonNegativityMethod,
         lower_bound::{LbEvalScratch, LbEvalScratchBundle, LbEvalSpec, evaluate_lower_bound},
         lp_builder::PatchBuffer,
@@ -821,6 +821,54 @@ mod lb_conformance {
 
     use super::{LocalComm, MockSolver, make_fcf, minimal_template, simple_opening_tree};
 
+    /// Build the role-(a) [`StateLayout`] whose `storage_in` / `inflow_lags` /
+    /// `anticipated_state` column starts match `indexer`'s identical fields.
+    ///
+    /// Mirrors the gated `indexer::test_fixtures::state_layout_for` body via the
+    /// public [`StateLayout::new`] constructor, so this external test crate (which
+    /// does not see the parent crate's `#[cfg(test)]` surface) resolves
+    /// byte-identical patch columns on the default feature set.
+    fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
+        StateLayout::new(
+            hydro_count,
+            max_par_order,
+            0,
+            0,
+            vec![],
+            &vec![max_par_order; hydro_count],
+        )
+    }
+
+    /// Build a role-(b) `StageIndexer` geometry descriptor (no equipment, no
+    /// anticipated thermals) via the public `with_equipment_and_evaporation`
+    /// constructor, for the `TrainingContext.indexer` slot.
+    fn geom(_hydro_count: usize, _max_par_order: usize) -> StageIndexer {
+        StageIndexer::with_equipment_and_evaporation(
+            &cobre_sddp::indexer::EquipmentCounts {
+                hydro_count: 0,
+                max_par_order: 0,
+                n_thermals: 0,
+                n_lines: 0,
+                n_buses: 0,
+                n_blks: 0,
+                has_inflow_penalty: false,
+                max_deficit_segments: 0,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
+                n_pumping: 0,
+            },
+            &cobre_sddp::indexer::FphaColumnLayout {
+                hydro_indices: vec![],
+                planes_per_hydro: vec![],
+            },
+            &cobre_sddp::indexer::EvapConfig {
+                hydro_indices: vec![],
+            },
+        )
+    }
+
     /// Conformance contract: `evaluate_lower_bound` returns a higher (or equal)
     /// value when the mock solver produces higher objectives, simulating the
     /// effect of tighter cuts added to the FCF.
@@ -829,20 +877,13 @@ mod lb_conformance {
     /// public-API integration test.
     #[test]
     fn evaluate_lower_bound_monotonicity_with_additional_cuts() {
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            // Finalize as production setup does: full-order mask + state→LP-column map.
-            let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-            let anticipated_k = ix.anticipated_lead_stages.clone();
-            ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-            ix.finalize_state_column_map();
-            ix
-        };
+        let indexer = geom(1, 0);
+        let state = state_layout_for(1, 0);
+        let state_layout = state_layout_for(1, 0);
         let template = minimal_template();
-        let fcf = make_fcf(2, indexer.n_state);
-        let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf =
-            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
+        let fcf = make_fcf(2, state.n_state);
+        let initial_state = vec![0.0_f64; state.n_state];
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(2);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -889,6 +930,7 @@ mod lb_conformance {
                 &fcf,
                 &initial_state,
                 &indexer,
+                &state_layout,
                 &mut bundle,
                 &spec,
                 &comm,
@@ -917,6 +959,7 @@ mod lb_conformance {
                 &fcf,
                 &initial_state,
                 &indexer,
+                &state_layout,
                 &mut bundle,
                 &spec,
                 &comm,
@@ -948,9 +991,9 @@ mod lb_conformance {
 /// empty (0..0) ranges for a constraint family that should be present.
 #[test]
 fn indexer_constraint_inventory() {
-    use cobre_sddp::indexer::{EquipmentCounts, FphaColumnLayout, StageIndexer};
+    use cobre_sddp::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout, StageIndexer};
 
-    let indexer = StageIndexer::with_equipment(
+    let indexer = StageIndexer::with_equipment_and_evaporation(
         &EquipmentCounts {
             hydro_count: 3,
             max_par_order: 1,
@@ -969,6 +1012,9 @@ fn indexer_constraint_inventory() {
         &FphaColumnLayout {
             hydro_indices: vec![0],
             planes_per_hydro: vec![3],
+        },
+        &EvapConfig {
+            hydro_indices: vec![],
         },
     );
 
@@ -1079,9 +1125,9 @@ fn indexer_constraint_inventory() {
 fn constraint_extraction_regression_guard() {
     use std::ops::Range;
 
-    use cobre_sddp::indexer::{EquipmentCounts, FphaColumnLayout, StageIndexer};
+    use cobre_sddp::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout, StageIndexer};
 
-    let indexer = StageIndexer::with_equipment(
+    let indexer = StageIndexer::with_equipment_and_evaporation(
         &EquipmentCounts {
             hydro_count: 2,
             max_par_order: 1,
@@ -1100,6 +1146,9 @@ fn constraint_extraction_regression_guard() {
         &FphaColumnLayout {
             hydro_indices: vec![0],
             planes_per_hydro: vec![2],
+        },
+        &EvapConfig {
+            hydro_indices: vec![],
         },
     );
 

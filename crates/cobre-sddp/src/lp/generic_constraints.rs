@@ -7,16 +7,19 @@
 //!
 //! ## Column index arithmetic
 //!
-//! All column offsets follow the layout defined in [`StageIndexer`]; the
-//! block-stride arithmetic routes through the [`BlockGrid`] primitive obtained
-//! from [`StageIndexer::block_grid`] so the stride expression is single-owned:
+//! Column offsets come from the [`GenericResolverGeom`] view: the stage-invariant
+//! role-(a) state region (storage and z-inflow columns) through its [`StateLayout`]
+//! handle, and the per-stage role-(b) equipment ranges directly. The block-stride
+//! arithmetic routes through the [`BlockGrid`] primitive built from the view's own
+//! `n_blks`/`max_deficit_segments` so the stride expression is single-owned:
 //!
 //! - Block-level variables (turbine, spillage, thermal, line, excess) use the
 //!   flat block-major address [`BlockGrid::flat`] (`start + entity * n_blks + blk`).
 //! - Deficit uses the 3-term [`BlockGrid::deficit`] (bus-outer, segment-middle,
 //!   block-inner).
-//! - Stage-level variables (storage, evaporation, withdrawal) use `col_start + entity_pos`.
-//! - FPHA generation uses [`BlockGrid::flat`] on `generation.start`.
+//! - Stage-level variables: storage (role (a)) uses `state.storage.start + pos`;
+//!   evaporation (role (b)) reads the evap-flow column.
+//! - FPHA generation uses [`BlockGrid::flat`] on the role-(b) `generation.start`.
 //!
 //! ## Block expansion
 //!
@@ -43,11 +46,80 @@
 //! entity types.
 
 use std::collections::{BTreeMap, HashMap};
+use std::ops::Range;
 
 use cobre_core::{CascadeTopology, ConstraintExpression, EntityId, PumpingStation, VariableRef};
 
 use crate::hydro_models::{ProductionModelSet, ResolvedProductionModel};
-use crate::indexer::{BlockGrid, StageIndexer};
+use crate::indexer::{BlockGrid, EvaporationIndices, StateLayout};
+
+/// Borrowed LP-column geometry the generic-constraint resolver reads, split by
+/// concern between the stage-invariant role-(a) state region and the per-stage
+/// role-(b) equipment geometry.
+///
+/// Built in `entries.rs::fill_generic_constraint_entries` from the `StageLayout`
+/// being filled (which is private to the `builder` module), so this view is the
+/// resolver's window onto the geometry without exposing `StageLayout` outside
+/// `builder`. Every field is a borrow or a `Copy` scalar — constructing the view
+/// is allocation-free and does not clone the layout.
+///
+/// ## Role split (the load-bearing distinction for the cut path)
+///
+/// - **Role (a)** — `state`: the stage-invariant state region (storage and
+///   z-inflow columns). These offsets are pure functions of `N`, `L`, `A`,
+///   `k_max` and are owned by [`StateLayout`]; resolving a `HydroStorage` or
+///   `HydroInflow` term through the handle is what keeps a generic constraint's
+///   storage/inflow column landing on the same column the cut path reads.
+/// - **Role (b)** — every other field: per-stage equipment/slack column ranges
+///   (turbine, spillage, …, deficit, generation), the block-stride constants
+///   (`n_blks`, `max_deficit_segments`), the FPHA/evaporation local maps, and the
+///   anticipated-decision column base + reverse map. These ride this stage's own
+///   block count and are owned by `StageLayout`.
+pub(crate) struct GenericResolverGeom<'a> {
+    /// Role-(a) state-region handle (storage + z-inflow column owner).
+    pub state: &'a StateLayout,
+    /// Role-(b) turbine column range (one per hydro per block).
+    pub turbine: &'a Range<usize>,
+    /// Role-(b) spillage column range.
+    pub spillage: &'a Range<usize>,
+    /// Role-(b) diversion column range.
+    pub diversion: &'a Range<usize>,
+    /// Role-(b) thermal column range.
+    pub thermal: &'a Range<usize>,
+    /// Role-(b) forward line-flow column range.
+    pub line_fwd: &'a Range<usize>,
+    /// Role-(b) reverse line-flow column range.
+    pub line_rev: &'a Range<usize>,
+    /// Role-(b) bus-excess column range.
+    pub excess: &'a Range<usize>,
+    /// Role-(b) FPHA generation column range.
+    pub generation: &'a Range<usize>,
+    /// Role-(b) bus-deficit column range.
+    pub deficit: &'a Range<usize>,
+    /// Role-(b) deficit-stride constant (`S`).
+    pub max_deficit_segments: usize,
+    /// Role-(b) per-stage block count (`K`); the `BlockGrid` flat/​deficit stride.
+    pub n_blks: usize,
+    /// Role-(b) per-evaporation-hydro column indices, parallel to
+    /// [`Self::evap_hydro_indices`].
+    pub evap_indices: &'a [EvaporationIndices],
+    /// Role-(b) system hydro indices of the evaporation hydros at this stage.
+    pub evap_hydro_indices: &'a [usize],
+    /// Role-(b) system hydro indices of the FPHA hydros at this stage.
+    pub fpha_hydro_indices: &'a [usize],
+    /// Role-(b) first anticipated-decision column (`anticipated_decision.start`).
+    pub anticipated_decision_start: usize,
+    /// Role-(b) reverse map: global thermal position → anticipated-local index.
+    pub anticipated_local_by_sys_pos: &'a HashMap<usize, usize>,
+}
+
+impl GenericResolverGeom<'_> {
+    /// The [`BlockGrid`] for this stage, built from the role-(b) stride constants.
+    #[inline]
+    fn block_grid(&self) -> BlockGrid {
+        BlockGrid::new(self.n_blks, self.max_deficit_segments)
+    }
+}
 
 /// Position maps for entity types, mapping entity IDs to their index in
 /// the system's entity arrays.
@@ -91,12 +163,11 @@ pub(crate) struct CascadeRefs<'a> {
 pub(crate) struct PumpingRefs<'a> {
     /// First pumping-flow column. The column for station local index `p_idx`,
     /// block `blk` is `grid.flat(col_pumping_start, p_idx, blk)`, where `grid` is
-    /// the [`BlockGrid`](crate::indexer::BlockGrid) sourced from the `StageIndexer`
-    /// inside [`resolve_variable_ref`] (the single stride owner every block-major
-    /// resolver helper addresses through), not a field here.
+    /// the [`BlockGrid`](crate::indexer::BlockGrid) built from the
+    /// [`GenericResolverGeom`] inside [`resolve_variable_ref`] (the single stride
+    /// owner every block-major resolver helper addresses through), not a field here.
     ///
-    /// Sourced from `StageLayout::col_pumping_start` (the real reserved range),
-    /// **not** from `StageIndexer::pumping_flow` (a permanent `0..0` sentinel).
+    /// Sourced from `StageLayout::col_pumping_start` (the real reserved range).
     /// When `pumping_stations` is empty this value is meaningless, so the resolver
     /// guards on the `pumping_pos` lookup before using it.
     pub col_pumping_start: usize,
@@ -121,7 +192,10 @@ pub(crate) struct PumpingRefs<'a> {
 ///   this is ignored; for block-level variables with `block_id = Some(b)` the
 ///   function returns the column for block `b` regardless of `block_idx`.
 /// - `stage_idx` — stage index used to look up per-stage production models.
-/// - `indexer` — column layout for the current stage LP.
+/// - `geom` — the role-(a) state handle + role-(b) column geometry the resolver
+///   reads, grouped into [`GenericResolverGeom`]. Role-(a) terms (`HydroStorage`,
+///   `HydroInflow`) resolve through `geom.state`; every other term reads
+///   `geom`'s role-(b) ranges.
 /// - `production_models` — resolved production model set, used to distinguish
 ///   FPHA hydros from constant-productivity hydros for `HydroGeneration`.
 /// - `positions` — entity position maps grouped into [`EntityPositionMaps`].
@@ -148,7 +222,7 @@ pub(crate) fn resolve_variable_ref(
     var_ref: &VariableRef,
     block_idx: usize,
     stage_idx: usize,
-    indexer: &StageIndexer,
+    geom: &GenericResolverGeom<'_>,
     production_models: &ProductionModelSet,
     positions: &EntityPositionMaps<'_>,
     cascade_refs: &CascadeRefs<'_>,
@@ -158,15 +232,13 @@ pub(crate) fn resolve_variable_ref(
     let thermal_pos = positions.thermal;
     let bus_pos = positions.bus;
     let line_pos = positions.line;
-    let grid = indexer.block_grid();
+    let grid = geom.block_grid();
     match var_ref {
         // ── Stage-level hydro variables ────────────────────────────────────
-        VariableRef::HydroStorage { hydro_id } => {
-            resolve_hydro_storage(*hydro_id, indexer, hydro_pos)
-        }
+        VariableRef::HydroStorage { hydro_id } => resolve_hydro_storage(*hydro_id, geom, hydro_pos),
 
         VariableRef::HydroEvaporation { hydro_id } => {
-            resolve_hydro_evaporation(*hydro_id, indexer, hydro_pos)
+            resolve_hydro_evaporation(*hydro_id, geom, hydro_pos)
         }
 
         // ── Block-level hydro variables ────────────────────────────────────
@@ -175,7 +247,7 @@ pub(crate) fn resolve_variable_ref(
             *block_id,
             block_idx,
             grid,
-            indexer,
+            geom,
             hydro_pos,
             cascade_refs,
         ),
@@ -185,7 +257,7 @@ pub(crate) fn resolve_variable_ref(
             *block_id,
             block_idx,
             grid,
-            block_col_range(indexer, ElementKind::Turbine).start,
+            block_col_range(geom, ElementKind::Turbine).start,
             hydro_pos,
             1.0,
         ),
@@ -195,13 +267,13 @@ pub(crate) fn resolve_variable_ref(
             *block_id,
             block_idx,
             grid,
-            block_col_range(indexer, ElementKind::Spillage).start,
+            block_col_range(geom, ElementKind::Spillage).start,
             hydro_pos,
             1.0,
         ),
 
         VariableRef::HydroOutflow { hydro_id, block_id } => {
-            resolve_hydro_outflow(*hydro_id, *block_id, block_idx, grid, indexer, hydro_pos)
+            resolve_hydro_outflow(*hydro_id, *block_id, block_idx, grid, geom, hydro_pos)
         }
 
         VariableRef::HydroGeneration { hydro_id, block_id } => resolve_hydro_generation(
@@ -210,7 +282,7 @@ pub(crate) fn resolve_variable_ref(
             block_idx,
             grid,
             stage_idx,
-            indexer,
+            geom,
             production_models,
             hydro_pos,
         ),
@@ -224,7 +296,7 @@ pub(crate) fn resolve_variable_ref(
             *block_id,
             block_idx,
             grid,
-            block_col_range(indexer, ElementKind::Thermal).start,
+            block_col_range(geom, ElementKind::Thermal).start,
             thermal_pos,
             1.0,
         ),
@@ -235,7 +307,7 @@ pub(crate) fn resolve_variable_ref(
             *block_id,
             block_idx,
             grid,
-            block_col_range(indexer, ElementKind::LineFwd).start,
+            block_col_range(geom, ElementKind::LineFwd).start,
             line_pos,
             1.0,
         ),
@@ -245,18 +317,18 @@ pub(crate) fn resolve_variable_ref(
             *block_id,
             block_idx,
             grid,
-            block_col_range(indexer, ElementKind::LineRev).start,
+            block_col_range(geom, ElementKind::LineRev).start,
             line_pos,
             1.0,
         ),
 
         VariableRef::LineExchange { line_id, block_id } => {
-            resolve_line_exchange(*line_id, *block_id, block_idx, grid, indexer, line_pos)
+            resolve_line_exchange(*line_id, *block_id, block_idx, grid, geom, line_pos)
         }
 
         // ── Bus deficit / excess ───────────────────────────────────────────
         VariableRef::BusDeficit { bus_id, block_id } => {
-            resolve_bus_deficit(*bus_id, *block_id, block_idx, grid, indexer, bus_pos)
+            resolve_bus_deficit(*bus_id, *block_id, block_idx, grid, geom, bus_pos)
         }
 
         VariableRef::BusExcess { bus_id, block_id } => resolve_block_variable(
@@ -264,7 +336,7 @@ pub(crate) fn resolve_variable_ref(
             *block_id,
             block_idx,
             grid,
-            block_col_range(indexer, ElementKind::Excess).start,
+            block_col_range(geom, ElementKind::Excess).start,
             bus_pos,
             1.0,
         ),
@@ -274,14 +346,14 @@ pub(crate) fn resolve_variable_ref(
             *block_id,
             block_idx,
             grid,
-            block_col_range(indexer, ElementKind::Diversion).start,
+            block_col_range(geom, ElementKind::Diversion).start,
             hydro_pos,
             1.0,
         ),
 
         // ── Anticipated thermal decision column ────────────────────────────
         VariableRef::AnticipatedDecision { thermal_id } => {
-            resolve_anticipated_decision(*thermal_id, indexer, thermal_pos)
+            resolve_anticipated_decision(*thermal_id, geom, thermal_pos)
         }
 
         // ── Pumping columns ────────────────────────────────────────────────
@@ -324,7 +396,7 @@ pub(crate) fn resolve_variable_ref(
         // column(s) here — preventing a silent fall-through to the empty return.
         VariableRef::ContractImport { .. } => {
             debug_assert!(
-                block_col_range(indexer, ElementKind::ContractImport).is_empty(),
+                block_col_range(geom, ElementKind::ContractImport).is_empty(),
                 "ContractImport gained an LP column range but this arm still emits no \
                  (column, coefficient) pair — wire the contract-column resolution here",
             );
@@ -332,7 +404,7 @@ pub(crate) fn resolve_variable_ref(
         }
         VariableRef::ContractExport { .. } => {
             debug_assert!(
-                block_col_range(indexer, ElementKind::ContractExport).is_empty(),
+                block_col_range(geom, ElementKind::ContractExport).is_empty(),
                 "ContractExport gained an LP column range but this arm still emits no \
                  (column, coefficient) pair — wire the contract-column resolution here",
             );
@@ -437,15 +509,15 @@ pub(crate) fn expression_is_block_independent(expression: &ConstraintExpression)
 
 /// Resolve `HydroStorage` to its stage-level outgoing storage column.
 ///
-/// `indexer.storage[h] = storage.start + h`. Returns empty vec when the hydro
-/// ID is not found in `hydro_pos`.
+/// Role (a): the storage column is `state.storage.start + h`, read through the
+/// state handle. Returns empty vec when the hydro ID is not found in `hydro_pos`.
 fn resolve_hydro_storage(
     hydro_id: EntityId,
-    indexer: &StageIndexer,
+    geom: &GenericResolverGeom<'_>,
     hydro_pos: &BTreeMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     if let Some(&pos) = hydro_pos.get(&hydro_id) {
-        vec![(indexer.storage.start + pos, 1.0)]
+        vec![(geom.state.storage.start + pos, 1.0)]
     } else {
         vec![]
     }
@@ -483,11 +555,14 @@ fn resolve_hydro_inflow(
     block_id: Option<usize>,
     block_idx: usize,
     grid: BlockGrid,
-    indexer: &StageIndexer,
+    geom: &GenericResolverGeom<'_>,
     hydro_pos: &BTreeMap<EntityId, usize>,
     cascade_refs: &CascadeRefs<'_>,
 ) -> Vec<(usize, f64)> {
-    if indexer.z_inflow.is_empty() {
+    // Role (a): the z_inflow column owner is the state handle. Empty when
+    // `hydro_count == 0` (unlike `storage`, non-empty whenever hydros exist), so
+    // `z_inflow.start` would be meaningless there.
+    if geom.state.z_inflow.is_empty() {
         return vec![];
     }
     let Some(&pos_h) = hydro_pos.get(&hydro_id) else {
@@ -504,14 +579,14 @@ fn resolve_hydro_inflow(
     // Incremental term, then two per upstream plant, then one per diverting plant.
     let mut result = Vec::with_capacity(1 + 2 * upstream.len() + diversion_into.len());
 
-    // Incremental (local) inflow: the free z_inflow column.
-    result.push((indexer.z_inflow.start + pos_h, 1.0));
+    // Incremental (local) inflow: the free z_inflow column (role (a)).
+    result.push((geom.state.z_inflow.start + pos_h, 1.0));
 
     // Upstream cascade releases: turbine + spillage of each immediately-upstream
     // plant at the effective block. Same column set as the storage-balance inflow
     // side, but with +1.0 (rate) instead of −τ (volume).
-    let turbine = block_col_range(indexer, ElementKind::Turbine);
-    let spillage = block_col_range(indexer, ElementKind::Spillage);
+    let turbine = block_col_range(geom, ElementKind::Turbine);
+    let spillage = block_col_range(geom, ElementKind::Spillage);
     if !turbine.is_empty() && !spillage.is_empty() {
         for &up_id in upstream {
             if let Some(&pos_up) = hydro_pos.get(&up_id) {
@@ -524,7 +599,7 @@ fn resolve_hydro_inflow(
     // Diverted inflow: the diversion column of each plant diverting into `h`.
     // `diversion_upstream[h]` already holds system indices, so no `hydro_pos`
     // lookup is needed (mirrors the matrix.rs diversion-inflow loop).
-    let diversion = block_col_range(indexer, ElementKind::Diversion);
+    let diversion = block_col_range(geom, ElementKind::Diversion);
     if !diversion.is_empty() {
         for &d_idx in diversion_into {
             result.push((grid.flat(diversion.start, d_idx, eff_blk), 1.0));
@@ -541,26 +616,22 @@ fn resolve_hydro_inflow(
 /// linearized evaporation at this stage.
 fn resolve_hydro_evaporation(
     hydro_id: EntityId,
-    indexer: &StageIndexer,
+    geom: &GenericResolverGeom<'_>,
     hydro_pos: &BTreeMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     let Some(&sys_pos) = hydro_pos.get(&hydro_id) else {
         return vec![];
     };
-    // Linear scan over the small per-stage evaporation-hydro list. This runs
-    // on the cold per-constraint-term resolver path (template build, not a
-    // solve loop), so the O(n) cost over a handful of evaporation hydros is
-    // not measurable and a pre-built O(1) reverse map is not warranted here —
-    // unlike `resolve_anticipated_decision`, whose larger/hotter set earns
+    // Role (b): linear scan over the small per-stage evaporation-hydro list. This
+    // runs on the cold per-constraint-term resolver path (template build, not a
+    // solve loop), so the O(n) cost over a handful of evaporation hydros is not
+    // measurable and a pre-built O(1) reverse map is not warranted here — unlike
+    // `resolve_anticipated_decision`, whose larger/hotter set earns
     // `anticipated_local_by_sys_pos`.
-    let Some(local_idx) = indexer
-        .evap_hydro_indices
-        .iter()
-        .position(|&p| p == sys_pos)
-    else {
+    let Some(local_idx) = geom.evap_hydro_indices.iter().position(|&p| p == sys_pos) else {
         return vec![];
     };
-    let evaporation_flow_col = indexer.evap_indices[local_idx].evaporation_flow_col;
+    let evaporation_flow_col = geom.evap_indices[local_idx].evaporation_flow_col;
     vec![(evaporation_flow_col, 1.0)]
 }
 
@@ -575,7 +646,7 @@ fn resolve_hydro_outflow(
     block_id: Option<usize>,
     block_idx: usize,
     grid: BlockGrid,
-    indexer: &StageIndexer,
+    geom: &GenericResolverGeom<'_>,
     hydro_pos: &BTreeMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     let Some(&pos) = hydro_pos.get(&hydro_id) else {
@@ -583,12 +654,12 @@ fn resolve_hydro_outflow(
     };
     let effective_blk = block_id.unwrap_or(block_idx);
     let turbine_col = grid.flat(
-        block_col_range(indexer, ElementKind::Turbine).start,
+        block_col_range(geom, ElementKind::Turbine).start,
         pos,
         effective_blk,
     );
     let spillage_col = grid.flat(
-        block_col_range(indexer, ElementKind::Spillage).start,
+        block_col_range(geom, ElementKind::Spillage).start,
         pos,
         effective_blk,
     );
@@ -606,7 +677,7 @@ fn resolve_hydro_generation(
     block_idx: usize,
     grid: BlockGrid,
     stage_idx: usize,
-    indexer: &StageIndexer,
+    geom: &GenericResolverGeom<'_>,
     production_models: &ProductionModelSet,
     hydro_pos: &BTreeMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
@@ -615,22 +686,19 @@ fn resolve_hydro_generation(
     };
     match production_models.model(sys_pos, stage_idx) {
         ResolvedProductionModel::Fpha { .. } => {
-            // Linear scan over the small per-stage FPHA-hydro list. This runs on
-            // the cold per-constraint-term resolver path (template build, not a
-            // solve loop), so the O(n) cost over a handful of FPHA hydros is not
-            // measurable and a pre-built O(1) reverse map is not warranted here —
-            // unlike `resolve_anticipated_decision`, whose larger/hotter set earns
-            // `anticipated_local_by_sys_pos`.
-            if let Some(fpha_local_idx) = indexer
-                .fpha_hydro_indices
-                .iter()
-                .position(|&p| p == sys_pos)
+            // Role (b): linear scan over the small per-stage FPHA-hydro list. This
+            // runs on the cold per-constraint-term resolver path (template build,
+            // not a solve loop), so the O(n) cost over a handful of FPHA hydros is
+            // not measurable and a pre-built O(1) reverse map is not warranted here
+            // — unlike `resolve_anticipated_decision`, whose larger/hotter set
+            // earns `anticipated_local_by_sys_pos`.
+            if let Some(fpha_local_idx) = geom.fpha_hydro_indices.iter().position(|&p| p == sys_pos)
             {
                 let effective_blk = block_id.unwrap_or(block_idx);
-                let col = grid.flat(indexer.generation.start, fpha_local_idx, effective_blk);
+                let col = grid.flat(geom.generation.start, fpha_local_idx, effective_blk);
                 vec![(col, 1.0)]
             } else {
-                // Should not happen if indexer and production_models are consistent.
+                // Should not happen if geom and production_models are consistent.
                 vec![]
             }
         }
@@ -641,7 +709,7 @@ fn resolve_hydro_generation(
                 block_id,
                 block_idx,
                 grid,
-                block_col_range(indexer, ElementKind::Turbine).start,
+                block_col_range(geom, ElementKind::Turbine).start,
                 hydro_pos,
                 *productivity,
             )
@@ -655,18 +723,18 @@ fn resolve_line_exchange(
     block_id: Option<usize>,
     block_idx: usize,
     grid: BlockGrid,
-    indexer: &StageIndexer,
+    geom: &GenericResolverGeom<'_>,
     line_pos: &BTreeMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     if let Some(&pos) = line_pos.get(&line_id) {
         let effective_blk = block_id.unwrap_or(block_idx);
         let fwd_col = grid.flat(
-            block_col_range(indexer, ElementKind::LineFwd).start,
+            block_col_range(geom, ElementKind::LineFwd).start,
             pos,
             effective_blk,
         );
         let rev_col = grid.flat(
-            block_col_range(indexer, ElementKind::LineRev).start,
+            block_col_range(geom, ElementKind::LineRev).start,
             pos,
             effective_blk,
         );
@@ -681,22 +749,22 @@ fn resolve_line_exchange(
 /// Each segment's column is the deficit 3-term address
 /// `grid.deficit(deficit.start, b_pos, seg, blk)` (bus-outer, segment-middle,
 /// block-inner); see [`BlockGrid::deficit`]. The segment count `S` comes from
-/// `indexer.max_deficit_segments` because the grid exposes no accessor for it.
+/// `geom.max_deficit_segments` because the grid exposes no accessor for it.
 fn resolve_bus_deficit(
     bus_id: EntityId,
     block_id: Option<usize>,
     block_idx: usize,
     grid: BlockGrid,
-    indexer: &StageIndexer,
+    geom: &GenericResolverGeom<'_>,
     bus_pos: &BTreeMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     if let Some(&b_pos) = bus_pos.get(&bus_id) {
         let effective_blk = block_id.unwrap_or(block_idx);
-        let s = indexer.max_deficit_segments;
+        let s = geom.max_deficit_segments;
         (0..s)
             .map(|seg| {
                 (
-                    grid.deficit(indexer.deficit.start, b_pos, seg, effective_blk),
+                    grid.deficit(geom.deficit.start, b_pos, seg, effective_blk),
                     1.0,
                 )
             })
@@ -708,28 +776,28 @@ fn resolve_bus_deficit(
 
 /// Resolve `AnticipatedDecision` to the per-plant stage-level decision column.
 ///
-/// Column layout: `anticipated_decision.start + local_idx` where `local_idx`
-/// is the position of the thermal's system index in
-/// `indexer.anticipated_thermal_indices`.
+/// Column layout: `anticipated_decision_start + local_idx` where `local_idx`
+/// is the anticipated-local index of the thermal's system position, looked up via
+/// `geom.anticipated_local_by_sys_pos`.
 ///
 /// Returns an empty vec when:
 /// - `thermal_id` is not in `thermal_pos` (defense-in-depth; referential
 ///   validation should have caught this).
-/// - The thermal's system position is not in `anticipated_thermal_indices`
+/// - The thermal's system position is not in `anticipated_local_by_sys_pos`
 ///   (the thermal is not anticipated; semantic validation should have caught
 ///   this via rule 17 in `check_anticipated_decision_target_is_anticipated`).
 fn resolve_anticipated_decision(
     thermal_id: EntityId,
-    indexer: &StageIndexer,
+    geom: &GenericResolverGeom<'_>,
     thermal_pos: &BTreeMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     let Some(&sys_pos) = thermal_pos.get(&thermal_id) else {
         return vec![];
     };
-    // O(1) reverse lookup via the pre-built map in the indexer rather than
-    // a linear scan over anticipated_thermal_indices.
-    if let Some(&local_idx) = indexer.anticipated_local_by_sys_pos.get(&sys_pos) {
-        vec![(indexer.anticipated_decision.start + local_idx, 1.0)]
+    // Role (b): O(1) reverse lookup via the pre-built map rather than a linear
+    // scan over anticipated_thermal_indices.
+    if let Some(&local_idx) = geom.anticipated_local_by_sys_pos.get(&sys_pos) {
+        vec![(geom.anticipated_decision_start + local_idx, 1.0)]
     } else {
         vec![]
     }
@@ -805,8 +873,8 @@ fn resolve_block_variable(
 }
 
 /// A block-major equipment/line/contract column family the resolver addresses by
-/// reading the family's [`StageIndexer`]-owned column range. Each variant maps to
-/// exactly one range in [`block_col_range`].
+/// reading the family's role-(b) column range on the geometry. Each variant maps
+/// to exactly one range in [`block_col_range`].
 ///
 /// Closed set, exhaustively matched (no `_` arm) in [`block_col_range`]: a new
 /// block-major family is a compile error there until its range source is named,
@@ -825,31 +893,32 @@ enum ElementKind {
     ContractExport,
 }
 
-/// Map an [`ElementKind`] to its block-major column range on `indexer`.
+/// Map an [`ElementKind`] to its role-(b) block-major column range on `geom`.
 ///
-/// This is the single point that pairs an element family with its [`StageIndexer`]
-/// column range, so a wrong arm mapping (e.g. returning `indexer.spillage` for
-/// `Turbine`) is caught here, once, instead of being open-coded — and silently
-/// wrong — at each `col_start` read across the resolver and its helpers.
+/// This is the single point that pairs an element family with its `StageLayout`
+/// role-(b) column range (carried on [`GenericResolverGeom`]), so a wrong arm
+/// mapping (e.g. returning `geom.spillage` for `Turbine`) is caught here, once,
+/// instead of being open-coded — and silently wrong — at each `col_start` read
+/// across the resolver and its helpers.
 ///
 /// `ContractImport`/`ContractExport` return the empty `0..0` range: contracts have
-/// no LP columns in this implementation (the indexer exposes no contract range), so
-/// they resolve to no `(column, coefficient)` pair. This is the single owner of the
-/// contract column range, so wiring real contract columns later is one edit here.
+/// no LP columns in this implementation (the geometry exposes no contract range),
+/// so they resolve to no `(column, coefficient)` pair. This is the single owner of
+/// the contract column range, so wiring real contract columns later is one edit here.
 ///
 /// Returns an **owned** `Range<usize>` (a two-`usize` clone, stack-only) so the
 /// `0..0` contract sentinel is returnable without tying the result's lifetime to
-/// `indexer`; do NOT change this to `&Range<usize>`.
+/// `geom`; do NOT change this to `&Range<usize>`.
 #[must_use]
-fn block_col_range(indexer: &StageIndexer, kind: ElementKind) -> std::ops::Range<usize> {
+fn block_col_range(geom: &GenericResolverGeom<'_>, kind: ElementKind) -> Range<usize> {
     match kind {
-        ElementKind::Turbine => indexer.turbine.clone(),
-        ElementKind::Spillage => indexer.spillage.clone(),
-        ElementKind::Diversion => indexer.diversion.clone(),
-        ElementKind::Thermal => indexer.thermal.clone(),
-        ElementKind::LineFwd => indexer.line_fwd.clone(),
-        ElementKind::LineRev => indexer.line_rev.clone(),
-        ElementKind::Excess => indexer.excess.clone(),
+        ElementKind::Turbine => geom.turbine.clone(),
+        ElementKind::Spillage => geom.spillage.clone(),
+        ElementKind::Diversion => geom.diversion.clone(),
+        ElementKind::Thermal => geom.thermal.clone(),
+        ElementKind::LineFwd => geom.line_fwd.clone(),
+        ElementKind::LineRev => geom.line_rev.clone(),
+        ElementKind::Excess => geom.excess.clone(),
         ElementKind::ContractImport | ElementKind::ContractExport => 0..0,
     }
 }
@@ -868,13 +937,65 @@ mod tests {
     use cobre_core::{CascadeTopology, EntityId, Hydro, PumpingStation, VariableRef};
 
     use super::{
-        CascadeRefs, ElementKind, PumpingRefs, block_col_range, resolve_variable_ref,
-        variable_ref_is_block_independent,
+        CascadeRefs, ElementKind, GenericResolverGeom, PumpingRefs, block_col_range,
+        resolve_variable_ref, variable_ref_is_block_independent,
     };
     use crate::hydro_models::{FphaPlane, ProductionModelSet, ResolvedProductionModel};
-    use crate::indexer::StageIndexer;
+    use crate::indexer::{StageIndexer, StateLayout};
 
     // ── Test helpers ──────────────────────────────────────────────────────────
+
+    /// Build the [`StateLayout`] matching [`make_indexer`]'s state dimensions
+    /// (N=4 hydros, L=0 lags, no anticipated thermals), so the role-(a) storage /
+    /// z-inflow columns the resolver reads through the handle equal the indexer's.
+    fn make_state() -> StateLayout {
+        StateLayout::new(4, 0, 0, 0, vec![], &[0, 0, 0, 0])
+    }
+
+    /// Build the [`StateLayout`] matching [`make_indexer_with_anticipated`]'s state
+    /// dimensions (N=0 hydros, L=0, A=1 anticipated plant, k_max=2, K=[2]).
+    fn make_state_anticipated() -> StateLayout {
+        StateLayout::new(0, 0, 1, 2, vec![2], &[])
+    }
+
+    /// Build the [`GenericResolverGeom`] view from a test [`StageIndexer`] (role
+    /// (b)) and a [`StateLayout`] (role (a)). Mirrors the production view built in
+    /// `entries.rs`, sourcing each role-(b) range from the indexer's equivalent
+    /// field so the resolver tests exercise the same offsets production does.
+    fn make_geom<'a>(indexer: &'a StageIndexer, state: &'a StateLayout) -> GenericResolverGeom<'a> {
+        // Production builds the `anticipated_local_by_sys_pos` reverse map on the
+        // per-stage `StageLayout`; the slim role-(b) `StageIndexer` carries only the
+        // `anticipated_thermal_indices` identity list. Reconstruct the equivalent
+        // reverse map here (test-only) and leak it so the borrowed `GenericResolverGeom`
+        // field has a `'a`-compatible referent without threading an owner through every
+        // call site.
+        let reverse: std::collections::HashMap<usize, usize> = indexer
+            .anticipated_thermal_indices
+            .iter()
+            .enumerate()
+            .map(|(local, &sys_pos)| (sys_pos, local))
+            .collect();
+        let reverse: &'a std::collections::HashMap<usize, usize> = Box::leak(Box::new(reverse));
+        GenericResolverGeom {
+            state,
+            turbine: &indexer.turbine,
+            spillage: &indexer.spillage,
+            diversion: &indexer.diversion,
+            thermal: &indexer.thermal,
+            line_fwd: &indexer.line_fwd,
+            line_rev: &indexer.line_rev,
+            excess: &indexer.excess,
+            generation: &indexer.generation,
+            deficit: &indexer.deficit,
+            max_deficit_segments: indexer.max_deficit_segments,
+            n_blks: indexer.n_blks,
+            evap_indices: &indexer.evap_indices,
+            evap_hydro_indices: &indexer.evap_hydro_indices,
+            fpha_hydro_indices: &indexer.fpha_hydro_indices,
+            anticipated_decision_start: indexer.anticipated_decision.start,
+            anticipated_local_by_sys_pos: reverse,
+        }
+    }
 
     /// Minimal `Hydro` carrying only the `id`/`downstream_id` that
     /// [`CascadeTopology::build`] reads; every other field is an inert default.
@@ -1048,7 +1169,7 @@ mod tests {
     fn call(
         var_ref: VariableRef,
         block_idx: usize,
-        indexer: &StageIndexer,
+        geom: &GenericResolverGeom<'_>,
         production_models: &ProductionModelSet,
         hydro_pos: &BTreeMap<EntityId, usize>,
         thermal_pos: &BTreeMap<EntityId, usize>,
@@ -1061,7 +1182,7 @@ mod tests {
         call_with_cascade(
             var_ref,
             block_idx,
-            indexer,
+            geom,
             production_models,
             hydro_pos,
             thermal_pos,
@@ -1077,7 +1198,7 @@ mod tests {
     fn call_with_cascade(
         var_ref: VariableRef,
         block_idx: usize,
-        indexer: &StageIndexer,
+        geom: &GenericResolverGeom<'_>,
         production_models: &ProductionModelSet,
         hydro_pos: &BTreeMap<EntityId, usize>,
         thermal_pos: &BTreeMap<EntityId, usize>,
@@ -1109,7 +1230,7 @@ mod tests {
             &var_ref,
             block_idx,
             0, // stage_idx = 0
-            indexer,
+            geom,
             production_models,
             &positions,
             &cascade_refs,
@@ -1128,7 +1249,7 @@ mod tests {
     fn call_pumping(
         var_ref: VariableRef,
         block_idx: usize,
-        indexer: &StageIndexer,
+        geom: &GenericResolverGeom<'_>,
         production_models: &ProductionModelSet,
         col_pumping_start: usize,
         n_blks: usize,
@@ -1153,16 +1274,16 @@ mod tests {
             pumping_stations,
             pumping_pos,
         };
-        // The pumping column stride is now sourced from the indexer's `BlockGrid`,
-        // so the fixture's declared `n_blks` must match `indexer.n_blks` for the
+        // The pumping column stride is now sourced from the geometry's `BlockGrid`,
+        // so the fixture's declared `n_blks` must match `geom.n_blks` for the
         // asserted columns to hold; pin that invariant rather than silently
         // diverging if a future fixture sets a mismatched stride.
-        assert_eq!(n_blks, indexer.n_blks);
+        assert_eq!(n_blks, geom.n_blks);
         resolve_variable_ref(
             &var_ref,
             block_idx,
             0, // stage_idx = 0
-            indexer,
+            geom,
             production_models,
             &positions,
             &cascade_refs,
@@ -1192,10 +1313,12 @@ mod tests {
     /// `ThermalGeneration` column arithmetic across the `block_id`/position axes
     /// the per-arm coverage requires: one `block_id = None`, one `block_id = Some`,
     /// and one `position != 0`. All resolve through `resolve_block_variable` with
-    /// `block_col_range(indexer, ElementKind::Thermal).start = 49`, `n_blks = 3`.
+    /// `block_col_range(geom, ElementKind::Thermal).start = 49`, `n_blks = 3`.
     #[test]
     fn thermal_generation_column_arithmetic() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -1216,7 +1339,7 @@ mod tests {
                     block_id,
                 },
                 block_idx,
-                &indexer,
+                &geom,
                 &prod,
                 &hpos,
                 &tpos,
@@ -1240,6 +1363,8 @@ mod tests {
     #[test]
     fn hydro_storage_stage_level_ignores_block() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -1252,7 +1377,7 @@ mod tests {
                     hydro_id: EntityId(10),
                 },
                 block_idx,
-                &indexer,
+                &geom,
                 &prod,
                 &hpos,
                 &tpos,
@@ -1269,7 +1394,7 @@ mod tests {
                 hydro_id: EntityId(30),
             },
             0,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -1290,6 +1415,8 @@ mod tests {
     #[test]
     fn hydro_outflow_expands_to_turbine_and_spillage() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -1302,7 +1429,7 @@ mod tests {
                 block_id: None,
             },
             0, // block_idx
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -1321,6 +1448,8 @@ mod tests {
     #[test]
     fn hydro_outflow_block_id_some_uses_explicit_block() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -1333,7 +1462,7 @@ mod tests {
                 block_id: Some(1),
             },
             0, // block_idx is irrelevant when block_id = Some
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -1356,6 +1485,8 @@ mod tests {
     #[test]
     fn hydro_generation_constant_productivity_maps_to_turbine() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -1368,7 +1499,7 @@ mod tests {
                 block_id: None,
             },
             0,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -1388,6 +1519,8 @@ mod tests {
     #[test]
     fn hydro_generation_fpha_maps_to_generation_column() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -1400,7 +1533,7 @@ mod tests {
                 block_id: None,
             },
             0,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -1420,6 +1553,8 @@ mod tests {
     #[test]
     fn hydro_generation_fpha_second_hydro_block_2() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -1432,7 +1567,7 @@ mod tests {
                 block_id: None,
             },
             2,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -1519,13 +1654,15 @@ mod tests {
             pumping_stations: &no_stations,
             pumping_pos: &empty_pumping_pos,
         };
+        let state = StateLayout::new(2, 0, 0, 0, vec![], &[0, 0]);
+        let geom = make_geom(&evap_indexer, &state);
         let result = resolve_variable_ref(
             &VariableRef::HydroEvaporation {
                 hydro_id: EntityId(10),
             },
             0,
             0, // stage_idx
-            &evap_indexer,
+            &geom,
             &prod_models,
             &positions,
             &cascade_refs,
@@ -1598,13 +1735,15 @@ mod tests {
             pumping_stations: &no_stations,
             pumping_pos: &empty_pumping_pos,
         };
+        let state = StateLayout::new(2, 0, 0, 0, vec![], &[0, 0]);
+        let geom = make_geom(&evap_indexer, &state);
         let result = resolve_variable_ref(
             &VariableRef::HydroEvaporation {
                 hydro_id: EntityId(20),
             },
             0,
             0,
-            &evap_indexer,
+            &geom,
             &prod_models,
             &positions,
             &cascade_refs,
@@ -1640,6 +1779,8 @@ mod tests {
     #[test]
     fn pumping_flow_resolves_to_flow_column_with_unit_coeff() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let (stations, ppos) = make_pumping_fixture();
 
@@ -1649,7 +1790,7 @@ mod tests {
                 block_id: Some(2),
             },
             0, // block_idx — overridden by block_id = Some(2)
-            &indexer,
+            &geom,
             &prod,
             PUMP_COL_START,
             PUMP_N_BLKS,
@@ -1668,6 +1809,8 @@ mod tests {
     #[test]
     fn pumping_power_resolves_to_flow_column_with_consumption_coeff() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let (stations, ppos) = make_pumping_fixture();
 
@@ -1678,7 +1821,7 @@ mod tests {
                 block_id: Some(blk),
             },
             0,
-            &indexer,
+            &geom,
             &prod,
             PUMP_COL_START,
             PUMP_N_BLKS,
@@ -1691,7 +1834,7 @@ mod tests {
                 block_id: Some(blk),
             },
             0,
-            &indexer,
+            &geom,
             &prod,
             PUMP_COL_START,
             PUMP_N_BLKS,
@@ -1711,6 +1854,8 @@ mod tests {
     #[test]
     fn pumping_flow_none_resolves_per_block() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let (stations, ppos) = make_pumping_fixture();
 
@@ -1724,7 +1869,7 @@ mod tests {
                         block_id: None,
                     },
                     blk, // block_idx supplies the effective block
-                    &indexer,
+                    &geom,
                     &prod,
                     PUMP_COL_START,
                     PUMP_N_BLKS,
@@ -1752,6 +1897,8 @@ mod tests {
     #[test]
     fn pumping_power_none_resolves_per_block_with_consumption() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let (stations, ppos) = make_pumping_fixture();
 
@@ -1763,7 +1910,7 @@ mod tests {
                         block_id: None,
                     },
                     blk,
-                    &indexer,
+                    &geom,
                     &prod,
                     PUMP_COL_START,
                     PUMP_N_BLKS,
@@ -1789,6 +1936,8 @@ mod tests {
     #[test]
     fn pumping_unknown_station_returns_empty() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let (stations, ppos) = make_pumping_fixture();
 
@@ -1805,7 +1954,7 @@ mod tests {
             let result = call_pumping(
                 var_ref,
                 0,
-                &indexer,
+                &geom,
                 &prod,
                 PUMP_COL_START,
                 PUMP_N_BLKS,
@@ -1824,6 +1973,8 @@ mod tests {
     #[test]
     fn pumping_no_stations_returns_empty() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let no_stations: Vec<PumpingStation> = Vec::new();
         let empty_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
@@ -1841,7 +1992,7 @@ mod tests {
             let result = call_pumping(
                 var_ref,
                 0,
-                &indexer,
+                &geom,
                 &prod,
                 PUMP_COL_START,
                 PUMP_N_BLKS,
@@ -1905,6 +2056,8 @@ mod tests {
     #[test]
     fn contract_import_returns_empty() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -1917,7 +2070,7 @@ mod tests {
                 block_id: None,
             },
             0,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -1933,6 +2086,8 @@ mod tests {
     #[test]
     fn contract_export_returns_empty() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -1945,7 +2100,7 @@ mod tests {
                 block_id: None,
             },
             0,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -1960,6 +2115,8 @@ mod tests {
     #[test]
     fn non_controllable_generation_returns_empty() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -1972,7 +2129,7 @@ mod tests {
                 block_id: None,
             },
             0,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -1993,6 +2150,8 @@ mod tests {
     #[test]
     fn hydro_withdrawal_returns_empty() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2004,7 +2163,7 @@ mod tests {
                 hydro_id: EntityId(999),
             },
             0,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2028,6 +2187,8 @@ mod tests {
     #[test]
     fn non_controllable_curtailment_returns_empty() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2040,7 +2201,7 @@ mod tests {
                 block_id: None,
             },
             0,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2061,6 +2222,8 @@ mod tests {
     #[test]
     fn missing_entity_id_returns_empty() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2074,7 +2237,7 @@ mod tests {
                 block_id: None,
             },
             0,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2096,6 +2259,8 @@ mod tests {
     #[test]
     fn bus_deficit_returns_one_entry_per_segment() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2108,7 +2273,7 @@ mod tests {
                 block_id: None,
             },
             0,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2132,6 +2297,8 @@ mod tests {
     #[test]
     fn bus_deficit_second_bus_block_1() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2144,7 +2311,7 @@ mod tests {
                 block_id: None,
             },
             1,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2166,6 +2333,8 @@ mod tests {
     #[test]
     fn bus_excess_maps_to_excess_column() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2178,7 +2347,7 @@ mod tests {
                 block_id: None,
             },
             2,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2198,6 +2367,8 @@ mod tests {
     #[test]
     fn line_direct_maps_to_fwd_column() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2210,7 +2381,7 @@ mod tests {
                 block_id: None,
             },
             1,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2228,6 +2399,8 @@ mod tests {
     #[test]
     fn line_reverse_maps_to_rev_column() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2240,7 +2413,7 @@ mod tests {
                 block_id: None,
             },
             0,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2261,6 +2434,8 @@ mod tests {
     #[test]
     fn line_exchange_maps_to_fwd_and_rev_columns() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2273,7 +2448,7 @@ mod tests {
                 block_id: None,
             },
             1,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2291,6 +2466,8 @@ mod tests {
     #[test]
     fn line_exchange_with_explicit_block() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2303,7 +2480,7 @@ mod tests {
                 block_id: Some(0),
             },
             2,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2318,6 +2495,8 @@ mod tests {
     #[test]
     fn line_exchange_unknown_id_returns_empty() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2330,7 +2509,7 @@ mod tests {
                 block_id: None,
             },
             0,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2401,6 +2580,8 @@ mod tests {
     #[test]
     fn anticipated_decision_maps_to_correct_column() {
         let indexer = make_indexer_with_anticipated();
+        let state = make_state_anticipated();
+        let geom = make_geom(&indexer, &state);
         let prod = ProductionModelSet::new(vec![], 0, 1);
         let hpos: BTreeMap<EntityId, usize> = BTreeMap::new();
         let tpos: BTreeMap<EntityId, usize> =
@@ -2420,7 +2601,7 @@ mod tests {
                 thermal_id: EntityId(6), // sys_pos=1, local anticipated idx=0
             },
             0, // block_idx is ignored for stage-level variable
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2440,6 +2621,8 @@ mod tests {
     #[test]
     fn anticipated_decision_ignores_block_idx() {
         let indexer = make_indexer_with_anticipated();
+        let state = make_state_anticipated();
+        let geom = make_geom(&indexer, &state);
         let prod = ProductionModelSet::new(vec![], 0, 1);
         let hpos: BTreeMap<EntityId, usize> = BTreeMap::new();
         let tpos: BTreeMap<EntityId, usize> =
@@ -2453,7 +2636,7 @@ mod tests {
                     thermal_id: EntityId(6),
                 },
                 block_idx,
-                &indexer,
+                &geom,
                 &prod,
                 &hpos,
                 &tpos,
@@ -2475,6 +2658,8 @@ mod tests {
     #[test]
     fn anticipated_decision_non_anticipated_thermal_returns_empty() {
         let indexer = make_indexer_with_anticipated();
+        let state = make_state_anticipated();
+        let geom = make_geom(&indexer, &state);
         let prod = ProductionModelSet::new(vec![], 0, 1);
         let hpos: BTreeMap<EntityId, usize> = BTreeMap::new();
         let tpos: BTreeMap<EntityId, usize> =
@@ -2487,7 +2672,7 @@ mod tests {
                 thermal_id: EntityId(5), // sys_pos=0, NOT anticipated
             },
             0,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2505,6 +2690,8 @@ mod tests {
     #[test]
     fn anticipated_decision_unknown_entity_returns_empty() {
         let indexer = make_indexer_with_anticipated();
+        let state = make_state_anticipated();
+        let geom = make_geom(&indexer, &state);
         let prod = ProductionModelSet::new(vec![], 0, 1);
         let hpos: BTreeMap<EntityId, usize> = BTreeMap::new();
         let tpos: BTreeMap<EntityId, usize> =
@@ -2517,7 +2704,7 @@ mod tests {
                 thermal_id: EntityId(999), // unknown
             },
             0,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2537,19 +2724,24 @@ mod tests {
     /// the two contract families map to the empty `0..0` sentinel. This pins the
     /// family↔range pairing the resolver's `col_start` reads depend on.
     #[test]
-    fn block_col_range_maps_each_family_to_its_indexer_range() {
+    fn block_col_range_maps_each_family_to_its_geometry_range() {
         let idx = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&idx, &state);
 
-        assert_eq!(block_col_range(&idx, ElementKind::Turbine), idx.turbine);
-        assert_eq!(block_col_range(&idx, ElementKind::Spillage), idx.spillage);
-        assert_eq!(block_col_range(&idx, ElementKind::Diversion), idx.diversion);
-        assert_eq!(block_col_range(&idx, ElementKind::Thermal), idx.thermal);
-        assert_eq!(block_col_range(&idx, ElementKind::LineFwd), idx.line_fwd);
-        assert_eq!(block_col_range(&idx, ElementKind::LineRev), idx.line_rev);
-        assert_eq!(block_col_range(&idx, ElementKind::Excess), idx.excess);
+        assert_eq!(block_col_range(&geom, ElementKind::Turbine), idx.turbine);
+        assert_eq!(block_col_range(&geom, ElementKind::Spillage), idx.spillage);
+        assert_eq!(
+            block_col_range(&geom, ElementKind::Diversion),
+            idx.diversion
+        );
+        assert_eq!(block_col_range(&geom, ElementKind::Thermal), idx.thermal);
+        assert_eq!(block_col_range(&geom, ElementKind::LineFwd), idx.line_fwd);
+        assert_eq!(block_col_range(&geom, ElementKind::LineRev), idx.line_rev);
+        assert_eq!(block_col_range(&geom, ElementKind::Excess), idx.excess);
 
-        assert_eq!(block_col_range(&idx, ElementKind::ContractImport), 0..0);
-        assert_eq!(block_col_range(&idx, ElementKind::ContractExport), 0..0);
+        assert_eq!(block_col_range(&geom, ElementKind::ContractImport), 0..0);
+        assert_eq!(block_col_range(&geom, ElementKind::ContractExport), 0..0);
     }
 
     // ── HydroTurbined / HydroSpillage tests ───────────────────────────────────
@@ -2558,6 +2750,8 @@ mod tests {
     #[test]
     fn hydro_turbined_maps_to_turbine_column() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2571,7 +2765,7 @@ mod tests {
                 block_id: None,
             },
             2,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2586,6 +2780,8 @@ mod tests {
     #[test]
     fn hydro_spillage_maps_to_spillage_column() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2599,7 +2795,7 @@ mod tests {
                 block_id: None,
             },
             1,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2613,12 +2809,14 @@ mod tests {
     /// HydroDiversion maps to the diversion column.
     ///
     /// Routes through `resolve_block_variable` with
-    /// `block_col_range(indexer, ElementKind::Diversion).start = 37`. For hydro
+    /// `block_col_range(geom, ElementKind::Diversion).start = 37`. For hydro
     /// pos=1 (EntityId 20), n_blks=3, block=2 the flat block-major address is
     /// `37 + 1*3 + 2 = 42` with the unit coefficient.
     #[test]
     fn diversion_maps_to_diversion_column() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2631,7 +2829,7 @@ mod tests {
                 block_id: None,
             },
             2,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2666,6 +2864,8 @@ mod tests {
     #[test]
     fn hydro_inflow_two_upstream_canonical_order() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2681,7 +2881,7 @@ mod tests {
                 block_id: Some(blk),
             },
             0, // block_idx — overridden by block_id = Some(blk)
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2712,6 +2912,8 @@ mod tests {
     #[test]
     fn hydro_inflow_none_matches_some_block_idx() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2727,7 +2929,7 @@ mod tests {
                 block_id: None,
             },
             blk, // block_idx supplies the effective block
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2742,7 +2944,7 @@ mod tests {
                 block_id: Some(blk),
             },
             0,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2763,6 +2965,8 @@ mod tests {
     #[test]
     fn hydro_inflow_diversion_into_appends_diversion_column() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2778,7 +2982,7 @@ mod tests {
                 block_id: Some(blk),
             },
             0,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2814,6 +3018,8 @@ mod tests {
     #[test]
     fn hydro_inflow_headwater_resolves_to_z_inflow_only() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2829,7 +3035,7 @@ mod tests {
                     block_id: None,
                 },
                 block_idx,
-                &indexer,
+                &geom,
                 &prod,
                 &hpos,
                 &tpos,
@@ -2849,6 +3055,8 @@ mod tests {
     #[test]
     fn hydro_inflow_empty_when_no_hydros() {
         let indexer = make_indexer_with_anticipated();
+        let state = make_state_anticipated();
+        let geom = make_geom(&indexer, &state);
         let prod = ProductionModelSet::new(vec![], 0, 1);
         let hpos: BTreeMap<EntityId, usize> = BTreeMap::new();
         let tpos: BTreeMap<EntityId, usize> = BTreeMap::new();
@@ -2856,7 +3064,7 @@ mod tests {
         let lpos: BTreeMap<EntityId, usize> = BTreeMap::new();
 
         assert!(
-            indexer.z_inflow.is_empty(),
+            state.z_inflow.is_empty(),
             "z_inflow must be empty with hydro_count == 0"
         );
 
@@ -2866,7 +3074,7 @@ mod tests {
                 block_id: None,
             },
             0,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,
@@ -2884,6 +3092,8 @@ mod tests {
     #[test]
     fn hydro_inflow_unknown_id_returns_empty() {
         let indexer = make_indexer();
+        let state = make_state();
+        let geom = make_geom(&indexer, &state);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2896,7 +3106,7 @@ mod tests {
                 block_id: None,
             },
             0,
-            &indexer,
+            &geom,
             &prod,
             &hpos,
             &tpos,

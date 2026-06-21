@@ -22,7 +22,7 @@ use crate::{
     cut::FutureCostFunction,
     error::SddpError,
     forward::{ForwardResult, StageKey, run_forward_stage},
-    indexer::StageIndexer,
+    indexer::StateLayout,
     solve::partition,
     solver_phase::Phase,
     solver_stats::SolverStatsDelta,
@@ -150,8 +150,11 @@ pub(crate) struct ForwardWorkerParams<'a> {
     pub recent_accum_seed: &'a [f64],
     /// Lag-accumulator weight seed at trajectory start.
     pub recent_weight_seed: f64,
-    /// Stage-dimension indexer (state, hydro, lag counts).
-    pub indexer: &'a StageIndexer,
+    /// Stage-invariant role-(a) state layout (state-vector column ranges,
+    /// hydro/lag counts). The only field read from it is `inflow_lags.start`
+    /// (for the initial-state lag base), so the geometry descriptor is not needed
+    /// here.
+    pub state: &'a StateLayout,
     /// Stage-level LP context (templates, row counts, noise scales).
     pub ctx: &'a StageContext<'a>,
     /// Baked LP templates including pre-appended prior-iteration cuts.
@@ -300,7 +303,7 @@ impl ForwardPassState {
     /// Panics if any of the following debug preconditions are violated:
     ///
     /// - `inputs.records.len() != inputs.local_forward_passes * num_stages`
-    /// - `inputs.training_ctx.initial_state.len() != indexer.n_state`
+    /// - `inputs.training_ctx.initial_state.len() != state.n_state`
     /// - `inputs.baked.len() != num_stages`
     pub(crate) fn run<S>(
         &mut self,
@@ -312,7 +315,7 @@ impl ForwardPassState {
         let training_ctx = inputs.training_ctx;
         let TrainingContext {
             horizon,
-            indexer,
+            state,
             stochastic,
             initial_state,
             recent_accum_seed,
@@ -325,7 +328,7 @@ impl ForwardPassState {
         let forward_passes = inputs.local_forward_passes;
 
         debug_assert_eq!(inputs.records.len(), forward_passes * num_stages);
-        debug_assert_eq!(initial_state.len(), indexer.n_state);
+        debug_assert_eq!(initial_state.len(), state.n_state);
         debug_assert_eq!(
             inputs.baked.len(),
             num_stages,
@@ -447,7 +450,7 @@ impl ForwardPassState {
             initial_state,
             recent_accum_seed,
             recent_weight_seed,
-            indexer,
+            state,
             ctx: inputs.ctx,
             baked: inputs.baked,
             fcf: inputs.fcf,
@@ -780,7 +783,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 params.sampler.apply_initial_state(
                     &class_req,
                     &mut ws.current_state,
-                    params.indexer.inflow_lags.start,
+                    params.state.inflow_lags.start,
                 );
             }
             let noise = params.sampler.sample(SampleRequest {
@@ -875,7 +878,7 @@ mod tests {
         context::{StageContext, TrainingContext},
         cut::FutureCostFunction,
         horizon_mode::HorizonMode,
-        indexer::StageIndexer,
+        indexer::{StageIndexer, StateLayout},
         inflow_method::InflowNonNegativityMethod,
         trajectory::TrajectoryRecord,
         workspace::{BackwardAccumulators, BasisStore, SolverWorkspace},
@@ -984,27 +987,30 @@ mod tests {
         }
     }
 
-    fn single_workspace(solver: MockSolver, indexer: &StageIndexer) -> SolverWorkspace<MockSolver> {
+    fn single_workspace(
+        solver: MockSolver,
+        state: &crate::indexer::StateLayout,
+    ) -> SolverWorkspace<MockSolver> {
         SolverWorkspace {
             rank: 0,
             worker_id: 0,
             solver: ProfiledSolver::new(solver),
             patch_buf: crate::lp_builder::PatchBuffer::new(
-                indexer.hydro_count,
-                indexer.max_par_order,
+                state.hydro_count,
+                state.max_par_order,
                 0,
                 0,
                 0,
                 0,
             ),
-            current_state: Vec::with_capacity(indexer.n_state),
+            current_state: Vec::with_capacity(state.n_state),
             scratch: crate::workspace::ScratchBuffers {
-                noise_buf: Vec::with_capacity(indexer.hydro_count),
-                inflow_m3s_buf: Vec::with_capacity(indexer.hydro_count),
-                lag_matrix_buf: Vec::with_capacity(indexer.max_par_order * indexer.hydro_count),
-                par_inflow_buf: Vec::with_capacity(indexer.hydro_count),
-                eta_floor_buf: Vec::with_capacity(indexer.hydro_count),
-                zero_targets_buf: vec![0.0_f64; indexer.hydro_count],
+                noise_buf: Vec::with_capacity(state.hydro_count),
+                inflow_m3s_buf: Vec::with_capacity(state.hydro_count),
+                lag_matrix_buf: Vec::with_capacity(state.max_par_order * state.hydro_count),
+                par_inflow_buf: Vec::with_capacity(state.hydro_count),
+                eta_floor_buf: Vec::with_capacity(state.hydro_count),
+                zero_targets_buf: vec![0.0_f64; state.hydro_count],
                 ncs_col_upper_buf: Vec::new(),
                 ncs_col_lower_buf: Vec::new(),
                 ncs_col_indices_buf: Vec::new(),
@@ -1210,6 +1216,7 @@ mod tests {
         n_stages: usize,
         n_scenarios: usize,
         indexer: StageIndexer,
+        state: StateLayout,
         templates: Vec<StageTemplate>,
         base_rows: Vec<usize>,
         initial_state: Vec<f64>,
@@ -1227,20 +1234,21 @@ mod tests {
         fn new() -> Self {
             let n_stages = 2_usize;
             let n_scenarios = 2_usize;
-            let indexer = StageIndexer::new(1, 0);
+            let indexer = crate::indexer::test_fixtures::geom(1, 0);
+            let state = crate::indexer::test_fixtures::state_layout(1, 0);
             let stochastic = make_stochastic_context_2_stages();
             let stages = make_stages_2();
             let solution = fixed_solution_1_0();
             let solver = MockSolver::always_ok(solution);
             let templates = vec![minimal_template_1_0(); n_stages];
             let base_rows = vec![0_usize; n_stages];
-            let initial_state = vec![0.0_f64; indexer.n_state];
-            let noise_scale = vec![0.0_f64; n_stages * indexer.hydro_count];
-            let fcf = FutureCostFunction::new(n_stages, indexer.n_state, 2, 10, &vec![0; n_stages]);
+            let initial_state = vec![0.0_f64; state.n_state];
+            let noise_scale = vec![0.0_f64; n_stages * state.hydro_count];
+            let fcf = FutureCostFunction::new(n_stages, state.n_state, 2, 10, &vec![0; n_stages]);
             let horizon = HorizonMode::Finite {
                 num_stages: n_stages,
             };
-            let workspaces = vec![single_workspace(solver, &indexer)];
+            let workspaces = vec![single_workspace(solver, &state)];
             let basis_store = BasisStore::new(n_scenarios, n_stages);
             let records = (0..n_scenarios * n_stages)
                 .map(|_| TrajectoryRecord {
@@ -1254,6 +1262,7 @@ mod tests {
                 n_stages,
                 n_scenarios,
                 indexer,
+                state,
                 templates,
                 base_rows,
                 initial_state,
@@ -1313,6 +1322,7 @@ mod tests {
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
+            state: &fx.state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1382,6 +1392,7 @@ mod tests {
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
+            state: &fx.state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1431,7 +1442,7 @@ mod tests {
             initial_state: &fx.initial_state,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
-            indexer: &fx.indexer,
+            state: &fx.state,
             ctx: &ctx,
             baked: &fx.templates,
             fcf: &fx.fcf,
@@ -1440,7 +1451,7 @@ mod tests {
         };
 
         // Mutable per-call state: independent allocations, not borrows of fx.
-        let mut ws = single_workspace(MockSolver::always_ok(fixed_solution_1_0()), &fx.indexer);
+        let mut ws = single_workspace(MockSolver::always_ok(fixed_solution_1_0()), &fx.state);
         let mut basis_store = BasisStore::new(fx.n_scenarios, fx.n_stages);
         let mut basis_slices = basis_store.split_workers_mut(1);
         let mut basis_slice = basis_slices.remove(0);
@@ -1502,6 +1513,7 @@ mod tests {
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
+            state: &fx.state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1623,6 +1635,7 @@ mod tests {
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
+            state: &fx.state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,

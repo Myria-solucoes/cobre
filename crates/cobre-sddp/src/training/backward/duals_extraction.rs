@@ -10,7 +10,7 @@
 
 use cobre_solver::SolutionView;
 
-use crate::indexer::StageIndexer;
+use crate::indexer::StateLayout;
 
 use super::SuccessorSpec;
 
@@ -36,7 +36,7 @@ use super::SuccessorSpec;
 pub(crate) fn extract_duals_from_view(
     view: &SolutionView<'_>,
     n_state: usize,
-    indexer: &StageIndexer,
+    state: &StateLayout,
     col_scale: &[f64],
     succ: &SuccessorSpec<'_>,
     state_duals: &mut Vec<f64>,
@@ -55,7 +55,7 @@ pub(crate) fn extract_duals_from_view(
     // `state_duals` carries pre-warmed capacity; `clear` + `push` reuses it.
     state_duals.clear();
     for j in 0..n_state {
-        let col = indexer.state_to_lp_incoming_column(j);
+        let col = state.state_to_lp_incoming_column(j);
         let rc = view.reduced_costs[col];
         let unscaled = if col_scale.is_empty() {
             rc
@@ -104,7 +104,7 @@ pub(crate) fn extract_duals_from_view(
 pub(crate) fn extract_state_duals_only(
     view: &SolutionView<'_>,
     n_state: usize,
-    indexer: &StageIndexer,
+    state: &StateLayout,
     col_scale: &[f64],
     state_duals: &mut Vec<f64>,
 ) -> f64 {
@@ -112,7 +112,7 @@ pub(crate) fn extract_state_duals_only(
 
     state_duals.clear();
     for j in 0..n_state {
-        let col = indexer.state_to_lp_incoming_column(j);
+        let col = state.state_to_lp_incoming_column(j);
         let rc = view.reduced_costs[col];
         let unscaled = if col_scale.is_empty() {
             rc

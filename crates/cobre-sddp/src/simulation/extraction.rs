@@ -35,7 +35,7 @@ use cobre_core::ConstraintSense;
 use cobre_core::EntityId;
 
 use crate::energy_conversion::EnergyConversionSet;
-use crate::indexer::{BlockGrid, StageIndexer};
+use crate::indexer::{BlockGrid, StageIndexer, StateLayout};
 use crate::lp_builder::{COST_SCALE_FACTOR, GenericConstraintRowEntry};
 use crate::simulation::types::{
     ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult, SimulationCostResult,
@@ -136,10 +136,12 @@ fn compute_anticipated_decision_mw(
     thermal_local: usize,
 ) -> Option<f64> {
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
-    let k_i = spec.indexer.anticipated_lead_stages[local_idx];
-    // Canonical predicate: matches `StageIndexer::anticipated_decision_active_at_stage`
-    // and the LP-builder horizon gates (`stage_idx + K_i < n_stages`) in the
-    // `lp::builder` column/row fill paths.
+    // `anticipated_lead_stages` is stage-invariant role-(a) (read from the state
+    // layout); `anticipated_decision` is the control-region priced column (role-(b),
+    // read from the geometry descriptor).
+    let k_i = spec.state.anticipated_lead_stages[local_idx];
+    // Canonical predicate: matches the LP-builder horizon gates
+    // (`stage_idx + K_i < n_stages`) in the `lp::builder` column/row fill paths.
     if spec.stage_index.saturating_add(k_i) >= spec.n_stages {
         return None;
     }
@@ -194,10 +196,12 @@ fn compute_anticipated_committed_mw(
     thermal_local: usize,
 ) -> Option<f64> {
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
-    // Slot-major, plant-minor layout (see `StageIndexer::anticipated_state`):
+    // Slot-major, plant-minor layout (see `StateLayout::anticipated_state`):
     //   col = anticipated_state.start + slot * n_anticipated + plant
     // Slot 0 = anticipated_state.start + local_idx (the `0 * n_anticipated` term).
-    let col = spec.indexer.anticipated_state.start + local_idx;
+    // The anticipated-state ring buffer lives in the stage-invariant state region,
+    // so its base is read from the role-(a) `StateLayout`, not the geometry indexer.
+    let col = spec.state.anticipated_state.start + local_idx;
     debug_assert!(
         col < view.primal.len(),
         "anticipated_state slot-0 col {col} out of primal bounds {}",
@@ -331,8 +335,17 @@ pub const ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S: f64 = 1.0e6 / 3600.0;
 /// Bundles the static configuration used by all per-entity extraction helpers
 /// so that `extract_stage_result` needs only three parameters.
 pub struct StageExtractionSpec<'a> {
-    /// Stage indexer providing column/row layout.
+    /// Role-(b) geometry descriptor: the per-stage equipment column/row ranges
+    /// and identity lists this extraction reads (`turbine`, `spillage`,
+    /// `withdrawal_slack_*`, the operational-violation slacks, `generation`,
+    /// `evap_indices`, `water_balance`, the FPHA/evap/anticipated identity
+    /// lists, and the stage-invariant scalars `max_deficit_segments`/`has_*`).
     pub indexer: &'a StageIndexer,
+    /// Stage-invariant role-(a) state layout: the source of the state-region
+    /// column reads (`storage`, `storage_in`, `inflow_lags`, `anticipated_state`,
+    /// `max_par_order`) the extraction performs. These offsets are pure functions
+    /// of `(N, L, A, k_max)` and so resolve correctly at every stage.
+    pub state: &'a StateLayout,
     /// Per-stage dispatch block count for this stage, sourced from
     /// `block_counts_per_stage[t]`.
     ///
@@ -488,10 +501,11 @@ fn extract_hydro_no_turbine(
     stage_id: u32,
 ) -> SimulationHydroResult {
     let indexer = spec.indexer;
+    let state = spec.state;
     let incremental_inflow = if h < spec.inflow_m3s_per_hydro.len() {
         spec.inflow_m3s_per_hydro[h]
-    } else if indexer.max_par_order > 0 {
-        view.primal[indexer.inflow_lags.start + h]
+    } else if state.max_par_order > 0 {
+        view.primal[state.inflow_lags.start + h]
     } else {
         0.0
     };
@@ -558,8 +572,8 @@ fn extract_hydro_no_turbine(
         .energy_conversion
         .accumulated_productivity(h, spec.stage_index);
     let v_min = spec.hydro_min_storage_hm3.get(h).copied().unwrap_or(0.0);
-    let storage_initial = view.primal[indexer.storage_in.start + h];
-    let storage_final = view.primal[indexer.storage.start + h];
+    let storage_initial = view.primal[state.storage_in.start + h];
+    let storage_final = view.primal[state.storage.start + h];
 
     SimulationHydroResult {
         stage_id,
@@ -635,12 +649,13 @@ impl HydroStageContext {
         h: usize,
     ) -> Self {
         let indexer = spec.indexer;
-        let storage_final = view.primal[indexer.storage.start + h];
-        let storage_initial = view.primal[indexer.storage_in.start + h];
+        let state = spec.state;
+        let storage_final = view.primal[state.storage.start + h];
+        let storage_initial = view.primal[state.storage_in.start + h];
         let incremental_inflow = if h < spec.inflow_m3s_per_hydro.len() {
             spec.inflow_m3s_per_hydro[h]
-        } else if indexer.max_par_order > 0 {
-            view.primal[indexer.inflow_lags.start + h]
+        } else if state.max_par_order > 0 {
+            view.primal[state.inflow_lags.start + h]
         } else {
             0.0
         };
@@ -1022,21 +1037,20 @@ fn extract_buses(
 
 /// Extract a [`SimulationStageResult`] from a raw LP solution at one stage.
 ///
-/// Reads equipment column values from `view.primal` using the ranges stored in
-/// `spec.indexer`. When the indexer was constructed via
-/// [`StageIndexer::with_equipment`] equipment columns are read directly from the
-/// primal solution vector. When constructed via [`StageIndexer::new`] equipment
-/// ranges are empty and results default to zero (backward-compatible behaviour).
+/// Reads role-(b) equipment column values from `view.primal` using the ranges
+/// stored in `spec.indexer` (the geometry descriptor); role-(a) state columns
+/// resolve via `spec.state` ([`StateLayout`]). When a family has zero entities
+/// its range is empty (`0..0`) and that result defaults to zero.
 ///
-/// The LP objective is split into `future_cost = primal[indexer.theta]` and
+/// The LP objective is split into `future_cost = primal[spec.state.theta]` and
 /// `stage_cost = objective - future_cost`, following the same convention as the
 /// training forward pass.
 ///
 /// # Preconditions
 ///
-/// - `view.primal.len() >= spec.indexer.theta + 1`
-/// - `spec.entity_counts.hydro_ids.len() == spec.indexer.hydro_count`
-/// - `spec.entity_counts.hydro_productivities.len() == spec.indexer.hydro_count`
+/// - `view.primal.len() >= spec.state.theta + 1`
+/// - `spec.entity_counts.hydro_ids.len() == spec.state.hydro_count`
+/// - `spec.entity_counts.hydro_productivities.len() == spec.state.hydro_count`
 /// - `view.objective_coeffs.len() >= view.primal.len()` when equipment ranges are non-empty
 /// - `view.row_lower.len() >= spec.indexer.load_balance.end` when `load_balance` is non-empty
 /// - `stage_id` is 0-based
@@ -1086,17 +1100,18 @@ pub(crate) fn extract_stage_result_with_lookups(
     thermal_lookup: &ThermalReverseLookup,
 ) -> SimulationStageResult {
     let indexer = spec.indexer;
+    let state = spec.state;
     debug_assert!(
-        view.primal.len() > indexer.theta,
+        view.primal.len() > state.theta,
         "primal vector too short: len={}, need > theta={}",
         view.primal.len(),
-        indexer.theta
+        state.theta
     );
     debug_assert!(
-        spec.entity_counts.hydro_ids.len() == indexer.hydro_count,
-        "hydro_ids length {} does not match indexer.hydro_count {}",
+        spec.entity_counts.hydro_ids.len() == state.hydro_count,
+        "hydro_ids length {} does not match state.hydro_count {}",
         spec.entity_counts.hydro_ids.len(),
-        indexer.hydro_count
+        state.hydro_count
     );
     debug_assert!(
         indexer.excess.is_empty() || view.objective_coeffs.len() >= indexer.excess.end,
@@ -1105,10 +1120,10 @@ pub(crate) fn extract_stage_result_with_lookups(
         indexer.excess.end
     );
     debug_assert!(
-        spec.entity_counts.hydro_productivities.len() == indexer.hydro_count,
-        "hydro_productivities length {} does not match indexer.hydro_count {}",
+        spec.entity_counts.hydro_productivities.len() == state.hydro_count,
+        "hydro_productivities length {} does not match state.hydro_count {}",
         spec.entity_counts.hydro_productivities.len(),
-        indexer.hydro_count
+        state.hydro_count
     );
     debug_assert!(
         indexer.load_balance.is_empty() || view.row_lower.len() >= indexer.load_balance.end,
@@ -1123,6 +1138,7 @@ pub(crate) fn extract_stage_result_with_lookups(
     let costs = vec![compute_cost_result(
         view,
         spec.indexer,
+        spec.state,
         spec.col_scale,
         generic_violation_cost,
         spec.cumulative_discount_factor,
@@ -1219,6 +1235,7 @@ fn compute_hydro_violation_costs(
 fn compute_cost_result(
     view: &SolutionView<'_>,
     indexer: &StageIndexer,
+    state: &StateLayout,
     col_scale: &[f64],
     generic_violation_cost: f64,
     cumulative_discount_factor: f64,
@@ -1238,10 +1255,10 @@ fn compute_cost_result(
 
     let theta_obj_coeff = view
         .objective_coeffs
-        .get(indexer.theta)
+        .get(state.theta)
         .copied()
         .unwrap_or(1.0);
-    let theta_contribution = view.primal[indexer.theta] * theta_obj_coeff;
+    let theta_contribution = view.primal[state.theta] * theta_obj_coeff;
     let future_cost = theta_contribution * COST_SCALE_FACTOR;
     let immediate_cost = (view.objective - theta_contribution) * COST_SCALE_FACTOR;
 
@@ -1566,21 +1583,20 @@ fn extract_stub_collections(
     Vec<SimulationPumpingResult>,
     Vec<SimulationContractResult>,
 ) {
-    let indexer = spec.indexer;
+    let state = spec.state;
     let inflow_lags: Vec<SimulationInflowLagResult> = spec
         .entity_counts
         .hydro_ids
         .iter()
         .enumerate()
         .flat_map(|(h, &hydro_id)| {
-            (0..indexer.max_par_order).map(move |l| {
+            (0..state.max_par_order).map(move |l| {
                 #[allow(clippy::cast_possible_truncation)]
                 SimulationInflowLagResult {
                     stage_id,
                     hydro_id,
                     lag_index: l as u32,
-                    inflow_m3s: view.primal
-                        [indexer.inflow_lags.start + l * indexer.hydro_count + h],
+                    inflow_m3s: view.primal[state.inflow_lags.start + l * state.hydro_count + h],
                 }
             })
         })
@@ -1833,8 +1849,9 @@ mod tests {
     #[test]
     fn extract_costs_has_one_entry_matching_stage_id() {
         // Acceptance criterion: costs contains exactly one entry whose stage_id
-        // matches the input stage and whose future_cost == primal[indexer.theta].
-        let indexer = StageIndexer::new(2, 1);
+        // matches the input stage and whose future_cost == primal[state.theta].
+        let indexer = crate::indexer::test_fixtures::geom(2, 1);
+        let state = crate::indexer::test_fixtures::state_layout(2, 1);
         let primal = make_primal_2_1([100.0, 200.0], [50.0, 60.0], [90.0, 180.0], 999.5);
         let dual = vec![0.0; 4];
         let ec = zero_energy_conversion(2, 1);
@@ -1849,6 +1866,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_2_hydros(),
                 inflow_m3s_per_hydro: &[],
@@ -1883,7 +1901,8 @@ mod tests {
     #[test]
     fn extract_cost_splits_objective_correctly() {
         // objective = immediate_cost + future_cost
-        let indexer = StageIndexer::new(2, 1);
+        let indexer = crate::indexer::test_fixtures::geom(2, 1);
+        let state = crate::indexer::test_fixtures::state_layout(2, 1);
         let theta_val = 300.0;
         let objective = 800.0;
         let primal = make_primal_2_1([0.0; 2], [0.0; 2], [0.0; 2], theta_val);
@@ -1900,6 +1919,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_2_hydros(),
                 inflow_m3s_per_hydro: &[],
@@ -1936,7 +1956,8 @@ mod tests {
     fn extract_hydro_storage_values_from_primal() {
         // Hydro h=0: storage[0]=100, storage_in[4]=90
         // Hydro h=1: storage[1]=200, storage_in[5]=180
-        let indexer = StageIndexer::new(2, 1);
+        let indexer = crate::indexer::test_fixtures::geom(2, 1);
+        let state = crate::indexer::test_fixtures::state_layout(2, 1);
         let primal = make_primal_2_1([100.0, 200.0], [50.0, 60.0], [90.0, 180.0], 999.5);
         let dual = vec![0.0; 4];
         let ec = zero_energy_conversion(2, 1);
@@ -1951,6 +1972,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_2_hydros(),
                 inflow_m3s_per_hydro: &[],
@@ -1989,7 +2011,8 @@ mod tests {
     #[test]
     fn extract_inflow_lag_values_from_primal() {
         // inflow_lags[2]=50.0 for hydro 0 lag 0, [3]=60.0 for hydro 1 lag 0
-        let indexer = StageIndexer::new(2, 1);
+        let indexer = crate::indexer::test_fixtures::geom(2, 1);
+        let state = crate::indexer::test_fixtures::state_layout(2, 1);
         let primal = make_primal_2_1([100.0, 200.0], [50.0, 60.0], [90.0, 180.0], 999.5);
         let dual = vec![0.0; 4];
         let ec = zero_energy_conversion(2, 1);
@@ -2004,6 +2027,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_2_hydros(),
                 inflow_m3s_per_hydro: &[],
@@ -2043,7 +2067,8 @@ mod tests {
     #[test]
     fn extract_no_lags_when_max_par_order_zero() {
         // StageIndexer(N=2, L=0): no inflow_lag columns → empty inflow_lags vec.
-        let indexer = StageIndexer::new(2, 0);
+        let indexer = crate::indexer::test_fixtures::geom(2, 0);
+        let state = crate::indexer::test_fixtures::state_layout(2, 0);
         // Layout: storage[0..2], z_inflow[2..4], storage_in[4..6], theta=6
         let primal = vec![100.0, 200.0, 0.0, 0.0, 90.0, 180.0, 500.0];
         let dual = vec![];
@@ -2069,6 +2094,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -2100,7 +2126,8 @@ mod tests {
 
     #[test]
     fn extract_stage_id_propagates_to_all_results() {
-        let indexer = StageIndexer::new(2, 1);
+        let indexer = crate::indexer::test_fixtures::geom(2, 1);
+        let state = crate::indexer::test_fixtures::state_layout(2, 1);
         let primal = make_primal_2_1([100.0, 200.0], [50.0, 60.0], [90.0, 180.0], 10.0);
         let dual = vec![0.0; 4];
         let stage_id = 7_u32;
@@ -2116,6 +2143,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_2_hydros(),
                 inflow_m3s_per_hydro: &[],
@@ -2154,7 +2182,8 @@ mod tests {
     fn extract_equipment_zero_when_indexer_has_no_equipment_ranges() {
         // When StageIndexer is built via `new`, equipment ranges are empty and
         // all equipment result fields default to zero — backward-compatible behaviour.
-        let indexer = StageIndexer::new(2, 1);
+        let indexer = crate::indexer::test_fixtures::geom(2, 1);
+        let state = crate::indexer::test_fixtures::state_layout(2, 1);
         let primal = make_primal_2_1([0.0; 2], [0.0; 2], [0.0; 2], 0.0);
         let dual = vec![0.0; 4];
         let ec = zero_energy_conversion(2, 1);
@@ -2169,6 +2198,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_2_hydros(),
                 inflow_m3s_per_hydro: &[],
@@ -2231,7 +2261,7 @@ mod tests {
     #[test]
     fn extract_equipment_reads_primal_when_with_equipment() {
         // N=2, L=1, T=1, Ln=1, B=1, K=1
-        let indexer = StageIndexer::with_equipment(
+        let indexer = StageIndexer::with_equipment_and_evaporation(
             &crate::indexer::EquipmentCounts {
                 hydro_count: 2,
                 max_par_order: 1,
@@ -2251,9 +2281,11 @@ mod tests {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
+            &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let state = crate::indexer::test_fixtures::state_layout_full(2, 1, 0, 0, vec![]);
         // theta = 8, equipment starts at 9
-        assert_eq!(indexer.theta, 8);
+        assert_eq!(state.theta, 8);
         assert_eq!(indexer.turbine, 9..11);
         assert_eq!(indexer.spillage, 11..13);
         assert_eq!(indexer.diversion, 13..15);
@@ -2333,6 +2365,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -2421,7 +2454,7 @@ mod tests {
     #[test]
     fn extract_thermals_marks_anticipated_thermals_when_indices_nonempty() {
         // N=0 hydros, T=2 thermals, B=0 buses, K=1 block, n_anticipated=1 (index 1)
-        let indexer = StageIndexer::with_equipment(
+        let indexer = StageIndexer::with_equipment_and_evaporation(
             &crate::indexer::EquipmentCounts {
                 hydro_count: 0,
                 max_par_order: 0,
@@ -2441,14 +2474,16 @@ mod tests {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
+            &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 1, vec![1]);
         // With N=0, L=0, A=1, K_max=1 (anticipated_state_out relocated to the
         // state region after the ring buffer):
         //   anticipated_state     = [0, 1)  (A*K_max = 1 slot)
         //   anticipated_state_out = [1, 2)  (A = 1 column)
         //   theta = N*(3+L) + A*K_max + A = 0 + 1 + 1 = 2
         //   thermal = [theta+1, theta+1+T*K) = [3, 5)  — t0→3, t1→4
-        assert_eq!(indexer.theta, 2);
+        assert_eq!(state.theta, 2);
         assert_eq!(indexer.thermal, 3..5);
 
         // n_cols must cover at least anticipated_decision.end (last column used)
@@ -2484,6 +2519,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -2540,7 +2576,7 @@ mod tests {
     #[test]
     fn extract_thermals_marks_no_thermals_anticipated_when_indices_empty() {
         // N=0 hydros, T=2 thermals, B=0 buses, K=1 block, n_anticipated=0
-        let indexer = StageIndexer::with_equipment(
+        let indexer = StageIndexer::with_equipment_and_evaporation(
             &crate::indexer::EquipmentCounts {
                 hydro_count: 0,
                 max_par_order: 0,
@@ -2560,7 +2596,9 @@ mod tests {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
+            &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 0, 0, vec![]);
 
         let n_cols = indexer.generation_below_slack.end.max(3);
         let primal = vec![0.0_f64; n_cols];
@@ -2588,6 +2626,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -2638,7 +2677,7 @@ mod tests {
     ///   `n_ant_state = 1*2 = 2`  →  theta = 2
     ///   thermal = [3, 5)         →  `anticipated_decision.start = 5`
     fn make_anticipated_decision_indexer_k2() -> crate::indexer::StageIndexer {
-        StageIndexer::with_equipment(
+        StageIndexer::with_equipment_and_evaporation(
             &crate::indexer::EquipmentCounts {
                 hydro_count: 0,
                 max_par_order: 0,
@@ -2658,6 +2697,7 @@ mod tests {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
+            &crate::indexer::test_fixtures::evap(vec![]),
         )
     }
 
@@ -2680,6 +2720,7 @@ mod tests {
     #[test]
     fn extract_thermals_reads_anticipated_decision_when_in_horizon() {
         let indexer = make_anticipated_decision_indexer_k2();
+        let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 2, vec![2]);
         let primal = make_primal_with_decision_sentinel(&indexer, 123.5);
         let obj = vec![0.0_f64; primal.len()];
 
@@ -2705,6 +2746,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -2748,6 +2790,7 @@ mod tests {
     #[test]
     fn extract_thermals_emits_none_at_horizon_boundary() {
         let indexer = make_anticipated_decision_indexer_k2();
+        let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 2, vec![2]);
         let primal = make_primal_with_decision_sentinel(&indexer, 123.5);
         let obj = vec![0.0_f64; primal.len()];
 
@@ -2773,6 +2816,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -2814,6 +2858,7 @@ mod tests {
     #[test]
     fn extract_thermals_emits_none_one_past_horizon_boundary() {
         let indexer = make_anticipated_decision_indexer_k2();
+        let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 2, vec![2]);
         let primal = make_primal_with_decision_sentinel(&indexer, 123.5);
         let obj = vec![0.0_f64; primal.len()];
 
@@ -2839,6 +2884,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -2881,7 +2927,7 @@ mod tests {
     fn extract_thermals_emits_none_for_non_anticipated_thermals() {
         // N=0, T=2, n_blks=1, n_anticipated=1 (index 1), k_max=1, K_i=1
         // Layout: n_ant_state=1, theta=1, thermal=[2,4), anticipated_decision.start=4
-        let indexer = StageIndexer::with_equipment(
+        let indexer = StageIndexer::with_equipment_and_evaporation(
             &crate::indexer::EquipmentCounts {
                 hydro_count: 0,
                 max_par_order: 0,
@@ -2901,7 +2947,9 @@ mod tests {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
+            &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 1, vec![1]);
 
         let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
         let mut primal = vec![0.0_f64; n_cols];
@@ -2930,6 +2978,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -2972,7 +3021,7 @@ mod tests {
     ///   `n_ant_state=1`, theta=1, thermal=[2,6), `anticipated_decision.start=6`
     #[test]
     fn extract_thermals_anticipated_decision_is_per_block_invariant() {
-        let indexer = StageIndexer::with_equipment(
+        let indexer = StageIndexer::with_equipment_and_evaporation(
             &crate::indexer::EquipmentCounts {
                 hydro_count: 0,
                 max_par_order: 0,
@@ -2992,7 +3041,9 @@ mod tests {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
+            &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 1, vec![1]);
 
         let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
         let mut primal = vec![0.0_f64; n_cols];
@@ -3021,6 +3072,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -3078,7 +3130,7 @@ mod tests {
     ///   `thermal` = `[4, 7)`          (1 thermal * 3 blocks)
     ///   `anticipated_decision.start = 7`
     fn make_anticipated_committed_indexer_k2_3blks() -> crate::indexer::StageIndexer {
-        StageIndexer::with_equipment(
+        StageIndexer::with_equipment_and_evaporation(
             &crate::indexer::EquipmentCounts {
                 hydro_count: 0,
                 max_par_order: 0,
@@ -3098,6 +3150,7 @@ mod tests {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
+            &crate::indexer::test_fixtures::evap(vec![]),
         )
     }
 
@@ -3119,10 +3172,11 @@ mod tests {
     #[test]
     fn extract_thermals_per_block_committed_at_delivery_stage() {
         let indexer = make_anticipated_committed_indexer_k2_3blks();
+        let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 2, vec![2]);
         // thermal = [4, 7): col 4 = block 0, col 5 = block 1, col 6 = block 2
         assert_eq!(indexer.thermal.start, 4);
         // anticipated_state = [0, 2): col 0 = slot 0, col 1 = slot 1
-        assert_eq!(indexer.anticipated_state.start, 0);
+        assert_eq!(state.anticipated_state.start, 0);
         let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
         let mut primal = vec![0.0_f64; n_cols];
         primal[0] = 42.0; // ant_state slot 0 (the committed scalar)
@@ -3137,6 +3191,7 @@ mod tests {
         let lookup = super::ThermalReverseLookup::build(&indexer, 1);
         let spec = StageExtractionSpec {
             indexer: &indexer,
+            state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &EntityCounts {
                 hydro_ids: vec![],
@@ -3206,6 +3261,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -3261,6 +3317,7 @@ mod tests {
     #[test]
     fn extract_thermals_per_block_committed_slot0_when_seed_zero() {
         let indexer = make_anticipated_committed_indexer_k2_3blks();
+        let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 2, vec![2]);
         let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
         let mut primal = vec![0.0_f64; n_cols];
         primal[3] = 50.0; // thermal 10, block 0
@@ -3289,6 +3346,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -3329,6 +3387,7 @@ mod tests {
     #[test]
     fn extract_thermals_per_block_committed_at_first_delivery_boundary() {
         let indexer = make_anticipated_committed_indexer_k2_3blks();
+        let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 2, vec![2]);
         let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
         let mut primal = vec![0.0_f64; n_cols];
         primal[3] = 50.0;
@@ -3357,6 +3416,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -3396,7 +3456,7 @@ mod tests {
     #[test]
     fn extract_thermals_per_block_committed_none_for_non_anticipated() {
         // N=0, T=2, n_blks=3, n_anticipated=1 (global index 1), k_max=2, K_i=2
-        let indexer = StageIndexer::with_equipment(
+        let indexer = StageIndexer::with_equipment_and_evaporation(
             &crate::indexer::EquipmentCounts {
                 hydro_count: 0,
                 max_par_order: 0,
@@ -3416,7 +3476,9 @@ mod tests {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
+            &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 2, vec![2]);
 
         let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
         let mut primal = vec![0.0_f64; n_cols];
@@ -3451,6 +3513,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -3499,7 +3562,7 @@ mod tests {
     #[test]
     fn extract_thermals_no_block_committed_at_delivery_is_zero() {
         // N=0, T=1, n_blks=0 (no-block branch), n_anticipated=1, k_max=1, K_i=1
-        let indexer = StageIndexer::with_equipment(
+        let indexer = StageIndexer::with_equipment_and_evaporation(
             &crate::indexer::EquipmentCounts {
                 hydro_count: 0,
                 max_par_order: 0,
@@ -3519,7 +3582,9 @@ mod tests {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
+            &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 1, vec![1]);
         assert!(
             indexer.thermal.is_empty(),
             "n_blks=0 must yield empty thermal range"
@@ -3529,6 +3594,7 @@ mod tests {
         let lookup = super::ThermalReverseLookup::build(&indexer, 1);
         let spec_delivery = StageExtractionSpec {
             indexer: &indexer,
+            state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &EntityCounts {
                 hydro_ids: vec![],
@@ -3605,6 +3671,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -3644,7 +3711,7 @@ mod tests {
     /// (zero-initialised slot 0).
     #[test]
     fn extract_thermals_no_block_committed_reads_slot0_when_seed_zero() {
-        let indexer = StageIndexer::with_equipment(
+        let indexer = StageIndexer::with_equipment_and_evaporation(
             &crate::indexer::EquipmentCounts {
                 hydro_count: 0,
                 max_par_order: 0,
@@ -3664,7 +3731,9 @@ mod tests {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
+            &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 1, vec![1]);
 
         let n_cols = indexer.anticipated_decision.end.max(1);
         let primal = vec![0.0_f64; n_cols];
@@ -3691,6 +3760,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -3734,7 +3804,7 @@ mod tests {
     fn extract_stage_result_prebuilt_lookup_matches_standard_path() {
         use super::{HydroReverseLookup, ThermalReverseLookup, extract_stage_result_with_lookups};
 
-        let indexer = crate::indexer::StageIndexer::with_equipment(
+        let indexer = StageIndexer::with_equipment_and_evaporation(
             &crate::indexer::EquipmentCounts {
                 hydro_count: 0,
                 max_par_order: 0,
@@ -3754,17 +3824,19 @@ mod tests {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
+            &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 1, vec![1]);
 
         let n_cols = indexer
             .anticipated_decision
             .end
             .max(indexer.thermal.end)
-            .max(indexer.anticipated_state.end)
-            .max(indexer.theta + 1);
+            .max(state.anticipated_state.end)
+            .max(state.theta + 1);
         let mut primal = vec![0.0_f64; n_cols];
         // Slot 0 of anticipated_state = committed MW scalar.
-        primal[indexer.anticipated_state.start] = 37.5;
+        primal[state.anticipated_state.start] = 37.5;
         // Anticipated decision column.
         primal[indexer.anticipated_decision.start] = 80.0;
         // Thermal columns: block 0, block 1.
@@ -3793,6 +3865,7 @@ mod tests {
         };
         let spec = StageExtractionSpec {
             indexer: &indexer,
+            state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
             inflow_m3s_per_hydro: &[],
@@ -3860,7 +3933,8 @@ mod tests {
 
     #[test]
     fn extract_optional_entity_types_are_empty_when_absent() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
         let primal = vec![50.0, 0.0, 40.0, 200.0]; // storage, z_inflow, storage_in, theta
         let dual = vec![];
         let counts = EntityCounts {
@@ -3885,6 +3959,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -4092,7 +4167,7 @@ mod tests {
     #[test]
     fn test_slack_extraction_with_penalty_active() {
         // N=2, L=1, T=1, Ln=1, B=1, K=1, has_inflow_penalty=true
-        let indexer = StageIndexer::with_equipment(
+        let indexer = StageIndexer::with_equipment_and_evaporation(
             &crate::indexer::EquipmentCounts {
                 hydro_count: 2,
                 max_par_order: 1,
@@ -4112,7 +4187,9 @@ mod tests {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
+            &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let state = crate::indexer::test_fixtures::state_layout_full(2, 1, 0, 0, vec![]);
 
         assert!(
             indexer.has_inflow_penalty,
@@ -4166,6 +4243,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -4213,7 +4291,7 @@ mod tests {
     #[test]
     fn test_slack_extraction_without_penalty_is_zero() {
         // N=2, L=1, T=1, Ln=1, B=1, K=1, has_inflow_penalty=false
-        let indexer = StageIndexer::with_equipment(
+        let indexer = StageIndexer::with_equipment_and_evaporation(
             &crate::indexer::EquipmentCounts {
                 hydro_count: 2,
                 max_par_order: 1,
@@ -4233,7 +4311,9 @@ mod tests {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
+            &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let state = crate::indexer::test_fixtures::state_layout_full(2, 1, 0, 0, vec![]);
         assert!(
             !indexer.has_inflow_penalty,
             "has_inflow_penalty must be false"
@@ -4267,6 +4347,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -4304,10 +4385,10 @@ mod tests {
     /// when `has_inflow_penalty == true`.
     #[test]
     fn test_slack_extraction_fallback_path_with_penalty() {
-        // Use StageIndexer::new (no equipment) but manually set has_inflow_penalty
-        // by using with_equipment with zero blocks — turbine.is_empty() triggers fallback.
+        // Zero blocks via with_equipment_and_evaporation (turbine.is_empty()) with
+        // has_inflow_penalty=true — exercises the empty-equipment-range extraction path.
         // N=2, L=1, T=0, Ln=0, B=0, K=0, has_inflow_penalty=true
-        let indexer = StageIndexer::with_equipment(
+        let indexer = StageIndexer::with_equipment_and_evaporation(
             &crate::indexer::EquipmentCounts {
                 hydro_count: 2,
                 max_par_order: 1,
@@ -4327,7 +4408,9 @@ mod tests {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
+            &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let state = crate::indexer::test_fixtures::state_layout_full(2, 1, 0, 0, vec![]);
 
         // turbine is empty (n_blks=0) → fallback path
         assert!(
@@ -4379,6 +4462,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -4430,7 +4514,7 @@ mod tests {
     /// ```
     fn make_indexer_2h_1fpha_1blk() -> StageIndexer {
         // h0 is FPHA (system index 0), h1 is constant-productivity (system index 1)
-        StageIndexer::with_equipment(
+        StageIndexer::with_equipment_and_evaporation(
             &crate::indexer::EquipmentCounts {
                 hydro_count: 2,
                 max_par_order: 0,
@@ -4450,6 +4534,7 @@ mod tests {
                 hydro_indices: vec![0],
                 planes_per_hydro: vec![2],
             },
+            &crate::indexer::test_fixtures::evap(vec![]),
         )
     }
 
@@ -4458,6 +4543,7 @@ mod tests {
     #[test]
     fn fpha_generation_read_from_lp_column() {
         let indexer = make_indexer_2h_1fpha_1blk();
+        let state = crate::indexer::test_fixtures::state_layout(2, 0);
         // generation.start should be after turbine(7..9) + spillage(9..11) + diversion(11..13) = 13
         // generation[0] = generation.start + 0 * 1 + 0 = 13
         assert_eq!(indexer.generation.start, 13, "generation starts at 13");
@@ -4504,6 +4590,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -4555,6 +4642,7 @@ mod tests {
     #[test]
     fn fpha_productivity_placeholder_zero() {
         let indexer = make_indexer_2h_1fpha_1blk();
+        let state = crate::indexer::test_fixtures::state_layout(2, 0);
         let n_cols = indexer.generation_below_slack.end;
         let primal = vec![0.0_f64; n_cols];
         let obj = vec![0.0_f64; n_cols];
@@ -4583,6 +4671,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -4661,6 +4750,7 @@ mod tests {
     #[test]
     fn evaporation_read_from_lp_column() {
         let indexer = make_indexer_1h_evap_1blk();
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
         assert_eq!(indexer.evap_hydro_indices, vec![0]);
         let ei = &indexer.evap_indices[0];
         assert_eq!(ei.evaporation_flow_col, 7);
@@ -4704,6 +4794,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -4747,6 +4838,7 @@ mod tests {
     #[test]
     fn evaporation_violation_is_sum_of_slacks() {
         let indexer = make_indexer_1h_evap_1blk();
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
         let n_cols = indexer.generation_below_slack.end;
         let mut primal = vec![0.0_f64; n_cols];
         primal[0] = 200.0;
@@ -4784,6 +4876,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -4832,6 +4925,7 @@ mod tests {
     #[test]
     fn turbined_cost_in_compute_cost_result() {
         let indexer = make_indexer_2h_1fpha_1blk();
+        let state = crate::indexer::test_fixtures::state_layout(2, 0);
         // turbine.start = 7 (h0 b0)
         let n_cols = indexer.generation_below_slack.end;
         let mut primal = vec![0.0_f64; n_cols];
@@ -4870,6 +4964,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -4913,6 +5008,7 @@ mod tests {
     #[test]
     fn cost_breakdown_sums_to_immediate_identity_scale() {
         let indexer = make_indexer_2h_1fpha_1blk();
+        let state = crate::indexer::test_fixtures::state_layout(2, 0);
         let n_cols = indexer.generation_below_slack.end;
         let mut primal = vec![0.0_f64; n_cols];
         primal[6] = 500.0; // theta
@@ -4950,6 +5046,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -5009,6 +5106,7 @@ mod tests {
     #[test]
     fn cost_unscaled_by_col_scale() {
         let indexer = make_indexer_2h_1fpha_1blk();
+        let state = crate::indexer::test_fixtures::state_layout(2, 0);
         let n_cols = indexer.generation_below_slack.end;
         let mut primal = vec![0.0_f64; n_cols];
         primal[6] = 500.0; // theta
@@ -5048,6 +5146,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -5088,6 +5187,7 @@ mod tests {
     #[test]
     fn hydro_violation_cost_decomposition() {
         let indexer = make_indexer_2h_1fpha_1blk();
+        let state = crate::indexer::test_fixtures::state_layout(2, 0);
         // Layout (see make_indexer_2h_1fpha_1blk):
         //   withdrawal_slack_neg:   14..16
         //   withdrawal_slack_pos:   16..18
@@ -5108,7 +5208,7 @@ mod tests {
         let mut obj = vec![0.0_f64; n_cols];
 
         // Set theta so objective algebra works.
-        primal[indexer.theta] = 0.0;
+        primal[state.theta] = 0.0;
 
         // Assign known primal (slack) and objective (penalty) values per
         // constraint type. Each slack * penalty gives a known cost contribution.
@@ -5168,6 +5268,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
@@ -5276,7 +5377,7 @@ mod tests {
         }
     }
 
-    /// Build a primal vector for `StageIndexer::new(1, 1)`:
+    /// Build a primal vector for the N=1, L=1 state layout:
     /// `[storage, lag, z_inflow, storage_in, theta]` (length 5).
     fn make_primal_1_1(storage: f64, storage_in: f64, theta: f64) -> Vec<f64> {
         vec![storage, 0.0, 0.0, storage_in, theta]
@@ -5286,7 +5387,8 @@ mod tests {
     fn stored_energy_initial_uses_v_min_offset() {
         // storage_initial = 110, V_min = 100, ρ_acum = 4.0 →
         // stored_energy_initial = (110 - 100) * 4 * 1e6 / 3600 ≈ 11_111.111…
-        let indexer = StageIndexer::new(1, 1);
+        let indexer = crate::indexer::test_fixtures::geom(1, 1);
+        let state = crate::indexer::test_fixtures::state_layout(1, 1);
         let primal = make_primal_1_1(120.0, 110.0, 0.0);
         let dual = vec![0.0; 2];
         let ec = one_hydro_energy_set(0.9, 4.0);
@@ -5301,6 +5403,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_1_hydro(),
                 inflow_m3s_per_hydro: &[],
@@ -5351,7 +5454,8 @@ mod tests {
     fn incremental_inflow_energy_uses_rho_acum() {
         // ρ_acum = 4.0, incremental_inflow = 50.0 →
         // incremental_inflow_energy = 4.0 * 50.0 = 200.0 (exactly).
-        let indexer = StageIndexer::new(1, 1);
+        let indexer = crate::indexer::test_fixtures::geom(1, 1);
+        let state = crate::indexer::test_fixtures::state_layout(1, 1);
         let primal = make_primal_1_1(120.0, 110.0, 0.0);
         let dual = vec![0.0; 2];
         let ec = one_hydro_energy_set(0.9, 4.0);
@@ -5366,6 +5470,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_1_hydro(),
                 inflow_m3s_per_hydro: &[50.0],
@@ -5405,7 +5510,8 @@ mod tests {
         // from the supplied EnergyConversionSet and surface them on the
         // result. The per-block path shares the same HydroStageContext,
         // so by construction it cannot disagree.
-        let indexer = StageIndexer::new(1, 1);
+        let indexer = crate::indexer::test_fixtures::geom(1, 1);
+        let state = crate::indexer::test_fixtures::state_layout(1, 1);
         let primal = make_primal_1_1(120.0, 110.0, 0.0);
         let dual = vec![0.0; 2];
         let ec = one_hydro_energy_set(0.85, 3.5);
@@ -5420,6 +5526,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_1_hydro(),
                 inflow_m3s_per_hydro: &[10.0],
@@ -5478,6 +5585,7 @@ mod tests {
     /// `n_blks` is set to `n_blks` so the block loop runs.
     fn pumping_only_spec<'a>(
         indexer: &'a StageIndexer,
+        state: &'a crate::indexer::StateLayout,
         entity_counts: &'a EntityCounts,
         pumping_col_start: usize,
         n_pumping: usize,
@@ -5487,6 +5595,7 @@ mod tests {
     ) -> StageExtractionSpec<'a> {
         StageExtractionSpec {
             indexer,
+            state,
             n_blks: indexer.n_blks,
             entity_counts,
             inflow_m3s_per_hydro: &[],
@@ -5520,7 +5629,8 @@ mod tests {
     /// no `col_scale` division) and `power_consumption_mw = flow * consumption`.
     #[test]
     fn extract_pumping_two_blocks_reads_per_block_flow_and_power() {
-        let mut indexer = StageIndexer::new(0, 0);
+        let mut indexer = crate::indexer::test_fixtures::geom(0, 0);
+        let state = crate::indexer::test_fixtures::state_layout(0, 0);
         indexer.n_blks = 2;
         let entity_counts = entity_counts_one_pumping_station();
         let ec = zero_energy_conversion(0, 1);
@@ -5542,6 +5652,7 @@ mod tests {
 
         let spec = pumping_only_spec(
             &indexer,
+            &state,
             &entity_counts,
             4,
             1,
@@ -5572,7 +5683,8 @@ mod tests {
     /// runs), independent of `n_blks`.
     #[test]
     fn extract_pumping_zero_stations_is_empty() {
-        let mut indexer = StageIndexer::new(0, 0);
+        let mut indexer = crate::indexer::test_fixtures::geom(0, 0);
+        let state = crate::indexer::test_fixtures::state_layout(0, 0);
         indexer.n_blks = 2;
         let entity_counts = EntityCounts {
             hydro_ids: vec![],
@@ -5596,7 +5708,7 @@ mod tests {
             row_lower: &[],
         };
 
-        let spec = pumping_only_spec(&indexer, &entity_counts, 0, 0, &[], &ec, &diversion);
+        let spec = pumping_only_spec(&indexer, &state, &entity_counts, 0, 0, &[], &ec, &diversion);
 
         let rows = extract_pumping_stations(&view, &spec, 0);
         assert!(rows.is_empty(), "no stations => no rows");
@@ -5605,7 +5717,8 @@ mod tests {
     /// `n_blks == 0` also yields an empty `Vec` even with an active station.
     #[test]
     fn extract_pumping_zero_blocks_is_empty() {
-        let indexer = StageIndexer::new(0, 0); // n_blks defaults to 0
+        let indexer = crate::indexer::test_fixtures::geom(0, 0); // n_blks defaults to 0
+        let state = crate::indexer::test_fixtures::state_layout(0, 0);
         let entity_counts = entity_counts_one_pumping_station();
         let ec = zero_energy_conversion(0, 1);
         let diversion = HashMap::new();
@@ -5622,6 +5735,7 @@ mod tests {
 
         let spec = pumping_only_spec(
             &indexer,
+            &state,
             &entity_counts,
             0,
             1,

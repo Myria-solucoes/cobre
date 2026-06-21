@@ -134,10 +134,7 @@ pub(super) fn fill_anticipated_state_out_columns(
     let n_stages = ctx.resolved.bounds.n_stages();
     for local_idx in 0..ctx.n_anticipated {
         let col = layout.anticipated.col_anticipated_state_out_start + local_idx;
-        if layout
-            .indexer
-            .is_anticipated_decision_active(local_idx, stage_idx, n_stages)
-        {
+        if layout.is_anticipated_decision_active(local_idx, stage_idx, n_stages) {
             bufs.col_lower[col] = f64::NEG_INFINITY;
             bufs.col_upper[col] = f64::INFINITY;
         } else {
@@ -146,11 +143,7 @@ pub(super) fn fill_anticipated_state_out_columns(
         }
     }
     let active_count = (0..ctx.n_anticipated)
-        .filter(|&i| {
-            layout
-                .indexer
-                .is_anticipated_decision_active(i, stage_idx, n_stages)
-        })
+        .filter(|&i| layout.is_anticipated_decision_active(i, stage_idx, n_stages))
         .count();
     debug_assert_eq!(
         active_count, layout.anticipated.n_anticipated_state_out_def_rows,
@@ -270,7 +263,6 @@ fn fill_thermal_columns(
         let marginal_cost_per_mwh = tb.cost_per_mwh;
         for blk in 0..layout.n_blks {
             let col = layout
-                .indexer
                 .block_grid()
                 .flat(layout.col_thermal_start(), t_idx, blk);
             bufs.col_lower[col] = tb.min_generation_mw;
@@ -305,10 +297,7 @@ fn fill_anticipated_decision_columns(
         let k_i = ctx.anticipated_lead_stages[local_idx];
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
         let col = layout.anticipated.col_anticipated_decision_start + local_idx;
-        if layout
-            .indexer
-            .is_anticipated_decision_active(local_idx, stage_idx, n_stages)
-        {
+        if layout.is_anticipated_decision_active(local_idx, stage_idx, n_stages) {
             let delivery_stage = stage_idx + k_i;
             let tb = ctx
                 .resolved
@@ -355,10 +344,7 @@ fn fill_anticipated_decision_objective(
     for local_idx in 0..ctx.n_anticipated {
         let k_i = ctx.anticipated_lead_stages[local_idx];
         let col = layout.anticipated.col_anticipated_decision_start + local_idx;
-        if layout
-            .indexer
-            .is_anticipated_decision_active(local_idx, stage_idx, n_stages)
-        {
+        if layout.is_anticipated_decision_active(local_idx, stage_idx, n_stages) {
             let delivery_stage = stage_idx + k_i;
             let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
             let tb = ctx
@@ -396,7 +382,7 @@ pub(super) fn zero_anticipated_delivery_thermal_cost(
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
-    let grid = layout.indexer.block_grid();
+    let grid = layout.block_grid();
     for local_idx in 0..ctx.n_anticipated {
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
         for blk in 0..layout.n_blks {
@@ -464,7 +450,6 @@ fn fill_deficit_and_excess_columns(
         }
         for blk in 0..layout.n_blks {
             let col_exc = layout
-                .indexer
                 .block_grid()
                 .flat(layout.col_excess_start(), b_idx, blk);
             let block_hours = stage.blocks[blk].duration_hours;
@@ -778,7 +763,6 @@ fn fill_ncs_columns(
             .available_generation(ncs_sys_idx, stage_idx);
         for blk in 0..layout.n_blks {
             let col = layout
-                .indexer
                 .block_grid()
                 .flat(layout.col_ncs_start, ncs_local, blk);
             let factor = ctx
@@ -817,7 +801,6 @@ pub(super) fn fill_pumping_columns(
         let pb = ctx.resolved.bounds.pumping_bounds(p_idx, stage_idx);
         for blk in 0..layout.n_blks {
             let col = layout
-                .indexer
                 .block_grid()
                 .flat(layout.col_pumping_start, p_idx, blk);
             bufs.col_lower[col] = pb.min_flow_m3s;
@@ -840,7 +823,12 @@ fn fill_z_inflow_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::float_cmp,
+    clippy::similar_names
+)]
 mod diversion_bound_tests {
     use std::collections::{BTreeMap, HashMap};
 
@@ -861,7 +849,7 @@ mod diversion_bound_tests {
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::super::layout::ResolvedTables;
-    use super::super::test_support::{two_block_stage, zero_hydro_penalties};
+    use super::super::test_support::{state_layout_for, two_block_stage, zero_hydro_penalties};
     use super::{ColumnBufs, StageLayout, TemplateBuildCtx, fill_diversion_columns};
 
     // Declaration-time diversion capacity on the entity. The test makes the
@@ -1097,11 +1085,18 @@ mod diversion_bound_tests {
         }
     }
 
-    /// Run `fill_diversion_columns` against the fixture and return `col_upper`.
-    fn run_fill(fixtures: &DivFixtures) -> (Vec<f64>, StageLayout) {
+    /// Run `fill_diversion_columns` against the fixture and return `col_upper`
+    /// plus the two layout offsets the assertions read.
+    ///
+    /// Returns the layout's `(n_blks, col_diversion_start)` by value rather than
+    /// the `StageLayout` itself: the layout borrows the function-local
+    /// `StateLayout`, so it cannot escape — the caller only needs these two
+    /// offsets to index `col_upper`.
+    fn run_fill(fixtures: &DivFixtures) -> (Vec<f64>, usize, usize) {
         let stage = two_block_stage(STAGE_IDX, [372.0, 372.0]);
         let ctx = fixtures.make_ctx();
-        let layout = StageLayout::new(&ctx, &stage, STAGE_IDX);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, STAGE_IDX);
         let mut col_lower = vec![0.0_f64; layout.num_cols];
         let mut col_upper = vec![f64::INFINITY; layout.num_cols];
         let mut objective = vec![0.0_f64; layout.num_cols];
@@ -1111,7 +1106,7 @@ mod diversion_bound_tests {
             objective: &mut objective,
         };
         fill_diversion_columns(&ctx, &stage, STAGE_IDX, &layout, &mut bufs);
-        (col_upper, layout)
+        (col_upper, layout.n_blks, layout.col_diversion_start())
     }
 
     /// A per-stage resolved override distinct from the declaration value flows
@@ -1127,9 +1122,9 @@ mod diversion_bound_tests {
         let mut fixtures = DivFixtures::new();
         fixtures.set_resolved_diversion(Some(override_value));
 
-        let (col_upper, layout) = run_fill(&fixtures);
-        for blk in 0..layout.n_blks {
-            let col = layout.col_diversion_start() + blk;
+        let (col_upper, n_blks, col_diversion_start) = run_fill(&fixtures);
+        for blk in 0..n_blks {
+            let col = col_diversion_start + blk;
             assert_eq!(
                 col_upper[col], override_value,
                 "blk {blk}: col_upper[{col}] must equal the resolved override {override_value}"
@@ -1149,9 +1144,9 @@ mod diversion_bound_tests {
         // resolver does for a diverting hydro with no per-stage override.
         fixtures.set_resolved_diversion(Some(DECLARATION_MAX_FLOW_M3S));
 
-        let (col_upper, layout) = run_fill(&fixtures);
-        for blk in 0..layout.n_blks {
-            let col = layout.col_diversion_start() + blk;
+        let (col_upper, n_blks, col_diversion_start) = run_fill(&fixtures);
+        for blk in 0..n_blks {
+            let col = col_diversion_start + blk;
             assert_eq!(
                 col_upper[col], DECLARATION_MAX_FLOW_M3S,
                 "blk {blk}: col_upper[{col}] must equal the declaration default \
@@ -1162,7 +1157,12 @@ mod diversion_bound_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::float_cmp,
+    clippy::similar_names
+)]
 mod block_family_slack_tests {
     use std::collections::{BTreeMap, HashMap};
 
@@ -1182,7 +1182,7 @@ mod block_family_slack_tests {
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::super::layout::ResolvedTables;
-    use super::super::test_support::{two_block_stage, zero_hydro_penalties};
+    use super::super::test_support::{state_layout_for, two_block_stage, zero_hydro_penalties};
     use super::{ColumnBufs, StageLayout, TemplateBuildCtx, fill_operational_slack_columns};
 
     const N_STAGES: usize = 1;
@@ -1521,10 +1521,10 @@ mod block_family_slack_tests {
 
     /// One family's expected contract: its name, the activation predicate over a
     /// `HydroSpec`, the `StageLayout` column accessor, and the expected cost field.
-    struct FamilyCheck {
+    struct FamilyCheck<'b> {
         name: &'static str,
         predicate: fn(&HydroSpec) -> bool,
-        accessor: fn(&StageLayout, usize, usize) -> usize,
+        accessor: fn(&StageLayout<'b>, usize, usize) -> usize,
         cost_of: fn(&HydroSpec) -> f64,
     }
 
@@ -1540,7 +1540,8 @@ mod block_family_slack_tests {
         let fixtures = SlackFixtures::new(&specs);
         let stage = two_block_stage(STAGE_IDX, [BLOCK_HOURS[0], BLOCK_HOURS[1]]);
         let ctx = fixtures.make_ctx();
-        let layout = StageLayout::new(&ctx, &stage, STAGE_IDX);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, STAGE_IDX);
 
         let mut col_lower = vec![0.0_f64; layout.num_cols];
         let mut col_upper = vec![f64::INFINITY; layout.num_cols];

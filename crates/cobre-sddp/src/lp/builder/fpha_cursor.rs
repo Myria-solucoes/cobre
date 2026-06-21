@@ -35,7 +35,7 @@ pub(super) fn for_each_fpha_plane<F>(
     F: FnMut(usize, usize, usize, usize, &FphaPlane, usize),
 {
     let n_blks = layout.n_blks;
-    let grid = layout.indexer.block_grid();
+    let grid = layout.block_grid();
     let mut fpha_block_start = layout.row_fpha_start();
     for (local_idx, &h_idx) in layout.fpha_hydro_indices.iter().enumerate() {
         let planes = match ctx.production_models.model(h_idx, stage_idx) {

@@ -2,8 +2,8 @@
 //! sibling indexer unit tests.
 //!
 //! Single owner of the `eq` / `eq_with_anticipated` / `fpha` / `evap` fixtures
-//! that the `constructors`, `anticipated`, `state_mapping`, and `sparse_state`
-//! test modules consume. The named `eq` / `eq_with_anticipated` builders set
+//! that the `constructors` test module and downstream `test-support` consumers
+//! use. The named `eq` / `eq_with_anticipated` builders set
 //! `max_deficit_segments: 1` (a non-degenerate deficit stride), which is **not**
 //! the `EquipmentCounts::default()` value `0`; use `..Default::default()`
 //! directly when an all-zero count is wanted instead.
@@ -12,7 +12,8 @@
 //! `cargo test` and downstream integration tests (via `test-support`) both
 //! reach the same builders.
 
-use super::layout::{EquipmentCounts, EvapConfig, FphaColumnLayout};
+use super::layout::{EquipmentCounts, EvapConfig, FphaColumnLayout, StageIndexer};
+use super::state_layout::StateLayout;
 
 /// Build `EquipmentCounts` with the seven scalar entity counts set and no
 /// anticipated thermals.
@@ -56,6 +57,107 @@ pub fn fpha(hydro_indices: Vec<usize>, planes_per_hydro: Vec<usize>) -> FphaColu
 #[must_use]
 pub fn evap(hydro_indices: Vec<usize>) -> EvapConfig {
     EvapConfig { hydro_indices }
+}
+
+/// Build a role-(b) [`StageIndexer`] geometry descriptor with **no equipment**,
+/// matching the empty-equipment geometry the pre-slim test-only `StageIndexer::new`
+/// produced.
+///
+/// The descriptor carries the role-(b) slots a `TrainingContext.indexer` /
+/// `StageExtractionSpec.indexer` consumer needs (`z_inflow_row_start`, `has_ncs`,
+/// `max_deficit_segments`) with every equipment / slack / withdrawal range empty
+/// (`has_withdrawal == false`, `has_operational_violations == false`). The
+/// state-region columns the study implies are owned by the separate
+/// [`state_layout`] handle, so the `_hydro_count` / `_max_par_order` arguments are
+/// accepted for call-site symmetry but do not add equipment columns here — the
+/// geometry is empty exactly as `new` left it.
+#[must_use]
+pub fn geom(_hydro_count: usize, _max_par_order: usize) -> StageIndexer {
+    StageIndexer::with_equipment_and_evaporation(
+        &eq(0, 0, 0, 0, 0, 0, false),
+        &fpha(vec![], vec![]),
+        &evap(vec![]),
+    )
+}
+
+/// Build a finalized storage+lag [`StateLayout`] (no anticipated thermals) with
+/// the full `max_par_order` lag stride for every hydro.
+///
+/// This is the dense coverage production `build_wired_indexer` finalizes for a
+/// study with no per-hydro AR-order truncation, so the layout's
+/// `nonzero_state_indices` and `state_to_lp_column_map` caches match a production
+/// storage+lag study. The state-fixing patch and cut-path tests read only the
+/// state-region column ranges, which are pure functions of `(hydro_count,
+/// max_par_order)`.
+#[must_use]
+pub fn state_layout(hydro_count: usize, max_par_order: usize) -> StateLayout {
+    let effective_lag_count = vec![max_par_order; hydro_count];
+    StateLayout::new(
+        hydro_count,
+        max_par_order,
+        0,
+        0,
+        vec![],
+        &effective_lag_count,
+    )
+}
+
+/// Build a finalized [`StateLayout`] from explicit state-vector dimensions,
+/// including anticipated thermals.
+///
+/// `effective_lag_count` is set to the full `max_par_order` for every hydro
+/// (dense coverage). `anticipated_lead_stages` must have length `n_anticipated`
+/// and its max (when non-empty) must equal `k_max`.
+#[must_use]
+pub fn state_layout_full(
+    hydro_count: usize,
+    max_par_order: usize,
+    n_anticipated: usize,
+    k_max: usize,
+    anticipated_lead_stages: Vec<usize>,
+) -> StateLayout {
+    let effective_lag_count = vec![max_par_order; hydro_count];
+    StateLayout::new(
+        hydro_count,
+        max_par_order,
+        n_anticipated,
+        k_max,
+        anticipated_lead_stages,
+        &effective_lag_count,
+    )
+}
+
+/// Build the role-(a) [`StateLayout`] matching a role-(b) [`StageIndexer`]'s
+/// implied state dimensions, recovered from its equipment geometry.
+///
+/// The slim role-(b) descriptor no longer stores the state-vector dimensions, so
+/// they are recovered: `hydro_count` from the per-block stride of the `turbine`
+/// range (`turbine.len() / n_blks`), `max_par_order` from the descriptor's
+/// `theta`-anchored control-region start. Test sites that already know the
+/// dimensions should prefer [`state_layout`] / [`state_layout_full`]; this bridge
+/// exists for sites that hold only a built indexer.
+///
+/// Anticipated thermals are recovered from `anticipated_thermal_indices.len()`
+/// (= `n_anticipated`); the per-plant lead stages are NOT stored on the
+/// descriptor, so this bridge assumes none and is valid only for non-anticipated
+/// indexers. Anticipated test sites must use [`state_layout_full`].
+#[must_use]
+pub fn state_layout_for(indexer: &StageIndexer) -> StateLayout {
+    debug_assert!(
+        indexer.anticipated_thermal_indices.is_empty(),
+        "state_layout_for assumes no anticipated thermals; use state_layout_full instead"
+    );
+    let n_blks = indexer.n_blks.max(1);
+    let hydro_count = indexer.turbine.len() / n_blks;
+    // control_region_start == theta + 1 == turbine.start; theta == N*(3+L) for a
+    // non-anticipated layout, so L == theta / N − 3 when N > 0.
+    let theta = indexer.turbine.start.saturating_sub(1);
+    let max_par_order = if hydro_count > 0 {
+        (theta / hydro_count).saturating_sub(3)
+    } else {
+        0
+    };
+    state_layout(hydro_count, max_par_order)
 }
 
 /// Test helper: build `EquipmentCounts` with explicit anticipated thermal

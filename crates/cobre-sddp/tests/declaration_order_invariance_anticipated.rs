@@ -578,10 +578,10 @@ fn declaration_order_invariance_anticipated_thermals() {
     let basis_cache_b = &result_b.basis_cache;
     assert_eq!(basis_cache_a.len(), basis_cache_b.len());
 
-    let indexer = setup_a.stage_indexer();
-    let ant_start = indexer.anticipated_state.start;
-    let n_anticipated = indexer.n_anticipated;
-    let k_max = indexer.k_max;
+    let state = setup_a.stage_state();
+    let ant_start = state.anticipated_state.start;
+    let n_anticipated = state.n_anticipated;
+    let k_max = state.k_max;
     let ant_block_len = n_anticipated * k_max;
 
     assert_eq!(n_anticipated, 2);

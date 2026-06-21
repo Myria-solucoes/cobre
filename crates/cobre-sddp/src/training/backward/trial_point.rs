@@ -208,7 +208,7 @@ impl StageOpeningSolver {
         omega: usize,
         is_first: bool,
     ) -> Result<(), SddpError> {
-        let indexer = training_ctx.indexer;
+        let state = training_ctx.state;
         patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
 
         // Scratch buffers are moved out before the solve to avoid borrow conflicts
@@ -246,8 +246,8 @@ impl StageOpeningSolver {
         // Statistics must be captured after view is dropped.
         let objective = extract_duals_from_view(
             &view,
-            indexer.n_state,
-            indexer,
+            state.n_state,
+            state,
             &ctx.templates[s].col_scale,
             succ,
             &mut state_duals,
@@ -346,7 +346,7 @@ impl StageOpeningSolver {
         omega: usize,
         continue_carry: bool,
     ) -> Result<(), SddpError> {
-        let indexer = training_ctx.indexer;
+        let state = training_ctx.state;
         // The DCS LP must start from the cut-free base structural template, NOT
         // `succ.baked_template`: when baking is active the baked template already
         // carries the active cut rows, and loading it would make the lazy loop's
@@ -396,7 +396,7 @@ impl StageOpeningSolver {
             &mut ws.solver,
             core,
             succ.successor_pool,
-            indexer,
+            state,
             col_scale,
             None,
             &ws.backward_accum.dcs_initial_resident,
@@ -414,7 +414,7 @@ impl StageOpeningSolver {
         // costs, identical in the all-cuts and lazy-solve LPs — exactness is
         // unaffected by the binding-count bookkeeping below.
         let objective =
-            extract_state_duals_only(&view, indexer.n_state, indexer, col_scale, &mut state_duals);
+            extract_state_duals_only(&view, state.n_state, state, col_scale, &mut state_duals);
 
         // Binding-count metadata, slot-correct under the resident `CutRowMap`. The
         // final all-satisfied solve's cut-row duals (`view.dual`, the full dual

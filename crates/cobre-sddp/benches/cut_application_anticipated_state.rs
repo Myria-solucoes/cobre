@@ -52,7 +52,7 @@
 
 use cobre_sddp::build_cut_row_batch_into;
 use cobre_sddp::cut::fcf::FutureCostFunction;
-use cobre_sddp::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout, StageIndexer};
+use cobre_sddp::indexer::StateLayout;
 use cobre_solver::RowBatch;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
@@ -100,24 +100,24 @@ fn bench_cut_application_baseline(c: &mut Criterion) {
     // Baseline: N=10 hydros, L=12 PAR order -> n_state = N*(1+L) = 130.
     // All hydros use full lag order 12, so the nonzero mask covers all 130 state
     // dimensions (dense path, 130 active coefficients per cut + theta = 131 nnz).
-    let mut indexer = StageIndexer::new(N, L_BASELINE);
+    // Populate dense mask: all N hydros at full lag order L_BASELINE.
+    // `StateLayout::new` finalizes the mask (and the column-map cache) in its
+    // constructor, mirroring production `build_wired_indexer`.
+    let lag_counts: Vec<usize> = vec![L_BASELINE; N];
+    let state = StateLayout::new(N, L_BASELINE, 0, 0, vec![], &lag_counts);
     debug_assert_eq!(
-        indexer.n_state, N_STATE,
+        state.n_state, N_STATE,
         "baseline n_state must equal {N_STATE}"
     );
-
-    // Populate dense mask: all N hydros at full lag order L_BASELINE.
-    let lag_counts: Vec<usize> = vec![L_BASELINE; N];
-    indexer.set_nonzero_mask(&lag_counts, &[]);
     debug_assert_eq!(
-        indexer.nonzero_state_indices.len(),
+        state.nonzero_state_indices.len(),
         N_STATE,
         "baseline mask must cover all {N_STATE} state dims"
     );
 
-    let fcf = build_fcf(indexer.n_state);
+    let fcf = build_fcf(state.n_state);
     // Dense mask: nnz_per_cut = mask.len() + 1.
-    let nnz_per_cut = indexer.nonzero_state_indices.len() + 1;
+    let nnz_per_cut = state.nonzero_state_indices.len() + 1;
     let mut batch = build_row_batch(nnz_per_cut);
 
     c.bench_function("bench_cut_application_baseline", |b| {
@@ -126,7 +126,7 @@ fn bench_cut_application_baseline(c: &mut Criterion) {
                 &mut batch,
                 black_box(&fcf),
                 black_box(0),
-                black_box(&indexer),
+                black_box(&state),
                 black_box(&[]),
             );
             black_box(batch.values.len());
@@ -141,49 +141,32 @@ fn bench_cut_application_with_anticipated(c: &mut Criterion) {
     // so the nonzero mask covers all 130 state dimensions (130 active coefficients
     // per cut + theta = 131 nnz — identical to baseline).
     let anticipated_lead_stages: Vec<usize> = vec![K_MAX; N_ANTICIPATED];
-    let anticipated_thermal_indices: Vec<usize> = (0..N_ANTICIPATED).collect();
-
-    let counts = EquipmentCounts {
-        hydro_count: N,
-        max_par_order: L_ANTICIPATED,
-        n_thermals: 0,
-        n_lines: 0,
-        n_buses: 0,
-        n_blks: 1,
-        has_inflow_penalty: false,
-        max_deficit_segments: 1,
-        n_anticipated: N_ANTICIPATED,
-        k_max: K_MAX,
-        anticipated_lead_stages: anticipated_lead_stages.clone(),
-        anticipated_thermal_indices,
-        n_pumping: 0,
-    };
-    let fpha = FphaColumnLayout {
-        hydro_indices: vec![],
-        planes_per_hydro: vec![],
-    };
-    let evap = EvapConfig {
-        hydro_indices: vec![],
-    };
-    let mut indexer = StageIndexer::with_equipment_and_evaporation(&counts, &fpha, &evap);
-    debug_assert_eq!(
-        indexer.n_state, N_STATE,
-        "extended n_state must equal {N_STATE}"
-    );
 
     // Populate the sparse mask: all hydros at full lag order L_ANTICIPATED, all
     // anticipated plants at K_i = K_max so every slot 0..K_max is nonzero.
+    // `StateLayout::new` finalizes both layout caches in its constructor.
     let lag_counts: Vec<usize> = vec![L_ANTICIPATED; N];
-    indexer.set_nonzero_mask(&lag_counts, &anticipated_lead_stages);
+    let state = StateLayout::new(
+        N,
+        L_ANTICIPATED,
+        N_ANTICIPATED,
+        K_MAX,
+        anticipated_lead_stages,
+        &lag_counts,
+    );
     debug_assert_eq!(
-        indexer.nonzero_state_indices.len(),
+        state.n_state, N_STATE,
+        "extended n_state must equal {N_STATE}"
+    );
+    debug_assert_eq!(
+        state.nonzero_state_indices.len(),
         N_STATE,
         "extended mask must cover all {N_STATE} state dims"
     );
 
-    let fcf = build_fcf(indexer.n_state);
+    let fcf = build_fcf(state.n_state);
     // Sparse mask: nnz_per_cut = mask.len() + 1 = 131.
-    let nnz_per_cut = indexer.nonzero_state_indices.len() + 1;
+    let nnz_per_cut = state.nonzero_state_indices.len() + 1;
     let mut batch = build_row_batch(nnz_per_cut);
 
     c.bench_function("bench_cut_application_with_anticipated", |b| {
@@ -192,7 +175,7 @@ fn bench_cut_application_with_anticipated(c: &mut Criterion) {
                 &mut batch,
                 black_box(&fcf),
                 black_box(0),
-                black_box(&indexer),
+                black_box(&state),
                 black_box(&[]),
             );
             black_box(batch.values.len());

@@ -5,8 +5,11 @@ use cobre_solver::StageTemplate;
 use cobre_stochastic::{ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext};
 
 use crate::{
-    dcs::DcsParams, horizon_mode::HorizonMode, indexer::StageIndexer,
-    inflow_method::InflowNonNegativityMethod, noise_key_diag::NoiseKeyDiag,
+    dcs::DcsParams,
+    horizon_mode::HorizonMode,
+    indexer::{StageIndexer, StateLayout},
+    inflow_method::InflowNonNegativityMethod,
+    noise_key_diag::NoiseKeyDiag,
 };
 
 /// Immutable per-stage LP layout and noise scaling parameters.
@@ -130,8 +133,18 @@ impl StageContext<'_> {
 pub struct TrainingContext<'a> {
     /// Horizon mode (finite/infinite) determining stage count.
     pub horizon: &'a HorizonMode,
-    /// Stage indexer providing state layout and entity counts.
+    /// Role-(b) geometry descriptor: the equipment/slack/row ranges, entity
+    /// counts, and presence flags. Carries no role-(a) state layout.
     pub indexer: &'a StageIndexer,
+    /// Stage-invariant state-vector layout (role (a)): the single owner of the
+    /// state column ranges, `n_state`, the resolvers, and the mask.
+    ///
+    /// Every hot-path role-(a) read resolves through this handle, not through
+    /// [`Self::indexer`]: the state-fixing column patch
+    /// (`PatchBuffer::fill_col_state_patches`), the cut-row build and dual
+    /// extraction (`cut::row`, `cut::dcs`, `duals_extraction`, the delta-cut
+    /// consumer), and the lower-bound / simulation-extraction state reads.
+    pub state: &'a StateLayout,
     /// Inflow non-negativity enforcement strategy.
     pub inflow_method: &'a InflowNonNegativityMethod,
     /// Stochastic context providing noise generation and PAR model.

@@ -146,10 +146,10 @@ where
     ) -> Result<Self, SddpError> {
         // ── Rank math ─────────────────────────────────────────────────────
         let horizon = training_ctx.horizon;
-        let indexer = training_ctx.indexer;
+        let state = training_ctx.state;
         let num_stages = horizon.num_stages();
         let total_forward_passes = config.loop_config.forward_passes as usize;
-        let ranks = RankDistribution::new(comm, num_stages, total_forward_passes, indexer.n_state);
+        let ranks = RankDistribution::new(comm, num_stages, total_forward_passes, state.n_state);
 
         // ── Dense cut packing ─────────────────────────────────────────────
         // Map the first training iteration (start_iteration + 1) to slot
@@ -164,8 +164,8 @@ where
             n_threads,
             ranks.n_state,
             WorkspaceSizing {
-                hydro_count: indexer.hydro_count,
-                max_par_order: indexer.max_par_order,
+                hydro_count: state.hydro_count,
+                max_par_order: state.max_par_order,
                 n_load_buses: stage_ctx.n_load_buses,
                 max_blocks: config.loop_config.max_blocks,
                 downstream_par_order: stage_ctx.downstream_par_order,
@@ -178,8 +178,8 @@ where
                 max_local_fwd: ranks.max_local_fwd,
                 total_forward_passes,
                 noise_dim: training_ctx.stochastic.dim(),
-                n_anticipated: indexer.n_anticipated,
-                k_max: indexer.k_max,
+                n_anticipated: state.n_anticipated,
+                k_max: state.k_max,
             },
             solver_factory,
         )
@@ -261,7 +261,7 @@ where
             TrainingEvent::TrainingStarted {
                 case_name: String::new(),
                 stages: ranks.num_stages as u32,
-                hydros: indexer.hydro_count as u32,
+                hydros: state.hydro_count as u32,
                 thermals: 0,
                 ranks: ranks.num_ranks as u32,
                 threads_per_rank: n_threads as u32,
@@ -282,10 +282,10 @@ where
             ranks.n_state,
             fcf.pools[0].capacity,
             stage_ctx.templates[0].num_rows,
-            indexer.hydro_count,
-            indexer.max_par_order,
-            indexer.n_anticipated,
-            indexer.k_max,
+            state.hydro_count,
+            state.max_par_order,
+            state.n_anticipated,
+            state.k_max,
             stage_ctx,
         );
 
@@ -1103,13 +1103,13 @@ where
     /// hot path for no production benefit. The simpler full rebake is preferred.
     fn bake_active_cuts_into_templates(&mut self) -> u64 {
         let mut total_rows_baked: u64 = 0;
-        let indexer = self.training_ctx.indexer;
+        let state = self.training_ctx.state;
         for t in 0..self.ranks.num_stages {
             build_cut_row_batch_into(
                 &mut self.scratch.bake_row_batches[t],
                 self.fcf,
                 t,
-                indexer,
+                state,
                 &self.stage_ctx.templates[t].col_scale,
             );
             #[allow(clippy::cast_possible_truncation)]
@@ -1233,6 +1233,7 @@ where
             self.fcf,
             self.training_ctx.initial_state,
             self.training_ctx.indexer,
+            self.training_ctx.state,
             &mut lb_bundle,
             &lb_spec,
             self.comm,
@@ -1309,7 +1310,7 @@ mod tests {
         cut::fcf::FutureCostFunction,
         error::SddpError,
         horizon_mode::HorizonMode,
-        indexer::StageIndexer,
+        indexer::{StageIndexer, StateLayout},
         inflow_method::InflowNonNegativityMethod,
         risk_measure::RiskMeasure,
     };
@@ -1691,6 +1692,7 @@ mod tests {
     fn make_training_ctx<'a>(
         horizon: &'a HorizonMode,
         indexer: &'a StageIndexer,
+        state: &'a StateLayout,
         stochastic: &'a StochasticContext,
         initial_state: &'a [f64],
         stages: &'a [Stage],
@@ -1698,6 +1700,7 @@ mod tests {
         TrainingContext {
             horizon,
             indexer,
+            state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic,
             initial_state,
@@ -1723,27 +1726,30 @@ mod tests {
     #[test]
     fn training_session_new_preallocates_all_buffers() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
         let config = make_config(1, 10, 1, n_stages);
         let mut solver = MockSolver::with_fixed(100.0);
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let training_ctx =
-            make_training_ctx(&horizon, &indexer, &stochastic, &initial_state, &stages);
+        let training_ctx = make_training_ctx(
+            &horizon,
+            &indexer,
+            &state,
+            &stochastic,
+            &initial_state,
+            &stages,
+        );
 
         let session = TrainingSession::new(
             &mut solver,
@@ -1789,20 +1795,17 @@ mod tests {
     #[test]
     fn training_session_finalize_emits_training_finished() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let (tx, rx) = mpsc::channel::<TrainingEvent>();
         let mut config = make_config(1, 10, 1, n_stages);
@@ -1812,8 +1815,14 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let training_ctx =
-            make_training_ctx(&horizon, &indexer, &stochastic, &initial_state, &stages);
+        let training_ctx = make_training_ctx(
+            &horizon,
+            &indexer,
+            &state,
+            &stochastic,
+            &initial_state,
+            &stages,
+        );
 
         let session = TrainingSession::new(
             &mut solver,
@@ -1846,20 +1855,17 @@ mod tests {
     #[test]
     fn training_session_finalize_with_error_emits_training_finished_with_error_reason() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let (tx, rx) = mpsc::channel::<TrainingEvent>();
         let mut config = make_config(1, 10, 1, n_stages);
@@ -1869,8 +1875,14 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let training_ctx =
-            make_training_ctx(&horizon, &indexer, &stochastic, &initial_state, &stages);
+        let training_ctx = make_training_ctx(
+            &horizon,
+            &indexer,
+            &state,
+            &stochastic,
+            &initial_state,
+            &stages,
+        );
 
         let session = TrainingSession::new(
             &mut solver,
@@ -1908,20 +1920,17 @@ mod tests {
     #[test]
     fn training_session_run_iteration_returns_continue_when_not_converged() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
         // iteration_limit=5, so iteration 1 should return Continue
         let config = make_config(1, 10, 5, n_stages);
 
@@ -1929,8 +1938,14 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let training_ctx =
-            make_training_ctx(&horizon, &indexer, &stochastic, &initial_state, &stages);
+        let training_ctx = make_training_ctx(
+            &horizon,
+            &indexer,
+            &state,
+            &stochastic,
+            &initial_state,
+            &stages,
+        );
 
         let mut session = TrainingSession::new(
             &mut solver,
@@ -1957,20 +1972,17 @@ mod tests {
     #[test]
     fn training_session_run_iteration_returns_converged_when_gap_closes() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
         // iteration_limit=1 so the first iteration triggers convergence
         let config = make_config(1, 10, 1, n_stages);
 
@@ -1978,8 +1990,14 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let training_ctx =
-            make_training_ctx(&horizon, &indexer, &stochastic, &initial_state, &stages);
+        let training_ctx = make_training_ctx(
+            &horizon,
+            &indexer,
+            &state,
+            &stochastic,
+            &initial_state,
+            &stages,
+        );
 
         let mut session = TrainingSession::new(
             &mut solver,
@@ -2021,20 +2039,17 @@ mod tests {
     #[test]
     fn training_session_run_iteration_emits_correct_event_sequence() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let (tx, rx) = mpsc::channel::<TrainingEvent>();
         let mut config = make_config(1, 10, 10, n_stages);
@@ -2044,8 +2059,14 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let training_ctx =
-            make_training_ctx(&horizon, &indexer, &stochastic, &initial_state, &stages);
+        let training_ctx = make_training_ctx(
+            &horizon,
+            &indexer,
+            &state,
+            &stochastic,
+            &initial_state,
+            &stages,
+        );
 
         let mut session = TrainingSession::new(
             &mut solver,

@@ -707,7 +707,7 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
 ) -> Result<StageOutput, SddpError> {
     let training_ctx = inputs.training_ctx;
     let ctx = inputs.ctx;
-    let indexer = training_ctx.indexer;
+    let cut_state = training_ctx.state;
     let num_stages = training_ctx.horizon.num_stages();
     let successor = t + 1;
 
@@ -752,7 +752,7 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
         &mut inputs.cut_batches[successor],
         inputs.fcf,
         successor,
-        indexer,
+        cut_state,
         &ctx.templates[successor].col_scale,
         inputs.iteration,
     );
@@ -827,7 +827,7 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
         let range = cut.coefficients_range.clone();
         let arena = &inputs.workspaces[*w].backward_accum.agg_arena;
         debug_assert!(
-            range.len() == indexer.n_state && range.end <= arena.len(),
+            range.len() == cut_state.n_state && range.end <= arena.len(),
             "coefficients_range must span exactly n_state and lie within the worker arena"
         );
         inputs.fcf.add_cut(
@@ -906,7 +906,7 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
     basis_slices: Vec<BasisStoreSliceMut<'_>>,
 ) -> Vec<Result<(usize, Vec<StagedCut>), SddpError>> {
     let n_openings = succ.probabilities.len();
-    let n_state = training_ctx.indexer.n_state;
+    let n_state = training_ctx.state.n_state;
     let pop = succ.successor_populated_count;
     let n_workers = workspaces.len().max(1);
 
@@ -1085,7 +1085,6 @@ mod tests {
         cut::FutureCostFunction,
         cut_sync::CutSyncBuffers,
         horizon_mode::HorizonMode,
-        indexer::StageIndexer,
         inflow_method::InflowNonNegativityMethod,
         risk_measure::RiskMeasure,
         solver_stats::WORKER_STATS_ENTRY_STRIDE,
@@ -1534,14 +1533,15 @@ mod tests {
         let n_stages = 2_usize;
         let n_openings = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
         let templates = vec![minimal_template_1_0(); n_stages];
         // Production carries a separate baked-template buffer alongside
         // `ctx.templates`; mirror that here so `baked` does not alias the
         // `&templates` borrow held by `ctx`.
         let baked_templates = templates.clone();
         let base_rows = vec![1_usize; n_stages];
-        let n_state = indexer.n_state;
+        let n_state = state.n_state;
         let forward_passes = 2_u32;
 
         let mut fcf =
@@ -1580,6 +1580,7 @@ mod tests {
         let training_ctx = TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1654,7 +1655,7 @@ mod tests {
     /// is correctly sized after the backward pass completes.
     ///
     /// After `BackwardPassState::run` returns, the single worker's
-    /// `backward_accum.state_duals_buf` must hold exactly `indexer.n_state`
+    /// `backward_accum.state_duals_buf` must hold exactly `state.n_state`
     /// entries — the last opening's unscaled duals that were written during
     /// the final trial-point/opening iteration.
     ///
@@ -1665,11 +1666,12 @@ mod tests {
         let n_stages = 2_usize;
         let n_openings = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
         let templates = vec![minimal_template_1_0(); n_stages];
         let baked_templates = templates.clone();
         let base_rows = vec![1_usize; n_stages];
-        let n_state = indexer.n_state;
+        let n_state = state.n_state;
         let forward_passes = 2_u32;
 
         let mut fcf =
@@ -1708,6 +1710,7 @@ mod tests {
         let training_ctx = TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],

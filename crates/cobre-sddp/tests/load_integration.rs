@@ -43,7 +43,7 @@ use cobre_sddp::{
     context::{StageContext, TrainingContext},
     cut::fcf::FutureCostFunction,
     horizon_mode::HorizonMode,
-    indexer::StageIndexer,
+    indexer::{StageIndexer, StateLayout},
     inflow_method::InflowNonNegativityMethod,
     risk_measure::RiskMeasure,
     train,
@@ -58,6 +58,54 @@ use cobre_stochastic::{
 // ===========================================================================
 // Shared helpers
 // ===========================================================================
+
+/// Build the role-(a) [`StateLayout`] whose `storage_in` / `inflow_lags` /
+/// `anticipated_state` column starts match `indexer`'s identical fields.
+///
+/// Mirrors the gated `indexer::test_fixtures::state_layout_for` body via the
+/// public [`StateLayout::new`] constructor, so this external test crate (which
+/// does not see the parent crate's `#[cfg(test)]` surface) resolves byte-identical
+/// patch columns on the default feature set.
+fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
+    StateLayout::new(
+        hydro_count,
+        max_par_order,
+        0,
+        0,
+        vec![],
+        &vec![max_par_order; hydro_count],
+    )
+}
+
+/// Build a role-(b) `StageIndexer` geometry descriptor (no equipment, no
+/// anticipated thermals) via the public `with_equipment_and_evaporation`
+/// constructor, for the `TrainingContext.indexer` slot.
+fn geom(_hydro_count: usize, _max_par_order: usize) -> StageIndexer {
+    StageIndexer::with_equipment_and_evaporation(
+        &cobre_sddp::indexer::EquipmentCounts {
+            hydro_count: 0,
+            max_par_order: 0,
+            n_thermals: 0,
+            n_lines: 0,
+            n_buses: 0,
+            n_blks: 0,
+            has_inflow_penalty: false,
+            max_deficit_segments: 0,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
+            n_pumping: 0,
+        },
+        &cobre_sddp::indexer::FphaColumnLayout {
+            hydro_indices: vec![],
+            planes_per_hydro: vec![],
+        },
+        &cobre_sddp::indexer::EvapConfig {
+            hydro_indices: vec![],
+        },
+    )
+}
 
 /// Single-rank communicator that correctly copies data through `allgatherv`
 /// and `allreduce`. Required by the exchange and forward-sync steps so that
@@ -404,21 +452,15 @@ fn test_stochastic_load_training_completes() {
         "pre-condition: n_load_buses must be 1"
     );
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    }; // N=1 hydro, L=0 PAR
+    let indexer = geom(1, 0);
+    let state = state_layout_for(1, 0);
     let templates = vec![minimal_template(); n_stages];
     let base_rows = vec![2usize; n_stages];
-    let initial_state = vec![0.0_f64; indexer.n_state];
+    let initial_state = vec![0.0_f64; state.n_state];
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
     };
+    let state = state_layout_for(1, 0);
     let risk_measures = vec![RiskMeasure::Expectation; n_stages];
     let mut fcf = make_fcf(n_stages);
     let mut solver = MockSolver::with_fixed(100.0);
@@ -485,6 +527,7 @@ fn test_stochastic_load_training_completes() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -550,18 +593,11 @@ fn test_deterministic_load_training_matches_baseline() {
         "pre-condition: deterministic load must yield n_load_buses=0"
     );
 
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        // Finalize as production setup does: full-order mask + state→LP-column map.
-        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-        let anticipated_k = ix.anticipated_lead_stages.clone();
-        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-        ix.finalize_state_column_map();
-        ix
-    };
+    let indexer = geom(1, 0);
+    let state = state_layout_for(1, 0);
     let templates = vec![minimal_template(); n_stages];
     let base_rows = vec![2usize; n_stages];
-    let initial_state = vec![0.0_f64; indexer.n_state];
+    let initial_state = vec![0.0_f64; state.n_state];
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
     };
@@ -621,6 +657,7 @@ fn test_deterministic_load_training_matches_baseline() {
         &TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
+            state: &state,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -663,18 +700,11 @@ fn test_stochastic_load_seed_determinism() {
 
     let run_training = || {
         let stochastic = build_context_with_load(n_stages, 500.0, 50.0);
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            // Finalize as production setup does: full-order mask + state→LP-column map.
-            let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-            let anticipated_k = ix.anticipated_lead_stages.clone();
-            ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-            ix.finalize_state_column_map();
-            ix
-        };
+        let indexer = geom(1, 0);
+        let state = state_layout_for(1, 0);
         let templates = vec![minimal_template(); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
@@ -739,6 +769,7 @@ fn test_stochastic_load_seed_determinism() {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
+                state: &state,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,

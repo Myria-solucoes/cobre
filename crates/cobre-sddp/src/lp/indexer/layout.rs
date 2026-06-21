@@ -1,11 +1,24 @@
-//! The [`StageIndexer`] struct, its satellite layout types, the small layout
-//! accessors, and the compile-time `Send + Sync` assertion.
+//! The [`StageIndexer`] role-(b) geometry descriptor, its satellite layout
+//! types, the small layout accessors, and the compile-time `Send + Sync`
+//! assertion.
 //!
-//! `StageIndexer` carries the state-pinning contract: the LP has no state-fixing
-//! row range; incoming state is pinned via column bounds resolved through
-//! [`StageIndexer::state_to_lp_incoming_column`], never a fixing-row index.
+//! `StageIndexer` is the **role-(b) geometry descriptor**: it carries the
+//! stage-0 equipment / slack / row ranges, the entity-count scalars that stride
+//! them, the presence flags, and the FPHA / evaporation / anticipated identity
+//! lists. The role-(a) state-vector concern — the state-region column ranges
+//! (`storage`, `inflow_lags`, `storage_in`, `anticipated_state`,
+//! `anticipated_state_out`, `z_inflow`, `theta`), `n_state`, the state-vector
+//! dimension scalars, and the cut resolvers / mask — lives entirely on
+//! [`StateLayout`](super::StateLayout). The cut path, state-fixing patch, and
+//! simulation-extraction state reads resolve through that handle; this descriptor
+//! never reimplements them.
+//!
+//! The equipment column **bases** here are strided by a stage-0-derived `n_blks`
+//! (the single global block count); they are valid only at stages whose block
+//! count equals stage 0's. The per-stage [`StageLayout`](crate::lp_builder)
+//! recomputes each stage's own equipment bases for template construction and is
+//! the authority where block counts vary.
 
-use std::collections::HashMap;
 use std::ops::Range;
 
 use super::BlockGrid;
@@ -39,129 +52,41 @@ pub struct FphaRowRange {
     pub planes_per_block: usize,
 }
 
-/// Read-only LP layout index map for one SDDP stage subproblem.
+/// Read-only role-(b) LP geometry descriptor for one SDDP stage subproblem.
 ///
-/// Computed once from `hydro_count` (N) and `max_par_order` (L), then shared
-/// read-only across all threads for the duration of training. Most fields are
-/// plain `usize` or `Range<usize>`; FPHA fields use `Vec` for variable-length
-/// hydro lists.
+/// Carries the stage-0 equipment / slack column ranges, the constraint row
+/// ranges, the entity-count scalars that stride them, the presence flags, and
+/// the FPHA / evaporation / anticipated identity lists. Computed once in
+/// `build_wired_indexer` and shared read-only across all threads for the
+/// duration of training.
 ///
-/// See the [module-level documentation](super) for the full column and row
-/// layout, and [`StageIndexer::new`] for the construction formulas.
+/// The role-(a) state-vector concern (`storage`, `inflow_lags`, `storage_in`,
+/// `anticipated_state`, `anticipated_state_out`, `z_inflow` columns, `theta`,
+/// `n_state`, the resolvers, the mask) lives on
+/// [`StateLayout`](super::StateLayout); this descriptor carries none of it.
 ///
-/// Equipment column ranges (`turbine`, `spillage`, `diversion`, `thermal`,
-/// `line_fwd`, `line_rev`, `deficit`, `excess`) are populated only when constructed via
-/// [`StageIndexer::with_equipment`]. When constructed via [`StageIndexer::new`],
-/// those ranges are all empty (`0..0`)
-/// and `n_blks`, `n_thermals`, `n_lines`, `n_buses` are zero.
-///
-/// FPHA fields (`generation`, `fpha_hydro_indices`, `fpha_rows`) are also
-/// populated only by [`StageIndexer::with_equipment`] when FPHA hydros are
-/// present. They are empty when built via [`StageIndexer::new`] or when no FPHA
-/// hydros exist.
+/// The equipment column ranges below are strided by a stage-0-derived `n_blks`
+/// and are valid only at stages whose block count equals stage 0's; the
+/// per-stage [`StageLayout`](crate::lp_builder) is the authority where block
+/// counts vary.
 // Rationale: the bool fields (`has_inflow_penalty`, `has_withdrawal`,
 // `has_operational_violations`, `has_ncs`) are independent presence flags for
 // optional column groups, not states of one machine; folding them into a
 // two-variant enum or state machine — the lint's suggested refactor — would
-// obscure that they vary independently. This is a plain LP-layout descriptor.
+// obscure that they vary independently. The slimmed descriptor still carries
+// four such flags (above clippy's three-bool trigger), so the allow stays.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct StageIndexer {
-    /// Column range `[0, N)` for outgoing storage volumes.
-    ///
-    /// Each entry `storage[h]` is the column index of hydro plant `h`'s
-    /// outgoing storage volume.
-    pub storage: Range<usize>,
-
-    /// Column range `[N, N*(1+L))` for AR lag variables.
-    ///
-    /// Lag variables are stored in lag-major order: all hydros for lag 0,
-    /// then all hydros for lag 1, etc. The column index for hydro `h` at
-    /// lag `l` (0-indexed, lag 0 = most recent) is:
-    /// `inflow_lags.start + l * hydro_count + h`.
-    pub inflow_lags: Range<usize>,
-
-    /// Column range `[N*(2+L), N*(3+L))` for incoming storage volumes.
-    ///
-    /// Pinned to the preceding stage's outgoing `storage` solution values via
-    /// `set_col_bounds` on these columns — not via equality rows (the LP has no
-    /// state-fixing row range). Resolve the column with
-    /// [`StageIndexer::state_to_lp_incoming_column`].
-    pub storage_in: Range<usize>,
-
-    /// Column index `N*(3+L)` for the future cost variable (theta).
-    ///
-    /// Scalar: there is exactly one theta variable per stage LP.
-    pub theta: usize,
-
-    /// State-vector dimension.
-    ///
-    /// Without anticipated thermals: `N*(1+L)`.
-    /// With `A` anticipated thermals at `K_max` lead stages each:
-    /// `N*(1+L) + A*K_max`.
-    ///
-    /// The state vector consists of the `N` outgoing storage volumes followed
-    /// by the `N*L` lag variables (and `A*K_max` anticipated-state slots when
-    /// anticipated thermals are present). State transfer copies
-    /// `primal[0..n_transfer]` (all but the oldest lag row).
-    ///
-    /// ## Semantic distinction
-    ///
-    /// `n_state` is the state-vector **dimension** used by cut storage and
-    /// broadcast payloads. It is **not** a valid LP row index. Do not slice
-    /// the LP row buffer as `[0, n_state)` — no state-fixing rows exist.
-    /// Use [`StageIndexer::state_to_lp_incoming_column`] to resolve the
-    /// column index for state-pinning and cut-subgradient extraction.
-    pub n_state: usize,
-
-    /// Column range `[N*(1+L), N*(1+L) + n_anticipated*K_max)` for
-    /// anticipated thermal commitment state slots.
-    ///
-    /// Ring-buffer block mirroring the inflow-lag layout: slot
-    /// `k = 0..K_max` for anticipated plant `i = 0..n_anticipated` lives at
-    /// column `anticipated_state.start + k * n_anticipated + i` (slot-major,
-    /// plant-minor). Slot 0 holds the commitment maturing at the current
-    /// stage; slot `K_max - 1` holds the commitment that matures
-    /// `K_max - 1` stages from now.
-    ///
-    /// Empty (`0..0`) when `n_anticipated == 0` or when built via
-    /// [`StageIndexer::new`].
-    pub anticipated_state: Range<usize>,
-
-    /// Number of anticipated thermals (plants with
-    /// `anticipated_config.is_some()`).
-    ///
-    /// Zero when no anticipated plants exist or when built via
-    /// [`StageIndexer::new`].
-    pub n_anticipated: usize,
-
-    /// Maximum `lead_stages` across the anticipated thermals (`K_max`).
-    ///
-    /// Zero when `n_anticipated == 0` or when built via
-    /// [`StageIndexer::new`].
-    pub k_max: usize,
-
-    /// Number of operating hydro plants (N).
-    pub hydro_count: usize,
-
-    /// Maximum PAR order across all operating hydros (L).
-    ///
-    /// All hydros use a uniform lag stride of `max_par_order`, enabling
-    /// contiguous memory access and SIMD vectorisation over the lag dimension.
-    pub max_par_order: usize,
-
     // ── Equipment column ranges ────────────────────────────────────────────
-    // Populated only by `with_equipment`; empty (`0..0`) when built via `new`.
     /// Column range for turbined flow variables, one per (hydro, block) pair.
     ///
     /// Index for hydro `h`, block `b`: `turbine.start + h * n_blks + b`.
-    /// Empty when built via [`StageIndexer::new`].
     pub turbine: Range<usize>,
 
     /// Column range for spillage variables, one per (hydro, block) pair.
     ///
     /// Index for hydro `h`, block `b`: `spillage.start + h * n_blks + b`.
-    /// Empty when built via [`StageIndexer::new`].
     pub spillage: Range<usize>,
 
     /// Column range for diversion flow variables, one per (hydro, block) pair.
@@ -169,13 +94,11 @@ pub struct StageIndexer {
     /// Index for hydro `h`, block `b`: `diversion.start + h * n_blks + b`.
     /// Hydros without a diversion channel have bounds [0, 0]; the LP presolve
     /// eliminates them.
-    /// Empty when built via [`StageIndexer::new`].
     pub diversion: Range<usize>,
 
     /// Column range for thermal generation variables, one per (thermal, block) pair.
     ///
     /// Index for thermal `t`, block `b`: `thermal.start + t * n_blks + b`.
-    /// Empty when built via [`StageIndexer::new`].
     pub thermal: Range<usize>,
 
     /// Column range for anticipated-thermal commitment decisions, one stage-level
@@ -187,79 +110,30 @@ pub struct StageIndexer {
     ///
     /// The `cobre-io` semantic validator enforces `K_i <= T` for every
     /// anticipated plant, so at stage 0 every anticipated plant is active and
-    /// the range length equals [`Self::n_anticipated`].
+    /// the range length equals the anticipated-plant count.
     ///
-    /// Per-stage gating is computed by
-    /// [`anticipated_decision_active_at_stage`](Self::anticipated_decision_active_at_stage):
-    /// at stage `t`, plant `i` is active iff `t + K_i <= T`. Inactive columns
-    /// receive bounds `[0, 0]` in the LP build, matching the deficit-segment
-    /// pattern.
-    ///
-    /// Empty (`0..0`) when `n_anticipated == 0` or when built via
-    /// [`StageIndexer::new`].
+    /// This is a **control-region** column: its base rides the n_blks-dependent
+    /// `thermal.end`, so it is valid only at stages whose block count equals
+    /// stage 0's. The matching cut-target `anticipated_state_out` column lives in
+    /// the stage-invariant state region on [`StateLayout`](super::StateLayout).
     pub anticipated_decision: Range<usize>,
-
-    /// Column range for the anticipated-thermal outgoing-state variables,
-    /// one column per anticipated plant (stage-level, NOT per-block).
-    ///
-    /// Length: `n_anticipated`. Placed in the **stage-invariant state region**,
-    /// immediately after the [`Self::anticipated_state`] ring buffer and before
-    /// [`Self::z_inflow`], so that
-    /// `anticipated_state_out.start == anticipated_state.end` and its offset is
-    /// a pure function of `N`, `L`, `A`, `k_max` — independent of `n_blks` and
-    /// `n_thermals`. This is what makes it a sound cut TARGET: the global
-    /// stage-0 cut map resolves the matured anticipated slot here (via
-    /// `state_to_lp_column`'s Equal branch) onto the same column at every stage
-    /// regardless of per-stage block counts. Locating it in the control region
-    /// (at `anticipated_decision.end`, which rides the n_blks-dependent
-    /// `thermal.end`) would write the cut coefficient to the wrong column
-    /// whenever a stage's block count differed from stage 0's.
-    ///
-    /// Despite living in the state region, it is NOT a state-vector dimension
-    /// and does NOT contribute to [`Self::n_state`]. Together with the
-    /// `anticipated_state_out` definition row it is pinned to the corresponding
-    /// [`Self::anticipated_decision`] column by an equality constraint
-    /// (`anticipated_state_out[p] − decision_col[p] = 0`).
-    ///
-    /// Empty (`0..0`) when `n_anticipated == 0` or when built via
-    /// [`StageIndexer::new`].
-    pub anticipated_state_out: Range<usize>,
-
-    /// Per-plant `lead_stages` (`K_i`) for the anticipated thermals.
-    ///
-    /// Length [`Self::n_anticipated`]; indexed by anticipated-local position
-    /// (0-indexed within the anticipated subset). Empty when built via
-    /// [`StageIndexer::new`].
-    pub anticipated_lead_stages: Vec<usize>,
 
     /// Mapping from anticipated-local position to global thermal index.
     ///
-    /// Length [`Self::n_anticipated`]; `anticipated_thermal_indices[i]` is the
-    /// position within `system.thermals[]` of the i-th anticipated plant.
-    /// Parallel to [`Self::anticipated_lead_stages`]. Mirrors the FPHA
-    /// `fpha_hydro_indices` pattern. Empty when built via
-    /// [`StageIndexer::new`].
+    /// `anticipated_thermal_indices[i]` is the position within `system.thermals[]`
+    /// of the i-th anticipated plant. Read by the simulation-extraction
+    /// reverse-lookup builder and by `build_initial_state`. Empty when
+    /// `n_anticipated == 0`.
     pub anticipated_thermal_indices: Vec<usize>,
-
-    /// Reverse map: global thermal position → anticipated-local index.
-    ///
-    /// Inverse of [`Self::anticipated_thermal_indices`]: given a system-level
-    /// thermal position `sys_pos`, `anticipated_local_by_sys_pos[&sys_pos]`
-    /// yields the anticipated-local index (0-indexed within the anticipated
-    /// subset). Built once at construction for O(1) resolution in
-    /// `resolve_anticipated_decision`. Empty when `n_anticipated == 0`.
-    pub(crate) anticipated_local_by_sys_pos: HashMap<usize, usize>,
 
     /// Column range for forward line flow variables, one per (line, block) pair.
     ///
     /// Index for line `l`, block `b`: `line_fwd.start + l * n_blks + b`.
-    /// Empty when built via [`StageIndexer::new`].
     pub line_fwd: Range<usize>,
 
     /// Column range for reverse line flow variables, one per (line, block) pair.
     ///
     /// Index for line `l`, block `b`: `line_rev.start + l * n_blks + b`.
-    /// Empty when built via [`StageIndexer::new`].
     pub line_rev: Range<usize>,
 
     /// Column range for bus deficit variables, `B * S * K` columns total.
@@ -271,56 +145,44 @@ pub struct StageIndexer {
     /// Index for bus `b_idx`, segment `s`, block `blk`:
     /// `deficit.start + b_idx * max_deficit_segments * n_blks + s * n_blks + blk`.
     ///
-    /// Empty when built via [`StageIndexer::new`].
     pub deficit: Range<usize>,
 
     /// Maximum number of deficit segments across all buses (S).
     ///
     /// Used together with `deficit.start` to compute per-segment column indices.
-    /// Set to `0` when built via [`StageIndexer::new`]; both equipment
-    /// constructors ([`StageIndexer::with_equipment`] and
-    /// [`StageIndexer::with_equipment_and_evaporation`]) pass the caller-supplied
-    /// `counts.max_deficit_segments` through unchanged.
     pub max_deficit_segments: usize,
 
     /// Column range for bus excess variables, one per (bus, block) pair.
     ///
     /// Index for bus `b_idx`, block `blk`: `excess.start + b_idx * n_blks + blk`.
-    /// Empty when built via [`StageIndexer::new`].
     pub excess: Range<usize>,
 
     /// Number of operating blocks per stage (K).
     ///
-    /// Zero when built via [`StageIndexer::new`].
     pub n_blks: usize,
 
     /// Number of thermal units (T).
     ///
-    /// Zero when built via [`StageIndexer::new`].
     pub n_thermals: usize,
 
     /// Number of transmission lines (`L_n`).
     ///
-    /// Zero when built via [`StageIndexer::new`].
     pub n_lines: usize,
 
     /// Number of buses (B).
     ///
-    /// Zero when built via [`StageIndexer::new`].
     pub n_buses: usize,
 
     /// Row range for water balance constraints, one per operating hydro.
     ///
     /// Index for hydro `h`: `water_balance.start + h`.
     /// The dual of this row gives the marginal value of water (water value).
-    /// Empty when built via [`StageIndexer::new`].
     pub water_balance: Range<usize>,
 
     /// Row range for load balance constraints, one per (bus, block) pair.
     ///
     /// Index for bus `b_idx`, block `blk`: `load_balance.start + b_idx * n_blks + blk`.
     /// The RHS of these rows contains the load (MW) for each bus in each block.
-    /// Empty when built via [`StageIndexer::new`].
     pub load_balance: Range<usize>,
 
     /// Column range for inflow non-negativity slack variables `sigma_inf_h`.
@@ -330,8 +192,6 @@ pub struct StageIndexer {
     /// it absorbs negative inflow realisations and enters the water balance row
     /// with coefficient `+tau_total * M3S_TO_HM3`.
     ///
-    /// Empty (`0..0`) when `has_inflow_penalty == false` or when built via
-    /// [`StageIndexer::new`].
     pub inflow_slack: Range<usize>,
 
     /// Row range for inflow non-negativity constraint rows.
@@ -348,57 +208,46 @@ pub struct StageIndexer {
     /// `true` when `build_stage_templates` was called with an
     /// [`InflowNonNegativityMethod`](crate::inflow_method::InflowNonNegativityMethod)
     /// whose `has_slack_columns()` returns `true` and `n_hydros > 0`.
-    /// `false` otherwise (including when built via [`StageIndexer::new`]).
     pub has_inflow_penalty: bool,
 
     // ── FPHA column and row ranges ─────────────────────────────────────────
-    // Populated only by `with_equipment`; empty when built via `new`.
     /// Column range for FPHA generation variables, one per (`fpha_hydro`, block) pair.
     ///
     /// Index for FPHA hydro at local position `i`, block `b`:
     /// `generation.start + i * n_blks + b`.
-    /// Empty when no FPHA hydros exist or when built via [`StageIndexer::new`].
     pub generation: Range<usize>,
 
     /// Number of FPHA hydros in this stage.
     ///
-    /// Zero when built via [`StageIndexer::new`].
     pub n_fpha_hydros: usize,
 
     /// Mapping from FPHA local index to system hydro index.
     ///
     /// `fpha_hydro_indices[i]` is the system-level hydro position for FPHA hydro `i`.
-    /// Empty when no FPHA hydros exist or when built via [`StageIndexer::new`].
     pub fpha_hydro_indices: Vec<usize>,
 
     /// FPHA constraint row ranges per FPHA hydro.
     ///
     /// `fpha_rows[i]` is the [`FphaRowRange`] for FPHA hydro at local position `i`.
-    /// Empty when no FPHA hydros exist or when built via [`StageIndexer::new`].
     pub fpha_rows: Vec<FphaRowRange>,
 
     // ── Evaporation column and row indices ─────────────────────────────────
-    // Populated only by `with_equipment`; empty when built via `new`.
     /// Number of hydros with linearized evaporation at this stage.
     ///
-    /// Zero when built via [`StageIndexer::new`] or when no evaporation hydros exist.
     pub n_evap_hydros: usize,
 
     /// Mapping from evaporation local index to system hydro index.
     ///
     /// `evap_hydro_indices[i]` is the system-level hydro position for evaporation hydro `i`.
-    /// Empty when no evaporation hydros exist or when built via [`StageIndexer::new`].
     pub evap_hydro_indices: Vec<usize>,
 
     /// Per-evaporation-hydro column and row indices.
     ///
     /// `evap_indices[i]` is the [`EvaporationIndices`] for evaporation hydro at local
-    /// position `i`.  Empty when no evaporation hydros exist or when built via
-    /// [`StageIndexer::new`].
+    /// position `i`..
     pub evap_indices: Vec<EvaporationIndices>,
 
     // ── Withdrawal slack column ranges ─────────────────────────────────────
-    // Populated only by `with_equipment_and_evaporation`; empty when built via `new`.
     /// Column range for under-withdrawal slack (withdrew less than target).
     ///
     /// One slack per operating hydro, appended after the evaporation columns.
@@ -406,8 +255,6 @@ pub struct StageIndexer {
     /// the minimum water-withdrawal flow constraint.
     ///
     /// Allocated whenever `hydro_count > 0`, matching the `inflow_slack` pattern.
-    /// Empty (`0..0`) when `hydro_count == 0` or when built via
-    /// [`StageIndexer::new`].
     /// Layout: `withdrawal_slack_neg.start + h_idx`.
     pub withdrawal_slack_neg: Range<usize>,
 
@@ -419,61 +266,57 @@ pub struct StageIndexer {
 
     /// Whether withdrawal slack columns are present.
     ///
-    /// `true` when `with_equipment_and_evaporation` was called with
-    /// `hydro_count > 0`.  `false` otherwise (including when built via
-    /// [`StageIndexer::new`]).
+    /// `hydro_count > 0`; `false` otherwise (zero hydros).
     pub has_withdrawal: bool,
 
     // ── Operational violation slack column ranges ─────────────────────────
-    // Populated only by the full build path; empty (`0..0`) when built via `new`.
     /// Column range for outflow-below violation slacks, one per hydro per block.
     ///
     /// `outflow_below_slack.start + h * n_blks + blk` is the column for hydro `h`,
-    /// block `blk`.  Empty (`0..0`) when built via [`StageIndexer::new`].
+    /// block `blk`.
     pub outflow_below_slack: Range<usize>,
 
     /// Column range for outflow-above violation slacks, one per hydro per block.
     ///
     /// `outflow_above_slack.start + h * n_blks + blk` is the column for hydro `h`,
-    /// block `blk`.  Empty (`0..0`) when built via [`StageIndexer::new`].
+    /// block `blk`.
     pub outflow_above_slack: Range<usize>,
 
     /// Column range for turbine-below violation slacks, one per hydro per block.
     ///
     /// `turbine_below_slack.start + h * n_blks + blk` is the column for hydro `h`,
-    /// block `blk`.  Empty (`0..0`) when built via [`StageIndexer::new`].
+    /// block `blk`.
     pub turbine_below_slack: Range<usize>,
 
     /// Column range for generation-below violation slacks, one per hydro per block.
     ///
     /// `generation_below_slack.start + h * n_blks + blk` is the column for hydro `h`,
-    /// block `blk`.  Empty (`0..0`) when built via [`StageIndexer::new`].
+    /// block `blk`.
     pub generation_below_slack: Range<usize>,
 
     // ── Operational violation constraint row ranges ────────────────────────
-    // Populated only by the full build path; empty (`0..0`) when built via `new`.
     /// Row range for min-outflow constraint rows, one per hydro per block.
     ///
     /// `min_outflow_rows.start + h * n_blks + blk` is the row for hydro `h`,
-    /// block `blk`.  Empty (`0..0`) when built via [`StageIndexer::new`].
+    /// block `blk`.
     pub min_outflow_rows: Range<usize>,
 
     /// Row range for max-outflow constraint rows, one per hydro per block.
     ///
     /// `max_outflow_rows.start + h * n_blks + blk` is the row for hydro `h`,
-    /// block `blk`.  Empty (`0..0`) when built via [`StageIndexer::new`].
+    /// block `blk`.
     pub max_outflow_rows: Range<usize>,
 
     /// Row range for min-turbine constraint rows, one per hydro per block.
     ///
     /// `min_turbine_rows.start + h * n_blks + blk` is the row for hydro `h`,
-    /// block `blk`.  Empty (`0..0`) when built via [`StageIndexer::new`].
+    /// block `blk`.
     pub min_turbine_rows: Range<usize>,
 
     /// Row range for min-generation constraint rows, one per hydro per block.
     ///
     /// `min_generation_rows.start + h * n_blks + blk` is the row for hydro `h`,
-    /// block `blk`.  Empty (`0..0`) when built via [`StageIndexer::new`].
+    /// block `blk`.
     pub min_generation_rows: Range<usize>,
 
     /// Row range for anticipated-thermal fishing constraints.
@@ -494,7 +337,7 @@ pub struct StageIndexer {
     ///
     /// Equal to `min_generation_rows.end` when operational violations are
     /// active, or to `evap_rows_end` (= `fpha_row_cursor + n_evap_hydros`)
-    /// when they are not. Zero when built via [`StageIndexer::new`].
+    /// when they are not.
     ///
     /// Per-stage fishing row indices are computed as
     /// `lp_row = anticipated_fishing_start + local_idx_at_stage`.
@@ -503,43 +346,30 @@ pub struct StageIndexer {
     /// Whether operational violation slack columns are present.
     ///
     /// `true` when the full build path was used with `hydro_count > 0`.
-    /// `false` otherwise (including when built via [`StageIndexer::new`]).
     pub has_operational_violations: bool,
 
     // ── NCS presence flag ─────────────────────────────────────────────────
     // OWNER: set after construction by the NCS wiring in `setup`
-    // (`build_wired_indexer`) — NOT by `StageLayout::new`, which only reads
-    // indexer cursors. `false` for every `StageIndexer` constructor (`new`,
-    // `with_equipment`); the wiring sets it.
+    // (`build_wired_indexer`). The constructor leaves it `false`; the wiring sets it.
     //
     // This is a presence flag, never a column base: NCS columns are addressed
     // per-stage from `StageContext::ncs_col_starts[stage]` (and
     // `LbEvalSpec::ncs_generation` for the stage-0 lower bound), because a source
     // that commissions mid-horizon or a stage with a differing block count shifts
     // the NCS column base per stage. A single global base would address the wrong
-    // columns for such non-uniform geometries, so the indexer stores only whether
+    // columns for such non-uniform geometries, so the descriptor stores only whether
     // NCS columns exist, not where they start.
     /// Whether the study has NCS generation columns.
     ///
-    /// `true` when NCS entities are active. `false` when built via
-    /// [`StageIndexer::new`] or when no NCS entities are present, in which case
-    /// the forward, backward, and simulation NCS bound patches are guarded off.
+    /// `true` when NCS entities are active; `false` when no NCS entities are
+    /// present, in which case the forward, backward, and simulation NCS bound
+    /// patches are guarded off.
     pub has_ncs: bool,
 
-    // ── Z-inflow column and row ranges ────────────────────────────────────
-    // Populated by all constructors.  The z_inflow columns are auxiliary
-    // (NOT state variables); their primal values give the realized total
-    // inflow Z_t per hydro after solving.
-    /// Column range for realized-inflow variables `z_h`, one per hydro.
-    ///
-    /// These free columns (lower = -inf, upper = +inf, zero cost) represent the
-    /// total natural inflow `Z_t_h` at each hydro, defined by the z-inflow
-    /// equality constraints. After solving, `primal[z_inflow.start + h]` gives
-    /// the realized inflow for hydro h.
-    ///
-    /// Empty when `hydro_count == 0`.
-    pub z_inflow: Range<usize>,
-
+    // ── Z-inflow row range ────────────────────────────────────────────────
+    // The z_inflow *columns* are role-(a) and live on `StateLayout`; the z-inflow
+    // *rows* (the definition constraints, noise-patched per stage) are role-(b)
+    // geometry and stay here.
     /// Row range for z-inflow definition constraints, one per hydro.
     ///
     /// Each row defines: `z_h - sum_l[psi_l * lag_in[h,l]] = base_h + sigma_h * eta_h`
@@ -551,26 +381,8 @@ pub struct StageIndexer {
     /// Row index of the first z-inflow definition constraint.
     ///
     /// Used by `PatchBuffer::fill_z_inflow_patches` as the base offset for
-    /// Category 5 patches. Equal to `z_inflow_rows.start`.
+    /// Category 5 patches. Equal to `z_inflow_rows.start` (row 0).
     pub z_inflow_row_start: usize,
-
-    /// Indices of state dimensions whose cut coefficients can be nonzero.
-    ///
-    /// Storage indices `[0, N)` are always included. Lag indices `[N, N*(1+L))`
-    /// are included only when `lag < actual_ar_order[hydro]`. Hydros with AR
-    /// order < `max_par_order` have padded lag slots whose duals are
-    /// structurally zero.
-    ///
-    /// When empty (default), callers should treat all `n_state` indices as
-    /// nonzero (dense path). Use [`set_nonzero_mask`](Self::set_nonzero_mask) to
-    /// populate after construction when per-hydro AR orders are available.
-    pub nonzero_state_indices: Vec<usize>,
-
-    /// Precomputed `state_to_lp_column(j)` for every `j ∈ [0, n_state)`.
-    ///
-    /// Built once after the state layout is finalized; read on the
-    /// forward-pass cut-row hot path. Empty until finalized.
-    pub state_to_lp_column_map: Vec<usize>,
 }
 
 /// Equipment counts for constructing a [`StageIndexer`].
@@ -607,17 +419,17 @@ pub struct EquipmentCounts {
     /// Number of pumping stations.
     ///
     /// Accepted for structural symmetry with the other entity counts but **not
-    /// read** by [`StageIndexer::with_equipment_and_evaporation`]: the indexer
-    /// reserves no pumping column block. The real pumping-flow column block
-    /// (`n_pumping * n_blks`, block-major, reserved between the NCS region and
-    /// the generic-slack columns) is owned by `StageLayout`, which reads its
-    /// station count from `ctx.n_pumping`, not from this field.
+    /// read** by the geometry constructor: it reserves no pumping column block.
+    /// The real pumping-flow column block (`n_pumping * n_blks`, block-major,
+    /// reserved between the NCS region and the generic-slack columns) is owned by
+    /// `StageLayout`, which reads its station count from `ctx.n_pumping`, not from
+    /// this field.
     pub n_pumping: usize,
     /// Per-plant `lead_stages` (`K_i`) for the anticipated thermals.
     ///
     /// Length must equal `n_anticipated`. The maximum entry (when non-empty)
-    /// must equal `k_max`. Pass-through to
-    /// [`StageIndexer::anticipated_lead_stages`].
+    /// must equal `k_max`. Threaded into
+    /// [`StateLayout`](super::StateLayout)'s `anticipated_lead_stages`.
     pub anticipated_lead_stages: Vec<usize>,
     /// Mapping from anticipated-local position to global thermal index.
     ///
@@ -647,19 +459,18 @@ pub struct EvapConfig {
 impl StageIndexer {
     /// Return the [`BlockGrid`] address primitive for this stage's LP.
     ///
-    /// The grid carries this indexer's `n_blks` and `max_deficit_segments` — the
-    /// two stride constants the three block-stride shapes (flat block-major,
+    /// The grid carries this descriptor's `n_blks` and `max_deficit_segments` —
+    /// the two stride constants the three block-stride shapes (flat block-major,
     /// FPHA-plane, deficit 3-term) need beyond their per-call args. It is a cheap
-    /// `Copy` value, so both `StageLayout` consumers (which embed a
-    /// `StageIndexer`) and the `&StageIndexer` consumers (resolvers, extraction)
-    /// can obtain it without sharing a reference. Sourcing both constants from
-    /// this single owning indexer is what keeps the grid from disagreeing with
-    /// the LP it addresses; see [`BlockGrid`] for the per-shape contracts.
+    /// `Copy` value. Sourcing both constants from this single owning descriptor is
+    /// what keeps the grid from disagreeing with the LP it addresses; see
+    /// [`BlockGrid`] for the per-shape contracts.
     ///
-    /// This grid carries the indexer's own `n_blks` (the global count wired once
-    /// from stage 0). For a per-stage fill whose block count differs from stage 0
-    /// — the load-balance RHS patch — construct the grid from the per-stage count
-    /// with [`BlockGrid::new`] instead, or the row stride addresses the wrong row.
+    /// This grid carries the descriptor's own `n_blks` (the global count wired
+    /// once from stage 0). For a per-stage fill whose block count differs from
+    /// stage 0 — the load-balance RHS patch — construct the grid from the
+    /// per-stage count with [`BlockGrid::new`] instead, or the row stride
+    /// addresses the wrong row.
     #[inline]
     #[must_use]
     pub fn block_grid(&self) -> BlockGrid {
@@ -683,73 +494,6 @@ impl StageIndexer {
         );
         &self.evap_indices[local_idx]
     }
-
-    /// First column of the FPHA generation block, even when that block is empty.
-    ///
-    /// The public [`Self::generation`] range is normalised to `0..0` when no FPHA
-    /// hydros exist, so its `.start` is `0` rather than the real cursor. This
-    /// returns the cursor (`inflow_slack.end` when the inflow penalty is active,
-    /// otherwise `excess.end`), matching the `generation_start` derivation in the
-    /// constructor — never `0` for a real LP.
-    #[must_use]
-    pub(crate) fn generation_col_start(&self) -> usize {
-        if self.has_inflow_penalty {
-            self.inflow_slack.end
-        } else {
-            self.excess.end
-        }
-    }
-
-    /// First column of the evaporation block, even when that block is empty.
-    ///
-    /// The public [`Self::evap_indices`] list is empty when no evaporation hydros
-    /// exist, so it exposes no cursor. This returns the cursor
-    /// (`generation_col_start + n_fpha_hydros * n_blks`, i.e. the FPHA generation
-    /// block end), matching the `evap_col_start` derivation in the constructor.
-    #[must_use]
-    pub(crate) fn evap_col_start(&self) -> usize {
-        self.generation_col_start() + self.n_fpha_hydros * self.n_blks
-    }
-
-    /// First column after the operational-violation slack region when no hydros
-    /// are present.
-    ///
-    /// With `hydro_count == 0` the withdrawal and operational-violation slack
-    /// blocks are all empty, so the NCS region and every withdrawal/operational
-    /// column start coincide at the evaporation-column cursor. Returns
-    /// `evap_col_start()`: the single cursor those empty regions share. Reading a
-    /// stale `> 0`-branch cursor here would misalign the empty-hydro layout while
-    /// still compiling, which this accessor's single ownership prevents.
-    #[must_use]
-    pub(crate) fn post_equipment_col_start(&self) -> usize {
-        self.evap_col_start()
-    }
-
-    /// First row after the FPHA constraint block, even when that block is empty.
-    ///
-    /// The public [`Self::fpha_rows`] list is empty when no FPHA hydros exist, so
-    /// it exposes no end cursor. This returns the cursor
-    /// (`load_balance.end + n_blks * sum(planes_per_block)`, i.e. the row at which
-    /// evaporation rows begin), matching the `fpha_row_cursor` derivation in the
-    /// constructor.
-    #[must_use]
-    pub(crate) fn fpha_rows_end(&self) -> usize {
-        let total_planes: usize = self.fpha_rows.iter().map(|r| r.planes_per_block).sum();
-        self.load_balance.end + self.n_blks * total_planes
-    }
-
-    /// First row after the evaporation row block, where the operational-violation
-    /// row blocks begin when no hydros are present.
-    ///
-    /// With `hydro_count == 0` the operational-violation row blocks are all empty,
-    /// so every operational-violation row start coincides at the row immediately
-    /// after the evaporation block: `fpha_rows_end() + n_evap_hydros`. Reading a
-    /// stale `> 0`-branch row cursor here would misalign the empty-hydro row layout
-    /// while still compiling, which this accessor's single ownership prevents.
-    #[must_use]
-    pub(crate) fn post_equipment_row_start(&self) -> usize {
-        self.fpha_rows_end() + self.n_evap_hydros
-    }
 }
 
 // StageIndexer contains only Send + Sync types (Range<usize>, usize, Vec<usize>,
@@ -767,16 +511,22 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::{EvaporationIndices, FphaRowRange};
-    use crate::indexer::{EquipmentCounts, StageIndexer};
+    use crate::indexer::StageIndexer;
+    use crate::indexer::test_fixtures::{eq, fpha};
 
     fn indexer_3_2() -> StageIndexer {
-        StageIndexer::new(3, 2)
+        // N=3, L=2, T=1, Ln=1, B=2, K=1 — a representative role-(b) geometry.
+        StageIndexer::with_equipment_and_evaporation(
+            &eq(3, 2, 1, 1, 2, 1, false),
+            &fpha(vec![], vec![]),
+            &crate::indexer::test_fixtures::evap(vec![]),
+        )
     }
 
     // EquipmentCounts::default() yields all-zero scalars and empty vecs.
     #[test]
     fn equipment_counts_default_is_all_zero() {
-        let counts = EquipmentCounts::default();
+        let counts = crate::indexer::EquipmentCounts::default();
         assert_eq!(counts.hydro_count, 0);
         assert_eq!(counts.max_par_order, 0);
         assert_eq!(counts.n_thermals, 0);
@@ -796,8 +546,10 @@ mod tests {
     fn clone_and_debug() {
         let idx = indexer_3_2();
         let cloned = idx.clone();
-        assert_eq!(cloned.theta, idx.theta);
-        assert_eq!(cloned.n_state, idx.n_state);
+        // Role-(b) geometry fields survive a clone.
+        assert_eq!(cloned.turbine, idx.turbine);
+        assert_eq!(cloned.thermal, idx.thermal);
+        assert_eq!(cloned.n_blks, idx.n_blks);
 
         let debug_str = format!("{idx:?}");
         assert!(debug_str.contains("StageIndexer"));

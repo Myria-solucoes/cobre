@@ -515,15 +515,16 @@ fn three_stage_k2_anticipated_cut_coefficient_propagates_correctly() {
     // For n_hydros = 0 and max_par_order = 0 the block starts at 0, with
     // layout `start + slot * n_anticipated + plant`. Here n_anticipated = 1
     // and plant = 0, so slot 0 lives at `start + 0` and slot 1 at `start + 1`.
-    let indexer = setup.stage_indexer();
-    let ant_state_start = indexer.anticipated_state.start;
+    let _indexer = setup.stage_indexer();
+    let state = setup.stage_state();
+    let ant_state_start = state.anticipated_state.start;
     let slot0_idx = ant_state_start; // slot 0, plant 0
     let slot1_idx = ant_state_start + 1; // slot 1, plant 0
     assert_eq!(
-        indexer.n_anticipated, 1,
+        state.n_anticipated, 1,
         "fixture must have exactly one anticipated thermal",
     );
-    assert_eq!(indexer.k_max, K_MAX, "fixture must have k_max = {K_MAX}");
+    assert_eq!(state.k_max, K_MAX, "fixture must have k_max = {K_MAX}");
     assert_eq!(
         ant_state_start, 0,
         "with n_hydros=0 and max_par_order=0, anticipated_state.start must \
@@ -554,11 +555,11 @@ fn three_stage_k2_anticipated_cut_coefficient_propagates_correctly() {
 
     assert_eq!(
         coefficients.len(),
-        indexer.anticipated_state.end,
+        state.anticipated_state.end,
         "coefficient slice length must equal n_state (= anticipated_state.end \
          in this no-hydro fixture); got len={}, expected={}",
         coefficients.len(),
-        indexer.anticipated_state.end,
+        state.anticipated_state.end,
     );
 
     // ── AC-3: coefficient at slot 1 ─────────────────────────────────────────

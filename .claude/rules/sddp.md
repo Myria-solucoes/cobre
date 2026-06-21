@@ -29,8 +29,8 @@ Incoming state is pinned with `set_col_bounds` on the incoming-state LP column.
 There is no state-fixing row range in the LP; incoming state is pinned entirely
 via column bounds. Always resolve the LP
 column — for both pinning and dual extraction — via
-`StageIndexer::state_to_lp_incoming_column`; never assume a fixing-row index.
-Read: `lp/indexer/state_mapping.rs`.
+`StateLayout::state_to_lp_incoming_column`; never assume a fixing-row index.
+Read: `lp/indexer/state_layout.rs`.
 
 ## FPHA uses average storage
 

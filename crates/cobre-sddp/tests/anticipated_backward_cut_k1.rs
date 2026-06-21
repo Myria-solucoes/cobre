@@ -7,7 +7,7 @@
 //!   regular thermal (cost `c_reg`, max `max_gen_reg`) at a single bus.
 //! - Load `D_0` at stage 0, `D_1` at stage 1; single one-hour block per stage.
 //! - `max_par_order = 0`, so `n_state = K_max = 1` and the anticipated-state
-//!   index inside the state vector equals `indexer.anticipated_state.start = 0`.
+//!   index inside the state vector equals `state.anticipated_state.start = 0`.
 //!
 //! The LP-builder divides every non-theta objective coefficient by
 //! `COST_SCALE_FACTOR = K = 1_000` (the `lp::builder` `COST_SCALE_FACTOR`
@@ -464,13 +464,13 @@ fn two_stage_k1_anticipated_cut_coefficient_matches_analytical() {
 
     // Locate the anticipated_state index inside the state vector.
     // For n_hydros = 0 and max_par_order = 0 this is `0` by construction.
-    let indexer = setup.stage_indexer();
-    let ant_state_idx = indexer.anticipated_state.start;
+    let state = setup.stage_state();
+    let ant_state_idx = state.anticipated_state.start;
     assert_eq!(
-        indexer.n_anticipated, 1,
+        state.n_anticipated, 1,
         "fixture must have exactly one anticipated thermal",
     );
-    assert_eq!(indexer.k_max, K_MAX, "fixture must have k_max = {K_MAX}");
+    assert_eq!(state.k_max, K_MAX, "fixture must have k_max = {K_MAX}");
     assert_eq!(
         ant_state_idx, 0,
         "with n_hydros=0 and max_par_order=0, anticipated_state.start must be 0; got {ant_state_idx}",
@@ -484,7 +484,7 @@ fn two_stage_k1_anticipated_cut_coefficient_matches_analytical() {
         .expect("AC-3: exactly one active cut must be retrievable from stage 0 pool");
     assert_eq!(
         coefficients.len(),
-        indexer.anticipated_state.end,
+        state.anticipated_state.end,
         "coefficient slice length must equal n_state",
     );
 

@@ -65,7 +65,7 @@ use crate::{
     error::SddpError,
     horizon_mode::HorizonMode,
     hydro_models::{EvaporationModel, PrepareHydroModelsResult, ResolvedProductionModel},
-    indexer::StageIndexer,
+    indexer::{StageIndexer, StateLayout},
     lp_builder::build_stage_templates,
     risk_measure::RiskMeasure,
     simulation::EntityCounts,
@@ -271,7 +271,9 @@ impl StudySetup {
     /// ranks). It performs the expensive computation steps that cannot be serialised:
     ///
     /// 1. `build_stage_templates` — constructs LP skeletons for each stage
-    /// 2. `StageIndexer::with_equipment` — computes LP column/row offsets
+    /// 2. `StateLayout::new` + `StageIndexer::with_equipment_and_evaporation` —
+    ///    compute the role-(a) state column/cache layout and the role-(b)
+    ///    equipment column/row offsets
     /// 3. `build_initial_state` — extracts initial storage and past inflows from system IC
     /// 4. `max_iterations_from_rules` — sizes the FCF cut pool
     /// 5. `FutureCostFunction::new` — pre-allocates cut storage
@@ -342,7 +344,7 @@ impl StudySetup {
             &scalar_parameters,
         )?;
 
-        let indexer = build_wired_indexer(
+        let (indexer, state_layout) = build_wired_indexer(
             system,
             &stage_templates,
             inflow_method,
@@ -350,14 +352,14 @@ impl StudySetup {
             &stochastic,
         );
 
-        let initial_state = build_initial_state(system, &indexer);
+        let initial_state = build_initial_state(system, &indexer, &state_layout);
 
         let n_stages = stage_templates.templates.len();
         let max_iterations = max_iterations_from_rules(&stopping_rule_set);
         let fcf_capacity_iterations = max_iterations.saturating_add(1);
         let fcf = FutureCostFunction::new(
             n_stages,
-            indexer.n_state,
+            state_layout.n_state,
             forward_passes,
             fcf_capacity_iterations,
             &vec![0; n_stages],
@@ -434,6 +436,7 @@ impl StudySetup {
             stage_data: stage_data::StageData {
                 stage_templates,
                 indexer,
+                state: state_layout,
                 stages,
                 entity_counts,
                 pumping_consumption_mw_per_m3s,
@@ -675,20 +678,24 @@ fn build_energy_and_templates(
     })
 }
 
-/// Build the fully-wired [`StageIndexer`] from the stage-0 LP layout.
+/// Build the fully-wired [`StageIndexer`] and the canonical [`StateLayout`]
+/// from the stage-0 LP layout.
 ///
 /// Derives equipment counts, FPHA/evaporation column layouts, and the
 /// anticipated-thermal lead-stage map from the system and the (representative)
 /// stage-0 template, wires the NCS column range from the LP builder's stage-0
 /// layout, and sets the cut sparse-mask non-zero pattern from the PAR effective
-/// lag counts. All inputs are read-only; the returned indexer owns its layout.
+/// lag counts. The returned [`StateLayout`] is built from the same state
+/// dimensions and effective lag counts that finalize the indexer's role-(a)
+/// caches, so it is byte-identical to the role-(a) embedded in the indexer. All
+/// inputs are read-only; the returned indexer owns its full layout.
 fn build_wired_indexer(
     system: &System,
     stage_templates: &crate::lp_builder::StageTemplates,
     inflow_method: crate::InflowNonNegativityMethod,
     hydro_models: &PrepareHydroModelsResult,
     stochastic: &StochasticContext,
-) -> StageIndexer {
+) -> (StageIndexer, StateLayout) {
     let stage_templates_ref = &stage_templates.templates;
     // `n_blks_stage0` is the single global block count for the whole study: it is
     // read from stage 0 and fed to the one global indexer below, which strides its
@@ -767,38 +774,42 @@ fn build_wired_indexer(
     // `StageContext::ncs_col_starts`, never from this global indexer.
     indexer.has_ncs = !stage_templates.ncs_col_starts.is_empty();
 
-    // z-inflow column and row ranges are set by StageIndexer::new at
-    // fixed offset N*(1+L), no per-stage wiring needed.
+    // z-inflow lives at the fixed offset N*(1+L): the column range is owned by
+    // `StateLayout` (role a), the row range by `StageIndexer`'s
+    // `with_equipment_and_evaporation` (role b); no per-stage wiring needed.
 
-    // Build the per-hydro lag-state-slot count for the cut sparse mask.
-    // When PAR(p)-A annual is active on a hydro, this is `max_par_order`
-    // (the widened psi stride); otherwise it is the classical AR order.
-    // Using `par.order(h)` here would silently truncate the cut row's state
-    // coefficients on lag slots that carry the annual `ψ̂/12` term and
-    // produce over-estimating cuts.
-    // Populate the cut sparse mask unconditionally so every production study —
-    // including storage-only (mask = [0, n_state) ascending) and pure-thermal
-    // (n_state == 0 → empty mask) — has a mask. The forward-pass cut-row loop is
-    // single-path (mask-driven); it relies on the mask always being populated.
-    {
+    // Per-hydro lag-state-slot count for the cut sparse mask. When PAR(p)-A annual
+    // is active on a hydro this is `max_par_order` (the widened psi stride);
+    // otherwise it is the classical AR order. Using `par.order(h)` here would
+    // silently truncate the cut row's state coefficients on lag slots that carry
+    // the annual `ψ̂/12` term and produce over-estimating cuts.
+    let effective_lag_counts: Vec<usize> = if eq_counts.max_par_order > 0 {
         let par = stochastic.par();
-        let effective_lag_counts: Vec<usize> = if indexer.max_par_order > 0 {
-            (0..par.n_hydros())
-                .map(|h| par.effective_lag_count(h))
-                .collect()
-        } else {
-            vec![0; indexer.hydro_count]
-        };
-        // Clone to release the immutable borrow on `indexer` before the
-        // mutable `set_nonzero_mask` call below.
-        let anticipated_k: Vec<usize> = indexer.anticipated_lead_stages.clone();
-        indexer.set_nonzero_mask(&effective_lag_counts, &anticipated_k);
-    }
-    // Precompute state_to_lp_column(j) from the now-final state layout, in the
-    // same place as the mask so both layout-derived caches stay in lockstep.
-    indexer.finalize_state_column_map();
+        (0..par.n_hydros())
+            .map(|h| par.effective_lag_count(h))
+            .collect()
+    } else {
+        vec![0; eq_counts.hydro_count]
+    };
 
-    indexer
+    // Build the single canonical `StateLayout` (role (a)) from the state
+    // dimensions and per-hydro effective lag counts. `StateLayout::new` finalizes
+    // both layout-derived caches (`set_nonzero_mask` → `finalize_state_column_map`)
+    // in its constructor — populating the mask unconditionally so every production
+    // study (storage-only ⇒ [0, n_state) ascending; pure-thermal ⇒ empty) has a
+    // finalized mask for the single-path mask-driven cut-row loop. `StateLayout`
+    // is the sole role-(a) owner; the role-(b) geometry descriptor `indexer`
+    // carries no state-vector caches.
+    let state = StateLayout::new(
+        eq_counts.hydro_count,
+        eq_counts.max_par_order,
+        n_anticipated,
+        k_max,
+        eq_counts.anticipated_lead_stages.clone(),
+        &effective_lag_counts,
+    );
+
+    (indexer, state)
 }
 
 /// Grouped output of [`precompute_lag_data`].
@@ -1132,8 +1143,8 @@ fn build_pumping_consumption(system: &System) -> Vec<f64> {
 ///
 /// Each `HydroStorage` entry in `initial_conditions.storage` is matched to
 /// its positional index among the system's hydros (both sorted by `hydro_id`).
-fn build_initial_state(system: &System, indexer: &StageIndexer) -> Vec<f64> {
-    let mut state = vec![0.0_f64; indexer.n_state];
+fn build_initial_state(system: &System, indexer: &StageIndexer, layout: &StateLayout) -> Vec<f64> {
+    let mut state = vec![0.0_f64; layout.n_state];
     let hydros = system.hydros();
     let ic = system.initial_conditions();
 
@@ -1144,13 +1155,13 @@ fn build_initial_state(system: &System, indexer: &StageIndexer) -> Vec<f64> {
         }
     }
 
-    if indexer.max_par_order > 0 {
-        let n_h = indexer.hydro_count;
+    if layout.max_par_order > 0 {
+        let n_h = layout.hydro_count;
         for pi in &ic.past_inflows {
             if let Ok(idx) = hydros.binary_search_by_key(&pi.hydro_id.0, |h| h.id.0) {
-                let n_lags = pi.values_m3s.len().min(indexer.max_par_order);
+                let n_lags = pi.values_m3s.len().min(layout.max_par_order);
                 for lag in 0..n_lags {
-                    let slot = indexer.inflow_lags.start + lag * n_h + idx;
+                    let slot = layout.inflow_lags.start + lag * n_h + idx;
                     state[slot] = pi.values_m3s[lag];
                 }
             }
@@ -1165,15 +1176,15 @@ fn build_initial_state(system: &System, indexer: &StageIndexer) -> Vec<f64> {
     // Padding slots [K_i, k_max) must stay zero (enforced by clamping to K_i
     // and debug_assert). The ring-buffer logic in noise.rs and indexer.rs
     // assumes padding slots are zero.
-    if indexer.n_anticipated > 0 && indexer.k_max > 0 {
+    if layout.n_anticipated > 0 && layout.k_max > 0 {
         debug_assert_eq!(
             indexer.anticipated_thermal_indices.len(),
-            indexer.n_anticipated,
+            layout.n_anticipated,
             "anticipated_thermal_indices length must equal n_anticipated",
         );
         let thermals = system.thermals();
-        let n_ant = indexer.n_anticipated;
-        let ant_start = indexer.anticipated_state.start;
+        let n_ant = layout.n_anticipated;
+        let ant_start = layout.anticipated_state.start;
         for history in &ic.past_anticipated_commitments {
             // Resolve global thermal index via binary search on EntityId.
             // Both system.thermals() and past_anticipated_commitments are
@@ -1199,7 +1210,7 @@ fn build_initial_state(system: &System, indexer: &StageIndexer) -> Vec<f64> {
             // K_i is the per-plant lead time; clamp to K_i (not k_max) to
             // prevent over-long input from corrupting padding slots.
             // cobre-io validator enforces values_mw.len() == K_i in production.
-            let k_i = indexer.anticipated_lead_stages[local_idx];
+            let k_i = layout.anticipated_lead_stages[local_idx];
             let n_slots = history.values_mw.len().min(k_i);
             for slot in 0..n_slots {
                 let off = ant_start + slot * n_ant + local_idx;
@@ -1208,12 +1219,12 @@ fn build_initial_state(system: &System, indexer: &StageIndexer) -> Vec<f64> {
             // Padding-slot invariant: [K_i, k_max) must remain 0.0 to prevent
             // ring-buffer corruption and LP infeasibility.
             #[allow(clippy::float_cmp)]
-            for slot in k_i..indexer.k_max {
+            for slot in k_i..layout.k_max {
                 let off = ant_start + slot * n_ant + local_idx;
                 debug_assert_eq!(
                     state[off], 0.0,
                     "padding slot must be zero: plant local_idx={local_idx}, slot={slot}, K_i={k_i}, k_max={}",
-                    indexer.k_max
+                    layout.k_max
                 );
             }
         }
@@ -1232,7 +1243,7 @@ mod tests {
     use crate::hydro_models::{
         PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel,
     };
-    use crate::indexer::StageIndexer;
+    use crate::indexer::{StageIndexer, StateLayout};
 
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, HydroStageBounds,
@@ -1926,7 +1937,7 @@ mod tests {
         )
         .expect("setup");
 
-        let n_state = setup.stage_data.indexer.n_state;
+        let n_state = setup.stage_data.state.n_state;
         let coefficients = vec![1.0_f64; n_state];
         setup.fcf.add_cut(0, 0, 0, 42.0, &coefficients);
         assert_eq!(setup.fcf.total_active_cuts(), 1);
@@ -2097,7 +2108,7 @@ mod tests {
             "horizon num_stages mismatch"
         );
         assert_eq!(
-            ctx.indexer.n_state, setup.stage_data.indexer.n_state,
+            ctx.state.n_state, setup.stage_data.state.n_state,
             "indexer n_state mismatch"
         );
         assert_eq!(
@@ -3257,9 +3268,28 @@ mod tests {
         );
     }
 
-    /// Build a `StageIndexer` for lag tests: N hydros, L lags, no equipment columns.
+    /// Build a role-(b) `StageIndexer` for lag tests: N hydros, L lags, no
+    /// equipment columns beyond the empty defaults.
     fn indexer_for_lag_test(hydro_count: usize, max_par_order: usize) -> StageIndexer {
-        StageIndexer::new(hydro_count, max_par_order)
+        crate::indexer::test_fixtures::geom(hydro_count, max_par_order)
+    }
+
+    /// Build the role-(a) `StateLayout` matching [`indexer_for_lag_test`].
+    fn layout_for_lag_test(hydro_count: usize, max_par_order: usize) -> StateLayout {
+        crate::indexer::test_fixtures::state_layout(hydro_count, max_par_order)
+    }
+
+    /// Build the role-(a) `StateLayout` matching [`indexer_with_anticipated`]
+    /// (1 hydro, 0 lags, `n_anticipated` plants with the given per-plant K).
+    fn layout_with_anticipated(n_anticipated: usize, k_values: &[usize]) -> StateLayout {
+        let k_max = k_values.iter().copied().max().unwrap_or(0);
+        crate::indexer::test_fixtures::state_layout_full(
+            1,
+            0,
+            n_anticipated,
+            k_max,
+            k_values.to_vec(),
+        )
     }
 
     /// Build a 2-hydro system (IDs 1 and 2) with `n_stages` study stages and
@@ -3521,14 +3551,15 @@ mod tests {
         let system =
             minimal_system_2_hydros_with_past_inflows(1, vec![600.0, 500.0], vec![200.0, 100.0]);
         let indexer = indexer_for_lag_test(2, 2);
+        let layout = layout_for_lag_test(2, 2);
 
-        let state = build_initial_state(&system, &indexer);
+        let state = build_initial_state(&system, &indexer, &layout);
 
         // State layout: storage(0..2), lags(2..6) in lag-major order.
         // Lag-major: slot = s + lag * N + h, where N = 2.
         // lag0_h0 = 600.0 at s+0, lag0_h1 = 200.0 at s+1,
         // lag1_h0 = 500.0 at s+2, lag1_h1 = 100.0 at s+3.
-        let s = indexer.inflow_lags.start;
+        let s = layout.inflow_lags.start;
         assert!(
             (state[s] - 600.0).abs() < 1e-10,
             "lag0 hydro 0: expected 600.0, got {}",
@@ -3551,7 +3582,7 @@ mod tests {
         );
         assert_eq!(
             state.len(),
-            indexer.n_state,
+            layout.n_state,
             "state length must equal n_state"
         );
     }
@@ -3563,10 +3594,11 @@ mod tests {
 
         let system = minimal_system(2);
         let indexer = indexer_for_lag_test(1, 3);
+        let layout = layout_for_lag_test(1, 3);
 
-        let state = build_initial_state(&system, &indexer);
+        let state = build_initial_state(&system, &indexer, &layout);
 
-        let s = indexer.inflow_lags.start;
+        let s = layout.inflow_lags.start;
         for l in 0..3 {
             assert!(
                 state[s + l].abs() < 1e-10,
@@ -3592,10 +3624,11 @@ mod tests {
             minimal_system(2)
         };
         let indexer = indexer_for_lag_test(1, 2);
+        let layout = layout_for_lag_test(1, 2);
 
-        let state = build_initial_state(&system, &indexer);
+        let state = build_initial_state(&system, &indexer, &layout);
 
-        let s = indexer.inflow_lags.start;
+        let s = layout.inflow_lags.start;
         assert!(
             state[s].abs() < 1e-10,
             "lag 0 should be 0.0 when past_inflows is absent, got {}",
@@ -3675,15 +3708,16 @@ mod tests {
 
         let system = minimal_system(2);
         let indexer = indexer_for_lag_test(1, 0);
+        let layout = layout_for_lag_test(1, 0);
 
         // n_state = N*(1+L) = 1*(1+0) = 1
-        assert_eq!(indexer.n_state, 1);
+        assert_eq!(layout.n_state, 1);
         assert!(
-            indexer.inflow_lags.is_empty(),
+            layout.inflow_lags.is_empty(),
             "inflow_lags range should be empty for L=0"
         );
 
-        let state = build_initial_state(&system, &indexer);
+        let state = build_initial_state(&system, &indexer, &layout);
 
         assert_eq!(state.len(), 1, "state length must equal n_state=1");
     }
@@ -3987,16 +4021,17 @@ mod tests {
 
         let system = minimal_system(2);
         let indexer = indexer_for_lag_test(1, 0);
+        let layout = layout_for_lag_test(1, 0);
 
         // n_anticipated == 0; anticipated_state range is 0..0.
-        assert_eq!(indexer.n_anticipated, 0);
-        assert!(indexer.anticipated_state.is_empty());
+        assert_eq!(layout.n_anticipated, 0);
+        assert!(layout.anticipated_state.is_empty());
 
-        let state = build_initial_state(&system, &indexer);
+        let state = build_initial_state(&system, &indexer, &layout);
 
         assert_eq!(
             state.len(),
-            indexer.n_state,
+            layout.n_state,
             "state length must equal n_state"
         );
         // All slots are 0.0 — storage IC is empty in minimal_system.
@@ -4027,15 +4062,16 @@ mod tests {
 
         // indexer: 1 hydro, 0 lags, 1 anticipated thermal (global idx 0), k_max=2.
         let indexer = indexer_with_anticipated(1, &[2], &[0]);
+        let layout = layout_with_anticipated(1, &[2]);
 
-        let state = build_initial_state(&system, &indexer);
+        let state = build_initial_state(&system, &indexer, &layout);
 
         assert_eq!(
             state.len(),
-            indexer.n_state,
+            layout.n_state,
             "state length must equal n_state"
         );
-        let ant_start = indexer.anticipated_state.start;
+        let ant_start = layout.anticipated_state.start;
         assert!(
             (state[ant_start] - 50.0).abs() < 1e-10,
             "slot 0 expected 50.0, got {}",
@@ -4082,18 +4118,19 @@ mod tests {
         //   anticipated_lead_stages     = [2, 3]
         //   k_max                       = 3
         let indexer = indexer_with_anticipated(2, &[2, 3], &[0, 1]);
+        let layout = layout_with_anticipated(2, &[2, 3]);
 
-        let state = build_initial_state(&system, &indexer);
+        let state = build_initial_state(&system, &indexer, &layout);
 
         assert_eq!(
             state.len(),
-            indexer.n_state,
+            layout.n_state,
             "state length must equal n_state"
         );
         // n_ant = 2, k_max = 3.  Slot-major offsets from ant_start:
         //   (slot, plant) → offset = slot * n_ant + plant
         //   (0,0)→0, (0,1)→1, (1,0)→2, (1,1)→3, (2,0)→4, (2,1)→5
-        let s = indexer.anticipated_state.start;
+        let s = layout.anticipated_state.start;
 
         assert!(
             (state[s] - 10.0).abs() < 1e-10,
@@ -4136,16 +4173,17 @@ mod tests {
         let system = system_with_anticipated_thermals(&[2], vec![]);
 
         let indexer = indexer_with_anticipated(1, &[2], &[0]);
+        let layout = layout_with_anticipated(1, &[2]);
 
-        let state = build_initial_state(&system, &indexer);
+        let state = build_initial_state(&system, &indexer, &layout);
 
         assert_eq!(
             state.len(),
-            indexer.n_state,
+            layout.n_state,
             "state length must equal n_state"
         );
-        let ant_start = indexer.anticipated_state.start;
-        let ant_end = indexer.anticipated_state.end;
+        let ant_start = layout.anticipated_state.start;
+        let ant_end = layout.anticipated_state.end;
         for (i, &v) in state[ant_start..ant_end].iter().enumerate() {
             assert!(
                 v.abs() < 1e-10,
@@ -4171,16 +4209,17 @@ mod tests {
         let system = system_with_anticipated_thermals(&[2], past_commits);
 
         let indexer = indexer_with_anticipated(1, &[2], &[0]);
+        let layout = layout_with_anticipated(1, &[2]);
 
-        let state = build_initial_state(&system, &indexer);
+        let state = build_initial_state(&system, &indexer, &layout);
 
         assert_eq!(
             state.len(),
-            indexer.n_state,
+            layout.n_state,
             "state length must equal n_state"
         );
-        let ant_start = indexer.anticipated_state.start;
-        let ant_end = indexer.anticipated_state.end;
+        let ant_start = layout.anticipated_state.start;
+        let ant_end = layout.anticipated_state.end;
         for (i, &v) in state[ant_start..ant_end].iter().enumerate() {
             assert!(
                 v.abs() < 1e-10,
@@ -4223,18 +4262,19 @@ mod tests {
         let system = system_with_anticipated_thermals(&[1, 2], past_commits);
         // n_anticipated=2, k_values=[1, 2] -> k_max=2.
         let indexer = indexer_with_anticipated(2, &[1, 2], &[0, 1]);
+        let layout = layout_with_anticipated(2, &[1, 2]);
 
-        let state = build_initial_state(&system, &indexer);
+        let state = build_initial_state(&system, &indexer, &layout);
 
         assert_eq!(
             state.len(),
-            indexer.n_state,
+            layout.n_state,
             "state length must equal n_state"
         );
-        let s = indexer.anticipated_state.start;
-        let n_ant = indexer.n_anticipated;
+        let s = layout.anticipated_state.start;
+        let n_ant = layout.n_anticipated;
         assert_eq!(n_ant, 2);
-        assert_eq!(indexer.k_max, 2);
+        assert_eq!(layout.k_max, 2);
 
         // slot 0, plant 0 -> 100.0
         assert!(
@@ -6082,14 +6122,370 @@ mod tests {
         .expect("setup");
 
         assert_eq!(
-            setup.stage_data.indexer.n_anticipated, 1,
+            setup.stage_data.state.n_anticipated, 1,
             "expected n_anticipated == 1"
         );
-        assert_eq!(setup.stage_data.indexer.k_max, 2, "expected k_max == 2");
+        assert_eq!(setup.stage_data.state.k_max, 2, "expected k_max == 2");
         assert_eq!(
-            setup.stage_data.indexer.anticipated_lead_stages,
+            setup.stage_data.state.anticipated_lead_stages,
             vec![2],
             "expected anticipated_lead_stages == [2]"
+        );
+    }
+
+    /// Assert the canonical `StageData.state` role-(a) layout is internally
+    /// consistent and finalized, and that it agrees with a reference
+    /// [`StateLayout`] built independently from the same state-vector dimensions.
+    ///
+    /// The role-(a) concern lives solely on `StateLayout`; the role-(b)
+    /// `StageData.indexer` carries none of it, so there is no indexer half to
+    /// compare against. This checks that `build_wired_indexer`'s `StateLayout`
+    /// finalizes both caches and reproduces a fresh `StateLayout::new` over the
+    /// same `(N, L, A, k_max, leads)` byte-for-byte — the property the
+    /// single-owner extraction guarantees.
+    fn assert_state_layout_finalized(state: &StateLayout) {
+        assert_eq!(
+            state.state_to_lp_column_map.len(),
+            state.n_state,
+            "state_to_lp_column_map must be finalized to n_state length"
+        );
+        let reference = StateLayout::new(
+            state.hydro_count,
+            state.max_par_order,
+            state.n_anticipated,
+            state.k_max,
+            state.anticipated_lead_stages.clone(),
+            &vec![state.max_par_order; state.hydro_count],
+        );
+        assert_eq!(
+            state.state_to_lp_column_map, reference.state_to_lp_column_map,
+            "state_to_lp_column_map must match a fresh StateLayout::new"
+        );
+        assert_eq!(state.n_state, reference.n_state, "n_state must match");
+        assert_eq!(state.theta, reference.theta, "theta column must match");
+        assert_eq!(state.storage, reference.storage, "storage range must match");
+        assert_eq!(
+            state.inflow_lags, reference.inflow_lags,
+            "inflow_lags range must match"
+        );
+        assert_eq!(
+            state.anticipated_state, reference.anticipated_state,
+            "anticipated_state range must match"
+        );
+        assert_eq!(
+            state.anticipated_state_out, reference.anticipated_state_out,
+            "anticipated_state_out range must match"
+        );
+        assert_eq!(
+            state.z_inflow, reference.z_inflow,
+            "z_inflow range must match"
+        );
+        assert_eq!(
+            state.storage_in, reference.storage_in,
+            "storage_in range must match"
+        );
+    }
+
+    /// AC#1 (uniform): `StageData.state` finalized by `build_wired_indexer` is
+    /// internally consistent and finalized for a storage+lag study.
+    #[test]
+    fn stage_data_state_matches_indexer_role_a_uniform() {
+        let system = minimal_system(3);
+        let config = minimal_config(2, 10);
+        let stochastic = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("stochastic context");
+
+        let setup = StudySetup::new(
+            &system,
+            &config,
+            stochastic,
+            PrepareHydroModelsResult::default_from_system(&system),
+        )
+        .expect("setup");
+
+        assert_state_layout_finalized(&setup.stage_data.state);
+    }
+
+    /// Descriptor byte-identity: the slim role-(b) `StageData.indexer` built by
+    /// `build_wired_indexer` is byte-identical to an independent
+    /// `with_equipment_and_evaporation` build from the same `EquipmentCounts`
+    /// (the role-(b) analogue of `assert_state_layout_finalized`). A divergence
+    /// means the role-(b) geometry extraction drifted from the production build.
+    #[test]
+    fn stage_data_indexer_role_b_matches_reference_build() {
+        let system = minimal_system(3);
+        let config = minimal_config(2, 10);
+        let stochastic = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("stochastic context");
+
+        let setup = StudySetup::new(
+            &system,
+            &config,
+            stochastic,
+            PrepareHydroModelsResult::default_from_system(&system),
+        )
+        .expect("setup");
+
+        let indexer = &setup.stage_data.indexer;
+        // Rebuild the role-(b) descriptor from the same per-stage counts the
+        // production `build_wired_indexer` derived (read back off the built
+        // descriptor's own entity counts so the reference cannot diverge in the
+        // inputs). `has_ncs` is set post-construction by the NCS wiring, so the
+        // reference reproduces that flag explicitly.
+        let counts = crate::indexer::EquipmentCounts {
+            hydro_count: indexer.water_balance.len(),
+            max_par_order: 0, // role-(b) ranges do not depend on L
+            n_thermals: indexer.n_thermals,
+            n_lines: indexer.n_lines,
+            n_buses: indexer.n_buses,
+            n_blks: indexer.n_blks,
+            has_inflow_penalty: indexer.has_inflow_penalty,
+            max_deficit_segments: indexer.max_deficit_segments,
+            n_anticipated: indexer.anticipated_thermal_indices.len(),
+            k_max: 0,
+            n_pumping: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: indexer.anticipated_thermal_indices.clone(),
+        };
+        let fpha = crate::indexer::FphaColumnLayout {
+            hydro_indices: indexer.fpha_hydro_indices.clone(),
+            planes_per_hydro: indexer
+                .fpha_rows
+                .iter()
+                .map(|r| r.planes_per_block)
+                .collect(),
+        };
+        let evap = crate::indexer::EvapConfig {
+            hydro_indices: indexer.evap_hydro_indices.clone(),
+        };
+        let mut reference = StageIndexer::with_equipment_and_evaporation(&counts, &fpha, &evap);
+        reference.has_ncs = indexer.has_ncs;
+
+        // Role-(b) equipment/slack column ranges.
+        assert_eq!(reference.turbine, indexer.turbine, "turbine range");
+        assert_eq!(reference.spillage, indexer.spillage, "spillage range");
+        assert_eq!(reference.diversion, indexer.diversion, "diversion range");
+        assert_eq!(reference.thermal, indexer.thermal, "thermal range");
+        assert_eq!(
+            reference.anticipated_decision, indexer.anticipated_decision,
+            "anticipated_decision range"
+        );
+        assert_eq!(reference.line_fwd, indexer.line_fwd, "line_fwd range");
+        assert_eq!(reference.line_rev, indexer.line_rev, "line_rev range");
+        assert_eq!(reference.deficit, indexer.deficit, "deficit range");
+        assert_eq!(reference.excess, indexer.excess, "excess range");
+        assert_eq!(reference.generation, indexer.generation, "generation range");
+        assert_eq!(
+            reference.withdrawal_slack_neg, indexer.withdrawal_slack_neg,
+            "withdrawal_slack_neg range"
+        );
+        assert_eq!(
+            reference.withdrawal_slack_pos, indexer.withdrawal_slack_pos,
+            "withdrawal_slack_pos range"
+        );
+        // Role-(b) constraint row ranges + scalars.
+        assert_eq!(
+            reference.water_balance, indexer.water_balance,
+            "water_balance"
+        );
+        assert_eq!(reference.load_balance, indexer.load_balance, "load_balance");
+        assert_eq!(
+            reference.z_inflow_rows, indexer.z_inflow_rows,
+            "z_inflow_rows"
+        );
+        assert_eq!(
+            reference.z_inflow_row_start, indexer.z_inflow_row_start,
+            "z_inflow_row_start"
+        );
+        assert_eq!(reference.n_blks, indexer.n_blks, "n_blks");
+        assert_eq!(reference.n_thermals, indexer.n_thermals, "n_thermals");
+        assert_eq!(
+            reference.max_deficit_segments, indexer.max_deficit_segments,
+            "max_deficit_segments"
+        );
+        assert_eq!(reference.has_ncs, indexer.has_ncs, "has_ncs");
+        assert_eq!(
+            reference.has_withdrawal, indexer.has_withdrawal,
+            "has_withdrawal"
+        );
+        assert_eq!(
+            reference.has_operational_violations, indexer.has_operational_violations,
+            "has_operational_violations"
+        );
+    }
+
+    /// AC#1 (anticipated): `StageData.state` is byte-identical to the indexer's
+    /// role-(a) when anticipated thermals are present (`K_i = 2`), exercising
+    /// the `anticipated_state` / `anticipated_state_out` ranges and the
+    /// anticipated entries of the nonzero mask.
+    #[test]
+    fn stage_data_state_matches_indexer_role_a_anticipated() {
+        let system = minimal_system_with_anticipated_lead_stages(2, 2);
+        let config = minimal_config(1, 10);
+        let stochastic = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("stochastic context");
+
+        let setup = StudySetup::new(
+            &system,
+            &config,
+            stochastic,
+            PrepareHydroModelsResult::default_from_system(&system),
+        )
+        .expect("setup");
+
+        assert_eq!(setup.stage_data.state.n_anticipated, 1, "fixture sanity");
+        assert_state_layout_finalized(&setup.stage_data.state);
+    }
+
+    /// AC#2 (cut-row byte-identity at the cut-path repoint): the production cut
+    /// row built by `build_cut_row_batch` reading role (a) from `StageData.state`
+    /// (a [`StateLayout`]) is byte-identical to an independent reference loop that
+    /// reads the same `StateLayout` (`theta`, `nonzero_state_indices`,
+    /// `lp_column_for_state`). This is the substitutability guarantee the cut-path
+    /// repoint relies on: after repointing the production builder onto
+    /// `StateLayout`, the mask, `theta`, and `lp_column_for_state` reads resolve
+    /// to the same LP columns and the same negated-scaled coefficients.
+    #[test]
+    fn cut_row_from_state_matches_cut_row_from_indexer() {
+        use crate::cut::FutureCostFunction;
+        use crate::cut::row::build_cut_row_batch;
+
+        let system = minimal_system(3);
+        let config = minimal_config(2, 10);
+        let stochastic = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("stochastic context");
+
+        let setup = StudySetup::new(
+            &system,
+            &config,
+            stochastic,
+            PrepareHydroModelsResult::default_from_system(&system),
+        )
+        .expect("setup");
+
+        let state = &setup.stage_data.state;
+        let n_state = state.n_state;
+        assert!(n_state > 0, "fixture must have a non-empty state vector");
+
+        // One stage, one cut with a fixed, non-trivial coefficient vector.
+        // `u32::try_from` + `f64::from` keeps the indices lossless without a
+        // cast-precision lint relaxation.
+        let mut fcf = FutureCostFunction::new(2, n_state, 1, 4, &[0; 2]);
+        let coefficients: Vec<f64> = (0..n_state)
+            .map(|j| 1.0 + f64::from(u32::try_from(j).expect("state index fits u32")))
+            .collect();
+        fcf.add_cut(0, 0, 0, 7.5, &coefficients);
+
+        // Production batch: reads role (a) from the `StateLayout`.
+        let from_production = build_cut_row_batch(&fcf, 0, state, &[]);
+
+        // Reference batch: an independent loop driven by the same canonical
+        // `StateLayout` role-(a) reads (`theta`, `nonzero_state_indices`,
+        // `lp_column_for_state`). Mirrors `cut::row::build_cut_row_batch_into`'s
+        // mask-driven body; if production and this mirror disagree, the cut-path
+        // repoint changed the emitted row.
+        let mut from_state = cobre_solver::RowBatch {
+            num_rows: 0,
+            row_starts: Vec::new(),
+            col_indices: Vec::new(),
+            values: Vec::new(),
+            row_lower: Vec::new(),
+            row_upper: Vec::new(),
+        };
+        let theta_col = state.theta;
+        let mask = &state.nonzero_state_indices;
+        for (_slot, intercept, coeffs) in fcf.active_cuts(0) {
+            from_state.row_starts.push(0);
+            for &j in mask {
+                let lp_col = state.lp_column_for_state(j);
+                from_state
+                    .col_indices
+                    .push(i32::try_from(lp_col).expect("col fits i32"));
+                from_state.values.push(-coeffs[j]);
+            }
+            from_state
+                .col_indices
+                .push(i32::try_from(theta_col).expect("theta fits i32"));
+            from_state.values.push(1.0);
+            from_state.row_lower.push(intercept);
+            from_state.row_upper.push(f64::INFINITY);
+        }
+        from_state
+            .row_starts
+            .push(i32::try_from(mask.len() + 1).expect("nnz fits i32"));
+        from_state.num_rows = 1;
+
+        assert_eq!(
+            from_production.row_starts, from_state.row_starts,
+            "row_starts must be byte-identical"
+        );
+        assert_eq!(
+            from_production.col_indices, from_state.col_indices,
+            "col_indices must be byte-identical"
+        );
+        assert_eq!(
+            from_production.values, from_state.values,
+            "values must be byte-identical"
+        );
+        assert_eq!(
+            from_production.row_lower, from_state.row_lower,
+            "row_lower must be byte-identical"
+        );
+        assert_eq!(
+            from_production.row_upper, from_state.row_upper,
+            "row_upper must be byte-identical"
+        );
+        assert_eq!(
+            from_production.num_rows, from_state.num_rows,
+            "num_rows must match"
         );
     }
 }

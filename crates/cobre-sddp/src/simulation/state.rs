@@ -231,7 +231,7 @@ impl SimulationState {
     ///
     /// - `inputs.ctx.templates.len() != num_stages`
     /// - `inputs.ctx.base_rows.len() != num_stages`
-    /// - `inputs.training_ctx.initial_state.len() != indexer.n_state`
+    /// - `inputs.training_ctx.initial_state.len() != state.n_state`
     pub(crate) fn run<S, C: Communicator>(
         &mut self,
         inputs: &mut SimulationInputs<'_, S, C>,
@@ -242,14 +242,14 @@ impl SimulationState {
         let training_ctx = inputs.training_ctx;
         let TrainingContext {
             horizon,
-            indexer,
+            state,
             initial_state,
             ..
         } = training_ctx;
         let num_stages = horizon.num_stages();
         let rank = inputs.comm.rank();
 
-        debug_assert_inputs(inputs.ctx, num_stages, initial_state.len(), indexer.n_state);
+        debug_assert_inputs(inputs.ctx, num_stages, initial_state.len(), state.n_state);
 
         if let Some(baked) = inputs.baked_templates
             && baked.len() != num_stages
@@ -265,7 +265,7 @@ impl SimulationState {
         rebake_templates_if_needed(
             inputs.fcf,
             inputs.ctx,
-            indexer,
+            state,
             num_stages,
             inputs.baked_templates,
             &mut self.bake_batch,
@@ -552,15 +552,15 @@ fn build_sim_sampler<'a>(
 /// used directly and `owned_baked` is not touched.
 ///
 /// If `caller_baked` is `None`, the function clears `owned_baked`, then rebuilds
-/// it from the FCF, context templates, and indexer. `bake_batch` is used as
-/// scratch and its contents after the call are unspecified.
+/// it from the FCF, context templates, and the state layout. `bake_batch` is used
+/// as scratch and its contents after the call are unspecified.
 ///
 /// Cost is `O(num_stages * num_active_cuts)` — a one-time setup amortised across
 /// the simulation's per-scenario LP solves.
 fn rebake_templates_if_needed(
     fcf: &FutureCostFunction,
     ctx: &StageContext<'_>,
-    indexer: &crate::indexer::StageIndexer,
+    state: &crate::indexer::StateLayout,
     num_stages: usize,
     caller_baked: Option<&[StageTemplate]>,
     bake_batch: &mut RowBatch,
@@ -575,7 +575,7 @@ fn rebake_templates_if_needed(
 
     let mut owned = Vec::with_capacity(num_stages);
     for t in 0..num_stages {
-        build_cut_row_batch_into(bake_batch, fcf, t, indexer, &ctx.templates[t].col_scale);
+        build_cut_row_batch_into(bake_batch, fcf, t, state, &ctx.templates[t].col_scale);
         let mut baked = StageTemplate::empty();
         cobre_solver::bake_rows_into_template(
             &ctx.templates[t],

@@ -86,9 +86,9 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
     // ring-buffer advance happens once in the forward pass; the backward
     // and simulation paths reuse those slot values without re-shifting.
     ws.patch_buf
-        .fill_col_state_patches(training_ctx.indexer, x_hat, &ctx.templates[s].col_scale);
+        .fill_col_state_patches(training_ctx.state, x_hat, &ctx.templates[s].col_scale);
     ws.patch_buf.fill_forward_patches(
-        training_ctx.indexer,
+        training_ctx.state,
         x_hat,
         &ws.scratch.noise_buf,
         ctx.base_rows[s],

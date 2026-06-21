@@ -7,8 +7,8 @@
 //!
 //! - [`indexer`] — [`StageIndexer`] maps every entity to its LP column/row
 //!   range. The LP has no state-fixing row range: state is pinned via
-//!   [`StageIndexer::state_to_lp_incoming_column`] column bounds, never a fixing
-//!   row.
+//!   [`crate::indexer::StateLayout::state_to_lp_incoming_column`] column bounds,
+//!   never a fixing row.
 //! - `generic_constraints` — lowers user-declared generic constraints onto the
 //!   indexed column layout. Crate-private: it has no external raw-path consumer.
 //! - [`builder`] — [`build_stage_templates`] assembles the CSC structural LP,

@@ -1,10 +1,12 @@
-//! [`StageIndexer`] constructors and the private column/row range build helpers.
+//! The [`StageIndexer`] role-(b) geometry constructor and the private
+//! column/row range build helpers.
 //!
-//! Owns the three public constructors (`new`, `with_equipment`,
-//! `with_equipment_and_evaporation`) and the private helpers that compute each
-//! region's column/row range.
+//! Owns the single role-(b) constructor (`with_equipment_and_evaporation`) and
+//! the private helpers that compute each region's column/row range. The control
+//! region is anchored at `theta + 1`, where `theta = N*(3+L) + A*k_max + A` is a
+//! pure function of the state-vector dimensions; the descriptor does not store
+//! `theta` (it is role-(a), owned by [`StateLayout`](super::StateLayout)).
 
-use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::lp_builder::{
@@ -99,134 +101,14 @@ fn build_oper_violation_ranges(
 }
 
 impl StageIndexer {
-    /// Construct a [`StageIndexer`] from `hydro_count` (N) and `max_par_order` (L).
+    /// Construct the role-(b) geometry descriptor for one stage's LP.
     ///
-    /// All index ranges are computed from N and L using the formulas in
-    /// Solver Abstraction SS2.1–SS2.2. The constructor is infallible;
-    /// validation of N and L is the caller's responsibility.
-    ///
-    /// Equipment column ranges (`turbine`, `spillage`, `thermal`, `line_fwd`,
-    /// `line_rev`, `deficit`, `excess`) are all empty (`0..0`) and equipment
-    /// counts (`n_blks`, `n_thermals`, `n_lines`, `n_buses`) are zero. Use
-    /// [`StageIndexer::with_equipment`] to populate them.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use cobre_sddp::indexer::StageIndexer;
-    ///
-    /// // Worked example from spec SS5.5.3: N = 3, L = 2
-    /// let idx = StageIndexer::new(3, 2);
-    /// assert_eq!(idx.storage,   0..3);
-    /// assert_eq!(idx.inflow_lags, 3..9);
-    /// assert_eq!(idx.z_inflow,  9..12);
-    /// assert_eq!(idx.storage_in, 12..15);
-    /// assert_eq!(idx.theta,   15);
-    /// assert_eq!(idx.n_state,  9);
-    /// // Equipment ranges are empty when built via `new`.
-    /// assert!(idx.turbine.is_empty());
-    /// assert_eq!(idx.n_blks, 0);
-    /// // z_inflow rows start at row 0.
-    /// assert_eq!(idx.z_inflow_rows, 0..3);
-    /// assert_eq!(idx.z_inflow_row_start, 0);
-    /// ```
-    #[must_use]
-    pub fn new(hydro_count: usize, max_par_order: usize) -> Self {
-        let n = hydro_count;
-        let l = max_par_order;
-
-        let storage = 0..n;
-        let inflow_lags = n..n * (1 + l);
-
-        // z_inflow columns at fixed offset N*(1+L), immediately after lags
-        // and before storage_in. This makes z_inflow stage-invariant.
-        let z_inflow_start = n * (1 + l);
-        let z_inflow = z_inflow_start..z_inflow_start + n;
-
-        let storage_in = n * (2 + l)..n * (3 + l);
-        let theta = n * (3 + l);
-        let n_state = n * (1 + l);
-
-        // z_inflow rows start at row 0 — the first row block in the LP.
-        let z_inflow_start_row = 0_usize;
-        let z_inflow_rows = z_inflow_start_row..z_inflow_start_row + n;
-        let z_inflow_row_start = z_inflow_start_row;
-
-        Self {
-            storage,
-            inflow_lags,
-            storage_in,
-            theta,
-            n_state,
-            // State fixing uses column bounds, not rows: the column ranges
-            // (storage, inflow_lags, anticipated_state) carry the state-pinning
-            // semantics via set_col_bounds, so the LP has no state-fixing row.
-            // Anticipated state block is empty when built via `new`;
-            // callers that need it must use `with_equipment_and_evaporation`.
-            anticipated_state: 0..0,
-            n_anticipated: 0,
-            k_max: 0,
-            hydro_count,
-            max_par_order,
-            // Equipment ranges are empty until `with_equipment` is called.
-            turbine: 0..0,
-            spillage: 0..0,
-            diversion: 0..0,
-            thermal: 0..0,
-            // Anticipated decision and state-out blocks are empty when built via `new`.
-            anticipated_decision: 0..0,
-            anticipated_state_out: 0..0,
-            anticipated_lead_stages: Vec::new(),
-            anticipated_thermal_indices: Vec::new(),
-            anticipated_local_by_sys_pos: HashMap::new(),
-            line_fwd: 0..0,
-            line_rev: 0..0,
-            deficit: 0..0,
-            max_deficit_segments: 0,
-            excess: 0..0,
-            n_blks: 0,
-            n_thermals: 0,
-            n_lines: 0,
-            n_buses: 0,
-            water_balance: 0..0,
-            load_balance: 0..0,
-            inflow_slack: 0..0,
-            inflow_slack_rows: 0..0,
-            has_inflow_penalty: false,
-            generation: 0..0,
-            n_fpha_hydros: 0,
-            fpha_hydro_indices: Vec::new(),
-            fpha_rows: Vec::new(),
-            n_evap_hydros: 0,
-            evap_hydro_indices: Vec::new(),
-            evap_indices: Vec::new(),
-            withdrawal_slack_neg: 0..0,
-            withdrawal_slack_pos: 0..0,
-            has_withdrawal: false,
-            outflow_below_slack: 0..0,
-            outflow_above_slack: 0..0,
-            turbine_below_slack: 0..0,
-            generation_below_slack: 0..0,
-            min_outflow_rows: 0..0,
-            max_outflow_rows: 0..0,
-            min_turbine_rows: 0..0,
-            min_generation_rows: 0..0,
-            anticipated_fishing: 0..0,
-            anticipated_fishing_start: 0,
-            has_operational_violations: false,
-            has_ncs: false,
-            z_inflow,
-            z_inflow_rows,
-            z_inflow_row_start,
-            nonzero_state_indices: Vec::new(),
-            state_to_lp_column_map: Vec::new(),
-        }
-    }
-
-    /// Construct a [`StageIndexer`] with full equipment column ranges.
-    ///
-    /// Computes both the state-variable ranges (identical to [`StageIndexer::new`])
-    /// and the equipment decision-variable ranges that follow `theta` in the LP.
+    /// Computes the equipment decision-variable ranges that follow `theta` in the
+    /// LP, the FPHA / evaporation / withdrawal / operational-violation slack
+    /// ranges, the constraint row ranges, and the anticipated identity maps. The
+    /// role-(a) state-vector region (`storage`, `inflow_lags`, `theta`, `n_state`,
+    /// the resolvers, the mask) is **not** built here — it lives on
+    /// [`StateLayout`](super::StateLayout).
     ///
     /// The equipment column layout matches the `build_single_stage_template`
     /// column layout in the [`lp::builder`](crate::lp::builder) `template` module
@@ -238,7 +120,8 @@ impl StageIndexer {
     /// spillage_start      = turbine_start  + n_hydros * n_blks
     /// diversion_start     = spillage_start + n_hydros * n_blks
     /// thermal_start       = diversion_start + n_hydros * n_blks
-    /// line_fwd_start      = thermal_start  + n_thermals * n_blks
+    /// anticipated_decision = [thermal_end, thermal_end + A)
+    /// line_fwd_start      = thermal_end + A
     /// line_rev_start      = line_fwd_start + n_lines * n_blks
     /// deficit_start       = line_rev_start + n_lines * n_blks
     /// excess_start        = deficit_start  + n_buses * max_deficit_segments * n_blks
@@ -247,99 +130,29 @@ impl StageIndexer {
     /// evap_start          = generation_end  (3 columns per evaporation hydro, stage-level)
     /// ```
     ///
-    /// FPHA generation columns come immediately after `inflow_slack` (or after
-    /// `excess` when `has_inflow_penalty == false`), one column per FPHA hydro
-    /// per block.  FPHA constraint rows are placed after `load_balance`.
+    /// where `theta = N*(3+L) + A*k_max + A` is a pure function of the state-vector
+    /// dimensions. FPHA generation columns come immediately after `inflow_slack`
+    /// (or after `excess` when `has_inflow_penalty == false`), one column per FPHA
+    /// hydro per block. FPHA constraint rows are placed after `load_balance`.
     ///
-    /// Evaporation columns (3 per evaporation hydro: evaporation outflow, `f_evap_plus`,
-    /// `f_evap_minus`) are stage-level (not per-block) and come immediately after
-    /// the FPHA generation columns.  Evaporation rows (1 per evaporation hydro)
-    /// are placed after FPHA rows.
+    /// Evaporation columns (3 per evaporation hydro: evaporation outflow,
+    /// `f_evap_plus`, `f_evap_minus`) are stage-level (not per-block) and come
+    /// immediately after the FPHA generation columns. Evaporation rows (1 per
+    /// evaporation hydro) are placed after FPHA rows.
     ///
     /// # Notes
     ///
-    /// This single global indexer strides its equipment column ranges by a
+    /// This single global descriptor strides its equipment column ranges by a
     /// stage-0-derived `n_blks`, so those ranges are valid only at stages whose
     /// block count equals stage 0's; the per-stage `StageLayout` reads each
     /// stage's own `stage.blocks.len()` and is the authority where block counts
     /// vary.
     ///
-    /// NCS generation columns are **not** addressed from this indexer. The
-    /// indexer carries only the [`has_ncs`](crate::indexer::StageIndexer::has_ncs)
+    /// NCS generation columns are **not** addressed from this descriptor. It
+    /// carries only the [`has_ncs`](crate::indexer::StageIndexer::has_ncs)
     /// presence flag; the per-(ncs, block) column base is read per stage from
-    /// `StageContext::ncs_col_starts[stage]` (and `LbEvalSpec::ncs_generation`
-    /// for the stage-0 lower bound). Anchoring NCS columns at a single global
-    /// stage-0 base would stride off a base that assumed stage 0's block count,
-    /// landing the bound patch on the wrong columns for any stage whose NCS base
-    /// shifts — a source commissioning mid-horizon, or a stage with a differing
-    /// block count. The per-stage base is what keeps such non-uniform geometries
-    /// correct.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use cobre_sddp::indexer::StageIndexer;
-    ///
-    /// // N=1 hydro, L=0 lags, T=2 thermals, L_n=1 line, B=2 buses, K=1 block, no penalty
-    /// // theta = N*(3+L) = 1*(3+0) = 3
-    /// // decision_start = 4
-    /// // turbine:    4..5   (1 hydro * 1 block)
-    /// // spillage:   5..6   (1 hydro * 1 block)
-    /// // diversion:  6..7   (1 hydro * 1 block)
-    /// // thermal:    7..9   (2 thermals * 1 block)
-    /// // line_fwd:   9..10  (1 line * 1 block)
-    /// // line_rev:  10..11  (1 line * 1 block)
-    /// // deficit:   11..13  (2 buses * 1 block)
-    /// // excess:    13..15  (2 buses * 1 block)
-    /// let counts = cobre_sddp::indexer::EquipmentCounts {
-    ///     hydro_count: 1, max_par_order: 0, n_thermals: 2, n_lines: 1,
-    ///     n_buses: 2, n_blks: 1, has_inflow_penalty: false, max_deficit_segments: 1,
-    ///     n_anticipated: 0, k_max: 0, n_pumping: 0,
-    ///     anticipated_lead_stages: vec![], anticipated_thermal_indices: vec![],
-    /// };
-    /// let fpha = cobre_sddp::indexer::FphaColumnLayout { hydro_indices: vec![], planes_per_hydro: vec![] };
-    /// let idx = StageIndexer::with_equipment(&counts, &fpha);
-    /// assert_eq!(idx.turbine,    4..5);
-    /// assert_eq!(idx.spillage,   5..6);
-    /// assert_eq!(idx.diversion,  6..7);
-    /// assert_eq!(idx.thermal,    7..9);
-    /// assert_eq!(idx.line_fwd,   9..10);
-    /// assert_eq!(idx.line_rev,  10..11);
-    /// assert_eq!(idx.deficit,   11..13);
-    /// assert_eq!(idx.excess,    13..15);
-    /// assert!(idx.inflow_slack.is_empty());
-    /// assert!(idx.generation.is_empty());
-    /// assert_eq!(idx.n_blks, 1);
-    /// assert_eq!(idx.n_thermals, 2);
-    /// assert_eq!(idx.n_lines, 1);
-    /// assert_eq!(idx.n_buses, 2);
-    /// ```
-    #[must_use]
-    pub fn with_equipment(counts: &EquipmentCounts, fpha: &FphaColumnLayout) -> Self {
-        Self::with_equipment_and_evaporation(
-            counts,
-            fpha,
-            &EvapConfig {
-                hydro_indices: vec![],
-            },
-        )
-    }
-
-    /// Construct a [`StageIndexer`] with full equipment column ranges and evaporation.
-    ///
-    /// Extends [`StageIndexer::with_equipment`] with evaporation hydro indices.
-    /// Evaporation columns (3 per evaporation hydro: evaporation outflow, `f_evap_plus`,
-    /// `f_evap_minus`) are stage-level and placed after FPHA generation columns.
-    /// Evaporation rows (1 per evaporation hydro) are placed after FPHA rows.
-    ///
-    /// # Arguments
-    ///
-    /// - `counts` — equipment counts grouped into [`EquipmentCounts`]
-    /// - `fpha` — FPHA column layout grouped into [`FphaColumnLayout`]
-    /// - `evap` — evaporation configuration grouped into [`EvapConfig`]
-    ///
-    /// When `evap.hydro_indices` is empty this produces the same result as
-    /// [`StageIndexer::with_equipment`].
+    /// `StageContext::ncs_col_starts[stage]` (and `LbEvalSpec::ncs_generation` for
+    /// the stage-0 lower bound).
     #[must_use]
     // Rationale: single cohesive LP column/row layout constructor; every local binding
     // contributes to the `Self { .. }` literal that closes the function.  Splitting into
@@ -396,96 +209,30 @@ impl StageIndexer {
             "fpha_hydro_indices and fpha_planes_per_hydro must have equal length"
         );
 
-        let base = Self::new(hydro_count, max_par_order);
+        // theta is the role-(a) future-cost column, a pure function of the
+        // state-vector dimensions: it lives after the storage / inflow-lag /
+        // anticipated-state / anticipated-state-out / z-inflow / storage-in
+        // blocks. It is owned by `StateLayout`; computed here only to anchor the
+        // control region (`decision_start = theta + 1`) byte-identically.
+        //   theta = N*(3+L) + A*k_max + A
+        let theta = hydro_count * (3 + max_par_order) + n_ant_state + n_anticipated;
+        let decision_start = theta + 1;
 
-        // Shift state-block downstream offsets to make room for the two
-        // stage-invariant anticipated blocks placed in the state region: the
-        // ring buffer `anticipated_state` (width A*k_max) immediately after
-        // `inflow_lags`, then the cut-target `anticipated_state_out` (width A)
-        // immediately after it and before `z_inflow`.
-        //
-        // `anticipated_state_out` is a cut TARGET column (the matured slot's
-        // `state_to_lp_column` Equal branch resolves here), NOT a state-vector
-        // dimension, so it does NOT enter `n_state`. Locating it in the state
-        // region makes its offset a pure function of N, L, A, k_max — free of
-        // `n_blks`/`n_thermals` — so the global stage-0 cut map lands on the
-        // correct column at every stage regardless of per-stage block counts.
-        // Placing it in the control region (at `anticipated_decision.end`,
-        // whose offset rides on the n_blks-dependent `thermal_end`) silently
-        // wrote the matured anticipated cut coefficient to the wrong column
-        // whenever a stage's block count differed from stage 0's.
-        //
-        // The new layout:
-        //   storage               = 0..N
-        //   inflow_lags           = N..N*(1+L)
-        //   anticipated_state     = N*(1+L)..N*(1+L) + A*k_max
-        //   anticipated_state_out = + A
-        //   z_inflow              = + N
-        //   storage_in            = + N
-        //   theta                 = N*(3+L) + A*k_max + A
-        //   n_state               = N*(1+L) + A*k_max   (state_out excluded)
-        let n_state = hydro_count * (1 + max_par_order) + n_ant_state;
-        let anticipated_state_start = hydro_count * (1 + max_par_order);
-        let anticipated_state_end = anticipated_state_start + n_ant_state;
-        // When the block is empty, normalise the public range to `0..0` to
-        // mirror the project-wide convention used by `inflow_slack`,
-        // `withdrawal_slack`, and the operational-violation ranges. Use
-        // `anticipated_state_end` (not `anticipated_state.end`) for
-        // downstream layout arithmetic so the shift is preserved even when
-        // the public range collapses to `0..0`.
-        let anticipated_state = if n_ant_state > 0 {
-            anticipated_state_start..anticipated_state_end
-        } else {
-            0..0
-        };
-        // Relocated cut-target block: immediately after the ring buffer, before
-        // z_inflow. Width is `n_anticipated` (one column per anticipated plant,
-        // stage-level). Empty-normalise to `0..0` when there are none. Use
-        // `anticipated_state_out_end` for downstream arithmetic so the A-wide
-        // shift survives the public `0..0` collapse.
-        let anticipated_state_out_start = anticipated_state_end;
-        let anticipated_state_out_end = anticipated_state_out_start + n_anticipated;
-        let anticipated_state_out = if n_anticipated > 0 {
-            anticipated_state_out_start..anticipated_state_out_end
-        } else {
-            0..0
-        };
-        // Guard the relocation against a future reordering: the block must begin
-        // exactly at the end of the `n_state`-wide state vector (right after the
-        // `anticipated_state` ring buffer). Checked against the independently
-        // computed `n_state`, not against `anticipated_state_end` — the prior
-        // `start >= anticipated_state_end` / `end <= z_inflow_start` forms were
-        // tautological (each RHS is the LHS by the assignment above), so they
-        // guarded nothing. z_inflow then follows by construction below.
-        debug_assert_eq!(
-            anticipated_state_out_start, n_state,
-            "relocated anticipated_state_out must begin at the end of the n_state state vector"
-        );
-        let z_inflow_start = anticipated_state_out_end;
-        let z_inflow = z_inflow_start..z_inflow_start + hydro_count;
-        let storage_in_start = z_inflow.end;
-        let storage_in = storage_in_start..storage_in_start + hydro_count;
-        let theta = storage_in.end;
         // z_inflow rows start at row 0 (ROW start, not column start).
         let z_inflow_start_row = 0_usize;
         let z_inflow_rows = z_inflow_start_row..z_inflow_start_row + hydro_count;
         let z_inflow_row_start = z_inflow_start_row;
-
-        let decision_start = theta + 1;
 
         let turbine_start = decision_start;
         let spillage_start = turbine_start + hydro_count * n_blks;
         let diversion_start = spillage_start + hydro_count * n_blks;
         let thermal_start = diversion_start + hydro_count * n_blks;
         let thermal_end = thermal_start + n_thermals * n_blks;
-        // Anticipated-decision columns sit between `thermal` and `line_fwd`.
-        // Every anticipated plant has K_i <= T, so at stage 0 (the canonical
-        // stage) all `n_anticipated` columns are active. Per-stage gating is
-        // bound-driven downstream via `anticipated_decision_active_at_stage`;
-        // the column count is constant. The matching `anticipated_state_out`
-        // cut-target block does NOT live here — it is relocated into the
-        // stage-invariant state region (immediately after `anticipated_state`,
-        // before `z_inflow`); only the priced decision variable rides the
+        // Anticipated-decision columns sit between `thermal` and `line_fwd`. Every
+        // anticipated plant has K_i <= T, so at stage 0 (the canonical stage) all
+        // `n_anticipated` columns are active. The matching `anticipated_state_out`
+        // cut-target block does NOT live here — it is in the stage-invariant state
+        // region on `StateLayout`; only the priced decision variable rides the
         // n_blks-dependent `thermal_end` offset.
         //
         // Control-region layout (equipment side):
@@ -530,8 +277,8 @@ impl StageIndexer {
         let n_evap_hydros = evap_hydro_indices.len();
         let evap_col_start = generation_end;
 
-        // z_inflow rows start at row 0 (z_inflow_start_row declared above);
-        // water_balance follows z_inflow at row hydro_count.
+        // z_inflow rows start at row 0; water_balance follows z_inflow at row
+        // hydro_count.
         let water_balance_start = z_inflow_start_row + hydro_count;
         let load_balance_start = water_balance_start + hydro_count;
         let load_balance_end = load_balance_start + n_buses * n_blks;
@@ -556,21 +303,15 @@ impl StageIndexer {
         let ws_end = withdrawal_slack_pos.end;
         let op = build_oper_violation_ranges(hydro_count, n_blks, ws_end, evap_rows_end);
 
-        // Anticipated-fishing rows are placed after the operational-violation
-        // rows when those are active, otherwise directly after the evaporation
-        // rows. The stage-0 canonical layout stores a zero-length range; the
-        // per-stage template populates
-        // `anticipated_fishing_start + local_idx_at_stage`.
+        // Anticipated-fishing rows are placed after the operational-violation rows
+        // when those are active, otherwise directly after the evaporation rows. The
+        // stage-0 canonical layout stores a zero-length range; the per-stage
+        // template populates `anticipated_fishing_start + local_idx_at_stage`.
         let fishing_start = if op.has_operational_violations {
             op.min_generation_rows.end
         } else {
             evap_rows_end
         };
-
-        // z_inflow / storage_in / theta / n_state are computed locally above
-        // to absorb the anticipated_state shift; the remaining fields
-        // (storage, inflow_lags, hydro_count, max_par_order,
-        // nonzero_state_indices) are inherited from `base` via `..base`.
 
         Self {
             turbine: turbine_start..spillage_start,
@@ -578,14 +319,6 @@ impl StageIndexer {
             diversion: diversion_start..thermal_start,
             thermal: thermal_start..thermal_end,
             anticipated_decision,
-            anticipated_state_out,
-            anticipated_lead_stages: counts.anticipated_lead_stages.clone(),
-            anticipated_local_by_sys_pos: counts
-                .anticipated_thermal_indices
-                .iter()
-                .enumerate()
-                .map(|(local, &sys_pos)| (sys_pos, local))
-                .collect(),
             anticipated_thermal_indices: counts.anticipated_thermal_indices.clone(),
             line_fwd: line_fwd_start..line_rev_start,
             line_rev: line_rev_start..deficit_start,
@@ -622,21 +355,9 @@ impl StageIndexer {
             anticipated_fishing: fishing_start..fishing_start,
             anticipated_fishing_start: fishing_start,
             has_operational_violations: op.has_operational_violations,
-            // Shifted state-block fields (recomputed to absorb n_ant_state).
-            anticipated_state,
-            n_anticipated,
-            k_max,
-            n_state,
-            storage_in,
-            theta,
-            z_inflow,
+            has_ncs: false,
             z_inflow_rows,
             z_inflow_row_start,
-            // Built empty here; filled by `finalize_state_column_map` once the
-            // (shifted) state layout above is final.
-            state_to_lp_column_map: Vec::new(),
-            // Remaining state-block fields are unchanged; inherit from base.
-            ..base
         }
     }
 
@@ -677,114 +398,29 @@ impl StageIndexer {
 
 #[cfg(test)]
 mod tests {
-    use crate::indexer::test_fixtures::{eq, eq_with_anticipated, evap, fpha};
-    use crate::indexer::{EquipmentCounts, StageIndexer};
+    use crate::indexer::StageIndexer;
+    use crate::indexer::test_fixtures::{eq, evap, fpha};
 
-    // Worked example from spec SS5.5.3: N = 3, L = 2
-
-    fn indexer_3_2() -> StageIndexer {
-        StageIndexer::new(3, 2)
-    }
-
-    #[test]
-    fn row_column_symmetry_3_2() {
-        let idx = indexer_3_2();
-        assert_eq!(idx.storage, 0..3);
-        assert_eq!(idx.inflow_lags, 3..9);
-    }
-
-    // Production scale: N = 160, L = 12
-
-    fn indexer_160_12() -> StageIndexer {
-        StageIndexer::new(160, 12)
-    }
-
-    #[test]
-    fn n_state_production_scale() {
-        assert_eq!(indexer_160_12().n_state, 2080);
-    }
-
-    #[test]
-    fn theta_production_scale() {
-        assert_eq!(indexer_160_12().theta, 2400);
-    }
-
-    #[test]
-    fn row_column_symmetry_production_scale() {
-        let idx = indexer_160_12();
-        assert_eq!(idx.storage, 0..160);
-        assert_eq!(idx.inflow_lags, 160..160 * 13);
-    }
-
-    #[test]
-    fn single_hydro_no_lags() {
-        let idx = StageIndexer::new(1, 0);
-
-        assert_eq!(idx.storage, 0..1);
-        assert_eq!(idx.inflow_lags, 1..1);
-        assert_eq!(idx.z_inflow, 1..2);
-        assert_eq!(idx.storage_in, 2..3);
-        assert_eq!(idx.theta, 3);
-        assert_eq!(idx.n_state, 1);
-    }
-
-    // Edge case: N = 0, L = 0 (degenerate — all ranges empty)
-
-    #[test]
-    fn degenerate_zero_hydros() {
-        let idx = StageIndexer::new(0, 0);
-
-        assert_eq!(idx.storage, 0..0);
-        assert_eq!(idx.inflow_lags, 0..0);
-        assert_eq!(idx.z_inflow, 0..0);
-        assert_eq!(idx.storage_in, 0..0);
-        assert_eq!(idx.theta, 0);
-        assert_eq!(idx.n_state, 0);
-    }
-
-    // new() produces empty equipment ranges
-    #[test]
-    fn new_equipment_ranges_are_empty() {
-        let idx = StageIndexer::new(3, 2);
-        assert!(idx.turbine.is_empty());
-        assert!(idx.spillage.is_empty());
-        assert!(idx.diversion.is_empty());
-        assert!(idx.thermal.is_empty());
-        assert!(idx.line_fwd.is_empty());
-        assert!(idx.line_rev.is_empty());
-        assert!(idx.deficit.is_empty());
-        assert!(idx.excess.is_empty());
-        assert_eq!(idx.n_blks, 0);
-        assert_eq!(idx.n_thermals, 0);
-        assert_eq!(idx.n_lines, 0);
-        assert_eq!(idx.n_buses, 0);
-    }
-
-    // with_equipment: worked example from doc comment (N=1, L=0, T=2, Ln=1, B=2, K=1)
+    // Worked example: N=1, L=0, T=2, Ln=1, B=2, K=1, no penalty.
     //
     // theta = N*(3+L) = 1*(3+0) = 3
     // decision_start = 4
-    // turbine:    [4, 4+1*1)  = 4..5
-    // spillage:   [5, 5+1*1)  = 5..6
-    // diversion:  [6, 6+1*1)  = 6..7
-    // thermal:    [7, 7+2*1)  = 7..9
-    // line_fwd:   [9, 9+1*1)  = 9..10
-    // line_rev:  [10,10+1*1)  = 10..11
-    // deficit:   [11,11+2*1)  = 11..13
-    // excess:    [13,13+2*1)  = 13..15
+    // turbine:    [4, 5)   (1 hydro * 1 block)
+    // spillage:   [5, 6)
+    // diversion:  [6, 7)
+    // thermal:    [7, 9)   (2 thermals * 1 block)
+    // line_fwd:   [9, 10)
+    // line_rev:  [10, 11)
+    // deficit:   [11, 13)  (2 buses * 1 block)
+    // excess:    [13, 15)
     #[test]
     fn with_equipment_doctest_n1_l0_t2_l1_b2_k1() {
-        let idx = StageIndexer::with_equipment(&eq(1, 0, 2, 1, 2, 1, false), &fpha(vec![], vec![]));
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq(1, 0, 2, 1, 2, 1, false),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
 
-        // State ranges are identical to new(1, 0)
-        assert_eq!(idx.storage, 0..1);
-        assert_eq!(idx.inflow_lags, 1..1);
-        assert_eq!(idx.z_inflow, 1..2);
-        assert_eq!(idx.storage_in, 2..3);
-        assert_eq!(idx.theta, 3);
-        assert_eq!(idx.n_state, 1);
-
-        // Equipment ranges
         assert_eq!(idx.turbine, 4..5);
         assert_eq!(idx.spillage, 5..6);
         assert_eq!(idx.diversion, 6..7);
@@ -794,34 +430,23 @@ mod tests {
         assert_eq!(idx.deficit, 11..13);
         assert_eq!(idx.excess, 13..15);
 
-        // Equipment counts
         assert_eq!(idx.n_blks, 1);
         assert_eq!(idx.n_thermals, 2);
         assert_eq!(idx.n_lines, 1);
         assert_eq!(idx.n_buses, 2);
     }
 
-    // with_equipment: N=2, L=1, T=3, Ln=2, B=4, K=2
+    // N=2, L=1, T=3, Ln=2, B=4, K=2.
     //
-    // theta = N*(3+L) = 2*(3+1) = 8
-    // decision_start = 9
-    // turbine:    [9,  9+2*2)  = 9..13
-    // spillage:  [13, 13+2*2)  = 13..17
-    // diversion: [17, 17+2*2)  = 17..21
-    // thermal:   [21, 21+3*2)  = 21..27
-    // line_fwd:  [27, 27+2*2)  = 27..31
-    // line_rev:  [31, 31+2*2)  = 31..35
-    // deficit:   [35, 35+4*2)  = 35..43
-    // excess:    [43, 43+4*2)  = 43..51
+    // theta = N*(3+L) = 2*(3+1) = 8 → decision_start = 9.
     #[test]
     fn with_equipment_n2_l1_t3_l2_b4_k2() {
-        let idx = StageIndexer::with_equipment(&eq(2, 1, 3, 2, 4, 2, false), &fpha(vec![], vec![]));
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq(2, 1, 3, 2, 4, 2, false),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
 
-        // State ranges identical to new(2, 1)
-        assert_eq!(idx.theta, 8);
-        assert_eq!(idx.n_state, 4); // N*(1+L) = 2*2 = 4
-
-        // Equipment ranges
         assert_eq!(idx.turbine, 9..13);
         assert_eq!(idx.spillage, 13..17);
         assert_eq!(idx.diversion, 17..21);
@@ -832,37 +457,15 @@ mod tests {
         assert_eq!(idx.excess, 43..51);
     }
 
-    // with_equipment: no equipment (all counts zero), matches new() state layout
-    #[test]
-    fn with_equipment_all_counts_zero_matches_new() {
-        let with_eq =
-            StageIndexer::with_equipment(&eq(3, 2, 0, 0, 0, 0, false), &fpha(vec![], vec![]));
-        let base = StageIndexer::new(3, 2);
-
-        assert_eq!(with_eq.storage, base.storage);
-        assert_eq!(with_eq.inflow_lags, base.inflow_lags);
-        assert_eq!(with_eq.storage_in, base.storage_in);
-        assert_eq!(with_eq.theta, base.theta);
-        assert_eq!(with_eq.n_state, base.n_state);
-        // All equipment ranges empty
-        assert!(with_eq.turbine.is_empty());
-        assert!(with_eq.spillage.is_empty());
-        assert!(with_eq.diversion.is_empty());
-        assert!(with_eq.thermal.is_empty());
-        assert!(with_eq.line_fwd.is_empty());
-        assert!(with_eq.line_rev.is_empty());
-        assert!(with_eq.deficit.is_empty());
-        assert!(with_eq.excess.is_empty());
-    }
-
-    // with_equipment: adjacency invariant — ranges must be contiguous and non-overlapping
+    // Adjacency invariant — ranges must be contiguous and non-overlapping.
     #[test]
     fn with_equipment_ranges_are_contiguous() {
-        let idx = StageIndexer::with_equipment(&eq(2, 1, 3, 2, 4, 2, false), &fpha(vec![], vec![]));
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq(2, 1, 3, 2, 4, 2, false),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
 
-        // turbine immediately follows theta
-        assert_eq!(idx.turbine.start, idx.theta + 1);
-        // each range starts where the previous ends
         assert_eq!(idx.spillage.start, idx.turbine.end);
         assert_eq!(idx.diversion.start, idx.spillage.end);
         assert_eq!(idx.thermal.start, idx.diversion.end);
@@ -872,83 +475,48 @@ mod tests {
         assert_eq!(idx.excess.start, idx.deficit.end);
     }
 
-    // Column index formula: turbine[h, b] = turbine.start + h * n_blks + b
-    #[test]
-    fn with_equipment_column_index_formulas() {
-        let n_blks = 3_usize;
-        let idx =
-            StageIndexer::with_equipment(&eq(2, 1, 1, 1, 1, n_blks, false), &fpha(vec![], vec![]));
-
-        // turbine is the first decision column, immediately after theta.
-        // For this fixture (N=2, L=1, no anticipated): theta = N*(3+L) = 8,
-        // so turbine.start = theta + 1 = 9.
-        assert_eq!(idx.turbine.start, idx.theta + 1);
-        assert_eq!(idx.turbine.start, 9);
-        // Block-stride formula turbine[h, b] = turbine.start + h*n_blks + b
-        // resolves to absolute columns: turbine[h=1, b=2] = 9 + 3 + 2 = 14.
-        assert_eq!(idx.turbine.start + n_blks + 2, 14);
-        // turbine[h=1, b=0] = 9 + 3 + 0 = 12.
-        assert_eq!(idx.turbine.start + n_blks, 12);
-    }
-
-    // with_equipment: has_inflow_penalty=true appends N slack columns after excess
+    // has_inflow_penalty=true appends N slack columns after excess.
     //
-    // N=2, L=1, T=1, Ln=1, B=1, K=1, penalty=true
-    // theta = N*(3+L) = 2*(3+1) = 8
-    // decision_start = 9
-    // turbine:    [9,  11)
-    // spillage:  [11, 13)
-    // diversion: [13, 15)
-    // thermal:   [15, 16)
-    // line_fwd:  [16, 17)
-    // line_rev:  [17, 18)
-    // deficit:   [18, 19)
-    // excess:    [19, 20)
-    // inflow_slack: [20, 22)  <- excess_end..excess_end+N
+    // N=2, L=1, T=1, Ln=1, B=1, K=1, penalty=true. theta = 8 → decision_start = 9.
+    // excess: [19, 20); inflow_slack: [20, 22).
     #[test]
     fn with_equipment_inflow_penalty_appends_slack() {
-        let idx = StageIndexer::with_equipment(&eq(2, 1, 1, 1, 1, 1, true), &fpha(vec![], vec![]));
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq(2, 1, 1, 1, 1, 1, true),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
 
         assert!(idx.has_inflow_penalty, "has_inflow_penalty must be true");
-        // inflow_slack must start exactly where excess ends
         assert_eq!(
             idx.inflow_slack.start, idx.excess.end,
             "inflow_slack.start must equal excess.end (contiguous)"
         );
-        // inflow_slack must contain exactly hydro_count columns
-        assert_eq!(
-            idx.inflow_slack.len(),
-            idx.hydro_count,
-            "inflow_slack must contain exactly hydro_count columns"
-        );
         assert_eq!(idx.inflow_slack, 20..22);
-        // inflow_slack_rows stays empty in this implementation
         assert!(
             idx.inflow_slack_rows.is_empty(),
             "inflow_slack_rows must remain empty"
         );
-        // without penalty the slack range is empty
-        let no_penalty =
-            StageIndexer::with_equipment(&eq(2, 1, 1, 1, 1, 1, false), &fpha(vec![], vec![]));
+
+        let no_penalty = StageIndexer::with_equipment_and_evaporation(
+            &eq(2, 1, 1, 1, 1, 1, false),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
         assert!(!no_penalty.has_inflow_penalty);
         assert!(no_penalty.inflow_slack.is_empty());
     }
 
     // ── FPHA field tests ───────────────────────────────────────────────────
 
-    // AC-4: no FPHA hydros → generation is empty, fpha_rows is empty.
-    //
-    // N=4, L=0, T=0, Ln=0, B=1, K=1, no penalty, no FPHA.
-    // theta = N*(3+L) = 4*(3+0) = 12
-    // decision_start = 13
-    // turbine:  [13, 17)
-    // spillage: [17, 21)
-    // deficit:  [21, 22)
-    // excess:   [22, 23)
-    // generation: empty (no FPHA hydros)
+    // No FPHA hydros → generation is empty, fpha_rows is empty.
     #[test]
     fn fpha_no_hydros_generation_is_empty() {
-        let idx = StageIndexer::with_equipment(&eq(4, 0, 0, 0, 1, 1, false), &fpha(vec![], vec![]));
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq(4, 0, 0, 0, 1, 1, false),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
 
         assert!(
             idx.generation.is_empty(),
@@ -959,39 +527,19 @@ mod tests {
         assert!(idx.fpha_rows.is_empty());
     }
 
-    // AC-1 + AC-2: 1 FPHA hydro, 1 block, 3 planes.
-    //
-    // N=2, L=0, T=1, Ln=0, B=1, K=1, no penalty.
-    // theta = N*(3+L) = 2*(3+0) = 6
-    // decision_start = 7
-    // turbine:    [7, 9)   (2 hydros * 1 block)
-    // spillage:   [9, 11)
-    // diversion: [11, 13)  (2 hydros * 1 block)
-    // thermal:   [13, 14)  (1 thermal * 1 block)
-    // deficit:   [14, 15)  (1 bus * 1 block)
-    // excess:    [15, 16)
-    // generation: [16, 17) (1 FPHA hydro * 1 block)
-    //
-    // Row layout:
-    // n_state = N*(1+L) = 2*(1+0) = 2
-    // z_inflow rows = 2..4  (N*(1+L)..N*(2+L))
-    // water_balance_start = N*(2+L) = 4
-    // load_balance_start  = 4 + 2 = 6
-    // load_balance_end    = 6 + 1*1 = 7
-    // fpha_rows[0].start  = 7 (after load_balance.end)
-    // fpha_rows[0].planes_per_block = 3
+    // 1 FPHA hydro, 1 block, 3 planes. fpha_rows[0].start == load_balance.end.
     #[test]
     fn fpha_one_hydro_one_block_three_planes() {
-        let idx =
-            StageIndexer::with_equipment(&eq(2, 0, 1, 0, 1, 1, false), &fpha(vec![0], vec![3]));
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq(2, 0, 1, 0, 1, 1, false),
+            &fpha(vec![0], vec![3]),
+            &evap(vec![]),
+        );
 
-        // AC-1: generation spans 1 column (1 FPHA hydro * 1 block)
         assert_eq!(idx.generation.len(), 1, "generation must span 1 column");
-        assert_eq!(idx.generation, 16..17);
         assert_eq!(idx.n_fpha_hydros, 1);
         assert_eq!(idx.fpha_hydro_indices, vec![0]);
 
-        // AC-2: fpha_rows[0].start is after load_balance.end, planes_per_block == 3
         assert_eq!(idx.fpha_rows.len(), 1);
         assert_eq!(
             idx.fpha_rows[0].start, idx.load_balance.end,
@@ -1000,41 +548,25 @@ mod tests {
         assert_eq!(idx.fpha_rows[0].planes_per_block, 3);
     }
 
-    // AC-3: 2 FPHA hydros, 2 blocks, plane counts [5, 4].
-    //
-    // N=4, L=0, T=0, Ln=0, B=1, K=2, no penalty.
-    // theta = N*(3+L) = 4*(3+0) = 12
-    // decision_start = 13
-    // turbine:    [13, 21)  (4 hydros * 2 blocks)
-    // spillage:   [21, 29)
-    // diversion:  [29, 37)  (4 hydros * 2 blocks)
-    // deficit:    [37, 39)  (1 bus * 2 blocks)
-    // excess:     [39, 41)
-    // generation: [41, 45) (2 FPHA hydros * 2 blocks = 4 columns)
+    // 2 FPHA hydros, 2 blocks, plane counts [5, 4].
     #[test]
     fn fpha_two_hydros_two_blocks_different_planes() {
-        let idx = StageIndexer::with_equipment(
+        let idx = StageIndexer::with_equipment_and_evaporation(
             &eq(4, 0, 0, 0, 1, 2, false),
             &fpha(vec![1, 3], vec![5, 4]),
+            &evap(vec![]),
         );
 
-        // AC-3: generation spans 4 columns (2 FPHA hydros * 2 blocks)
         assert_eq!(idx.generation.len(), 4, "generation must span 4 columns");
         assert_eq!(idx.n_fpha_hydros, 2);
         assert_eq!(idx.fpha_hydro_indices, vec![1, 3]);
 
-        // fpha_rows: 2 entries with correct starts and plane counts
         assert_eq!(idx.fpha_rows.len(), 2);
-
-        // fpha_rows[0]: hydro at local 0 (system hydro 1), 5 planes, 2 blocks
-        // starts at load_balance.end
         assert_eq!(
             idx.fpha_rows[0].start, idx.load_balance.end,
             "fpha_rows[0].start must equal load_balance.end"
         );
         assert_eq!(idx.fpha_rows[0].planes_per_block, 5);
-
-        // fpha_rows[1]: starts after fpha_rows[0]'s region (5 planes * 2 blocks = 10 rows)
         assert_eq!(
             idx.fpha_rows[1].start,
             idx.fpha_rows[0].start + 5 * 2,
@@ -1044,50 +576,27 @@ mod tests {
     }
 
     // FPHA generation columns are contiguous with the prior column region.
-    //
-    // No penalty: generation immediately follows excess.
-    // With penalty: generation immediately follows inflow_slack.
     #[test]
     fn fpha_generation_contiguous_with_prior_region() {
-        // No penalty case: generation.start == excess.end
-        let no_penalty =
-            StageIndexer::with_equipment(&eq(2, 0, 0, 0, 1, 1, false), &fpha(vec![0], vec![2]));
+        let no_penalty = StageIndexer::with_equipment_and_evaporation(
+            &eq(2, 0, 0, 0, 1, 1, false),
+            &fpha(vec![0], vec![2]),
+            &evap(vec![]),
+        );
         assert_eq!(
             no_penalty.generation.start, no_penalty.excess.end,
             "generation.start must equal excess.end when no penalty"
         );
 
-        // With penalty case: generation.start == inflow_slack.end
-        let with_penalty =
-            StageIndexer::with_equipment(&eq(2, 0, 0, 0, 1, 1, true), &fpha(vec![0], vec![2]));
+        let with_penalty = StageIndexer::with_equipment_and_evaporation(
+            &eq(2, 0, 0, 0, 1, 1, true),
+            &fpha(vec![0], vec![2]),
+            &evap(vec![]),
+        );
         assert_eq!(
             with_penalty.generation.start, with_penalty.inflow_slack.end,
             "generation.start must equal inflow_slack.end when penalty active"
         );
-    }
-
-    // FPHA rows are contiguous with load_balance (start at load_balance.end).
-    #[test]
-    fn fpha_rows_contiguous_with_load_balance() {
-        let idx = StageIndexer::with_equipment(
-            &eq(3, 1, 2, 0, 2, 3, false),
-            &fpha(vec![0, 2], vec![4, 6]),
-        );
-
-        // First FPHA hydro starts at load_balance.end
-        assert_eq!(
-            idx.fpha_rows[0].start, idx.load_balance.end,
-            "fpha_rows[0] must start at load_balance.end"
-        );
-
-        // Each subsequent FPHA hydro starts after its predecessor's block
-        // fpha_rows[0]: 4 planes * 3 blocks = 12 rows
-        assert_eq!(
-            idx.fpha_rows[1].start,
-            idx.fpha_rows[0].start + 4 * 3,
-            "fpha_rows[1] must start after fpha_rows[0]'s rows"
-        );
-        assert_eq!(idx.fpha_rows[1].planes_per_block, 6);
     }
 
     // ── Evaporation field tests ────────────────────────────────────────────
@@ -1095,7 +604,11 @@ mod tests {
     // 0 evaporation hydros → evap_indices is empty.
     #[test]
     fn evap_no_hydros_indices_empty() {
-        let idx = StageIndexer::with_equipment(&eq(3, 0, 1, 0, 1, 1, false), &fpha(vec![], vec![]));
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq(3, 0, 1, 0, 1, 1, false),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
 
         assert_eq!(idx.n_evap_hydros, 0);
         assert!(idx.evap_hydro_indices.is_empty());
@@ -1105,22 +618,8 @@ mod tests {
     // 1 evaporation hydro — verify column/row positions.
     //
     // N=2, L=0, T=0, Ln=0, B=1, K=1, no penalty, no FPHA, 1 evap hydro.
-    // theta = N*(3+L) = 2*(3+0) = 6
-    // decision_start = 7
-    // turbine:    [7, 9)   (2 hydros * 1 block)
-    // spillage:   [9, 11)
-    // diversion: [11, 13)  (2 hydros * 1 block)
-    // deficit:   [13, 14)  (1 bus * 1 block)
-    // excess:    [14, 15)
-    // generation: empty (no FPHA)
-    // evap cols: [15, 18)  (3 columns: evaporation outflow, f_evap_plus, f_evap_minus)
-    //
-    // Row layout (Phase 1: state-fixing rows removed):
-    // z_inflow rows = 0..2  (start at row 0)
-    // water_balance_start = 2  (z_inflow rows end)
-    // load_balance_start = 2 + 2 = 4
-    // load_balance_end   = 4 + 1*1 = 5
-    // evap_row[0] = 5
+    // theta = 6 → decision_start = 7. excess: [14, 15); evap cols: [15, 18).
+    // Rows: z_inflow [0,2); water_balance [2,4); load_balance [4,5); evap_row[0]=5.
     #[test]
     fn evap_one_hydro_column_row_positions() {
         let idx = StageIndexer::with_equipment_and_evaporation(
@@ -1134,913 +633,9 @@ mod tests {
         assert_eq!(idx.evap_indices.len(), 1);
 
         let ei = idx.evap_indices(0);
-        // 3 columns placed after generation_end (which equals excess.end = 15)
         assert_eq!(ei.evaporation_flow_col, 15);
         assert_eq!(ei.f_evap_plus_col, 16);
         assert_eq!(ei.f_evap_minus_col, 17);
-        // Row placed after load_balance.end = 5.
         assert_eq!(ei.evap_row, 5);
-    }
-
-    // 2 evaporation hydros — verify column/row ranges are
-    // contiguous and non-overlapping with FPHA ranges.
-    //
-    // N=4, L=0, T=0, Ln=0, B=1, K=1, no penalty, 1 FPHA hydro (index 0, 3 planes),
-    // 2 evap hydros (indices 1, 2).
-    // theta = 4*(3+0) = 12
-    // decision_start = 13
-    // turbine:    [13, 17)  (4 hydros * 1 block)
-    // spillage:   [17, 21)
-    // diversion:  [21, 25)  (4 hydros * 1 block)
-    // deficit:    [25, 26)  (1 bus * 1 block)
-    // excess:     [26, 27)
-    // generation: [27, 28) (1 FPHA hydro * 1 block)
-    //
-    // Row layout (Phase 1: state-fixing rows removed):
-    // z_inflow rows = 0..4  (start at row 0)
-    // water_balance_start = 4  (z_inflow rows end)
-    // load_balance_start = 4 + 4 = 8
-    // load_balance_end   = 8 + 1*1 = 9
-    // fpha_rows[0].start = 9
-    // fpha_row_cursor after FPHA = 9 + 3*1 = 12
-    // evap cols: [28, 34)   (2 evap hydros * 3 = 6 columns)
-    // evap_row[0] = 12, evap_row[1] = 13
-    #[test]
-    fn evap_two_hydros_with_fpha_contiguous() {
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &eq(4, 0, 0, 0, 1, 1, false),
-            &fpha(vec![0], vec![3]),
-            &evap(vec![1, 2]),
-        );
-
-        assert_eq!(idx.n_evap_hydros, 2);
-        assert_eq!(idx.evap_hydro_indices, vec![1, 2]);
-
-        let ei0 = idx.evap_indices(0);
-        let ei1 = idx.evap_indices(1);
-
-        // Columns start at generation_end = 28
-        assert_eq!(ei0.evaporation_flow_col, 28);
-        assert_eq!(ei0.f_evap_plus_col, 29);
-        assert_eq!(ei0.f_evap_minus_col, 30);
-
-        assert_eq!(ei1.evaporation_flow_col, 31);
-        assert_eq!(ei1.f_evap_plus_col, 32);
-        assert_eq!(ei1.f_evap_minus_col, 33);
-
-        // Rows placed after fpha_rows region: fpha_row_cursor = 9 + 3*1 = 12.
-        assert_eq!(ei0.evap_row, 12);
-        assert_eq!(ei1.evap_row, 13);
-
-        // Evap rows do not overlap FPHA rows
-        assert!(ei0.evap_row > idx.fpha_rows[0].start);
-    }
-
-    // new() produces empty evaporation fields.
-    #[test]
-    fn new_evap_ranges_are_empty() {
-        let idx = StageIndexer::new(3, 2);
-        assert_eq!(idx.n_evap_hydros, 0);
-        assert!(idx.evap_hydro_indices.is_empty());
-        assert!(idx.evap_indices.is_empty());
-    }
-
-    // ── Withdrawal slack field tests ───────────────────────────────────────
-
-    // AC: with_equipment_and_evaporation, N=3 hydros, 1 evap hydro →
-    // withdrawal_slack_neg starts at evap_col_end, withdrawal_slack_pos follows.
-    //
-    // N=3, L=0, T=0, Ln=0, B=1, K=1, no penalty, no FPHA, 1 evap hydro.
-    // theta = N*(3+L) = 3*(3+0) = 9
-    // decision_start = 10
-    // turbine:    [10, 13)  (3 hydros * 1 block)
-    // spillage:   [13, 16)
-    // diversion:  [16, 19)  (3 hydros * 1 block)
-    // deficit:    [19, 20)  (1 bus * 1 block)
-    // excess:     [20, 21)
-    // generation: empty (no FPHA)
-    // evap cols:  [21, 24)  (1 evap hydro * 3 columns)
-    // withdrawal_slack_neg: [24, 27)  (3 hydros)
-    // withdrawal_slack_pos: [27, 30)  (3 hydros)
-    #[test]
-    fn withdrawal_slack_with_equipment_and_evaporation_n3_evap1() {
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &eq(3, 0, 0, 0, 1, 1, false),
-            &fpha(vec![], vec![]),
-            &evap(vec![0]),
-        );
-
-        assert!(idx.has_withdrawal);
-        let evap_col_end = idx.evap_indices(0).f_evap_minus_col + 1;
-        assert_eq!(
-            idx.withdrawal_slack_neg.start, evap_col_end,
-            "withdrawal_slack_neg.start must equal evap_col_end"
-        );
-        assert_eq!(idx.withdrawal_slack_neg.len(), 3);
-        assert_eq!(idx.withdrawal_slack_neg, 24..27);
-        assert_eq!(idx.withdrawal_slack_pos.start, idx.withdrawal_slack_neg.end);
-        assert_eq!(idx.withdrawal_slack_pos.len(), 3);
-        assert_eq!(idx.withdrawal_slack_pos, 27..30);
-    }
-
-    // AC: with_equipment_and_evaporation, N=0 → both withdrawal slacks are 0..0.
-    #[test]
-    fn withdrawal_slack_zero_hydros_is_empty() {
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &eq(0, 0, 0, 0, 1, 1, false),
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-
-        assert!(!idx.has_withdrawal);
-        assert_eq!(idx.withdrawal_slack_neg, 0..0);
-        assert_eq!(idx.withdrawal_slack_pos, 0..0);
-    }
-
-    // AC: new() → both withdrawal slacks are 0..0.
-    #[test]
-    fn withdrawal_slack_from_new_is_empty() {
-        let idx = StageIndexer::new(3, 2);
-        assert!(!idx.has_withdrawal);
-        assert_eq!(idx.withdrawal_slack_neg, 0..0);
-        assert_eq!(idx.withdrawal_slack_pos, 0..0);
-    }
-
-    // AC: both withdrawal_slack ranges have length == hydro_count.
-    #[test]
-    fn withdrawal_slack_length_equals_hydro_count() {
-        for n in [1_usize, 5] {
-            let idx = StageIndexer::with_equipment_and_evaporation(
-                &EquipmentCounts {
-                    hydro_count: n,
-                    max_par_order: 0,
-                    n_thermals: 0,
-                    n_lines: 0,
-                    n_buses: 1,
-                    n_blks: 1,
-                    has_inflow_penalty: false,
-                    max_deficit_segments: 1,
-                    n_anticipated: 0,
-                    k_max: 0,
-                    anticipated_lead_stages: vec![],
-                    anticipated_thermal_indices: vec![],
-                    n_pumping: 0,
-                },
-                &fpha(vec![], vec![]),
-                &evap(vec![]),
-            );
-
-            assert!(idx.has_withdrawal, "has_withdrawal must be true for n={n}");
-            assert_eq!(
-                idx.withdrawal_slack_neg.len(),
-                n,
-                "withdrawal_slack_neg length must equal hydro_count for n={n}"
-            );
-            assert_eq!(
-                idx.withdrawal_slack_pos.len(),
-                n,
-                "withdrawal_slack_pos length must equal hydro_count for n={n}"
-            );
-        }
-    }
-
-    // AC: withdrawal_slack_neg.start == evap_col_end, pos starts at neg.end.
-    //
-    // N=2, L=0, no penalty, no FPHA, 1 evap hydro.
-    // evap cols: [excess_end, excess_end+3) = [15, 18)
-    // withdrawal_slack_neg: [18, 20)
-    // withdrawal_slack_pos: [20, 22)
-    #[test]
-    fn withdrawal_slack_immediately_after_evap_columns() {
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &eq(2, 0, 0, 0, 1, 1, false),
-            &fpha(vec![], vec![]),
-            &evap(vec![0]),
-        );
-
-        assert_eq!(
-            idx.withdrawal_slack_neg.start, 18,
-            "withdrawal_slack_neg must start at evap_col_end=18"
-        );
-        assert_eq!(idx.withdrawal_slack_neg.len(), 2);
-        assert_eq!(idx.withdrawal_slack_neg, 18..20);
-        assert_eq!(idx.withdrawal_slack_pos, 20..22);
-        // Operational slacks must start at pos.end
-        assert_eq!(
-            idx.outflow_below_slack.start, idx.withdrawal_slack_pos.end,
-            "outflow_below_slack must start at withdrawal_slack_pos.end"
-        );
-    }
-
-    // new() produces empty FPHA ranges.
-    #[test]
-    fn new_fpha_ranges_are_empty() {
-        let idx = StageIndexer::new(3, 2);
-        assert!(idx.generation.is_empty());
-        assert_eq!(idx.n_fpha_hydros, 0);
-        assert!(idx.fpha_hydro_indices.is_empty());
-        assert!(idx.fpha_rows.is_empty());
-    }
-
-    // Adjacency invariant extended: generation immediately follows the prior region.
-    #[test]
-    fn extended_adjacency_invariant_with_fpha() {
-        // N=2, L=1, T=1, Ln=1, B=1, K=1, no penalty, 1 FPHA hydro.
-        // theta=8, decision_start=9
-        // turbine:[9,11), spillage:[11,13), diversion:[13,15), thermal:[15,16),
-        // line_fwd:[16,17), line_rev:[17,18), deficit:[18,19), excess:[19,20)
-        // generation:[20,21) (1 FPHA * 1 block, after excess.end since no penalty)
-        let idx =
-            StageIndexer::with_equipment(&eq(2, 1, 1, 1, 1, 1, false), &fpha(vec![0], vec![3]));
-
-        assert_eq!(idx.turbine.start, idx.theta + 1);
-        assert_eq!(idx.spillage.start, idx.turbine.end);
-        assert_eq!(idx.diversion.start, idx.spillage.end);
-        assert_eq!(idx.thermal.start, idx.diversion.end);
-        assert_eq!(idx.line_fwd.start, idx.thermal.end);
-        assert_eq!(idx.line_rev.start, idx.line_fwd.end);
-        assert_eq!(idx.deficit.start, idx.line_rev.end);
-        assert_eq!(idx.excess.start, idx.deficit.end);
-        // generation follows excess (no penalty)
-        assert_eq!(idx.generation.start, idx.excess.end);
-        assert_eq!(idx.generation.len(), 1);
-    }
-
-    // ── Diversion field tests ──────────────────────────────────────────────
-
-    // Diversion range: N=3, K=2 → diversion.len() = 6, contiguous with spillage.
-    #[test]
-    fn test_diversion_range_n3_l0_k2() {
-        let idx = StageIndexer::with_equipment(&eq(3, 0, 0, 0, 1, 2, false), &fpha(vec![], vec![]));
-
-        assert_eq!(idx.diversion.start, idx.spillage.end);
-        assert_eq!(idx.diversion.len(), 3 * 2);
-        assert_eq!(idx.thermal.start, idx.diversion.end);
-    }
-
-    // Diversion range: N=0 → diversion is empty.
-    #[test]
-    fn test_diversion_zero_hydros() {
-        let idx = StageIndexer::with_equipment(&eq(0, 0, 1, 0, 1, 1, false), &fpha(vec![], vec![]));
-
-        assert!(idx.diversion.is_empty());
-    }
-
-    // ── z_inflow field tests ───────────────────────────────────────────────
-
-    // z_inflow starts at N*(1+L) (fixed offset) and has length hydro_count.
-    #[test]
-    fn z_inflow_range_new_constructor() {
-        let idx = StageIndexer::new(3, 2);
-        // z_inflow at N*(1+L) = 9..12
-        assert_eq!(idx.z_inflow, 9..12);
-        assert_eq!(idx.z_inflow.len(), idx.hydro_count);
-    }
-
-    // z_inflow is empty when hydro_count == 0.
-    #[test]
-    fn z_inflow_range_zero_hydros() {
-        let idx = StageIndexer::new(0, 0);
-        assert!(idx.z_inflow.is_empty());
-        assert!(idx.z_inflow_rows.is_empty());
-        assert_eq!(idx.z_inflow_row_start, 0);
-    }
-
-    // z_inflow rows start at row 0.
-    #[test]
-    fn z_inflow_row_fields() {
-        let idx = StageIndexer::new(5, 1);
-        // z_inflow rows start at row 0, length = hydro_count = 5.
-        assert_eq!(idx.z_inflow_rows, 0..5);
-        assert_eq!(idx.z_inflow_row_start, 0);
-        assert_eq!(idx.z_inflow.len(), 5);
-    }
-
-    // z_inflow has correct length and rows for with_equipment constructor.
-    #[test]
-    fn z_inflow_range_with_equipment() {
-        let idx = StageIndexer::with_equipment(&eq(2, 1, 1, 1, 1, 1, false), &fpha(vec![], vec![]));
-        // N*(1+L) = 2*(1+1) = 4 (column range unchanged)
-        assert_eq!(idx.z_inflow, 4..6);
-        assert_eq!(idx.z_inflow.len(), 2);
-        // z_inflow rows start at row 0, length = hydro_count = 2.
-        assert_eq!(idx.z_inflow_rows, 0..2);
-        assert_eq!(idx.z_inflow_row_start, 0);
-    }
-
-    // z_inflow placed correctly for single hydro, no lags case.
-    #[test]
-    fn z_inflow_single_hydro_no_lags() {
-        let idx = StageIndexer::new(1, 0);
-        // N*(1+L) = 1*(1+0) = 1, z_inflow at 1..2
-        assert_eq!(idx.z_inflow, 1..2);
-        assert_eq!(idx.z_inflow.len(), 1);
-    }
-
-    // ── Anticipated thermal state tests ────────────────────────────────────
-
-    /// `StageIndexer::new` always produces an empty anticipated block.
-    #[test]
-    fn anticipated_state_empty_for_new() {
-        let idx = StageIndexer::new(3, 2);
-        assert_eq!(idx.anticipated_state, 0..0);
-        assert_eq!(idx.n_anticipated, 0);
-        assert_eq!(idx.k_max, 0);
-    }
-
-    /// SS5.5.3-style example with two anticipated plants and `K_max = 3`:
-    /// `anticipated_state` consumes 6 columns starting at `N*(1+L) = 9`, then
-    /// the relocated `anticipated_state_out` consumes `A = 2` columns, shifting
-    /// `z_inflow`, `storage_in` and `theta` by `A*k_max + A = 8`.
-    #[test]
-    fn anticipated_state_layout_n3_l2_nant2_kmax3() {
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &eq_with_anticipated(3, 2, 0, 0, 1, 1, false, 2, 3),
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-
-        assert_eq!(idx.anticipated_state, 9..15);
-        // Relocated cut-target block: A=2 columns after the ring buffer.
-        assert_eq!(idx.anticipated_state_out, 15..17);
-        assert_eq!(idx.z_inflow, 17..20);
-        assert_eq!(idx.storage_in, 20..23);
-        assert_eq!(idx.theta, 23);
-        // n_state excludes anticipated_state_out (control variable, not a state dim).
-        assert_eq!(idx.n_state, 15);
-        assert_eq!(idx.n_anticipated, 2);
-        assert_eq!(idx.k_max, 3);
-    }
-
-    /// Zero hydros but two anticipated plants: `anticipated_state` is `0..6`,
-    /// the relocated `anticipated_state_out` is `6..8`, `z_inflow` and
-    /// `storage_in` are empty (N=0), `theta == 8`.
-    #[test]
-    fn anticipated_state_layout_n0_nant2_kmax3() {
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &eq_with_anticipated(0, 0, 0, 0, 1, 1, false, 2, 3),
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-
-        assert_eq!(idx.anticipated_state, 0..6);
-        assert_eq!(idx.anticipated_state_out, 6..8);
-        assert_eq!(idx.n_state, 6);
-        assert_eq!(idx.z_inflow, 8..8);
-        assert_eq!(idx.storage_in, 8..8);
-        assert_eq!(idx.theta, 8);
-        assert_eq!(idx.n_anticipated, 2);
-        assert_eq!(idx.k_max, 3);
-    }
-
-    /// When `n_anticipated == 0` the layout produced by
-    /// `with_equipment_and_evaporation` must match the pre-anticipated layout
-    /// field-for-field against `StageIndexer::new`.
-    #[test]
-    fn anticipated_state_no_thermals_matches_existing() {
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &eq(3, 2, 0, 0, 0, 0, false),
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-        let base = StageIndexer::new(3, 2);
-
-        assert_eq!(idx.storage, base.storage);
-        assert_eq!(idx.inflow_lags, base.inflow_lags);
-        assert_eq!(idx.anticipated_state, 0..0);
-        assert_eq!(idx.z_inflow, base.z_inflow);
-        assert_eq!(idx.storage_in, base.storage_in);
-        assert_eq!(idx.theta, base.theta);
-        assert_eq!(idx.n_state, base.n_state);
-        assert_eq!(idx.z_inflow_rows, base.z_inflow_rows);
-        assert_eq!(idx.z_inflow_row_start, base.z_inflow_row_start);
-        assert_eq!(idx.n_anticipated, 0);
-        assert_eq!(idx.k_max, 0);
-    }
-
-    /// `z_inflow.start` is exactly `N*(1+L) + n_anticipated*k_max + n_anticipated`
-    /// (the ring buffer plus the relocated `anticipated_state_out` block).
-    #[test]
-    fn anticipated_state_shifts_z_inflow() {
-        // SS5.5.3-extended: N=3, L=2, n_anticipated=2, k_max=3.
-        let idx_small = StageIndexer::with_equipment_and_evaporation(
-            &eq_with_anticipated(3, 2, 0, 0, 1, 1, false, 2, 3),
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-        assert_eq!(idx_small.z_inflow.start, 3 * (1 + 2) + 2 * 3 + 2);
-
-        // Production scale: N=160, L=12, n_anticipated=10, k_max=4.
-        let idx_prod = StageIndexer::with_equipment_and_evaporation(
-            &eq_with_anticipated(160, 12, 0, 0, 1, 1, false, 10, 4),
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-        assert_eq!(idx_prod.z_inflow.start, 160 * (1 + 12) + 10 * 4 + 10);
-    }
-
-    /// Minimal non-empty anticipated block: `n_anticipated=1`, `k_max=1` → length 1.
-    #[test]
-    fn anticipated_state_boundary_kmax_one() {
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &eq_with_anticipated(2, 1, 0, 0, 1, 1, false, 1, 1),
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-
-        // N*(1+L) = 2*2 = 4
-        assert_eq!(idx.anticipated_state, 4..5);
-        assert_eq!(idx.anticipated_state.len(), 1);
-        // Relocated cut-target block: A=1 column after the ring buffer.
-        assert_eq!(idx.anticipated_state_out, 5..6);
-        assert_eq!(idx.n_state, 5); // base 4 + 1 (state_out excluded)
-        assert_eq!(idx.z_inflow, 6..8);
-        assert_eq!(idx.theta, 10); // 6 + 2 + 2
-    }
-
-    /// Acceptance side of the `debug_assert`: (`n_anticipated=0`, `k_max=0`)
-    /// produces a layout identical to the existing one.
-    #[test]
-    fn anticipated_state_boundary_n_anticipated_zero() {
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &eq_with_anticipated(3, 2, 0, 0, 1, 1, false, 0, 0),
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-        // Layout must collapse back to the pre-anticipated state form.
-        assert_eq!(idx.anticipated_state, 0..0);
-        assert_eq!(idx.z_inflow, 9..12);
-        assert_eq!(idx.storage_in, 12..15);
-        assert_eq!(idx.theta, 15);
-        assert_eq!(idx.n_state, 9);
-    }
-
-    /// Debug-only assertion: building with `n_anticipated > 0` but `k_max == 0`
-    /// must trigger the documented `debug_assert!` failure.
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(expected = "k_max must be >= 1 when n_anticipated > 0")]
-    fn anticipated_state_debug_assert_kmax_zero_when_nant_nonzero() {
-        let _ = StageIndexer::with_equipment_and_evaporation(
-            &eq_with_anticipated(1, 0, 0, 0, 1, 1, false, 1, 0),
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-    }
-
-    /// `n_state == N*(1+L) + n_anticipated * k_max` exactly.
-    #[test]
-    fn anticipated_state_n_state_formula() {
-        for (n, l, n_anticipated, k_max) in [
-            (3_usize, 2_usize, 0_usize, 0_usize),
-            (3, 2, 2, 3),
-            (160, 12, 10, 4),
-            (1, 0, 1, 1),
-        ] {
-            let idx = StageIndexer::with_equipment_and_evaporation(
-                &eq_with_anticipated(n, l, 0, 0, 1, 1, false, n_anticipated, k_max),
-                &fpha(vec![], vec![]),
-                &evap(vec![]),
-            );
-            assert_eq!(
-                idx.n_state,
-                n * (1 + l) + n_anticipated * k_max,
-                "n_state mismatch for (N={n}, L={l}, n_anticipated={n_anticipated}, k_max={k_max})"
-            );
-        }
-    }
-
-    // ── Anticipated decision column tests ──────────────────────────────────
-
-    /// `StageIndexer::new` produces an empty anticipated-decision block and
-    /// empty per-plant metadata vectors.
-    #[test]
-    fn anticipated_decision_empty_for_new() {
-        let idx = StageIndexer::new(3, 2);
-        assert_eq!(idx.anticipated_decision, 0..0);
-        assert!(idx.anticipated_lead_stages.is_empty());
-        assert!(idx.anticipated_thermal_indices.is_empty());
-    }
-
-    /// Direct `EquipmentCounts` literal mirroring the AC-2 example:
-    /// `n_anticipated=2`, `k_max=3`, `K_i = [3, 2]`, `thermal_idx = [0, 2]`.
-    #[test]
-    fn anticipated_decision_layout_basic() {
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &EquipmentCounts {
-                hydro_count: 2,
-                max_par_order: 1,
-                n_thermals: 3,
-                n_lines: 2,
-                n_buses: 4,
-                n_blks: 2,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 2,
-                k_max: 3,
-                anticipated_lead_stages: vec![3, 2],
-                anticipated_thermal_indices: vec![0, 2],
-                n_pumping: 0,
-            },
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-
-        // anticipated_decision sits between thermal and line_fwd, length 2.
-        // The relocated anticipated_state_out is NOT in the control region.
-        assert_eq!(idx.anticipated_decision.start, idx.thermal.end);
-        assert_eq!(idx.anticipated_decision.len(), 2);
-        // line_fwd now follows anticipated_decision directly (state_out moved out).
-        assert_eq!(idx.line_fwd.start, idx.anticipated_decision.end);
-        // anticipated_state_out lives in the state region, after the ring buffer.
-        assert_eq!(idx.anticipated_state_out.start, idx.anticipated_state.end);
-        assert_eq!(idx.anticipated_state_out.len(), 2);
-        assert_eq!(idx.z_inflow.start, idx.anticipated_state_out.end);
-        // Per-plant metadata round-trips intact.
-        assert_eq!(idx.anticipated_lead_stages, vec![3, 2]);
-        assert_eq!(idx.anticipated_thermal_indices, vec![0, 2]);
-    }
-
-    /// When `n_anticipated == 0` the layout produced by
-    /// `with_equipment_and_evaporation` must be byte-identical to a build with
-    /// the legacy non-anticipated layout: `line_fwd.start == thermal.end`
-    /// and no shift downstream.
-    #[test]
-    fn anticipated_decision_no_anticipated_matches_existing() {
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &eq(2, 1, 3, 2, 4, 2, false),
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-
-        assert_eq!(idx.anticipated_decision, 0..0);
-        assert_eq!(idx.line_fwd.start, idx.thermal.end);
-        // Concrete offsets for the no-anticipated layout (decision_start = theta+1).
-        // N=2, L=1, T=3, Ln=2, B=4, K=2, no penalty:
-        // theta = 2*(3+1) = 8; decision_start = 9
-        // turbine: 9..13 (2*2), spillage: 13..17, diversion: 17..21,
-        // thermal: 21..27 (3*2), line_fwd: 27..31 (2*2), line_rev: 31..35,
-        // deficit: 35..43 (4*1*2), excess: 43..51 (4*2)
-        assert_eq!(idx.theta, 8);
-        assert_eq!(idx.turbine, 9..13);
-        assert_eq!(idx.thermal, 21..27);
-        assert_eq!(idx.line_fwd, 27..31);
-        assert_eq!(idx.line_rev, 31..35);
-        assert_eq!(idx.deficit, 35..43);
-        assert_eq!(idx.excess, 43..51);
-    }
-
-    /// `line_fwd.start == anticipated_decision.end` for various `n_anticipated`.
-    /// Sweep includes 0 (no shift), 1, 2, 5.
-    ///
-    /// `anticipated_state_out` is relocated to the state region (after the
-    /// `anticipated_state` ring buffer, before `z_inflow`), so the control
-    /// region is `anticipated_decision → line_fwd` directly and the state-region
-    /// invariant is `anticipated_state.end == anticipated_state_out.start` and
-    /// `anticipated_state_out.end == z_inflow.start`.
-    #[test]
-    fn anticipated_decision_shifts_line_fwd() {
-        for n_ant in [0_usize, 1, 2, 5] {
-            let lead = if n_ant == 0 { vec![] } else { vec![2; n_ant] };
-            let thermal_idx = (0..n_ant).collect::<Vec<_>>();
-            let k_max = if n_ant == 0 { 0 } else { 2 };
-            let idx = StageIndexer::with_equipment_and_evaporation(
-                &EquipmentCounts {
-                    hydro_count: 1,
-                    max_par_order: 0,
-                    n_thermals: n_ant.max(1),
-                    n_lines: 1,
-                    n_buses: 1,
-                    n_blks: 1,
-                    has_inflow_penalty: false,
-                    max_deficit_segments: 1,
-                    n_anticipated: n_ant,
-                    k_max,
-                    anticipated_lead_stages: lead,
-                    anticipated_thermal_indices: thermal_idx,
-                    n_pumping: 0,
-                },
-                &fpha(vec![], vec![]),
-                &evap(vec![]),
-            );
-            if n_ant > 0 {
-                // Control region: line_fwd follows anticipated_decision directly.
-                assert_eq!(
-                    idx.line_fwd.start, idx.anticipated_decision.end,
-                    "line_fwd.start must equal anticipated_decision.end for n_ant={n_ant}"
-                );
-                // State region: state_out sits between the ring buffer and z_inflow.
-                assert_eq!(
-                    idx.anticipated_state_out.start, idx.anticipated_state.end,
-                    "anticipated_state_out.start must equal anticipated_state.end for n_ant={n_ant}"
-                );
-                assert_eq!(
-                    idx.z_inflow.start, idx.anticipated_state_out.end,
-                    "z_inflow.start must equal anticipated_state_out.end for n_ant={n_ant}"
-                );
-                assert_eq!(
-                    idx.anticipated_state_out.len(),
-                    n_ant,
-                    "anticipated_state_out.len() must equal n_anticipated for n_ant={n_ant}"
-                );
-            } else {
-                // When the block collapses to `0..0`, `line_fwd.start` falls
-                // directly on `thermal.end` (no shift in the control region).
-                assert_eq!(
-                    idx.anticipated_state_out,
-                    0..0,
-                    "anticipated_state_out must be 0..0 when n_ant=0"
-                );
-                assert_eq!(
-                    idx.line_fwd.start, idx.thermal.end,
-                    "line_fwd.start must equal thermal.end when n_ant=0"
-                );
-            }
-            assert_eq!(
-                idx.anticipated_decision.len(),
-                n_ant,
-                "anticipated_decision.len() must equal n_anticipated for n_ant={n_ant}"
-            );
-        }
-    }
-
-    /// `anticipated_decision.start == thermal.end` whenever `n_anticipated > 0`.
-    #[test]
-    fn anticipated_decision_contiguous_with_thermal() {
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &EquipmentCounts {
-                hydro_count: 1,
-                max_par_order: 0,
-                n_thermals: 2,
-                n_lines: 1,
-                n_buses: 1,
-                n_blks: 2,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 2,
-                k_max: 3,
-                anticipated_lead_stages: vec![3, 2],
-                anticipated_thermal_indices: vec![0, 1],
-                n_pumping: 0,
-            },
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-        assert_eq!(idx.anticipated_decision.start, idx.thermal.end);
-    }
-
-    /// Per-plant `anticipated_thermal_indices` round-trips through the
-    /// constructor exactly.
-    #[test]
-    fn anticipated_decision_thermal_indices_preserved() {
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &EquipmentCounts {
-                hydro_count: 1,
-                max_par_order: 0,
-                n_thermals: 6,
-                n_lines: 0,
-                n_buses: 1,
-                n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 3,
-                k_max: 4,
-                anticipated_lead_stages: vec![4, 2, 1],
-                anticipated_thermal_indices: vec![0, 2, 5],
-                n_pumping: 0,
-            },
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-        assert_eq!(idx.anticipated_thermal_indices, vec![0, 2, 5]);
-        assert_eq!(idx.anticipated_lead_stages, vec![4, 2, 1]);
-    }
-
-    // ── Anticipated fishing row tests (placement, via constructor) ───────────
-
-    /// `StageIndexer::new` produces an empty fishing range and a zero start.
-    #[test]
-    fn anticipated_fishing_empty_for_new() {
-        let idx = StageIndexer::new(3, 2);
-        assert_eq!(idx.anticipated_fishing, 0..0);
-        assert_eq!(idx.anticipated_fishing_start, 0);
-    }
-
-    /// When operational violations are active, `anticipated_fishing_start`
-    /// equals `min_generation_rows.end`. AC-2 worked example: 4 operational
-    /// row families of N*K = 2 rows each = 8 rows total beginning at `A`,
-    /// so `anticipated_fishing_start == A + 8 == min_generation_rows.end`.
-    #[test]
-    fn anticipated_fishing_start_after_min_generation_rows() {
-        // N=2 hydros, K=1 block, no FPHA, no evap, no penalty.
-        // n_anticipated=2, k_max=3 — shifts state by 2*3 = 6.
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &EquipmentCounts {
-                hydro_count: 2,
-                max_par_order: 0,
-                n_thermals: 2,
-                n_lines: 0,
-                n_buses: 1,
-                n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 2,
-                k_max: 3,
-                anticipated_lead_stages: vec![3, 2],
-                anticipated_thermal_indices: vec![0, 1],
-                n_pumping: 0,
-            },
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-        // Operational violations must be active (hydro_count > 0).
-        assert!(idx.has_operational_violations);
-        // The start offset is precisely the end of `min_generation_rows`.
-        assert_eq!(idx.anticipated_fishing_start, idx.min_generation_rows.end);
-        // Stage-0 canonical layout: zero-length range anchored at the start.
-        assert_eq!(
-            idx.anticipated_fishing,
-            idx.anticipated_fishing_start..idx.anticipated_fishing_start,
-        );
-    }
-
-    /// When operational violations are inactive (`hydro_count == 0`),
-    /// `anticipated_fishing_start` equals `evap_rows_end`
-    /// (= `fpha_row_cursor + n_evap_hydros`).
-    #[test]
-    fn anticipated_fishing_start_after_evap_when_no_op_violations() {
-        // hydro_count = 0 → no operational violations, no withdrawal slack,
-        // no FPHA, no evap. Row cursor sits at `load_balance.end` because
-        // `fpha_row_cursor == load_balance.end` and `n_evap_hydros == 0`.
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &EquipmentCounts {
-                hydro_count: 0,
-                max_par_order: 0,
-                n_thermals: 1,
-                n_lines: 0,
-                n_buses: 1,
-                n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 0,
-                k_max: 0,
-                anticipated_lead_stages: vec![],
-                anticipated_thermal_indices: vec![],
-                n_pumping: 0,
-            },
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-        assert!(!idx.has_operational_violations);
-        // With no FPHA and no evap, `evap_rows_end == load_balance.end`.
-        let evap_rows_end = idx.load_balance.end;
-        assert_eq!(idx.anticipated_fishing_start, evap_rows_end);
-        assert_eq!(
-            idx.anticipated_fishing,
-            idx.anticipated_fishing_start..idx.anticipated_fishing_start,
-        );
-    }
-
-    /// `anticipated_state_out` is relocated into the state region, immediately
-    /// after the `anticipated_state` ring buffer and before `z_inflow`. The
-    /// control region goes `anticipated_decision → line_fwd` directly.
-    #[test]
-    fn test_anticipated_state_out_range_is_after_anticipated_decision() {
-        let counts = EquipmentCounts {
-            hydro_count: 2,
-            max_par_order: 1,
-            n_thermals: 3,
-            n_lines: 1,
-            n_buses: 2,
-            n_blks: 1,
-            has_inflow_penalty: false,
-            max_deficit_segments: 1,
-            n_anticipated: 2,
-            k_max: 3,
-            anticipated_lead_stages: vec![2, 3],
-            anticipated_thermal_indices: vec![0, 1],
-            n_pumping: 0,
-        };
-        let idx = StageIndexer::with_equipment(&counts, &fpha(vec![], vec![]));
-
-        // State-region adjacency: ring buffer → state_out → z_inflow.
-        assert_eq!(idx.anticipated_state_out.start, idx.anticipated_state.end);
-        assert_eq!(
-            idx.anticipated_state_out.end - idx.anticipated_state_out.start,
-            2
-        );
-        assert_eq!(idx.z_inflow.start, idx.anticipated_state_out.end);
-
-        // Control region: line_fwd follows anticipated_decision directly.
-        assert_eq!(idx.line_fwd.start, idx.anticipated_decision.end);
-
-        // n_state is unchanged: N*(1+L) + A*K_max = 2*2 + 2*3 = 10
-        // (state_out is a control variable, excluded from n_state).
-        assert_eq!(idx.n_state, 10);
-    }
-
-    /// `anticipated_state_out` is empty (`0..0`) when built via `StageIndexer::new`.
-    #[test]
-    fn test_anticipated_state_out_is_empty_when_no_anticipated() {
-        let idx = StageIndexer::new(3, 2);
-        assert_eq!(idx.anticipated_state_out, 0..0);
-        assert_eq!(idx.n_state, 9);
-    }
-
-    /// Relocated-block adjacency: the `anticipated_state_out` cut-target block
-    /// sits exactly between the `anticipated_state` ring buffer and `z_inflow`
-    /// (`anticipated_state.end == anticipated_state_out.start` and
-    /// `anticipated_state_out.end == z_inflow.start`), and never overlaps the
-    /// ring buffer.
-    #[test]
-    fn anticipated_state_out_relocated_block_adjacency() {
-        // Sweep a few (N, L, A, k_max) shapes including N=0 and k_max=1.
-        for (n, l, n_ant, k_max) in [
-            (3_usize, 2_usize, 2_usize, 3_usize),
-            (0, 0, 2, 3),
-            (2, 1, 1, 1),
-        ] {
-            let idx = StageIndexer::with_equipment_and_evaporation(
-                &eq_with_anticipated(n, l, 0, 0, 1, 1, false, n_ant, k_max),
-                &fpha(vec![], vec![]),
-                &evap(vec![]),
-            );
-            assert_eq!(
-                idx.anticipated_state_out.start, idx.anticipated_state.end,
-                "state_out must begin where the ring buffer ends for (N={n}, L={l}, A={n_ant}, K={k_max})"
-            );
-            assert_eq!(
-                idx.z_inflow.start, idx.anticipated_state_out.end,
-                "z_inflow must begin where state_out ends for (N={n}, L={l}, A={n_ant}, K={k_max})"
-            );
-            assert_eq!(idx.anticipated_state_out.len(), n_ant);
-            // No overlap with the ring buffer.
-            assert!(idx.anticipated_state_out.start >= idx.anticipated_state.end);
-        }
-    }
-
-    // ---------------------------------------------------------------------------
-    // Layout-invariance tests
-    // ---------------------------------------------------------------------------
-
-    /// Locks the `n_state` formula against the addition of the
-    /// `anticipated_state_out` control-region column: `anticipated_state_out` is
-    /// not a state index and must not contribute to `n_state`.
-    #[test]
-    fn test_n_state_unchanged_with_anticipated_state_out_addition() {
-        let fpha_empty = fpha(vec![], vec![]);
-
-        // Case A: no anticipated thermals.
-        // n_state = hydro_count * (1 + max_par_order) = 3 * (1 + 2) = 9.
-        let counts_a = EquipmentCounts {
-            hydro_count: 3,
-            max_par_order: 2,
-            n_thermals: 1,
-            n_lines: 1,
-            n_buses: 1,
-            n_blks: 1,
-            has_inflow_penalty: false,
-            max_deficit_segments: 1,
-            n_anticipated: 0,
-            k_max: 0,
-            anticipated_lead_stages: vec![],
-            anticipated_thermal_indices: vec![],
-            n_pumping: 0,
-        };
-        let idx_a = StageIndexer::with_equipment(&counts_a, &fpha_empty);
-        assert_eq!(idx_a.n_state, 3 * (1 + 2), "n_state without anticipated");
-        assert_eq!(idx_a.anticipated_state_out, 0..0);
-
-        // Case B: with anticipated thermals.
-        // n_state = hydro_count * (1 + max_par_order) + n_anticipated * k_max
-        //         = 3 * (1 + 2) + 2 * 3 = 15.
-        // anticipated_state_out has length n_anticipated = 2, but is a
-        // control-region column and must NOT be counted in n_state.
-        let counts_b = EquipmentCounts {
-            hydro_count: 3,
-            max_par_order: 2,
-            n_thermals: 2,
-            n_lines: 1,
-            n_buses: 1,
-            n_blks: 1,
-            has_inflow_penalty: false,
-            max_deficit_segments: 1,
-            n_anticipated: 2,
-            k_max: 3,
-            anticipated_lead_stages: vec![2, 3],
-            anticipated_thermal_indices: vec![0, 1],
-            n_pumping: 0,
-        };
-        let idx_b = StageIndexer::with_equipment(&counts_b, &fpha_empty);
-        assert_eq!(
-            idx_b.n_state,
-            3 * (1 + 2) + 2 * 3,
-            "n_state formula must be N*(1+L) + A*K_max"
-        );
-        assert_eq!(
-            idx_b.anticipated_state_out.end - idx_b.anticipated_state_out.start,
-            2,
-            "anticipated_state_out range length must equal n_anticipated"
-        );
     }
 }

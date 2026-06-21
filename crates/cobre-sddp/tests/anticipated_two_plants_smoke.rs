@@ -555,13 +555,13 @@ fn test_two_anticipated_plants_k1_2_k2_4_convergence() {
          If intentional, update EXPECTED_LB."
     );
 
-    let indexer = setup.stage_indexer();
-    assert_eq!(indexer.n_anticipated, 2);
-    assert_eq!(indexer.k_max, 4);
+    let state = setup.stage_state();
+    assert_eq!(state.n_anticipated, 2);
+    assert_eq!(state.k_max, 4);
 
-    let n_anticipated = indexer.n_anticipated;
-    let k_max = indexer.k_max;
-    let ant_start = indexer.anticipated_state.start;
+    let n_anticipated = state.n_anticipated;
+    let k_max = state.k_max;
+    let ant_start = state.anticipated_state.start;
     let ant_block_len = n_anticipated * k_max;
 
     let basis_cache = &result.basis_cache;
