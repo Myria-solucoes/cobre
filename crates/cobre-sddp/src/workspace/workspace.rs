@@ -2317,6 +2317,78 @@ mod tests {
         assert_eq!(recovered.state_at_capture, original.state_at_capture);
     }
 
+    /// Full-`Basis` round-trip on a relocated-layout anticipated solve: the
+    /// `col_status` count carries the relocated `anticipated_state_out` block in
+    /// the state region (column count is wider by `n_anticipated` than the
+    /// no-anticipated baseline), and `cut_row_slots` carries a slot that the
+    /// reconstruction path will match by identity. The wire format serialises
+    /// `col_status.len()`/`row_status.len()` as live counts, so the wider column
+    /// block round-trips byte-for-byte with no format change: relocating the
+    /// cut-target column must not corrupt the broadcast round-trip.
+    #[test]
+    fn test_captured_basis_round_trip_relocated_anticipated_column_layout() {
+        // Anticipated layout sketch: N=2, L=1, A=2, k_max=2.
+        //   n_state             = N*(1+L) + A*k_max = 2*2 + 2*2 = 8.
+        //   col_status models a relocated-layout LP whose column count grew by
+        //   A=2 relative to the no-anticipated layout (z_inflow onward shifted).
+        // Numerically distinct status bytes per region so a positional mix-up
+        // (e.g. cut row written onto a state column) would show as a diff.
+        let col_status: Vec<i32> = (0..14_i32).collect(); // wider by A vs baseline
+        // Status bytes are opaque to the wire format; 1 = BASIC, 4 = LOWER per
+        // the HiGHS basis-status encoding. 6 template rows then 2 cut rows.
+        let row_status: Vec<i32> = vec![5_i32, 5, 5, 5, 5, 5, 1, 4];
+        let state_at_capture = vec![1.0_f64, 2.0, 100.0, 200.0, 1000.0, 2000.0, 3000.0, 4000.0];
+
+        let original = CapturedBasis {
+            basis: Basis {
+                col_status: col_status.clone(),
+                row_status: row_status.clone(),
+            },
+            base_row_count: 6,
+            cut_row_slots: vec![7_u32, 42],
+            state_at_capture: state_at_capture.clone(),
+        };
+
+        let mut i32_buf: Vec<i32> = Vec::new();
+        let mut f64_buf: Vec<f64> = Vec::new();
+        original.to_broadcast_payload(&mut i32_buf, &mut f64_buf);
+
+        let mut i32_cursor = 0_usize;
+        let mut f64_cursor = 0_usize;
+        let recovered = CapturedBasis::try_from_broadcast_payload(
+            0,
+            &i32_buf,
+            &mut i32_cursor,
+            &f64_buf,
+            &mut f64_cursor,
+        )
+        .expect("round-trip must not fail")
+        .expect("sentinel is 1; must return Some");
+
+        // The wider column block (incl. the relocated anticipated_state_out
+        // columns) round-trips byte-for-byte.
+        assert_eq!(
+            recovered.basis.col_status, col_status,
+            "relocated-layout col_status must round-trip bit-identically"
+        );
+        assert_eq!(
+            recovered.basis.row_status, row_status,
+            "template+cut row_status must round-trip bit-identically"
+        );
+        assert_eq!(recovered.base_row_count, 6);
+        assert_eq!(
+            recovered.cut_row_slots,
+            vec![7_u32, 42],
+            "cut_row_slots (the slot-identity key) must round-trip bit-identically"
+        );
+        assert_eq!(
+            recovered.state_at_capture, state_at_capture,
+            "state_at_capture must round-trip bit-identically"
+        );
+        assert_eq!(i32_cursor, i32_buf.len(), "i32_cursor must be at end");
+        assert_eq!(f64_cursor, f64_buf.len(), "f64_cursor must be at end");
+    }
+
     // ---------------------------------------------------------------------------
     // ProfiledSolver integration
     // ---------------------------------------------------------------------------

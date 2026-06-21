@@ -1469,13 +1469,16 @@ mod zero_cost_tests {
     }
 
     impl AntFixtures {
-        /// Build a minimal `ResolvedBounds` with zero entities and the given `n_stages`.
+        /// Build a minimal `ResolvedBounds` with zero entities and the given
+        /// `n_stages` and `k_max`.
         ///
-        /// `n_stages` must exceed the queried `stage_idx` (and each plant's
-        /// delivery stage `stage_idx + K_i`) so the anticipated layout the
-        /// fixture builds places every plant inside the study horizon
-        /// `[0, n_stages)`.
-        fn bounds_with_n_stages(n_stages: usize) -> ResolvedBounds {
+        /// `n_stages` must exceed the queried `stage_idx` so the anticipated
+        /// layout the fixture builds places every plant inside the study horizon
+        /// `[0, n_stages)`. `k_max` sizes the thermal-bounds stage axis: it must
+        /// be large enough that every delivery stage `stage_idx + K_i` the test
+        /// accesses falls within `[0, n_stages + k_max)` (callers whose
+        /// deliveries all fall strictly inside `[0, n_stages)` pass `0`).
+        fn bounds_with_n_stages(n_stages: usize, k_max: usize) -> ResolvedBounds {
             ResolvedBounds::new(
                 &BoundsCountsSpec {
                     n_hydros: 0,
@@ -1484,7 +1487,7 @@ mod zero_cost_tests {
                     n_pumping: 0,
                     n_contracts: 0,
                     n_stages,
-                    k_max: 0,
+                    k_max,
                 },
                 &BoundsDefaults {
                     hydro: HydroStageBounds {
@@ -1604,7 +1607,7 @@ mod zero_cost_tests {
         let mut fixtures = AntFixtures::new();
         // Override bounds so every plant's delivery stage `stage_idx + K_i`
         // falls inside the horizon `[0, n_stages)` when the layout is built.
-        fixtures.bounds = AntFixtures::bounds_with_n_stages(10);
+        fixtures.bounds = AntFixtures::bounds_with_n_stages(10, 0);
         let ctx = fixtures.make_ctx(
             2,          // n_anticipated
             5,          // k_max (max of [1, 5])
@@ -1655,7 +1658,7 @@ mod zero_cost_tests {
     #[test]
     fn fishing_rows_fill_all_plants() {
         let mut fixtures = AntFixtures::new();
-        fixtures.bounds = AntFixtures::bounds_with_n_stages(10);
+        fixtures.bounds = AntFixtures::bounds_with_n_stages(10, 0);
         let ctx = fixtures.make_ctx(2, 5, vec![1, 5], vec![0, 1], 2);
         let stage = two_block_stage(2, [372.0, 372.0]);
         let layout = StageLayout::new(&ctx, &stage, 2);
@@ -1696,7 +1699,7 @@ mod zero_cost_tests {
     #[test]
     fn fishing_rows_always_active_stage_zero() {
         let mut fixtures = AntFixtures::new();
-        fixtures.bounds = AntFixtures::bounds_with_n_stages(10);
+        fixtures.bounds = AntFixtures::bounds_with_n_stages(10, 0);
         let ctx = fixtures.make_ctx(2, 5, vec![1, 5], vec![0, 1], 2);
         let stage = two_block_stage(0, [372.0, 372.0]);
         let layout = StageLayout::new(&ctx, &stage, 0);
@@ -1770,51 +1773,9 @@ mod zero_cost_tests {
     /// and `fill_anticipated_state_out_def_entries`.
     fn build_anticipated_ctx_n_stages_6() -> (AntFixtures, Stage) {
         let mut fixtures = AntFixtures::new();
-        // Override bounds with a 6-stage table (zero entities, k_max = 3).
-        fixtures.bounds = ResolvedBounds::new(
-            &BoundsCountsSpec {
-                n_hydros: 0,
-                n_thermals: 0,
-                n_lines: 0,
-                n_pumping: 0,
-                n_contracts: 0,
-                n_stages: 6,
-                k_max: 3,
-            },
-            &BoundsDefaults {
-                hydro: HydroStageBounds {
-                    min_storage_hm3: 0.0,
-                    max_storage_hm3: 0.0,
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 0.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 0.0,
-                    max_diversion_m3s: None,
-                    filling_inflow_m3s: 0.0,
-                    water_withdrawal_m3s: 0.0,
-                },
-                thermal: ThermalStageBounds {
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 0.0,
-                    cost_per_mwh: 0.0,
-                },
-                line: LineStageBounds {
-                    direct_mw: 0.0,
-                    reverse_mw: 0.0,
-                },
-                pumping: PumpingStageBounds {
-                    min_flow_m3s: 0.0,
-                    max_flow_m3s: 0.0,
-                },
-                contract: ContractStageBounds {
-                    min_mw: 0.0,
-                    max_mw: 0.0,
-                    price_per_mwh: 0.0,
-                },
-            },
-        );
+        // Override bounds with a 6-stage table; k_max = 3 matches the
+        // anticipated config the state-out tests pass to `make_ctx`.
+        fixtures.bounds = AntFixtures::bounds_with_n_stages(6, 3);
         let stage = two_block_stage(0, [372.0, 372.0]);
         (fixtures, stage)
     }
@@ -2008,7 +1969,8 @@ mod zero_cost_tests {
             3,          // k_max
             vec![2, 3], // anticipated_lead_stages
             vec![0, 1], // anticipated_thermal_indices
-            0,          // n_thermals
+            2,          // n_thermals: must cover thermal indices 0 and 1 so the
+                        // fishing-row entry resolves to a real thermal column.
         );
 
         let layout = StageLayout::new(&ctx, &stage, 0);

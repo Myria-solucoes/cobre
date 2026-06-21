@@ -9500,16 +9500,18 @@ fn one_anticipated_thermal_system(
 /// Compute `col_anticipated_decision_start` for the minimal geometry used by
 /// the anticipated-decision tests (0 hydros, 1 thermal, 1 anticipated, 1 blk).
 ///
-/// Layout derivation:
+/// Layout derivation (anticipated_state_out relocated into the state region):
 /// - `n_ant_state = n_anticipated * k_max = 1 * lead_stages`
-/// - `theta = n_ant_state + 0 (z_inflow) + 0 (storage_in) = n_ant_state`
+/// - the relocated `anticipated_state_out` block adds `n_anticipated = 1` column
+///   in the state region, after the ring buffer and before z_inflow
+/// - `theta = n_ant_state + n_anticipated + 0 (z_inflow) + 0 (storage_in)`
+///   = `n_ant_state + 1`
 /// - `decision_start = theta + 1`
 /// - `col_thermal_start = decision_start` (0 turbine/spillage/diversion cols)
 /// - `col_anticipated_decision_start = col_thermal_start + n_thermals * n_blks`
-///   = `(n_ant_state + 1) + 1`
 fn anticipated_decision_col(lead_stages: usize) -> usize {
     let n_ant_state = lead_stages; // n_anticipated=1, k_max=lead_stages
-    let theta = n_ant_state; // no hydro z_inflow or storage_in
+    let theta = n_ant_state + 1; // + n_anticipated (relocated state_out), no z_inflow/storage_in
     let decision_start = theta + 1;
     let col_thermal_start = decision_start; // 0 hydro turbine/spillage/diversion cols
     col_thermal_start + 1 // n_thermals=1, n_blks=1
@@ -9849,7 +9851,8 @@ fn test_anticipated_decision_no_column_at_boundary_stage_strict_predicate() {
 ///
 /// Column layout (0 hydros, 2 thermals, 1 anticipated, 1 blk per stage):
 /// - `n_ant_state = n_anticipated * k_max = 1 * lead_stages`
-/// - `theta = n_ant_state`
+/// - `theta = n_ant_state + n_anticipated` (relocated anticipated_state_out adds
+///   n_anticipated cols)
 /// - `col_thermal_start = theta + 1` (0 turbine/spillage/diversion cols)
 /// - `col_anticipated_decision_start = col_thermal_start + 2 * n_blks`
 ///   = `theta + 1 + 2`
@@ -9998,15 +10001,17 @@ fn two_thermal_one_anticipated_system(n_stages: usize, lead_stages: u32) -> cobr
 /// Compute column offsets for the two-thermal geometry.
 ///
 /// Layout: 0 hydros, 2 thermals, 1 anticipated (thermal 0), 1 blk, K=lead_stages.
+/// The relocated `anticipated_state_out` block (width n_anticipated=1) shifts
+/// theta by 1 beyond the ring buffer.
 /// - `n_ant_state = lead_stages`
-/// - `theta = n_ant_state`
+/// - `theta = n_ant_state + n_anticipated = n_ant_state + 1`
 /// - `col_thermal_start = theta + 1`
 /// - `col_thermal_0_blk0 = col_thermal_start`           (thermal 0, block 0)
 /// - `col_thermal_1_blk0 = col_thermal_start + 1`       (thermal 1, block 0)
 /// - `col_anticipated_start = col_thermal_start + 2`    (2 thermals * 1 blk)
 fn two_thermal_col_thermal_start(lead_stages: usize) -> usize {
     let n_ant_state = lead_stages;
-    let theta = n_ant_state;
+    let theta = n_ant_state + 1; // + n_anticipated (relocated state_out block)
     theta + 1
 }
 
@@ -10604,15 +10609,15 @@ fn test_anticipated_fishing_same_count_both_stages() {
 // Geometry for AC-1..3, AC-6..8 (two-anticipated-thermal system):
 //   n_hydros=0, n_anticipated=2 (K_0=1, K_1=2), k_max=2, n_ant_state=4
 //   col_anticipated_state_start = 0   (N*(1+L) = 0)
-//   theta = n_ant_state = 4
-//   decision_start = 5
-//   col_thermal_start = 5  (0 turbine/spillage/diversion cols)
-//   col_anticipated_decision_start = 5 + 2*1 = 7  (2 thermals, 1 blk)
+//   theta = n_ant_state + n_anticipated = 6  (relocated anticipated_state_out adds 2 cols)
+//   decision_start = 7
+//   col_thermal_start = 7  (0 turbine/spillage/diversion cols)
+//   col_anticipated_decision_start = 7 + 2*1 = 9  (2 thermals, 1 blk)
 //
 // Geometry for AC-4..5 (one-anticipated-thermal system, K=2):
 //   n_hydros=0, n_anticipated=1, k_max=2, n_ant_state=2
 //   col_anticipated_state_start = 0
-//   col_anticipated_decision_start = anticipated_decision_col(2) = 4
+//   col_anticipated_decision_start = anticipated_decision_col(2) = 5
 
 // ── AC-1: anticipated-state columns are unconstrained ─────────────────────
 
@@ -10668,8 +10673,8 @@ fn test_anticipated_state_columns_unconstrained() {
 /// Layout for this system (no hydros, 1 bus, 1 block):
 ///   n_state = n_ant_state = K = 2
 ///   row_anticipated_state_fixing rows: 0, 1  (K=2)
-///   col_anticipated_decision_start: 4  (= anticipated_decision_col(2))
-///   col_anticipated_state_out_start: 5  (= col_anticipated_decision_start + n_anticipated)
+///   col_anticipated_state_out_start: 2  (state region: = anticipated_state.end = n_ant_state)
+///   col_anticipated_decision_start: 5  (= anticipated_decision_col(2))
 ///   old Cat 6 slot row: row_fix_start + (K_i-1)*n_anticipated + 0 = 0 + 1 + 0 = 1
 #[test]
 fn test_anticipated_decision_write_to_state_out_def_row() {
@@ -10828,13 +10833,13 @@ fn test_n_transfer_unchanged_by_anticipated() {
 //   n_ant_state = 1 * K = K
 //   n_state = N*(1+L) + n_ant_state = 1 + K
 //   col_anticipated_state_start = N*(1+L) = 1
-//   z_inflow = [1+K, 1+K+N) = [1+K, 2+K)
-//   storage_in = [2+K, 2+K+N) = [2+K, 3+K)
-//   theta = 3+K
-//   decision_start = 4+K
-//   col_thermal_start = 4+K + 3*N*n_blks = 4+K+6 = 10+K
-//   col_anticipated_decision_start = 10+K + 1*2 = 12+K
-//   col_anticipated_state_out_start = 12+K + n_anticipated = 13+K  (1 per plant)
+//   col_anticipated_state_out_start = 1+K  (state region: = anticipated_state.end, 1 per plant)
+//   z_inflow = [2+K, 2+K+N) = [2+K, 3+K)
+//   storage_in = [3+K, 3+K+N) = [3+K, 4+K)
+//   theta = 4+K
+//   decision_start = 5+K
+//   col_thermal_start = 5+K + 3*N*n_blks = 5+K+6 = 11+K
+//   col_anticipated_decision_start = 11+K + 1*2 = 13+K
 //   line_fwd/rev: 0 (no lines)
 //   deficit: B*1*n_blks = 2 columns → cols 14+K..15+K
 //   excess:  B*n_blks = 2 columns  → cols 16+K..17+K
@@ -11306,16 +11311,18 @@ fn rt_col_ant_state_start() -> usize {
 
 /// `col_thermal_start` for the roundtrip geometry (N=1, L=0, K=k).
 ///
-/// = decision_start + 3*N*n_blks = (4+K) + 6 = 10+K.
+/// The relocated `anticipated_state_out` block (width n_anticipated=1) shifts
+/// theta — and therefore every control-region column — by 1.
+/// = decision_start + 3*N*n_blks = (5+K) + 6 = 11+K.
 fn rt_col_thermal_start(k: usize) -> usize {
-    10 + k
+    11 + k
 }
 
 /// `col_anticipated_decision_start` for the roundtrip geometry.
 ///
-/// = col_thermal_start + T*n_blks = (10+K) + 2 = 12+K.
+/// = col_thermal_start + T*n_blks = (11+K) + 2 = 13+K.
 fn rt_col_ant_dec_start(k: usize) -> usize {
-    12 + k
+    13 + k
 }
 
 /// `row_anticipated_fishing_start` for the roundtrip geometry.

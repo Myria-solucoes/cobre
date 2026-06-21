@@ -398,16 +398,32 @@ impl StageIndexer {
 
         let base = Self::new(hydro_count, max_par_order);
 
-        // Shift state-block downstream offsets by n_ant_state to make room for
-        // the anticipated_state block placed immediately after `inflow_lags`.
+        // Shift state-block downstream offsets to make room for the two
+        // stage-invariant anticipated blocks placed in the state region: the
+        // ring buffer `anticipated_state` (width A*k_max) immediately after
+        // `inflow_lags`, then the cut-target `anticipated_state_out` (width A)
+        // immediately after it and before `z_inflow`.
+        //
+        // `anticipated_state_out` is a cut TARGET column (the matured slot's
+        // `state_to_lp_column` Equal branch resolves here), NOT a state-vector
+        // dimension, so it does NOT enter `n_state`. Locating it in the state
+        // region makes its offset a pure function of N, L, A, k_max — free of
+        // `n_blks`/`n_thermals` — so the global stage-0 cut map lands on the
+        // correct column at every stage regardless of per-stage block counts.
+        // Placing it in the control region (at `anticipated_decision.end`,
+        // whose offset rides on the n_blks-dependent `thermal_end`) silently
+        // wrote the matured anticipated cut coefficient to the wrong column
+        // whenever a stage's block count differed from stage 0's.
+        //
         // The new layout:
-        //   storage           = 0..N
-        //   inflow_lags       = N..N*(1+L)
-        //   anticipated_state = N*(1+L)..N*(1+L) + n_ant_state
-        //   z_inflow          = + N
-        //   storage_in        = + N
-        //   theta             = N*(3+L) + n_ant_state
-        //   n_state           = N*(1+L) + n_ant_state
+        //   storage               = 0..N
+        //   inflow_lags           = N..N*(1+L)
+        //   anticipated_state     = N*(1+L)..N*(1+L) + A*k_max
+        //   anticipated_state_out = + A
+        //   z_inflow              = + N
+        //   storage_in            = + N
+        //   theta                 = N*(3+L) + A*k_max + A
+        //   n_state               = N*(1+L) + A*k_max   (state_out excluded)
         let n_state = hydro_count * (1 + max_par_order) + n_ant_state;
         let anticipated_state_start = hydro_count * (1 + max_par_order);
         let anticipated_state_end = anticipated_state_start + n_ant_state;
@@ -422,7 +438,30 @@ impl StageIndexer {
         } else {
             0..0
         };
-        let z_inflow_start = anticipated_state_end;
+        // Relocated cut-target block: immediately after the ring buffer, before
+        // z_inflow. Width is `n_anticipated` (one column per anticipated plant,
+        // stage-level). Empty-normalise to `0..0` when there are none. Use
+        // `anticipated_state_out_end` for downstream arithmetic so the A-wide
+        // shift survives the public `0..0` collapse.
+        let anticipated_state_out_start = anticipated_state_end;
+        let anticipated_state_out_end = anticipated_state_out_start + n_anticipated;
+        let anticipated_state_out = if n_anticipated > 0 {
+            anticipated_state_out_start..anticipated_state_out_end
+        } else {
+            0..0
+        };
+        // Guard the relocation against a future reordering: the block must begin
+        // exactly at the end of the `n_state`-wide state vector (right after the
+        // `anticipated_state` ring buffer). Checked against the independently
+        // computed `n_state`, not against `anticipated_state_end` — the prior
+        // `start >= anticipated_state_end` / `end <= z_inflow_start` forms were
+        // tautological (each RHS is the LHS by the assignment above), so they
+        // guarded nothing. z_inflow then follows by construction below.
+        debug_assert_eq!(
+            anticipated_state_out_start, n_state,
+            "relocated anticipated_state_out must begin at the end of the n_state state vector"
+        );
+        let z_inflow_start = anticipated_state_out_end;
         let z_inflow = z_inflow_start..z_inflow_start + hydro_count;
         let storage_in_start = z_inflow.end;
         let storage_in = storage_in_start..storage_in_start + hydro_count;
@@ -439,16 +478,19 @@ impl StageIndexer {
         let diversion_start = spillage_start + hydro_count * n_blks;
         let thermal_start = diversion_start + hydro_count * n_blks;
         let thermal_end = thermal_start + n_thermals * n_blks;
-        // Anticipated-decision and anticipated-state-out columns sit between
-        // `thermal` and `line_fwd`.  Every anticipated plant has K_i <= T, so at
-        // stage 0 (the canonical stage) all `n_anticipated` columns are active.
-        // Per-stage gating is bound-driven downstream via
-        // `anticipated_decision_active_at_stage`; the column count is constant.
+        // Anticipated-decision columns sit between `thermal` and `line_fwd`.
+        // Every anticipated plant has K_i <= T, so at stage 0 (the canonical
+        // stage) all `n_anticipated` columns are active. Per-stage gating is
+        // bound-driven downstream via `anticipated_decision_active_at_stage`;
+        // the column count is constant. The matching `anticipated_state_out`
+        // cut-target block does NOT live here — it is relocated into the
+        // stage-invariant state region (immediately after `anticipated_state`,
+        // before `z_inflow`); only the priced decision variable rides the
+        // n_blks-dependent `thermal_end` offset.
         //
         // Control-region layout (equipment side):
-        //   anticipated_decision   = [thermal_end, thermal_end + A)
-        //   anticipated_state_out  = [thermal_end + A, thermal_end + 2*A)
-        //   line_fwd               = [thermal_end + 2*A, …)
+        //   anticipated_decision = [thermal_end, thermal_end + A)
+        //   line_fwd             = [thermal_end + A, …)
         let anticipated_decision_start = thermal_end;
         let anticipated_decision_end = thermal_end + n_anticipated;
         let anticipated_decision = if n_anticipated > 0 {
@@ -456,14 +498,7 @@ impl StageIndexer {
         } else {
             0..0
         };
-        let anticipated_state_out_start = anticipated_decision_end;
-        let anticipated_state_out_end = anticipated_state_out_start + n_anticipated;
-        let anticipated_state_out = if n_anticipated > 0 {
-            anticipated_state_out_start..anticipated_state_out_end
-        } else {
-            0..0
-        };
-        let line_fwd_start = anticipated_state_out_end;
+        let line_fwd_start = anticipated_decision_end;
         let line_rev_start = line_fwd_start + n_lines * n_blks;
         let deficit_start = line_rev_start + n_lines * n_blks;
         let max_deficit_segments = counts.max_deficit_segments;
@@ -1414,8 +1449,9 @@ mod tests {
     }
 
     /// SS5.5.3-style example with two anticipated plants and `K_max = 3`:
-    /// `anticipated_state` consumes 6 columns starting at `N*(1+L) = 9`,
-    /// shifting `z_inflow`, `storage_in` and `theta` by 6.
+    /// `anticipated_state` consumes 6 columns starting at `N*(1+L) = 9`, then
+    /// the relocated `anticipated_state_out` consumes `A = 2` columns, shifting
+    /// `z_inflow`, `storage_in` and `theta` by `A*k_max + A = 8`.
     #[test]
     fn anticipated_state_layout_n3_l2_nant2_kmax3() {
         let idx = StageIndexer::with_equipment_and_evaporation(
@@ -1425,16 +1461,20 @@ mod tests {
         );
 
         assert_eq!(idx.anticipated_state, 9..15);
-        assert_eq!(idx.z_inflow, 15..18);
-        assert_eq!(idx.storage_in, 18..21);
-        assert_eq!(idx.theta, 21);
+        // Relocated cut-target block: A=2 columns after the ring buffer.
+        assert_eq!(idx.anticipated_state_out, 15..17);
+        assert_eq!(idx.z_inflow, 17..20);
+        assert_eq!(idx.storage_in, 20..23);
+        assert_eq!(idx.theta, 23);
+        // n_state excludes anticipated_state_out (control variable, not a state dim).
         assert_eq!(idx.n_state, 15);
         assert_eq!(idx.n_anticipated, 2);
         assert_eq!(idx.k_max, 3);
     }
 
-    /// Zero hydros but two anticipated plants: `anticipated_state` collapses
-    /// to `0..6`, `z_inflow` and `storage_in` are empty, `theta == 6`.
+    /// Zero hydros but two anticipated plants: `anticipated_state` is `0..6`,
+    /// the relocated `anticipated_state_out` is `6..8`, `z_inflow` and
+    /// `storage_in` are empty (N=0), `theta == 8`.
     #[test]
     fn anticipated_state_layout_n0_nant2_kmax3() {
         let idx = StageIndexer::with_equipment_and_evaporation(
@@ -1444,10 +1484,11 @@ mod tests {
         );
 
         assert_eq!(idx.anticipated_state, 0..6);
+        assert_eq!(idx.anticipated_state_out, 6..8);
         assert_eq!(idx.n_state, 6);
-        assert_eq!(idx.z_inflow, 6..6);
-        assert_eq!(idx.storage_in, 6..6);
-        assert_eq!(idx.theta, 6);
+        assert_eq!(idx.z_inflow, 8..8);
+        assert_eq!(idx.storage_in, 8..8);
+        assert_eq!(idx.theta, 8);
         assert_eq!(idx.n_anticipated, 2);
         assert_eq!(idx.k_max, 3);
     }
@@ -1477,7 +1518,8 @@ mod tests {
         assert_eq!(idx.k_max, 0);
     }
 
-    /// `z_inflow.start` is exactly `N*(1+L) + n_anticipated * k_max`.
+    /// `z_inflow.start` is exactly `N*(1+L) + n_anticipated*k_max + n_anticipated`
+    /// (the ring buffer plus the relocated `anticipated_state_out` block).
     #[test]
     fn anticipated_state_shifts_z_inflow() {
         // SS5.5.3-extended: N=3, L=2, n_anticipated=2, k_max=3.
@@ -1486,7 +1528,7 @@ mod tests {
             &fpha(vec![], vec![]),
             &evap(vec![]),
         );
-        assert_eq!(idx_small.z_inflow.start, 3 * (1 + 2) + 2 * 3);
+        assert_eq!(idx_small.z_inflow.start, 3 * (1 + 2) + 2 * 3 + 2);
 
         // Production scale: N=160, L=12, n_anticipated=10, k_max=4.
         let idx_prod = StageIndexer::with_equipment_and_evaporation(
@@ -1494,7 +1536,7 @@ mod tests {
             &fpha(vec![], vec![]),
             &evap(vec![]),
         );
-        assert_eq!(idx_prod.z_inflow.start, 160 * (1 + 12) + 10 * 4);
+        assert_eq!(idx_prod.z_inflow.start, 160 * (1 + 12) + 10 * 4 + 10);
     }
 
     /// Minimal non-empty anticipated block: `n_anticipated=1`, `k_max=1` → length 1.
@@ -1509,9 +1551,11 @@ mod tests {
         // N*(1+L) = 2*2 = 4
         assert_eq!(idx.anticipated_state, 4..5);
         assert_eq!(idx.anticipated_state.len(), 1);
-        assert_eq!(idx.n_state, 5); // base 4 + 1
-        assert_eq!(idx.z_inflow, 5..7);
-        assert_eq!(idx.theta, 9); // 5 + 2*(storage_in width) = 5 + 2 + 2
+        // Relocated cut-target block: A=1 column after the ring buffer.
+        assert_eq!(idx.anticipated_state_out, 5..6);
+        assert_eq!(idx.n_state, 5); // base 4 + 1 (state_out excluded)
+        assert_eq!(idx.z_inflow, 6..8);
+        assert_eq!(idx.theta, 10); // 6 + 2 + 2
     }
 
     /// Acceptance side of the `debug_assert`: (`n_anticipated=0`, `k_max=0`)
@@ -1602,17 +1646,16 @@ mod tests {
             &evap(vec![]),
         );
 
-        // anticipated_decision sits between thermal and anticipated_state_out, length 2.
+        // anticipated_decision sits between thermal and line_fwd, length 2.
+        // The relocated anticipated_state_out is NOT in the control region.
         assert_eq!(idx.anticipated_decision.start, idx.thermal.end);
         assert_eq!(idx.anticipated_decision.len(), 2);
-        // anticipated_state_out sits immediately after anticipated_decision, length 2.
-        assert_eq!(
-            idx.anticipated_state_out.start,
-            idx.anticipated_decision.end
-        );
+        // line_fwd now follows anticipated_decision directly (state_out moved out).
+        assert_eq!(idx.line_fwd.start, idx.anticipated_decision.end);
+        // anticipated_state_out lives in the state region, after the ring buffer.
+        assert_eq!(idx.anticipated_state_out.start, idx.anticipated_state.end);
         assert_eq!(idx.anticipated_state_out.len(), 2);
-        // line_fwd starts after anticipated_state_out.
-        assert_eq!(idx.line_fwd.start, idx.anticipated_state_out.end);
+        assert_eq!(idx.z_inflow.start, idx.anticipated_state_out.end);
         // Per-plant metadata round-trips intact.
         assert_eq!(idx.anticipated_lead_stages, vec![3, 2]);
         assert_eq!(idx.anticipated_thermal_indices, vec![0, 2]);
@@ -1647,13 +1690,14 @@ mod tests {
         assert_eq!(idx.excess, 43..51);
     }
 
-    /// `line_fwd.start == anticipated_state_out.end` for various
-    /// `n_anticipated`. Sweep includes 0 (no shift), 1, 2, 5.
+    /// `line_fwd.start == anticipated_decision.end` for various `n_anticipated`.
+    /// Sweep includes 0 (no shift), 1, 2, 5.
     ///
-    /// `anticipated_state_out` is inserted between `anticipated_decision`
-    /// and `line_fwd`, so the layout invariant is:
-    ///   `anticipated_decision.end` == `anticipated_state_out.start`
-    ///   `anticipated_state_out.end` == `line_fwd.start`
+    /// `anticipated_state_out` is relocated to the state region (after the
+    /// `anticipated_state` ring buffer, before `z_inflow`), so the control
+    /// region is `anticipated_decision → line_fwd` directly and the state-region
+    /// invariant is `anticipated_state.end == anticipated_state_out.start` and
+    /// `anticipated_state_out.end == z_inflow.start`.
     #[test]
     fn anticipated_decision_shifts_line_fwd() {
         for n_ant in [0_usize, 1, 2, 5] {
@@ -1680,16 +1724,19 @@ mod tests {
                 &evap(vec![]),
             );
             if n_ant > 0 {
-                // When the block is non-empty:
-                //   anticipated_decision.end == anticipated_state_out.start
-                //   anticipated_state_out.end == line_fwd.start
+                // Control region: line_fwd follows anticipated_decision directly.
                 assert_eq!(
-                    idx.anticipated_state_out.start, idx.anticipated_decision.end,
-                    "anticipated_state_out.start must equal anticipated_decision.end for n_ant={n_ant}"
+                    idx.line_fwd.start, idx.anticipated_decision.end,
+                    "line_fwd.start must equal anticipated_decision.end for n_ant={n_ant}"
+                );
+                // State region: state_out sits between the ring buffer and z_inflow.
+                assert_eq!(
+                    idx.anticipated_state_out.start, idx.anticipated_state.end,
+                    "anticipated_state_out.start must equal anticipated_state.end for n_ant={n_ant}"
                 );
                 assert_eq!(
-                    idx.line_fwd.start, idx.anticipated_state_out.end,
-                    "line_fwd.start must equal anticipated_state_out.end for n_ant={n_ant}"
+                    idx.z_inflow.start, idx.anticipated_state_out.end,
+                    "z_inflow.start must equal anticipated_state_out.end for n_ant={n_ant}"
                 );
                 assert_eq!(
                     idx.anticipated_state_out.len(),
@@ -1697,8 +1744,8 @@ mod tests {
                     "anticipated_state_out.len() must equal n_anticipated for n_ant={n_ant}"
                 );
             } else {
-                // When both blocks collapse to `0..0`, `line_fwd.start`
-                // falls directly on `thermal.end` (no shift).
+                // When the block collapses to `0..0`, `line_fwd.start` falls
+                // directly on `thermal.end` (no shift in the control region).
                 assert_eq!(
                     idx.anticipated_state_out,
                     0..0,
@@ -1854,8 +1901,9 @@ mod tests {
         );
     }
 
-    /// `anticipated_state_out` range is placed immediately after
-    /// `anticipated_decision` and `line_fwd` follows `anticipated_state_out`.
+    /// `anticipated_state_out` is relocated into the state region, immediately
+    /// after the `anticipated_state` ring buffer and before `z_inflow`. The
+    /// control region goes `anticipated_decision → line_fwd` directly.
     #[test]
     fn test_anticipated_state_out_range_is_after_anticipated_decision() {
         let counts = EquipmentCounts {
@@ -1875,20 +1923,19 @@ mod tests {
         };
         let idx = StageIndexer::with_equipment(&counts, &fpha(vec![], vec![]));
 
-        // Range adjacency.
-        assert_eq!(
-            idx.anticipated_state_out.start,
-            idx.anticipated_decision.end
-        );
+        // State-region adjacency: ring buffer → state_out → z_inflow.
+        assert_eq!(idx.anticipated_state_out.start, idx.anticipated_state.end);
         assert_eq!(
             idx.anticipated_state_out.end - idx.anticipated_state_out.start,
             2
         );
+        assert_eq!(idx.z_inflow.start, idx.anticipated_state_out.end);
 
-        // line_fwd starts immediately after the new column block.
-        assert_eq!(idx.line_fwd.start, idx.anticipated_state_out.end);
+        // Control region: line_fwd follows anticipated_decision directly.
+        assert_eq!(idx.line_fwd.start, idx.anticipated_decision.end);
 
-        // n_state is unchanged: N*(1+L) + A*K_max = 2*2 + 2*3 = 10.
+        // n_state is unchanged: N*(1+L) + A*K_max = 2*2 + 2*3 = 10
+        // (state_out is a control variable, excluded from n_state).
         assert_eq!(idx.n_state, 10);
     }
 
@@ -1898,6 +1945,38 @@ mod tests {
         let idx = StageIndexer::new(3, 2);
         assert_eq!(idx.anticipated_state_out, 0..0);
         assert_eq!(idx.n_state, 9);
+    }
+
+    /// Relocated-block adjacency: the `anticipated_state_out` cut-target block
+    /// sits exactly between the `anticipated_state` ring buffer and `z_inflow`
+    /// (`anticipated_state.end == anticipated_state_out.start` and
+    /// `anticipated_state_out.end == z_inflow.start`), and never overlaps the
+    /// ring buffer.
+    #[test]
+    fn anticipated_state_out_relocated_block_adjacency() {
+        // Sweep a few (N, L, A, k_max) shapes including N=0 and k_max=1.
+        for (n, l, n_ant, k_max) in [
+            (3_usize, 2_usize, 2_usize, 3_usize),
+            (0, 0, 2, 3),
+            (2, 1, 1, 1),
+        ] {
+            let idx = StageIndexer::with_equipment_and_evaporation(
+                &eq_with_anticipated(n, l, 0, 0, 1, 1, false, n_ant, k_max),
+                &fpha(vec![], vec![]),
+                &evap(vec![]),
+            );
+            assert_eq!(
+                idx.anticipated_state_out.start, idx.anticipated_state.end,
+                "state_out must begin where the ring buffer ends for (N={n}, L={l}, A={n_ant}, K={k_max})"
+            );
+            assert_eq!(
+                idx.z_inflow.start, idx.anticipated_state_out.end,
+                "z_inflow must begin where state_out ends for (N={n}, L={l}, A={n_ant}, K={k_max})"
+            );
+            assert_eq!(idx.anticipated_state_out.len(), n_ant);
+            // No overlap with the ring buffer.
+            assert!(idx.anticipated_state_out.start >= idx.anticipated_state.end);
+        }
     }
 
     // ---------------------------------------------------------------------------

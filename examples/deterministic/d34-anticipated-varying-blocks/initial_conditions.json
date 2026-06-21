@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/initial_conditions.schema.json",
+  "storage": [
+    {
+      "hydro_id": 0,
+      "value_hm3": 5.0
+    }
+  ],
+  "filling_storage": [],
+  "past_anticipated_commitments": [
+    {
+      "thermal_id": 1,
+      "values_mw": [0.0]
+    }
+  ]
+}

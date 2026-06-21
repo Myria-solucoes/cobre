@@ -202,13 +202,24 @@ pub struct StageIndexer {
     /// Column range for the anticipated-thermal outgoing-state variables,
     /// one column per anticipated plant (stage-level, NOT per-block).
     ///
-    /// Length: `n_anticipated`. Placed immediately after
-    /// [`Self::anticipated_decision`] in the control region so that
-    /// `anticipated_state_out.start == anticipated_decision.end`. Together
-    /// with the `anticipated_state_out` definition row, this variable is
-    /// pinned to the corresponding `anticipated_decision` column by an
-    /// equality constraint, making it the correct target for cut-coefficient
-    /// mapping via `state_to_lp_column`'s Equal branch.
+    /// Length: `n_anticipated`. Placed in the **stage-invariant state region**,
+    /// immediately after the [`Self::anticipated_state`] ring buffer and before
+    /// [`Self::z_inflow`], so that
+    /// `anticipated_state_out.start == anticipated_state.end` and its offset is
+    /// a pure function of `N`, `L`, `A`, `k_max` — independent of `n_blks` and
+    /// `n_thermals`. This is what makes it a sound cut TARGET: the global
+    /// stage-0 cut map resolves the matured anticipated slot here (via
+    /// `state_to_lp_column`'s Equal branch) onto the same column at every stage
+    /// regardless of per-stage block counts. Locating it in the control region
+    /// (at `anticipated_decision.end`, which rides the n_blks-dependent
+    /// `thermal.end`) would write the cut coefficient to the wrong column
+    /// whenever a stage's block count differed from stage 0's.
+    ///
+    /// Despite living in the state region, it is NOT a state-vector dimension
+    /// and does NOT contribute to [`Self::n_state`]. Together with the
+    /// `anticipated_state_out` definition row it is pinned to the corresponding
+    /// [`Self::anticipated_decision`] column by an equality constraint
+    /// (`anticipated_state_out[p] − decision_col[p] = 0`).
     ///
     /// Empty (`0..0`) when `n_anticipated == 0` or when built via
     /// [`StageIndexer::new`].

@@ -2352,17 +2352,18 @@ mod tests {
     /// Column layout (no hydros, no FPHA, no evap):
     ///   storage:            [0, 0)    empty
     ///   lags:               [0, 0)    empty
-    ///   z_inflow:           [0, 0)    empty
-    ///   storage_in:         [0, 0)    empty
-    ///   theta:              0
-    ///   decision_start:     1
-    ///   anticipated_state:  [1, 1 + 2*1) = [1, 3)  (k_max=2, n_anticipated=1)
-    ///   thermal:            [3, 3 + 2*2) = [3, 7)  (T=2, K=2)
-    ///   anticipated_decision: [7, 7+1) = [7, 8)   (n_anticipated=1)
-    ///   line_fwd: [8, 8) empty
-    ///   line_rev: [8, 8) empty
-    ///   deficit: [8, 8+1*1*2) = [8, 10)  (B=1, S=1, K=2)
-    ///   excess:  [10, 10+1*2) = [10, 12)
+    ///   anticipated_state:     [0, 0 + 2*1) = [0, 2)  (k_max=2, n_anticipated=1)
+    ///   anticipated_state_out: [2, 3)        (relocated state region, A=1)
+    ///   z_inflow:              [3, 3)    empty
+    ///   storage_in:            [3, 3)    empty
+    ///   theta:                 3
+    ///   decision_start:        4
+    ///   thermal:               [4, 4 + 2*2) = [4, 8)  (T=2, K=2)
+    ///   anticipated_decision:  [8, 8+1) = [8, 9)   (n_anticipated=1)
+    ///   line_fwd: [9, 9) empty
+    ///   line_rev: [9, 9) empty
+    ///   deficit: [9, 9+1*1*2) = [9, 11)  (B=1, S=1, K=2)
+    ///   excess:  [11, 11+1*2) = [11, 13)
     fn make_indexer_with_anticipated() -> StageIndexer {
         StageIndexer::with_equipment_and_evaporation(
             &crate::indexer::EquipmentCounts {
@@ -2395,8 +2396,8 @@ mod tests {
     ///
     /// Using `make_indexer_with_anticipated`:
     /// - Thermal EntityId(6) at sys_pos=1, which is anticipated_thermal_indices[0].
-    /// - anticipated_decision.start = 7, local_idx = 0.
-    /// - Expected column = 7 + 0 = 7.
+    /// - anticipated_decision.start = 8, local_idx = 0.
+    /// - Expected column = 8 + 0 = 8.
     #[test]
     fn anticipated_decision_maps_to_correct_column() {
         let indexer = make_indexer_with_anticipated();
@@ -2409,8 +2410,8 @@ mod tests {
 
         // Verify anticipated_decision.start is as expected.
         assert_eq!(
-            indexer.anticipated_decision.start, 7,
-            "anticipated_decision.start should be 7, got {}",
+            indexer.anticipated_decision.start, 8,
+            "anticipated_decision.start should be 8, got {}",
             indexer.anticipated_decision.start
         );
 
@@ -2429,8 +2430,8 @@ mod tests {
 
         assert_eq!(
             result,
-            vec![(7, 1.0)],
-            "AnticipatedDecision(6) should resolve to column 7 (anticipated_decision.start + 0)"
+            vec![(8, 1.0)],
+            "AnticipatedDecision(6) should resolve to column 8 (anticipated_decision.start + 0)"
         );
     }
 
@@ -2461,7 +2462,7 @@ mod tests {
             );
             assert_eq!(
                 result,
-                vec![(7, 1.0)],
+                vec![(8, 1.0)],
                 "AnticipatedDecision must be stage-level (block_idx={block_idx} should not change column)"
             );
         }

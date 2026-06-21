@@ -496,6 +496,7 @@ mod tests {
             push_nonempty(&mut v, idx.storage.clone());
             push_nonempty(&mut v, idx.inflow_lags.clone());
             push_nonempty(&mut v, idx.anticipated_state.clone());
+            push_nonempty(&mut v, idx.anticipated_state_out.clone());
             push_nonempty(&mut v, idx.z_inflow.clone());
             push_nonempty(&mut v, idx.storage_in.clone());
             v.push(idx.theta..idx.theta + 1);
@@ -583,12 +584,15 @@ mod tests {
             }
         }
 
-        /// I5: theta placement `theta == storage_in.end == N*(3+L) + n_ant*k_max`.
+        /// I5: theta placement
+        /// `theta == storage_in.end == N*(3+L) + n_ant*k_max + n_ant`.
+        /// The trailing `+ n_ant` is the relocated `anticipated_state_out` block
+        /// (width `n_ant`) that now sits in the state region before `z_inflow`.
         #[test]
         fn i5_theta_placement() {
             for p in parameter_grid() {
                 let (idx, _) = build_indexer(&p);
-                let expected = p.n_hyd * (3 + p.l) + p.n_ant * p.k_max;
+                let expected = p.n_hyd * (3 + p.l) + p.n_ant * p.k_max + p.n_ant;
                 assert_eq!(
                     idx.theta, idx.storage_in.end,
                     "I5 storage_in.end mismatch at {p:?}"
@@ -601,30 +605,39 @@ mod tests {
             }
         }
 
-        /// I6: `anticipated_decision` and `anticipated_state_out` are contiguous
-        /// between `thermal` and `line_fwd`.
+        /// I6: contiguity of the anticipated blocks after the `state_out`
+        /// relocation. The control region is
+        /// `thermal → anticipated_decision → line_fwd`; the relocated
+        /// `anticipated_state_out` sits in the state region between the
+        /// `anticipated_state` ring buffer and `z_inflow`:
+        /// `anticipated_state → anticipated_state_out → z_inflow`.
         ///
-        /// The layout is: `thermal → anticipated_decision → anticipated_state_out → line_fwd`.
-        /// When both blocks collapse to `0..0` (no anticipated plants), the
-        /// contiguity property reduces to `line_fwd.start == thermal.end`.
-        /// Check that branch explicitly so the public `0..0` normalisation does
-        /// not silently break the layout.
+        /// When the anticipated blocks collapse to `0..0` (no anticipated
+        /// plants), the control-region property reduces to
+        /// `line_fwd.start == thermal.end`. Check that branch explicitly so the
+        /// public `0..0` normalisation does not silently break the layout.
         #[test]
         fn i6_decision_contiguity() {
             for p in parameter_grid() {
                 let (idx, _) = build_indexer(&p);
                 if p.n_ant > 0 {
+                    // Control region: thermal → decision → line_fwd.
                     assert_eq!(
                         idx.anticipated_decision.start, idx.thermal.end,
                         "I6 decision.start != thermal.end at {p:?}"
                     );
                     assert_eq!(
-                        idx.anticipated_state_out.start, idx.anticipated_decision.end,
-                        "I6 state_out.start != decision.end at {p:?}"
+                        idx.line_fwd.start, idx.anticipated_decision.end,
+                        "I6 line_fwd.start != decision.end at {p:?}"
+                    );
+                    // State region: anticipated_state → state_out → z_inflow.
+                    assert_eq!(
+                        idx.anticipated_state_out.start, idx.anticipated_state.end,
+                        "I6 state_out.start != anticipated_state.end at {p:?}"
                     );
                     assert_eq!(
-                        idx.line_fwd.start, idx.anticipated_state_out.end,
-                        "I6 line_fwd.start != state_out.end at {p:?}"
+                        idx.z_inflow.start, idx.anticipated_state_out.end,
+                        "I6 z_inflow.start != state_out.end at {p:?}"
                     );
                 } else {
                     assert_eq!(

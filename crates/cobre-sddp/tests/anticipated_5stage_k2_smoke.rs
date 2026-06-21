@@ -66,7 +66,7 @@ use cobre_io::config::{
     SimulationConfig as IoSimulationConfig, StoppingRuleConfig, TrainingConfig,
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
-use cobre_sddp::{StudySetup, hydro_models::PrepareHydroModelsResult};
+use cobre_sddp::{SolverStatsDelta, StudySetup, hydro_models::PrepareHydroModelsResult};
 use cobre_solver::ActiveSolver;
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
@@ -492,5 +492,66 @@ fn test_anticipated_5stage_k2_analytical_lb() {
         anticipated_state_start,
         n_anticipated,
         &[2, 3, 4],
+    );
+}
+
+/// Warm-start regression: an anticipated-thermal study trained with warm-start
+/// must reconstruct every stored basis with zero rejections.
+///
+/// `anticipated_state_out` lives in the stage-invariant state region, so the
+/// cut row that targets it shifts `z_inflow`/`storage_in`/`theta` and the whole
+/// control region downstream by `n_anticipated`. The risk this test pins: that
+/// the shift breaks `reconstruct_basis`'s slot-identity matching and starts
+/// producing bases `HiGHS` rejects. It cannot, because `reconstruct_basis`
+/// matches stored cut rows to current LP rows by `CutPool` slot identity — never
+/// by absolute column index — and copies the column block verbatim before
+/// resizing to the (now-wider) column count. `basis_consistency_failures` is the
+/// `SolverStatistics` counter incremented whenever the solver rejects an offered
+/// warm-start basis (`isBasisConsistent` returns false): every reconstructed
+/// basis must be accepted by the solver.
+///
+/// Aggregated across all training-phase log entries (forward and backward) so a
+/// rejection on either pass surfaces. Iteration 1's forward pass captures the
+/// first basis; iterations 2..8 warm-start from the stored basis through
+/// `reconstruct_basis`, which is precisely the path the relocation could have
+/// broken.
+#[test]
+fn test_anticipated_5stage_k2_warm_start_zero_basis_rejections() {
+    let system = build_system();
+    let config = build_config();
+    let mut setup = build_setup(system, &config);
+    let comm = StubComm;
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+
+    let outcome = setup
+        .train(&mut solver, &comm, 8, ActiveSolver::new, None, None)
+        .expect("train must not return Err");
+    assert!(
+        outcome.error.is_none(),
+        "training error: {:?}",
+        outcome.error
+    );
+
+    let result = &outcome.result;
+    assert_eq!(
+        result.iterations, 8,
+        "warm-start regression needs the full 8-iteration run to exercise \
+         reconstruct_basis on iterations 2..8"
+    );
+
+    // Aggregate basis-rejection telemetry across every phase. On the baked
+    // warm-start path `reconstruct_basis` runs once per warm-start solve; a
+    // single rejection here would mean the relocated-column LP produced a basis
+    // HiGHS could not accept.
+    let total_rejections =
+        SolverStatsDelta::aggregate(result.solver_stats_log.iter().map(|entry| &entry.delta))
+            .basis_consistency_failures;
+
+    assert_eq!(
+        total_rejections, 0,
+        "anticipated warm-start: expected 0 basis rejections after relocating \
+         anticipated_state_out into the state region, got {total_rejections} \
+         (reconstruct_basis must match cut rows by CutPool slot identity, not by \
+         absolute column index, so the column shift is transparent)"
     );
 }

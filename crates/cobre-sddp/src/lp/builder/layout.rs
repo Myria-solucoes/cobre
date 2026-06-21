@@ -166,8 +166,12 @@ pub(crate) struct AnticipatedLayout {
     /// the column range is empty and `col_line_fwd_start` is unshifted).
     pub(crate) col_anticipated_decision_start: usize,
     /// Start of the `anticipated_state_out` column block (one column per
-    /// anticipated plant; stage-level, NOT per-block). Located immediately
-    /// after `col_anticipated_decision_start` in the control region.
+    /// anticipated plant; stage-level, NOT per-block). Sourced from the
+    /// indexer's relocated **state-region** position
+    /// (`StageIndexer::anticipated_state_out.start`, immediately after the
+    /// `anticipated_state` ring buffer), so the offset is stage-invariant and
+    /// independent of this stage's block count — the property that keeps the
+    /// global stage-0 cut map landing on the correct column at every stage.
     /// Pinned to `decision_col[plant]` by the `anticipated_state_out_def` row.
     /// When `n_anticipated == 0`, equals `col_anticipated_decision_start`
     /// (the block is empty).
@@ -684,12 +688,23 @@ impl StageLayout {
         let num_rows = row_generic_start + generic.n_generic_rows;
         let zeta = stage.blocks.iter().map(|b| b.duration_hours).sum::<f64>() * M3S_TO_HM3;
 
-        // The anticipated blocks normalise to `0..0` when empty; the decision and
-        // state-out column starts are the thermal-block end plus the (possibly
-        // zero) anticipated count.
+        // The anticipated blocks normalise to `0..0` when empty. The priced
+        // decision column starts at the (n_blks-dependent) thermal-block end;
+        // the state-out cut-target column is sourced from its relocated
+        // stage-invariant state-region position (`idx.anticipated_state_out`),
+        // NOT from `thermal.end + n_anticipated`, so the global stage-0 cut map
+        // lands on the correct column even when this stage's block count differs
+        // from stage 0's. When `n_anticipated == 0` the relocated range is the
+        // empty-normalised `0..0`; fall back to the decision start so the two
+        // coincide, matching the deficit-segment empty-block convention.
+        let col_anticipated_state_out_start = if ctx.n_anticipated > 0 {
+            idx.anticipated_state_out.start
+        } else {
+            idx.thermal.end
+        };
         let anticipated = AnticipatedLayout {
             col_anticipated_decision_start: idx.thermal.end,
-            col_anticipated_state_out_start: idx.thermal.end + ctx.n_anticipated,
+            col_anticipated_state_out_start,
             row_anticipated_state_out_def_start,
             n_anticipated_state_out_def_rows,
             row_anticipated_fishing_start,
@@ -1522,9 +1537,13 @@ mod tests {
     /// `col_anticipated_decision_start` falls between thermal end and
     /// `col_line_fwd_start` when `n_anticipated=2, n_thermals=3, n_blks=4`.
     ///
-    /// The layout in the control region is:
-    /// `thermal | anticipated_decision (2 cols) | anticipated_state_out (2 cols) | line_fwd`
-    /// So `col_line_fwd_start == col_anticipated_decision_start + 2 * n_anticipated`.
+    /// After the `anticipated_state_out` relocation the control region is
+    /// `thermal` then `anticipated_decision` (2 cols) then `line_fwd` —
+    /// `state_out` moved to the state region. So `col_line_fwd_start` equals
+    /// `col_anticipated_decision_start + n_anticipated`, and
+    /// `col_anticipated_state_out_start` is sourced from the state-region
+    /// position (immediately after the `anticipated_state` ring buffer), not
+    /// from the control region.
     #[test]
     fn anticipated_decision_columns_placed_between_thermal_and_line_fwd() {
         use chrono::NaiveDate;
@@ -1585,9 +1604,8 @@ mod tests {
         // n_thermals = 0, n_blks = 4:
         // col_thermal_start = col_diversion_start + 0 * 4 = col_diversion_start
         // col_anticipated_decision_start = col_thermal_start + 0 * 4 = col_thermal_start
-        // col_anticipated_state_out_start = col_anticipated_decision_start + n_anticipated
-        // col_line_fwd_start = col_anticipated_state_out_start + n_anticipated
-        //                    = col_anticipated_decision_start + 2 * n_anticipated
+        // col_line_fwd_start = col_anticipated_decision_start + n_anticipated
+        //   (state_out is no longer in the control region)
         assert_eq!(
             layout.anticipated.col_anticipated_decision_start,
             layout.col_thermal_start(),
@@ -1595,33 +1613,42 @@ mod tests {
              when n_thermals=0 (no thermal per-block cols)"
         );
         assert_eq!(
-            layout.anticipated.col_anticipated_state_out_start,
-            layout.anticipated.col_anticipated_decision_start + n_anticipated,
-            "col_anticipated_state_out_start == col_anticipated_decision_start + n_anticipated"
-        );
-        assert_eq!(
             layout.col_line_fwd_start(),
-            layout.anticipated.col_anticipated_state_out_start + n_anticipated,
-            "col_line_fwd_start == col_anticipated_state_out_start + n_anticipated"
+            layout.anticipated.col_anticipated_decision_start + n_anticipated,
+            "col_line_fwd_start == col_anticipated_decision_start + n_anticipated \
+             (state_out relocated out of the control region)"
         );
-        // Verify the separation between thermal_start and line_fwd_start is exactly 2*n_anticipated
-        // (n_anticipated cols for anticipated_decision + n_anticipated cols for anticipated_state_out).
+        // The relocated state_out start equals the indexer's state-region
+        // position: after the ring buffer (N*(1+L) + n_ant*k_max). Here N=0,
+        // L=0, k_max=1, n_ant=2 → ring buffer is [0, 2), state_out starts at 2.
+        assert_eq!(
+            layout.anticipated.col_anticipated_state_out_start,
+            n_anticipated * k_max,
+            "col_anticipated_state_out_start must equal the state-region offset \
+             N*(1+L) + n_ant*k_max"
+        );
+        // Verify the separation between thermal_start and line_fwd_start is
+        // exactly n_anticipated (only the decision block remains between them).
         assert_eq!(
             layout.col_line_fwd_start() - layout.col_thermal_start(),
-            2 * n_anticipated,
-            "gap from thermal_start to line_fwd_start must be exactly 2*n_anticipated (two stage-level blocks)"
+            n_anticipated,
+            "gap from thermal_start to line_fwd_start must be exactly n_anticipated \
+             (only the anticipated_decision block remains in the control region)"
         );
     }
 
     // ── AC-4 ─────────────────────────────────────────────────────────────────
 
     /// AC-4: `StageLayout` with `n_anticipated=2, k_max=3, n_hydros=0,
-    /// max_par_order=0` has `col_turbine_start == 0*(3+0) + 6 + 1 == 7`.
+    /// max_par_order=0` has `col_turbine_start == 0*(3+0) + 6 + 2 + 1 == 9`.
     ///
-    /// `n_ant_state = n_anticipated * k_max = 2 * 3 = 6` shifts `theta`
-    /// from the legacy `N*(3+L) = 0` to `0 + 6 = 6`, so decisions begin at 7.
+    /// `n_ant_state = n_anticipated * k_max = 2 * 3 = 6` and the relocated
+    /// `anticipated_state_out` block (width `n_anticipated = 2`) together shift
+    /// `theta` from the legacy `N*(3+L) = 0` to `0 + 6 + 2 = 8`, so decisions
+    /// begin at 9.
     ///
-    /// The general formula (any N, L) is `N*(3+L) + n_ant_state + 1`.
+    /// The general formula (any N, L) is
+    /// `N*(3+L) + n_ant_state + n_anticipated + 1`.
     #[test]
     fn stage_layout_with_anticipated_shifts_decision_region() {
         let n_hydros = 0_usize;
@@ -1643,13 +1670,14 @@ mod tests {
         let expected_n_ant_state = n_anticipated * k_max;
         assert_eq!(layout.n_ant_state, expected_n_ant_state, "n_ant_state");
 
-        // theta = N*(3+L) + n_ant_state = 0*(3+0) + 6 = 6
-        // col_turbine_start = theta + 1 = 7
-        let expected_col_turbine_start = n_hydros * (3 + max_par_order) + expected_n_ant_state + 1;
+        // theta = N*(3+L) + n_ant_state + n_anticipated = 0*(3+0) + 6 + 2 = 8
+        // col_turbine_start = theta + 1 = 9
+        let expected_col_turbine_start =
+            n_hydros * (3 + max_par_order) + expected_n_ant_state + n_anticipated + 1;
         assert_eq!(
             layout.col_turbine_start(),
             expected_col_turbine_start,
-            "col_turbine_start == N*(3+L) + n_ant_state + 1"
+            "col_turbine_start == N*(3+L) + n_ant_state + n_anticipated + 1"
         );
     }
 
@@ -1916,12 +1944,14 @@ mod tests {
         }
     }
 
-    /// `col_anticipated_state_out_start` is adjacent to `col_anticipated_decision_start`,
-    /// `col_line_fwd_start` follows `col_anticipated_state_out_start`, and
-    /// `n_anticipated_state_out_def_rows` counts both active plants at stage 0.
+    /// `col_anticipated_state_out_start` is sourced from the relocated
+    /// state-region position (after the `anticipated_state` ring buffer, before
+    /// `z_inflow`), `col_line_fwd_start` follows `anticipated_decision` directly,
+    /// and `n_anticipated_state_out_def_rows` counts both active plants at stage 0.
     ///
-    /// Fixture: `n_anticipated=2`, `K=[2,3]`, `n_stages=6`, `stage_idx=0`.
-    /// Both plants are active: `0+2=2 < 6` and `0+3=3 < 6`.
+    /// Fixture: `n_anticipated=2`, `K=[2,3]`, `k_max=3`, `n_stages=6`,
+    /// `stage_idx=0`, `N=0`, `L=0`. Both plants are active: `0+2=2 < 6` and
+    /// `0+3=3 < 6`. State-region offset = `N*(1+L) + n_ant*k_max = 0 + 6 = 6`.
     #[test]
     fn test_layout_state_out_block_adjacent_to_decision() {
         let fixtures = AntFixturesWithNStages::new(6);
@@ -1934,15 +1964,17 @@ mod tests {
         let stage = minimal_stage();
         let layout = StageLayout::new(&ctx, &stage, 0);
 
+        // state_out is relocated to the state region: N*(1+L) + n_ant*k_max.
         assert_eq!(
-            layout.anticipated.col_anticipated_state_out_start,
-            layout.anticipated.col_anticipated_decision_start + 2,
-            "state_out columns must be immediately after anticipated_decision"
+            layout.anticipated.col_anticipated_state_out_start, 6,
+            "state_out columns must be sourced from the state-region offset \
+             N*(1+L) + n_ant*k_max"
         );
+        // line_fwd follows anticipated_decision directly (state_out moved out).
         assert_eq!(
             layout.col_line_fwd_start(),
-            layout.anticipated.col_anticipated_state_out_start + 2,
-            "line_fwd must be immediately after state_out columns"
+            layout.anticipated.col_anticipated_decision_start + 2,
+            "line_fwd must be immediately after the anticipated_decision block"
         );
         assert_eq!(layout.anticipated.n_anticipated_state_out_def_rows, 2);
         assert_eq!(
@@ -1970,11 +2002,9 @@ mod tests {
         let layout = StageLayout::new(&ctx, &stage, 5);
 
         assert_eq!(layout.anticipated.n_anticipated_state_out_def_rows, 0);
-        // Column block stays allocated regardless of activity.
-        assert_eq!(
-            layout.anticipated.col_anticipated_state_out_start,
-            layout.anticipated.col_anticipated_decision_start + 2
-        );
+        // Column block stays allocated at the state-region offset regardless of
+        // activity: N*(1+L) + n_ant*k_max = 0 + 6 = 6.
+        assert_eq!(layout.anticipated.col_anticipated_state_out_start, 6);
     }
 
     /// Zero-anticipated layouts must not grow `num_cols` or emit def rows.

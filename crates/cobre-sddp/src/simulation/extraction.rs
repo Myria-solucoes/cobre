@@ -2442,23 +2442,25 @@ mod tests {
                 planes_per_hydro: vec![],
             },
         );
-        // With N=0, L=0, A=1, K_max=1:
-        //   anticipated_state = [0, 1)  (A*K_max = 1 slot)
-        //   theta = N*(3+L) + A*K_max = 0 + 1 = 1
-        //   thermal = [theta+1, theta+1+T*K) = [2, 4)  — t0→2, t1→3
-        assert_eq!(indexer.theta, 1);
-        assert_eq!(indexer.thermal, 2..4);
+        // With N=0, L=0, A=1, K_max=1 (anticipated_state_out relocated to the
+        // state region after the ring buffer):
+        //   anticipated_state     = [0, 1)  (A*K_max = 1 slot)
+        //   anticipated_state_out = [1, 2)  (A = 1 column)
+        //   theta = N*(3+L) + A*K_max + A = 0 + 1 + 1 = 2
+        //   thermal = [theta+1, theta+1+T*K) = [3, 5)  — t0→3, t1→4
+        assert_eq!(indexer.theta, 2);
+        assert_eq!(indexer.thermal, 3..5);
 
         // n_cols must cover at least anticipated_decision.end (last column used)
-        let n_cols = indexer.anticipated_decision.end.max(4);
+        let n_cols = indexer.anticipated_decision.end.max(5);
         let mut primal = vec![0.0_f64; n_cols];
-        primal[1] = 0.0; // theta
-        primal[2] = 50.0; // thermal t0 b0 (gen_mw)
-        primal[3] = 30.0; // thermal t1 b0 (gen_mw)
+        primal[2] = 0.0; // theta
+        primal[3] = 50.0; // thermal t0 b0 (gen_mw)
+        primal[4] = 30.0; // thermal t1 b0 (gen_mw)
 
         let mut obj = vec![0.0_f64; n_cols];
-        obj[2] = 10.0; // thermal t0 cost coefficient
-        obj[3] = 20.0; // thermal t1 cost coefficient
+        obj[3] = 10.0; // thermal t0 cost coefficient
+        obj[4] = 20.0; // thermal t1 cost coefficient
 
         let counts = EntityCounts {
             hydro_ids: vec![],
@@ -3069,10 +3071,12 @@ mod tests {
     /// N=0 hydros, T=1 thermal (ID 10, global index 0), `n_blks=3`, `n_anticipated=1`
     /// (global index 0, local index 0), `k_max=2`, `K_i=2`.
     ///
-    /// Layout:
-    ///   `n_ant_state = 1*2 = 2`  →  theta = 2
-    ///   thermal = [3, 6)          (1 thermal * 3 blocks)
-    ///   `anticipated_decision.start = 6`
+    /// Layout (`anticipated_state_out` relocated to the state region):
+    ///   `n_ant_state = 1*2 = 2`, plus the A=1 `state_out` column → `theta = 3`
+    ///   `anticipated_state`     = `[0, 2)`
+    ///   `anticipated_state_out` = `[2, 3)`
+    ///   `thermal` = `[4, 7)`          (1 thermal * 3 blocks)
+    ///   `anticipated_decision.start = 7`
     fn make_anticipated_committed_indexer_k2_3blks() -> crate::indexer::StageIndexer {
         StageIndexer::with_equipment(
             &crate::indexer::EquipmentCounts {
@@ -3115,18 +3119,18 @@ mod tests {
     #[test]
     fn extract_thermals_per_block_committed_at_delivery_stage() {
         let indexer = make_anticipated_committed_indexer_k2_3blks();
-        // thermal = [3, 6): col 3 = block 0, col 4 = block 1, col 5 = block 2
-        assert_eq!(indexer.thermal.start, 3);
+        // thermal = [4, 7): col 4 = block 0, col 5 = block 1, col 6 = block 2
+        assert_eq!(indexer.thermal.start, 4);
         // anticipated_state = [0, 2): col 0 = slot 0, col 1 = slot 1
         assert_eq!(indexer.anticipated_state.start, 0);
         let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
         let mut primal = vec![0.0_f64; n_cols];
         primal[0] = 42.0; // ant_state slot 0 (the committed scalar)
         primal[1] = 99.0; // ant_state slot 1 (unrelated; must not be read)
-        primal[2] = 0.0; // theta
-        primal[3] = 50.0; // thermal 10, block 0
-        primal[4] = 60.0; // thermal 10, block 1
-        primal[5] = 70.0; // thermal 10, block 2
+        primal[3] = 0.0; // theta
+        primal[4] = 50.0; // thermal 10, block 0
+        primal[5] = 60.0; // thermal 10, block 1
+        primal[6] = 70.0; // thermal 10, block 2
         let obj = vec![0.0_f64; n_cols];
 
         // Also verify the helper directly for AC-1 coverage.

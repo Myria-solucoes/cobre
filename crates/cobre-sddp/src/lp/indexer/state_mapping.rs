@@ -23,7 +23,12 @@ impl StageIndexer {
     ///   → shift-aware mapping (mirrors the inflow-lag pattern structurally):
     ///   - `slot == K_p − 1` for plant `p`: the post-shift outgoing slot carries
     ///     the decision committed at stage `t`. The Equal branch returns
-    ///     `anticipated_state_out.start + p`, which is pinned to
+    ///     `anticipated_state_out.start + p`. That target column is
+    ///     stage-invariant: `anticipated_state_out` lives in the state region
+    ///     (immediately after the `anticipated_state` ring buffer), so its
+    ///     offset is a pure function of `N`, `L`, `A`, `k_max` and the single
+    ///     global stage-0 cut map resolves onto the correct column at every
+    ///     stage regardless of per-stage block counts. The column is pinned to
     ///     `decision_col[p]` by the `anticipated_state_out_def` equality row
     ///     (`anticipated_state_out[p] − decision_col[p] = 0`). The state-fixing
     ///     row at slot `K_p − 1` is PURE IDENTITY under this layout (no
@@ -675,5 +680,97 @@ mod tests {
             idx.state_to_lp_column(3),
             "lag range should differ for j=3"
         );
+    }
+
+    /// The Equal branch resolves the matured anticipated slot into the
+    /// **state region**: for `j = anticipated_state.start + (K_p − 1)*A + plant`
+    /// it returns `anticipated_state_out.start + plant`, and that column lies
+    /// in `[anticipated_state.end, theta)` — i.e. inside the relocated
+    /// state-region block, not the control region.
+    #[test]
+    fn state_to_lp_column_equal_branch_resolves_into_state_region() {
+        // N=3, L=2, A=2, k_max=3, uniform K_p = 3.
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq_with_anticipated(3, 2, 4, 0, 1, 1, false, 2, 3),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        let a = idx.n_anticipated;
+        for plant in 0..a {
+            let k_p = idx.anticipated_lead_stages[plant];
+            let j = idx.anticipated_state.start + (k_p - 1) * a + plant;
+            let col = idx.state_to_lp_column(j);
+            assert_eq!(
+                col,
+                idx.anticipated_state_out.start + plant,
+                "Equal branch must return anticipated_state_out.start + plant"
+            );
+            // Inside the state region: at/after the ring-buffer end, before theta.
+            assert!(
+                col >= idx.anticipated_state.end,
+                "resolved column {col} must be >= anticipated_state.end {}",
+                idx.anticipated_state.end
+            );
+            assert!(
+                col < idx.theta,
+                "resolved column {col} must be < theta {}",
+                idx.theta
+            );
+        }
+    }
+
+    /// Stage-invariance: two indexers with identical `N, L, A, k_max` but
+    /// different `n_blks` and `n_thermals` resolve every matured anticipated
+    /// slot to the **same** column. This is the property the relocation buys —
+    /// the global stage-0 cut map lands on the correct column at every stage
+    /// regardless of per-stage block counts. Under the old control-region
+    /// placement the Equal-branch target rode the n_blks-dependent `thermal.end`
+    /// and would differ between these two indexers.
+    #[test]
+    fn state_to_lp_column_equal_branch_stage_invariant_across_block_counts() {
+        let build = |n_blks: usize, n_thermals: usize| {
+            StageIndexer::with_equipment_and_evaporation(
+                &EquipmentCounts {
+                    hydro_count: 3,
+                    max_par_order: 2,
+                    n_thermals,
+                    n_lines: 1,
+                    n_buses: 2,
+                    n_blks,
+                    has_inflow_penalty: false,
+                    max_deficit_segments: 1,
+                    n_anticipated: 2,
+                    k_max: 3,
+                    anticipated_lead_stages: vec![2, 3],
+                    anticipated_thermal_indices: vec![0, 1],
+                    n_pumping: 0,
+                },
+                &fpha(vec![], vec![]),
+                &evap(vec![]),
+            )
+        };
+        let idx_a = build(1, 2);
+        let idx_b = build(4, 5);
+
+        // Same state-region geometry (N, L, A, k_max identical).
+        assert_eq!(idx_a.anticipated_state, idx_b.anticipated_state);
+        assert_eq!(idx_a.anticipated_state_out, idx_b.anticipated_state_out);
+        assert_eq!(idx_a.n_state, idx_b.n_state);
+
+        // But different control-region geometry (proves the test is meaningful).
+        assert_ne!(idx_a.thermal.end, idx_b.thermal.end);
+
+        // Every matured anticipated slot resolves to the same column.
+        let a = idx_a.n_anticipated;
+        for slot in 0..idx_a.k_max {
+            for plant in 0..a {
+                let j = idx_a.anticipated_state.start + slot * a + plant;
+                assert_eq!(
+                    idx_a.state_to_lp_column(j),
+                    idx_b.state_to_lp_column(j),
+                    "slot={slot} plant={plant} must resolve identically across block counts"
+                );
+            }
+        }
     }
 }

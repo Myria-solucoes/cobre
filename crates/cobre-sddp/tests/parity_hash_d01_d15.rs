@@ -232,6 +232,20 @@ fn case_dir(label: &str) -> std::path::PathBuf {
         // block-factor array is sized to each stage's own count, exercising the
         // per-stage block-indexed input path.
         "D33" => "d33-per-stage-block-counts",
+        // Anticipated thermals under a per-stage-varying block schedule
+        // (1 / 3 / 2). The cheap anticipated thermal (K=1) commits at stage 0
+        // and stage 1, maturing at the interior delivery stages 1 (3 blocks)
+        // and 2 (2 blocks) — both with block counts differing from stage 0's
+        // single block. The matured-anticipated cut coefficient is therefore
+        // harvested at an off-stage-0 block count, which is exactly the
+        // condition that distinguishes the `anticipated_state_out` column
+        // resolved through the stage-invariant state region (correct) from one
+        // resolved through an `n_blks`-dependent control-region offset (the
+        // class of bug a uniform-block anticipated case cannot detect, because
+        // every stage shares the same per-block stride). Pairs anticipated
+        // thermals (absent from D33) with the non-uniform block schedule
+        // (absent from every anticipated test).
+        "D34" => "d34-anticipated-varying-blocks",
         other => panic!("unknown case label: {other}"),
     };
     // Integration tests run from the crate root; fixtures live at
@@ -539,4 +553,13 @@ fn parity_hash_d32() {
 )]
 fn parity_hash_d33() {
     run_case("D33");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d34() {
+    run_case("D34");
 }
