@@ -1156,7 +1156,7 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
@@ -1236,7 +1236,7 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
             indexer: &indexer,
@@ -1316,7 +1316,7 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
             indexer: &indexer,

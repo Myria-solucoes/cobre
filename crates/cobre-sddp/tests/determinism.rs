@@ -89,19 +89,24 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
 /// Mirrors the gated `indexer::test_fixtures::study_dims_for` body via the public
 /// `StudyDimensions` fields, so this external test crate (which does not see the
 /// parent crate's `#[cfg(test)]` surface) carries the identical non-state facts the
-/// `indexer` does for the `TrainingContext` / `StageExtractionSpec` slot.
-fn study_dims_for(indexer: &StageIndexer) -> cobre_sddp::indexer::StudyDimensions {
+/// production `build_wired_indexer` derives from the same counts bag.
+///
+/// `has_ncs` is `false`: NCS presence is set only by the production NCS wiring,
+/// never by `EquipmentCounts` or by any test fixture here.
+fn study_dims_for(
+    counts: &cobre_sddp::indexer::EquipmentCounts,
+) -> cobre_sddp::indexer::StudyDimensions {
     cobre_sddp::indexer::StudyDimensions {
-        n_thermals: indexer.n_thermals,
-        n_lines: indexer.n_lines,
-        n_buses: indexer.n_buses,
-        max_deficit_segments: indexer.max_deficit_segments,
-        has_ncs: indexer.has_ncs,
-        has_inflow_penalty: indexer.has_inflow_penalty,
-        has_withdrawal: indexer.has_withdrawal,
-        has_operational_violations: indexer.has_operational_violations,
-        anticipated_thermal_indices: indexer.anticipated_thermal_indices.clone(),
-        n_pumping: 0,
+        n_thermals: counts.n_thermals,
+        n_lines: counts.n_lines,
+        n_buses: counts.n_buses,
+        max_deficit_segments: counts.max_deficit_segments,
+        has_ncs: false,
+        has_inflow_penalty: counts.has_inflow_penalty,
+        has_withdrawal: counts.hydro_count > 0,
+        has_operational_violations: counts.hydro_count != 0,
+        anticipated_thermal_indices: counts.anticipated_thermal_indices.clone(),
+        n_pumping: counts.n_pumping,
     }
 }
 
@@ -653,7 +658,7 @@ fn run_training(
                     horizon: &fx.horizon,
                     indexer: &fx.indexer,
                     state: &fx.state,
-                    study_dims: &study_dims_for(&fx.indexer),
+                    study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
                     inflow_method: &InflowNonNegativityMethod::None,
                     stochastic: &fx.stochastic,
                     initial_state: &fx.initial_state,
@@ -786,7 +791,7 @@ fn run_simulation(
                     horizon: &fx.horizon,
                     indexer: &fx.indexer,
                     state: &fx.state,
-                    study_dims: &study_dims_for(&fx.indexer),
+                    study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
                     inflow_method: &InflowNonNegativityMethod::None,
                     stochastic: &fx.stochastic,
                     initial_state: &fx.initial_state,

@@ -81,18 +81,20 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
 /// `StudyDimensions` fields, so this external test crate (which does not see the
 /// parent crate's `#[cfg(test)]` surface) carries the identical non-state facts the
 /// `indexer` does for the `TrainingContext` / `StageExtractionSpec` slot.
-fn study_dims_for(indexer: &StageIndexer) -> cobre_sddp::indexer::StudyDimensions {
+fn study_dims_for(
+    counts: &cobre_sddp::indexer::EquipmentCounts,
+) -> cobre_sddp::indexer::StudyDimensions {
     cobre_sddp::indexer::StudyDimensions {
-        n_thermals: indexer.n_thermals,
-        n_lines: indexer.n_lines,
-        n_buses: indexer.n_buses,
-        max_deficit_segments: indexer.max_deficit_segments,
-        has_ncs: indexer.has_ncs,
-        has_inflow_penalty: indexer.has_inflow_penalty,
-        has_withdrawal: indexer.has_withdrawal,
-        has_operational_violations: indexer.has_operational_violations,
-        anticipated_thermal_indices: indexer.anticipated_thermal_indices.clone(),
-        n_pumping: 0,
+        n_thermals: counts.n_thermals,
+        n_lines: counts.n_lines,
+        n_buses: counts.n_buses,
+        max_deficit_segments: counts.max_deficit_segments,
+        has_ncs: false,
+        has_inflow_penalty: counts.has_inflow_penalty,
+        has_withdrawal: counts.hydro_count > 0,
+        has_operational_violations: counts.hydro_count != 0,
+        anticipated_thermal_indices: counts.anticipated_thermal_indices.clone(),
+        n_pumping: counts.n_pumping,
     }
 }
 
@@ -684,7 +686,7 @@ fn train_simulate_write_cycle() {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
-            study_dims: &study_dims_for(&fx.indexer),
+            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -869,7 +871,7 @@ fn train_simulate_write_cycle() {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
-            study_dims: &study_dims_for(&fx.indexer),
+            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1360,22 +1362,24 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
     let t0 = &templates_result.templates[0];
 
     // Build indexer matching the template layout.
+    let eq_counts = cobre_sddp::indexer::EquipmentCounts {
+        hydro_count: 1,
+        max_par_order: 0,
+        n_thermals: 0,
+        n_lines: 0,
+        n_buses: 1,
+        n_blks: 1,
+        has_inflow_penalty: false,
+        max_deficit_segments: 1,
+        n_anticipated: 0,
+        k_max: 0,
+        anticipated_lead_stages: vec![],
+        anticipated_thermal_indices: vec![],
+        n_pumping: 0,
+    };
+    let study_dims = study_dims_for(&eq_counts);
     let indexer = StageIndexer::with_equipment_and_evaporation(
-        &cobre_sddp::indexer::EquipmentCounts {
-            hydro_count: 1,
-            max_par_order: 0,
-            n_thermals: 0,
-            n_lines: 0,
-            n_buses: 1,
-            n_blks: 1,
-            has_inflow_penalty: false,
-            max_deficit_segments: 1,
-            n_anticipated: 0,
-            k_max: 0,
-            anticipated_lead_stages: vec![],
-            anticipated_thermal_indices: vec![],
-            n_pumping: 0,
-        },
+        &eq_counts,
         &cobre_sddp::indexer::FphaColumnLayout {
             hydro_indices: vec![],
             planes_per_hydro: vec![],
@@ -1386,7 +1390,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
     );
     let state = state_layout_for(1, 0);
 
-    assert!(indexer.has_operational_violations);
+    assert!(study_dims.has_operational_violations);
     assert!(!indexer.outflow_below_slack.is_empty());
 
     let slack_col = indexer.outflow_below_slack.start;
@@ -1490,7 +1494,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&indexer),
+            study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1576,7 +1580,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&indexer),
+            study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,

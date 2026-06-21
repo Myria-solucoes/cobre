@@ -3,15 +3,18 @@
 //! assertion.
 //!
 //! `StageIndexer` is the **role-(b) geometry descriptor**: it carries the
-//! stage-0 equipment / slack / row ranges, the entity-count scalars that stride
-//! them, the presence flags, and the FPHA / evaporation / anticipated identity
-//! lists. The role-(a) state-vector concern — the state-region column ranges
-//! (`storage`, `inflow_lags`, `storage_in`, `anticipated_state`,
-//! `anticipated_state_out`, `z_inflow`, `theta`), `n_state`, the state-vector
-//! dimension scalars, and the cut resolvers / mask — lives entirely on
-//! [`StateLayout`](super::StateLayout). The cut path, state-fixing patch, and
-//! simulation-extraction state reads resolve through that handle; this descriptor
-//! never reimplements them.
+//! stage-0 equipment / slack / row ranges, the `n_blks` / `max_deficit_segments`
+//! stride scalars, and the FPHA / evaporation identity lists. The role-(a)
+//! state-vector concern — the state-region column ranges (`storage`,
+//! `inflow_lags`, `storage_in`, `anticipated_state`, `anticipated_state_out`,
+//! `z_inflow`, `theta`), `n_state`, the state-vector dimension scalars, and the
+//! cut resolvers / mask — lives entirely on
+//! [`StateLayout`](super::StateLayout). The non-state study-shape scalars and
+//! presence flags (`n_thermals`, `n_lines`, `n_buses`, the `has_*` flags, the
+//! anticipated identity list) live on
+//! [`StudyDimensions`](super::StudyDimensions). The cut path, state-fixing patch,
+//! and simulation-extraction state reads resolve through those handles; this
+//! descriptor never reimplements them.
 //!
 //! The equipment column **bases** here are strided by a stage-0-derived `n_blks`
 //! (the single global block count); they are valid only at stages whose block
@@ -55,27 +58,21 @@ pub struct FphaRowRange {
 /// Read-only role-(b) LP geometry descriptor for one SDDP stage subproblem.
 ///
 /// Carries the stage-0 equipment / slack column ranges, the constraint row
-/// ranges, the entity-count scalars that stride them, the presence flags, and
-/// the FPHA / evaporation / anticipated identity lists. Computed once in
-/// `build_wired_indexer` and shared read-only across all threads for the
-/// duration of training.
+/// ranges, the `n_blks` / `max_deficit_segments` stride scalars, and the
+/// FPHA / evaporation identity lists. Computed once in `build_wired_indexer` and
+/// shared read-only across all threads for the duration of training.
 ///
 /// The role-(a) state-vector concern (`storage`, `inflow_lags`, `storage_in`,
 /// `anticipated_state`, `anticipated_state_out`, `z_inflow` columns, `theta`,
 /// `n_state`, the resolvers, the mask) lives on
-/// [`StateLayout`](super::StateLayout); this descriptor carries none of it.
+/// [`StateLayout`](super::StateLayout); the non-state study-shape scalars and
+/// presence flags live on [`StudyDimensions`](super::StudyDimensions); this
+/// descriptor carries neither.
 ///
 /// The equipment column ranges below are strided by a stage-0-derived `n_blks`
 /// and are valid only at stages whose block count equals stage 0's; the
 /// per-stage [`StageLayout`](crate::lp_builder) is the authority where block
 /// counts vary.
-// Rationale: the bool fields (`has_inflow_penalty`, `has_withdrawal`,
-// `has_operational_violations`, `has_ncs`) are independent presence flags for
-// optional column groups, not states of one machine; folding them into a
-// two-variant enum or state machine — the lint's suggested refactor — would
-// obscure that they vary independently. The slimmed descriptor still carries
-// four such flags (above clippy's three-bool trigger), so the allow stays.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct StageIndexer {
     // ── Equipment column ranges ────────────────────────────────────────────
@@ -118,14 +115,6 @@ pub struct StageIndexer {
     /// the stage-invariant state region on [`StateLayout`](super::StateLayout).
     pub anticipated_decision: Range<usize>,
 
-    /// Mapping from anticipated-local position to global thermal index.
-    ///
-    /// `anticipated_thermal_indices[i]` is the position within `system.thermals[]`
-    /// of the i-th anticipated plant. Read by the simulation-extraction
-    /// reverse-lookup builder and by `build_initial_state`. Empty when
-    /// `n_anticipated == 0`.
-    pub anticipated_thermal_indices: Vec<usize>,
-
     /// Column range for forward line flow variables, one per (line, block) pair.
     ///
     /// Index for line `l`, block `b`: `line_fwd.start + l * n_blks + b`.
@@ -161,18 +150,6 @@ pub struct StageIndexer {
     ///
     pub n_blks: usize,
 
-    /// Number of thermal units (T).
-    ///
-    pub n_thermals: usize,
-
-    /// Number of transmission lines (`L_n`).
-    ///
-    pub n_lines: usize,
-
-    /// Number of buses (B).
-    ///
-    pub n_buses: usize,
-
     /// Row range for water balance constraints, one per operating hydro.
     ///
     /// Index for hydro `h`: `water_balance.start + h`.
@@ -202,13 +179,6 @@ pub struct StageIndexer {
     ///
     /// Empty (`0..0`) in this implementation.
     pub inflow_slack_rows: Range<usize>,
-
-    /// Whether inflow non-negativity penalty slack columns are present.
-    ///
-    /// `true` when `build_stage_templates` was called with an
-    /// [`InflowNonNegativityMethod`](crate::inflow_method::InflowNonNegativityMethod)
-    /// whose `has_slack_columns()` returns `true` and `n_hydros > 0`.
-    pub has_inflow_penalty: bool,
 
     // ── FPHA column and row ranges ─────────────────────────────────────────
     /// Column range for FPHA generation variables, one per (`fpha_hydro`, block) pair.
@@ -263,11 +233,6 @@ pub struct StageIndexer {
     /// One slack per operating hydro, immediately following `withdrawal_slack_neg`.
     /// Layout: `withdrawal_slack_pos.start + h_idx`.
     pub withdrawal_slack_pos: Range<usize>,
-
-    /// Whether withdrawal slack columns are present.
-    ///
-    /// `hydro_count > 0`; `false` otherwise (zero hydros).
-    pub has_withdrawal: bool,
 
     // ── Operational violation slack column ranges ─────────────────────────
     /// Column range for outflow-below violation slacks, one per hydro per block.
@@ -343,29 +308,6 @@ pub struct StageIndexer {
     /// `lp_row = anticipated_fishing_start + local_idx_at_stage`.
     pub anticipated_fishing_start: usize,
 
-    /// Whether operational violation slack columns are present.
-    ///
-    /// `true` when the full build path was used with `hydro_count > 0`.
-    pub has_operational_violations: bool,
-
-    // ── NCS presence flag ─────────────────────────────────────────────────
-    // OWNER: set after construction by the NCS wiring in `setup`
-    // (`build_wired_indexer`). The constructor leaves it `false`; the wiring sets it.
-    //
-    // This is a presence flag, never a column base: NCS columns are addressed
-    // per-stage from `StageContext::ncs_col_starts[stage]` (and
-    // `LbEvalSpec::ncs_generation` for the stage-0 lower bound), because a source
-    // that commissions mid-horizon or a stage with a differing block count shifts
-    // the NCS column base per stage. A single global base would address the wrong
-    // columns for such non-uniform geometries, so the descriptor stores only whether
-    // NCS columns exist, not where they start.
-    /// Whether the study has NCS generation columns.
-    ///
-    /// `true` when NCS entities are active; `false` when no NCS entities are
-    /// present, in which case the forward, backward, and simulation NCS bound
-    /// patches are guarded off.
-    pub has_ncs: bool,
-
     // ── Z-inflow row range ────────────────────────────────────────────────
     // The z_inflow *columns* are role-(a) and live on `StateLayout`; the z-inflow
     // *rows* (the definition constraints, noise-patched per stage) are role-(b)
@@ -434,7 +376,8 @@ pub struct EquipmentCounts {
     /// Mapping from anticipated-local position to global thermal index.
     ///
     /// Length must equal `n_anticipated`. Parallel to `anticipated_lead_stages`.
-    /// Pass-through to [`StageIndexer::anticipated_thermal_indices`].
+    /// Threaded into
+    /// [`StudyDimensions::anticipated_thermal_indices`](super::StudyDimensions).
     pub anticipated_thermal_indices: Vec<usize>,
 }
 

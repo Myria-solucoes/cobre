@@ -1054,10 +1054,11 @@ fn indexer_constraint_inventory() {
         "min_generation_rows must be non-empty"
     );
 
-    // has_operational_violations flag.
+    // Operational-violation presence: the flag moved to `StudyDimensions`; the
+    // surviving role-(b) evidence is the non-empty min-outflow slack range.
     assert!(
-        indexer.has_operational_violations,
-        "has_operational_violations must be true when hydro_count > 0"
+        !indexer.outflow_below_slack.is_empty(),
+        "operational-violation slack columns must be present when hydro_count > 0"
     );
 
     // Inflow non-negativity slack.

@@ -300,17 +300,21 @@ pub(crate) struct SimLookups {
 }
 
 impl SimLookups {
-    /// Build both reverse-lookup tables from the study's indexer and entity counts.
+    /// Build both reverse-lookup tables from the study's dimensions, indexer, and
+    /// entity counts.
     ///
     /// Allocates once; the returned value is then used read-only for the entire
-    /// simulation run.
+    /// simulation run. The thermal lookup reads the anticipated identity list from
+    /// `study_dims`; the hydro lookup reads the per-stage FPHA/evaporation identity
+    /// lists from `indexer`.
     pub(crate) fn build(
+        study_dims: &crate::indexer::StudyDimensions,
         indexer: &crate::indexer::StageIndexer,
         n_thermals: usize,
         n_hydros: usize,
     ) -> Self {
         Self {
-            thermal: ThermalReverseLookup::build(indexer, n_thermals),
+            thermal: ThermalReverseLookup::build(study_dims, n_thermals),
             hydro: HydroReverseLookup::build(indexer, n_hydros),
         }
     }
@@ -515,7 +519,7 @@ fn solve_simulation_stage<S: SolverInterface>(
     // Patch NCS column upper bounds with per-scenario stochastic availability.
     // ncs_col_upper_buf was populated by transform_ncs_noise in the caller.
     let n_stochastic_ncs = stochastic.n_stochastic_ncs();
-    if n_stochastic_ncs > 0 && indexer.has_ncs {
+    if n_stochastic_ncs > 0 && study_dims.has_ncs {
         apply_ncs_col_bounds(
             &mut ws.solver,
             &mut ws.scratch,
@@ -1998,7 +2002,7 @@ mod tests {
                 horizon: &horizon,
                 indexer: &indexer,
                 state: &state,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2160,7 +2164,7 @@ mod tests {
                 horizon: &horizon,
                 indexer: &indexer,
                 state: &state,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2347,7 +2351,7 @@ mod tests {
                 horizon: &horizon,
                 indexer: &indexer,
                 state: &state,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2718,7 +2722,7 @@ mod tests {
                 horizon: &horizon,
                 indexer: &indexer,
                 state: &state,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::Truncation,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2845,7 +2849,7 @@ mod tests {
                 horizon: &horizon,
                 indexer: &indexer,
                 state: &state,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -3129,7 +3133,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             };
-            let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
+            let study_dims = crate::indexer::test_fixtures::study_dims();
             let training_ctx = TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
@@ -3182,7 +3186,8 @@ mod tests {
                 baked_template: baked,
                 warm_basis: None,
             };
-            let lookups = SimLookups::build(&indexer, 0, 1);
+            let lookups =
+                SimLookups::build(&crate::indexer::test_fixtures::study_dims(), &indexer, 0, 1);
 
             let (immediate, result) = solve_simulation_stage(
                 &mut ws,

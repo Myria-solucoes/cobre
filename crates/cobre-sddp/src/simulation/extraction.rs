@@ -81,12 +81,12 @@ impl HydroReverseLookup {
 ///
 /// Build once per simulation run via [`ThermalReverseLookup::build`] and reuse
 /// across all (scenario, stage) pairs.  The lookup depends only on the
-/// study-invariant [`StageIndexer`] and `n_thermals`; it never changes between
+/// study-invariant [`StudyDimensions`] and `n_thermals`; it never changes between
 /// stages or scenarios.
 ///
 /// Entry `t` is `Some(local_anticipated_idx)` when thermal `t` is anticipated,
 /// `None` otherwise. The `local_anticipated_idx` is the position of `t` within
-/// `indexer.anticipated_thermal_indices`, which downstream callers use to address
+/// `study_dims.anticipated_thermal_indices`, which downstream callers use to address
 /// anticipated-decision columns.
 pub(crate) struct ThermalReverseLookup {
     /// `thermal_is_anticipated[t]` is `Some(local_anticipated_idx)` if thermal `t`
@@ -100,9 +100,9 @@ impl ThermalReverseLookup {
     /// Allocates a `Vec<Option<usize>>` of length `n_thermals`. Call this once
     /// per simulation run (or once per worker) and pass the result by reference
     /// into each per-stage extraction call.
-    pub(crate) fn build(indexer: &StageIndexer, n_thermals: usize) -> Self {
+    pub(crate) fn build(study_dims: &StudyDimensions, n_thermals: usize) -> Self {
         let mut thermal_is_anticipated = vec![None; n_thermals];
-        for (local, &sys) in indexer.anticipated_thermal_indices.iter().enumerate() {
+        for (local, &sys) in study_dims.anticipated_thermal_indices.iter().enumerate() {
             debug_assert!(
                 sys < n_thermals,
                 "anticipated_thermal_indices entry {sys} >= n_thermals {n_thermals}"
@@ -530,6 +530,7 @@ fn extract_hydro_no_turbine(
     stage_id: u32,
 ) -> SimulationHydroResult {
     let indexer = spec.indexer;
+    let study_dims = spec.study_dims;
     let state = spec.state;
     let incremental_inflow = if h < spec.inflow_m3s_per_hydro.len() {
         spec.inflow_m3s_per_hydro[h]
@@ -542,17 +543,17 @@ fn extract_hydro_no_turbine(
     // `+ h` with no block stride) but their BASE rides `n_blks`-dependent prior
     // families, so it shifts under a non-uniform schedule; read it from the
     // per-stage `equipment` geometry, not the global stage-0 `indexer`.
-    let inflow_slack = if indexer.has_inflow_penalty {
+    let inflow_slack = if study_dims.has_inflow_penalty {
         view.primal[spec.equipment.inflow_slack.start + h]
     } else {
         0.0
     };
-    let withdrawal_neg = if indexer.has_withdrawal {
+    let withdrawal_neg = if study_dims.has_withdrawal {
         view.primal[spec.equipment.withdrawal_slack_neg.start + h]
     } else {
         0.0
     };
-    let withdrawal_pos = if indexer.has_withdrawal {
+    let withdrawal_pos = if study_dims.has_withdrawal {
         view.primal[spec.equipment.withdrawal_slack_pos.start + h]
     } else {
         0.0
@@ -566,7 +567,7 @@ fn extract_hydro_no_turbine(
 
     // Operational violation slacks are per-block in rate units (m3/s or MW).
     // Stage-level: hours-weighted average across blocks.
-    let (turbined_slack, outflow_slack_below, outflow_slack_above, generation_slack) = if indexer
+    let (turbined_slack, outflow_slack_below, outflow_slack_above, generation_slack) = if study_dims
         .has_operational_violations
     {
         let grid = spec.block_grid();
@@ -686,6 +687,7 @@ impl HydroStageContext {
         h: usize,
     ) -> Self {
         let indexer = spec.indexer;
+        let study_dims = spec.study_dims;
         let state = spec.state;
         let storage_final = view.primal[state.storage.start + h];
         let storage_initial = view.primal[state.storage_in.start + h];
@@ -700,17 +702,17 @@ impl HydroStageContext {
         // families even though each is a single stage-level column per hydro, so
         // the base comes from the per-stage `equipment` geometry, not the global
         // stage-0 `indexer`.
-        let inflow_slack = if indexer.has_inflow_penalty {
+        let inflow_slack = if study_dims.has_inflow_penalty {
             view.primal[spec.equipment.inflow_slack.start + h]
         } else {
             0.0
         };
-        let withdrawal_neg = if indexer.has_withdrawal {
+        let withdrawal_neg = if study_dims.has_withdrawal {
             view.primal[spec.equipment.withdrawal_slack_neg.start + h]
         } else {
             0.0
         };
-        let withdrawal_pos = if indexer.has_withdrawal {
+        let withdrawal_pos = if study_dims.has_withdrawal {
             view.primal[spec.equipment.withdrawal_slack_pos.start + h]
         } else {
             0.0
@@ -1122,7 +1124,7 @@ pub fn extract_stage_result(
     let n_hydros = spec.entity_counts.hydro_ids.len();
     let n_thermals = spec.entity_counts.thermal_ids.len();
     let hydro_lookup = HydroReverseLookup::build(spec.indexer, n_hydros);
-    let thermal_lookup = ThermalReverseLookup::build(spec.indexer, n_thermals);
+    let thermal_lookup = ThermalReverseLookup::build(spec.study_dims, n_thermals);
     extract_stage_result_with_lookups(view, spec, stage_id, &hydro_lookup, &thermal_lookup)
 }
 
@@ -1198,7 +1200,7 @@ pub(crate) fn extract_stage_result_with_lookups(
     let (non_controllables, ncs_curtailment_cost) = extract_non_controllables(view, spec, stage_id);
     let costs = vec![compute_cost_result(
         view,
-        spec.indexer,
+        spec.study_dims,
         spec.equipment,
         spec.state,
         spec.col_scale,
@@ -1253,7 +1255,7 @@ impl HydroViolationCosts {
 /// have the wrong base AND length, so summing them would attribute cost from the
 /// wrong columns. `equipment.<family>` addresses the stage-correct columns.
 fn compute_hydro_violation_costs(
-    indexer: &StageIndexer,
+    study_dims: &StudyDimensions,
     equipment: &crate::lp_builder::StageEquipmentGeometry,
     col_cost: impl Fn(usize) -> f64,
     range_sum: impl Fn(std::ops::Range<usize>) -> f64,
@@ -1276,17 +1278,17 @@ fn compute_hydro_violation_costs(
             * COST_SCALE_FACTOR
     };
 
-    let (outflow_below, outflow_above, turbined, generation) = if indexer.has_operational_violations
-    {
-        (
-            range_sum(equipment.outflow_below_slack.clone()) * COST_SCALE_FACTOR,
-            range_sum(equipment.outflow_above_slack.clone()) * COST_SCALE_FACTOR,
-            range_sum(equipment.turbine_below_slack.clone()) * COST_SCALE_FACTOR,
-            range_sum(equipment.generation_below_slack.clone()) * COST_SCALE_FACTOR,
-        )
-    } else {
-        (0.0, 0.0, 0.0, 0.0)
-    };
+    let (outflow_below, outflow_above, turbined, generation) =
+        if study_dims.has_operational_violations {
+            (
+                range_sum(equipment.outflow_below_slack.clone()) * COST_SCALE_FACTOR,
+                range_sum(equipment.outflow_above_slack.clone()) * COST_SCALE_FACTOR,
+                range_sum(equipment.turbine_below_slack.clone()) * COST_SCALE_FACTOR,
+                range_sum(equipment.generation_below_slack.clone()) * COST_SCALE_FACTOR,
+            )
+        } else {
+            (0.0, 0.0, 0.0, 0.0)
+        };
 
     HydroViolationCosts {
         evaporation,
@@ -1306,7 +1308,7 @@ fn compute_hydro_violation_costs(
 /// boundary to recover original units.
 fn compute_cost_result(
     view: &SolutionView<'_>,
-    indexer: &StageIndexer,
+    study_dims: &StudyDimensions,
     equipment: &crate::lp_builder::StageEquipmentGeometry,
     state: &StateLayout,
     col_scale: &[f64],
@@ -1403,7 +1405,7 @@ fn compute_cost_result(
         range_sum(equipment.diversion.clone()) * COST_SCALE_FACTOR
     };
 
-    let hv = compute_hydro_violation_costs(indexer, equipment, col_cost, range_sum);
+    let hv = compute_hydro_violation_costs(study_dims, equipment, col_cost, range_sum);
 
     SimulationCostResult {
         stage_id,
@@ -1934,6 +1936,7 @@ mod tests {
         // Acceptance criterion: costs contains exactly one entry whose stage_id
         // matches the input stage and whose future_cost == primal[state.theta].
         let indexer = crate::indexer::test_fixtures::geom(2, 1);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let state = crate::indexer::test_fixtures::state_layout(2, 1);
         let primal = make_primal_2_1([100.0, 200.0], [50.0, 60.0], [90.0, 180.0], 999.5);
         let dual = vec![0.0; 4];
@@ -1949,7 +1952,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -1987,6 +1990,7 @@ mod tests {
     fn extract_cost_splits_objective_correctly() {
         // objective = immediate_cost + future_cost
         let indexer = crate::indexer::test_fixtures::geom(2, 1);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let state = crate::indexer::test_fixtures::state_layout(2, 1);
         let theta_val = 300.0;
         let objective = 800.0;
@@ -2004,7 +2008,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2044,6 +2048,7 @@ mod tests {
         // Hydro h=0: storage[0]=100, storage_in[4]=90
         // Hydro h=1: storage[1]=200, storage_in[5]=180
         let indexer = crate::indexer::test_fixtures::geom(2, 1);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let state = crate::indexer::test_fixtures::state_layout(2, 1);
         let primal = make_primal_2_1([100.0, 200.0], [50.0, 60.0], [90.0, 180.0], 999.5);
         let dual = vec![0.0; 4];
@@ -2059,7 +2064,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2101,6 +2106,7 @@ mod tests {
     fn extract_inflow_lag_values_from_primal() {
         // inflow_lags[2]=50.0 for hydro 0 lag 0, [3]=60.0 for hydro 1 lag 0
         let indexer = crate::indexer::test_fixtures::geom(2, 1);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let state = crate::indexer::test_fixtures::state_layout(2, 1);
         let primal = make_primal_2_1([100.0, 200.0], [50.0, 60.0], [90.0, 180.0], 999.5);
         let dual = vec![0.0; 4];
@@ -2116,7 +2122,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2159,6 +2165,7 @@ mod tests {
     fn extract_no_lags_when_max_par_order_zero() {
         // StageIndexer(N=2, L=0): no inflow_lag columns → empty inflow_lags vec.
         let indexer = crate::indexer::test_fixtures::geom(2, 0);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let state = crate::indexer::test_fixtures::state_layout(2, 0);
         // Layout: storage[0..2], z_inflow[2..4], storage_in[4..6], theta=6
         let primal = vec![100.0, 200.0, 0.0, 0.0, 90.0, 180.0, 500.0];
@@ -2185,7 +2192,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2220,6 +2227,7 @@ mod tests {
     #[test]
     fn extract_stage_id_propagates_to_all_results() {
         let indexer = crate::indexer::test_fixtures::geom(2, 1);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let state = crate::indexer::test_fixtures::state_layout(2, 1);
         let primal = make_primal_2_1([100.0, 200.0], [50.0, 60.0], [90.0, 180.0], 10.0);
         let dual = vec![0.0; 4];
@@ -2236,7 +2244,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2278,6 +2286,7 @@ mod tests {
         // When StageIndexer is built via `new`, equipment ranges are empty and
         // all equipment result fields default to zero — backward-compatible behaviour.
         let indexer = crate::indexer::test_fixtures::geom(2, 1);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let state = crate::indexer::test_fixtures::state_layout(2, 1);
         let primal = make_primal_2_1([0.0; 2], [0.0; 2], [0.0; 2], 0.0);
         let dual = vec![0.0; 4];
@@ -2293,7 +2302,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2358,28 +2367,30 @@ mod tests {
     #[test]
     fn extract_equipment_reads_primal_when_with_equipment() {
         // N=2, L=1, T=1, Ln=1, B=1, K=1
+        let eq_counts = crate::indexer::EquipmentCounts {
+            hydro_count: 2,
+            max_par_order: 1,
+            n_thermals: 1,
+            n_lines: 1,
+            n_buses: 1,
+            n_blks: 1,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
+            n_pumping: 0,
+        };
         let indexer = StageIndexer::with_equipment_and_evaporation(
-            &crate::indexer::EquipmentCounts {
-                hydro_count: 2,
-                max_par_order: 1,
-                n_thermals: 1,
-                n_lines: 1,
-                n_buses: 1,
-                n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 0,
-                k_max: 0,
-                anticipated_lead_stages: vec![],
-                anticipated_thermal_indices: vec![],
-                n_pumping: 0,
-            },
+            &eq_counts,
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
             &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&eq_counts);
         let state = crate::indexer::test_fixtures::state_layout_full(2, 1, 0, 0, vec![]);
         // theta = 8, equipment starts at 9
         assert_eq!(state.theta, 8);
@@ -2462,7 +2473,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2553,28 +2564,30 @@ mod tests {
     #[test]
     fn extract_thermals_marks_anticipated_thermals_when_indices_nonempty() {
         // N=0 hydros, T=2 thermals, B=0 buses, K=1 block, n_anticipated=1 (index 1)
+        let eq_counts = crate::indexer::EquipmentCounts {
+            hydro_count: 0,
+            max_par_order: 0,
+            n_thermals: 2,
+            n_lines: 0,
+            n_buses: 0,
+            n_blks: 1,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 1,
+            k_max: 1,
+            anticipated_lead_stages: vec![1],
+            anticipated_thermal_indices: vec![1],
+            n_pumping: 0,
+        };
         let indexer = StageIndexer::with_equipment_and_evaporation(
-            &crate::indexer::EquipmentCounts {
-                hydro_count: 0,
-                max_par_order: 0,
-                n_thermals: 2,
-                n_lines: 0,
-                n_buses: 0,
-                n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 1,
-                k_max: 1,
-                anticipated_lead_stages: vec![1],
-                anticipated_thermal_indices: vec![1],
-                n_pumping: 0,
-            },
+            &eq_counts,
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
             &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&eq_counts);
         let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 1, vec![1]);
         // With N=0, L=0, A=1, K_max=1 (anticipated_state_out relocated to the
         // state region after the ring buffer):
@@ -2618,7 +2631,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2677,28 +2690,30 @@ mod tests {
     #[test]
     fn extract_thermals_marks_no_thermals_anticipated_when_indices_empty() {
         // N=0 hydros, T=2 thermals, B=0 buses, K=1 block, n_anticipated=0
+        let eq_counts = crate::indexer::EquipmentCounts {
+            hydro_count: 0,
+            max_par_order: 0,
+            n_thermals: 2,
+            n_lines: 0,
+            n_buses: 0,
+            n_blks: 1,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
+            n_pumping: 0,
+        };
         let indexer = StageIndexer::with_equipment_and_evaporation(
-            &crate::indexer::EquipmentCounts {
-                hydro_count: 0,
-                max_par_order: 0,
-                n_thermals: 2,
-                n_lines: 0,
-                n_buses: 0,
-                n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 0,
-                k_max: 0,
-                anticipated_lead_stages: vec![],
-                anticipated_thermal_indices: vec![],
-                n_pumping: 0,
-            },
+            &eq_counts,
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
             &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&eq_counts);
         let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 0, 0, vec![]);
 
         let n_cols = indexer.generation_below_slack.end.max(3);
@@ -2727,7 +2742,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2779,23 +2794,30 @@ mod tests {
     /// Layout:
     ///   `n_ant_state = 1*2 = 2`  →  theta = 2
     ///   thermal = [3, 5)         →  `anticipated_decision.start = 5`
+    /// The `EquipmentCounts` both [`make_anticipated_decision_indexer_k2`] and the
+    /// matching `study_dims` derive from, so the role-(b) geometry and the
+    /// non-state `StudyDimensions` stay aligned from one source.
+    fn anticipated_decision_counts_k2() -> crate::indexer::EquipmentCounts {
+        crate::indexer::EquipmentCounts {
+            hydro_count: 0,
+            max_par_order: 0,
+            n_thermals: 2,
+            n_lines: 0,
+            n_buses: 0,
+            n_blks: 1,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 1,
+            k_max: 2,
+            anticipated_lead_stages: vec![2],
+            anticipated_thermal_indices: vec![1],
+            n_pumping: 0,
+        }
+    }
+
     fn make_anticipated_decision_indexer_k2() -> crate::indexer::StageIndexer {
         StageIndexer::with_equipment_and_evaporation(
-            &crate::indexer::EquipmentCounts {
-                hydro_count: 0,
-                max_par_order: 0,
-                n_thermals: 2,
-                n_lines: 0,
-                n_buses: 0,
-                n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 1,
-                k_max: 2,
-                anticipated_lead_stages: vec![2],
-                anticipated_thermal_indices: vec![1],
-                n_pumping: 0,
-            },
+            &anticipated_decision_counts_k2(),
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
@@ -2823,6 +2845,8 @@ mod tests {
     #[test]
     fn extract_thermals_reads_anticipated_decision_when_in_horizon() {
         let indexer = make_anticipated_decision_indexer_k2();
+        let study_dims =
+            crate::indexer::test_fixtures::study_dims_for(&anticipated_decision_counts_k2());
         let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 2, vec![2]);
         let primal = make_primal_with_decision_sentinel(&indexer, 123.5);
         let obj = vec![0.0_f64; primal.len()];
@@ -2849,7 +2873,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2895,6 +2919,8 @@ mod tests {
     #[test]
     fn extract_thermals_emits_none_at_horizon_boundary() {
         let indexer = make_anticipated_decision_indexer_k2();
+        let study_dims =
+            crate::indexer::test_fixtures::study_dims_for(&anticipated_decision_counts_k2());
         let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 2, vec![2]);
         let primal = make_primal_with_decision_sentinel(&indexer, 123.5);
         let obj = vec![0.0_f64; primal.len()];
@@ -2921,7 +2947,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2965,6 +2991,8 @@ mod tests {
     #[test]
     fn extract_thermals_emits_none_one_past_horizon_boundary() {
         let indexer = make_anticipated_decision_indexer_k2();
+        let study_dims =
+            crate::indexer::test_fixtures::study_dims_for(&anticipated_decision_counts_k2());
         let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 2, vec![2]);
         let primal = make_primal_with_decision_sentinel(&indexer, 123.5);
         let obj = vec![0.0_f64; primal.len()];
@@ -2991,7 +3019,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -3036,28 +3064,30 @@ mod tests {
     fn extract_thermals_emits_none_for_non_anticipated_thermals() {
         // N=0, T=2, n_blks=1, n_anticipated=1 (index 1), k_max=1, K_i=1
         // Layout: n_ant_state=1, theta=1, thermal=[2,4), anticipated_decision.start=4
+        let eq_counts = crate::indexer::EquipmentCounts {
+            hydro_count: 0,
+            max_par_order: 0,
+            n_thermals: 2,
+            n_lines: 0,
+            n_buses: 0,
+            n_blks: 1,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 1,
+            k_max: 1,
+            anticipated_lead_stages: vec![1],
+            anticipated_thermal_indices: vec![1],
+            n_pumping: 0,
+        };
         let indexer = StageIndexer::with_equipment_and_evaporation(
-            &crate::indexer::EquipmentCounts {
-                hydro_count: 0,
-                max_par_order: 0,
-                n_thermals: 2,
-                n_lines: 0,
-                n_buses: 0,
-                n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 1,
-                k_max: 1,
-                anticipated_lead_stages: vec![1],
-                anticipated_thermal_indices: vec![1],
-                n_pumping: 0,
-            },
+            &eq_counts,
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
             &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&eq_counts);
         let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 1, vec![1]);
 
         let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
@@ -3087,7 +3117,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -3132,28 +3162,30 @@ mod tests {
     ///   `n_ant_state=1`, theta=1, thermal=[2,6), `anticipated_decision.start=6`
     #[test]
     fn extract_thermals_anticipated_decision_is_per_block_invariant() {
+        let eq_counts = crate::indexer::EquipmentCounts {
+            hydro_count: 0,
+            max_par_order: 0,
+            n_thermals: 1,
+            n_lines: 0,
+            n_buses: 0,
+            n_blks: 4,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 1,
+            k_max: 1,
+            anticipated_lead_stages: vec![1],
+            anticipated_thermal_indices: vec![0],
+            n_pumping: 0,
+        };
         let indexer = StageIndexer::with_equipment_and_evaporation(
-            &crate::indexer::EquipmentCounts {
-                hydro_count: 0,
-                max_par_order: 0,
-                n_thermals: 1,
-                n_lines: 0,
-                n_buses: 0,
-                n_blks: 4,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 1,
-                k_max: 1,
-                anticipated_lead_stages: vec![1],
-                anticipated_thermal_indices: vec![0],
-                n_pumping: 0,
-            },
+            &eq_counts,
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
             &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&eq_counts);
         let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 1, vec![1]);
 
         let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
@@ -3183,7 +3215,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -3242,23 +3274,31 @@ mod tests {
     ///   `anticipated_state_out` = `[2, 3)`
     ///   `thermal` = `[4, 7)`          (1 thermal * 3 blocks)
     ///   `anticipated_decision.start = 7`
+    /// The `EquipmentCounts` both
+    /// [`make_anticipated_committed_indexer_k2_3blks`] and the matching
+    /// `study_dims` derive from, keeping the role-(b) geometry and the non-state
+    /// `StudyDimensions` aligned from one source.
+    fn anticipated_committed_counts_k2_3blks() -> crate::indexer::EquipmentCounts {
+        crate::indexer::EquipmentCounts {
+            hydro_count: 0,
+            max_par_order: 0,
+            n_thermals: 1,
+            n_lines: 0,
+            n_buses: 0,
+            n_blks: 3,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 1,
+            k_max: 2,
+            anticipated_lead_stages: vec![2],
+            anticipated_thermal_indices: vec![0],
+            n_pumping: 0,
+        }
+    }
+
     fn make_anticipated_committed_indexer_k2_3blks() -> crate::indexer::StageIndexer {
         StageIndexer::with_equipment_and_evaporation(
-            &crate::indexer::EquipmentCounts {
-                hydro_count: 0,
-                max_par_order: 0,
-                n_thermals: 1,
-                n_lines: 0,
-                n_buses: 0,
-                n_blks: 3,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 1,
-                k_max: 2,
-                anticipated_lead_stages: vec![2],
-                anticipated_thermal_indices: vec![0],
-                n_pumping: 0,
-            },
+            &anticipated_committed_counts_k2_3blks(),
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
@@ -3301,8 +3341,9 @@ mod tests {
         let obj = vec![0.0_f64; n_cols];
 
         // Also verify the helper directly for AC-1 coverage.
-        let lookup = super::ThermalReverseLookup::build(&indexer, 1);
-        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
+        let study_dims =
+            crate::indexer::test_fixtures::study_dims_for(&anticipated_committed_counts_k2_3blks());
+        let lookup = super::ThermalReverseLookup::build(&study_dims, 1);
         let spec = StageExtractionSpec {
             indexer: &indexer,
             study_dims: &study_dims,
@@ -3377,7 +3418,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -3435,6 +3476,8 @@ mod tests {
     #[test]
     fn extract_thermals_per_block_committed_slot0_when_seed_zero() {
         let indexer = make_anticipated_committed_indexer_k2_3blks();
+        let study_dims =
+            crate::indexer::test_fixtures::study_dims_for(&anticipated_committed_counts_k2_3blks());
         let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 2, vec![2]);
         let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
         let mut primal = vec![0.0_f64; n_cols];
@@ -3464,7 +3507,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -3507,6 +3550,8 @@ mod tests {
     #[test]
     fn extract_thermals_per_block_committed_at_first_delivery_boundary() {
         let indexer = make_anticipated_committed_indexer_k2_3blks();
+        let study_dims =
+            crate::indexer::test_fixtures::study_dims_for(&anticipated_committed_counts_k2_3blks());
         let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 2, vec![2]);
         let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
         let mut primal = vec![0.0_f64; n_cols];
@@ -3536,7 +3581,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -3578,28 +3623,30 @@ mod tests {
     #[test]
     fn extract_thermals_per_block_committed_none_for_non_anticipated() {
         // N=0, T=2, n_blks=3, n_anticipated=1 (global index 1), k_max=2, K_i=2
+        let eq_counts = crate::indexer::EquipmentCounts {
+            hydro_count: 0,
+            max_par_order: 0,
+            n_thermals: 2,
+            n_lines: 0,
+            n_buses: 0,
+            n_blks: 3,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 1,
+            k_max: 2,
+            anticipated_lead_stages: vec![2],
+            anticipated_thermal_indices: vec![1],
+            n_pumping: 0,
+        };
         let indexer = StageIndexer::with_equipment_and_evaporation(
-            &crate::indexer::EquipmentCounts {
-                hydro_count: 0,
-                max_par_order: 0,
-                n_thermals: 2,
-                n_lines: 0,
-                n_buses: 0,
-                n_blks: 3,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 1,
-                k_max: 2,
-                anticipated_lead_stages: vec![2],
-                anticipated_thermal_indices: vec![1],
-                n_pumping: 0,
-            },
+            &eq_counts,
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
             &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&eq_counts);
         let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 2, vec![2]);
 
         let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
@@ -3635,7 +3682,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -3686,28 +3733,30 @@ mod tests {
     #[test]
     fn extract_thermals_no_block_committed_at_delivery_is_zero() {
         // N=0, T=1, n_blks=0 (no-block branch), n_anticipated=1, k_max=1, K_i=1
+        let eq_counts = crate::indexer::EquipmentCounts {
+            hydro_count: 0,
+            max_par_order: 0,
+            n_thermals: 1,
+            n_lines: 0,
+            n_buses: 0,
+            n_blks: 0,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 1,
+            k_max: 1,
+            anticipated_lead_stages: vec![1],
+            anticipated_thermal_indices: vec![0],
+            n_pumping: 0,
+        };
         let indexer = StageIndexer::with_equipment_and_evaporation(
-            &crate::indexer::EquipmentCounts {
-                hydro_count: 0,
-                max_par_order: 0,
-                n_thermals: 1,
-                n_lines: 0,
-                n_buses: 0,
-                n_blks: 0,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 1,
-                k_max: 1,
-                anticipated_lead_stages: vec![1],
-                anticipated_thermal_indices: vec![0],
-                n_pumping: 0,
-            },
+            &eq_counts,
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
             &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&eq_counts);
         let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 1, vec![1]);
         assert!(
             indexer.thermal.is_empty(),
@@ -3715,8 +3764,7 @@ mod tests {
         );
 
         // Also verify stage-level helper directly.
-        let lookup = super::ThermalReverseLookup::build(&indexer, 1);
-        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
+        let lookup = super::ThermalReverseLookup::build(&study_dims, 1);
         let spec_delivery = StageExtractionSpec {
             indexer: &indexer,
             study_dims: &study_dims,
@@ -3798,7 +3846,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -3840,28 +3888,30 @@ mod tests {
     /// (zero-initialised slot 0).
     #[test]
     fn extract_thermals_no_block_committed_reads_slot0_when_seed_zero() {
+        let eq_counts = crate::indexer::EquipmentCounts {
+            hydro_count: 0,
+            max_par_order: 0,
+            n_thermals: 1,
+            n_lines: 0,
+            n_buses: 0,
+            n_blks: 0,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 1,
+            k_max: 1,
+            anticipated_lead_stages: vec![1],
+            anticipated_thermal_indices: vec![0],
+            n_pumping: 0,
+        };
         let indexer = StageIndexer::with_equipment_and_evaporation(
-            &crate::indexer::EquipmentCounts {
-                hydro_count: 0,
-                max_par_order: 0,
-                n_thermals: 1,
-                n_lines: 0,
-                n_buses: 0,
-                n_blks: 0,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 1,
-                k_max: 1,
-                anticipated_lead_stages: vec![1],
-                anticipated_thermal_indices: vec![0],
-                n_pumping: 0,
-            },
+            &eq_counts,
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
             &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&eq_counts);
         let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 1, vec![1]);
 
         let n_cols = indexer.anticipated_decision.end.max(1);
@@ -3889,7 +3939,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -3935,22 +3985,23 @@ mod tests {
     fn extract_stage_result_prebuilt_lookup_matches_standard_path() {
         use super::{HydroReverseLookup, ThermalReverseLookup, extract_stage_result_with_lookups};
 
+        let eq_counts = crate::indexer::EquipmentCounts {
+            hydro_count: 0,
+            max_par_order: 0,
+            n_thermals: 1,
+            n_lines: 0,
+            n_buses: 0,
+            n_blks: 2,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 1,
+            k_max: 1,
+            anticipated_lead_stages: vec![1],
+            anticipated_thermal_indices: vec![0],
+            n_pumping: 0,
+        };
         let indexer = StageIndexer::with_equipment_and_evaporation(
-            &crate::indexer::EquipmentCounts {
-                hydro_count: 0,
-                max_par_order: 0,
-                n_thermals: 1,
-                n_lines: 0,
-                n_buses: 0,
-                n_blks: 2,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 1,
-                k_max: 1,
-                anticipated_lead_stages: vec![1],
-                anticipated_thermal_indices: vec![0],
-                n_pumping: 0,
-            },
+            &eq_counts,
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
@@ -3994,7 +4045,7 @@ mod tests {
             objective_coeffs: &obj,
             row_lower: &[],
         };
-        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&eq_counts);
         let spec = StageExtractionSpec {
             indexer: &indexer,
             study_dims: &study_dims,
@@ -4027,7 +4078,7 @@ mod tests {
         let result_standard = extract_stage_result(&view, &spec, 2);
 
         // Pre-built path: lookup built once, reused across calls (hot-path pattern).
-        let thermal_lookup = ThermalReverseLookup::build(&indexer, counts.thermal_ids.len());
+        let thermal_lookup = ThermalReverseLookup::build(&study_dims, counts.thermal_ids.len());
         let hydro_lookup = HydroReverseLookup::build(&indexer, counts.hydro_ids.len());
         let result_prebuilt =
             extract_stage_result_with_lookups(&view, &spec, 2, &hydro_lookup, &thermal_lookup);
@@ -4068,6 +4119,7 @@ mod tests {
     #[test]
     fn extract_optional_entity_types_are_empty_when_absent() {
         let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
         let primal = vec![50.0, 0.0, 40.0, 200.0]; // storage, z_inflow, storage_in, theta
         let dual = vec![];
@@ -4093,7 +4145,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -4303,32 +4355,34 @@ mod tests {
     #[test]
     fn test_slack_extraction_with_penalty_active() {
         // N=2, L=1, T=1, Ln=1, B=1, K=1, has_inflow_penalty=true
+        let eq_counts = crate::indexer::EquipmentCounts {
+            hydro_count: 2,
+            max_par_order: 1,
+            n_thermals: 1,
+            n_lines: 1,
+            n_buses: 1,
+            n_blks: 1,
+            has_inflow_penalty: true,
+            max_deficit_segments: 1,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
+            n_pumping: 0,
+        };
         let indexer = StageIndexer::with_equipment_and_evaporation(
-            &crate::indexer::EquipmentCounts {
-                hydro_count: 2,
-                max_par_order: 1,
-                n_thermals: 1,
-                n_lines: 1,
-                n_buses: 1,
-                n_blks: 1,
-                has_inflow_penalty: true,
-                max_deficit_segments: 1,
-                n_anticipated: 0,
-                k_max: 0,
-                anticipated_lead_stages: vec![],
-                anticipated_thermal_indices: vec![],
-                n_pumping: 0,
-            },
+            &eq_counts,
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
             &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&eq_counts);
         let state = crate::indexer::test_fixtures::state_layout_full(2, 1, 0, 0, vec![]);
 
         assert!(
-            indexer.has_inflow_penalty,
+            study_dims.has_inflow_penalty,
             "has_inflow_penalty must be true"
         );
         assert!(
@@ -4379,7 +4433,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -4429,31 +4483,33 @@ mod tests {
     #[test]
     fn test_slack_extraction_without_penalty_is_zero() {
         // N=2, L=1, T=1, Ln=1, B=1, K=1, has_inflow_penalty=false
+        let eq_counts = crate::indexer::EquipmentCounts {
+            hydro_count: 2,
+            max_par_order: 1,
+            n_thermals: 1,
+            n_lines: 1,
+            n_buses: 1,
+            n_blks: 1,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
+            n_pumping: 0,
+        };
         let indexer = StageIndexer::with_equipment_and_evaporation(
-            &crate::indexer::EquipmentCounts {
-                hydro_count: 2,
-                max_par_order: 1,
-                n_thermals: 1,
-                n_lines: 1,
-                n_buses: 1,
-                n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 0,
-                k_max: 0,
-                anticipated_lead_stages: vec![],
-                anticipated_thermal_indices: vec![],
-                n_pumping: 0,
-            },
+            &eq_counts,
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
             &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&eq_counts);
         let state = crate::indexer::test_fixtures::state_layout_full(2, 1, 0, 0, vec![]);
         assert!(
-            !indexer.has_inflow_penalty,
+            !study_dims.has_inflow_penalty,
             "has_inflow_penalty must be false"
         );
 
@@ -4485,7 +4541,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -4528,28 +4584,30 @@ mod tests {
         // Zero blocks via with_equipment_and_evaporation (turbine.is_empty()) with
         // has_inflow_penalty=true — exercises the empty-equipment-range extraction path.
         // N=2, L=1, T=0, Ln=0, B=0, K=0, has_inflow_penalty=true
+        let eq_counts = crate::indexer::EquipmentCounts {
+            hydro_count: 2,
+            max_par_order: 1,
+            n_thermals: 0,
+            n_lines: 0,
+            n_buses: 0,
+            n_blks: 0,
+            has_inflow_penalty: true,
+            max_deficit_segments: 1,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
+            n_pumping: 0,
+        };
         let indexer = StageIndexer::with_equipment_and_evaporation(
-            &crate::indexer::EquipmentCounts {
-                hydro_count: 2,
-                max_par_order: 1,
-                n_thermals: 0,
-                n_lines: 0,
-                n_buses: 0,
-                n_blks: 0,
-                has_inflow_penalty: true,
-                max_deficit_segments: 1,
-                n_anticipated: 0,
-                k_max: 0,
-                anticipated_lead_stages: vec![],
-                anticipated_thermal_indices: vec![],
-                n_pumping: 0,
-            },
+            &eq_counts,
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
             },
             &crate::indexer::test_fixtures::evap(vec![]),
         );
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&eq_counts);
         let state = crate::indexer::test_fixtures::state_layout_full(2, 1, 0, 0, vec![]);
 
         // turbine is empty (n_blks=0) → fallback path
@@ -4558,7 +4616,7 @@ mod tests {
             "turbine must be empty to trigger fallback"
         );
         assert!(
-            indexer.has_inflow_penalty,
+            study_dims.has_inflow_penalty,
             "has_inflow_penalty must be true"
         );
 
@@ -4602,7 +4660,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -4654,24 +4712,31 @@ mod tests {
     /// diversion: [11, 13)   h0→11, h1→12
     /// generation:[13, 14)   fpha h0 b0 → 13
     /// ```
+    /// The `EquipmentCounts` both [`make_indexer_2h_1fpha_1blk`] and the matching
+    /// `study_dims` derive from, keeping the role-(b) geometry and the non-state
+    /// `StudyDimensions` aligned from one source.
+    fn counts_2h_1fpha_1blk() -> crate::indexer::EquipmentCounts {
+        crate::indexer::EquipmentCounts {
+            hydro_count: 2,
+            max_par_order: 0,
+            n_thermals: 0,
+            n_lines: 0,
+            n_buses: 0,
+            n_blks: 1,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
+            n_pumping: 0,
+        }
+    }
+
     fn make_indexer_2h_1fpha_1blk() -> StageIndexer {
         // h0 is FPHA (system index 0), h1 is constant-productivity (system index 1)
         StageIndexer::with_equipment_and_evaporation(
-            &crate::indexer::EquipmentCounts {
-                hydro_count: 2,
-                max_par_order: 0,
-                n_thermals: 0,
-                n_lines: 0,
-                n_buses: 0,
-                n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 0,
-                k_max: 0,
-                anticipated_lead_stages: vec![],
-                anticipated_thermal_indices: vec![],
-                n_pumping: 0,
-            },
+            &counts_2h_1fpha_1blk(),
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![0],
                 planes_per_hydro: vec![2],
@@ -4685,6 +4750,7 @@ mod tests {
     #[test]
     fn fpha_generation_read_from_lp_column() {
         let indexer = make_indexer_2h_1fpha_1blk();
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&counts_2h_1fpha_1blk());
         let state = crate::indexer::test_fixtures::state_layout(2, 0);
         // generation.start should be after turbine(7..9) + spillage(9..11) + diversion(11..13) = 13
         // generation[0] = generation.start + 0 * 1 + 0 = 13
@@ -4732,7 +4798,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -4786,6 +4852,7 @@ mod tests {
     #[test]
     fn fpha_productivity_placeholder_zero() {
         let indexer = make_indexer_2h_1fpha_1blk();
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&counts_2h_1fpha_1blk());
         let state = crate::indexer::test_fixtures::state_layout(2, 0);
         let n_cols = indexer.generation_below_slack.end;
         let primal = vec![0.0_f64; n_cols];
@@ -4815,7 +4882,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -4865,23 +4932,30 @@ mod tests {
     /// diversion:  [6, 7)   h0→6
     /// evap:       [7, 10)  evaporation_flow→7, f_plus→8, f_minus→9
     /// ```
+    /// The `EquipmentCounts` both [`make_indexer_1h_evap_1blk`] and the matching
+    /// `study_dims` derive from, keeping the role-(b) geometry and the non-state
+    /// `StudyDimensions` aligned from one source.
+    fn counts_1h_evap_1blk() -> crate::indexer::EquipmentCounts {
+        crate::indexer::EquipmentCounts {
+            hydro_count: 1,
+            max_par_order: 0,
+            n_thermals: 0,
+            n_lines: 0,
+            n_buses: 0,
+            n_blks: 1,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
+            n_pumping: 0,
+        }
+    }
+
     fn make_indexer_1h_evap_1blk() -> StageIndexer {
         StageIndexer::with_equipment_and_evaporation(
-            &crate::indexer::EquipmentCounts {
-                hydro_count: 1,
-                max_par_order: 0,
-                n_thermals: 0,
-                n_lines: 0,
-                n_buses: 0,
-                n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 0,
-                k_max: 0,
-                anticipated_lead_stages: vec![],
-                anticipated_thermal_indices: vec![],
-                n_pumping: 0,
-            },
+            &counts_1h_evap_1blk(),
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
                 planes_per_hydro: vec![],
@@ -4896,6 +4970,7 @@ mod tests {
     #[test]
     fn evaporation_read_from_lp_column() {
         let indexer = make_indexer_1h_evap_1blk();
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&counts_1h_evap_1blk());
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
         assert_eq!(indexer.evap_hydro_indices, vec![0]);
         let ei = &indexer.evap_indices[0];
@@ -4940,7 +5015,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -4986,6 +5061,7 @@ mod tests {
     #[test]
     fn evaporation_violation_is_sum_of_slacks() {
         let indexer = make_indexer_1h_evap_1blk();
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&counts_1h_evap_1blk());
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
         let n_cols = indexer.generation_below_slack.end;
         let mut primal = vec![0.0_f64; n_cols];
@@ -5024,7 +5100,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -5075,6 +5151,7 @@ mod tests {
     #[test]
     fn turbined_cost_in_compute_cost_result() {
         let indexer = make_indexer_2h_1fpha_1blk();
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&counts_2h_1fpha_1blk());
         let state = crate::indexer::test_fixtures::state_layout(2, 0);
         // turbine.start = 7 (h0 b0)
         let n_cols = indexer.generation_below_slack.end;
@@ -5114,7 +5191,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -5160,6 +5237,7 @@ mod tests {
     #[test]
     fn cost_breakdown_sums_to_immediate_identity_scale() {
         let indexer = make_indexer_2h_1fpha_1blk();
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&counts_2h_1fpha_1blk());
         let state = crate::indexer::test_fixtures::state_layout(2, 0);
         let n_cols = indexer.generation_below_slack.end;
         let mut primal = vec![0.0_f64; n_cols];
@@ -5198,7 +5276,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -5260,6 +5338,7 @@ mod tests {
     #[test]
     fn cost_unscaled_by_col_scale() {
         let indexer = make_indexer_2h_1fpha_1blk();
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&counts_2h_1fpha_1blk());
         let state = crate::indexer::test_fixtures::state_layout(2, 0);
         let n_cols = indexer.generation_below_slack.end;
         let mut primal = vec![0.0_f64; n_cols];
@@ -5300,7 +5379,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -5343,6 +5422,7 @@ mod tests {
     #[test]
     fn hydro_violation_cost_decomposition() {
         let indexer = make_indexer_2h_1fpha_1blk();
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&counts_2h_1fpha_1blk());
         let state = crate::indexer::test_fixtures::state_layout(2, 0);
         // Layout (see make_indexer_2h_1fpha_1blk):
         //   withdrawal_slack_neg:   14..16
@@ -5357,7 +5437,7 @@ mod tests {
         assert_eq!(indexer.outflow_above_slack, 20..22);
         assert_eq!(indexer.turbine_below_slack, 22..24);
         assert_eq!(indexer.generation_below_slack, 24..26);
-        assert!(indexer.has_operational_violations);
+        assert!(study_dims.has_operational_violations);
 
         let n_cols = indexer.generation_below_slack.end;
         let mut primal = vec![0.0_f64; n_cols];
@@ -5424,7 +5504,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -5546,6 +5626,7 @@ mod tests {
         // storage_initial = 110, V_min = 100, ρ_acum = 4.0 →
         // stored_energy_initial = (110 - 100) * 4 * 1e6 / 3600 ≈ 11_111.111…
         let indexer = crate::indexer::test_fixtures::geom(1, 1);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let state = crate::indexer::test_fixtures::state_layout(1, 1);
         let primal = make_primal_1_1(120.0, 110.0, 0.0);
         let dual = vec![0.0; 2];
@@ -5561,7 +5642,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -5615,6 +5696,7 @@ mod tests {
         // ρ_acum = 4.0, incremental_inflow = 50.0 →
         // incremental_inflow_energy = 4.0 * 50.0 = 200.0 (exactly).
         let indexer = crate::indexer::test_fixtures::geom(1, 1);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let state = crate::indexer::test_fixtures::state_layout(1, 1);
         let primal = make_primal_1_1(120.0, 110.0, 0.0);
         let dual = vec![0.0; 2];
@@ -5630,7 +5712,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -5673,6 +5755,7 @@ mod tests {
         // result. The per-block path shares the same HydroStageContext,
         // so by construction it cannot disagree.
         let indexer = crate::indexer::test_fixtures::geom(1, 1);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let state = crate::indexer::test_fixtures::state_layout(1, 1);
         let primal = make_primal_1_1(120.0, 110.0, 0.0);
         let dual = vec![0.0; 2];
@@ -5688,7 +5771,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
-                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
+                study_dims: &study_dims,
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -5824,7 +5907,7 @@ mod tests {
         };
 
         let equipment = StageEquipmentGeometry::default();
-        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let spec = pumping_only_spec(
             &indexer,
             &study_dims,
@@ -5886,7 +5969,7 @@ mod tests {
         };
 
         let equipment = StageEquipmentGeometry::default();
-        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let spec = pumping_only_spec(
             &indexer,
             &study_dims,
@@ -5924,7 +6007,7 @@ mod tests {
         };
 
         let equipment = StageEquipmentGeometry::default();
-        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let spec = pumping_only_spec(
             &indexer,
             &study_dims,

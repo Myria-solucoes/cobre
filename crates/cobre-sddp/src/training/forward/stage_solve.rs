@@ -64,6 +64,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     let n_hydros = ctx.n_hydros;
     let n_load_buses = ctx.n_load_buses;
     let indexer = training_ctx.indexer;
+    let study_dims = training_ctx.study_dims;
     let state = training_ctx.state;
     let stochastic = training_ctx.stochastic;
     let horizon = training_ctx.horizon;
@@ -164,7 +165,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     // openings, so it is rebuilt lazily on a stage transition (when the per-stage
     // NCS column start or the active-subset length changes); the bounds change
     // every scenario, so they are gathered every solve.
-    if n_stochastic_ncs > 0 && indexer.has_ncs {
+    if n_stochastic_ncs > 0 && study_dims.has_ncs {
         let n_blks = ctx.block_counts_per_stage[t];
         let slot_to_local = &ctx.ncs_active_slot_to_local[t];
         let ncs_col_start = ctx.ncs_col_starts[t];

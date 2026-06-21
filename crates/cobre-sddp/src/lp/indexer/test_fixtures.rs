@@ -138,14 +138,15 @@ pub fn state_layout_full(
 /// dimensions should prefer [`state_layout`] / [`state_layout_full`]; this bridge
 /// exists for sites that hold only a built indexer.
 ///
-/// Anticipated thermals are recovered from `anticipated_thermal_indices.len()`
-/// (= `n_anticipated`); the per-plant lead stages are NOT stored on the
-/// descriptor, so this bridge assumes none and is valid only for non-anticipated
-/// indexers. Anticipated test sites must use [`state_layout_full`].
+/// Anticipated thermals are recovered from the `anticipated_decision` column
+/// range (its length = `n_anticipated`); the per-plant lead stages are NOT
+/// stored on the descriptor, so this bridge assumes none and is valid only for
+/// non-anticipated indexers. Anticipated test sites must use
+/// [`state_layout_full`].
 #[must_use]
 pub fn state_layout_for(indexer: &StageIndexer) -> StateLayout {
     debug_assert!(
-        indexer.anticipated_thermal_indices.is_empty(),
+        indexer.anticipated_decision.is_empty(),
         "state_layout_for assumes no anticipated thermals; use state_layout_full instead"
     );
     let n_blks = indexer.n_blks.max(1);
@@ -173,29 +174,35 @@ pub fn study_dims() -> StudyDimensions {
     StudyDimensions::default()
 }
 
-/// Build the [`StudyDimensions`] matching a built [`StageIndexer`]'s non-state
-/// shape, reading each fact from the field the indexer already carries.
+/// Build the [`StudyDimensions`] matching the [`EquipmentCounts`] a test built
+/// its [`StageIndexer`] from, so the bridged `study_dims` carries the identical
+/// non-state facts the production `build_wired_indexer` derives from the same
+/// counts bag.
 ///
-/// The bridge for test sites that hold a built indexer: it copies the non-state
-/// entity counts (`n_thermals`, `n_lines`, `n_buses`, `max_deficit_segments`),
-/// the presence flags (`has_ncs`, `has_inflow_penalty`, `has_withdrawal`,
-/// `has_operational_violations`), and the anticipated-thermal identity list
-/// straight off the indexer, so the borrowed `study_dims` carries the identical
-/// facts the `indexer` does. `n_pumping` is not stored on the descriptor (it is
-/// `0` there), matching `study_dims().n_pumping`.
+/// The non-state scalars come straight off `counts`; the presence flags use the
+/// same predicates the role-(b) constructor applies (`has_inflow_penalty` is the
+/// counts flag, `has_withdrawal == hydro_count > 0`,
+/// `has_operational_violations == hydro_count != 0`); the anticipated identity
+/// list is the counts input the constructor clones. `n_pumping` is `0` on the
+/// non-state shape these fixtures imply.
+///
+/// `has_ncs` is `false`: NCS presence is set only by the production NCS wiring
+/// (`!ncs_col_starts.is_empty()`), never by `EquipmentCounts` or by any test
+/// fixture — every fixture-built indexer is NCS-inactive, so the constant
+/// matches what the deleted `StageIndexer::has_ncs` carried at every bridge site.
 #[must_use]
-pub fn study_dims_for(indexer: &StageIndexer) -> StudyDimensions {
+pub fn study_dims_for(counts: &EquipmentCounts) -> StudyDimensions {
     StudyDimensions {
-        n_thermals: indexer.n_thermals,
-        n_lines: indexer.n_lines,
-        n_buses: indexer.n_buses,
-        max_deficit_segments: indexer.max_deficit_segments,
-        has_ncs: indexer.has_ncs,
-        has_inflow_penalty: indexer.has_inflow_penalty,
-        has_withdrawal: indexer.has_withdrawal,
-        has_operational_violations: indexer.has_operational_violations,
-        anticipated_thermal_indices: indexer.anticipated_thermal_indices.clone(),
-        n_pumping: 0,
+        n_thermals: counts.n_thermals,
+        n_lines: counts.n_lines,
+        n_buses: counts.n_buses,
+        max_deficit_segments: counts.max_deficit_segments,
+        has_ncs: false,
+        has_inflow_penalty: counts.has_inflow_penalty,
+        has_withdrawal: counts.hydro_count > 0,
+        has_operational_violations: counts.hydro_count != 0,
+        anticipated_thermal_indices: counts.anticipated_thermal_indices.clone(),
+        n_pumping: counts.n_pumping,
     }
 }
 

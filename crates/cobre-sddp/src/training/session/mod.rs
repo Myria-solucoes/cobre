@@ -1744,7 +1744,7 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = make_training_ctx(
             &horizon,
             &indexer,
@@ -1819,7 +1819,7 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = make_training_ctx(
             &horizon,
             &indexer,
@@ -1881,7 +1881,7 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = make_training_ctx(
             &horizon,
             &indexer,
@@ -1946,7 +1946,7 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = make_training_ctx(
             &horizon,
             &indexer,
@@ -2000,7 +2000,7 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = make_training_ctx(
             &horizon,
             &indexer,
@@ -2071,7 +2071,7 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = make_training_ctx(
             &horizon,
             &indexer,

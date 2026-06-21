@@ -148,9 +148,10 @@ impl StageIndexer {
     /// stage's own `stage.blocks.len()` and is the authority where block counts
     /// vary.
     ///
-    /// NCS generation columns are **not** addressed from this descriptor. It
-    /// carries only the [`has_ncs`](crate::indexer::StageIndexer::has_ncs)
-    /// presence flag; the per-(ncs, block) column base is read per stage from
+    /// NCS generation columns are **not** addressed from this descriptor. NCS
+    /// presence is carried by
+    /// [`StudyDimensions::has_ncs`](crate::indexer::StudyDimensions); the
+    /// per-(ncs, block) column base is read per stage from
     /// `StageContext::ncs_col_starts[stage]` (and `LbEvalSpec::ncs_generation` for
     /// the stage-0 lower bound).
     #[must_use]
@@ -289,12 +290,12 @@ impl StageIndexer {
         let evap_indices_vec =
             Self::build_evap_indices(n_evap_hydros, evap_col_start, fpha_row_cursor);
         let evap_col_end = evap_col_start + n_evap_hydros * EVAP_COLS_PER_HYDRO;
-        let (withdrawal_slack_neg, withdrawal_slack_pos, has_withdrawal) = if hydro_count > 0 {
+        let (withdrawal_slack_neg, withdrawal_slack_pos) = if hydro_count > 0 {
             let neg = evap_col_end..evap_col_end + hydro_count;
             let pos = neg.end..neg.end + hydro_count;
-            (neg, pos, true)
+            (neg, pos)
         } else {
-            (0..0, 0..0, false)
+            (0..0, 0..0)
         };
 
         // Operational violation slack columns: 4 families * (hydro_count * n_blks).
@@ -319,21 +320,16 @@ impl StageIndexer {
             diversion: diversion_start..thermal_start,
             thermal: thermal_start..thermal_end,
             anticipated_decision,
-            anticipated_thermal_indices: counts.anticipated_thermal_indices.clone(),
             line_fwd: line_fwd_start..line_rev_start,
             line_rev: line_rev_start..deficit_start,
             deficit: deficit_start..excess_start,
             max_deficit_segments,
             excess: excess_start..excess_end,
             n_blks,
-            n_thermals,
-            n_lines,
-            n_buses,
             water_balance: water_balance_start..water_balance_start + hydro_count,
             load_balance: load_balance_start..load_balance_end,
             inflow_slack,
             inflow_slack_rows: 0..0,
-            has_inflow_penalty: active_penalty,
             generation,
             n_fpha_hydros,
             fpha_hydro_indices,
@@ -343,7 +339,6 @@ impl StageIndexer {
             evap_indices: evap_indices_vec,
             withdrawal_slack_neg,
             withdrawal_slack_pos,
-            has_withdrawal,
             outflow_below_slack: op.outflow_below_slack,
             outflow_above_slack: op.outflow_above_slack,
             turbine_below_slack: op.turbine_below_slack,
@@ -354,8 +349,6 @@ impl StageIndexer {
             min_generation_rows: op.min_generation_rows,
             anticipated_fishing: fishing_start..fishing_start,
             anticipated_fishing_start: fishing_start,
-            has_operational_violations: op.has_operational_violations,
-            has_ncs: false,
             z_inflow_rows,
             z_inflow_row_start,
         }
@@ -431,9 +424,10 @@ mod tests {
         assert_eq!(idx.excess, 13..15);
 
         assert_eq!(idx.n_blks, 1);
-        assert_eq!(idx.n_thermals, 2);
-        assert_eq!(idx.n_lines, 1);
-        assert_eq!(idx.n_buses, 2);
+        // The non-state scalars (`n_thermals`/`n_lines`/`n_buses`) moved to
+        // `StudyDimensions`; the equipment ranges above already prove the
+        // constructor applied them (`thermal = 7..9` at `n_blks = 1` ⟹ T = 2,
+        // `line_fwd = 9..10` ⟹ Ln = 1, `deficit = 11..13` at S = 1 ⟹ B = 2).
     }
 
     // N=2, L=1, T=3, Ln=2, B=4, K=2.
@@ -487,7 +481,13 @@ mod tests {
             &evap(vec![]),
         );
 
-        assert!(idx.has_inflow_penalty, "has_inflow_penalty must be true");
+        // The `has_inflow_penalty` flag moved to `StudyDimensions`; the surviving
+        // non-empty `inflow_slack` range is the role-(b) evidence the slack columns
+        // were appended.
+        assert!(
+            !idx.inflow_slack.is_empty(),
+            "inflow_slack columns must be present"
+        );
         assert_eq!(
             idx.inflow_slack.start, idx.excess.end,
             "inflow_slack.start must equal excess.end (contiguous)"
@@ -503,7 +503,6 @@ mod tests {
             &fpha(vec![], vec![]),
             &evap(vec![]),
         );
-        assert!(!no_penalty.has_inflow_penalty);
         assert!(no_penalty.inflow_slack.is_empty());
     }
 

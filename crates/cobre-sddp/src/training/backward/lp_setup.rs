@@ -133,7 +133,7 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
     // overrun. Index buffer rebuilt lazily on a stage transition (when the
     // per-stage NCS column start or the active-subset length changes); bounds
     // gathered every opening.
-    if n_stochastic_ncs > 0 && training_ctx.indexer.has_ncs {
+    if n_stochastic_ncs > 0 && training_ctx.study_dims.has_ncs {
         let n_blks_stage = ctx.block_counts_per_stage[s];
         let slot_to_local = &ctx.ncs_active_slot_to_local[s];
         let ncs_col_start = ctx.ncs_col_starts[s];

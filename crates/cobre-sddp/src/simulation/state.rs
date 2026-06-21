@@ -441,6 +441,7 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
     // per-(scenario, stage) allocation that would otherwise occur inside
     // extract_thermals / extract_hydros (600k allocs for 10k scenarios × 60 stages).
     let lookups = SimLookups::build(
+        params.training_ctx.study_dims,
         params.training_ctx.indexer,
         params.output.entity_counts.thermal_ids.len(),
         params.output.entity_counts.hydro_ids.len(),

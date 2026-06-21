@@ -98,18 +98,20 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
 /// `StudyDimensions` fields, so this external test crate (which does not see the
 /// parent crate's `#[cfg(test)]` surface) carries the identical non-state facts the
 /// `indexer` does for the `TrainingContext` slot.
-fn study_dims_for(indexer: &StageIndexer) -> cobre_sddp::indexer::StudyDimensions {
+fn study_dims_for(
+    counts: &cobre_sddp::indexer::EquipmentCounts,
+) -> cobre_sddp::indexer::StudyDimensions {
     cobre_sddp::indexer::StudyDimensions {
-        n_thermals: indexer.n_thermals,
-        n_lines: indexer.n_lines,
-        n_buses: indexer.n_buses,
-        max_deficit_segments: indexer.max_deficit_segments,
-        has_ncs: indexer.has_ncs,
-        has_inflow_penalty: indexer.has_inflow_penalty,
-        has_withdrawal: indexer.has_withdrawal,
-        has_operational_violations: indexer.has_operational_violations,
-        anticipated_thermal_indices: indexer.anticipated_thermal_indices.clone(),
-        n_pumping: 0,
+        n_thermals: counts.n_thermals,
+        n_lines: counts.n_lines,
+        n_buses: counts.n_buses,
+        max_deficit_segments: counts.max_deficit_segments,
+        has_ncs: false,
+        has_inflow_penalty: counts.has_inflow_penalty,
+        has_withdrawal: counts.hydro_count > 0,
+        has_operational_violations: counts.hydro_count != 0,
+        anticipated_thermal_indices: counts.anticipated_thermal_indices.clone(),
+        n_pumping: counts.n_pumping,
     }
 }
 
@@ -441,6 +443,7 @@ struct Fixture {
     stage_templates: cobre_sddp::StageTemplates,
     stochastic: StochasticContext,
     indexer: StageIndexer,
+    study_dims: cobre_sddp::indexer::StudyDimensions,
     state: StateLayout,
     initial_state: Vec<f64>,
     horizon: HorizonMode,
@@ -486,22 +489,24 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
     let first_tmpl = stage_templates.templates.first().expect("at least 1 stage");
     let n_blks = system.stages().first().map_or(1, |s| s.blocks.len().max(1));
     let has_inflow_penalty = inflow_method.has_slack_columns() && first_tmpl.n_hydro > 0;
+    let eq_counts = cobre_sddp::indexer::EquipmentCounts {
+        hydro_count: first_tmpl.n_hydro,
+        max_par_order: first_tmpl.max_par_order,
+        n_thermals: system.thermals().len(),
+        n_lines: system.lines().len(),
+        n_buses: system.buses().len(),
+        n_blks,
+        has_inflow_penalty,
+        max_deficit_segments: 1,
+        n_anticipated: 0,
+        k_max: 0,
+        anticipated_lead_stages: vec![],
+        anticipated_thermal_indices: vec![],
+        n_pumping: 0,
+    };
+    let study_dims = study_dims_for(&eq_counts);
     let indexer = StageIndexer::with_equipment_and_evaporation(
-        &cobre_sddp::indexer::EquipmentCounts {
-            hydro_count: first_tmpl.n_hydro,
-            max_par_order: first_tmpl.max_par_order,
-            n_thermals: system.thermals().len(),
-            n_lines: system.lines().len(),
-            n_buses: system.buses().len(),
-            n_blks,
-            has_inflow_penalty,
-            max_deficit_segments: 1,
-            n_anticipated: 0,
-            k_max: 0,
-            anticipated_lead_stages: vec![],
-            anticipated_thermal_indices: vec![],
-            n_pumping: 0,
-        },
+        &eq_counts,
         &cobre_sddp::indexer::FphaColumnLayout {
             hydro_indices: vec![],
             planes_per_hydro: vec![],
@@ -535,6 +540,7 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
         stage_templates,
         stochastic,
         indexer,
+        study_dims,
         state,
         initial_state,
         horizon,
@@ -619,7 +625,7 @@ fn train_fixture(
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
-            study_dims: &study_dims_for(&fx.indexer),
+            study_dims: &fx.study_dims,
             inflow_method: &fx.inflow_method,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -718,7 +724,7 @@ fn simulate_fixture(
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
-            study_dims: &study_dims_for(&fx.indexer),
+            study_dims: &fx.study_dims,
             inflow_method: &fx.inflow_method,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,

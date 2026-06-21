@@ -83,18 +83,20 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
 /// `StudyDimensions` fields, so this external test crate (which does not see the
 /// parent crate's `#[cfg(test)]` surface) carries the identical non-state facts the
 /// `indexer` does for the `TrainingContext` / `StageExtractionSpec` slot.
-fn study_dims_for(indexer: &StageIndexer) -> cobre_sddp::indexer::StudyDimensions {
+fn study_dims_for(
+    counts: &cobre_sddp::indexer::EquipmentCounts,
+) -> cobre_sddp::indexer::StudyDimensions {
     cobre_sddp::indexer::StudyDimensions {
-        n_thermals: indexer.n_thermals,
-        n_lines: indexer.n_lines,
-        n_buses: indexer.n_buses,
-        max_deficit_segments: indexer.max_deficit_segments,
-        has_ncs: indexer.has_ncs,
-        has_inflow_penalty: indexer.has_inflow_penalty,
-        has_withdrawal: indexer.has_withdrawal,
-        has_operational_violations: indexer.has_operational_violations,
-        anticipated_thermal_indices: indexer.anticipated_thermal_indices.clone(),
-        n_pumping: 0,
+        n_thermals: counts.n_thermals,
+        n_lines: counts.n_lines,
+        n_buses: counts.n_buses,
+        max_deficit_segments: counts.max_deficit_segments,
+        has_ncs: false,
+        has_inflow_penalty: counts.has_inflow_penalty,
+        has_withdrawal: counts.hydro_count > 0,
+        has_operational_violations: counts.hydro_count != 0,
+        anticipated_thermal_indices: counts.anticipated_thermal_indices.clone(),
+        n_pumping: counts.n_pumping,
     }
 }
 
@@ -549,7 +551,7 @@ fn test_stochastic_load_training_completes() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&indexer),
+            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -680,7 +682,7 @@ fn test_deterministic_load_training_matches_baseline() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&indexer),
+            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -793,7 +795,7 @@ fn test_stochastic_load_seed_determinism() {
                 horizon: &horizon,
                 indexer: &indexer,
                 state: &state,
-                study_dims: &study_dims_for(&indexer),
+                study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,

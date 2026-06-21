@@ -8046,7 +8046,9 @@ fn operational_violation_row_col_counts() {
     assert_eq!(indexer.outflow_above_slack.len(), 2);
     assert_eq!(indexer.turbine_below_slack.len(), 2);
     assert_eq!(indexer.generation_below_slack.len(), 2);
-    assert!(indexer.has_operational_violations);
+    // Operational-violation presence: the flag moved to `StudyDimensions`; the
+    // non-empty slack ranges above are the surviving role-(b) evidence.
+    assert!(!indexer.outflow_below_slack.is_empty());
 
     // 4 row ranges each contain n_hydros * n_blks = 1 * 2 = 2 rows.
     assert_eq!(indexer.min_outflow_rows.len(), 2);
@@ -8802,9 +8804,11 @@ fn diagnostic_template_operational_violation_correctness() {
         },
     );
 
+    // Operational-violation presence: the flag moved to `StudyDimensions`; the
+    // surviving role-(b) evidence is the non-empty min-outflow slack range.
     assert!(
-        indexer.has_operational_violations,
-        "indexer.has_operational_violations must be true when hydros exist"
+        !indexer.outflow_below_slack.is_empty(),
+        "operational-violation slack columns must be present when hydros exist"
     );
 
     // Per-block formulation: RHS is in rate units (m3/s or MW), not volume/energy.

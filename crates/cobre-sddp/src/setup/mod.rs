@@ -770,29 +770,28 @@ fn build_wired_indexer(
     let evap_cfg = crate::indexer::EvapConfig {
         hydro_indices: evap_hydro_indices,
     };
-    let mut indexer =
-        StageIndexer::with_equipment_and_evaporation(&eq_counts, &fpha_cfg, &evap_cfg);
-
-    // Flag NCS presence; the per-(ncs, block) column base is read per stage from
-    // `StageContext::ncs_col_starts`, never from this global indexer.
-    indexer.has_ncs = !stage_templates.ncs_col_starts.is_empty();
+    let indexer = StageIndexer::with_equipment_and_evaporation(&eq_counts, &fpha_cfg, &evap_cfg);
 
     // Single owner of the study-invariant, non-state LP shape. Each fact is read
-    // from the value that already derived it — the scalars and `has_inflow_penalty`
-    // from `eq_counts`, the constructor-derived flags and the anticipated identity
-    // list from the built `indexer` (after `has_ncs` is set) — so it carries the
-    // identical facts the role-(b) descriptor does. `n_blks` is deliberately absent:
-    // it is per-stage and owned by the per-stage geometry, never study-global.
+    // from the value that derives it: the scalars and `has_inflow_penalty` from
+    // `eq_counts`; the presence flags from the same `hydro_count`/`ncs_col_starts`
+    // predicates the role-(b) constructor uses (`has_withdrawal == hydro_count > 0`,
+    // `has_operational_violations == hydro_count != 0`); the anticipated identity
+    // list from the `eq_counts` input the constructor clones; and `has_ncs` from
+    // the NCS column presence — the per-(ncs, block) column base is read per stage
+    // from `StageContext::ncs_col_starts`, never from a global handle. `n_blks` is
+    // deliberately absent: it is per-stage and owned by the per-stage geometry,
+    // never study-global.
     let study_dims = crate::indexer::StudyDimensions {
         n_thermals: eq_counts.n_thermals,
         n_lines: eq_counts.n_lines,
         n_buses: eq_counts.n_buses,
         max_deficit_segments: eq_counts.max_deficit_segments,
-        has_ncs: indexer.has_ncs,
+        has_ncs: !stage_templates.ncs_col_starts.is_empty(),
         has_inflow_penalty: eq_counts.has_inflow_penalty,
-        has_withdrawal: indexer.has_withdrawal,
-        has_operational_violations: indexer.has_operational_violations,
-        anticipated_thermal_indices: indexer.anticipated_thermal_indices.clone(),
+        has_withdrawal: eq_counts.hydro_count > 0,
+        has_operational_violations: eq_counts.hydro_count != 0,
+        anticipated_thermal_indices: eq_counts.anticipated_thermal_indices.clone(),
         n_pumping: eq_counts.n_pumping,
     };
 
@@ -3294,18 +3293,12 @@ mod tests {
         );
     }
 
-    /// Build a role-(b) `StageIndexer` for lag tests: N hydros, L lags, no
-    /// equipment columns beyond the empty defaults.
-    fn indexer_for_lag_test(hydro_count: usize, max_par_order: usize) -> StageIndexer {
-        crate::indexer::test_fixtures::geom(hydro_count, max_par_order)
-    }
-
-    /// Build the role-(a) `StateLayout` matching [`indexer_for_lag_test`].
+    /// Build the role-(a) `StateLayout` for lag tests: N hydros, L lags.
     fn layout_for_lag_test(hydro_count: usize, max_par_order: usize) -> StateLayout {
         crate::indexer::test_fixtures::state_layout(hydro_count, max_par_order)
     }
 
-    /// Build the role-(a) `StateLayout` matching [`indexer_with_anticipated`]
+    /// Build the role-(a) `StateLayout` matching [`counts_with_anticipated`]
     /// (1 hydro, 0 lags, `n_anticipated` plants with the given per-plant K).
     fn layout_with_anticipated(n_anticipated: usize, k_values: &[usize]) -> StateLayout {
         let k_max = k_values.iter().copied().max().unwrap_or(0);
@@ -3576,12 +3569,11 @@ mod tests {
 
         let system =
             minimal_system_2_hydros_with_past_inflows(1, vec![600.0, 500.0], vec![200.0, 100.0]);
-        let indexer = indexer_for_lag_test(2, 2);
         let layout = layout_for_lag_test(2, 2);
 
         let state = build_initial_state(
             &system,
-            &crate::indexer::test_fixtures::study_dims_for(&indexer),
+            &crate::indexer::test_fixtures::study_dims(),
             &layout,
         );
 
@@ -3623,12 +3615,11 @@ mod tests {
         use super::build_initial_state;
 
         let system = minimal_system(2);
-        let indexer = indexer_for_lag_test(1, 3);
         let layout = layout_for_lag_test(1, 3);
 
         let state = build_initial_state(
             &system,
-            &crate::indexer::test_fixtures::study_dims_for(&indexer),
+            &crate::indexer::test_fixtures::study_dims(),
             &layout,
         );
 
@@ -3657,12 +3648,11 @@ mod tests {
             // no past_inflows, so both lag slots are 0.0.
             minimal_system(2)
         };
-        let indexer = indexer_for_lag_test(1, 2);
         let layout = layout_for_lag_test(1, 2);
 
         let state = build_initial_state(
             &system,
-            &crate::indexer::test_fixtures::study_dims_for(&indexer),
+            &crate::indexer::test_fixtures::study_dims(),
             &layout,
         );
 
@@ -3745,7 +3735,6 @@ mod tests {
         use super::build_initial_state;
 
         let system = minimal_system(2);
-        let indexer = indexer_for_lag_test(1, 0);
         let layout = layout_for_lag_test(1, 0);
 
         // n_state = N*(1+L) = 1*(1+0) = 1
@@ -3757,7 +3746,7 @@ mod tests {
 
         let state = build_initial_state(
             &system,
-            &crate::indexer::test_fixtures::study_dims_for(&indexer),
+            &crate::indexer::test_fixtures::study_dims(),
             &layout,
         );
 
@@ -3771,39 +3760,31 @@ mod tests {
     /// Build a `StageIndexer` that has N=1 hydro, L=0 lags, and the given
     /// anticipated-thermal metadata, using `with_equipment_and_evaporation`.
     ///
-    /// This gives a non-zero `anticipated_state` block in the state vector.
-    fn indexer_with_anticipated(
+    /// This gives a non-zero `anticipated_state` block in the state vector. The
+    /// anticipated `build_initial_state` tests build their role-(b) descriptor
+    /// from these same counts, so the geometry and the non-state
+    /// `StudyDimensions` (via `study_dims_for`) stay aligned from one source.
+    fn counts_with_anticipated(
         n_anticipated: usize,
-        k_values: &[usize],        // K_i per plant, length == n_anticipated
-        thermal_indices: &[usize], // global thermal index per plant
-    ) -> StageIndexer {
-        use crate::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout};
-
+        k_values: &[usize],
+        thermal_indices: &[usize],
+    ) -> crate::indexer::EquipmentCounts {
         let k_max = k_values.iter().copied().max().unwrap_or(0);
-        StageIndexer::with_equipment_and_evaporation(
-            &EquipmentCounts {
-                hydro_count: 1,
-                max_par_order: 0,
-                n_thermals: n_anticipated, // at least cover the anticipated plants
-                n_lines: 0,
-                n_buses: 1,
-                n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated,
-                k_max,
-                n_pumping: 0,
-                anticipated_lead_stages: k_values.to_vec(),
-                anticipated_thermal_indices: thermal_indices.to_vec(),
-            },
-            &FphaColumnLayout {
-                hydro_indices: vec![],
-                planes_per_hydro: vec![],
-            },
-            &EvapConfig {
-                hydro_indices: vec![],
-            },
-        )
+        crate::indexer::EquipmentCounts {
+            hydro_count: 1,
+            max_par_order: 0,
+            n_thermals: n_anticipated, // at least cover the anticipated plants
+            n_lines: 0,
+            n_buses: 1,
+            n_blks: 1,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated,
+            k_max,
+            n_pumping: 0,
+            anticipated_lead_stages: k_values.to_vec(),
+            anticipated_thermal_indices: thermal_indices.to_vec(),
+        }
     }
 
     /// Build a 1-bus / 1-hydro system whose `thermals` list contains N
@@ -4062,7 +4043,6 @@ mod tests {
         use super::build_initial_state;
 
         let system = minimal_system(2);
-        let indexer = indexer_for_lag_test(1, 0);
         let layout = layout_for_lag_test(1, 0);
 
         // n_anticipated == 0; anticipated_state range is 0..0.
@@ -4071,7 +4051,7 @@ mod tests {
 
         let state = build_initial_state(
             &system,
-            &crate::indexer::test_fixtures::study_dims_for(&indexer),
+            &crate::indexer::test_fixtures::study_dims(),
             &layout,
         );
 
@@ -4107,12 +4087,11 @@ mod tests {
         let system = system_with_anticipated_thermals(&[2], past_commits);
 
         // indexer: 1 hydro, 0 lags, 1 anticipated thermal (global idx 0), k_max=2.
-        let indexer = indexer_with_anticipated(1, &[2], &[0]);
         let layout = layout_with_anticipated(1, &[2]);
 
         let state = build_initial_state(
             &system,
-            &crate::indexer::test_fixtures::study_dims_for(&indexer),
+            &crate::indexer::test_fixtures::study_dims_for(&counts_with_anticipated(1, &[2], &[0])),
             &layout,
         );
 
@@ -4167,12 +4146,15 @@ mod tests {
         //   anticipated_thermal_indices = [0, 1]  (global idxs in thermals())
         //   anticipated_lead_stages     = [2, 3]
         //   k_max                       = 3
-        let indexer = indexer_with_anticipated(2, &[2, 3], &[0, 1]);
         let layout = layout_with_anticipated(2, &[2, 3]);
 
         let state = build_initial_state(
             &system,
-            &crate::indexer::test_fixtures::study_dims_for(&indexer),
+            &crate::indexer::test_fixtures::study_dims_for(&counts_with_anticipated(
+                2,
+                &[2, 3],
+                &[0, 1],
+            )),
             &layout,
         );
 
@@ -4226,12 +4208,11 @@ mod tests {
 
         let system = system_with_anticipated_thermals(&[2], vec![]);
 
-        let indexer = indexer_with_anticipated(1, &[2], &[0]);
         let layout = layout_with_anticipated(1, &[2]);
 
         let state = build_initial_state(
             &system,
-            &crate::indexer::test_fixtures::study_dims_for(&indexer),
+            &crate::indexer::test_fixtures::study_dims_for(&counts_with_anticipated(1, &[2], &[0])),
             &layout,
         );
 
@@ -4266,12 +4247,11 @@ mod tests {
         }];
         let system = system_with_anticipated_thermals(&[2], past_commits);
 
-        let indexer = indexer_with_anticipated(1, &[2], &[0]);
         let layout = layout_with_anticipated(1, &[2]);
 
         let state = build_initial_state(
             &system,
-            &crate::indexer::test_fixtures::study_dims_for(&indexer),
+            &crate::indexer::test_fixtures::study_dims_for(&counts_with_anticipated(1, &[2], &[0])),
             &layout,
         );
 
@@ -4323,12 +4303,15 @@ mod tests {
         ];
         let system = system_with_anticipated_thermals(&[1, 2], past_commits);
         // n_anticipated=2, k_values=[1, 2] -> k_max=2.
-        let indexer = indexer_with_anticipated(2, &[1, 2], &[0, 1]);
         let layout = layout_with_anticipated(2, &[1, 2]);
 
         let state = build_initial_state(
             &system,
-            &crate::indexer::test_fixtures::study_dims_for(&indexer),
+            &crate::indexer::test_fixtures::study_dims_for(&counts_with_anticipated(
+                2,
+                &[1, 2],
+                &[0, 1],
+            )),
             &layout,
         );
 
@@ -6317,25 +6300,27 @@ mod tests {
         .expect("setup");
 
         let indexer = &setup.stage_data.indexer;
-        // Rebuild the role-(b) descriptor from the same per-stage counts the
-        // production `build_wired_indexer` derived (read back off the built
-        // descriptor's own entity counts so the reference cannot diverge in the
-        // inputs). `has_ncs` is set post-construction by the NCS wiring, so the
-        // reference reproduces that flag explicitly.
+        let study_dims = &setup.stage_data.study_dims;
+        // Rebuild the role-(b) descriptor from the same counts the production
+        // `build_wired_indexer` derived. The non-state scalars / flags / anticipated
+        // identity list now live on `study_dims` (the single owner), so the
+        // reference reads them from there; the surviving role-(b) stride scalars
+        // (`n_blks`, `max_deficit_segments`) and the per-stage identity lists are
+        // read off the built descriptor's own fields.
         let counts = crate::indexer::EquipmentCounts {
             hydro_count: indexer.water_balance.len(),
             max_par_order: 0, // role-(b) ranges do not depend on L
-            n_thermals: indexer.n_thermals,
-            n_lines: indexer.n_lines,
-            n_buses: indexer.n_buses,
+            n_thermals: study_dims.n_thermals,
+            n_lines: study_dims.n_lines,
+            n_buses: study_dims.n_buses,
             n_blks: indexer.n_blks,
-            has_inflow_penalty: indexer.has_inflow_penalty,
+            has_inflow_penalty: study_dims.has_inflow_penalty,
             max_deficit_segments: indexer.max_deficit_segments,
-            n_anticipated: indexer.anticipated_thermal_indices.len(),
+            n_anticipated: study_dims.anticipated_thermal_indices.len(),
             k_max: 0,
             n_pumping: 0,
             anticipated_lead_stages: vec![],
-            anticipated_thermal_indices: indexer.anticipated_thermal_indices.clone(),
+            anticipated_thermal_indices: study_dims.anticipated_thermal_indices.clone(),
         };
         let fpha = crate::indexer::FphaColumnLayout {
             hydro_indices: indexer.fpha_hydro_indices.clone(),
@@ -6348,8 +6333,7 @@ mod tests {
         let evap = crate::indexer::EvapConfig {
             hydro_indices: indexer.evap_hydro_indices.clone(),
         };
-        let mut reference = StageIndexer::with_equipment_and_evaporation(&counts, &fpha, &evap);
-        reference.has_ncs = indexer.has_ncs;
+        let reference = StageIndexer::with_equipment_and_evaporation(&counts, &fpha, &evap);
 
         // Role-(b) equipment/slack column ranges.
         assert_eq!(reference.turbine, indexer.turbine, "turbine range");
@@ -6373,7 +6357,7 @@ mod tests {
             reference.withdrawal_slack_pos, indexer.withdrawal_slack_pos,
             "withdrawal_slack_pos range"
         );
-        // Role-(b) constraint row ranges + scalars.
+        // Role-(b) constraint row ranges + surviving stride scalars.
         assert_eq!(
             reference.water_balance, indexer.water_balance,
             "water_balance"
@@ -6388,19 +6372,9 @@ mod tests {
             "z_inflow_row_start"
         );
         assert_eq!(reference.n_blks, indexer.n_blks, "n_blks");
-        assert_eq!(reference.n_thermals, indexer.n_thermals, "n_thermals");
         assert_eq!(
             reference.max_deficit_segments, indexer.max_deficit_segments,
             "max_deficit_segments"
-        );
-        assert_eq!(reference.has_ncs, indexer.has_ncs, "has_ncs");
-        assert_eq!(
-            reference.has_withdrawal, indexer.has_withdrawal,
-            "has_withdrawal"
-        );
-        assert_eq!(
-            reference.has_operational_violations, indexer.has_operational_violations,
-            "has_operational_violations"
         );
     }
 
