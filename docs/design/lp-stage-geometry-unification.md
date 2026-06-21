@@ -110,16 +110,19 @@ Approved model: **disjoint single-ownership** — each fact owned by exactly one
 type, split by concern (no shared dims bag, so the cut hot path keeps reading its
 state dims directly with no indirection).
 
-| Owner                                         | Owns — and nothing another owns                                                                                                                                                                                              | Derivation                                 |
-| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
-| **`StateLayout`** (role a)                    | State column ranges, resolvers, caches; **state-defining dims** `hydro_count`, `max_par_order`, `n_anticipated`, `k_max`, `anticipated_lead_stages`, `n_state`.                                                              | exists — unchanged                         |
-| **`StudyDimensions`** (non-state study shape) | `n_thermals`, `n_lines`, `n_buses`, `max_deficit_segments`; `has_ncs`, `has_inflow_penalty`; `anticipated_thermal_indices`; `n_pumping`. Persisted once, threaded like `StateLayout`; also serves as the construction input. | **`EquipmentCounts` repurposed + renamed** |
-| **`StageGeometry`** (role b, per-stage)       | Equipment/slack **column ranges + row ranges + per-stage identity lists** (`fpha_/evap_hydro_indices`, `evap_indices`) + **per-stage `n_blks`**. Persisted as a per-stage `Vec`.                                             | **`StageEquipmentGeometry` widened**       |
-| **`StageLayout<'a>`** (ephemeral builder)     | Transient build state; **borrows** `&StateLayout` + `&StudyDimensions`; **produces** one `StageGeometry` per stage. No stored dim copies.                                                                                    | keep; drop the `n_h`/`lag_order`/… copies  |
+| Owner                                         | Owns — and nothing another owns                                                                                                                                                       | Derivation                                                                             |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| **`StateLayout`** (role a)                    | State column ranges, resolvers, caches; **state-defining dims** `hydro_count`, `max_par_order`, `n_anticipated`, `k_max`, `anticipated_lead_stages`, `n_state`.                       | exists — unchanged                                                                     |
+| **`StudyDimensions`** (non-state study shape) | `n_thermals`, `n_lines`, `n_buses`, `max_deficit_segments`; `has_ncs`, `has_inflow_penalty`; `anticipated_thermal_indices`; `n_pumping`. Persisted once, threaded like `StateLayout`. | **new persisted owner; supersedes the `EquipmentCounts`→`StageIndexer` scalar copies** |
+| **`StageGeometry`** (role b, per-stage)       | Equipment/slack **column ranges + row ranges + per-stage identity lists** (`fpha_/evap_hydro_indices`, `evap_indices`) + **per-stage `n_blks`**. Persisted as a per-stage `Vec`.      | **`StageEquipmentGeometry` widened**                                                   |
+| **`StageLayout<'a>`** (ephemeral builder)     | Transient build state; **borrows** `&StateLayout` + `&StudyDimensions`; **produces** one `StageGeometry` per stage. No stored dim copies.                                             | keep; drop the `n_h`/`lag_order`/… copies                                              |
 
-**Deleted:** `StageIndexer`, `EquipmentCounts` (it _becomes_ `StudyDimensions`),
-and both copy constructors. No new bag is introduced — `StudyDimensions` is the
-existing `EquipmentCounts` promoted to a single owner.
+**Deleted (end state):** `StageIndexer`, `EquipmentCounts`, and both copy
+constructors. `StudyDimensions` is the single _persisted_ owner of the non-state
+study shape; `EquipmentCounts` is demoted to `StageIndexer`'s transient
+constructor-input scaffolding and is deleted in the same step as `StageIndexer`
+(its only consumer). No new persisted/threaded bag is introduced — the duplication
+that was rejected was a threaded one.
 
 ### 4.1 No-duplication proof
 
@@ -161,20 +164,26 @@ exactly one type.
 
 ## 6. Sequencing (each phase hash-neutral, independently revertible)
 
-1. **`EquipmentCounts` → `StudyDimensions`.** Promote the input bag to the single
-   persisted owner of the non-state study scalars/flags + `anticipated_thermal_indices`;
-   move those fields off `StageIndexer`; delete the `n_state`/`hydro_count`
-   `StageIndexer` duplicates (read `StateLayout`); thread `StudyDimensions` through
-   the contexts; repoint readers. **No new struct** — `EquipmentCounts` is
-   renamed and promoted, not supplemented.
+1. **Add `StudyDimensions`, the single persisted owner of the non-state study
+   shape.** _Expand:_ build it once in `build_wired_indexer` from the same values
+   `StageIndexer` carries (bit-identical, hash-neutral), thread it by handle
+   through `StageData`/`TrainingContext`/`StageExtractionSpec`. _Contract:_ repoint
+   every reader of the non-state study fields off `StageIndexer` onto the handle
+   and delete those fields from `StageIndexer`. `EquipmentCounts` remains
+   `StageIndexer`'s transient constructor input — it is retired with `StageIndexer`
+   in step 3, because deleting it earlier would mean reworking a constructor that
+   step 3 removes.
 2. **`StageEquipmentGeometry` → `StageGeometry`.** Widen with per-stage row ranges
+
    - per-stage identity lists + per-stage `n_blks`; repoint the per-stage readers
      (extraction, the setup-derived specs); make `StageLayout` borrow dims instead
-     of copying them.
-3. **Delete `StageIndexer`** + both copy constructors; replace
+     of copying them. `max_deficit_segments` and the global `n_blks` leave
+     `StageIndexer` here (they are coupled in `block_grid()`).
+
+3. **Delete `StageIndexer` + `EquipmentCounts` + both copy constructors**; replace
    `StageData.indexer` / `TrainingContext.indexer` with the `StudyDimensions`
    handle + the per-stage `StageGeometry` table + the existing `StateLayout`
-   handle. The compiler proves completeness (the type becomes dead).
+   handle. The compiler proves completeness (the types become dead).
 
 **Verification each phase:** `cargo fmt`; build + clippy `-D warnings` on **both**
 default and `test-support` features; `RUSTDOCFLAGS=-Dwarnings cargo doc`;
