@@ -1,273 +1,210 @@
-# `crates/cobre-sddp/src/lp/` — Post-Redesign Assessment: Unifying the Role-(b) Geometry Carriers
+# `crates/cobre-sddp/src/lp/` — Post-Redesign Assessment: Collapsing the Duplicated Layout Bags
 
-> **Status: design only. No code.** This is the post-redesign continuation of
+> **Status: design approved (disjoint-owner model). No code yet beyond this
+> blueprint.** Post-redesign continuation of
 > `lp-architecture-degradation-assessment.md` (§D1, §6, §7) and
 > `lp-indexer-simplification-assessment.md` (§8). The role-(a) `StateLayout`
-> extraction and the `anticipated_state_out` relocation those docs designed are
-> **done**; the per-stage simulation-extraction base fix is **done**. This doc
-> assesses the _resulting_ shape and specifies the next structural move:
-> collapsing the role-(b) per-stage geometry from three hand-synced carriers to
-> one, and retiring `StageIndexer` as a distinct persisted type. Grounded in a
-> consumer trace of the live tree, not in the doc-comments.
+> extraction, the `anticipated_state_out` relocation, and the per-stage
+> simulation-extraction base fix are **done**. This doc specifies the next
+> structural move: collapse the duplicated layout bags so **every layout fact has
+> exactly one owner**. Grounded in a field-and-consumer trace of the live tree.
 
 ## 0. Verdict up front
 
-The redesign improved one axis and regressed the other.
+The redesign cleaned role (a) (`StateLayout`) but left **two** duplication axes:
 
-- **Role (a) is now genuinely clean.** `StateLayout` is a single-concern,
-  stage-invariant owner of the state-vector columns, the cut/pin resolvers, and
-  the two caches; every offset is a pure function of `(N, L, A, k_max)`. The
-  `anticipated_state_out` relocation fixed the cut-target latent bug _by
-  construction_. This is a real reduction in coupling and a real correctness win.
+1. **Role-(b) geometry triplicated.** The ~18 equipment/slack ranges live in
+   `StageIndexer` (stage-0), `StageLayout` (per-stage ephemeral), and
+   `StageEquipmentGeometry` (per-stage persisted), synced by two copy
+   constructors.
+2. **Study-invariant scalars duplicated across 4–5 bags.** `hydro_count`,
+   `n_thermals`, `n_lines`, `n_buses`, `n_blks`, `max_deficit_segments`,
+   `n_anticipated`, `k_max`, `has_*` are each declared in **`EquipmentCounts`**
+   (the constructor-input bag), **`StageIndexer`**, **`StateLayout`** (the state
+   subset), and **`StageLayout`** (builder copies). `EquipmentCounts` is the
+   input-side twin of `StageIndexer`'s persisted scalars.
 
-- **Role (b) is now more fragmented than before the redesign.** The same ~18
-  equipment/slack column ranges are declared in **three** types
-  (`StageIndexer`, `StageLayout`, `StageEquipmentGeometry`) with **three**
-  validity scopes and **two** field-by-field copy constructors. Before the
-  redesign there were two role-(b) carriers; there are now three. `StageIndexer`
-  has degenerated from "the layout source of truth" into a grab-bag of
-  stage-invariant row bases + study-wide flags + stage-0 identity lists + a
-  vestigial copy of the equipment ranges.
+The target gives each fact exactly one owner across **three disjoint persisted
+owners + one ephemeral builder**, deleting `StageIndexer` and `EquipmentCounts`.
+The critical structural point: **`n_blks` is per-stage, not study-invariant** —
+it must cease to exist as a persisted global fact, which is what kills the
+stage-0/`n_blks` defect class by construction. The move is **expected
+hash-neutral**: it relocates _which type holds_ a fact, never the fact.
 
-This realizes the exact prediction of degradation §D1 ("geometry lives in 4+
-hand-synced owners"). The fix is the §6 target taken one step further: make the
-**per-stage** geometry the single owner and dissolve `StageIndexer`. The move is
-**expected hash-neutral** — it relocates _which type holds_ an index, not the
-index itself.
-
----
-
-## 1. What the redesign delivered (the post-plan map)
-
-Four types now carry what `StageIndexer` alone used to:
-
-| Type                                             | What it actually holds (verified from fields + readers)                                                                                                                                                                                                                                | Lifetime                                                                |
-| ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `StateLayout` (`indexer/state_layout.rs`)        | Role (a): `storage`, `inflow_lags`, `anticipated_state`, `anticipated_state_out`, `storage_in`, `z_inflow` columns; `theta`; `n_state`; state dims; `anticipated_lead_stages`; the two caches; the resolvers + `is_anticipated_decision_active`. Every offset is `n_blks`-independent. | Long-lived; shared by `&` (`StageData.state`, `TrainingContext.state`). |
-| `StageIndexer` (`indexer/layout.rs`)             | Role (b) **anchored at stage-0's global `n_blks`**. Equipment/slack column ranges, row ranges, counts, `has_*` flags, FPHA/evap/anticipated identity lists. Its own rustdoc admits it is "valid only at stages whose block count equals stage 0's."                                    | Long-lived (`StageData.indexer`, `TrainingContext.indexer`).            |
-| `StageLayout<'a>` (`builder/layout.rs`)          | Borrows `&StateLayout` (role a, **not** duplicated) **+** its own per-stage role-(b) equipment/row ranges (correct `n_blks`) **+** transient build state (identity maps, `generic_constraint_rows`, `zeta`, `num_cols/num_rows`).                                                      | Ephemeral; dropped after the CSC is baked.                              |
-| `StageEquipmentGeometry` (`builder/template.rs`) | A persisted **snapshot of `StageLayout`'s 18 equipment ranges**, for the simulation read path.                                                                                                                                                                                         | Long-lived (`StageTemplates::equipment_geometry_per_stage`).            |
-
-The role-(a) boundary is exactly the one designed in indexer §8.1 and it holds.
-The new cost is entirely on the role-(b) side.
+> A rejected first attempt introduced a new `StudyLpMeta` struct holding a subset
+> of `EquipmentCounts`' fields — a _sixth_ owner of the same scalars. The lesson,
+> baked into this revision: the fix is to **collapse** the existing bags into
+> single owners, never to add another.
 
 ---
 
-## 2. The realized degradation: role-(b) geometry triplicated
+## 1. The cast today (post-plan)
 
-### 2.1 The same ranges, declared three times
+| Type                                             | Holds                                                                                                                                                                     | Lifetime                         |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| `EquipmentCounts` (`indexer/layout.rs`)          | The study-invariant scalar dims + flags + anticipated identity lists, as a **constructor-input** bag for `StageIndexer`.                                                  | Transient input                  |
+| `StageIndexer` (`indexer/layout.rs`)             | Role-(b) ranges anchored at stage-0 `n_blks`; a **persisted copy** of the same scalars/flags `EquipmentCounts` carries; identity lists; row ranges.                       | Long-lived (`StageData.indexer`) |
+| `StateLayout` (`indexer/state_layout.rs`)        | Role (a): state ranges, resolvers, caches **+ the state-defining dims** (`hydro_count`, `max_par_order`, `n_anticipated`, `k_max`, `anticipated_lead_stages`, `n_state`). | Long-lived; shared `&`           |
+| `StageLayout<'a>` (`builder/layout.rs`)          | Borrows `&StateLayout`; **own copies** of `n_h`/`lag_order`/`n_anticipated`/`k_max`; per-stage role-(b) ranges; transient build state.                                    | Ephemeral                        |
+| `StageEquipmentGeometry` (`builder/template.rs`) | Persisted snapshot of `StageLayout`'s 18 equipment ranges.                                                                                                                | Long-lived per-stage             |
 
-The block-major equipment/slack families each have a `Range<usize>` field in all
-three role-(b) carriers:
-
-| Family                                                                    | `StageIndexer` | `StageLayout`               | `StageEquipmentGeometry` | Scope of each                                                        |
-| ------------------------------------------------------------------------- | -------------- | --------------------------- | ------------------------ | -------------------------------------------------------------------- |
-| `turbine`, `spillage`, `diversion`, `thermal`                             | ✓              | ✓                           | ✓                        | indexer = stage-0; layout = per-stage; geometry = per-stage snapshot |
-| `line_fwd`, `line_rev`, `deficit`, `excess`                               | ✓              | ✓                           | ✓                        | ""                                                                   |
-| `generation`, `evap_indices`                                              | ✓              | ✓                           | ✓                        | ""                                                                   |
-| `inflow_slack`, `withdrawal_slack_{neg,pos}`                              | ✓              | ✓                           | ✓                        | ""                                                                   |
-| `outflow_below`/`outflow_above`/`turbine_below`/`generation_below` slacks | ✓              | ✓                           | ✓                        | ""                                                                   |
-| `anticipated_decision`                                                    | ✓              | ✓ (via `AnticipatedLayout`) | ✓                        | ""                                                                   |
-
-Synchronisation between them is two field-by-field copy constructors:
-
-- `StageEquipmentGeometry::from_layout(&StageLayout)` — the **production** path
-  (per-stage, correct). Built in `build_single_stage_template`, transposed into
-  `StageTemplates::equipment_geometry_per_stage`.
-- `StageEquipmentGeometry::from_indexer(&StageIndexer)` — **tests + uniform-block
-  single-stage convenience only**; copies the stage-0 ranges verbatim. Its own
-  rustdoc names it "the bug this type exists to forbid" when misused at a stage
-  whose block count differs.
-
-Adding or moving any equipment family is now an edit in three struct definitions
-plus one (or two) copy constructors, none enforced by the compiler — the same
-"thread it through ≥N sites in agreement" hazard degradation §D1 flagged, now
-with an extra site.
-
-### 2.2 `StageIndexer` has become a grab-bag
-
-A consumer trace of the persisted `StageIndexer` (excluding `#[cfg(test)]` and
-the `indexer/` module itself) shows its production readers fall into four
-unrelated groups:
-
-1. **Genuinely stage-invariant row geometry** (correct to read globally):
-   `water_balance.start`, `load_balance.start`, `z_inflow_row_start`,
-   `turbine.start` (= `theta + 1`, the control-region anchor).
-2. **Study-wide scalars/flags:** `has_inflow_penalty`, `has_withdrawal`,
-   `has_operational_violations`, `has_ncs`, `max_deficit_segments`, `n_state`,
-   `hydro_count` — several of which **duplicate `StateLayout`** (`n_state`,
-   `hydro_count`).
-3. **Stage-0 identity lists:** `fpha_hydro_indices`, `fpha_rows`,
-   `evap_hydro_indices`, `evap_indices`, `anticipated_thermal_indices`,
-   `anticipated_fishing_start`. These are the **stage-0** sets; FPHA/evap
-   membership can vary per stage, so a global read here is a latent footgun of
-   the same class as §2.3 (currently masked because the production per-stage
-   consumers read the recomputed `StageLayout`/persisted per-stage tables).
-4. **Vestigial equipment ranges:** the §2.1 column ranges, now consumed in
-   production only where stage-0 == per-stage (uniform studies), or via the
-   test-only `from_indexer`.
-
-Group (4) is dead weight on the hot path; groups (1)–(3) are three different
-concerns wearing one type. `StageIndexer` is no longer a single source of
-truth — it is the residue left after role (a) and the correct role-(b) geometry
-moved out.
-
-### 2.3 The `n_blks` footgun is still embedded in the type
-
-`StageIndexer.n_blks` is the **global stage-0** block count. The type carries it
-as a stride for its own equipment ranges, so the type _invites_ the very
-non-uniform-block bug the redesign just fixed in `extraction.rs`. The fix
-repointed the simulation reads onto the per-stage `StageEquipmentGeometry`, but
-the trap (a persisted global stride next to persisted global bases) is still
-present in the type for the next consumer to step on.
+Each study scalar appears in up to **five** of these. That is the duplication to
+remove.
 
 ---
 
-## 3. Root cause: persisted is stage-0-global; correct is ephemeral
+## 2. The two duplication axes (the defect)
 
-The single decision that produced the triplication: **the geometry the long-lived
-context structs persist (`StageData.indexer`, `TrainingContext.indexer`) is the
-stage-0-global `StageIndexer`, while the stage-correct geometry (`StageLayout`)
-is computed at bake time and dropped.**
+### 2.1 Role-(b) geometry — three carriers, two copy constructors
 
-When a post-bake consumer (simulation extraction) needed correct per-stage
-geometry, neither persisted source served it — `StageIndexer` is stage-0-wrong
-for non-uniform blocks, and `StageLayout` no longer exists. The extraction fix
-closed the correctness gap by **persisting a third carrier**
-(`StageEquipmentGeometry`) instead of making the per-stage geometry _the_
-persisted role-(b) representation and retiring the stage-0 one. That was the
-correct, surgical, hash-bounded move for a correctness fix under an in-flight
-plan; it was explicitly **not** the structural unification, which was deferred to
-here.
+The block-major equipment/slack families each have a `Range<usize>` in
+`StageIndexer`, `StageLayout`, and `StageEquipmentGeometry`, kept in sync by
+`StageEquipmentGeometry::from_layout` (production, per-stage) and `::from_indexer`
+(test/uniform-block only). Adding or moving a family is an edit in three struct
+defs + a copy constructor, none compiler-enforced.
+
+### 2.2 Study-invariant scalars — `EquipmentCounts` is the input-side root
+
+`EquipmentCounts` (`#[derive(Clone, Default)]`, `pub`) is passed to
+`StageIndexer::with_equipment_and_evaporation`; `build_wired_indexer` then **copies
+its scalars into the persisted `StageIndexer`**, `StateLayout` holds the state
+subset, and `StageLayout::new` re-derives its own `n_h`/`lag_order`/… copies. So
+`hydro_count` lives in four owners, `n_thermals` in two, `n_blks` in three, etc.
+The scalars have no single source of truth — the §D1 prediction, on the _scalar_
+axis.
+
+### 2.3 `StageIndexer` is a grab-bag
+
+Its production readers split into unrelated groups: stage-invariant row bases
+(`water_balance.start`, `load_balance.start`, `z_inflow_row_start`,
+`turbine.start` = `theta + 1`); study-wide flags/dims (several duplicating
+`StateLayout`); stage-0 identity lists (`fpha_/evap_hydro_indices`,
+`anticipated_thermal_indices` — a per-stage footgun where FPHA/evap membership
+varies by stage); and vestigial equipment ranges (read in production only where
+stage-0 == per-stage, or via the test-only `from_indexer`).
+
+### 2.4 The `n_blks` footgun is embedded in the persisted types
+
+`EquipmentCounts.n_blks` and `StageIndexer.n_blks` are the **global stage-0**
+block count, carried as a stride next to global bases — the exact shape of the
+non-uniform-block bug the extraction fix just dodged. A persisted global `n_blks`
+must not survive the redesign.
 
 ---
 
-## 4. Target shape: one per-stage geometry owner; dissolve `StageIndexer`
+## 3. Root cause
 
-A shape, not a ticket list. The model is already right; this is one more
-"convention/copy → construction" upgrade in the spirit of degradation §6.
+The long-lived context structs persist the **stage-0-global** `StageIndexer` (fed
+by the equally-global `EquipmentCounts`), while the **stage-correct** geometry
+(`StageLayout`) is computed at bake and dropped. Post-bake consumers that need
+correct per-stage geometry were served by _adding_ a third carrier
+(`StageEquipmentGeometry`) rather than making the per-stage geometry the single
+persisted role-(b) owner. On the scalar axis, the same global bag
+(`EquipmentCounts`) is simply copied into every consumer that wants a count.
 
-**(T1) One persisted per-stage role-(b) geometry table.** Generalize
-`StageEquipmentGeometry` (or a renamed `StageGeometry`) into the single owner of
-"where does family X live at stage `t`": the equipment/slack column ranges it
-already holds, **plus** the per-stage row ranges and the per-stage identity lists
-that consumers currently reach into `StageIndexer` for. Built once per stage from
-`StageLayout` (the existing `from_layout` path), persisted as the existing
-per-stage `Vec`, indexed by `t`. This is the same per-stage-`&[…]` pattern
-`ncs_col_starts` / `pumping_col_starts` already established.
+---
 
-**(T2) Study-invariant scalars move to where they belong.** The `has_*` flags and
-study-wide dims become a small study-level metadata holder (or fold onto
-`StateLayout` where they are state-related — `n_state`, `hydro_count` already live
-there, so the `StageIndexer` copies are deleted, not moved).
+## 4. Target: three disjoint owners + one ephemeral builder
 
-**(T3) Stage-invariant row anchors fold into the state/metadata layer.** The row
-_bases_ (`water_balance.start`, `load_balance.start`, `z_inflow_row_start`) and
-the control anchor (`theta + 1`, already `StateLayout::control_region_start()`)
-are `n_blks`-independent; they belong on `StateLayout`/the metadata holder, read
-through the handle the hot paths already carry.
+Approved model: **disjoint single-ownership** — each fact owned by exactly one
+type, split by concern (no shared dims bag, so the cut hot path keeps reading its
+state dims directly with no indirection).
 
-**(T4) Retire `StageIndexer`.** With T1–T3 it has no remaining concern of its own:
-`StageData.indexer` / `TrainingContext.indexer` are replaced by `state:
-&StateLayout` (already present) + the per-stage geometry table (T1) + the
-metadata holder (T2). Both copy constructors (`from_layout`, `from_indexer`) and
-the stage-0 `n_blks` footgun (§2.3) disappear with the type.
+| Owner                                         | Owns — and nothing another owns                                                                                                                                                                                              | Derivation                                 |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| **`StateLayout`** (role a)                    | State column ranges, resolvers, caches; **state-defining dims** `hydro_count`, `max_par_order`, `n_anticipated`, `k_max`, `anticipated_lead_stages`, `n_state`.                                                              | exists — unchanged                         |
+| **`StudyDimensions`** (non-state study shape) | `n_thermals`, `n_lines`, `n_buses`, `max_deficit_segments`; `has_ncs`, `has_inflow_penalty`; `anticipated_thermal_indices`; `n_pumping`. Persisted once, threaded like `StateLayout`; also serves as the construction input. | **`EquipmentCounts` repurposed + renamed** |
+| **`StageGeometry`** (role b, per-stage)       | Equipment/slack **column ranges + row ranges + per-stage identity lists** (`fpha_/evap_hydro_indices`, `evap_indices`) + **per-stage `n_blks`**. Persisted as a per-stage `Vec`.                                             | **`StageEquipmentGeometry` widened**       |
+| **`StageLayout<'a>`** (ephemeral builder)     | Transient build state; **borrows** `&StateLayout` + `&StudyDimensions`; **produces** one `StageGeometry` per stage. No stored dim copies.                                                                                    | keep; drop the `n_h`/`lag_order`/… copies  |
 
-### 4.1 Boundary — what each residual `StageIndexer` member becomes
+**Deleted:** `StageIndexer`, `EquipmentCounts` (it _becomes_ `StudyDimensions`),
+and both copy constructors. No new bag is introduced — `StudyDimensions` is the
+existing `EquipmentCounts` promoted to a single owner.
 
-| Residual member (group from §2.2)              | Destination                                                                                         |
-| ---------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| Equipment/slack column ranges (4)              | The per-stage geometry table (T1) — already there as the `from_layout` snapshot.                    |
-| Per-stage row ranges + identity lists (3)      | The per-stage geometry table (T1), made per-stage-correct (closes the §2.2-group-3 latent footgun). |
-| Stage-invariant row bases + control anchor (1) | `StateLayout` / metadata holder (T3).                                                               |
-| `has_*` flags, study dims (2)                  | Metadata holder (T2); `n_state`/`hydro_count` deleted as `StateLayout` duplicates.                  |
+### 4.1 No-duplication proof
 
-### 4.2 The dependency stays one-way
+`hydro_count` → `StateLayout` only. `n_thermals` → `StudyDimensions` only.
+`n_blks` → `StageGeometry` only (per-stage; no global copy survives).
+`max_deficit_segments` → `StudyDimensions` only. Every layout scalar resolves to
+exactly one type.
 
-The acyclic graph indexer §8.2 established is preserved: geometry → `StateLayout`
-(reads `control_region_start()`, anticipated metadata); `StateLayout` reads
-nothing back. T1–T4 only remove a redundant node (`StageIndexer`) and a redundant
-edge (the stage-0 copies); they introduce no new reverse dependency.
+### 4.2 Ownership rules that make it stick
+
+- **State-defining vs equipment dims are disjoint sets** — a count is either
+  state-defining (→ `StateLayout`) or equipment-shape (→ `StudyDimensions`),
+  never both. `hydro_count` is state-defining; per-stage row counts that need it
+  read `state.hydro_count`.
+- **`n_blks` is per-stage by definition** — it appears only on `StageGeometry`.
+  Any consumer reading a "global `n_blks`" is reading a footgun and is repointed
+  to the per-stage value.
+- **Identity lists by variance:** `anticipated_thermal_indices` is study-invariant
+  (→ `StudyDimensions`); `fpha_/evap_hydro_indices`/`evap_indices` vary per stage
+  (→ `StageGeometry`).
+- The dependency graph stays one-way: `StageGeometry`/`StageLayout` →
+  {`StateLayout`, `StudyDimensions`}; the leaf owners read nothing back.
 
 ---
 
 ## 5. What is **not** a defect (do not over-correct)
 
-- **`StageLayout` being a fat builder is fine.** It legitimately holds a borrowed
-  role-(a) handle + its own role-(b) geometry + transient build state. A builder
-  is allowed to be wide; the defect is that its role-(b) half is _copied out and
-  separately maintained_, not that it holds it. Do **not** try to slim
-  `StageLayout` itself.
-- **Do not merge role (a) back in.** The `StateLayout` boundary is the redesign's
-  win; T1–T4 keep it untouched.
-- **The two cut representations stay two** (`cut/row` baked path vs `cut/dcs`) —
-  degradation §3. This doc is about role-(b) geometry ownership only.
-- **No new user-blocking validation.** The non-uniform-block path is _supported_,
-  not forbidden (degradation §1.4); T1 widens support, it does not gate input.
+- **`StateLayout` keeping its own state dims is correct**, not duplication — under
+  the disjoint model it is the _sole_ owner of those dims; no other type holds
+  them after the collapse.
+- **`StageLayout` being a fat builder is fine** — it borrows dims and produces a
+  `StageGeometry`; the defect was the _copied, separately-maintained_ role-(b)
+  half, not its breadth.
+- **The two cut representations stay two** (`cut/row` vs `cut/dcs`).
+- **No new user-blocking validation** — the non-uniform-block path is supported,
+  not forbidden.
 
 ---
 
-## 6. Verification, sequencing, and blast radius (honest)
+## 6. Sequencing (each phase hash-neutral, independently revertible)
 
-**Hash-neutrality.** T1–T4 relocate _which type owns_ an index; they do not change
-any column or row address. The move is therefore **expected hash-neutral**.
-Verify by `COBRE_PARITY_REGEN` neutrality across **all** D-cases, including the
-non-uniform D33/D34. Any digest movement is not "expected churn" — it flags a
-residual stage-0 read that the relocation surfaced (a found bug of the §2.2
-group-3 class), and that case alone requires `sddp-specialist` sign-off. This is
-the opposite risk profile from the `anticipated_state_out` relocation, which was
-_intentionally_ non-hash-neutral.
+1. **`EquipmentCounts` → `StudyDimensions`.** Promote the input bag to the single
+   persisted owner of the non-state study scalars/flags + `anticipated_thermal_indices`;
+   move those fields off `StageIndexer`; delete the `n_state`/`hydro_count`
+   `StageIndexer` duplicates (read `StateLayout`); thread `StudyDimensions` through
+   the contexts; repoint readers. **No new struct** — `EquipmentCounts` is
+   renamed and promoted, not supplemented.
+2. **`StageEquipmentGeometry` → `StageGeometry`.** Widen with per-stage row ranges
+   - per-stage identity lists + per-stage `n_blks`; repoint the per-stage readers
+     (extraction, the setup-derived specs); make `StageLayout` borrow dims instead
+     of copying them.
+3. **Delete `StageIndexer`** + both copy constructors; replace
+   `StageData.indexer` / `TrainingContext.indexer` with the `StudyDimensions`
+   handle + the per-stage `StageGeometry` table + the existing `StateLayout`
+   handle. The compiler proves completeness (the type becomes dead).
 
-**Blast radius.** `StageIndexer` is read across the persisted context structs and
-~10 production files. The heavy consumer is `simulation/extraction.rs` (already
-repointed onto the per-stage geometry for the `n_blks`-dependent reads; the
-remainder are the stage-invariant group-1 reads, the easy part of T3). The hot
-paths (`training/forward/stage_solve.rs`, `training/backward/lp_setup.rs`,
-`training/lower_bound.rs`) read the stage-invariant subset (`has_*`, row bases,
-`n_blks`) — folded by T2/T3. The cut/warm-start path already consumes role (a)
-via `StateLayout::state*`, so T1–T4 do not touch the basis wire format
-(`CapturedBasis`) or cut storage.
-
-**Sane order.**
-
-1. **T3 + T2 first (stage-invariant fold)** — move row bases, the control anchor,
-   and the flags onto `StateLayout`/metadata; delete the `n_state`/`hydro_count`
-   duplicates. Pure substitution; hash-neutral; smallest risk.
-2. **T1 (widen the per-stage table)** — add the per-stage row ranges + identity
-   lists to the geometry table; repoint the remaining `StageIndexer` group-3
-   reads onto it. Hash-neutral; closes the §2.2-group-3 footgun.
-3. **T4 (delete `StageIndexer` + both copy constructors)** — falls out once
-   1–2 leave it with no readers. The compiler proves completeness (dead type).
-
-Each step is independently hash-verifiable and independently revertible.
-
-**What this buys.** Three role-(b) carriers → one (+ the ephemeral builder, which
-is correct to keep); two copy constructors → zero; the stage-0 `n_blks` footgun
-deleted with its type; `StageIndexer`'s grab-bag dissolved into single-concern
-owners. Net subtractive — a smaller codebase, the §D1 prediction discharged.
+**Verification each phase:** `cargo fmt`; build + clippy `-D warnings` on **both**
+default and `test-support` features; `RUSTDOCFLAGS=-Dwarnings cargo doc`;
+`cargo test` (test-support); and `COBRE_PARITY_REGEN` **neutrality** across all
+D-cases (including non-uniform D33/D34). Any digest movement is a _found bug_
+surfaced by the move (not expected churn) and gates an `sddp-specialist` sign-off
+for that case. A focused `sddp-specialist` review follows Phase 2 (the
+cut/anticipated/extraction-touching phase) and the final phase.
 
 ---
 
 ## 7. Key symbols
 
-- `crates/cobre-sddp/src/lp/indexer/layout.rs` — `StageIndexer` (the type to
-  dissolve; the stage-0 `n_blks` stride; the `has_*` flags; the identity lists).
+- `crates/cobre-sddp/src/lp/indexer/layout.rs` — `EquipmentCounts` (→
+  `StudyDimensions`), `StageIndexer` (to dissolve), the stage-0 `n_blks` stride,
+  the `has_*` flags, the identity lists.
 - `crates/cobre-sddp/src/lp/indexer/state_layout.rs` — `StateLayout`
-  (`control_region_start()`, `n_state`, `hydro_count`; the T2/T3 destination).
-- `crates/cobre-sddp/src/lp/builder/template.rs` — `StageEquipmentGeometry`,
-  `from_layout` (the production per-stage path; the T1 nucleus), `from_indexer`
-  (the test/uniform copy to delete), `equipment_geometry_per_stage`.
+  (`control_region_start()`, the state-defining dims; unchanged owner).
+- `crates/cobre-sddp/src/lp/builder/template.rs` — `StageEquipmentGeometry` (→
+  `StageGeometry`), `from_layout` (the per-stage nucleus), `from_indexer` (to
+  delete), `equipment_geometry_per_stage`.
 - `crates/cobre-sddp/src/lp/builder/layout.rs` — `StageLayout` (the per-stage
-  geometry source; keep as the builder).
-- `crates/cobre-sddp/src/setup/stage_data.rs` — `StageData.{indexer,state}` (the
-  persisted owners; `indexer` to be replaced by the geometry table + metadata).
-- `crates/cobre-sddp/src/workspace/context.rs` — `TrainingContext.{indexer,state}`
-  (the hot-path handles).
-- `crates/cobre-sddp/src/simulation/extraction.rs` — the heaviest consumer;
-  already per-stage for equipment, stage-invariant remainder is the T3 tail.
-- `docs/design/lp-architecture-degradation-assessment.md` — §D1 (the prediction),
-  §6/§7 (the target shape this continues).
-- `docs/design/lp-indexer-simplification-assessment.md` — §8 (the role-(a)
-  extraction this builds on; §8.5's "audit residual global geometry reads").
-- `docs/design/lp-extraction-nonuniform-block-base-bug.md` — the correctness fix
-  that added the third carrier under the in-flight plan.
+  builder; drop the dim copies; borrow `StudyDimensions`).
+- `crates/cobre-sddp/src/setup/mod.rs` — `build_wired_indexer` (the single
+  construction site; builds the dims/flags, sets `has_ncs`).
+- `crates/cobre-sddp/src/setup/stage_data.rs`,
+  `crates/cobre-sddp/src/workspace/context.rs` — `StageData` / `TrainingContext`
+  (the persisted/hot-path handles to repoint).
+- `crates/cobre-sddp/src/simulation/extraction.rs` — the heaviest per-stage
+  consumer.
+- `docs/design/lp-architecture-degradation-assessment.md` §D1/§6/§7;
+  `docs/design/lp-indexer-simplification-assessment.md` §8;
+  `docs/design/lp-extraction-nonuniform-block-base-bug.md` — the prior passes.
