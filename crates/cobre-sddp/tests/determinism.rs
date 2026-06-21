@@ -629,6 +629,7 @@ fn run_training(
         .unwrap();
 
     let stage_ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &fx.templates,
         base_rows: &fx.base_rows,
         noise_scale: &[],
@@ -768,6 +769,7 @@ fn run_simulation(
             simulate(
                 &mut workspaces,
                 &StageContext {
+                    geometry_per_stage: &[],
                     templates: &fx.templates,
                     base_rows: &fx.base_rows,
                     noise_scale: &[],

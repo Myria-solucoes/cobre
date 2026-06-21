@@ -669,6 +669,7 @@ fn single_stage_system_produces_no_cuts() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -769,6 +770,7 @@ fn two_stage_system_two_trial_points_generates_two_cuts_at_stage_0() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -869,6 +871,7 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -965,6 +968,7 @@ fn no_cuts_generated_at_last_stage() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1061,6 +1065,7 @@ fn elapsed_ms_is_non_negative() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1155,6 +1160,7 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1294,6 +1300,7 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1411,6 +1418,7 @@ fn cut_gradient_sign_physically_correct() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1533,6 +1541,7 @@ fn cut_is_tight_at_trial_point() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1641,6 +1650,7 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1759,6 +1769,7 @@ fn forward_pass_index_matches_global_scenario_index() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1871,6 +1882,7 @@ fn warm_start_uses_prepopulated_forward_basis() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1977,6 +1989,7 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -2090,6 +2103,7 @@ fn backward_solver_error_propagates() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -2245,6 +2259,7 @@ fn test_backward_pass_parallel_cut_determinism() {
     }];
     let mut basis_store_1 = empty_basis_store(exchange.local_count(), n_stages);
     let ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &[],
@@ -2727,6 +2742,7 @@ fn backward_pass_load_patches_applied() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &noise_scale,
@@ -2900,6 +2916,7 @@ fn backward_pass_no_load_buses_unchanged() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &noise_scale,
@@ -3078,6 +3095,7 @@ fn backward_pass_cut_coefficients_unaffected() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &noise_scale,
@@ -3202,6 +3220,7 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -3335,6 +3354,7 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -3524,6 +3544,7 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -3891,6 +3912,7 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -4119,6 +4141,7 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -4243,6 +4266,7 @@ fn run_one_trial_point_with_stores(
     ]));
     let base_rows: &'static _ = Box::leak(Box::new(vec![1_usize, 1_usize]));
     let ctx: StageContext<'static> = StageContext {
+        geometry_per_stage: &[],
         templates,
         base_rows,
         noise_scale: Box::leak(Box::new(vec![])),
@@ -4575,6 +4599,7 @@ fn handshake_passes_with_local_backend() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -4735,6 +4760,7 @@ fn handshake_rejects_nonuniform_workers() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -5000,6 +5026,7 @@ fn run_dcs_backward_trial_point_at(
     let mut basis_store = empty_basis_store(exchange.local_count(), 2);
 
     let ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &[],
@@ -5481,6 +5508,7 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
     let mut basis_store = empty_basis_store(exchange.local_count(), 2);
 
     let ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &[],

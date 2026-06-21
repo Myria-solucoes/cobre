@@ -498,11 +498,11 @@ impl StageExtractionSpec<'_> {
     /// `self.n_blks`; sourcing the stride from `self.indexer.n_blks` instead would
     /// misread any stage whose block count differs from stage 0's. The deficit
     /// shape's second constant `max_deficit_segments` is study-invariant and is
-    /// taken from the indexer. For uniform-block studies `n_blks ==
-    /// indexer.n_blks` and the two coincide.
+    /// taken from `self.study_dims`, the single owner of the non-state study shape.
+    /// For uniform-block studies `n_blks == indexer.n_blks` and the two coincide.
     #[inline]
     fn block_grid(&self) -> BlockGrid {
-        BlockGrid::new(self.n_blks, self.indexer.max_deficit_segments)
+        BlockGrid::new(self.n_blks, self.study_dims.max_deficit_segments)
     }
 
     /// Column scaling factor for a given column index.
@@ -529,7 +529,6 @@ fn extract_hydro_no_turbine(
     hydro_id: i32,
     stage_id: u32,
 ) -> SimulationHydroResult {
-    let indexer = spec.indexer;
     let study_dims = spec.study_dims;
     let state = spec.state;
     let incremental_inflow = if h < spec.inflow_m3s_per_hydro.len() {
@@ -542,7 +541,7 @@ fn extract_hydro_no_turbine(
     // inflow_slack / withdrawal_slack bases are stage-level (one column per hydro,
     // `+ h` with no block stride) but their BASE rides `n_blks`-dependent prior
     // families, so it shifts under a non-uniform schedule; read it from the
-    // per-stage `equipment` geometry, not the global stage-0 `indexer`.
+    // per-stage `geometry`, not the global stage-0 `indexer`.
     let inflow_slack = if study_dims.has_inflow_penalty {
         view.primal[spec.geometry.inflow_slack.start + h]
     } else {
@@ -558,9 +557,12 @@ fn extract_hydro_no_turbine(
     } else {
         0.0
     };
+    // The water-balance row base is stage-invariant in count (one row per hydro)
+    // but its start rides the per-stage row layout, so read it from the per-stage
+    // `geometry`, not the global stage-0 `indexer`.
     let water_value = view
         .dual
-        .get(indexer.water_balance.start + h)
+        .get(spec.geometry.water_balance.start + h)
         .copied()
         .unwrap_or(0.0)
         * COST_SCALE_FACTOR;
@@ -686,7 +688,6 @@ impl HydroStageContext {
         lookup: &HydroReverseLookup,
         h: usize,
     ) -> Self {
-        let indexer = spec.indexer;
         let study_dims = spec.study_dims;
         let state = spec.state;
         let storage_final = view.primal[state.storage.start + h];
@@ -700,8 +701,8 @@ impl HydroStageContext {
         };
         // inflow_slack / withdrawal_slack bases ride `n_blks`-dependent prior
         // families even though each is a single stage-level column per hydro, so
-        // the base comes from the per-stage `equipment` geometry, not the global
-        // stage-0 `indexer`.
+        // the base comes from the per-stage `geometry`, not the global stage-0
+        // `indexer`.
         let inflow_slack = if study_dims.has_inflow_penalty {
             view.primal[spec.geometry.inflow_slack.start + h]
         } else {
@@ -717,15 +718,18 @@ impl HydroStageContext {
         } else {
             0.0
         };
+        // Water-balance row base: stage-invariant in count (one row per hydro)
+        // but its start rides the per-stage row layout, so read it from the
+        // per-stage `geometry`, not the global stage-0 `indexer`.
         let water_value = view
             .dual
-            .get(indexer.water_balance.start + h)
+            .get(spec.geometry.water_balance.start + h)
             .copied()
             .unwrap_or(0.0)
             * COST_SCALE_FACTOR;
         let fpha_local = lookup.fpha[h];
         // Evaporation columns are anchored at the `n_blks`-dependent FPHA-
-        // generation end, so they come from the per-stage `equipment.evap_indices`.
+        // generation end, so they come from the per-stage `geometry.evap_indices`.
         let (evaporation_m3s, evaporation_violation_neg_m3s, evaporation_violation_pos_m3s) =
             if let Some(lei) = lookup.evap[h] {
                 let ei = &spec.geometry.evap_indices[lei];
@@ -1043,7 +1047,10 @@ fn extract_buses(
             .collect()
     } else {
         let grid = spec.block_grid();
-        let max_segs = indexer.max_deficit_segments;
+        // `max_deficit_segments` is study-invariant (the deficit-segment stride is
+        // a study-global fact, not a per-stage one), so it reads from the single
+        // `study_dims` owner, never the global stage-0 `indexer`.
+        let max_segs = spec.study_dims.max_deficit_segments;
         spec.entity_counts
             .bus_ids
             .iter()
@@ -1061,9 +1068,10 @@ fn extract_buses(
                         })
                         .sum();
                     let excess_col = grid.flat(spec.geometry.excess.start, bus_idx, b);
-                    // load_balance is a row base, not an equipment column, and is
-                    // stage-invariant in its leading offset; it stays on the indexer.
-                    let load_row = grid.flat(indexer.load_balance.start, bus_idx, b);
+                    // load_balance is a row base whose start rides the per-stage row
+                    // layout, so it reads from the per-stage `geometry`, not the
+                    // global stage-0 `indexer`.
+                    let load_row = grid.flat(spec.geometry.load_balance.start, bus_idx, b);
                     let raw_dual = view.dual.get(load_row).copied().unwrap_or(0.0);
                     let hrs = spec.block_hours.get(b).copied().unwrap_or(0.0);
                     #[allow(clippy::cast_possible_truncation)]
@@ -1103,7 +1111,7 @@ fn extract_buses(
 /// - `spec.entity_counts.hydro_ids.len() == spec.state.hydro_count`
 /// - `spec.entity_counts.hydro_productivities.len() == spec.state.hydro_count`
 /// - `view.objective_coeffs.len() >= view.primal.len()` when equipment ranges are non-empty
-/// - `view.row_lower.len() >= spec.indexer.load_balance.end` when `load_balance` is non-empty
+/// - `view.row_lower.len() >= spec.geometry.load_balance.end` when `load_balance` is non-empty
 /// - `stage_id` is 0-based
 ///
 /// Violations are caught by `debug_assert!` in debug builds.
@@ -1150,7 +1158,6 @@ pub(crate) fn extract_stage_result_with_lookups(
     hydro_lookup: &HydroReverseLookup,
     thermal_lookup: &ThermalReverseLookup,
 ) -> SimulationStageResult {
-    let indexer = spec.indexer;
     let state = spec.state;
     debug_assert!(
         view.primal.len() > state.theta,
@@ -1183,13 +1190,16 @@ pub(crate) fn extract_stage_result_with_lookups(
     // this stage's block count, so the bound it needs is the per-stage row end
     // `load_balance.start + n_buses * n_blks` — computed from the per-stage `n_blks`
     // and bus count, never the n_blks-dependent stage-0 `indexer.load_balance.end`.
-    let load_balance_end = if indexer.load_balance.is_empty() {
-        indexer.load_balance.end
+    // The base itself comes from the per-stage `geometry`, not the global stage-0
+    // `indexer`.
+    let load_balance = &spec.geometry.load_balance;
+    let load_balance_end = if load_balance.is_empty() {
+        load_balance.end
     } else {
-        indexer.load_balance.start + spec.entity_counts.bus_ids.len() * spec.n_blks
+        load_balance.start + spec.entity_counts.bus_ids.len() * spec.n_blks
     };
     debug_assert!(
-        indexer.load_balance.is_empty() || view.row_lower.len() >= load_balance_end,
+        load_balance.is_empty() || view.row_lower.len() >= load_balance_end,
         "row_lower too short: len={}, need >= load_balance_end={load_balance_end}",
         view.row_lower.len(),
     );

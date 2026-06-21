@@ -36,7 +36,7 @@ use crate::{
     cut::FutureCostFunction,
     cut::row::build_cut_row_batch_into,
     error::SddpError,
-    indexer::{StageIndexer, StateLayout},
+    indexer::StateLayout,
     inflow_method::InflowNonNegativityMethod,
     lp_builder::COST_SCALE_FACTOR,
     lp_builder::PatchBuffer,
@@ -100,6 +100,15 @@ pub struct LbEvalSpec<'a> {
     /// evaluates stage 0 only. Empty when no NCS entities are present; NCS
     /// patching is then skipped.
     pub ncs_generation: Range<usize>,
+    /// Row index of the first z-inflow definition constraint at stage 0.
+    ///
+    /// Always `0`: state pinning uses column bounds, so no rows precede the
+    /// z-inflow block. Sourced from the per-stage `StageContext::geometry_per_stage[0]`
+    /// (the stage-0 `StageGeometry`) — never the global stage-0 `StageIndexer`, since
+    /// the lower bound evaluates stage 0 only and the per-stage geometry is the single
+    /// owner of the row layout, mirroring how `block_count`/`ncs_generation` are
+    /// sourced from the stage-0 `StageContext` slices.
+    pub z_inflow_row_start: usize,
     /// Inflow non-negativity treatment method.
     ///
     /// When `Truncation` or `TruncationWithPenalty`, the opening loop clamps
@@ -343,7 +352,6 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
     spec: &LbEvalSpec<'_>,
     patch_buf: &mut PatchBuffer,
     initial_state: &[f64],
-    indexer: &StageIndexer,
     state_layout: &StateLayout,
     scratch: &mut LbEvalScratch,
 ) -> Result<(), SddpError> {
@@ -453,7 +461,7 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             &spec.template.row_scale,
         );
         patch_buf.fill_z_inflow_patches(
-            indexer.z_inflow_row_start,
+            spec.z_inflow_row_start,
             &scratch.z_inflow_rhs_buf,
             &spec.template.row_scale,
         );
@@ -570,7 +578,6 @@ fn lb_aggregate_and_broadcast<C: Communicator>(
 ///   ranks skip the opening loop entirely.
 /// - `fcf` — Future Cost Function with all accumulated cuts.
 /// - `initial_state` — Known initial state vector `x_0` (length `state.n_state`).
-/// - `indexer` — LP layout map for stage 0.
 /// - `scratch` — Bundled mutable scratch references (patch buffer, cut batch,
 ///   cut row map, and per-evaluation buffers). See [`LbEvalScratchBundle`].
 /// - `spec` — Stage-0 data bundle: template, base row, noise scale, hydro count,
@@ -594,7 +601,6 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
     solver: &mut S,
     fcf: &FutureCostFunction,
     initial_state: &[f64],
-    indexer: &StageIndexer,
     state_layout: &StateLayout,
     scratch: &mut LbEvalScratchBundle<'_>,
     spec: &LbEvalSpec<'_>,
@@ -625,7 +631,6 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
             spec,
             scratch.patch_buf,
             initial_state,
-            indexer,
             state_layout,
             scratch.lb_scratch,
         )?;
@@ -1001,7 +1006,6 @@ mod tests {
     #[test]
     fn one_opening_expectation_lb_equals_single_objective() {
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1026,6 +1030,7 @@ mod tests {
             ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
+            z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
         };
         let (mut row_batch, mut lb_scratch) = make_lb_locals();
@@ -1039,7 +1044,6 @@ mod tests {
             &mut solver,
             &fcf,
             &initial_state,
-            &indexer,
             &state,
             &mut bundle,
             &spec,
@@ -1057,7 +1061,6 @@ mod tests {
     #[test]
     fn three_openings_expectation_lb_equals_mean() {
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1083,6 +1086,7 @@ mod tests {
             ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
+            z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
         };
         let (mut row_batch_lb, mut lb_scratch_lb) = make_lb_locals();
@@ -1096,7 +1100,6 @@ mod tests {
             &mut solver,
             &fcf,
             &initial_state,
-            &indexer,
             &state,
             &mut bundle_lb,
             &spec,
@@ -1115,7 +1118,6 @@ mod tests {
     #[test]
     fn two_openings_pure_cvar_alpha_half_lb_equals_worst() {
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1147,6 +1149,7 @@ mod tests {
             ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
+            z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
         };
         let (mut row_batch_lb, mut lb_scratch_lb) = make_lb_locals();
@@ -1160,7 +1163,6 @@ mod tests {
             &mut solver,
             &fcf,
             &initial_state,
-            &indexer,
             &state,
             &mut bundle_lb,
             &spec,
@@ -1180,7 +1182,6 @@ mod tests {
     #[test]
     fn two_openings_cvar_alpha_one_equals_expectation() {
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1208,6 +1209,7 @@ mod tests {
             ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
+            z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
         };
         let (mut row_batch_lb, mut lb_scratch_lb) = make_lb_locals();
@@ -1221,7 +1223,6 @@ mod tests {
             &mut solver,
             &fcf,
             &initial_state,
-            &indexer,
             &state,
             &mut bundle_lb,
             &spec,
@@ -1240,7 +1241,6 @@ mod tests {
     #[test]
     fn infeasible_solve_maps_to_sddp_infeasible() {
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1265,6 +1265,7 @@ mod tests {
             ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
+            z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
         };
         let (mut row_batch_result, mut lb_scratch_result) = make_lb_locals();
@@ -1278,7 +1279,6 @@ mod tests {
             &mut solver,
             &fcf,
             &initial_state,
-            &indexer,
             &state,
             &mut bundle_result,
             &spec,
@@ -1295,7 +1295,6 @@ mod tests {
     #[test]
     fn broadcast_failure_maps_to_communication_error() {
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1320,6 +1319,7 @@ mod tests {
             ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
+            z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
         };
         let (mut row_batch_result, mut lb_scratch_result) = make_lb_locals();
@@ -1333,7 +1333,6 @@ mod tests {
             &mut solver,
             &fcf,
             &initial_state,
-            &indexer,
             &state,
             &mut bundle_result,
             &spec,
@@ -1356,7 +1355,6 @@ mod tests {
     #[test]
     fn integration_two_openings_local_backend_expectation() {
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
         // Start with 0 cuts (empty FCF).
         let fcf = make_fcf(2, state.n_state);
@@ -1382,6 +1380,7 @@ mod tests {
             ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
+            z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
         };
         let (mut row_batch_lb, mut lb_scratch_lb) = make_lb_locals();
@@ -1395,7 +1394,6 @@ mod tests {
             &mut solver,
             &fcf,
             &initial_state,
-            &indexer,
             &state,
             &mut bundle_lb,
             &spec,
@@ -1418,7 +1416,6 @@ mod tests {
     #[test]
     fn integration_monotonicity_more_cuts_yields_higher_or_equal_lb() {
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64];
@@ -1441,6 +1438,7 @@ mod tests {
             ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
+            z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
         };
 
@@ -1457,7 +1455,6 @@ mod tests {
             &mut solver1,
             &fcf,
             &initial_state,
-            &indexer,
             &state,
             &mut bundle_lb1,
             &spec,
@@ -1478,7 +1475,6 @@ mod tests {
             &mut solver2,
             &fcf,
             &initial_state,
-            &indexer,
             &state,
             &mut bundle_lb2,
             &spec,
@@ -1502,7 +1498,6 @@ mod tests {
     #[test]
     fn test_lb_none_method_unchanged() {
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1527,6 +1522,7 @@ mod tests {
             ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
+            z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
         };
         let (mut row_batch_lb, mut lb_scratch_lb) = make_lb_locals();
@@ -1540,7 +1536,6 @@ mod tests {
             &mut solver,
             &fcf,
             &initial_state,
-            &indexer,
             &state,
             &mut bundle_lb,
             &spec,
@@ -1563,7 +1558,6 @@ mod tests {
     #[test]
     fn test_lb_truncation_no_crash() {
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1588,6 +1582,7 @@ mod tests {
             ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
+            z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::Truncation,
         };
         let (mut row_batch_result, mut lb_scratch_result) = make_lb_locals();
@@ -1601,7 +1596,6 @@ mod tests {
             &mut solver,
             &fcf,
             &initial_state,
-            &indexer,
             &state,
             &mut bundle_result,
             &spec,
@@ -1618,7 +1612,6 @@ mod tests {
     #[test]
     fn test_lb_truncation_with_penalty_no_crash() {
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1643,6 +1636,7 @@ mod tests {
             ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
+            z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::TruncationWithPenalty,
         };
         let (mut row_batch_result, mut lb_scratch_result) = make_lb_locals();
@@ -1656,7 +1650,6 @@ mod tests {
             &mut solver,
             &fcf,
             &initial_state,
-            &indexer,
             &state,
             &mut bundle_result,
             &spec,
@@ -1842,7 +1835,6 @@ mod tests {
         };
 
         let state = crate::indexer::test_fixtures::state_layout(0, 0);
-        let indexer = crate::indexer::test_fixtures::geom(0, 0);
         let ncs_max_gen = vec![100.0_f64; n_ncs];
         let ncs_allow_curtailment = vec![true; n_ncs];
         // All n_ncs stochastic NCS are active at stage 0, in slot order.
@@ -1862,6 +1854,7 @@ mod tests {
             ncs_active_slot_to_local: &ncs_active_slot_to_local,
             block_count,
             ncs_generation: 0..block_count,
+            z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
         };
 
@@ -1891,7 +1884,6 @@ mod tests {
             &spec,
             &mut patch_buf,
             &initial_state,
-            &indexer,
             &state,
             &mut lb_scratch,
         )
@@ -1927,7 +1919,6 @@ mod tests {
         // after the first call). The template must have at least 1 row to avoid
         // index-out-of-bounds in fill_forward_patches when n_hydros = 1.
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1950,6 +1941,7 @@ mod tests {
             ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
+            z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
         };
 
@@ -1969,7 +1961,6 @@ mod tests {
                 &mut solver1,
                 &fcf,
                 &initial_state,
-                &indexer,
                 &state,
                 &mut bundle,
                 &spec,
@@ -1998,7 +1989,6 @@ mod tests {
                 &mut solver2,
                 &fcf,
                 &initial_state,
-                &indexer,
                 &state,
                 &mut bundle,
                 &spec,

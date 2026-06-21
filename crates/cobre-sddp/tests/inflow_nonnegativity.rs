@@ -573,6 +573,7 @@ fn train_fixture(
     let max_blocks = block_counts.iter().copied().max().unwrap_or(1);
 
     let stage_ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &fx.stage_templates.templates,
         base_rows: &fx.stage_templates.base_rows,
         noise_scale: &fx.stage_templates.noise_scale,
@@ -701,6 +702,7 @@ fn simulate_fixture(
     simulate(
         &mut sim_workspaces,
         &StageContext {
+            geometry_per_stage: &[],
             templates: &fx.stage_templates.templates,
             base_rows: &fx.stage_templates.base_rows,
             noise_scale: &fx.stage_templates.noise_scale,

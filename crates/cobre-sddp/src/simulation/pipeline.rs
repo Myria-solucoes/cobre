@@ -487,10 +487,30 @@ fn solve_simulation_stage<S: SolverInterface>(
         ctx.base_rows[t],
         &ctx.templates[t].row_scale,
     );
+    // Per-stage geometry handle: the stage-correct row ranges and block count the
+    // patch strides below address, sourced from this stage's `StageLayout` table
+    // rather than the global stage-0 `indexer`. The production table is transposed
+    // one entry per study stage; a synthetic test that omits it falls back to the
+    // all-empty `Default`, matching the empty-slice fallback the sibling
+    // `ncs_col_starts` / `pumping_col_starts` tables use.
+    debug_assert!(
+        output.geometry_per_stage.is_empty()
+            || output.geometry_per_stage.len() == ctx.templates.len(),
+        "geometry_per_stage must carry one entry per study stage when populated",
+    );
+    let geometry_default = crate::lp_builder::StageGeometry::default();
+    let geometry = output
+        .geometry_per_stage
+        .get(t)
+        .unwrap_or(&geometry_default);
     if ctx.n_load_buses > 0 {
         // Per-stage grid: it must carry this stage's block count, not the global
-        // `indexer.n_blks`, so the load-balance row stride matches the per-stage LP.
-        let grid = BlockGrid::new(ctx.block_counts_per_stage[t], indexer.max_deficit_segments);
+        // `indexer.n_blks`. `max_deficit_segments` is study-invariant, so it reads
+        // from the single `study_dims` owner, not the global stage-0 `indexer`.
+        let grid = BlockGrid::new(
+            ctx.block_counts_per_stage[t],
+            study_dims.max_deficit_segments,
+        );
         ws.patch_buf.fill_load_patches(
             ctx.load_balance_row_starts[t],
             grid,
@@ -499,8 +519,11 @@ fn solve_simulation_stage<S: SolverInterface>(
             &ctx.templates[t].row_scale,
         );
     }
+    // z-inflow rows start at the per-stage `geometry.z_inflow_row_start` (always 0:
+    // state pinning uses column bounds, so no rows precede the z-inflow block),
+    // read from the per-stage geometry rather than the global stage-0 `indexer`.
     ws.patch_buf.fill_z_inflow_patches(
-        indexer.z_inflow_row_start,
+        geometry.z_inflow_row_start,
         &ws.scratch.z_inflow_rhs_buf,
         &ctx.templates[t].row_scale,
     );
@@ -809,7 +832,7 @@ fn extract_sim_stage_result(
     // (a permanent `0..0` sentinel).
     let pumping_col_start = output.pumping_col_starts.get(t).copied().unwrap_or(0);
     let n_pumping = output.n_pumping_per_stage.get(t).copied().unwrap_or(0);
-    // Per-stage equipment geometry: the stage-correct column ranges every
+    // Per-stage equipment geometry: the stage-correct column and row ranges every
     // block-major family read below addresses, sourced from this stage's
     // `StageLayout` rather than the global stage-0 `indexer`. The production
     // table is transposed one entry per study stage; a synthetic test that omits
@@ -1979,6 +2002,7 @@ mod tests {
         run_simulate(
             &mut workspaces,
             &StageContext {
+                geometry_per_stage: &[],
                 templates: &templates,
                 base_rows: &base_rows,
                 noise_scale: &noise_scale,
@@ -2141,6 +2165,7 @@ mod tests {
         run_simulate(
             &mut workspaces,
             &StageContext {
+                geometry_per_stage: &[],
                 templates: &templates,
                 base_rows: &base_rows,
                 noise_scale: &[],
@@ -2328,6 +2353,7 @@ mod tests {
         run_simulate(
             &mut workspaces,
             &StageContext {
+                geometry_per_stage: &[],
                 templates: &templates,
                 base_rows: &base_rows,
                 noise_scale: &noise_scale,
@@ -2699,6 +2725,7 @@ mod tests {
         run_simulate(
             &mut workspaces,
             &StageContext {
+                geometry_per_stage: &[],
                 templates: &templates,
                 base_rows: &base_rows,
                 noise_scale: &noise_scale,
@@ -2826,6 +2853,7 @@ mod tests {
         run_simulate(
             &mut workspaces,
             &StageContext {
+                geometry_per_stage: &[],
                 templates: &templates,
                 base_rows: &base_rows,
                 noise_scale: &noise_scale,
@@ -3115,6 +3143,7 @@ mod tests {
             ws.scratch.inflow_m3s_buf.push(0.0);
 
             let ctx = StageContext {
+                geometry_per_stage: &[],
                 templates: &templates,
                 base_rows: &base_rows,
                 noise_scale: &[1.0],

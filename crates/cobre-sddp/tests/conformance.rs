@@ -811,7 +811,7 @@ mod lb_conformance {
     //! LB monotonicity conformance: adding cuts can only increase the lower bound.
 
     use cobre_sddp::{
-        indexer::{StageIndexer, StateLayout},
+        indexer::StateLayout,
         inflow_method::InflowNonNegativityMethod,
         lower_bound::{LbEvalScratch, LbEvalScratchBundle, LbEvalSpec, evaluate_lower_bound},
         lp_builder::PatchBuffer,
@@ -839,36 +839,6 @@ mod lb_conformance {
         )
     }
 
-    /// Build a role-(b) `StageIndexer` geometry descriptor (no equipment, no
-    /// anticipated thermals) via the public `with_equipment_and_evaporation`
-    /// constructor, for the `TrainingContext.indexer` slot.
-    fn geom(_hydro_count: usize, _max_par_order: usize) -> StageIndexer {
-        StageIndexer::with_equipment_and_evaporation(
-            &cobre_sddp::indexer::EquipmentCounts {
-                hydro_count: 0,
-                max_par_order: 0,
-                n_thermals: 0,
-                n_lines: 0,
-                n_buses: 0,
-                n_blks: 0,
-                has_inflow_penalty: false,
-                max_deficit_segments: 0,
-                n_anticipated: 0,
-                k_max: 0,
-                anticipated_lead_stages: vec![],
-                anticipated_thermal_indices: vec![],
-                n_pumping: 0,
-            },
-            &cobre_sddp::indexer::FphaColumnLayout {
-                hydro_indices: vec![],
-                planes_per_hydro: vec![],
-            },
-            &cobre_sddp::indexer::EvapConfig {
-                hydro_indices: vec![],
-            },
-        )
-    }
-
     /// Conformance contract: `evaluate_lower_bound` returns a higher (or equal)
     /// value when the mock solver produces higher objectives, simulating the
     /// effect of tighter cuts added to the FCF.
@@ -877,7 +847,6 @@ mod lb_conformance {
     /// public-API integration test.
     #[test]
     fn evaluate_lower_bound_monotonicity_with_additional_cuts() {
-        let indexer = geom(1, 0);
         let state = state_layout_for(1, 0);
         let state_layout = state_layout_for(1, 0);
         let template = minimal_template();
@@ -902,6 +871,7 @@ mod lb_conformance {
             ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
+            z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
         };
 
@@ -929,7 +899,6 @@ mod lb_conformance {
                 &mut solver1,
                 &fcf,
                 &initial_state,
-                &indexer,
                 &state_layout,
                 &mut bundle,
                 &spec,
@@ -958,7 +927,6 @@ mod lb_conformance {
                 &mut solver2,
                 &fcf,
                 &initial_state,
-                &indexer,
                 &state_layout,
                 &mut bundle,
                 &spec,

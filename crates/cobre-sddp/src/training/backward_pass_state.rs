@@ -1559,6 +1559,7 @@ mod tests {
         let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
         let mut cut_batches = empty_cut_batches(n_stages);
         let ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1691,6 +1692,7 @@ mod tests {
         let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
         let mut cut_batches = empty_cut_batches(n_stages);
         let ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],

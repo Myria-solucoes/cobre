@@ -9,6 +9,7 @@ use crate::{
     horizon_mode::HorizonMode,
     indexer::{StageIndexer, StateLayout, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
+    lp_builder::StageGeometry,
     noise_key_diag::NoiseKeyDiag,
 };
 
@@ -22,6 +23,18 @@ pub struct StageContext<'a> {
     pub templates: &'a [StageTemplate],
     /// Row index of the first water-balance row in each stage template.
     pub base_rows: &'a [usize],
+    /// Per-stage equipment geometry (one entry per study stage).
+    ///
+    /// `geometry_per_stage[t]` holds the stage-correct column and row ranges for
+    /// stage `t`, sourced from that stage's `StageLayout` — never the global
+    /// stage-0 `StageIndexer`, whose `n_blks`-striped bases misread any stage with
+    /// a differing block count. The hot patch path reads the per-stage row bases
+    /// (e.g. `z_inflow_row_start`) through this table, mirroring the sibling
+    /// per-stage slices (`base_rows`, `load_balance_row_starts`, `ncs_col_starts`).
+    /// Empty `&[]` in tests that drive a sub-path without a real stage table; the
+    /// reader falls back to the all-empty `StageGeometry::default` in that case,
+    /// matching how the sibling per-stage slices default.
+    pub geometry_per_stage: &'a [StageGeometry],
     /// Noise scaling factors, layout: `[stage * n_hydros + hydro]`.
     pub noise_scale: &'a [f64],
     /// Number of hydro plants with LP variables.

@@ -659,6 +659,7 @@ fn train_simulate_write_cycle() {
 
     let block_counts_per_stage = vec![1usize; fx.n_stages];
     let stage_ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &fx.templates,
         base_rows: &fx.base_rows,
         noise_scale: &[],
@@ -848,6 +849,7 @@ fn train_simulate_write_cycle() {
     simulate(
         &mut sim_workspaces,
         &StageContext {
+            geometry_per_stage: &[],
             templates: &fx.templates,
             base_rows: &fx.base_rows,
             noise_scale: &[],
@@ -1441,6 +1443,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
 
     let block_counts = vec![1usize; n_stages];
     let stage_ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &templates_result.noise_scale,

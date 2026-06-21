@@ -524,6 +524,7 @@ fn test_stochastic_load_training_completes() {
     let block_counts_per_stage = vec![1usize; n_stages];
 
     let stage_ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &[],
@@ -633,6 +634,7 @@ fn test_deterministic_load_training_matches_baseline() {
     let block_counts_per_stage = vec![1usize; n_stages];
 
     let stage_ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &[],
@@ -768,6 +770,7 @@ fn test_stochastic_load_seed_determinism() {
         let block_counts_per_stage = vec![1usize; n_stages];
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],

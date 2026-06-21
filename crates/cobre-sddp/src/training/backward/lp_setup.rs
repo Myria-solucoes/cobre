@@ -96,8 +96,9 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
     );
     if ctx.n_load_buses > 0 {
         // Per-stage grid: it must carry this stage's block count, not the global
-        // `indexer.n_blks`, so the load-balance row stride matches the per-stage LP.
-        let grid = BlockGrid::new(n_blks, training_ctx.indexer.max_deficit_segments);
+        // `indexer.n_blks`. `max_deficit_segments` is study-invariant, so it reads
+        // from the single `study_dims` owner, not the global stage-0 `indexer`.
+        let grid = BlockGrid::new(n_blks, training_ctx.study_dims.max_deficit_segments);
         ws.patch_buf.fill_load_patches(
             ctx.load_balance_row_starts[s],
             grid,
@@ -106,8 +107,18 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
             &ctx.templates[s].row_scale,
         );
     }
+    // z-inflow rows start at the per-stage `geometry.z_inflow_row_start` (always 0:
+    // state pinning uses column bounds, so no rows precede the z-inflow block),
+    // read from the per-stage geometry table rather than the global stage-0
+    // `indexer`. Empty `geometry_per_stage` in a synthetic test falls back to the
+    // all-empty `StageGeometry::default` (also 0), matching the sibling per-stage
+    // slices.
+    let z_inflow_row_start = ctx
+        .geometry_per_stage
+        .get(s)
+        .map_or(0, |g| g.z_inflow_row_start);
     ws.patch_buf.fill_z_inflow_patches(
-        training_ctx.indexer.z_inflow_row_start,
+        z_inflow_row_start,
         &ws.scratch.z_inflow_rhs_buf,
         &ctx.templates[s].row_scale,
     );

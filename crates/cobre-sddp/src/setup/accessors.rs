@@ -118,6 +118,7 @@ impl StudySetup {
         StageContext {
             templates: &self.stage_data.stage_templates.templates,
             base_rows: &self.stage_data.stage_templates.base_rows,
+            geometry_per_stage: &self.stage_data.stage_templates.geometry_per_stage,
             noise_scale: &self.stage_data.stage_templates.noise_scale,
             n_hydros: self.stage_data.stage_templates.n_hydros,
             n_load_buses: self.stage_data.stage_templates.n_load_buses,

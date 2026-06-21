@@ -322,6 +322,7 @@ mod tests {
     /// Build a minimal `StageContext` wrapping a single template.
     fn make_context(templates: &[StageTemplate]) -> StageContext<'_> {
         StageContext {
+            geometry_per_stage: &[],
             templates,
             base_rows: &[],
             noise_scale: &[],

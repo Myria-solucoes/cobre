@@ -713,6 +713,7 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
         BasisStore::new(config.loop_config.forward_passes as usize, templates.len());
 
     let ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &[],
@@ -843,6 +844,7 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
         BasisStore::new(config.loop_config.forward_passes as usize, templates.len());
 
     let ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &[],
@@ -979,6 +981,7 @@ fn cost_statistics_accumulated_correctly() {
         BasisStore::new(config.loop_config.forward_passes as usize, templates.len());
 
     let ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &[],
@@ -1430,6 +1433,7 @@ fn run_one_iteration(
     let stages = make_stages_3();
 
     let ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &[],
@@ -1604,6 +1608,7 @@ fn test_forward_pass_parallel_cost_agreement() {
     let n_scenarios = 10;
 
     let ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &[],
@@ -1768,6 +1773,7 @@ fn test_forward_pass_work_distribution() {
     let mut basis_store = BasisStore::new(n_scenarios, num_stages);
 
     let ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &[],
@@ -2067,6 +2073,7 @@ fn run_single_stage_forward(
     let noise_scale = vec![noise_scale_val];
 
     let ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &noise_scale,
@@ -2288,6 +2295,7 @@ fn none_method_unchanged_with_truncation_code_present() {
         BasisStore::new(config.loop_config.forward_passes as usize, templates.len());
 
     let ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &[],
@@ -2540,6 +2548,7 @@ fn test_forward_pass_parallel_infeasibility() {
     let mut basis_store = BasisStore::new(n_scenarios, num_stages);
 
     let ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &[],
@@ -2700,6 +2709,7 @@ fn forward_pass_load_noise_positive_realization() {
     let block_counts_per_stage = vec![1usize];
 
     let ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &[1.0],
@@ -2855,6 +2865,7 @@ fn forward_pass_load_noise_clamped_to_zero() {
     let block_counts_per_stage = vec![1usize];
 
     let ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &[1.0],
@@ -2961,6 +2972,7 @@ fn forward_pass_no_load_buses_unchanged() {
     let mut basis_store = BasisStore::new(1, 3);
 
     let ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &[], // noise_scale empty when n_hydros=0
@@ -3524,6 +3536,7 @@ mod dcs_forward {
         // theta=10 (a wrong baked load).
         let discount_factors = [0.0_f64, 0.0];
         let ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],

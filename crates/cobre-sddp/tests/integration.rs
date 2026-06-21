@@ -647,6 +647,7 @@ fn run_one_deterministic_pass(
     let mut fcf = make_fcf(fx.n_stages);
     let mut solver = MockSolver::with_fixed(50.0);
     let stage_ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &fx.templates,
         base_rows: &fx.base_rows,
         noise_scale: &[],
@@ -755,6 +756,7 @@ fn train_converges_with_mock_solver() {
     };
 
     let stage_ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &fx.templates,
         base_rows: &fx.base_rows,
         noise_scale: &[],
@@ -871,6 +873,7 @@ fn train_lb_monotonically_nondecreasing() {
     };
 
     let stage_ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &fx.templates,
         base_rows: &fx.base_rows,
         noise_scale: &[],
@@ -978,6 +981,7 @@ fn train_emits_correct_event_sequence() {
     };
 
     let stage_ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &fx.templates,
         base_rows: &fx.base_rows,
         noise_scale: &[],
@@ -1068,6 +1072,7 @@ fn train_stops_at_iteration_limit() {
     let comm = StubComm;
 
     let stage_ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &fx.templates,
         base_rows: &fx.base_rows,
         noise_scale: &[],
@@ -1164,6 +1169,7 @@ fn train_stops_on_graceful_shutdown() {
     };
 
     let stage_ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &fx.templates,
         base_rows: &fx.base_rows,
         noise_scale: &[],
@@ -1250,6 +1256,7 @@ fn train_propagates_infeasible_error() {
     let comm = StubComm;
 
     let stage_ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &fx.templates,
         base_rows: &fx.base_rows,
         noise_scale: &[],
@@ -1385,6 +1392,7 @@ fn d17_level1_cut_selection_convergence() {
     };
 
     let stage_ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &fx.templates,
         base_rows: &fx.base_rows,
         noise_scale: &[],
@@ -1523,6 +1531,7 @@ fn d17_level1_cut_selection_reconstruction() {
     let comm = StubComm;
 
     let stage_ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &fx.templates,
         base_rows: &fx.base_rows,
         noise_scale: &[],
@@ -1665,6 +1674,7 @@ fn d18_lml1_cut_selection_convergence() {
     };
 
     let stage_ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &fx.templates,
         base_rows: &fx.base_rows,
         noise_scale: &[],
@@ -1886,6 +1896,7 @@ fn baked_backward_pass_smoke_test() {
     // dual and would panic with an out-of-bounds slice access.
     let mut solver = ExpandingMockSolver::with_objectives(vec![50.0]);
     let stage_ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &fx.templates,
         base_rows: &fx.base_rows,
         noise_scale: &[],

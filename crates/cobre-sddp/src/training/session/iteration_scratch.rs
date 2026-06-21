@@ -235,6 +235,7 @@ mod tests {
 
     fn make_stage_ctx(templates: &[StageTemplate]) -> StageContext<'_> {
         StageContext {
+            geometry_per_stage: &[],
             templates,
             base_rows: &[],
             noise_scale: &[],

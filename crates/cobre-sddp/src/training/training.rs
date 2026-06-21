@@ -906,6 +906,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1010,6 +1011,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1133,6 +1135,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1339,6 +1342,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1514,6 +1518,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1616,6 +1621,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1715,6 +1721,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1822,6 +1829,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1939,6 +1947,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -2066,6 +2075,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -2204,6 +2214,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -2316,6 +2327,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -2437,6 +2449,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -2539,6 +2552,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -3271,6 +3285,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],

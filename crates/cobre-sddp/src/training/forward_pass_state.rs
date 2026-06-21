@@ -1301,6 +1301,7 @@ mod tests {
     fn forward_pass_state_run_produces_expected_scenario_count() {
         let mut fx = ForwardFixture::new();
         let ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &fx.templates,
             base_rows: &fx.base_rows,
             noise_scale: &fx.noise_scale,
@@ -1373,6 +1374,7 @@ mod tests {
     fn run_forward_worker_produces_expected_trajectory_costs() {
         let fx = ForwardFixture::new();
         let ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &fx.templates,
             base_rows: &fx.base_rows,
             noise_scale: &fx.noise_scale,
@@ -1496,6 +1498,7 @@ mod tests {
     fn forward_pass_state_run_preserves_worker_stage_stats_shape() {
         let mut fx = ForwardFixture::new();
         let ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &fx.templates,
             base_rows: &fx.base_rows,
             noise_scale: &fx.noise_scale,
@@ -1620,6 +1623,7 @@ mod tests {
     fn forward_pass_state_run_reuses_scenario_costs_allocation() {
         let mut fx = ForwardFixture::new();
         let ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &fx.templates,
             base_rows: &fx.base_rows,
             noise_scale: &fx.noise_scale,

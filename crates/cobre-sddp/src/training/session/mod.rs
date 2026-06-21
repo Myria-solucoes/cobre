@@ -1220,6 +1220,14 @@ where
             ncs_active_slot_to_local: slot_to_local_stage0,
             block_count: block_count_stage0,
             ncs_generation,
+            // z-inflow rows start at row 0 (state pinning uses column bounds);
+            // sourced from the stage-0 geometry, falling back to 0 when the table
+            // is absent, matching the sibling stage-0 `StageContext` reads above.
+            z_inflow_row_start: self
+                .stage_ctx
+                .geometry_per_stage
+                .first()
+                .map_or(0, |g| g.z_inflow_row_start),
             inflow_method: self.training_ctx.inflow_method,
         };
         let mut lb_bundle = LbEvalScratchBundle::from_scratch_fields(
@@ -1232,7 +1240,6 @@ where
             self.solver,
             self.fcf,
             self.training_ctx.initial_state,
-            self.training_ctx.indexer,
             self.training_ctx.state,
             &mut lb_bundle,
             &lb_spec,
@@ -1669,6 +1676,7 @@ mod tests {
         block_counts: &'a [usize],
     ) -> StageContext<'a> {
         StageContext {
+            geometry_per_stage: &[],
             templates,
             base_rows,
             noise_scale: &[],
