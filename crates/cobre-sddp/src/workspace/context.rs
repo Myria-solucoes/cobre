@@ -7,7 +7,7 @@ use cobre_stochastic::{ExternalScenarioLibrary, HistoricalScenarioLibrary, Stoch
 use crate::{
     dcs::DcsParams,
     horizon_mode::HorizonMode,
-    indexer::{StageIndexer, StateLayout},
+    indexer::{StageIndexer, StateLayout, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
     noise_key_diag::NoiseKeyDiag,
 };
@@ -145,6 +145,14 @@ pub struct TrainingContext<'a> {
     /// extraction (`cut::row`, `cut::dcs`, `duals_extraction`, the delta-cut
     /// consumer), and the lower-bound / simulation-extraction state reads.
     pub state: &'a StateLayout,
+    /// Single owner of the study-invariant, non-state LP shape (non-state entity
+    /// counts, optional-column presence flags, anticipated-thermal identity list).
+    ///
+    /// Reads of these facts resolve here, not through [`Self::indexer`]. Nested
+    /// contexts that already borrow this `TrainingContext` (the forward worker
+    /// spec, the session) reach it transitively as `training_ctx.study_dims`
+    /// rather than carrying an independent handle.
+    pub study_dims: &'a StudyDimensions,
     /// Inflow non-negativity enforcement strategy.
     pub inflow_method: &'a InflowNonNegativityMethod,
     /// Stochastic context providing noise generation and PAR model.

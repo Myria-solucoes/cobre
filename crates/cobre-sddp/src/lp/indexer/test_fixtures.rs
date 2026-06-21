@@ -14,6 +14,7 @@
 
 use super::layout::{EquipmentCounts, EvapConfig, FphaColumnLayout, StageIndexer};
 use super::state_layout::StateLayout;
+use super::study_dimensions::StudyDimensions;
 
 /// Build `EquipmentCounts` with the seven scalar entity counts set and no
 /// anticipated thermals.
@@ -158,6 +159,44 @@ pub fn state_layout_for(indexer: &StageIndexer) -> StateLayout {
         0
     };
     state_layout(hydro_count, max_par_order)
+}
+
+/// Build an all-default [`StudyDimensions`] (every count `0`, every flag
+/// `false`, empty anticipated list).
+///
+/// Matches the empty non-state shape that the [`geom`] fixture's empty-equipment
+/// [`StageIndexer`] implies, for the common test site that builds a `geom`
+/// indexer. Sites whose indexer carries real equipment should use
+/// [`study_dims_for`] so the non-state facts stay aligned with the indexer.
+#[must_use]
+pub fn study_dims() -> StudyDimensions {
+    StudyDimensions::default()
+}
+
+/// Build the [`StudyDimensions`] matching a built [`StageIndexer`]'s non-state
+/// shape, reading each fact from the field the indexer already carries.
+///
+/// The bridge for test sites that hold a built indexer: it copies the non-state
+/// entity counts (`n_thermals`, `n_lines`, `n_buses`, `max_deficit_segments`),
+/// the presence flags (`has_ncs`, `has_inflow_penalty`, `has_withdrawal`,
+/// `has_operational_violations`), and the anticipated-thermal identity list
+/// straight off the indexer, so the borrowed `study_dims` carries the identical
+/// facts the `indexer` does. `n_pumping` is not stored on the descriptor (it is
+/// `0` there), matching `study_dims().n_pumping`.
+#[must_use]
+pub fn study_dims_for(indexer: &StageIndexer) -> StudyDimensions {
+    StudyDimensions {
+        n_thermals: indexer.n_thermals,
+        n_lines: indexer.n_lines,
+        n_buses: indexer.n_buses,
+        max_deficit_segments: indexer.max_deficit_segments,
+        has_ncs: indexer.has_ncs,
+        has_inflow_penalty: indexer.has_inflow_penalty,
+        has_withdrawal: indexer.has_withdrawal,
+        has_operational_violations: indexer.has_operational_violations,
+        anticipated_thermal_indices: indexer.anticipated_thermal_indices.clone(),
+        n_pumping: 0,
+    }
 }
 
 /// Test helper: build `EquipmentCounts` with explicit anticipated thermal

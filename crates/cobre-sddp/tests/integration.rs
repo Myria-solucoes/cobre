@@ -81,6 +81,27 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     )
 }
 
+/// Build the `StudyDimensions` matching a built `StageIndexer`'s non-state shape.
+///
+/// Mirrors the gated `indexer::test_fixtures::study_dims_for` body via the public
+/// `StudyDimensions` fields, so this external test crate (which does not see the
+/// parent crate's `#[cfg(test)]` surface) carries the identical non-state facts the
+/// `indexer` does for the `TrainingContext` / `StageExtractionSpec` slot.
+fn study_dims_for(indexer: &StageIndexer) -> cobre_sddp::indexer::StudyDimensions {
+    cobre_sddp::indexer::StudyDimensions {
+        n_thermals: indexer.n_thermals,
+        n_lines: indexer.n_lines,
+        n_buses: indexer.n_buses,
+        max_deficit_segments: indexer.max_deficit_segments,
+        has_ncs: indexer.has_ncs,
+        has_inflow_penalty: indexer.has_inflow_penalty,
+        has_withdrawal: indexer.has_withdrawal,
+        has_operational_violations: indexer.has_operational_violations,
+        anticipated_thermal_indices: indexer.anticipated_thermal_indices.clone(),
+        n_pumping: 0,
+    }
+}
+
 /// Build a role-(b) `StageIndexer` geometry descriptor (no equipment, no
 /// anticipated thermals) via the public `with_equipment_and_evaporation`
 /// constructor, for the `TrainingContext.indexer` slot.
@@ -673,6 +694,7 @@ fn run_one_deterministic_pass(
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
+            study_dims: &study_dims_for(&fx.indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic,
             initial_state: &fx.initial_state,
@@ -758,6 +780,7 @@ fn train_converges_with_mock_solver() {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
+            study_dims: &study_dims_for(&fx.indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -873,6 +896,7 @@ fn train_lb_monotonically_nondecreasing() {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
+            study_dims: &study_dims_for(&fx.indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -979,6 +1003,7 @@ fn train_emits_correct_event_sequence() {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
+            study_dims: &study_dims_for(&fx.indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1090,6 +1115,7 @@ fn train_stops_at_iteration_limit() {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
+            study_dims: &study_dims_for(&fx.indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1185,6 +1211,7 @@ fn train_stops_on_graceful_shutdown() {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
+            study_dims: &study_dims_for(&fx.indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1270,6 +1297,7 @@ fn train_propagates_infeasible_error() {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
+            study_dims: &study_dims_for(&fx.indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1382,6 +1410,7 @@ fn d17_level1_cut_selection_convergence() {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
+            study_dims: &study_dims_for(&fx.indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1545,6 +1574,7 @@ fn d17_level1_cut_selection_reconstruction() {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
+            study_dims: &study_dims_for(&fx.indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1660,6 +1690,7 @@ fn d18_lml1_cut_selection_convergence() {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
+            study_dims: &study_dims_for(&fx.indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1903,6 +1934,7 @@ fn baked_backward_pass_smoke_test() {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
+            study_dims: &study_dims_for(&fx.indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,

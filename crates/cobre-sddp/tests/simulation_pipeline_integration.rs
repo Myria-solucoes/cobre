@@ -59,6 +59,27 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     )
 }
 
+/// Build the `StudyDimensions` matching a built `StageIndexer`'s non-state shape.
+///
+/// Mirrors the gated `indexer::test_fixtures::study_dims_for` body via the public
+/// `StudyDimensions` fields, so this external test crate (which does not see the
+/// parent crate's `#[cfg(test)]` surface) carries the identical non-state facts the
+/// `indexer` does for the `TrainingContext` / `StageExtractionSpec` slot.
+fn study_dims_for(indexer: &StageIndexer) -> cobre_sddp::indexer::StudyDimensions {
+    cobre_sddp::indexer::StudyDimensions {
+        n_thermals: indexer.n_thermals,
+        n_lines: indexer.n_lines,
+        n_buses: indexer.n_buses,
+        max_deficit_segments: indexer.max_deficit_segments,
+        has_ncs: indexer.has_ncs,
+        has_inflow_penalty: indexer.has_inflow_penalty,
+        has_withdrawal: indexer.has_withdrawal,
+        has_operational_violations: indexer.has_operational_violations,
+        anticipated_thermal_indices: indexer.anticipated_thermal_indices.clone(),
+        n_pumping: 0,
+    }
+}
+
 /// Build a role-(b) `StageIndexer` geometry descriptor (no equipment, no
 /// anticipated thermals) via the public `with_equipment_and_evaporation`
 /// constructor, for the `TrainingContext.indexer` slot.
@@ -611,6 +632,7 @@ fn simulate_single_rank_4_scenarios_produces_4_results() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
+            study_dims: &study_dims_for(&indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -735,6 +757,7 @@ fn simulate_infeasible_returns_lp_infeasible_error() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
+            study_dims: &study_dims_for(&indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -849,6 +872,7 @@ fn simulate_infeasible_at_scenario2_stage3() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
+            study_dims: &study_dims_for(&indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -961,6 +985,7 @@ fn simulate_channel_closed_returns_error() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
+            study_dims: &study_dims_for(&indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1075,6 +1100,7 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
+            study_dims: &study_dims_for(&indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1186,6 +1212,7 @@ fn simulate_cost_buffer_scenario_ids_match_assigned_range() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
+            study_dims: &study_dims_for(&indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1297,6 +1324,7 @@ fn simulate_channel_receives_results_in_scenario_order() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
+            study_dims: &study_dims_for(&indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1405,6 +1433,7 @@ fn test_simulation_parallel_cost_determinism() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
+            study_dims: &study_dims_for(&indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1490,6 +1519,7 @@ fn test_simulation_parallel_cost_determinism() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
+            study_dims: &study_dims_for(&indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1628,6 +1658,7 @@ fn simulate_emits_progress_events() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
+            study_dims: &study_dims_for(&indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1760,6 +1791,7 @@ fn simulate_no_events_when_sender_is_none() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
+            study_dims: &study_dims_for(&indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1877,6 +1909,7 @@ fn simulate_progress_events_received_before_return() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
+            study_dims: &study_dims_for(&indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2005,6 +2038,7 @@ fn simulate_progress_scenario_cost_equals_total_cost() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
+            study_dims: &study_dims_for(&indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2132,6 +2166,7 @@ fn simulate_emits_simulation_finished_as_last_event() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
+            study_dims: &study_dims_for(&indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2274,6 +2309,7 @@ fn simulate_progress_scenario_cost_is_finite() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
+            study_dims: &study_dims_for(&indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2397,6 +2433,7 @@ fn simulate_baked_path_issues_zero_add_rows() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
+            study_dims: &study_dims_for(&indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2524,6 +2561,7 @@ fn simulate_fallback_path_issues_expected_add_rows() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
+            study_dims: &study_dims_for(&indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2644,6 +2682,7 @@ fn simulate_baked_length_mismatch_returns_error() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
+            study_dims: &study_dims_for(&indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2812,6 +2851,7 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
+            study_dims: &study_dims_for(&indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2971,6 +3011,7 @@ fn simulate_with_empty_stage_bases_cold_starts() {
             horizon: &horizon,
             indexer: &indexer,
             state: &state,
+            study_dims: &study_dims_for(&indexer),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,

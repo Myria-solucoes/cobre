@@ -146,6 +146,7 @@ mod block_grid;
 mod constructors;
 mod layout;
 mod state_layout;
+mod study_dimensions;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_fixtures;
 
@@ -154,3 +155,4 @@ pub use layout::{
     EquipmentCounts, EvapConfig, EvaporationIndices, FphaColumnLayout, FphaRowRange, StageIndexer,
 };
 pub use state_layout::StateLayout;
+pub use study_dimensions::StudyDimensions;

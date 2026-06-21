@@ -1319,10 +1319,12 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&fx.indexer);
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
+            study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1389,10 +1391,12 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&fx.indexer);
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
+            study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1510,10 +1514,12 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&fx.indexer);
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
+            study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -1632,10 +1638,12 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&fx.indexer);
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
+            study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,

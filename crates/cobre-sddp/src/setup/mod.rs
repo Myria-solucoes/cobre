@@ -65,7 +65,7 @@ use crate::{
     error::SddpError,
     horizon_mode::HorizonMode,
     hydro_models::{EvaporationModel, PrepareHydroModelsResult, ResolvedProductionModel},
-    indexer::{StageIndexer, StateLayout},
+    indexer::{StageIndexer, StateLayout, StudyDimensions},
     lp_builder::build_stage_templates,
     risk_measure::RiskMeasure,
     simulation::EntityCounts,
@@ -344,7 +344,7 @@ impl StudySetup {
             &scalar_parameters,
         )?;
 
-        let (indexer, state_layout) = build_wired_indexer(
+        let (indexer, state_layout, study_dims) = build_wired_indexer(
             system,
             &stage_templates,
             inflow_method,
@@ -352,7 +352,7 @@ impl StudySetup {
             &stochastic,
         );
 
-        let initial_state = build_initial_state(system, &indexer, &state_layout);
+        let initial_state = build_initial_state(system, &study_dims, &state_layout);
 
         let n_stages = stage_templates.templates.len();
         let max_iterations = max_iterations_from_rules(&stopping_rule_set);
@@ -437,6 +437,7 @@ impl StudySetup {
                 stage_templates,
                 indexer,
                 state: state_layout,
+                study_dims,
                 stages,
                 entity_counts,
                 pumping_consumption_mw_per_m3s,
@@ -678,8 +679,8 @@ fn build_energy_and_templates(
     })
 }
 
-/// Build the fully-wired [`StageIndexer`] and the canonical [`StateLayout`]
-/// from the stage-0 LP layout.
+/// Build the fully-wired [`StageIndexer`], the canonical [`StateLayout`], and
+/// the [`StudyDimensions`] from the stage-0 LP layout.
 ///
 /// Derives equipment counts, FPHA/evaporation column layouts, and the
 /// anticipated-thermal lead-stage map from the system and the (representative)
@@ -687,15 +688,17 @@ fn build_energy_and_templates(
 /// layout, and sets the cut sparse-mask non-zero pattern from the PAR effective
 /// lag counts. The returned [`StateLayout`] is built from the same state
 /// dimensions and effective lag counts that finalize the indexer's role-(a)
-/// caches, so it is byte-identical to the role-(a) embedded in the indexer. All
-/// inputs are read-only; the returned indexer owns its full layout.
+/// caches, so it is byte-identical to the role-(a) embedded in the indexer. The
+/// returned [`StudyDimensions`] reads its non-state study shape from the same
+/// `indexer`/`eq_counts` values, so it carries the identical facts. All inputs
+/// are read-only; the returned indexer owns its full layout.
 fn build_wired_indexer(
     system: &System,
     stage_templates: &crate::lp_builder::StageTemplates,
     inflow_method: crate::InflowNonNegativityMethod,
     hydro_models: &PrepareHydroModelsResult,
     stochastic: &StochasticContext,
-) -> (StageIndexer, StateLayout) {
+) -> (StageIndexer, StateLayout, StudyDimensions) {
     let stage_templates_ref = &stage_templates.templates;
     // `n_blks_stage0` is the single global block count for the whole study: it is
     // read from stage 0 and fed to the one global indexer below, which strides its
@@ -774,6 +777,25 @@ fn build_wired_indexer(
     // `StageContext::ncs_col_starts`, never from this global indexer.
     indexer.has_ncs = !stage_templates.ncs_col_starts.is_empty();
 
+    // Single owner of the study-invariant, non-state LP shape. Each fact is read
+    // from the value that already derived it — the scalars and `has_inflow_penalty`
+    // from `eq_counts`, the constructor-derived flags and the anticipated identity
+    // list from the built `indexer` (after `has_ncs` is set) — so it carries the
+    // identical facts the role-(b) descriptor does. `n_blks` is deliberately absent:
+    // it is per-stage and owned by the per-stage geometry, never study-global.
+    let study_dims = crate::indexer::StudyDimensions {
+        n_thermals: eq_counts.n_thermals,
+        n_lines: eq_counts.n_lines,
+        n_buses: eq_counts.n_buses,
+        max_deficit_segments: eq_counts.max_deficit_segments,
+        has_ncs: indexer.has_ncs,
+        has_inflow_penalty: eq_counts.has_inflow_penalty,
+        has_withdrawal: indexer.has_withdrawal,
+        has_operational_violations: indexer.has_operational_violations,
+        anticipated_thermal_indices: indexer.anticipated_thermal_indices.clone(),
+        n_pumping: eq_counts.n_pumping,
+    };
+
     // z-inflow lives at the fixed offset N*(1+L): the column range is owned by
     // `StateLayout` (role a), the row range by `StageIndexer`'s
     // `with_equipment_and_evaporation` (role b); no per-stage wiring needed.
@@ -809,7 +831,7 @@ fn build_wired_indexer(
         &effective_lag_counts,
     );
 
-    (indexer, state)
+    (indexer, state, study_dims)
 }
 
 /// Grouped output of [`precompute_lag_data`].
@@ -1143,7 +1165,11 @@ fn build_pumping_consumption(system: &System) -> Vec<f64> {
 ///
 /// Each `HydroStorage` entry in `initial_conditions.storage` is matched to
 /// its positional index among the system's hydros (both sorted by `hydro_id`).
-fn build_initial_state(system: &System, indexer: &StageIndexer, layout: &StateLayout) -> Vec<f64> {
+fn build_initial_state(
+    system: &System,
+    study_dims: &StudyDimensions,
+    layout: &StateLayout,
+) -> Vec<f64> {
     let mut state = vec![0.0_f64; layout.n_state];
     let hydros = system.hydros();
     let ic = system.initial_conditions();
@@ -1178,7 +1204,7 @@ fn build_initial_state(system: &System, indexer: &StageIndexer, layout: &StateLa
     // assumes padding slots are zero.
     if layout.n_anticipated > 0 && layout.k_max > 0 {
         debug_assert_eq!(
-            indexer.anticipated_thermal_indices.len(),
+            study_dims.anticipated_thermal_indices.len(),
             layout.n_anticipated,
             "anticipated_thermal_indices length must equal n_anticipated",
         );
@@ -1198,7 +1224,7 @@ fn build_initial_state(system: &System, indexer: &StageIndexer, layout: &StateLa
             };
             // Find the anticipated-local index by linear search.
             // n_anticipated is small (typical range 1–50), so O(n) is fine.
-            let Some(local_idx) = indexer
+            let Some(local_idx) = study_dims
                 .anticipated_thermal_indices
                 .iter()
                 .position(|&g| g == global_idx)
@@ -3553,7 +3579,11 @@ mod tests {
         let indexer = indexer_for_lag_test(2, 2);
         let layout = layout_for_lag_test(2, 2);
 
-        let state = build_initial_state(&system, &indexer, &layout);
+        let state = build_initial_state(
+            &system,
+            &crate::indexer::test_fixtures::study_dims_for(&indexer),
+            &layout,
+        );
 
         // State layout: storage(0..2), lags(2..6) in lag-major order.
         // Lag-major: slot = s + lag * N + h, where N = 2.
@@ -3596,7 +3626,11 @@ mod tests {
         let indexer = indexer_for_lag_test(1, 3);
         let layout = layout_for_lag_test(1, 3);
 
-        let state = build_initial_state(&system, &indexer, &layout);
+        let state = build_initial_state(
+            &system,
+            &crate::indexer::test_fixtures::study_dims_for(&indexer),
+            &layout,
+        );
 
         let s = layout.inflow_lags.start;
         for l in 0..3 {
@@ -3626,7 +3660,11 @@ mod tests {
         let indexer = indexer_for_lag_test(1, 2);
         let layout = layout_for_lag_test(1, 2);
 
-        let state = build_initial_state(&system, &indexer, &layout);
+        let state = build_initial_state(
+            &system,
+            &crate::indexer::test_fixtures::study_dims_for(&indexer),
+            &layout,
+        );
 
         let s = layout.inflow_lags.start;
         assert!(
@@ -3717,7 +3755,11 @@ mod tests {
             "inflow_lags range should be empty for L=0"
         );
 
-        let state = build_initial_state(&system, &indexer, &layout);
+        let state = build_initial_state(
+            &system,
+            &crate::indexer::test_fixtures::study_dims_for(&indexer),
+            &layout,
+        );
 
         assert_eq!(state.len(), 1, "state length must equal n_state=1");
     }
@@ -4027,7 +4069,11 @@ mod tests {
         assert_eq!(layout.n_anticipated, 0);
         assert!(layout.anticipated_state.is_empty());
 
-        let state = build_initial_state(&system, &indexer, &layout);
+        let state = build_initial_state(
+            &system,
+            &crate::indexer::test_fixtures::study_dims_for(&indexer),
+            &layout,
+        );
 
         assert_eq!(
             state.len(),
@@ -4064,7 +4110,11 @@ mod tests {
         let indexer = indexer_with_anticipated(1, &[2], &[0]);
         let layout = layout_with_anticipated(1, &[2]);
 
-        let state = build_initial_state(&system, &indexer, &layout);
+        let state = build_initial_state(
+            &system,
+            &crate::indexer::test_fixtures::study_dims_for(&indexer),
+            &layout,
+        );
 
         assert_eq!(
             state.len(),
@@ -4120,7 +4170,11 @@ mod tests {
         let indexer = indexer_with_anticipated(2, &[2, 3], &[0, 1]);
         let layout = layout_with_anticipated(2, &[2, 3]);
 
-        let state = build_initial_state(&system, &indexer, &layout);
+        let state = build_initial_state(
+            &system,
+            &crate::indexer::test_fixtures::study_dims_for(&indexer),
+            &layout,
+        );
 
         assert_eq!(
             state.len(),
@@ -4175,7 +4229,11 @@ mod tests {
         let indexer = indexer_with_anticipated(1, &[2], &[0]);
         let layout = layout_with_anticipated(1, &[2]);
 
-        let state = build_initial_state(&system, &indexer, &layout);
+        let state = build_initial_state(
+            &system,
+            &crate::indexer::test_fixtures::study_dims_for(&indexer),
+            &layout,
+        );
 
         assert_eq!(
             state.len(),
@@ -4211,7 +4269,11 @@ mod tests {
         let indexer = indexer_with_anticipated(1, &[2], &[0]);
         let layout = layout_with_anticipated(1, &[2]);
 
-        let state = build_initial_state(&system, &indexer, &layout);
+        let state = build_initial_state(
+            &system,
+            &crate::indexer::test_fixtures::study_dims_for(&indexer),
+            &layout,
+        );
 
         assert_eq!(
             state.len(),
@@ -4264,7 +4326,11 @@ mod tests {
         let indexer = indexer_with_anticipated(2, &[1, 2], &[0, 1]);
         let layout = layout_with_anticipated(2, &[1, 2]);
 
-        let state = build_initial_state(&system, &indexer, &layout);
+        let state = build_initial_state(
+            &system,
+            &crate::indexer::test_fixtures::study_dims_for(&indexer),
+            &layout,
+        );
 
         assert_eq!(
             state.len(),

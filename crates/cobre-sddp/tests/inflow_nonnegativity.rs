@@ -92,6 +92,27 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     )
 }
 
+/// Build the `StudyDimensions` matching a built `StageIndexer`'s non-state shape.
+///
+/// Mirrors the gated `indexer::test_fixtures::study_dims_for` body via the public
+/// `StudyDimensions` fields, so this external test crate (which does not see the
+/// parent crate's `#[cfg(test)]` surface) carries the identical non-state facts the
+/// `indexer` does for the `TrainingContext` slot.
+fn study_dims_for(indexer: &StageIndexer) -> cobre_sddp::indexer::StudyDimensions {
+    cobre_sddp::indexer::StudyDimensions {
+        n_thermals: indexer.n_thermals,
+        n_lines: indexer.n_lines,
+        n_buses: indexer.n_buses,
+        max_deficit_segments: indexer.max_deficit_segments,
+        has_ncs: indexer.has_ncs,
+        has_inflow_penalty: indexer.has_inflow_penalty,
+        has_withdrawal: indexer.has_withdrawal,
+        has_operational_violations: indexer.has_operational_violations,
+        anticipated_thermal_indices: indexer.anticipated_thermal_indices.clone(),
+        n_pumping: 0,
+    }
+}
+
 /// Single-rank communicator that performs identity operations.
 struct StubComm;
 
@@ -598,6 +619,7 @@ fn train_fixture(
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
+            study_dims: &study_dims_for(&fx.indexer),
             inflow_method: &fx.inflow_method,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -696,6 +718,7 @@ fn simulate_fixture(
             horizon: &fx.horizon,
             indexer: &fx.indexer,
             state: &fx.state,
+            study_dims: &study_dims_for(&fx.indexer),
             inflow_method: &fx.inflow_method,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,

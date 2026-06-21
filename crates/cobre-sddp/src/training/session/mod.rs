@@ -1310,7 +1310,7 @@ mod tests {
         cut::fcf::FutureCostFunction,
         error::SddpError,
         horizon_mode::HorizonMode,
-        indexer::{StageIndexer, StateLayout},
+        indexer::{StageIndexer, StateLayout, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
         risk_measure::RiskMeasure,
     };
@@ -1692,6 +1692,7 @@ mod tests {
     fn make_training_ctx<'a>(
         horizon: &'a HorizonMode,
         indexer: &'a StageIndexer,
+        study_dims: &'a StudyDimensions,
         state: &'a StateLayout,
         stochastic: &'a StochasticContext,
         initial_state: &'a [f64],
@@ -1701,6 +1702,7 @@ mod tests {
             horizon,
             indexer,
             state,
+            study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic,
             initial_state,
@@ -1742,9 +1744,11 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
         let training_ctx = make_training_ctx(
             &horizon,
             &indexer,
+            &study_dims,
             &state,
             &stochastic,
             &initial_state,
@@ -1815,9 +1819,11 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
         let training_ctx = make_training_ctx(
             &horizon,
             &indexer,
+            &study_dims,
             &state,
             &stochastic,
             &initial_state,
@@ -1875,9 +1881,11 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
         let training_ctx = make_training_ctx(
             &horizon,
             &indexer,
+            &study_dims,
             &state,
             &stochastic,
             &initial_state,
@@ -1938,9 +1946,11 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
         let training_ctx = make_training_ctx(
             &horizon,
             &indexer,
+            &study_dims,
             &state,
             &stochastic,
             &initial_state,
@@ -1990,9 +2000,11 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
         let training_ctx = make_training_ctx(
             &horizon,
             &indexer,
+            &study_dims,
             &state,
             &stochastic,
             &initial_state,
@@ -2059,9 +2071,11 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
         let training_ctx = make_training_ctx(
             &horizon,
             &indexer,
+            &study_dims,
             &state,
             &stochastic,
             &initial_state,

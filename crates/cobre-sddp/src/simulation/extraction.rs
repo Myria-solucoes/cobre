@@ -35,7 +35,7 @@ use cobre_core::ConstraintSense;
 use cobre_core::EntityId;
 
 use crate::energy_conversion::EnergyConversionSet;
-use crate::indexer::{BlockGrid, StageIndexer, StateLayout};
+use crate::indexer::{BlockGrid, StageIndexer, StateLayout, StudyDimensions};
 use crate::lp_builder::{COST_SCALE_FACTOR, GenericConstraintRowEntry};
 use crate::simulation::types::{
     ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult, SimulationCostResult,
@@ -353,6 +353,11 @@ pub struct StageExtractionSpec<'a> {
     /// `max_par_order`) the extraction performs. These offsets are pure functions
     /// of `(N, L, A, k_max)` and so resolve correctly at every stage.
     pub state: &'a StateLayout,
+    /// Single owner of the study-invariant, non-state LP shape: the non-state
+    /// entity counts and optional-column presence flags this extraction reads.
+    /// These facts are stage- and block-independent, so the single study-global
+    /// handle resolves correctly at every stage.
+    pub study_dims: &'a StudyDimensions,
     /// Per-stage dispatch block count for this stage, sourced from
     /// `block_counts_per_stage[t]`.
     ///
@@ -769,6 +774,7 @@ fn extract_hydro_per_block<'a>(
     stage_id: u32,
 ) -> impl Iterator<Item = SimulationHydroResult> + 'a {
     let indexer = spec.indexer;
+    let study_dims = spec.study_dims;
     let n_blks = spec.n_blks;
     let grid = spec.block_grid();
 
@@ -819,7 +825,7 @@ fn extract_hydro_per_block<'a>(
 
         // Operational violation slacks: read per-block value directly (m3/s or MW).
         let (turbined_slack, outflow_slack_below, outflow_slack_above, generation_slack) =
-            if indexer.has_operational_violations {
+            if study_dims.has_operational_violations {
                 (
                     view.primal[grid.flat(spec.equipment.turbine_below_slack.start, h, b)],
                     view.primal[grid.flat(spec.equipment.outflow_below_slack.start, h, b)],
@@ -1786,7 +1792,7 @@ mod tests {
         EntityCounts, SolutionView, StageExtractionSpec, accumulate_category_costs,
         assign_scenarios, extract_pumping_stations, extract_stage_result,
     };
-    use crate::indexer::StageIndexer;
+    use crate::indexer::{StageIndexer, StudyDimensions};
     use crate::lp_builder::StageEquipmentGeometry;
     use crate::simulation::types::{ScenarioCategoryCosts, SimulationCostResult};
 
@@ -1943,6 +1949,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -1997,6 +2004,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2051,6 +2059,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2107,6 +2116,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2175,6 +2185,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2225,6 +2236,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2281,6 +2293,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2449,6 +2462,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2604,6 +2618,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2712,6 +2727,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2833,6 +2849,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2904,6 +2921,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -2973,6 +2991,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -3068,6 +3087,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -3163,6 +3183,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -3281,8 +3302,10 @@ mod tests {
 
         // Also verify the helper directly for AC-1 coverage.
         let lookup = super::ThermalReverseLookup::build(&indexer, 1);
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
         let spec = StageExtractionSpec {
             indexer: &indexer,
+            study_dims: &study_dims,
             equipment: &StageEquipmentGeometry::from_indexer(&indexer),
             state: &state,
             n_blks: indexer.n_blks,
@@ -3354,6 +3377,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -3440,6 +3464,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -3511,6 +3536,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -3609,6 +3635,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -3689,8 +3716,10 @@ mod tests {
 
         // Also verify stage-level helper directly.
         let lookup = super::ThermalReverseLookup::build(&indexer, 1);
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
         let spec_delivery = StageExtractionSpec {
             indexer: &indexer,
+            study_dims: &study_dims,
             equipment: &StageEquipmentGeometry::from_indexer(&indexer),
             state: &state,
             n_blks: indexer.n_blks,
@@ -3769,6 +3798,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -3859,6 +3889,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -3963,8 +3994,10 @@ mod tests {
             objective_coeffs: &obj,
             row_lower: &[],
         };
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
         let spec = StageExtractionSpec {
             indexer: &indexer,
+            study_dims: &study_dims,
             equipment: &StageEquipmentGeometry::from_indexer(&indexer),
             state: &state,
             n_blks: indexer.n_blks,
@@ -4060,6 +4093,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -4345,6 +4379,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -4450,6 +4485,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -4566,6 +4602,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -4695,6 +4732,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -4777,6 +4815,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -4901,6 +4940,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -4984,6 +5024,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -5073,6 +5114,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -5156,6 +5198,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -5257,6 +5300,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -5380,6 +5424,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -5516,6 +5561,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -5584,6 +5630,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -5641,6 +5688,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                study_dims: &crate::indexer::test_fixtures::study_dims_for(&indexer),
                 equipment: &StageEquipmentGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
@@ -5706,6 +5754,7 @@ mod tests {
     #[allow(clippy::too_many_arguments)]
     fn pumping_only_spec<'a>(
         indexer: &'a StageIndexer,
+        study_dims: &'a StudyDimensions,
         equipment: &'a StageEquipmentGeometry,
         state: &'a crate::indexer::StateLayout,
         entity_counts: &'a EntityCounts,
@@ -5717,6 +5766,7 @@ mod tests {
     ) -> StageExtractionSpec<'a> {
         StageExtractionSpec {
             indexer,
+            study_dims,
             equipment,
             state,
             n_blks: indexer.n_blks,
@@ -5774,8 +5824,10 @@ mod tests {
         };
 
         let equipment = StageEquipmentGeometry::default();
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
         let spec = pumping_only_spec(
             &indexer,
+            &study_dims,
             &equipment,
             &state,
             &entity_counts,
@@ -5834,8 +5886,10 @@ mod tests {
         };
 
         let equipment = StageEquipmentGeometry::default();
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
         let spec = pumping_only_spec(
             &indexer,
+            &study_dims,
             &equipment,
             &state,
             &entity_counts,
@@ -5870,8 +5924,10 @@ mod tests {
         };
 
         let equipment = StageEquipmentGeometry::default();
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&indexer);
         let spec = pumping_only_spec(
             &indexer,
+            &study_dims,
             &equipment,
             &state,
             &entity_counts,

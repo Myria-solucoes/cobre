@@ -3,7 +3,7 @@
 use cobre_core::{Stage, temporal::StageLagTransition};
 
 use crate::{
-    indexer::{StageIndexer, StateLayout},
+    indexer::{StageIndexer, StateLayout, StudyDimensions},
     lp_builder::StageTemplates,
     scaling_report::ScalingReport,
     simulation::EntityCounts,
@@ -36,6 +36,18 @@ pub struct StageData {
     /// consumers), and the simulation extraction's state columns.
     /// [`Self::indexer`] carries role-(b) geometry only.
     pub(crate) state: StateLayout,
+
+    /// Single owner of the study-invariant, non-state LP shape: the non-state
+    /// entity counts, the optional-column presence flags, and the
+    /// anticipated-thermal identity list.
+    ///
+    /// Built once in [`super::build_wired_indexer`] alongside [`Self::indexer`]
+    /// and [`Self::state`]. Borrowed into `TrainingContext::study_dims` and
+    /// `StageExtractionSpec::study_dims`; every reader of one of these facts
+    /// resolves it here. The state-defining dims live on [`Self::state`] and the
+    /// per-stage `n_blks` lives on the per-stage geometry, so neither is carried
+    /// here.
+    pub(crate) study_dims: StudyDimensions,
 
     /// Study stages (id >= 0) in index order.
     ///
