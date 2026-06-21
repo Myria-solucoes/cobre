@@ -244,7 +244,7 @@ fn shift_lag_state_from_inflows(
 /// (`stage_idx + K_i < n_stages`, the `is_anticipated_decision_active` predicate).
 /// Inactive plants — those at stages where the LP did not emit a real
 /// decision column — rely on the LP builder pinning their decision column
-/// bounds to `[0.0, 0.0]` (matrix.rs:`fill_anticipated_decision_columns`).
+/// bounds to `[0.0, 0.0]` (the LP-builder `fill_anticipated_columns` pass).
 /// The unscaled primal at that column is therefore `0.0`, and writing `0.0`
 /// into slot `K_i - 1` is the correct ring-buffer transition: no new
 /// commitment was placed, so slot `K_i - 1` should hold zero. If a future

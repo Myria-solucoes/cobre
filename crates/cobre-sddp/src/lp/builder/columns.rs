@@ -43,10 +43,7 @@ pub(super) fn fill_stage_columns(
     fill_spillage_columns(ctx, stage, stage_idx, layout, b);
     fill_diversion_columns(ctx, stage, stage_idx, layout, b);
     fill_thermal_columns(ctx, stage, stage_idx, layout, b);
-    fill_anticipated_decision_columns(ctx, stage_idx, layout, b);
-    fill_anticipated_state_out_columns(ctx, stage_idx, layout, b);
-    fill_anticipated_decision_objective(ctx, stage_idx, layout, b);
-    zero_anticipated_delivery_thermal_cost(ctx, layout, b);
+    fill_anticipated_columns(ctx, stage_idx, layout, b);
     fill_line_columns(ctx, stage, stage_idx, layout, b);
     fill_deficit_and_excess_columns(ctx, stage, stage_idx, layout, b);
     fill_inflow_slack_columns(ctx, stage_idx, layout, total_stage_hours, b);
@@ -108,47 +105,6 @@ fn fill_anticipated_state_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_
             bufs.col_upper[col] = f64::INFINITY;
         }
     }
-}
-
-/// Fill column bounds for the `anticipated_state_out` columns.
-///
-/// For each anticipated plant `i`:
-/// - Active (`stage_idx + K_i < n_stages`): bounds `[-INF, +INF]`.
-///   The `state_out` value is pinned to `decision_col[i]` by the
-///   `anticipated_state_out_def` equality row (filled by
-///   `fill_anticipated_state_out_def_entries`).
-/// - Inactive (`stage_idx + K_i >= n_stages`): bounds `[0, 0]`. The
-///   presolver eliminates the column. The definition row is NOT emitted
-///   for inactive plants (lockstep invariant: zero-bound iff no def row).
-///
-/// Objective coefficient stays at 0.0 (vec default) — the `state_out` column
-/// carries no direct cost; the cost flows through the cut machinery.
-///
-/// No-op when `n_anticipated == 0` (loop iterates zero times).
-pub(super) fn fill_anticipated_state_out_columns(
-    ctx: &TemplateBuildCtx<'_>,
-    stage_idx: usize,
-    layout: &StageLayout,
-    bufs: &mut ColumnBufs<'_>,
-) {
-    let n_stages = ctx.resolved.bounds.n_stages();
-    for local_idx in 0..ctx.n_anticipated {
-        let col = layout.anticipated.col_anticipated_state_out_start + local_idx;
-        if layout.is_anticipated_decision_active(local_idx, stage_idx, n_stages) {
-            bufs.col_lower[col] = f64::NEG_INFINITY;
-            bufs.col_upper[col] = f64::INFINITY;
-        } else {
-            bufs.col_lower[col] = 0.0;
-            bufs.col_upper[col] = 0.0;
-        }
-    }
-    let active_count = (0..ctx.n_anticipated)
-        .filter(|&i| layout.is_anticipated_decision_active(i, stage_idx, n_stages))
-        .count();
-    debug_assert_eq!(
-        active_count, layout.anticipated.n_anticipated_state_out_def_rows,
-        "active state_out column count must match def-row count at stage {stage_idx}"
-    );
 }
 
 /// Theta column: bounded below by zero so iteration-1 LPs with empty cut pools
@@ -251,7 +207,16 @@ fn fill_diversion_columns(
 }
 
 /// Thermal columns per thermal per block.
-fn fill_thermal_columns(
+///
+/// Anticipated thermals get their per-block **bounds** here like any other
+/// thermal, but their per-block **objective** is left at the `0.0`
+/// initialisation default: the generation is priced once at the decision stage
+/// via `fill_anticipated_columns`, and the delivery-stage column must consume it
+/// at zero marginal cost — pricing it here too would double-count.
+/// Anticipated plants are detected via `layout.anticipated_local_by_sys_pos`,
+/// the reverse map global-thermal-position → anticipated-local index; a
+/// non-anticipated thermal is simply not in the map and is priced normally.
+pub(super) fn fill_thermal_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
     stage_idx: usize,
@@ -261,135 +226,106 @@ fn fill_thermal_columns(
     for (t_idx, _thermal) in ctx.thermals.iter().enumerate() {
         let tb = ctx.resolved.bounds.thermal_bounds(t_idx, stage_idx);
         let marginal_cost_per_mwh = tb.cost_per_mwh;
+        let is_anticipated = layout.anticipated_local_by_sys_pos.contains_key(&t_idx);
         for blk in 0..layout.n_blks {
             let col = layout
                 .block_grid()
                 .flat(layout.col_thermal_start(), t_idx, blk);
             bufs.col_lower[col] = tb.min_generation_mw;
             bufs.col_upper[col] = tb.max_generation_mw;
-            let block_hours = stage.blocks[blk].duration_hours;
-            bufs.objective[col] = marginal_cost_per_mwh * block_hours;
+            if !is_anticipated {
+                let block_hours = stage.blocks[blk].duration_hours;
+                bufs.objective[col] = marginal_cost_per_mwh * block_hours;
+            }
         }
     }
 }
 
-/// Anticipated-decision columns: one per anticipated thermal, stage-level.
+/// Anticipated-plant columns: state-out bound, decision bound, and decision
+/// objective, resolved in one pass so the active-set predicate
+/// [`StageLayout::is_anticipated_decision_active`] is evaluated once per plant.
 ///
-/// For each anticipated plant `i` at decision stage `t`:
-/// - If `t + K_i < n_stages` (active): bounds come from `thermal_bounds(thermal_idx, t + K_i)`,
-///   the delivery-stage bounds.
-/// - Else (inactive, `t + K_i >= n_stages`): bounds are `[0, 0]`; the presolver eliminates.
+/// Each plant `i` writes three values, each at a distinct column index, so the
+/// fold is byte-identical to filling the three column families in separate
+/// passes (column order is fixed by `layout`, not by write order):
 ///
-/// The boundary case `t + K_i == n_stages` is excluded: the delivery stage
-/// would fall outside the study horizon `[0, n_stages)`, so no delivery LP is
-/// built for it. Pricing such a commitment with no enforcement would create a
-/// cost-only column with no physical delivery.
+/// - **State-out bound** at `col_anticipated_state_out_start + i`:
+///   - Active (`stage_idx + K_i < n_stages`): `[-INF, +INF]`. The `state_out`
+///     value is pinned to `decision_col[i]` by the `anticipated_state_out_def`
+///     equality row (filled by `fill_anticipated_state_out_def_entries`).
+///   - Inactive: `[0, 0]`. The presolver eliminates the column. The definition
+///     row is NOT emitted for inactive plants (lockstep invariant: zero-bound
+///     iff no def row). The `state_out` objective stays `0.0` (vec default) —
+///     the column carries no direct cost; the cost flows through the cut machinery.
 ///
-/// Objective coefficients are NOT set here; they are filled by a separate pass.
-fn fill_anticipated_decision_columns(
+/// - **Decision bound** at `col_anticipated_decision_start + i`:
+///   - Active: the delivery-stage bounds `thermal_bounds(thermal_idx, t + K_i)`.
+///   - Inactive: `[0, 0]`; the presolver eliminates. The boundary case
+///     `t + K_i == n_stages` is inactive (strict gate): the delivery stage would
+///     fall outside `[0, n_stages)`, so no delivery LP exists and pricing it
+///     would create a cost-only column with no physical delivery.
+///
+/// - **Decision objective** at `col_anticipated_decision_start + i`:
+///   - Active: the present-value cost of committing one MW at stage `t` for
+///     delivery at stage `t + K_i`,
+///
+///     ```text
+///     cost_per_mwh(thermal_idx, t + K_i)
+///         * total_hours_per_stage[t + K_i]
+///         * cumulative_discount_factors[t + K_i]
+///     ```
+///
+///     The coefficient is UNSCALED: the caller (`build_single_stage_template`)
+///     divides every non-theta objective entry by `COST_SCALE_FACTOR` afterwards.
+///   - Inactive: stays `0.0` (vec default); the `[0, 0]` decision bounds make the
+///     LP effect identical to not having the column regardless of objective value.
+///
+/// The active-plant count from this single pass discharges the lockstep
+/// invariant against `n_anticipated_state_out_def_rows`.
+///
+/// No-op when `n_anticipated == 0` (loop iterates zero times).
+pub(super) fn fill_anticipated_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
     let n_stages = ctx.resolved.bounds.n_stages();
+    let mut active_count = 0_usize;
     for local_idx in 0..ctx.n_anticipated {
-        let k_i = ctx.anticipated_lead_stages[local_idx];
-        let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
-        let col = layout.anticipated.col_anticipated_decision_start + local_idx;
+        let state_out_col = layout.anticipated.col_anticipated_state_out_start + local_idx;
+        let decision_col = layout.anticipated.col_anticipated_decision_start + local_idx;
         if layout.is_anticipated_decision_active(local_idx, stage_idx, n_stages) {
-            let delivery_stage = stage_idx + k_i;
-            let tb = ctx
-                .resolved
-                .bounds
-                .thermal_bounds(thermal_idx, delivery_stage);
-            bufs.col_lower[col] = tb.min_generation_mw;
-            bufs.col_upper[col] = tb.max_generation_mw;
-        } else {
-            // Inactive: bounds [0, 0]; the presolver will eliminate.
-            bufs.col_lower[col] = 0.0;
-            bufs.col_upper[col] = 0.0;
-        }
-        // Objective coefficient left at default 0.0; set by fill_anticipated_decision_objective.
-    }
-}
-
-/// Set NPV-discounted objective coefficients for anticipated-decision columns.
-///
-/// For each anticipated plant `i` active at decision stage `t`
-/// (i.e. `t + K_i < n_stages`), writes:
-///
-/// ```text
-/// objective[col_anticipated_decision_start + i] =
-///     cost_per_mwh(thermal_idx, delivery_stage)
-///     * total_hours_per_stage[delivery_stage]
-///     * cumulative_discount_factors[delivery_stage]
-/// ```
-///
-/// This encodes the present-value cost of committing one MW at stage `t`
-/// for delivery at stage `t + K_i`. Inactive plants leave objective at `0.0`
-/// (the vec initialisation default); their `[0, 0]` bounds make the LP effect
-/// identical to not having the column.
-///
-/// The written coefficient is UNSCALED: the caller (`build_single_stage_template`)
-/// divides every non-theta objective entry by `COST_SCALE_FACTOR` after this
-/// function returns.
-fn fill_anticipated_decision_objective(
-    ctx: &TemplateBuildCtx<'_>,
-    stage_idx: usize,
-    layout: &StageLayout,
-    bufs: &mut ColumnBufs<'_>,
-) {
-    let n_stages = ctx.resolved.bounds.n_stages();
-    for local_idx in 0..ctx.n_anticipated {
-        let k_i = ctx.anticipated_lead_stages[local_idx];
-        let col = layout.anticipated.col_anticipated_decision_start + local_idx;
-        if layout.is_anticipated_decision_active(local_idx, stage_idx, n_stages) {
-            let delivery_stage = stage_idx + k_i;
+            active_count += 1;
+            let delivery_stage = stage_idx + ctx.anticipated_lead_stages[local_idx];
             let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
             let tb = ctx
                 .resolved
                 .bounds
                 .thermal_bounds(thermal_idx, delivery_stage);
+
+            bufs.col_lower[state_out_col] = f64::NEG_INFINITY;
+            bufs.col_upper[state_out_col] = f64::INFINITY;
+
+            bufs.col_lower[decision_col] = tb.min_generation_mw;
+            bufs.col_upper[decision_col] = tb.max_generation_mw;
+
             let delivery_hours = ctx.total_hours_per_stage[delivery_stage];
             let d_factor = ctx.cumulative_discount_factors[delivery_stage];
-            bufs.objective[col] = tb.cost_per_mwh * delivery_hours * d_factor;
-        }
-        // Inactive plants: objective stays at 0.0 (the vec default).
-        // The bounds [0, 0] from fill_anticipated_decision_columns ensure the
-        // column has no LP effect regardless of objective value.
-    }
-}
-
-/// Zero out per-block thermal objective coefficients for every anticipated plant
-/// at every stage where its column exists.
-///
-/// The anticipated-fishing constraint is always active, so the per-block
-/// generation cost is zeroed unconditionally for every anticipated plant `i` at
-/// every stage. This prevents double-counting: the generation is already priced
-/// at the decision stage via `fill_anticipated_decision_objective`; the LP must
-/// consume it at zero marginal cost.
-///
-/// Must be called AFTER `fill_thermal_columns`, which writes the standard
-/// non-zero cost for all thermals at all stages. This function overwrites that
-/// cost for every anticipated thermal at every stage.
-///
-/// The assignment `= 0.0` (not `*= 0.0`) is deliberate: a clean write that
-/// survives floating-point anomalies. Dividing zero by `COST_SCALE_FACTOR`
-/// (the post-loop in `build_single_stage_template`) still gives zero.
-pub(super) fn zero_anticipated_delivery_thermal_cost(
-    ctx: &TemplateBuildCtx<'_>,
-    layout: &StageLayout,
-    bufs: &mut ColumnBufs<'_>,
-) {
-    let grid = layout.block_grid();
-    for local_idx in 0..ctx.n_anticipated {
-        let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
-        for blk in 0..layout.n_blks {
-            let col = grid.flat(layout.col_thermal_start(), thermal_idx, blk);
-            bufs.objective[col] = 0.0;
+            bufs.objective[decision_col] = tb.cost_per_mwh * delivery_hours * d_factor;
+        } else {
+            // Inactive: both columns pinned to [0, 0] for presolve elimination;
+            // the decision objective stays at the 0.0 vec default.
+            bufs.col_lower[state_out_col] = 0.0;
+            bufs.col_upper[state_out_col] = 0.0;
+            bufs.col_lower[decision_col] = 0.0;
+            bufs.col_upper[decision_col] = 0.0;
         }
     }
+    debug_assert_eq!(
+        active_count, layout.anticipated.n_anticipated_state_out_def_rows,
+        "active state_out column count must match def-row count at stage {stage_idx}"
+    );
 }
 
 /// Line columns per line per block (forward and reverse).
@@ -1153,6 +1089,269 @@ mod diversion_bound_tests {
                  {DECLARATION_MAX_FLOW_M3S} when no override tightens it"
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::float_cmp,
+    clippy::similar_names
+)]
+mod anticipated_objective_tests {
+    use std::collections::{BTreeMap, HashMap};
+
+    use cobre_core::entities::thermal::AnticipatedConfig;
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, CascadeTopology, ContractStageBounds, EntityId,
+        HydroStageBounds, LineStageBounds, PumpingStageBounds, ResolvedBounds,
+        ResolvedExchangeFactors, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
+        ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, Thermal, ThermalStageBounds,
+    };
+    use cobre_stochastic::par::precompute::PrecomputedPar;
+
+    use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
+    use crate::resolved_parameters::ResolvedParameters;
+
+    use super::super::layout::ResolvedTables;
+    use super::super::test_support::{state_layout_for, two_block_stage};
+    use super::{StageLayout, TemplateBuildCtx, fill_stage_columns};
+
+    const N_STAGES: usize = 6;
+    const K_MAX: usize = 1;
+    const DELIVERY_COST_PER_MWH: f64 = 30.0;
+    const STD_COST_PER_MWH: f64 = 40.0;
+    const MAX_GEN_MW: f64 = 100.0;
+    const STAGE_IDX: usize = 0;
+    const DELIVERY_STAGE: usize = STAGE_IDX + 1; // K_0 = 1.
+
+    /// Owns the borrow targets for a one-anticipated-thermal `TemplateBuildCtx`.
+    ///
+    /// Thermal 0 is anticipated (`K=1`), thermal 1 is a standard thermal. Both
+    /// carry a non-zero resolved `cost_per_mwh` so the R3 skip and the R1 NPV
+    /// objective are both observable in the assertions.
+    struct AntObjFixtures {
+        par_lp: PrecomputedPar,
+        thermals: Vec<Thermal>,
+        cascade: CascadeTopology,
+        bounds: ResolvedBounds,
+        penalties: ResolvedPenalties,
+        production_models: ProductionModelSet,
+        evaporation_models: EvaporationModelSet,
+        resolved_generic_bounds: ResolvedGenericConstraintBounds,
+        resolved_load_factors: ResolvedLoadFactors,
+        resolved_exchange_factors: ResolvedExchangeFactors,
+        resolved_ncs_bounds: ResolvedNcsBounds,
+        resolved_ncs_factors: ResolvedNcsFactors,
+        resolved_parameters: ResolvedParameters,
+    }
+
+    impl AntObjFixtures {
+        fn new() -> Self {
+            let thermals = vec![
+                Thermal {
+                    id: EntityId(1),
+                    name: "T_ant".to_string(),
+                    bus_id: EntityId(1),
+                    min_generation_mw: 0.0,
+                    max_generation_mw: MAX_GEN_MW,
+                    cost_per_mwh: DELIVERY_COST_PER_MWH,
+                    // lead_stages == K_MAX; the entity field is u32 while K_MAX
+                    // is the usize layout dimension, so write the value directly.
+                    anticipated_config: Some(AnticipatedConfig { lead_stages: 1 }),
+                    entry_stage_id: None,
+                    exit_stage_id: None,
+                },
+                Thermal {
+                    id: EntityId(2),
+                    name: "T_std".to_string(),
+                    bus_id: EntityId(1),
+                    min_generation_mw: 0.0,
+                    max_generation_mw: MAX_GEN_MW,
+                    cost_per_mwh: STD_COST_PER_MWH,
+                    anticipated_config: None,
+                    entry_stage_id: None,
+                    exit_stage_id: None,
+                },
+            ];
+            let mut bounds = bounds_two_thermals();
+            for stage in 0..N_STAGES {
+                let ant = bounds.thermal_bounds_mut(0, stage);
+                ant.cost_per_mwh = DELIVERY_COST_PER_MWH;
+                ant.max_generation_mw = MAX_GEN_MW;
+                let std = bounds.thermal_bounds_mut(1, stage);
+                std.cost_per_mwh = STD_COST_PER_MWH;
+                std.max_generation_mw = MAX_GEN_MW;
+            }
+            Self {
+                par_lp: PrecomputedPar::default(),
+                thermals,
+                cascade: CascadeTopology::build(&[]),
+                bounds,
+                penalties: ResolvedPenalties::empty(),
+                production_models: ProductionModelSet::new(vec![], 0, 1),
+                evaporation_models: EvaporationModelSet::new(vec![]),
+                resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
+                resolved_load_factors: ResolvedLoadFactors::empty(),
+                resolved_exchange_factors: ResolvedExchangeFactors::empty(),
+                resolved_ncs_bounds: ResolvedNcsBounds::empty(),
+                resolved_ncs_factors: ResolvedNcsFactors::empty(),
+                resolved_parameters: ResolvedParameters {
+                    per_param: vec![],
+                    id_to_slot: vec![],
+                },
+            }
+        }
+
+        fn make_ctx(&self) -> TemplateBuildCtx<'_> {
+            TemplateBuildCtx {
+                hydros: &[],
+                thermals: &self.thermals,
+                lines: &[],
+                buses: &[],
+                load_models: &[],
+                cascade: &self.cascade,
+                resolved: ResolvedTables {
+                    bounds: &self.bounds,
+                    penalties: &self.penalties,
+                    resolved_generic_bounds: &self.resolved_generic_bounds,
+                    resolved_load_factors: &self.resolved_load_factors,
+                    resolved_exchange_factors: &self.resolved_exchange_factors,
+                    resolved_ncs_bounds: &self.resolved_ncs_bounds,
+                    resolved_ncs_factors: &self.resolved_ncs_factors,
+                    resolved_parameters: &self.resolved_parameters,
+                },
+                hydro_pos: BTreeMap::new(),
+                thermal_pos: BTreeMap::new(),
+                line_pos: BTreeMap::new(),
+                bus_pos: BTreeMap::new(),
+                par_lp: &self.par_lp,
+                production_models: &self.production_models,
+                evaporation_models: &self.evaporation_models,
+                generic_constraints: &[],
+                non_controllable_sources: &[],
+                pumping_stations: &[],
+                pumping_pos: BTreeMap::new(),
+                n_pumping: 0,
+                diversion_upstream: HashMap::new(),
+                n_hydros: 0,
+                n_thermals: 2,
+                n_lines: 0,
+                n_buses: 0,
+                max_par_order: 0,
+                n_anticipated: 1,
+                k_max: K_MAX,
+                anticipated_lead_stages: vec![K_MAX],
+                anticipated_thermal_indices: vec![0],
+                has_penalty: false,
+                cumulative_discount_factors: vec![1.0, 0.9, 0.81, 0.729, 0.6561, 0.59049],
+                total_hours_per_stage: vec![744.0; N_STAGES],
+            }
+        }
+    }
+
+    /// `ResolvedBounds` table for two thermals across `N_STAGES` stages.
+    fn bounds_two_thermals() -> ResolvedBounds {
+        ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 2,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: K_MAX,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 0.0,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 0.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    max_diversion_m3s: None,
+                    filling_inflow_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        )
+    }
+
+    /// After `fill_stage_columns`, the anticipated thermal's per-block delivery
+    /// objective is `0.0` (R3: `fill_thermal_columns` skips the objective write),
+    /// while the standard thermal is priced normally; and the anticipated
+    /// decision column carries the NPV-discounted commitment cost (R1: the merged
+    /// `fill_anticipated_columns` writes `cost * hours * cumulative_discount`).
+    #[test]
+    fn anticipated_objective_skip_and_npv_after_fill_stage_columns() {
+        let fixtures = AntObjFixtures::new();
+        let ctx = fixtures.make_ctx();
+        let stage = two_block_stage(STAGE_IDX, [372.0, 372.0]);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, STAGE_IDX);
+
+        let (_col_lower, col_upper, objective) =
+            fill_stage_columns(&ctx, &stage, STAGE_IDX, &layout);
+
+        let n_blks = layout.n_blks;
+        // R3: anticipated thermal (t_idx 0) objective stays at the 0.0 default;
+        // its per-block bounds are still written by fill_thermal_columns.
+        for blk in 0..n_blks {
+            let col = layout.col_thermal_start() + blk;
+            assert_eq!(
+                objective[col], 0.0,
+                "anticipated thermal objective must be 0.0 at col {col}",
+            );
+            assert_eq!(
+                col_upper[col], MAX_GEN_MW,
+                "anticipated thermal per-block bounds must still be set at col {col}",
+            );
+        }
+        // R3 control: standard thermal (t_idx 1) is priced as cost * block_hours.
+        for blk in 0..n_blks {
+            let col = layout.col_thermal_start() + n_blks + blk;
+            let expected = STD_COST_PER_MWH * stage.blocks[blk].duration_hours;
+            assert_eq!(
+                objective[col], expected,
+                "standard thermal objective must be priced at col {col}",
+            );
+        }
+        // R1: anticipated decision column carries the NPV commitment cost
+        // cost_per_mwh(delivery) * total_hours[delivery] * cumulative_discount[delivery].
+        let decision_col = layout.anticipated.col_anticipated_decision_start;
+        let expected_npv = DELIVERY_COST_PER_MWH
+            * ctx.total_hours_per_stage[DELIVERY_STAGE]
+            * ctx.cumulative_discount_factors[DELIVERY_STAGE];
+        assert_eq!(
+            objective[decision_col], expected_npv,
+            "anticipated decision objective must equal the NPV commitment cost",
+        );
+        // The active plant's state-out column is open (active), confirming the
+        // merged fill ran the active branch.
+        let state_out_col = layout.anticipated.col_anticipated_state_out_start;
+        assert_eq!(col_upper[state_out_col], f64::INFINITY);
     }
 }
 

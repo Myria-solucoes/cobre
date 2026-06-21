@@ -413,9 +413,6 @@ pub(crate) struct StageLayout<'a> {
     pub(crate) post_equipment_row_start: usize,
 
     // ── Role-(b) anticipated identity maps (own fields) ──────────────────────
-    /// Per-plant `lead_stages` (`K_i`) for the anticipated thermals, indexed by
-    /// anticipated-local position. Drives `is_anticipated_decision_active`.
-    pub(crate) anticipated_lead_stages: Vec<usize>,
     /// Reverse map: global thermal position → anticipated-local index. Built once
     /// for O(1) resolution in the generic-constraint `AnticipatedDecision` arm.
     pub(crate) anticipated_local_by_sys_pos: HashMap<usize, usize>,
@@ -494,28 +491,6 @@ fn build_evap_indices(
             evap_row: row_start + i,
         })
         .collect()
-}
-
-/// Whether anticipated plant `local_idx` is active (emits a decision column and
-/// a state-out-def row) at `stage_idx`.
-///
-/// Active iff the commitment delivered `K_i` stages later still falls within the
-/// horizon: `stage_idx + K_i < n_stages` (strict gate). This is the single-owner
-/// predicate shared by the per-stage column/row counts in [`StageLayout::new`],
-/// the column bound fills, and the generic-constraint row fill — keeping the
-/// active set defined in exactly one place so the three sites cannot disagree.
-fn is_anticipated_decision_active(
-    anticipated_lead_stages: &[usize],
-    local_idx: usize,
-    stage_idx: usize,
-    n_stages: usize,
-) -> bool {
-    debug_assert!(
-        local_idx < anticipated_lead_stages.len(),
-        "local_idx {local_idx} out of bounds (n_anticipated = {})",
-        anticipated_lead_stages.len(),
-    );
-    stage_idx.saturating_add(anticipated_lead_stages[local_idx]) < n_stages
 }
 
 // ── Private helper functions ───────────────────────────────────────────────────
@@ -941,18 +916,13 @@ impl<'a> StageLayout<'a> {
         let row_anticipated_fishing_start = row_min_generation_start + n_op_rows;
 
         // Anticipated-state-out definition rows: one per ACTIVE plant. Active is
-        // the single-owner gate `Self::is_anticipated_decision_active`; inactive
-        // plants emit no row. Placed immediately after fishing rows, before
-        // generic rows.
+        // the single-owner gate `StateLayout::is_anticipated_decision_active`;
+        // inactive plants emit no row. Placed immediately after fishing rows,
+        // before generic rows.
         let n_stages = ctx.resolved.bounds.n_stages();
         let n_anticipated_state_out_def_rows = (0..ctx.n_anticipated)
             .filter(|&local_idx| {
-                is_anticipated_decision_active(
-                    &ctx.anticipated_lead_stages,
-                    local_idx,
-                    stage_idx,
-                    n_stages,
-                )
+                state.is_anticipated_decision_active(local_idx, stage_idx, n_stages)
             })
             .count();
         let row_anticipated_state_out_def_start =
@@ -1067,7 +1037,6 @@ impl<'a> StageLayout<'a> {
             min_turbine_rows: oper.min_turbine_rows,
             min_generation_rows: oper.min_generation_rows,
             post_equipment_row_start,
-            anticipated_lead_stages: ctx.anticipated_lead_stages.clone(),
             anticipated_local_by_sys_pos,
         }
     }
@@ -1104,10 +1073,11 @@ impl<'a> StageLayout<'a> {
 
     /// Whether anticipated plant `local_idx` is active at `stage_idx`.
     ///
-    /// Single-owner predicate: active iff the commitment delivered `K_i` stages
-    /// later still falls within the horizon (`stage_idx + K_i < n_stages`). The
-    /// per-stage column/row counts in [`Self::new`] and the column/row fills all
-    /// resolve activity through this method, so the active set is defined once.
+    /// Builder-side accessor that delegates to the cross-module single owner of
+    /// the strict horizon gate, [`StateLayout::is_anticipated_decision_active`].
+    /// The per-stage column/row counts in [`Self::new`] and the column/row fills
+    /// resolve activity through this method, which holds the role-(a) handle
+    /// (`self.state`) the leaf owner reads — so the active set is defined once.
     #[inline]
     #[must_use]
     pub(crate) fn is_anticipated_decision_active(
@@ -1116,12 +1086,8 @@ impl<'a> StageLayout<'a> {
         stage_idx: usize,
         n_stages: usize,
     ) -> bool {
-        is_anticipated_decision_active(
-            &self.anticipated_lead_stages,
-            local_idx,
-            stage_idx,
-            n_stages,
-        )
+        self.state
+            .is_anticipated_decision_active(local_idx, stage_idx, n_stages)
     }
 
     /// Turbine-flow column for hydro `h_idx`, block `blk`.

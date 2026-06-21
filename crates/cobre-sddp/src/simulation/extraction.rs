@@ -120,12 +120,13 @@ impl ThermalReverseLookup {
 /// Returns `Some(v)` where `v = primal[anticipated_decision.start + local_idx]` when:
 /// - thermal `thermal_local` is anticipated (i.e., `lookup.thermal_is_anticipated[thermal_local]`
 ///   is `Some(local_idx)`), AND
-/// - the decision is active at the current stage: `spec.stage_index + K_i < spec.n_stages`.
+/// - the decision is active at the current stage per the single-owner predicate
+///   [`StateLayout::is_anticipated_decision_active`].
 ///
 /// Returns `None` silently under any of:
 /// - the thermal is not anticipated,
-/// - `spec.stage_index + K_i >= spec.n_stages` (decision absent from LP — the
-///   strict-predicate boundary),
+/// - [`StateLayout::is_anticipated_decision_active`] is `false` (the decision is
+///   absent from the LP at this stage),
 /// - the plant is outside its entry/exit window (the LP builder sets `[0,0]` bounds for
 ///   those columns; the activation predicate is the canonical test — do not read-then-check).
 #[inline]
@@ -136,15 +137,18 @@ fn compute_anticipated_decision_mw(
     thermal_local: usize,
 ) -> Option<f64> {
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
-    // `anticipated_lead_stages` is stage-invariant role-(a) (read from the state
-    // layout); `anticipated_decision` is the control-region priced column (role-(b),
-    // read from the geometry descriptor).
-    let k_i = spec.state.anticipated_lead_stages[local_idx];
-    // Canonical predicate: matches the LP-builder horizon gates
-    // (`stage_idx + K_i < n_stages`) in the `lp::builder` column/row fill paths.
-    if spec.stage_index.saturating_add(k_i) >= spec.n_stages {
+    // Gate on the cross-module single owner of the strict horizon predicate,
+    // [`StateLayout::is_anticipated_decision_active`], so the simulation read
+    // cannot drift off the LP-build geometry. Inactive ⇒ the decision column is
+    // absent from the LP, so return `None` (the early-`None` contract).
+    if !spec
+        .state
+        .is_anticipated_decision_active(local_idx, spec.stage_index, spec.n_stages)
+    {
         return None;
     }
+    // `anticipated_decision` is the control-region priced column (role-(b), read
+    // from the geometry descriptor).
     let col = spec.indexer.anticipated_decision.start + local_idx;
     debug_assert!(
         col < view.primal.len(),

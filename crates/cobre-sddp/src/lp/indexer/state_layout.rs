@@ -456,6 +456,37 @@ impl StateLayout {
         }
     }
 
+    /// Whether anticipated plant `local_idx` emits a decision column and an
+    /// `anticipated_state_out_def` row at `stage_idx`.
+    ///
+    /// The single cross-module owner of the strict horizon gate: active iff the
+    /// commitment delivered `K_i` stages later still falls **inside** the horizon,
+    /// `stage_idx + K_i < n_stages`. The `<` is strict and load-bearing — a `<=`
+    /// gate would price a commitment delivered at `stage_idx + K_i == n_stages`,
+    /// whose delivery stage falls outside `[0, n_stages)` and has no delivery LP.
+    /// The LP-builder column/row counts (via the `lp::builder` `StageLayout`
+    /// method that delegates here) and the simulation read
+    /// (`compute_anticipated_decision_mw`) both resolve activity through this one
+    /// method, so the active set is defined in exactly one place.
+    ///
+    /// `local_idx` is the anticipated-local plant index (`0..n_anticipated`),
+    /// reading `self.anticipated_lead_stages[local_idx]`.
+    #[inline]
+    #[must_use]
+    pub fn is_anticipated_decision_active(
+        &self,
+        local_idx: usize,
+        stage_idx: usize,
+        n_stages: usize,
+    ) -> bool {
+        debug_assert!(
+            local_idx < self.anticipated_lead_stages.len(),
+            "local_idx {local_idx} out of bounds (n_anticipated = {})",
+            self.anticipated_lead_stages.len(),
+        );
+        stage_idx.saturating_add(self.anticipated_lead_stages[local_idx]) < n_stages
+    }
+
     /// Compute and store the nonzero state index mask from per-hydro
     /// lag-state-slot counts and per-plant anticipated lead-stage counts.
     ///
@@ -641,6 +672,34 @@ mod tests {
         for j in 0..idx.n_state {
             assert_eq!(idx.lp_column_for_state(j), j);
         }
+    }
+
+    // ── is_anticipated_decision_active tests ───────────────────────────────────
+
+    /// The strict horizon gate is active iff `stage_idx + K_i < n_stages`:
+    /// active strictly inside the horizon, inactive at the `==` boundary and
+    /// beyond. The `==` boundary must be inactive (a `<=` gate would price a
+    /// commitment whose delivery stage falls outside `[0, n_stages)`).
+    #[test]
+    fn is_anticipated_decision_active_strict_horizon_gate() {
+        // Two plants: K_0 = 1, K_1 = 2; k_max = 2; n_stages = 5.
+        let idx = finalized(0, 0, 2, 2, vec![1, 2]);
+        let n_stages = 5;
+
+        // Plant 0 (K=1): active while stage_idx + 1 < 5, i.e. stage_idx <= 3.
+        assert!(idx.is_anticipated_decision_active(0, 0, n_stages));
+        assert!(idx.is_anticipated_decision_active(0, 3, n_stages));
+        // == boundary (stage_idx + K_i == n_stages): inactive.
+        assert!(!idx.is_anticipated_decision_active(0, 4, n_stages));
+        // Beyond the boundary: inactive.
+        assert!(!idx.is_anticipated_decision_active(0, 5, n_stages));
+
+        // Plant 1 (K=2): active while stage_idx + 2 < 5, i.e. stage_idx <= 2.
+        assert!(idx.is_anticipated_decision_active(1, 2, n_stages));
+        // == boundary: inactive.
+        assert!(!idx.is_anticipated_decision_active(1, 3, n_stages));
+        // Beyond: inactive.
+        assert!(!idx.is_anticipated_decision_active(1, 4, n_stages));
     }
 
     // ── state_to_lp_column tests ──────────────────────────────────────────────

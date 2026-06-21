@@ -1466,9 +1466,7 @@ mod zero_cost_tests {
     use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
     use crate::resolved_parameters::ResolvedParameters;
 
-    use super::super::columns::{
-        ColumnBufs, fill_anticipated_state_out_columns, zero_anticipated_delivery_thermal_cost,
-    };
+    use super::super::columns::{ColumnBufs, fill_anticipated_columns, fill_thermal_columns};
     use super::super::layout::{ResolvedTables, StageLayout, TemplateBuildCtx};
     use super::super::rows::{fill_anticipated_fishing_rows, fill_anticipated_state_out_def_rows};
     use super::super::test_support::{state_layout_for, two_block_stage};
@@ -1494,8 +1492,8 @@ mod zero_cost_tests {
     }
 
     impl AntFixtures {
-        /// Build a minimal `ResolvedBounds` with zero entities and the given
-        /// `n_stages` and `k_max`.
+        /// Build a minimal `ResolvedBounds` with the given thermal count,
+        /// `n_stages`, and `k_max` (all other entity counts zero).
         ///
         /// `n_stages` must exceed the queried `stage_idx` so the anticipated
         /// layout the fixture builds places every plant inside the study horizon
@@ -1503,11 +1501,18 @@ mod zero_cost_tests {
         /// be large enough that every delivery stage `stage_idx + K_i` the test
         /// accesses falls within `[0, n_stages + k_max)` (callers whose
         /// deliveries all fall strictly inside `[0, n_stages)` pass `0`).
-        fn bounds_with_n_stages(n_stages: usize, k_max: usize) -> ResolvedBounds {
+        /// `n_thermals` sizes the thermal slot axis: tests that read or mutate
+        /// `thermal_bounds(t_idx, …)` for an active anticipated plant must size it
+        /// to cover every `t_idx` they touch; pure state-out/row tests pass `0`.
+        fn bounds_with_n_stages(
+            n_stages: usize,
+            k_max: usize,
+            n_thermals: usize,
+        ) -> ResolvedBounds {
             ResolvedBounds::new(
                 &BoundsCountsSpec {
                     n_hydros: 0,
-                    n_thermals: 0,
+                    n_thermals,
                     n_lines: 0,
                     n_pumping: 0,
                     n_contracts: 0,
@@ -1618,62 +1623,119 @@ mod zero_cost_tests {
                 anticipated_lead_stages,
                 anticipated_thermal_indices,
                 has_penalty: false,
-                cumulative_discount_factors: vec![1.0],
-                total_hours_per_stage: vec![744.0],
+                // Sized to cover every active plant's delivery stage
+                // (`stage_idx + K_i < n_stages`); `fill_anticipated_columns`
+                // indexes these by delivery stage when pricing the decision column.
+                cumulative_discount_factors: vec![1.0; self.bounds.n_stages() + k_max],
+                total_hours_per_stage: vec![744.0; self.bounds.n_stages() + k_max],
             }
         }
     }
 
-    /// Zeroes cost for every anticipated plant (the fishing constraint is
-    /// always active, one plant per iteration).
-    /// At stage 2 with `K_i=[1, 5]` and `n_anticipated=2`: both plants zeroed.
+    /// `fill_thermal_columns` skips the per-block objective for anticipated
+    /// plants (leaving the `0.0` vec default) while still writing it for
+    /// non-anticipated thermals — the order-independent replacement for the
+    /// former write-then-zero pass. The anticipated plant's per-block **bounds**
+    /// are still written.
+    ///
+    /// Fixture: two thermals, thermal 0 anticipated (`K=1`), thermal 1 standard,
+    /// both with non-zero resolved `cost_per_mwh` so the skip is observable
+    /// (a regression that priced anticipated plants would leave a non-zero
+    /// objective on thermal 0).
     #[test]
-    fn zero_anticipated_delivery_thermal_cost_zeroes_all_plants() {
+    fn fill_thermal_columns_skips_objective_for_anticipated_plants() {
+        use cobre_core::entities::thermal::AnticipatedConfig;
+        use cobre_core::{EntityId, Thermal};
+
+        const ANT_COST: f64 = 30.0;
+        const STD_COST: f64 = 40.0;
+
+        let thermals = vec![
+            Thermal {
+                id: EntityId(1),
+                name: "T_ant".to_string(),
+                bus_id: EntityId(1),
+                min_generation_mw: 0.0,
+                max_generation_mw: 100.0,
+                cost_per_mwh: ANT_COST,
+                anticipated_config: Some(AnticipatedConfig { lead_stages: 1 }),
+                entry_stage_id: None,
+                exit_stage_id: None,
+            },
+            Thermal {
+                id: EntityId(2),
+                name: "T_std".to_string(),
+                bus_id: EntityId(1),
+                min_generation_mw: 0.0,
+                max_generation_mw: 100.0,
+                cost_per_mwh: STD_COST,
+                anticipated_config: None,
+                entry_stage_id: None,
+                exit_stage_id: None,
+            },
+        ];
+
         let mut fixtures = AntFixtures::new();
-        // Override bounds so every plant's delivery stage `stage_idx + K_i`
-        // falls inside the horizon `[0, n_stages)` when the layout is built.
-        fixtures.bounds = AntFixtures::bounds_with_n_stages(10, 0);
-        let ctx = fixtures.make_ctx(
-            2,          // n_anticipated
-            5,          // k_max (max of [1, 5])
-            vec![1, 5], // anticipated_lead_stages: K_0 = 1, K_1 = 5
-            vec![0, 1], // anticipated_thermal_indices: positions in ctx.thermals
-            2,          // n_thermals
+        // 10 stages, k_max=1; seed each thermal's resolved per-stage cost so the
+        // objective write (when not skipped) is non-zero.
+        fixtures.bounds = AntFixtures::bounds_with_n_stages(10, 1, 2);
+        for stage in 0..10 {
+            fixtures.bounds.thermal_bounds_mut(0, stage).cost_per_mwh = ANT_COST;
+            fixtures
+                .bounds
+                .thermal_bounds_mut(0, stage)
+                .max_generation_mw = 100.0;
+            fixtures.bounds.thermal_bounds_mut(1, stage).cost_per_mwh = STD_COST;
+            fixtures
+                .bounds
+                .thermal_bounds_mut(1, stage)
+                .max_generation_mw = 100.0;
+        }
+        let mut ctx = fixtures.make_ctx(
+            1,       // n_anticipated
+            1,       // k_max
+            vec![1], // anticipated_lead_stages: K_0 = 1
+            vec![0], // anticipated_thermal_indices: thermal 0 is anticipated
+            2,       // n_thermals
         );
+        ctx.thermals = &thermals;
+
         let stage = two_block_stage(2, [372.0, 372.0]);
         let state = state_layout_for(&ctx);
         let layout = StageLayout::new(&ctx, &state, &stage, 2);
 
-        // Allocate objective buffer at full column width, pre-filled with a
-        // sentinel so any un-zeroed entry is visible in the assertions.
-        let mut objective = vec![42.0_f64; layout.num_cols];
+        let mut objective = vec![0.0_f64; layout.num_cols];
         let mut col_lower = vec![0.0_f64; layout.num_cols];
-        let mut col_upper = vec![f64::INFINITY; layout.num_cols];
+        let mut col_upper = vec![0.0_f64; layout.num_cols];
         let mut bufs = ColumnBufs {
             col_lower: &mut col_lower,
             col_upper: &mut col_upper,
             objective: &mut objective,
         };
 
-        zero_anticipated_delivery_thermal_cost(&ctx, &layout, &mut bufs);
+        fill_thermal_columns(&ctx, &stage, 2, &layout, &mut bufs);
 
         let n_blks = layout.n_blks;
-        // Plant 0 (K_0=1): zeroed under always-active predicate.
-        let thermal_idx_0 = ctx.anticipated_thermal_indices[0];
+        // Anticipated thermal 0: objective skipped (stays 0.0), bounds still set.
+        // Thermal 0's block columns start at col_thermal_start (t_idx 0 offset).
         for blk in 0..n_blks {
-            let col = layout.col_thermal_start() + thermal_idx_0 * n_blks + blk;
+            let col = layout.col_thermal_start() + blk;
             assert_eq!(
                 bufs.objective[col], 0.0,
-                "plant 0 must be zeroed at col {col}",
+                "anticipated thermal 0 objective must stay 0.0 at col {col}",
+            );
+            assert_eq!(
+                bufs.col_upper[col], 100.0,
+                "anticipated thermal 0 bounds must still be written at col {col}",
             );
         }
-        // Plant 1 (K_1=5): also zeroed under always-active predicate.
-        let thermal_idx_1 = ctx.anticipated_thermal_indices[1];
+        // Standard thermal 1: objective priced as cost * block_hours.
         for blk in 0..n_blks {
-            let col = layout.col_thermal_start() + thermal_idx_1 * n_blks + blk;
+            let col = layout.col_thermal_start() + n_blks + blk;
+            let expected = STD_COST * stage.blocks[blk].duration_hours;
             assert_eq!(
-                bufs.objective[col], 0.0,
-                "plant 1 must be zeroed at col {col}",
+                bufs.objective[col], expected,
+                "standard thermal 1 objective must be priced at col {col}",
             );
         }
     }
@@ -1684,7 +1746,7 @@ mod zero_cost_tests {
     #[test]
     fn fishing_rows_fill_all_plants() {
         let mut fixtures = AntFixtures::new();
-        fixtures.bounds = AntFixtures::bounds_with_n_stages(10, 0);
+        fixtures.bounds = AntFixtures::bounds_with_n_stages(10, 0, 0);
         let ctx = fixtures.make_ctx(2, 5, vec![1, 5], vec![0, 1], 2);
         let stage = two_block_stage(2, [372.0, 372.0]);
         let state = state_layout_for(&ctx);
@@ -1726,7 +1788,7 @@ mod zero_cost_tests {
     #[test]
     fn fishing_rows_always_active_stage_zero() {
         let mut fixtures = AntFixtures::new();
-        fixtures.bounds = AntFixtures::bounds_with_n_stages(10, 0);
+        fixtures.bounds = AntFixtures::bounds_with_n_stages(10, 0, 0);
         let ctx = fixtures.make_ctx(2, 5, vec![1, 5], vec![0, 1], 2);
         let stage = two_block_stage(0, [372.0, 372.0]);
         let state = state_layout_for(&ctx);
@@ -1797,19 +1859,22 @@ mod zero_cost_tests {
     ///
     /// `ResolvedBounds` is constructed with the correct `n_stages` so that
     /// `ctx.resolved.bounds.n_stages()` returns 6, which is required by
-    /// `fill_anticipated_state_out_columns`, `fill_anticipated_state_out_def_rows`,
+    /// `fill_anticipated_columns`, `fill_anticipated_state_out_def_rows`,
     /// and `fill_anticipated_state_out_def_entries`.
     fn build_anticipated_ctx_n_stages_6() -> (AntFixtures, Stage) {
         let mut fixtures = AntFixtures::new();
-        // Override bounds with a 6-stage table; k_max = 3 matches the
-        // anticipated config the state-out tests pass to `make_ctx`.
-        fixtures.bounds = AntFixtures::bounds_with_n_stages(6, 3);
+        // Override bounds with a 6-stage, 2-thermal table; k_max = 3 matches the
+        // anticipated config the state-out tests pass to `make_ctx`. The two
+        // thermal slots back the active anticipated plants' delivery-stage bound
+        // reads in `fill_anticipated_columns`; the row/def tests sharing this
+        // fixture leave them unread.
+        fixtures.bounds = AntFixtures::bounds_with_n_stages(6, 3, 2);
         let stage = two_block_stage(0, [372.0, 372.0]);
         (fixtures, stage)
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Tests for fill_anticipated_state_out_columns
+    // Tests for the anticipated state-out columns (fill_anticipated_columns)
     // ─────────────────────────────────────────────────────────────────────────
 
     /// Active plants (`stage_idx + K_i < n_stages`) get `[-INF, +INF]` bounds;
@@ -1819,7 +1884,7 @@ mod zero_cost_tests {
     /// Stage 0: both plants active  (0+2=2 < 6, 0+3=3 < 6) → `[-INF, +INF]`.
     /// Stage 5: both plants inactive (5+2=7 >= 6, 5+3=8 >= 6) → `[0, 0]`.
     #[test]
-    fn test_fill_anticipated_state_out_columns_active_and_inactive() {
+    fn test_fill_anticipated_columns_state_out_active_and_inactive() {
         let (fixtures, _) = build_anticipated_ctx_n_stages_6();
         let ctx = fixtures.make_ctx(
             2,          // n_anticipated
@@ -1841,7 +1906,7 @@ mod zero_cost_tests {
             col_upper: &mut col_upper,
             objective: &mut objective,
         };
-        fill_anticipated_state_out_columns(&ctx, 0, &layout0, &mut bufs);
+        fill_anticipated_columns(&ctx, 0, &layout0, &mut bufs);
         for i in 0..2 {
             let col = layout0.anticipated.col_anticipated_state_out_start + i;
             assert_eq!(
@@ -1870,7 +1935,7 @@ mod zero_cost_tests {
             col_upper: &mut col_upper5,
             objective: &mut objective5,
         };
-        fill_anticipated_state_out_columns(&ctx, 5, &layout5, &mut bufs5);
+        fill_anticipated_columns(&ctx, 5, &layout5, &mut bufs5);
         assert_eq!(
             layout5.anticipated.n_anticipated_state_out_def_rows, 0,
             "stage 5 inactive: expected no def rows, got {}",

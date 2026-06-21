@@ -47,7 +47,6 @@ pub fn build_delta_cut_row_batch_into(
     let n_state = state.n_state;
     let theta_col = state.theta;
     let mask = &state.nonzero_state_indices;
-    let is_sparse = !mask.is_empty();
 
     // Count delta cuts with a lightweight scan to avoid double-iteration
     // overhead in the common case of zero delta cuts (early return).
@@ -60,13 +59,11 @@ pub fn build_delta_cut_row_batch_into(
         return;
     }
 
-    // Sparse path: NNZ = mask.len() + 1 (nonzero state entries + theta).
-    // Dense path: NNZ = n_state + 1 (all state entries + theta).
-    let nnz_per_cut = if is_sparse {
-        mask.len() + 1
-    } else {
-        n_state + 1
-    };
+    // NNZ per cut = nonzero state entries + theta. The mask is always finalized
+    // (storage-only ⇒ full `[0, n_state)` range; pure-thermal ⇒ empty with
+    // `n_state == 0`), so this matches the sparse-only authority
+    // `cut::row::build_cut_row_batch_into`.
+    let nnz_per_cut = mask.len() + 1;
     let total_nnz = num_cuts * nnz_per_cut;
 
     let mut nz_offset = 0;
@@ -83,39 +80,19 @@ pub fn build_delta_cut_row_batch_into(
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         batch.row_starts.push(nz_offset as i32);
 
-        // Unified state coefficient loop: sparse iterates over the nonzero
-        // mask, dense iterates over all state indices. Both yield (col_index,
-        // coefficient) pairs and share the same push logic.
+        // Single mask-driven state coefficient loop. The mask carries the
+        // nonzero state indices in ascending order; padding slots are excluded
+        // by `set_nonzero_mask` (it emits only `slot < k_i`), so this loop
+        // never visits a padding slot.
         //
         // state_to_lp_column remaps outgoing-state indices to LP columns.
         // For storage (j < N) the mapping is identity. For lag dimensions
         // the outgoing state after shift_lag_state stores z_inflow at lag 0
         // and shifted incoming lags at lag 1+, so the cut must reference the
         // corresponding LP columns (z_inflow and incoming lag l−1).
-        if is_sparse {
-            for &j in mask {
-                let lp_col = state.state_to_lp_column(j);
-                push_scaled_coefficient(batch, lp_col, coefficients[j], col_scale);
-            }
-        } else {
-            for (j, &c) in coefficients.iter().enumerate() {
-                let lp_col = state.state_to_lp_column(j);
-                // Padding-slot invariant: when state_to_lp_column returns j unchanged
-                // and j falls inside the anticipated-state block, the slot is a padding
-                // slot (slot >= k_p for its plant). The INVARIANT comment in
-                // state_to_lp_column explains the 5-step chain that guarantees the
-                // corresponding cut coefficient is 0.0. Assert this in debug builds.
-                debug_assert!(
-                    !(lp_col == j
-                        && state.n_anticipated > 0
-                        && j >= state.anticipated_state.start
-                        && j < state.anticipated_state.start + state.n_anticipated * state.k_max)
-                        || c == 0.0,
-                    "padding-slot j={j} has non-zero cut coefficient {c}; \
-                     shift_anticipated_state must have seeded a non-zero into a padding slot"
-                );
-                push_scaled_coefficient(batch, lp_col, c, col_scale);
-            }
+        for &j in mask {
+            let lp_col = state.state_to_lp_column(j);
+            push_scaled_coefficient(batch, lp_col, coefficients[j], col_scale);
         }
 
         debug_assert!(

@@ -713,8 +713,9 @@ fn build_template_build_ctx<'a>(
     let diversion_upstream_output = diversion_upstream.clone();
 
     // Pre-compute discount factors and total stage hours before the per-stage
-    // template loop so that `fill_anticipated_decision_objective` can read them
-    // from the ctx at LP build time (before postprocess_templates runs).
+    // template loop so that the anticipated-decision objective in
+    // `fill_anticipated_columns` can read them from the ctx at LP build time
+    // (before postprocess_templates runs).
     //
     // Both arrays have length `n_study_stages` exactly. The anticipated-decision
     // predicate is strict (`stage_idx + K_i < n_stages`), so every active
