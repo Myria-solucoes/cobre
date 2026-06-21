@@ -295,7 +295,7 @@ fn build_system(
     //   index 1 → id=3 (backup, BACKUP_THERMAL_ID)
     //
     // The thermal stage axis has length N_STAGES + K_MAX (= 6 here) to support
-    // delivery-stage lookups in fill_anticipated_decision_objective. We set
+    // delivery-stage lookups in fill_anticipated_columns. We set
     // bounds for all stages in that axis so the LP reads correct costs at
     // both regular and anticipated delivery stages.
     let thermal_axis = N_STAGES + K_MAX;

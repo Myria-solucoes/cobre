@@ -32,8 +32,9 @@
 //!
 //! **Zone B — Delivery stages with matured anticipated commitment (t ∈ {2, 3, 4, 5}):**
 //! The anticipated thermal delivers `committed_t = d_{t-K} = 150 MW = load`.
-//! Per-block cost on the anticipated thermal at delivery stages is zeroed by
-//! `zero_anticipated_delivery_thermal_cost`, so delivered generation costs $0
+//! Per-block cost on the anticipated thermal at delivery stages is skipped in
+//! `fill_thermal_columns` (never written; the anticipated thermal is detected
+//! via `anticipated_local_by_sys_pos`), so delivered generation costs $0
 //! in the objective. No backup needed since 150 MW = load exactly.
 //!
 //! **Zone C — Pre-horizon stages (t ∈ {0, 1}):**
@@ -385,7 +386,7 @@ fn build_system_reconciliation_k2() -> cobre_core::System {
     }
 
     // The padding region [n_stages, n_stages + k) is the delivery-stage axis
-    // read by `fill_anticipated_decision_objective`; it must carry the
+    // read by `fill_anticipated_columns`; it must carry the
     // per-thermal cost so the decision column's objective coefficient is
     // non-zero.
     let thermal_axis = n_stages + k;
@@ -577,8 +578,8 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 /// - Zone A (active decision stages t∈{0,1,2,3}): LP picks d_t = load = 150 MW
 ///   (NOT max_gen=200). Decision cost = 4 × 150 × 744 × $10 = **$4,464,000**.
 /// - Zone B (delivery stages t∈{2,3,4,5}): anticipated thermal pinned to
-///   matured d_{t-K}=150 MW; per-block cost zeroed by
-///   `zero_anticipated_delivery_thermal_cost`; backup not needed → **$0**.
+///   matured d_{t-K}=150 MW; per-block cost skipped in `fill_thermal_columns`
+///   (never written); backup not needed → **$0**.
 /// - Zone C (pre-horizon stages t∈{0,1}): always-active fishing predicate pins
 ///   the anticipated thermal to seed slot 0 = 0 MW. Backup dispatches 150 MW at
 ///   $5000/MWh. Pre-horizon backup cost = 2 × 150 × 744 × $5000 = **$1,116,000,000**.

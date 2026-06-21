@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::ops::Range;
 
 use cobre_core::{EntityId, Stage, System};
 use cobre_solver::StageTemplate;
@@ -108,6 +109,16 @@ pub struct StageTemplates {
     /// `n_pumping_per_stage[stage_idx]` is the number of pumping stations
     /// contributing columns at that stage, sourced from `StageLayout::n_pumping`.
     pub n_pumping_per_stage: Vec<usize>,
+    /// Per-stage equipment column geometry for simulation extraction.
+    ///
+    /// `equipment_geometry_per_stage[stage_idx]` holds the stage-correct column
+    /// ranges for every block-major equipment family at that stage, sourced from
+    /// the per-stage `StageLayout` — never from the global stage-0 `StageIndexer`,
+    /// whose `n_blks`-striped bases/lengths misread any stage with a differing
+    /// block count. Length equals `templates.len()`. Threaded into
+    /// `StageExtractionSpec` so the simulation read-path addresses the columns the
+    /// solved primal occupies at the stage being extracted.
+    pub equipment_geometry_per_stage: Vec<StageEquipmentGeometry>,
     /// Per-stage active NCS system indices.
     ///
     /// `active_ncs_indices[stage_idx]` lists the system-level NCS indices active at
@@ -183,6 +194,7 @@ impl StageTemplates {
             n_ncs_per_stage: Vec::new(),
             pumping_col_starts: Vec::new(),
             n_pumping_per_stage: Vec::new(),
+            equipment_geometry_per_stage: Vec::new(),
             active_ncs_indices: Vec::new(),
             diversion_upstream: HashMap::new(),
             hydro_productivities_per_stage: Vec::new(),
@@ -226,6 +238,169 @@ impl StageTemplates {
     }
 }
 
+/// Per-stage equipment column ranges for simulation extraction.
+///
+/// Holds the stage-correct column `Range` for every block-major equipment
+/// family that simulation extraction reads — both the per-block `grid.flat`
+/// base reads and the cost-breakdown `range_sum` reads. Each range is computed
+/// from **this** stage's `StageLayout` (anchored at
+/// `state.control_region_start()` with the per-stage `n_blks`), so it is the
+/// stage-correct geometry, NOT the global stage-0 `StageIndexer`.
+///
+/// Resolving these ranges from the global stage-0 `StageIndexer` is the bug
+/// this struct exists to forbid: every family after the first block-major one
+/// (`turbine`) has a base `turbine.start + Σ(prior families)·n_blks` and a
+/// length `count·n_blks`, both striped by stage 0's block count. At any stage
+/// whose block count differs from stage 0's (a non-uniform schedule such as
+/// `[1, 3, 2]`), the stage-0 base/length addresses the **wrong** primal columns,
+/// silently misreporting per-block equipment and the cost breakdown. The
+/// per-stage `n_blks` *stride* (carried by `StageExtractionSpec::n_blks`) was
+/// already correct; this struct closes the matching *base/length* gap. For
+/// uniform-block studies every stage's geometry equals stage 0's, so the reads
+/// coincide.
+///
+/// Mirrors the established `ncs_col_starts` / `pumping_col_starts` per-stage
+/// persistence: built per stage in `build_single_stage_template`, transposed
+/// into [`StageTemplates::equipment_geometry_per_stage`], and threaded into
+/// `StageExtractionSpec` resolved at the stage being extracted.
+///
+/// The [`Default`] is the all-`0..0` geometry: every family empty, so every
+/// extraction read it gates returns zero. It is the safe fallback a caller
+/// borrows when no per-stage geometry is available (e.g. a synthetic test that
+/// drives a sub-path without a real stage table), matching the empty-slice
+/// fallbacks used for the sibling `ncs_col_starts` / `pumping_col_starts` tables.
+#[derive(Debug, Clone, Default)]
+pub struct StageEquipmentGeometry {
+    /// Turbined-flow column range (one per hydro per block). `turbine.start` is
+    /// `theta + 1` and stage-invariant, but `turbine.end` is `n_blks`-dependent,
+    /// so the cost-breakdown `range_sum` still needs the per-stage range.
+    pub turbine: Range<usize>,
+    /// Spillage column range (one per hydro per block).
+    pub spillage: Range<usize>,
+    /// Diversion-flow column range (one per hydro per block).
+    pub diversion: Range<usize>,
+    /// Thermal-generation column range (one per thermal per block).
+    pub thermal: Range<usize>,
+    /// Anticipated-decision column range (one per anticipated thermal,
+    /// stage-level). Starts at `thermal.end`, which is `n_blks`-dependent, so the
+    /// cost-breakdown `range_sum` needs the per-stage base.
+    pub anticipated_decision: Range<usize>,
+    /// Forward line-flow column range (one per line per block).
+    pub line_fwd: Range<usize>,
+    /// Reverse line-flow column range (one per line per block).
+    pub line_rev: Range<usize>,
+    /// Bus-deficit column range (`B · S · K` columns).
+    pub deficit: Range<usize>,
+    /// Bus-excess column range (one per bus per block).
+    pub excess: Range<usize>,
+    /// FPHA-generation column range (one per FPHA hydro per block).
+    pub generation: Range<usize>,
+    /// Per-evaporation-hydro column/row indices, parallel to the evaporation
+    /// reverse-lookup `local_evap_idx`. The three evaporation columns are
+    /// stage-level but anchored at the `n_blks`-dependent FPHA-generation-block
+    /// end, so they shift under a non-uniform schedule — this per-stage copy
+    /// carries the stage-correct columns, never the global stage-0
+    /// `StageIndexer`'s.
+    pub evap_indices: Vec<crate::indexer::EvaporationIndices>,
+    /// Inflow non-negativity slack column range (one per hydro, stage-level).
+    pub inflow_slack: Range<usize>,
+    /// Under-withdrawal slack column range (one per hydro, stage-level).
+    pub withdrawal_slack_neg: Range<usize>,
+    /// Over-withdrawal slack column range (one per hydro, stage-level).
+    pub withdrawal_slack_pos: Range<usize>,
+    /// Outflow-below-minimum slack column range (one per hydro per block).
+    pub outflow_below_slack: Range<usize>,
+    /// Outflow-above-maximum slack column range (one per hydro per block).
+    pub outflow_above_slack: Range<usize>,
+    /// Turbine-below-minimum slack column range (one per hydro per block).
+    pub turbine_below_slack: Range<usize>,
+    /// Generation-below-minimum slack column range (one per hydro per block).
+    pub generation_below_slack: Range<usize>,
+}
+
+impl StageEquipmentGeometry {
+    /// Build the per-stage equipment geometry from this stage's `StageLayout`.
+    ///
+    /// This is the production source: every range is the stage-correct geometry
+    /// the LP template was baked with, so the simulation read-path addresses the
+    /// columns the solved primal actually occupies at this stage. The empty-block
+    /// `start` accessors (`col_generation_start`, the `col_*_slack` accessors)
+    /// resolve the dedicated empty-block cursor rather than a bare `0` when the
+    /// family collapses to `0..0`, matching the indexer convention.
+    fn from_layout(layout: &StageLayout<'_>) -> Self {
+        // Every range below is a `StageLayout` own field, already normalised to
+        // `0..0` for an empty family (so a collapsed family yields an empty range
+        // rather than a stale offset). The four operational-violation slack
+        // ranges and the two withdrawal-slack ranges are likewise own fields, so
+        // there is no need to reconstruct them from the empty-block-cursor
+        // accessors here.
+        // Anticipated-decision: A=`n_anticipated` stage-level columns starting at
+        // the per-stage `thermal.end` cursor; `0..0` when no anticipated thermals,
+        // matching the empty-block convention the indexer uses.
+        let anticipated_decision = if layout.n_anticipated > 0 {
+            let s = layout.anticipated.col_anticipated_decision_start;
+            s..s + layout.n_anticipated
+        } else {
+            0..0
+        };
+        Self {
+            turbine: layout.turbine.clone(),
+            spillage: layout.spillage.clone(),
+            diversion: layout.diversion.clone(),
+            thermal: layout.thermal.clone(),
+            anticipated_decision,
+            line_fwd: layout.line_fwd.clone(),
+            line_rev: layout.line_rev.clone(),
+            deficit: layout.deficit.clone(),
+            excess: layout.excess.clone(),
+            generation: layout.generation.clone(),
+            evap_indices: layout.evap_indices.clone(),
+            inflow_slack: layout.inflow_slack.clone(),
+            withdrawal_slack_neg: layout.withdrawal_slack_neg.clone(),
+            withdrawal_slack_pos: layout.withdrawal_slack_pos.clone(),
+            outflow_below_slack: layout.outflow_below_slack.clone(),
+            outflow_above_slack: layout.outflow_above_slack.clone(),
+            turbine_below_slack: layout.turbine_below_slack.clone(),
+            generation_below_slack: layout.generation_below_slack.clone(),
+        }
+    }
+
+    /// Build the equipment geometry by mirroring a `StageIndexer`'s ranges.
+    ///
+    /// The returned geometry is correct **only for the single stage the indexer
+    /// describes** — it copies the indexer's block-major ranges verbatim, which
+    /// are striped by that indexer's `n_blks`. The production multi-stage
+    /// simulation path must resolve the geometry per stage from the per-stage
+    /// `StageLayout` instead; using this constructor with a stage-0 indexer at a
+    /// stage whose block count differs IS the bug this type exists to forbid. It
+    /// is provided for callers that hold a single `StageIndexer` for the exact
+    /// stage being extracted (synthetic single-stage tests, and uniform-block
+    /// studies whose every stage shares stage 0's geometry).
+    #[must_use]
+    pub fn from_indexer(indexer: &crate::indexer::StageIndexer) -> Self {
+        Self {
+            turbine: indexer.turbine.clone(),
+            spillage: indexer.spillage.clone(),
+            diversion: indexer.diversion.clone(),
+            thermal: indexer.thermal.clone(),
+            anticipated_decision: indexer.anticipated_decision.clone(),
+            line_fwd: indexer.line_fwd.clone(),
+            line_rev: indexer.line_rev.clone(),
+            deficit: indexer.deficit.clone(),
+            excess: indexer.excess.clone(),
+            generation: indexer.generation.clone(),
+            evap_indices: indexer.evap_indices.clone(),
+            inflow_slack: indexer.inflow_slack.clone(),
+            withdrawal_slack_neg: indexer.withdrawal_slack_neg.clone(),
+            withdrawal_slack_pos: indexer.withdrawal_slack_pos.clone(),
+            outflow_below_slack: indexer.outflow_below_slack.clone(),
+            outflow_above_slack: indexer.outflow_above_slack.clone(),
+            turbine_below_slack: indexer.turbine_below_slack.clone(),
+            generation_below_slack: indexer.generation_below_slack.clone(),
+        }
+    }
+}
+
 /// Per-stage outputs of [`build_single_stage_template`].
 ///
 /// One field per datum the per-stage build emits; produced by
@@ -257,6 +432,9 @@ pub(super) struct StageBuildOutput {
     /// Number of pumping stations contributing columns at the stage (sourced
     /// from [`StageLayout::n_pumping`]).
     pub n_pumping: usize,
+    /// Stage-correct equipment column ranges for simulation extraction, computed
+    /// from this stage's [`StageLayout`] (NOT the global stage-0 [`StageIndexer`]).
+    pub equipment_geometry: StageEquipmentGeometry,
 }
 
 /// Construct a [`StageTemplate`] for a single study stage.
@@ -353,6 +531,11 @@ pub(super) fn build_single_stage_template(
         row_scale: Vec::new(),
     };
 
+    // Snapshot the per-stage equipment geometry BEFORE moving `layout`'s owned
+    // Vec fields (`generic_constraint_rows`, `active_ncs_indices`) into the
+    // output: `from_layout` only borrows, so it must run while `layout` is intact.
+    let equipment_geometry = StageEquipmentGeometry::from_layout(&layout);
+
     StageBuildOutput {
         template,
         stage_base_row,
@@ -363,6 +546,7 @@ pub(super) fn build_single_stage_template(
         ncs_active: layout.active_ncs_indices,
         pumping_col_start: layout.col_pumping_start,
         n_pumping: layout.n_pumping,
+        equipment_geometry,
     }
 }
 
@@ -826,6 +1010,7 @@ fn assemble_stage_templates_output(
     let mut n_ncs_per_stage = Vec::with_capacity(n_study);
     let mut pumping_col_starts = Vec::with_capacity(n_study);
     let mut n_pumping_per_stage = Vec::with_capacity(n_study);
+    let mut equipment_geometry_per_stage = Vec::with_capacity(n_study);
     let mut active_ncs_indices_per_stage = Vec::with_capacity(n_study);
     for out in stage_outputs {
         templates.push(out.template);
@@ -836,6 +1021,7 @@ fn assemble_stage_templates_output(
         n_ncs_per_stage.push(out.ncs_count);
         pumping_col_starts.push(out.pumping_col_start);
         n_pumping_per_stage.push(out.n_pumping);
+        equipment_geometry_per_stage.push(out.equipment_geometry);
         active_ncs_indices_per_stage.push(out.ncs_active);
     }
 
@@ -869,6 +1055,7 @@ fn assemble_stage_templates_output(
         n_ncs_per_stage,
         pumping_col_starts,
         n_pumping_per_stage,
+        equipment_geometry_per_stage,
         active_ncs_indices: active_ncs_indices_per_stage,
         diversion_upstream: diversion_upstream_output,
         hydro_productivities_per_stage,

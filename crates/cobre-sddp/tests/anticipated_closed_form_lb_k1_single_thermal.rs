@@ -38,9 +38,10 @@
 //!
 //! The fishing constraint is always active for every anticipated plant at
 //! every stage, including stage 0. The fishing row `g_a_t − x_state_t = 0` is
-//! therefore emitted at stage 0 as well, and
-//! `zero_anticipated_delivery_thermal_cost` zeros the per-block cost of the
-//! anticipated column at stage 0 (same always-active path). See the K=1
+//! therefore emitted at stage 0 as well, and `fill_thermal_columns` skips the
+//! per-block cost of the anticipated column at stage 0 (never written, leaving
+//! it at zero; the anticipated thermal is detected via
+//! `anticipated_local_by_sys_pos`, same always-active path). See the K=1
 //! sign-chain table for the cut-coefficient sign convention that applies
 //! here.
 //!
@@ -53,8 +54,8 @@
 //!
 //! Stage 0 (always-active fishing; decision predicate `t + K_i < n_stages` is
 //! `0 + 1 < 2` — TRUE, so `d_ant_0` is active; fishing predicate now TRUE at
-//! every stage including 0; per-block anticipated cost zeroed by
-//! `zero_anticipated_delivery_thermal_cost`):
+//! every stage including 0; per-block anticipated cost skipped in
+//! `fill_thermal_columns`, so it stays at zero):
 //!
 //! ```text
 //!   min  0 · g_a_0 + c_b · g_b_0 + c_a · d_ant_0 + θ_0
@@ -77,13 +78,13 @@
 //! `c_a · d_ant_0` now and paying `c_b · max(0, D − d_ant_0)` at stage 1.
 //!
 //! The decision objective coefficient is set by
-//! `fill_anticipated_decision_objective` to
+//! `fill_anticipated_columns` to
 //! `c_a · total_hours_per_stage[delivery=1] · cumulative_discount_factors[1] =
 //! c_a · 1 · 1 = c_a`.
 //!
 //! Stage 1 (delivery; fishing always active; decision
 //! `1 + 1 < 2` — FALSE, so `d_ant_1 ∈ [0,0]` and per-block anticipated cost
-//! is zeroed by `zero_anticipated_delivery_thermal_cost`):
+//! is skipped in `fill_thermal_columns`, so it stays at zero):
 //!
 //! ```text
 //!   min  c_b · g_b_1 + 0 · g_a_1
@@ -380,7 +381,7 @@ fn build_system() -> cobre_core::System {
 
     // n_hydros = 0; anticipated + backup thermals only. k_max = 1.
     // Per-thermal per-stage overrides across the full thermal axis (length =
-    // n_stages + k_max = 3) so that `fill_anticipated_decision_objective`
+    // n_stages + k_max = 3) so that `fill_anticipated_columns`
     // reads a well-defined cost at delivery (stage 1).
     let mut bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
@@ -601,8 +602,8 @@ fn anticipated_closed_form_lb_k1_single_thermal() {
         EXPECTED_LB.to_bits(),
         "closed-form LB mismatch: actual = {actual}, expected = {EXPECTED_LB}. \
          Under always-active fishing the answer is `(C_A + C_B) · D_LOAD = 5500.0` \
-         (stage-0 backup covers load; anticipated column cost zeroed by \
-         zero_anticipated_delivery_thermal_cost). \
+         (stage-0 backup covers load; anticipated column cost skipped in \
+         fill_thermal_columns, so it stays at zero). \
          If a libhighs upgrade introduces sub-ULP arithmetic drift, switch to \
          a 1e-12 relative tolerance check.",
     );

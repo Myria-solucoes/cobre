@@ -10102,13 +10102,15 @@ fn test_anticipated_delivery_thermal_cost_is_zero() {
     }
 }
 
-/// AC-8: per-block thermal cost of the anticipated thermal is zeroed at all stages.
+/// AC-8: per-block thermal cost of the anticipated thermal is 0.0 at all stages.
 ///
 /// Because the fishing constraint is always active for every anticipated
-/// plant, `zero_anticipated_delivery_thermal_cost` zeroes the anticipated
-/// thermal's per-block cost at every stage, including pre-horizon stages 0 and
-/// 1 (before K_i=2 matures). The cost-zeroing loop and the fishing-row loop
-/// both run unconditionally for every plant under this always-active rule.
+/// plant, `fill_thermal_columns` skips the per-block objective for the
+/// anticipated thermal (detected via `anticipated_local_by_sys_pos`) at every
+/// stage, including pre-horizon stages 0 and 1 (before K_i=2 matures), so that
+/// cost is never written and stays at the `0.0` initialisation default. The
+/// fishing-row loop runs unconditionally for every plant under this
+/// always-active rule.
 /// Expected: `objective[col_thermal_start + 0 * 1 + 0] == 0.0` at every stage.
 #[test]
 fn test_anticipated_pre_delivery_thermal_cost_unchanged() {
@@ -10173,11 +10175,11 @@ fn test_non_anticipated_thermal_cost_unchanged_under_anticipated_zero_out() {
 /// equals the set of ALL stages (always-active rule).
 ///
 /// Because the fishing constraint is always active for every anticipated
-/// plant, `zero_anticipated_delivery_thermal_cost` zeroes the anticipated
-/// thermal's per-block cost at every stage. For K_i=2 and n_stages=4: all
-/// stages {0, 1, 2, 3} have zero cost. Both the fishing-row loop and the
-/// cost-zeroing loop run unconditionally for every plant under this
-/// always-active rule.
+/// plant, `fill_thermal_columns` skips the per-block objective for the
+/// anticipated thermal (detected via `anticipated_local_by_sys_pos`) at every
+/// stage, leaving it at the `0.0` initialisation default. For K_i=2 and
+/// n_stages=4: all stages {0, 1, 2, 3} have zero cost. The fishing-row loop
+/// runs unconditionally for every plant under this always-active rule.
 #[test]
 fn test_zero_out_and_fishing_active_predicate_align() {
     let lead_stages = 2_usize;

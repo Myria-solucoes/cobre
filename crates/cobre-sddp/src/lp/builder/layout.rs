@@ -360,6 +360,15 @@ pub(crate) struct StageLayout<'a> {
     pub(crate) max_deficit_segments: usize,
     /// Column range for bus excess variables (one per bus per block).
     pub(crate) excess: Range<usize>,
+    /// Column range for inflow non-negativity slack (one per hydro, stage-level).
+    ///
+    /// `excess.end .. excess.end + n_h` when the penalty method is active and
+    /// `n_h > 0`, else `0..0`. Stored first-class so the per-stage simulation
+    /// geometry ([`StageEquipmentGeometry`](super::template::StageEquipmentGeometry))
+    /// reads the stage-correct inflow-slack range rather than the global stage-0
+    /// `StageIndexer::inflow_slack`, whose `excess.end`-anchored base shifts under
+    /// a non-uniform block schedule.
+    pub(crate) inflow_slack: Range<usize>,
     /// Column-block cursor at which the FPHA generation block begins, even when
     /// that block is empty (`inflow_slack.end` with penalty, else `excess.end`).
     pub(crate) generation_col_start: usize,
@@ -1017,6 +1026,7 @@ impl<'a> StageLayout<'a> {
             deficit: deficit_start..excess_start,
             max_deficit_segments,
             excess: excess_start..excess_end,
+            inflow_slack,
             generation_col_start,
             generation,
             evap_col_start,

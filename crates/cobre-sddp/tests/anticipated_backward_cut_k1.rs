@@ -16,7 +16,8 @@
 //! end-to-end (forward.rs consumes the coefficients unrescaled).
 //!
 //! Stage-1 LP (delivery stage; the per-block anticipated-thermal generation
-//! column is zeroed by `zero_anticipated_delivery_thermal_cost`; the stage-1
+//! column's cost is skipped in `fill_thermal_columns` — never written, so it
+//! stays at zero — for plants in `anticipated_local_by_sys_pos`; the stage-1
 //! anticipated-decision column `d_ant` carries a scaled NPV cost
 //! `c_reg * block_hours_total / K = c_reg / K` because the delivery stage for
 //! that decision (`t + K_i = 2`) is in range):
@@ -299,7 +300,7 @@ fn build_system() -> cobre_core::System {
     // Per-thermal per-stage overrides across the full thermal stage axis
     // (length = n_stages + k_max = 3). Index 2 (the K-padded delivery cell)
     // matters only for plants with K_i > 0; we seed it from the anticipated
-    // delivery bounds so `fill_anticipated_decision_objective` reads a
+    // delivery bounds so `fill_anticipated_columns` reads a
     // well-defined cost at stage_idx + K_i = 0 + 1 = 1, which is in range.
     let thermal_axis = N_STAGES + K_MAX;
     for s in 0..thermal_axis {

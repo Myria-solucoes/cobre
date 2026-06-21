@@ -339,7 +339,7 @@ fn build_system_k3() -> cobre_core::System {
     // the expensive backup.
     //
     // The padding region `[n_stages, n_stages + k)` is the delivery-stage
-    // axis read by `fill_anticipated_decision_objective`; it must also
+    // axis read by `fill_anticipated_columns`; it must also
     // carry the per-thermal cost so the decision column's objective
     // coefficient is non-zero.
     let thermal_axis = n_stages + k;

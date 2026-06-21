@@ -41,8 +41,10 @@
 //! against September 2024 block fractions (0.2333, 0.2833, 0.4834).
 //!
 //! The fishing constraint is always active for every anticipated plant, so a
-//! fishing row is emitted at every stage. The cost-zeroing predicate for
-//! delivery-stage columns is applied in `fill_anticipated_decision_objective`.
+//! fishing row is emitted at every stage. The anticipated plant's delivery-stage
+//! per-block thermal cost is skipped in `fill_thermal_columns` (the plant is
+//! detected via `anticipated_local_by_sys_pos`), so it is never written and
+//! those columns are consumed at zero cost.
 //!
 //! ## Legacy behaviour (before always-active fishing)
 //!
@@ -374,7 +376,7 @@ fn build_system() -> cobre_core::System {
     }
 
     // The padding region [n_stages, n_stages + k) is the delivery-stage axis
-    // read by `fill_anticipated_decision_objective`; it must carry per-thermal
+    // read by `fill_anticipated_columns`; it must carry per-thermal
     // costs so the decision column's objective coefficient is non-zero.
     let thermal_axis = n_stages + k;
     let mut bounds = ResolvedBounds::new(

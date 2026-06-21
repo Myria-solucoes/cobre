@@ -382,7 +382,7 @@ fn build_system() -> cobre_core::System {
     }
 
     // The padding region [n_stages, n_stages + k) = [6, 9) is the delivery-stage
-    // axis read by `fill_anticipated_decision_objective`; it must carry per-thermal
+    // axis read by `fill_anticipated_columns`; it must carry per-thermal
     // costs so the decision column's objective coefficient is non-zero. Without
     // the padding, decision cost defaults to 0 and the LP commits everywhere,
     // masking the AC5 regression assertion.

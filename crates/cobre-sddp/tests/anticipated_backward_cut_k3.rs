@@ -313,7 +313,7 @@ fn build_system() -> cobre_core::System {
 
     // Per-thermal per-stage overrides across the full thermal stage axis
     // (length = n_stages + k_max = 7). K-padded delivery cells are read by
-    // `fill_anticipated_decision_objective` for stage_idx + K_i lookups.
+    // `fill_anticipated_columns` for stage_idx + K_i lookups.
     let thermal_axis = N_STAGES + K_MAX;
     for s in 0..thermal_axis {
         *bounds.thermal_bounds_mut(THERMAL_IDX_REG, s) = ThermalStageBounds {

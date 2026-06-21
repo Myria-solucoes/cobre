@@ -375,7 +375,7 @@ fn build_system(k: usize, past_commitments_mw: Vec<f64>, n_stages: usize) -> cob
     // which would obscure the regression assertion.
     //
     // The padding region `[n_stages, n_stages + k_max)` is the delivery-
-    // stage axis read by `fill_anticipated_decision_objective`; it must
+    // stage axis read by `fill_anticipated_columns`; it must
     // also carry the per-thermal cost so the decision column has a
     // non-zero objective coefficient.
     let thermal_axis = n_stages + k;

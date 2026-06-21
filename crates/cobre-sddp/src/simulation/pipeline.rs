@@ -113,6 +113,16 @@ pub struct SimulationOutputSpec<'a> {
     /// contributing columns at that stage.
     pub n_pumping_per_stage: &'a [usize],
 
+    /// Per-stage equipment column geometry for extraction.
+    ///
+    /// `equipment_geometry_per_stage[stage]` holds the stage-correct column
+    /// ranges for the block-major equipment families, sourced from the per-stage
+    /// `StageLayout` (via `StageTemplates`) — never from the global stage-0
+    /// `StageIndexer`, whose `n_blks`-striped bases/lengths misread any stage
+    /// with a differing block count. Resolved at the stage being extracted and
+    /// threaded into `StageExtractionSpec::equipment`.
+    pub equipment_geometry_per_stage: &'a [crate::lp_builder::StageEquipmentGeometry],
+
     /// Per-station pumping power-consumption rate \[MW/(m³/s)\], ID-sorted to
     /// match `entity_counts.pumping_station_ids`.
     ///
@@ -792,6 +802,22 @@ fn extract_sim_stage_result(
     // (a permanent `0..0` sentinel).
     let pumping_col_start = output.pumping_col_starts.get(t).copied().unwrap_or(0);
     let n_pumping = output.n_pumping_per_stage.get(t).copied().unwrap_or(0);
+    // Per-stage equipment geometry: the stage-correct column ranges every
+    // block-major family read below addresses, sourced from this stage's
+    // `StageLayout` rather than the global stage-0 `indexer`. The production
+    // table is transposed one entry per study stage; a synthetic test that omits
+    // it falls back to the all-empty `Default`, matching the empty-slice fallback
+    // the sibling `ncs_col_starts` / `pumping_col_starts` tables use.
+    debug_assert!(
+        output.equipment_geometry_per_stage.is_empty()
+            || output.equipment_geometry_per_stage.len() == ctx.templates.len(),
+        "equipment_geometry_per_stage must carry one entry per study stage when populated",
+    );
+    let equipment_default = crate::lp_builder::StageEquipmentGeometry::default();
+    let equipment = output
+        .equipment_geometry_per_stage
+        .get(t)
+        .unwrap_or(&equipment_default);
     // Build the per-active-local-column upper bounds: start from the template
     // `col_upper` (covers any deterministic NCS active column), then overwrite each
     // stochastic active column's block with the per-scenario realized availability
@@ -845,6 +871,7 @@ fn extract_sim_stage_result(
             indexer,
             state,
             n_blks: stage_n_blks,
+            equipment,
             entity_counts: output.entity_counts,
             inflow_m3s_per_hydro: inflow_m3s_buf,
             block_hours: blk_hrs,
@@ -1994,6 +2021,7 @@ mod tests {
                 n_ncs_per_stage: &[],
                 pumping_col_starts: &[],
                 n_pumping_per_stage: &[],
+                equipment_geometry_per_stage: &[],
                 pumping_consumption_mw_per_m3s: &[],
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
@@ -2154,6 +2182,7 @@ mod tests {
                 n_ncs_per_stage: &[],
                 pumping_col_starts: &[],
                 n_pumping_per_stage: &[],
+                equipment_geometry_per_stage: &[],
                 pumping_consumption_mw_per_m3s: &[],
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
@@ -2339,6 +2368,7 @@ mod tests {
                 n_ncs_per_stage: &[],
                 pumping_col_starts: &[],
                 n_pumping_per_stage: &[],
+                equipment_geometry_per_stage: &[],
                 pumping_consumption_mw_per_m3s: &[],
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
@@ -2708,6 +2738,7 @@ mod tests {
                 n_ncs_per_stage: &[],
                 pumping_col_starts: &[],
                 n_pumping_per_stage: &[],
+                equipment_geometry_per_stage: &[],
                 pumping_consumption_mw_per_m3s: &[],
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
@@ -2833,6 +2864,7 @@ mod tests {
                 n_ncs_per_stage: &[],
                 pumping_col_starts: &[],
                 n_pumping_per_stage: &[],
+                equipment_geometry_per_stage: &[],
                 pumping_consumption_mw_per_m3s: &[],
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
@@ -3121,6 +3153,7 @@ mod tests {
                 n_ncs_per_stage: &[],
                 pumping_col_starts: &[],
                 n_pumping_per_stage: &[],
+                equipment_geometry_per_stage: &[],
                 pumping_consumption_mw_per_m3s: &[],
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &diversion,
