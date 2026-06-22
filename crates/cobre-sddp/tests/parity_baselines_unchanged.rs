@@ -118,6 +118,16 @@ const EXPECTED_HASHES: &[(&str, &str)] = &[
         "D32",
         "be72c5faf5881687792dcd4939750906f61b984dc3209c7f8da97269d13a9e29",
     ),
+    // Pumping commissioning gating: the D32 reversible plant with an
+    // `entry_stage_id`/`exit_stage_id` window so it is active only at stage 1.
+    // The omitted stages (0 and 2) shed the forced `flow.min_m3s` transfer, so
+    // their storage trajectories diverge from the always-active D32 baseline.
+    // This guard pins only the HiGHS `D35.sha256`; the CLP `D35.sha256` is
+    // verified by the slow-gated CLP `parity_hash_d35`.
+    (
+        "D35",
+        "41f7a61ff3fa99d7144b37b2614c6d02ac7c771b2e5f29d2be9c9a3102c327d5",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
