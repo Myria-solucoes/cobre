@@ -749,7 +749,7 @@ fn solve_simulation_stage<S: SolverInterface>(
         &ws.scratch.anticipated_state_buf,
         unscaled_primal_ref,
         state,
-        indexer,
+        &geometry.anticipated_decision,
     );
 
     Ok((immediate_cost, result))

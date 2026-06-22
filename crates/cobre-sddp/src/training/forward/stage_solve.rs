@@ -63,7 +63,6 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     } = *key;
     let n_hydros = ctx.n_hydros;
     let n_load_buses = ctx.n_load_buses;
-    let indexer = training_ctx.indexer;
     let study_dims = training_ctx.study_dims;
     let state = training_ctx.state;
     let stochastic = training_ctx.stochastic;
@@ -375,12 +374,20 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             par_order: downstream_par_order,
         },
     );
+    // The anticipated-decision column base is n_blks-dependent, so the shift must
+    // read this stage's decision range, not the global stage-0 `indexer`. Empty
+    // `geometry_per_stage` in a synthetic test falls back to `0..0` (harmless: the
+    // shift early-returns when `n_anticipated == 0`).
+    let anticipated_decision = ctx
+        .geometry_per_stage
+        .get(t)
+        .map_or(0..0, |g| g.anticipated_decision.clone());
     crate::noise::shift_anticipated_state(
         &mut ws.current_state,
         &ws.scratch.anticipated_state_buf,
         &unscaled_primal,
         state,
-        indexer,
+        &anticipated_decision,
     );
     // Restore the scratch buffer so the next stage reuses the warmed allocation.
     // This is the last read of `unscaled_primal`.

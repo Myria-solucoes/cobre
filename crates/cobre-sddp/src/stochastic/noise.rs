@@ -261,7 +261,7 @@ pub(crate) fn shift_anticipated_state(
     incoming_anticipated: &[f64],
     unscaled_primal: &[f64],
     layout: &crate::indexer::StateLayout,
-    geom: &crate::indexer::StageIndexer,
+    anticipated_decision: &std::ops::Range<usize>,
 ) {
     let n_ant = layout.n_anticipated;
     let k_max = layout.k_max;
@@ -276,14 +276,16 @@ pub(crate) fn shift_anticipated_state(
         incoming_anticipated.len(),
     );
     debug_assert!(
-        unscaled_primal.len() >= geom.anticipated_decision.end,
+        unscaled_primal.len() >= anticipated_decision.end,
         "unscaled_primal too short for anticipated_decision range",
     );
     // `anticipated_state` (the ring-buffer base) is stage-invariant role-(a),
     // read from `layout`; `anticipated_decision` is the priced control-region
-    // column (n_blks-dependent), read from the geometry descriptor `geom`.
+    // column whose base is n_blks-dependent, so it must be THIS stage's range —
+    // never a global stage-0 base, which would misread the decision column at any
+    // stage whose block count differs from stage 0's.
     let state_start = layout.anticipated_state.start;
-    let decision_start = geom.anticipated_decision.start;
+    let decision_start = anticipated_decision.start;
     for (plant, &k_i) in layout.anticipated_lead_stages.iter().enumerate() {
         debug_assert!(
             k_i >= 1,
@@ -1538,7 +1540,13 @@ mod tests {
         let incoming = vec![];
         let primal = vec![0.0_f64; 10];
         let before = state.clone();
-        shift_anticipated_state(&mut state, &incoming, &primal, &layout, &indexer);
+        shift_anticipated_state(
+            &mut state,
+            &incoming,
+            &primal,
+            &layout,
+            &indexer.anticipated_decision,
+        );
         assert_eq!(
             state, before,
             "state must be unchanged when n_anticipated == 0"
@@ -1563,7 +1571,13 @@ mod tests {
         let mut primal = vec![0.0_f64; indexer.anticipated_decision.end + 1];
         primal[dec_start] = 99.0;
 
-        shift_anticipated_state(&mut state, &incoming, &primal, &layout, &indexer);
+        shift_anticipated_state(
+            &mut state,
+            &incoming,
+            &primal,
+            &layout,
+            &indexer.anticipated_decision,
+        );
 
         assert_eq!(
             state[ant_start], 20.0,
@@ -1594,7 +1608,13 @@ mod tests {
         let mut primal = vec![0.0_f64; indexer.anticipated_decision.end + 1];
         primal[dec_start] = 42.0;
 
-        shift_anticipated_state(&mut state, &incoming, &primal, &layout, &indexer);
+        shift_anticipated_state(
+            &mut state,
+            &incoming,
+            &primal,
+            &layout,
+            &indexer.anticipated_decision,
+        );
 
         // Shift loop is empty (0..0); the new decision write at slot K_i - 1 = 0
         // is the only operation.
@@ -1625,7 +1645,13 @@ mod tests {
         primal[dec_start] = 10.0; // decision for plant 0
         primal[dec_start + 1] = 20.0; // decision for plant 1
 
-        shift_anticipated_state(&mut state, &incoming, &primal, &layout, &indexer);
+        shift_anticipated_state(
+            &mut state,
+            &incoming,
+            &primal,
+            &layout,
+            &indexer.anticipated_decision,
+        );
 
         // Plant 0 (K=2): slot 0 = incoming[1*2+0]=3.0, slot 1 = decision[0]=10.0, slot 2 = 0.0
         assert_eq!(state[ant_start + 0 * 2 + 0], 3.0, "plant0 slot0");
@@ -1690,7 +1716,13 @@ mod tests {
         let mut primal = vec![0.0_f64; dec_start + 2];
         primal[dec_start] = 55.0;
 
-        shift_anticipated_state(&mut state, &incoming, &primal, &layout, &indexer);
+        shift_anticipated_state(
+            &mut state,
+            &incoming,
+            &primal,
+            &layout,
+            &indexer.anticipated_decision,
+        );
 
         // Storage and lag must be untouched.
         assert_eq!(state[0], 100.0, "storage[0] must be preserved");
@@ -1713,7 +1745,13 @@ mod tests {
         let incoming = vec![];
         let primal = vec![0.0_f64; 5];
         let before = state.clone();
-        shift_anticipated_state(&mut state, &incoming, &primal, &layout, &indexer);
+        shift_anticipated_state(
+            &mut state,
+            &incoming,
+            &primal,
+            &layout,
+            &indexer.anticipated_decision,
+        );
         assert_eq!(state, before, "state must be unchanged when k_max == 0");
     }
 
@@ -1748,14 +1786,14 @@ mod tests {
             &incoming_anticipated,
             &primal,
             &layout,
-            &indexer,
+            &indexer.anticipated_decision,
         );
         shift_anticipated_state(
             &mut state_b,
             &incoming_anticipated,
             &primal,
             &layout,
-            &indexer,
+            &indexer.anticipated_decision,
         );
 
         let s = layout.anticipated_state.start;
@@ -2800,21 +2838,39 @@ mod tests {
         // Stage 0: incoming=[10.0, 20.0], decision=30.0 → slot 0=20.0, slot 1=30.0
         incoming.copy_from_slice(&state[ant_start..ant_start + 2]);
         primal[dec_start] = 30.0;
-        shift_anticipated_state(&mut state, &incoming, &primal, &layout, &indexer);
+        shift_anticipated_state(
+            &mut state,
+            &incoming,
+            &primal,
+            &layout,
+            &indexer.anticipated_decision,
+        );
         assert_eq!(state[ant_start], 20.0);
         assert_eq!(state[ant_start + 1], 30.0);
 
         // Stage 1: incoming=[20.0, 30.0], decision=40.0 → slot 0=30.0, slot 1=40.0
         incoming.copy_from_slice(&state[ant_start..ant_start + 2]);
         primal[dec_start] = 40.0;
-        shift_anticipated_state(&mut state, &incoming, &primal, &layout, &indexer);
+        shift_anticipated_state(
+            &mut state,
+            &incoming,
+            &primal,
+            &layout,
+            &indexer.anticipated_decision,
+        );
         assert_eq!(state[ant_start], 30.0);
         assert_eq!(state[ant_start + 1], 40.0);
 
         // Stage 2: incoming=[30.0, 40.0], decision=50.0 → slot 0=40.0, slot 1=50.0
         incoming.copy_from_slice(&state[ant_start..ant_start + 2]);
         primal[dec_start] = 50.0;
-        shift_anticipated_state(&mut state, &incoming, &primal, &layout, &indexer);
+        shift_anticipated_state(
+            &mut state,
+            &incoming,
+            &primal,
+            &layout,
+            &indexer.anticipated_decision,
+        );
         assert_eq!(state[ant_start], 40.0);
         assert_eq!(state[ant_start + 1], 50.0);
     }
