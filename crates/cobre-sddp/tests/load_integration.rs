@@ -43,7 +43,7 @@ use cobre_sddp::{
     context::{StageContext, TrainingContext},
     cut::fcf::FutureCostFunction,
     horizon_mode::HorizonMode,
-    indexer::{StageIndexer, StateLayout},
+    indexer::StateLayout,
     inflow_method::InflowNonNegativityMethod,
     risk_measure::RiskMeasure,
     train,
@@ -77,57 +77,10 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     )
 }
 
-/// Build the `StudyDimensions` matching a built `StageIndexer`'s non-state shape.
-///
-/// Mirrors the gated `indexer::test_fixtures::study_dims_for` body via the public
-/// `StudyDimensions` fields, so this external test crate (which does not see the
-/// parent crate's `#[cfg(test)]` surface) carries the identical non-state facts the
-/// `indexer` does for the `TrainingContext` / `StageExtractionSpec` slot.
-fn study_dims_for(
-    counts: &cobre_sddp::indexer::EquipmentCounts,
-) -> cobre_sddp::indexer::StudyDimensions {
-    cobre_sddp::indexer::StudyDimensions {
-        n_thermals: counts.n_thermals,
-        n_lines: counts.n_lines,
-        n_buses: counts.n_buses,
-        max_deficit_segments: counts.max_deficit_segments,
-        has_ncs: false,
-        has_inflow_penalty: counts.has_inflow_penalty,
-        has_withdrawal: counts.hydro_count > 0,
-        has_operational_violations: counts.hydro_count != 0,
-        anticipated_thermal_indices: counts.anticipated_thermal_indices.clone(),
-        n_pumping: counts.n_pumping,
-    }
-}
-
-/// Build a role-(b) `StageIndexer` geometry descriptor (no equipment, no
-/// anticipated thermals) via the public `with_equipment_and_evaporation`
-/// constructor, for the `TrainingContext.indexer` slot.
-fn geom(_hydro_count: usize, _max_par_order: usize) -> StageIndexer {
-    StageIndexer::with_equipment_and_evaporation(
-        &cobre_sddp::indexer::EquipmentCounts {
-            hydro_count: 0,
-            max_par_order: 0,
-            n_thermals: 0,
-            n_lines: 0,
-            n_buses: 0,
-            n_blks: 0,
-            has_inflow_penalty: false,
-            max_deficit_segments: 0,
-            n_anticipated: 0,
-            k_max: 0,
-            anticipated_lead_stages: vec![],
-            anticipated_thermal_indices: vec![],
-            n_pumping: 0,
-        },
-        &cobre_sddp::indexer::FphaColumnLayout {
-            hydro_indices: vec![],
-            planes_per_hydro: vec![],
-        },
-        &cobre_sddp::indexer::EvapConfig {
-            hydro_indices: vec![],
-        },
-    )
+/// Build the default all-zero `StudyDimensions` (every count `0`, every flag
+/// `false`), matching the empty non-state shape these toy fixtures imply.
+fn study_dims() -> cobre_sddp::indexer::StudyDimensions {
+    cobre_sddp::indexer::StudyDimensions::default()
 }
 
 /// Single-rank communicator that correctly copies data through `allgatherv`
@@ -475,7 +428,6 @@ fn test_stochastic_load_training_completes() {
         "pre-condition: n_load_buses must be 1"
     );
 
-    let indexer = geom(1, 0);
     let state = state_layout_for(1, 0);
     let templates = vec![minimal_template(); n_stages];
     let base_rows = vec![2usize; n_stages];
@@ -550,9 +502,8 @@ fn test_stochastic_load_training_completes() {
         &stage_ctx,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -618,7 +569,6 @@ fn test_deterministic_load_training_matches_baseline() {
         "pre-condition: deterministic load must yield n_load_buses=0"
     );
 
-    let indexer = geom(1, 0);
     let state = state_layout_for(1, 0);
     let templates = vec![minimal_template(); n_stages];
     let base_rows = vec![2usize; n_stages];
@@ -682,9 +632,8 @@ fn test_deterministic_load_training_matches_baseline() {
         &stage_ctx,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -727,7 +676,6 @@ fn test_stochastic_load_seed_determinism() {
 
     let run_training = || {
         let stochastic = build_context_with_load(n_stages, 500.0, 50.0);
-        let indexer = geom(1, 0);
         let state = state_layout_for(1, 0);
         let templates = vec![minimal_template(); n_stages];
         let base_rows = vec![2usize; n_stages];
@@ -796,9 +744,8 @@ fn test_stochastic_load_seed_determinism() {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
-                study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+                study_dims: &study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,

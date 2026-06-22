@@ -100,8 +100,8 @@ pub struct StageTemplates {
     ///
     /// `pumping_col_starts[stage_idx]` is the column index of the first
     /// pumping-flow variable for that stage, sourced from
-    /// `StageLayout::col_pumping_start` — never from `StageIndexer::pumping_flow`,
-    /// which is a permanent `0..0` sentinel. Pumping columns are block-major:
+    /// `StageLayout::col_pumping_start`, the sole owner of the pumping-flow column
+    /// base. Pumping columns are block-major:
     /// `pumping_col_starts[stage_idx] + p_idx * n_blks + blk`.
     pub pumping_col_starts: Vec<usize>,
     /// Per-stage pumping-station counts.
@@ -113,8 +113,8 @@ pub struct StageTemplates {
     ///
     /// `geometry_per_stage[stage_idx]` holds the stage-correct column and row
     /// ranges for every block-major equipment family at that stage, sourced from
-    /// the per-stage `StageLayout` — never from the global stage-0 `StageIndexer`,
-    /// whose `n_blks`-striped bases/lengths misread any stage with a differing
+    /// the per-stage `StageLayout`. A single global stage-0 geometry would carry
+    /// `n_blks`-striped bases/lengths that misread any stage with a differing
     /// block count. Length equals `templates.len()`. Threaded into
     /// `StageExtractionSpec` so the simulation read-path addresses the columns the
     /// solved primal occupies at the stage being extracted.
@@ -245,20 +245,18 @@ impl StageTemplates {
 /// that simulation extraction reads — both the per-block `grid.flat` base reads
 /// and the cost-breakdown `range_sum` reads. Each datum is computed from
 /// **this** stage's `StageLayout` (anchored at `state.control_region_start()`
-/// with the per-stage `n_blks`), so it is the stage-correct geometry, NOT the
-/// global stage-0 `StageIndexer`.
+/// with the per-stage `n_blks`), so it is the stage-correct geometry.
 ///
-/// Resolving these ranges from the global stage-0 `StageIndexer` is the bug
-/// this struct exists to forbid: every family after the first block-major one
-/// (`turbine`) has a base `turbine.start + Σ(prior families)·n_blks` and a
-/// length `count·n_blks`, both striped by stage 0's block count. At any stage
-/// whose block count differs from stage 0's (a non-uniform schedule such as
-/// `[1, 3, 2]`), the stage-0 base/length addresses the **wrong** primal columns,
-/// silently misreporting per-block equipment and the cost breakdown. The
-/// per-stage `n_blks` *stride* (carried by `StageExtractionSpec::n_blks`) was
-/// already correct; this struct closes the matching *base/length* gap. For
-/// uniform-block studies every stage's geometry equals stage 0's, so the reads
-/// coincide.
+/// A single global stage-0 geometry would be the bug this struct exists to
+/// forbid: every family after the first block-major one (`turbine`) has a base
+/// `turbine.start + Σ(prior families)·n_blks` and a length `count·n_blks`, both
+/// striped by stage 0's block count. At any stage whose block count differs from
+/// stage 0's (a non-uniform schedule such as `[1, 3, 2]`), the stage-0
+/// base/length addresses the **wrong** primal columns, silently misreporting
+/// per-block equipment and the cost breakdown. The per-stage `n_blks` *stride*
+/// (carried by `StageExtractionSpec::n_blks`) was already correct; this struct
+/// closes the matching *base/length* gap. For uniform-block studies every
+/// stage's geometry equals stage 0's, so the reads coincide.
 ///
 /// Mirrors the established `ncs_col_starts` / `pumping_col_starts` per-stage
 /// persistence: built per stage in `build_single_stage_template`, transposed
@@ -300,8 +298,7 @@ pub struct StageGeometry {
     /// reverse-lookup `local_evap_idx`. The three evaporation columns are
     /// stage-level but anchored at the `n_blks`-dependent FPHA-generation-block
     /// end, so they shift under a non-uniform schedule — this per-stage copy
-    /// carries the stage-correct columns, never the global stage-0
-    /// `StageIndexer`'s.
+    /// carries the stage-correct columns.
     pub evap_indices: Vec<crate::indexer::EvaporationIndices>,
     /// Inflow non-negativity slack column range (one per hydro, stage-level).
     pub inflow_slack: Range<usize>,
@@ -320,33 +317,32 @@ pub struct StageGeometry {
 
     // ── Per-stage row ranges, identity lists, and block count ────────────────
     // These widen the geometry from columns-only to the full per-stage role-(b)
-    // shape the contraction step will repoint readers onto. Each is the
-    // stage-correct datum from **this** stage's `StageLayout`, never the global
-    // stage-0 `StageIndexer`, so a non-uniform block schedule cannot shift it.
+    // shape extraction reads. Each is the stage-correct datum from **this**
+    // stage's `StageLayout`, so a non-uniform block schedule cannot shift it.
     /// Water-balance row range (one row per hydro, stage-level). Stage-invariant
     /// in count (`n_hydros`) but its *base* rides the per-stage block-major rows
-    /// before it; carried here so extraction reads the stage-correct base rather
-    /// than the global stage-0 `StageIndexer::water_balance`.
+    /// before it; carried here so extraction reads the stage-correct base. A
+    /// single global stage-0 base would misread any stage with a differing block
+    /// count.
     pub water_balance: Range<usize>,
     /// Load-balance row range (one row per bus per block). `load_balance.end`
     /// rides `n_blks` (the row count is `n_buses · n_blks`), so under a
-    /// non-uniform schedule the stage-0 range misreads this stage's rows — this
-    /// per-stage range carries the stage-correct extent.
+    /// non-uniform schedule a single global stage-0 range would misread this
+    /// stage's rows — this per-stage range carries the stage-correct extent.
     pub load_balance: Range<usize>,
     /// Row index of the first z-inflow definition constraint. Always `0`: state
     /// pinning uses column bounds, so no state-fixing rows precede the z-inflow
-    /// block. Carried per stage to mirror `StageLayout::z_inflow_row_start`
-    /// rather than reading the global stage-0 `StageIndexer`.
+    /// block. Carried per stage to mirror `StageLayout::z_inflow_row_start`.
     pub z_inflow_row_start: usize,
     /// Number of operating blocks (K) at this stage. The block-major stride for
     /// every equipment column/row family. Per-stage by definition (the LP
-    /// template is built from `stage.blocks.len()`); reading a global stage-0
+    /// template is built from `stage.blocks.len()`); a single global stage-0
     /// `n_blks` would mis-stride any stage whose block count differs.
     pub n_blks: usize,
     /// System hydro indices using FPHA at this stage, in slot order. FPHA
     /// membership varies per stage (the resolved production model is per
-    /// `(hydro, stage)`), so this is the stage-correct list, never the global
-    /// stage-0 `StageIndexer::fpha_hydro_indices`.
+    /// `(hydro, stage)`), so this is the stage-correct list. A single global
+    /// stage-0 list would misclassify any stage whose membership differs.
     pub fpha_hydro_indices: Vec<usize>,
     /// System hydro indices with linearized evaporation at this stage, in slot
     /// order. Parallel to `evap_indices`; carried per stage for the same
@@ -406,47 +402,6 @@ impl StageGeometry {
             evap_hydro_indices: layout.evap_hydro_indices.clone(),
         }
     }
-
-    /// Build the equipment geometry by mirroring a `StageIndexer`'s ranges.
-    ///
-    /// The returned geometry is correct **only for the single stage the indexer
-    /// describes** — it copies the indexer's block-major ranges verbatim, which
-    /// are striped by that indexer's `n_blks`. The production multi-stage
-    /// simulation path must resolve the geometry per stage from the per-stage
-    /// `StageLayout` instead; using this constructor with a stage-0 indexer at a
-    /// stage whose block count differs IS the bug this type exists to forbid. It
-    /// is provided for callers that hold a single `StageIndexer` for the exact
-    /// stage being extracted (synthetic single-stage tests, and uniform-block
-    /// studies whose every stage shares stage 0's geometry).
-    #[must_use]
-    pub fn from_indexer(indexer: &crate::indexer::StageIndexer) -> Self {
-        Self {
-            turbine: indexer.turbine.clone(),
-            spillage: indexer.spillage.clone(),
-            diversion: indexer.diversion.clone(),
-            thermal: indexer.thermal.clone(),
-            anticipated_decision: indexer.anticipated_decision.clone(),
-            line_fwd: indexer.line_fwd.clone(),
-            line_rev: indexer.line_rev.clone(),
-            deficit: indexer.deficit.clone(),
-            excess: indexer.excess.clone(),
-            generation: indexer.generation.clone(),
-            evap_indices: indexer.evap_indices.clone(),
-            inflow_slack: indexer.inflow_slack.clone(),
-            withdrawal_slack_neg: indexer.withdrawal_slack_neg.clone(),
-            withdrawal_slack_pos: indexer.withdrawal_slack_pos.clone(),
-            outflow_below_slack: indexer.outflow_below_slack.clone(),
-            outflow_above_slack: indexer.outflow_above_slack.clone(),
-            turbine_below_slack: indexer.turbine_below_slack.clone(),
-            generation_below_slack: indexer.generation_below_slack.clone(),
-            water_balance: indexer.water_balance.clone(),
-            load_balance: indexer.load_balance.clone(),
-            z_inflow_row_start: indexer.z_inflow_row_start,
-            n_blks: indexer.n_blks,
-            fpha_hydro_indices: indexer.fpha_hydro_indices.clone(),
-            evap_hydro_indices: indexer.evap_hydro_indices.clone(),
-        }
-    }
 }
 
 /// Per-stage outputs of [`build_single_stage_template`].
@@ -481,7 +436,7 @@ pub(super) struct StageBuildOutput {
     /// from [`StageLayout::n_pumping`]).
     pub n_pumping: usize,
     /// Stage-correct equipment column ranges for simulation extraction, computed
-    /// from this stage's [`StageLayout`] (NOT the global stage-0 [`StageIndexer`]).
+    /// from this stage's [`StageLayout`].
     pub equipment_geometry: StageGeometry,
 }
 
@@ -1586,9 +1541,9 @@ mod tests {
         );
 
         // The re-pointed ctx count flows through to the layout: StageLayout reads
-        // its `n_pumping` from `EquipmentCounts.n_pumping = ctx.n_pumping`. (The
-        // block-major column reservation itself is pinned by the layout-module
-        // test `pumping_layout_reserves_block_major_columns`.)
+        // its `n_pumping` from `ctx.n_pumping`. (The block-major column reservation
+        // itself is pinned by the layout-module test
+        // `pumping_layout_reserves_block_major_columns`.)
         let stage = system
             .stages()
             .iter()
@@ -1608,8 +1563,8 @@ mod tests {
     /// equals `StageLayout::new(..).n_pumping`.
     ///
     /// This pins the threading contract the simulation extraction pipeline reads
-    /// from: the column base is sourced from the layout, never from
-    /// `StageIndexer::pumping_flow` (a permanent `0..0` sentinel).
+    /// from: the column base is sourced from the layout, the sole owner of the
+    /// pumping-flow column base.
     #[test]
     fn build_stage_templates_records_layout_pumping_col_start_per_stage() {
         let stations = vec![fixture_pumping_station(5), fixture_pumping_station(2)];
@@ -2588,6 +2543,642 @@ mod tests {
             cumulative[cumulative.len() - 1] < 1.0,
             "the final cumulative factor must be discounted below 1.0, got {}",
             cumulative[cumulative.len() - 1]
+        );
+    }
+
+    // ── Operational-violation RHS & matrix-coefficient verification ──────────
+    //
+    // These verify the LP-builder's row bounds (RHS) and CSC matrix coefficients
+    // at the four operational-violation constraint-row families. They locate the
+    // rows via `StageLayout`'s op-violation row ranges directly — the row ranges
+    // the per-stage layout owns and the public `StageGeometry` does not expose —
+    // so this is the correct layer for them. The RHS/coefficient values are
+    // produced by `fill_operational_violation_rows` / `fill_operational_violation_entries`
+    // through `build_single_stage_template`.
+
+    use super::super::layout::StageLayout;
+    use super::COST_SCALE_FACTOR;
+    use crate::hydro_models::{ProductionModelSet, ResolvedProductionModel};
+    use cobre_core::System;
+    use cobre_solver::StageTemplate;
+
+    /// One-hydro system with all operational-violation bounds active (min/max
+    /// outflow, min turbine, min generation > 0), two blocks per stage, and
+    /// `1000.0` violation penalties — the fixture the operational-violation
+    /// builder tests exercise.
+    fn one_hydro_active_violations(n_stages: usize) -> System {
+        use cobre_core::scenario::{InflowModel, LoadModel};
+
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+
+        let hydro = Hydro {
+            id: EntityId(2),
+            name: "H1".to_string(),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            min_outflow_m3s: 50.0,
+            max_outflow_m3s: Some(800.0),
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 10.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 5.0,
+            max_generation_mw: 250.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 1000.0,
+                outflow_violation_below_cost: 1000.0,
+                outflow_violation_above_cost: 1000.0,
+                generation_violation_below_cost: 1000.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        };
+
+        let stages: Vec<Stage> = (0..n_stages)
+            .map(|i| Stage {
+                index: i,
+                id: i as i32,
+                start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                season_id: None,
+                blocks: vec![
+                    Block {
+                        index: 0,
+                        name: "Heavy".to_string(),
+                        duration_hours: 720.0,
+                    },
+                    Block {
+                        index: 1,
+                        name: "Light".to_string(),
+                        duration_hours: 48.0,
+                    },
+                ],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            })
+            .collect();
+
+        let inflow_models: Vec<InflowModel> = (0..n_stages)
+            .map(|i| InflowModel {
+                hydro_id: EntityId(2),
+                stage_id: i as i32,
+                mean_m3s: 80.0,
+                std_m3s: 20.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..n_stages)
+            .map(|i| LoadModel {
+                bus_id: EntityId(1),
+                stage_id: i as i32,
+                mean_mw: 100.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let n_st = n_stages.max(1);
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: n_st,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 200.0,
+                    min_turbined_m3s: 10.0,
+                    max_turbined_m3s: 100.0,
+                    min_outflow_m3s: 50.0,
+                    max_outflow_m3s: Some(800.0),
+                    min_generation_mw: 5.0,
+                    max_generation_mw: 250.0,
+                    max_diversion_m3s: None,
+                    filling_inflow_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: n_st,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.01,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 0.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 1000.0,
+                    outflow_violation_below_cost: 1000.0,
+                    outflow_violation_above_cost: 1000.0,
+                    generation_violation_below_cost: 1000.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 1000.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .build()
+            .expect("one_hydro_active_violations: valid")
+    }
+
+    /// Get CSC entries for column `col` of a built `StageTemplate` as
+    /// `(row, value)` pairs.
+    #[allow(clippy::cast_sign_loss)]
+    fn csc_entries_for_col(t: &StageTemplate, col: usize) -> Vec<(usize, f64)> {
+        let start = t.col_starts[col] as usize;
+        let end = t.col_starts[col + 1] as usize;
+        (start..end)
+            .map(|nz| (t.row_indices[nz] as usize, t.values[nz]))
+            .collect()
+    }
+
+    /// Build the active-violations stage-0 `StageLayout` (the owner of the
+    /// op-violation row/column ranges) and the matching `StageTemplate` (RHS,
+    /// bounds, objective, CSC) from one shared `TemplateBuildCtx`, so the row
+    /// ranges and the template the tests query agree by construction.
+    ///
+    /// Productivity is `0.5` so the per-block min-generation row carries a
+    /// `0.5` turbine coefficient (asserted by
+    /// [`relocated_min_generation_constant_productivity_coefficients`]).
+    fn build_active_violations_layout_and_template() -> (StageLayout<'static>, StageTemplate) {
+        let system = Box::leak(Box::new(one_hydro_active_violations(1)));
+        let par_lp = Box::leak(Box::new(PrecomputedPar::default()));
+        let production = Box::leak(Box::new(ProductionModelSet::new(
+            vec![vec![ResolvedProductionModel::ConstantProductivity {
+                productivity: 0.5,
+            }]],
+            1,
+            1,
+        )));
+        let hydro_models = Box::leak(Box::new(PrepareHydroModelsResult::default_from_system(
+            system,
+        )));
+        let resolved_params = Box::leak(Box::new(ResolvedParameters {
+            per_param: vec![],
+            id_to_slot: vec![],
+        }));
+
+        let (ctx, _, _) = super::build_template_build_ctx(
+            system,
+            InflowNonNegativityMethod::None,
+            par_lp,
+            production,
+            &hydro_models.evaporation,
+            resolved_params,
+        );
+        let ctx = Box::leak(Box::new(ctx));
+        let state = Box::leak(Box::new(state_layout_for(ctx)));
+        let stage = &system.stages()[0];
+
+        // `build_single_stage_template` and `StageLayout::new` are deterministic
+        // functions of the same `(ctx, state, stage, 0)`, so the template and the
+        // layout agree on every row/column offset.
+        let template = super::build_single_stage_template(ctx, state, stage, 0).template;
+        let layout = StageLayout::new(ctx, state, stage, 0);
+        (layout, template)
+    }
+
+    #[test]
+    fn relocated_operational_violation_row_counts() {
+        // 1 hydro, 2 blocks => 4 operational violation rows of length 2 each.
+        let (layout, t) = build_active_violations_layout_and_template();
+
+        // 4 row ranges each contain n_hydros * n_blks = 1 * 2 = 2 rows.
+        assert_eq!(layout.min_outflow_rows.len(), 2);
+        assert_eq!(layout.max_outflow_rows.len(), 2);
+        assert_eq!(layout.min_turbine_rows.len(), 2);
+        assert_eq!(layout.min_generation_rows.len(), 2);
+
+        // All constraint rows are within the template's range.
+        assert!(
+            layout.min_generation_rows.end <= t.num_rows,
+            "operational violation rows exceed num_rows"
+        );
+    }
+
+    #[test]
+    fn relocated_min_outflow_row_bounds() {
+        // Per-block: RHS in rate units (m3/s), not volume.
+        let (layout, t) = build_active_violations_layout_and_template();
+        let expected_lower = 50.0; // min_outflow_m3s
+
+        // Both blocks get the same RHS.
+        for blk in 0..2 {
+            let row = layout.min_outflow_rows.start + blk;
+            assert!(
+                (t.row_lower[row] - expected_lower).abs() < 1e-10,
+                "min_outflow row_lower (block {blk}) = {}, expected {}",
+                t.row_lower[row],
+                expected_lower
+            );
+            assert_eq!(
+                t.row_upper[row],
+                f64::INFINITY,
+                "min_outflow row_upper must be +inf"
+            );
+        }
+    }
+
+    #[test]
+    fn relocated_max_outflow_row_bounds() {
+        // Per-block: RHS in rate units (m3/s).
+        let (layout, t) = build_active_violations_layout_and_template();
+        let expected_upper = 800.0; // max_outflow_m3s
+
+        for blk in 0..2 {
+            let row = layout.max_outflow_rows.start + blk;
+            assert_eq!(
+                t.row_lower[row],
+                f64::NEG_INFINITY,
+                "max_outflow row_lower must be -inf"
+            );
+            assert!(
+                (t.row_upper[row] - expected_upper).abs() < 1e-10,
+                "max_outflow row_upper (block {blk}) = {}, expected {}",
+                t.row_upper[row],
+                expected_upper
+            );
+        }
+    }
+
+    #[test]
+    fn relocated_min_turbine_row_bounds() {
+        // Per-block: RHS in rate units (m3/s).
+        let (layout, t) = build_active_violations_layout_and_template();
+        let expected_lower = 10.0; // min_turbined_m3s
+
+        for blk in 0..2 {
+            let row = layout.min_turbine_rows.start + blk;
+            assert!(
+                (t.row_lower[row] - expected_lower).abs() < 1e-10,
+                "min_turbine row_lower (block {blk}) = {}, expected {}",
+                t.row_lower[row],
+                expected_lower
+            );
+            assert_eq!(
+                t.row_upper[row],
+                f64::INFINITY,
+                "min_turbine row_upper must be +inf"
+            );
+        }
+    }
+
+    #[test]
+    fn relocated_min_generation_row_bounds() {
+        // Per-block: RHS in rate units (MW), not MWh.
+        let (layout, t) = build_active_violations_layout_and_template();
+        let expected_lower = 5.0; // min_generation_mw
+
+        for blk in 0..2 {
+            let row = layout.min_generation_rows.start + blk;
+            assert!(
+                (t.row_lower[row] - expected_lower).abs() < 1e-10,
+                "min_generation row_lower (block {blk}) = {}, expected {}",
+                t.row_lower[row],
+                expected_lower
+            );
+            assert_eq!(
+                t.row_upper[row],
+                f64::INFINITY,
+                "min_generation row_upper must be +inf"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::cast_sign_loss)]
+    fn relocated_min_outflow_matrix_coefficients() {
+        // Per-block min outflow: q + s + d + slack = 1.0 per block-row.
+        let (layout, t) = build_active_violations_layout_and_template();
+        let n_blks = 2;
+
+        for blk in 0..n_blks {
+            let row = layout.min_outflow_rows.start + blk;
+
+            // Turbine column for this block: coefficient 1.0
+            let entries = csc_entries_for_col(&t, layout.turbine.start + blk);
+            let v = entries.iter().find(|e| e.0 == row).map(|e| e.1);
+            assert!(
+                v.is_some() && (v.unwrap() - 1.0).abs() < 1e-15,
+                "turbine blk{blk} entry for min_outflow row: {v:?}"
+            );
+
+            // Spillage column for this block: coefficient 1.0
+            let entries = csc_entries_for_col(&t, layout.spillage.start + blk);
+            let v = entries.iter().find(|e| e.0 == row).map(|e| e.1);
+            assert!(
+                v.is_some() && (v.unwrap() - 1.0).abs() < 1e-15,
+                "spillage blk{blk} entry for min_outflow row: {v:?}"
+            );
+
+            // Slack column for this block: coefficient 1.0
+            let entries = csc_entries_for_col(&t, layout.outflow_below_slack.start + blk);
+            let v = entries.iter().find(|e| e.0 == row).map(|e| e.1);
+            assert!(
+                v.is_some() && (v.unwrap() - 1.0).abs() < 1e-15,
+                "outflow_below slack blk{blk}: {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::cast_sign_loss)]
+    fn relocated_max_outflow_matrix_slack_is_negative() {
+        // Per-block max outflow row: slack coefficient = -1.0.
+        let (layout, t) = build_active_violations_layout_and_template();
+        let n_blks = 2;
+
+        for blk in 0..n_blks {
+            let row = layout.max_outflow_rows.start + blk;
+            let entries = csc_entries_for_col(&t, layout.outflow_above_slack.start + blk);
+            let v = entries.iter().find(|e| e.0 == row).map(|e| e.1);
+            assert!(
+                v.is_some() && (v.unwrap() - (-1.0)).abs() < 1e-15,
+                "outflow_above slack blk{blk} must be -1.0, got {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::cast_sign_loss)]
+    fn relocated_min_turbine_matrix_only_turbine_cols() {
+        // Per-block min turbine: only turbine columns (no spillage), coefficient 1.0.
+        let (layout, t) = build_active_violations_layout_and_template();
+        let n_blks = 2;
+
+        for blk in 0..n_blks {
+            let row = layout.min_turbine_rows.start + blk;
+
+            // Turbine column: coefficient 1.0
+            let entries = csc_entries_for_col(&t, layout.turbine.start + blk);
+            let v = entries.iter().find(|e| e.0 == row).map(|e| e.1);
+            assert!(
+                v.is_some() && (v.unwrap() - 1.0).abs() < 1e-15,
+                "turbine blk{blk} min_turbine: {v:?}"
+            );
+
+            // Spillage should NOT appear in min_turbine row.
+            let entries_spill = csc_entries_for_col(&t, layout.spillage.start + blk);
+            let v_spill = entries_spill.iter().find(|e| e.0 == row);
+            assert!(
+                v_spill.is_none(),
+                "spillage should not appear in min_turbine row (blk {blk})"
+            );
+
+            // Slack = +1.0
+            let entries = csc_entries_for_col(&t, layout.turbine_below_slack.start + blk);
+            let v = entries.iter().find(|e| e.0 == row).map(|e| e.1);
+            assert!(
+                v.is_some() && (v.unwrap() - 1.0).abs() < 1e-15,
+                "turbine_below slack blk{blk}: {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::cast_sign_loss)]
+    fn relocated_min_generation_constant_productivity_coefficients() {
+        // Per-block constant productivity: coefficient = rho = 0.5 per block-row.
+        let (layout, t) = build_active_violations_layout_and_template();
+        let n_blks = 2;
+        let rho = 0.5;
+
+        for blk in 0..n_blks {
+            let row = layout.min_generation_rows.start + blk;
+
+            // Turbine column: coefficient = rho
+            let entries = csc_entries_for_col(&t, layout.turbine.start + blk);
+            let v = entries.iter().find(|e| e.0 == row).map(|e| e.1);
+            assert!(
+                v.is_some() && (v.unwrap() - rho).abs() < 1e-10,
+                "turbine blk{blk} min_gen coeff: {v:?}, expected {rho}"
+            );
+
+            // Slack: +1.0
+            let entries_s = csc_entries_for_col(&t, layout.generation_below_slack.start + blk);
+            let vs = entries_s.iter().find(|e| e.0 == row).map(|e| e.1);
+            assert!(
+                vs.is_some() && (vs.unwrap() - 1.0).abs() < 1e-15,
+                "generation_below slack blk{blk}: {vs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn relocated_operational_violation_rows_outside_dual_relevant() {
+        // n_dual_relevant is always 0 (state pinning uses column bounds). All
+        // operational violation rows must be placed beyond this range.
+        let (layout, t) = build_active_violations_layout_and_template();
+
+        assert_eq!(
+            t.n_dual_relevant, 0,
+            "n_dual_relevant is always 0 with column-bound state pinning"
+        );
+
+        // All 4 operational violation row ranges must start beyond n_dual_relevant.
+        assert!(
+            layout.min_outflow_rows.start > t.n_dual_relevant,
+            "min_outflow row {} must be > n_dual_relevant {}",
+            layout.min_outflow_rows.start,
+            t.n_dual_relevant
+        );
+        assert!(
+            layout.max_outflow_rows.start > t.n_dual_relevant,
+            "max_outflow row {} must be > n_dual_relevant {}",
+            layout.max_outflow_rows.start,
+            t.n_dual_relevant
+        );
+        assert!(
+            layout.min_turbine_rows.start > t.n_dual_relevant,
+            "min_turbine row {} must be > n_dual_relevant {}",
+            layout.min_turbine_rows.start,
+            t.n_dual_relevant
+        );
+        assert!(
+            layout.min_generation_rows.start > t.n_dual_relevant,
+            "min_generation row {} must be > n_dual_relevant {}",
+            layout.min_generation_rows.start,
+            t.n_dual_relevant
+        );
+    }
+
+    #[test]
+    fn relocated_diagnostic_template_operational_violation_correctness() {
+        let (layout, t) = build_active_violations_layout_and_template();
+
+        // Operational-violation presence: the non-empty min-outflow slack range
+        // is the evidence the families are present when hydros exist.
+        assert!(
+            !layout.outflow_below_slack.is_empty(),
+            "operational-violation slack columns must be present when hydros exist"
+        );
+
+        // Per-block formulation: RHS is in rate units (m3/s or MW), not volume/energy.
+        // Block 0 column at `.start`, block 1 at `.start + 1`.
+        let block_hours_0 = 720.0;
+
+        // Min outflow row (block 0): row_lower = 50.0 m3/s
+        let row = layout.min_outflow_rows.start;
+        assert!(
+            (t.row_lower[row] - 50.0).abs() < 1e-10,
+            "min_outflow row_lower = {}, expected 50.0 (rate units m3/s)",
+            t.row_lower[row],
+        );
+        assert_eq!(
+            t.row_upper[row],
+            f64::INFINITY,
+            "min_outflow row_upper must be +inf for >= constraint"
+        );
+
+        // Column bounds: outflow_below_slack block 0.
+        let col = layout.outflow_below_slack.start;
+        assert_eq!(
+            t.col_lower[col], 0.0,
+            "outflow_below_slack col_lower must be 0"
+        );
+        assert_eq!(
+            t.col_upper[col],
+            f64::INFINITY,
+            "outflow_below_slack col_upper must be +inf when min_outflow > 0"
+        );
+
+        // Objective: penalty * block_hours (block 0).
+        let expected_objective = 1000.0 * block_hours_0 / COST_SCALE_FACTOR;
+        assert!(
+            t.objective[col] > 0.0,
+            "outflow_below_slack objective must be positive (penalty), got {}",
+            t.objective[col]
+        );
+        assert!(
+            (t.objective[col] - expected_objective).abs() < 1e-10,
+            "outflow_below_slack objective = {}, expected {} (= 1000 * {} / {})",
+            t.objective[col],
+            expected_objective,
+            block_hours_0,
+            COST_SCALE_FACTOR
+        );
+
+        let col_above = layout.outflow_above_slack.start;
+        assert_eq!(t.col_upper[col_above], f64::INFINITY);
+        assert!(t.objective[col_above] > 0.0);
+
+        let col_turb = layout.turbine_below_slack.start;
+        assert_eq!(t.col_upper[col_turb], f64::INFINITY);
+        assert!(t.objective[col_turb] > 0.0);
+
+        let col_gen = layout.generation_below_slack.start;
+        assert_eq!(t.col_upper[col_gen], f64::INFINITY);
+        assert!(t.objective[col_gen] > 0.0);
+
+        // Min turbine row (block 0): row_lower = 10.0 m3/s
+        let min_turb_row = layout.min_turbine_rows.start;
+        assert!(
+            (t.row_lower[min_turb_row] - 10.0).abs() < 1e-10,
+            "min_turbine row_lower = {}, expected 10.0 (rate units m3/s)",
+            t.row_lower[min_turb_row],
+        );
+
+        // Min generation row (block 0): row_lower = 5.0 MW
+        let min_gen_row = layout.min_generation_rows.start;
+        assert!(
+            (t.row_lower[min_gen_row] - 5.0).abs() < 1e-10,
+            "min_generation row_lower = {}, expected 5.0 (rate units MW)",
+            t.row_lower[min_gen_row],
+        );
+
+        // Max outflow row (block 0): row_upper = 800.0 m3/s
+        let max_outflow_row = layout.max_outflow_rows.start;
+        assert!(
+            (t.row_upper[max_outflow_row] - 800.0).abs() < 1e-10,
+            "max_outflow row_upper = {}, expected 800.0 (rate units m3/s)",
+            t.row_upper[max_outflow_row],
         );
     }
 }

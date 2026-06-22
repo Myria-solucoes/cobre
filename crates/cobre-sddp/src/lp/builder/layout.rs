@@ -101,10 +101,10 @@ pub(crate) struct TemplateBuildCtx<'a> {
     pub(crate) pumping_pos: BTreeMap<EntityId, usize>,
     /// Number of pumping stations (`pumping_stations.len()`).
     ///
-    /// The authoritative count threaded into `EquipmentCounts.n_pumping`, so the
-    /// layout reserves `n_pumping * n_blks` pumping-flow columns. Asserted equal
-    /// to `bounds.n_pumping()` at ctx construction — a divergence means the
-    /// resolved-bounds table and the entity slice disagree on station count.
+    /// The authoritative station count: the layout reserves `n_pumping * n_blks`
+    /// pumping-flow columns from it. Asserted equal to `bounds.n_pumping()` at ctx
+    /// construction — a divergence means the resolved-bounds table and the entity
+    /// slice disagree on station count.
     pub(crate) n_pumping: usize,
     /// Mapping from target hydro ID to source hydro indices that divert to it.
     ///
@@ -364,10 +364,10 @@ pub(crate) struct StageLayout<'a> {
     ///
     /// `excess.end .. excess.end + n_h` when the penalty method is active and
     /// `n_h > 0`, else `0..0`. Stored first-class so the per-stage simulation
-    /// geometry ([`StageGeometry`](super::template::StageGeometry))
-    /// reads the stage-correct inflow-slack range rather than the global stage-0
-    /// `StageIndexer::inflow_slack`, whose `excess.end`-anchored base shifts under
-    /// a non-uniform block schedule.
+    /// geometry ([`StageGeometry`](super::template::StageGeometry)) reads the
+    /// stage-correct inflow-slack range. A single global stage-0 range would carry
+    /// an `excess.end`-anchored base that shifts under a non-uniform block
+    /// schedule.
     pub(crate) inflow_slack: Range<usize>,
     /// Column-block cursor at which the FPHA generation block begins, even when
     /// that block is empty (`inflow_slack.end` with penalty, else `excess.end`).
@@ -506,11 +506,9 @@ fn build_evap_indices(
 
 /// Collect the FPHA hydro indices and per-hydro plane counts for this stage.
 ///
-/// The returned vectors feed the indexer's [`FphaColumnLayout`], which is the
-/// single owner of the FPHA column and row offsets; this helper only enumerates
-/// which hydros use FPHA, never their offsets.
-///
-/// [`FphaColumnLayout`]: crate::indexer::FphaColumnLayout
+/// The returned vectors feed this stage's [`StageLayout`], which owns the FPHA
+/// column and row offsets; this helper only enumerates which hydros use FPHA,
+/// never their offsets.
 fn identify_fpha_hydros(ctx: &TemplateBuildCtx<'_>, stage_idx: usize) -> (Vec<usize>, Vec<usize>) {
     let mut fpha_hydro_indices: Vec<usize> = Vec::new();
     let mut fpha_planes_per_hydro: Vec<usize> = Vec::new();
@@ -527,11 +525,9 @@ fn identify_fpha_hydros(ctx: &TemplateBuildCtx<'_>, stage_idx: usize) -> (Vec<us
 
 /// Collect the indices of hydros with linearized evaporation at this stage.
 ///
-/// The returned vector feeds the indexer's [`EvapConfig`], which is the single
-/// owner of the evaporation column and row offsets; this helper only enumerates
-/// which hydros use evaporation, never their offsets.
-///
-/// [`EvapConfig`]: crate::indexer::EvapConfig
+/// The returned vector feeds this stage's [`StageLayout`], which owns the
+/// evaporation column and row offsets; this helper only enumerates which hydros
+/// use evaporation, never their offsets.
 fn identify_evap_hydros(ctx: &TemplateBuildCtx<'_>) -> Vec<usize> {
     (0..ctx.n_hydros)
         .filter(|&h_idx| {
@@ -1879,6 +1875,80 @@ mod tests {
         );
     }
 
+    // ── Operational-violation row ranges ─────────────────────────────────────
+
+    /// The four operational-violation row families (`min_outflow_rows`,
+    /// `max_outflow_rows`, `min_turbine_rows`, `min_generation_rows`) are
+    /// contiguous, in that order, each spanning exactly `n_h * n_blks` rows, and
+    /// the block starts immediately after the post-equipment row cursor
+    /// (`evap_rows_end`), which equals `min_outflow_rows.start`. The owning
+    /// arithmetic lives in [`StageLayout::new`]; this pins it at the internal
+    /// layer where the row ranges are visible. The forbidden alternative is a
+    /// stale or transposed base — placing `max_outflow` before `min_outflow`, or
+    /// striding any family by something other than `n_h * n_blks`, addresses the
+    /// wrong constraint rows and silently mis-bounds the operational violations.
+    ///
+    /// Fixture: `n_h = 3`, one block (`n_blks = 1`), so `n_op = 3` per family.
+    #[test]
+    fn stage_layout_operational_violation_rows_are_contiguous_blocks() {
+        let fixtures = FphaMixFixtures::new();
+        let ctx = fixtures.make_ctx();
+        let stage = minimal_stage();
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let n_op = ctx.n_hydros; // n_h * n_blks with n_blks == 1
+        assert!(
+            n_op > 0,
+            "fixture must have hydros so the rows are non-empty"
+        );
+
+        // The four families are non-empty, in canonical order, contiguous, and
+        // each spans exactly `n_op` rows.
+        assert_eq!(layout.min_outflow_rows.len(), n_op, "min_outflow row count");
+        assert_eq!(layout.max_outflow_rows.len(), n_op, "max_outflow row count");
+        assert_eq!(layout.min_turbine_rows.len(), n_op, "min_turbine row count");
+        assert_eq!(
+            layout.min_generation_rows.len(),
+            n_op,
+            "min_generation row count"
+        );
+
+        assert_eq!(
+            layout.max_outflow_rows.start, layout.min_outflow_rows.end,
+            "max_outflow must follow min_outflow contiguously"
+        );
+        assert_eq!(
+            layout.min_turbine_rows.start, layout.max_outflow_rows.end,
+            "min_turbine must follow max_outflow contiguously"
+        );
+        assert_eq!(
+            layout.min_generation_rows.start,
+            layout.max_outflow_rows.end + n_op,
+            "min_generation must follow min_turbine contiguously"
+        );
+
+        // The block anchors at the post-equipment row cursor, mirrored by the
+        // `row_min_outflow_start` accessor.
+        assert_eq!(
+            layout.min_outflow_rows.start,
+            layout.row_min_outflow_start(),
+            "min_outflow_rows.start must equal row_min_outflow_start() when n_h > 0"
+        );
+        assert_eq!(
+            layout.max_outflow_rows.start,
+            layout.row_max_outflow_start()
+        );
+        assert_eq!(
+            layout.min_turbine_rows.start,
+            layout.row_min_turbine_start()
+        );
+        assert_eq!(
+            layout.min_generation_rows.start,
+            layout.row_min_generation_start()
+        );
+    }
+
     // ── Anticipated-decision column positioning ──────────────────────────────
 
     /// `col_anticipated_decision_start` falls between thermal end and
@@ -2155,7 +2225,7 @@ mod tests {
 
     /// Build a `ResolvedBounds` with zero entities but the given `n_stages`.
     ///
-    /// Used to exercise the `StageIndexer::is_anticipated_decision_active` gate
+    /// Used to exercise the `StateLayout::is_anticipated_decision_active` gate
     /// in `n_anticipated_state_out_def_rows` without needing real entity data.
     fn bounds_with_n_stages(n_stages: usize) -> ResolvedBounds {
         ResolvedBounds::new(

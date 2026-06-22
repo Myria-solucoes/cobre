@@ -642,7 +642,6 @@ fn single_stage_system_produces_no_cuts() {
     // sweep (0..0) is empty — zero cuts are generated.
     let stochastic = make_stochastic_context(1, 2);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0()];
     let base_rows = vec![1_usize];
 
@@ -693,7 +692,6 @@ fn single_stage_system_produces_no_cuts() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -739,7 +737,6 @@ fn two_stage_system_two_trial_points_generates_two_cuts_at_stage_0() {
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -794,7 +791,6 @@ fn two_stage_system_two_trial_points_generates_two_cuts_at_stage_0() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -843,7 +839,6 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -895,7 +890,6 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -942,7 +936,6 @@ fn no_cuts_generated_at_last_stage() {
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -992,7 +985,6 @@ fn no_cuts_generated_at_last_stage() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1039,7 +1031,6 @@ fn elapsed_ms_is_non_negative() {
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 2);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1089,7 +1080,6 @@ fn elapsed_ms_is_non_negative() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1133,7 +1123,6 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1184,7 +1173,6 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1273,7 +1261,6 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1324,7 +1311,6 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1390,7 +1376,6 @@ fn cut_gradient_sign_physically_correct() {
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1442,7 +1427,6 @@ fn cut_gradient_sign_physically_correct() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1512,7 +1496,6 @@ fn cut_is_tight_at_trial_point() {
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1565,7 +1548,6 @@ fn cut_is_tight_at_trial_point() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1624,7 +1606,6 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1674,7 +1655,6 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1731,7 +1711,6 @@ fn forward_pass_index_matches_global_scenario_index() {
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1793,7 +1772,6 @@ fn forward_pass_index_matches_global_scenario_index() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1852,7 +1830,6 @@ fn warm_start_uses_prepopulated_forward_basis() {
     let n_openings = 1_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1906,7 +1883,6 @@ fn warm_start_uses_prepopulated_forward_basis() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1961,7 +1937,6 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
     let n_openings = 3_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -2013,7 +1988,6 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -2073,7 +2047,6 @@ fn backward_solver_error_propagates() {
     let n_openings = 1_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -2127,7 +2100,6 @@ fn backward_solver_error_propagates() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -2192,7 +2164,6 @@ fn test_backward_pass_parallel_cut_determinism() {
 
     let stochastic = make_stochastic_context(n_stages, n_openings);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -2288,7 +2259,6 @@ fn test_backward_pass_parallel_cut_determinism() {
         cut_batches: &mut empty_cut_batches(n_stages),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -2379,7 +2349,6 @@ fn test_backward_pass_parallel_cut_determinism() {
         cut_batches: &mut empty_cut_batches(n_stages),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -2639,7 +2608,6 @@ fn backward_pass_load_patches_applied() {
     // mean_mw=300 guarantees a positive realization for any reasonable eta draw.
     let stochastic = make_stochastic_context_with_load(n_stages, n_openings, 300.0, 30.0);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
 
     // PatchBuffer: n_hydros=1, max_par_order=0, n_load_buses=1, max_blocks=1.
     let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1, 0, 0);
@@ -2766,7 +2734,6 @@ fn backward_pass_load_patches_applied() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -2824,7 +2791,6 @@ fn backward_pass_no_load_buses_unchanged() {
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
 
     // PatchBuffer with no load buses: n_load_buses=0, max_blocks=1.
     let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 0, 0, 0, 0);
@@ -2940,7 +2906,6 @@ fn backward_pass_no_load_buses_unchanged() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -3000,7 +2965,6 @@ fn backward_pass_cut_coefficients_unaffected() {
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context_with_load(n_stages, n_openings, 200.0, 20.0);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
 
     let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1, 0, 0);
 
@@ -3119,7 +3083,6 @@ fn backward_pass_cut_coefficients_unaffected() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -3194,7 +3157,6 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -3244,7 +3206,6 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -3324,7 +3285,6 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -3378,7 +3338,6 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -3463,7 +3422,6 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
     let n_state = state.n_state; // 1
@@ -3568,7 +3526,6 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -3844,7 +3801,6 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
     let local_work = 4_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
     let n_state = state.n_state;
@@ -3936,7 +3892,6 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -4073,7 +4028,6 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
     let local_work = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
     let n_state = state.n_state;
@@ -4165,7 +4119,6 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -4240,7 +4193,6 @@ fn run_one_trial_point_with_stores(
     let n_openings = 1_usize;
     let n_state = 1_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let indexer = crate::indexer::test_fixtures::geom(n_state, 0);
     let state = crate::indexer::test_fixtures::state_layout(n_state, 0);
 
     let solver = MockSolver::always_ok(solution_1_0(100.0, -5.0));
@@ -4293,7 +4245,6 @@ fn run_one_trial_point_with_stores(
     let study_dims = crate::indexer::test_fixtures::study_dims();
     let training_ctx = TrainingContext {
         horizon: &horizon,
-        indexer: &indexer,
         state: &state,
         study_dims: &study_dims,
         inflow_method: &InflowNonNegativityMethod::None,
@@ -4531,7 +4482,6 @@ fn handshake_passes_with_local_backend() {
     let n_workers = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0()];
     let base_rows = vec![1_usize];
     let n_state = state.n_state;
@@ -4623,7 +4573,6 @@ fn handshake_passes_with_local_backend() {
         cut_batches: &mut empty_cut_batches(n_stages),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -4736,7 +4685,6 @@ fn handshake_rejects_nonuniform_workers() {
     let n_stages = 1_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let templates = vec![minimal_template_1_0()];
     let base_rows = vec![1_usize];
     let n_state = state.n_state;
@@ -4784,7 +4732,6 @@ fn handshake_rejects_nonuniform_workers() {
         cut_batches: &mut empty_cut_batches(n_stages),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -5006,7 +4953,6 @@ fn run_dcs_backward_trial_point_at(
     x_hat: f64,
 ) -> (super::StagedCut, Vec<f64>, Vec<u64>) {
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let n_state = state.n_state;
     let core = dcs_core_template();
     let templates = vec![core.clone(), core.clone()];
@@ -5048,7 +4994,6 @@ fn run_dcs_backward_trial_point_at(
     let study_dims = crate::indexer::test_fixtures::study_dims();
     let training_ctx = TrainingContext {
         horizon: &horizon,
-        indexer: &indexer,
         state: &state,
         study_dims: &study_dims,
         inflow_method: &InflowNonNegativityMethod::None,
@@ -5480,7 +5425,6 @@ fn dcs_baked_template_with_one_cut() -> StageTemplate {
 fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
     let iteration = 5;
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let n_state = state.n_state;
 
     // Cut-free base (loaded by the DCS path) and the baked successor
@@ -5530,7 +5474,6 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
     let study_dims = crate::indexer::test_fixtures::study_dims();
     let training_ctx = TrainingContext {
         horizon: &horizon,
-        indexer: &indexer,
         state: &state,
         study_dims: &study_dims,
         inflow_method: &InflowNonNegativityMethod::None,

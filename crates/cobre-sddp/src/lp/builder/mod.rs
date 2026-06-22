@@ -19,11 +19,11 @@
 //! ## LP layout (Solver Abstraction SS2)
 //!
 //! The column and row geometry — the contiguous regions, their ordering, and
-//! the offset arithmetic — is owned by [`crate::indexer::StageIndexer`]; the
-//! per-stage NCS, generic-constraint, and pumping blocks are owned by its
-//! per-stage companion `StageLayout`.  This module does not restate that
-//! geometry; it documents only the per-solve patch sequence layered on top of
-//! it (below).
+//! the offset arithmetic — is owned per stage by `StageLayout`, with the
+//! state-vector region on [`crate::indexer::StateLayout`] and the non-state
+//! study shape on [`crate::indexer::StudyDimensions`].  This module does not
+//! restate that geometry; it documents only the per-solve patch sequence layered
+//! on top of it (below).
 //!
 //! The AR dynamics (noise patch target) rows are the water balance constraints
 //! beginning at row `base_rows[stage]` (= `N` for a stage with N hydros). The

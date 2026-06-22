@@ -612,8 +612,8 @@ impl PatchBuffer {
 )]
 mod tests {
     use super::PatchBuffer;
-    use crate::indexer::test_fixtures::{state_layout, state_layout_for, state_layout_full};
-    use crate::indexer::{BlockGrid, StageIndexer, StateLayout};
+    use crate::indexer::test_fixtures::{state_layout, state_layout_full};
+    use crate::indexer::{BlockGrid, StateLayout};
 
     /// Convenience: make a role-(a) state layout without repeating N/L everywhere.
     fn idx(n: usize, l: usize) -> StateLayout {
@@ -968,43 +968,12 @@ mod tests {
     // fill_col_state_patches unit tests
     // -------------------------------------------------------------------------
 
-    /// Build an augmented indexer for N=3, L=2, A=0, K=0 to use across
-    /// Category 1 and 2 column-patch tests.
-    fn idx_augmented_3_2() -> StageIndexer {
-        use crate::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout};
-        StageIndexer::with_equipment_and_evaporation(
-            &EquipmentCounts {
-                hydro_count: 3,
-                max_par_order: 2,
-                n_thermals: 0,
-                n_lines: 0,
-                n_buses: 1,
-                n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 0,
-                k_max: 0,
-                anticipated_lead_stages: vec![],
-                anticipated_thermal_indices: vec![],
-                n_pumping: 0,
-            },
-            &FphaColumnLayout {
-                hydro_indices: vec![],
-                planes_per_hydro: vec![],
-            },
-            &EvapConfig {
-                hydro_indices: vec![],
-            },
-        )
-    }
-
     /// Category 1 col_indices[0..3] = [storage_in.start, +1, +2].
     #[test]
     fn fill_col_state_patches_category1_indices() {
-        let indexer = idx_augmented_3_2();
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
-        let state_layout = state_layout_for(&indexer);
+        let state_layout = state_layout(3, 2);
         buf.fill_col_state_patches(&state_layout, &state, &[]);
 
         let s = state_layout.storage_in.start;
@@ -1016,10 +985,9 @@ mod tests {
     /// Category 1 col_lower[0..3] == col_upper[0..3] == [10.0, 20.0, 30.0].
     #[test]
     fn fill_col_state_patches_category1_values() {
-        let indexer = idx_augmented_3_2();
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
-        let state_layout = state_layout_for(&indexer);
+        let state_layout = state_layout(3, 2);
         buf.fill_col_state_patches(&state_layout, &state, &[]);
 
         assert_eq!(buf.col_lower[0], 10.0);
@@ -1039,10 +1007,9 @@ mod tests {
     /// State layout: lags at `state[3..9]` = [1,2,3,4,5,6].
     #[test]
     fn fill_col_state_patches_category2_indices_and_values() {
-        let indexer = idx_augmented_3_2();
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
-        let state_layout = state_layout_for(&indexer);
+        let state_layout = state_layout(3, 2);
         buf.fill_col_state_patches(&state_layout, &state, &[]);
 
         let il = state_layout.inflow_lags.start;
@@ -1092,10 +1059,9 @@ mod tests {
     /// Every patch in the active col region has col_lower[i] == col_upper[i].
     #[test]
     fn fill_col_state_patches_equality_constraints() {
-        let indexer = idx_augmented_3_2();
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
-        let state_layout = state_layout_for(&indexer);
+        let state_layout = state_layout(3, 2);
         buf.fill_col_state_patches(&state_layout, &state, &[]);
 
         let count = buf.state_col_patch_count();
@@ -1116,8 +1082,7 @@ mod tests {
     /// expected col_lower[0..3] = [5.0, 10.0, 15.0].
     #[test]
     fn fill_col_state_patches_unscaled_with_col_scale() {
-        let indexer = idx_augmented_3_2();
-        let state_layout = state_layout_for(&indexer);
+        let state_layout = state_layout(3, 2);
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
 
@@ -1146,10 +1111,9 @@ mod tests {
     /// When n_anticipated == 0, Category 6 is empty and state_col_patch_count() == N*(1+L).
     #[test]
     fn fill_col_state_patches_zero_anticipated_collapses_correctly() {
-        let indexer = idx_augmented_3_2();
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
-        let state_layout = state_layout_for(&indexer);
+        let state_layout = state_layout(3, 2);
         buf.fill_col_state_patches(&state_layout, &state, &[]);
 
         // N*(1+L) + A*K = 3*3 + 0 = 9
@@ -1163,10 +1127,9 @@ mod tests {
     /// zero-initialised since no row-equality filler has been called.
     #[test]
     fn row_buffer_unchanged_after_fill_col_state_patches() {
-        let indexer = idx_augmented_3_2();
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
-        let state_layout = state_layout_for(&indexer);
+        let state_layout = state_layout(3, 2);
         buf.fill_col_state_patches(&state_layout, &state, &[]);
 
         assert!(

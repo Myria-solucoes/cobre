@@ -1185,7 +1185,7 @@ where
 
         // The lower bound evaluates stage 0 only, so its NCS column base is the
         // per-stage `StageContext::ncs_col_starts[0]` — never a single global
-        // stage-0 NCS base (the `StageIndexer` carries only `has_ncs`, no column
+        // stage-0 NCS base (`StudyDimensions` carries only `has_ncs`, no column
         // base). The range spans only the stage-0 **active** NCS columns
         // (`active_ncs_indices[0].len() * block_count[0]`), not a full
         // `n_stochastic_ncs` block — at a strict-subset stage 0 (an NCS that
@@ -1317,7 +1317,7 @@ mod tests {
         cut::fcf::FutureCostFunction,
         error::SddpError,
         horizon_mode::HorizonMode,
-        indexer::{StageIndexer, StateLayout, StudyDimensions},
+        indexer::{StateLayout, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
         risk_measure::RiskMeasure,
     };
@@ -1699,7 +1699,6 @@ mod tests {
 
     fn make_training_ctx<'a>(
         horizon: &'a HorizonMode,
-        indexer: &'a StageIndexer,
         study_dims: &'a StudyDimensions,
         state: &'a StateLayout,
         stochastic: &'a StochasticContext,
@@ -1708,7 +1707,6 @@ mod tests {
     ) -> TrainingContext<'a> {
         TrainingContext {
             horizon,
-            indexer,
             state,
             study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1737,7 +1735,6 @@ mod tests {
     fn training_session_new_preallocates_all_buffers() {
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1755,7 +1752,6 @@ mod tests {
         let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = make_training_ctx(
             &horizon,
-            &indexer,
             &study_dims,
             &state,
             &stochastic,
@@ -1808,7 +1804,6 @@ mod tests {
     fn training_session_finalize_emits_training_finished() {
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1830,7 +1825,6 @@ mod tests {
         let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = make_training_ctx(
             &horizon,
-            &indexer,
             &study_dims,
             &state,
             &stochastic,
@@ -1870,7 +1864,6 @@ mod tests {
     fn training_session_finalize_with_error_emits_training_finished_with_error_reason() {
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1892,7 +1885,6 @@ mod tests {
         let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = make_training_ctx(
             &horizon,
-            &indexer,
             &study_dims,
             &state,
             &stochastic,
@@ -1937,7 +1929,6 @@ mod tests {
     fn training_session_run_iteration_returns_continue_when_not_converged() {
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1957,7 +1948,6 @@ mod tests {
         let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = make_training_ctx(
             &horizon,
-            &indexer,
             &study_dims,
             &state,
             &stochastic,
@@ -1991,7 +1981,6 @@ mod tests {
     fn training_session_run_iteration_returns_converged_when_gap_closes() {
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -2011,7 +2000,6 @@ mod tests {
         let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = make_training_ctx(
             &horizon,
-            &indexer,
             &study_dims,
             &state,
             &stochastic,
@@ -2060,7 +2048,6 @@ mod tests {
     fn training_session_run_iteration_emits_correct_event_sequence() {
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -2082,7 +2069,6 @@ mod tests {
         let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = make_training_ctx(
             &horizon,
-            &indexer,
             &study_dims,
             &state,
             &stochastic,

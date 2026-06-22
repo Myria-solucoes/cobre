@@ -58,7 +58,7 @@ use cobre_sddp::{
     energy_conversion::{EnergyConversion, EnergyConversionSet},
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
-    indexer::{StageIndexer, StateLayout},
+    indexer::StateLayout,
     inflow_method::InflowNonNegativityMethod,
     lp_builder::{PatchBuffer, build_stage_templates},
     risk_measure::RiskMeasure,
@@ -92,26 +92,31 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     )
 }
 
-/// Build the `StudyDimensions` matching a built `StageIndexer`'s non-state shape.
+/// Build the `StudyDimensions` (non-state study shape) from explicit entity
+/// counts via the public `StudyDimensions` fields.
 ///
-/// Mirrors the gated `indexer::test_fixtures::study_dims_for` body via the public
-/// `StudyDimensions` fields, so this external test crate (which does not see the
-/// parent crate's `#[cfg(test)]` surface) carries the identical non-state facts the
-/// `indexer` does for the `TrainingContext` slot.
+/// This external test crate does not see the parent crate's
+/// `#[cfg(test)]`/`test-support` surface, so it carries the non-state facts
+/// directly. `max_deficit_segments` is `1` and `n_pumping`/`has_ncs`/anticipated
+/// are empty for these single-bus, no-pumping, no-NCS fixtures.
 fn study_dims_for(
-    counts: &cobre_sddp::indexer::EquipmentCounts,
+    n_thermals: usize,
+    n_lines: usize,
+    n_buses: usize,
+    hydro_count: usize,
+    has_inflow_penalty: bool,
 ) -> cobre_sddp::indexer::StudyDimensions {
     cobre_sddp::indexer::StudyDimensions {
-        n_thermals: counts.n_thermals,
-        n_lines: counts.n_lines,
-        n_buses: counts.n_buses,
-        max_deficit_segments: counts.max_deficit_segments,
+        n_thermals,
+        n_lines,
+        n_buses,
+        max_deficit_segments: 1,
         has_ncs: false,
-        has_inflow_penalty: counts.has_inflow_penalty,
-        has_withdrawal: counts.hydro_count > 0,
-        has_operational_violations: counts.hydro_count != 0,
-        anticipated_thermal_indices: counts.anticipated_thermal_indices.clone(),
-        n_pumping: counts.n_pumping,
+        has_inflow_penalty,
+        has_withdrawal: hydro_count > 0,
+        has_operational_violations: hydro_count != 0,
+        anticipated_thermal_indices: vec![],
+        n_pumping: 0,
     }
 }
 
@@ -442,7 +447,9 @@ fn build_stochastic() -> StochasticContext {
 struct Fixture {
     stage_templates: cobre_sddp::StageTemplates,
     stochastic: StochasticContext,
-    indexer: StageIndexer,
+    /// Production stage-0 geometry (the role-(b) equipment/slack column ranges),
+    /// cloned from `stage_templates.geometry_per_stage[0]`.
+    geometry: cobre_sddp::lp_builder::StageGeometry,
     study_dims: cobre_sddp::indexer::StudyDimensions,
     state: StateLayout,
     initial_state: Vec<f64>,
@@ -489,34 +496,22 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
     let first_tmpl = stage_templates.templates.first().expect("at least 1 stage");
     let n_blks = system.stages().first().map_or(1, |s| s.blocks.len().max(1));
     let has_inflow_penalty = inflow_method.has_slack_columns() && first_tmpl.n_hydro > 0;
-    let eq_counts = cobre_sddp::indexer::EquipmentCounts {
-        hydro_count: first_tmpl.n_hydro,
-        max_par_order: first_tmpl.max_par_order,
-        n_thermals: system.thermals().len(),
-        n_lines: system.lines().len(),
-        n_buses: system.buses().len(),
-        n_blks,
+    let _ = n_blks;
+    let study_dims = study_dims_for(
+        system.thermals().len(),
+        system.lines().len(),
+        system.buses().len(),
+        first_tmpl.n_hydro,
         has_inflow_penalty,
-        max_deficit_segments: 1,
-        n_anticipated: 0,
-        k_max: 0,
-        anticipated_lead_stages: vec![],
-        anticipated_thermal_indices: vec![],
-        n_pumping: 0,
-    };
-    let study_dims = study_dims_for(&eq_counts);
-    let indexer = StageIndexer::with_equipment_and_evaporation(
-        &eq_counts,
-        &cobre_sddp::indexer::FphaColumnLayout {
-            hydro_indices: vec![],
-            planes_per_hydro: vec![],
-        },
-        &cobre_sddp::indexer::EvapConfig {
-            hydro_indices: vec![],
-        },
     );
-    // z-inflow column and row ranges are set by StageIndexer::new at
-    // fixed offset N*(1+L), no per-stage wiring needed.
+    // The role-(b) equipment/slack column ranges come from the production
+    // stage-0 geometry the template build already computed; no separate
+    // hand-built descriptor is needed.
+    let geometry = stage_templates
+        .geometry_per_stage
+        .first()
+        .expect("at least 1 stage geometry")
+        .clone();
 
     let state = state_layout_for(first_tmpl.n_hydro, first_tmpl.max_par_order);
     let initial_state = vec![0.0_f64; state.n_state];
@@ -539,7 +534,7 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
     Fixture {
         stage_templates,
         stochastic,
-        indexer,
+        geometry,
         study_dims,
         state,
         initial_state,
@@ -624,7 +619,6 @@ fn train_fixture(
         &stage_ctx,
         &TrainingContext {
             horizon: &fx.horizon,
-            indexer: &fx.indexer,
             state: &fx.state,
             study_dims: &fx.study_dims,
             inflow_method: &fx.inflow_method,
@@ -724,7 +718,6 @@ fn simulate_fixture(
         fcf,
         &TrainingContext {
             horizon: &fx.horizon,
-            indexer: &fx.indexer,
             state: &fx.state,
             study_dims: &fx.study_dims,
             inflow_method: &fx.inflow_method,
@@ -887,8 +880,8 @@ fn truncation_with_penalty_training_completes() {
 
     // Verify the LP template has inflow slack columns in the indexer.
     assert!(
-        !fx.indexer.inflow_slack.is_empty(),
-        "indexer.inflow_slack must be non-empty for TruncationWithPenalty"
+        !fx.geometry.inflow_slack.is_empty(),
+        "geometry.inflow_slack must be non-empty for TruncationWithPenalty"
     );
 
     // Train and verify convergence.
@@ -1005,38 +998,15 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
     let tmpl0 = &templates.templates[0];
     let block_hours = 744.0_f64;
 
-    // The inflow slack columns are at indexer positions. With 2 hydros, PAR(0),
-    // and has_penalty=true, the indexer allocates 2 inflow slack columns.
-    let n_blks = 1;
-    let indexer = StageIndexer::with_equipment_and_evaporation(
-        &cobre_sddp::indexer::EquipmentCounts {
-            hydro_count: tmpl0.n_hydro,
-            max_par_order: tmpl0.max_par_order,
-            n_thermals: 0,
-            n_lines: 0,
-            n_buses: 1,
-            n_blks,
-            has_inflow_penalty: true,
-            max_deficit_segments: 1,
-            n_anticipated: 0,
-            k_max: 0,
-            anticipated_lead_stages: vec![],
-            anticipated_thermal_indices: vec![],
-            n_pumping: 0,
-        },
-        &cobre_sddp::indexer::FphaColumnLayout {
-            hydro_indices: vec![],
-            planes_per_hydro: vec![],
-        },
-        &cobre_sddp::indexer::EvapConfig {
-            hydro_indices: vec![],
-        },
-    );
+    // The inflow slack columns are read from the production stage-0 geometry.
+    // With 2 hydros, PAR(0), and has_penalty=true, the layout allocates 2 inflow
+    // slack columns.
+    let geometry = &templates.geometry_per_stage[0];
 
-    // Inflow slack columns: indexer.inflow_slack.start .. indexer.inflow_slack.end
-    assert_eq!(indexer.inflow_slack.len(), N_HYDROS);
-    let h1_col = indexer.inflow_slack.start; // H1 (index 0)
-    let h2_col = indexer.inflow_slack.start + 1; // H2 (index 1)
+    // Inflow slack columns: geometry.inflow_slack.start .. geometry.inflow_slack.end
+    assert_eq!(geometry.inflow_slack.len(), N_HYDROS);
+    let h1_col = geometry.inflow_slack.start; // H1 (index 0)
+    let h2_col = geometry.inflow_slack.start + 1; // H2 (index 1)
 
     let h1_obj = tmpl0.objective[h1_col];
     let h2_obj = tmpl0.objective[h2_col];

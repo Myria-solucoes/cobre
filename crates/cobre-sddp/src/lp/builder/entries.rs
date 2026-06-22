@@ -584,7 +584,7 @@ pub(super) fn fill_generic_constraint_entries(
     };
     // Pumping column start + station data for the PumpingFlow/PumpingPower arms.
     // `col_pumping_start` is the real reserved range on the `StageLayout` being
-    // built — NOT `StageIndexer::pumping_flow` (a permanent `0..0` sentinel).
+    // built — the sole owner of the pumping-flow column base.
     let pumping_refs = crate::generic_constraints::PumpingRefs {
         col_pumping_start: layout.col_pumping_start,
         pumping_stations: ctx.pumping_stations,

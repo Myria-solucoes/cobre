@@ -941,7 +941,8 @@ mod tests {
         resolve_variable_ref, variable_ref_is_block_independent,
     };
     use crate::hydro_models::{FphaPlane, ProductionModelSet, ResolvedProductionModel};
-    use crate::indexer::{StageIndexer, StateLayout};
+    use crate::indexer::StateLayout;
+    use crate::lp_builder::StageGeometry;
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
@@ -958,14 +959,15 @@ mod tests {
         StateLayout::new(0, 0, 1, 2, vec![2], &[])
     }
 
-    /// Build the [`GenericResolverGeom`] view from a test [`StageIndexer`] (role
-    /// (b)), a [`StateLayout`] (role (a)), and the anticipated-thermal identity
-    /// list. Mirrors the production view built in `entries.rs`, sourcing each
-    /// role-(b) range from the indexer's equivalent field so the resolver tests
-    /// exercise the same offsets production does.
+    /// Build the [`GenericResolverGeom`] view from a test [`StageGeometry`] (role
+    /// (b)), a [`StateLayout`] (role (a)), the deficit-segment stride, and the
+    /// anticipated-thermal identity list. Mirrors the production view built in
+    /// `entries.rs`, sourcing each role-(b) range from the geometry's equivalent
+    /// field so the resolver tests exercise the same offsets production does.
     fn make_geom<'a>(
-        indexer: &'a StageIndexer,
+        indexer: &'a StageGeometry,
         state: &'a StateLayout,
+        max_deficit_segments: usize,
         anticipated_thermal_indices: &[usize],
     ) -> GenericResolverGeom<'a> {
         // Production builds the `anticipated_local_by_sys_pos` reverse map on the
@@ -991,7 +993,7 @@ mod tests {
             excess: &indexer.excess,
             generation: &indexer.generation,
             deficit: &indexer.deficit,
-            max_deficit_segments: indexer.max_deficit_segments,
+            max_deficit_segments,
             n_blks: indexer.n_blks,
             evap_indices: &indexer.evap_indices,
             evap_hydro_indices: &indexer.evap_hydro_indices,
@@ -1056,7 +1058,7 @@ mod tests {
         CascadeTopology::build(&[])
     }
 
-    /// Build a `StageIndexer` with equipment for tests.
+    /// Build a `StageGeometry` with equipment for tests.
     ///
     /// N=4 hydros (2 FPHA at positions 0, 2), L=0, T=2 thermals, Ln=1 line, B=2 buses, K=3 blocks.
     /// S=2 max deficit segments.
@@ -1081,32 +1083,22 @@ mod tests {
     ///   withdrawal_slack_neg: [85, 89)  withdrawal_slack_pos: [89, 93) (4 hydros)
     ///
     /// Storage: 0..4
-    fn make_indexer() -> StageIndexer {
+    fn make_indexer() -> StageGeometry {
         // N=4, L=0, T=2, Ln=1, B=2, K=3, no penalty, 2 FPHA hydros at positions 0 and 2
         // (local FPHA indices 0 and 1), each with 3 planes.
-        StageIndexer::with_equipment_and_evaporation(
-            &crate::indexer::EquipmentCounts {
+        crate::indexer::test_fixtures::geometry(
+            &crate::indexer::test_fixtures::GeometryDims {
                 hydro_count: 4,
-                max_par_order: 0,
                 n_thermals: 2,
                 n_lines: 1,
                 n_buses: 2,
                 n_blks: 3,
-                has_inflow_penalty: false,
                 max_deficit_segments: 2,
-                n_anticipated: 0,
-                k_max: 0,
-                anticipated_lead_stages: vec![],
-                anticipated_thermal_indices: vec![],
-                n_pumping: 0,
+                ..Default::default()
             },
-            &crate::indexer::FphaColumnLayout {
-                hydro_indices: vec![0, 2],
-                planes_per_hydro: vec![3, 3],
-            },
-            &crate::indexer::EvapConfig {
-                hydro_indices: vec![],
-            },
+            vec![0, 2],
+            &[3, 3],
+            vec![],
         )
     }
 
@@ -1322,7 +1314,7 @@ mod tests {
     fn thermal_generation_column_arithmetic() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -1368,7 +1360,7 @@ mod tests {
     fn hydro_storage_stage_level_ignores_block() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -1420,7 +1412,7 @@ mod tests {
     fn hydro_outflow_expands_to_turbine_and_spillage() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -1453,7 +1445,7 @@ mod tests {
     fn hydro_outflow_block_id_some_uses_explicit_block() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -1490,7 +1482,7 @@ mod tests {
     fn hydro_generation_constant_productivity_maps_to_turbine() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -1524,7 +1516,7 @@ mod tests {
     fn hydro_generation_fpha_maps_to_generation_column() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -1558,7 +1550,7 @@ mod tests {
     fn hydro_generation_fpha_second_hydro_block_2() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -1599,29 +1591,16 @@ mod tests {
     /// evap cols: [15, 18)  → evaporation_flow=15, f_evap_plus=16, f_evap_minus=17
     #[test]
     fn hydro_evaporation_maps_to_evaporation_flow_col() {
-        let evap_indexer = StageIndexer::with_equipment_and_evaporation(
-            &crate::indexer::EquipmentCounts {
+        let evap_indexer = crate::indexer::test_fixtures::geometry(
+            &crate::indexer::test_fixtures::GeometryDims {
                 hydro_count: 2,
-                max_par_order: 0,
-                n_thermals: 0,
-                n_lines: 0,
                 n_buses: 1,
                 n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 0,
-                k_max: 0,
-                anticipated_lead_stages: vec![],
-                anticipated_thermal_indices: vec![],
-                n_pumping: 0,
+                ..Default::default()
             },
-            &crate::indexer::FphaColumnLayout {
-                hydro_indices: vec![],
-                planes_per_hydro: vec![],
-            },
-            &crate::indexer::EvapConfig {
-                hydro_indices: vec![0],
-            },
+            vec![],
+            &[],
+            vec![0],
         );
 
         let prod_models = ProductionModelSet::new(
@@ -1659,7 +1638,7 @@ mod tests {
             pumping_pos: &empty_pumping_pos,
         };
         let state = StateLayout::new(2, 0, 0, 0, vec![], &[0, 0]);
-        let geom = make_geom(&evap_indexer, &state, &[]);
+        let geom = make_geom(&evap_indexer, &state, 1, &[]);
         let result = resolve_variable_ref(
             &VariableRef::HydroEvaporation {
                 hydro_id: EntityId(10),
@@ -1679,29 +1658,16 @@ mod tests {
     /// HydroEvaporation for hydro that has no evaporation model returns empty vec.
     #[test]
     fn hydro_evaporation_no_evap_model_returns_empty() {
-        let evap_indexer = StageIndexer::with_equipment_and_evaporation(
-            &crate::indexer::EquipmentCounts {
+        let evap_indexer = crate::indexer::test_fixtures::geometry(
+            &crate::indexer::test_fixtures::GeometryDims {
                 hydro_count: 2,
-                max_par_order: 0,
-                n_thermals: 0,
-                n_lines: 0,
                 n_buses: 1,
                 n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 0,
-                k_max: 0,
-                anticipated_lead_stages: vec![],
-                anticipated_thermal_indices: vec![],
-                n_pumping: 0,
+                ..Default::default()
             },
-            &crate::indexer::FphaColumnLayout {
-                hydro_indices: vec![],
-                planes_per_hydro: vec![],
-            },
-            &crate::indexer::EvapConfig {
-                hydro_indices: vec![0],
-            },
+            vec![],
+            &[],
+            vec![0],
         );
 
         let prod_models = ProductionModelSet::new(
@@ -1740,7 +1706,7 @@ mod tests {
             pumping_pos: &empty_pumping_pos,
         };
         let state = StateLayout::new(2, 0, 0, 0, vec![], &[0, 0]);
-        let geom = make_geom(&evap_indexer, &state, &[]);
+        let geom = make_geom(&evap_indexer, &state, 1, &[]);
         let result = resolve_variable_ref(
             &VariableRef::HydroEvaporation {
                 hydro_id: EntityId(20),
@@ -1784,7 +1750,7 @@ mod tests {
     fn pumping_flow_resolves_to_flow_column_with_unit_coeff() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let (stations, ppos) = make_pumping_fixture();
 
@@ -1814,7 +1780,7 @@ mod tests {
     fn pumping_power_resolves_to_flow_column_with_consumption_coeff() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let (stations, ppos) = make_pumping_fixture();
 
@@ -1859,7 +1825,7 @@ mod tests {
     fn pumping_flow_none_resolves_per_block() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let (stations, ppos) = make_pumping_fixture();
 
@@ -1902,7 +1868,7 @@ mod tests {
     fn pumping_power_none_resolves_per_block_with_consumption() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let (stations, ppos) = make_pumping_fixture();
 
@@ -1941,7 +1907,7 @@ mod tests {
     fn pumping_unknown_station_returns_empty() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let (stations, ppos) = make_pumping_fixture();
 
@@ -1978,7 +1944,7 @@ mod tests {
     fn pumping_no_stations_returns_empty() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let no_stations: Vec<PumpingStation> = Vec::new();
         let empty_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
@@ -2061,7 +2027,7 @@ mod tests {
     fn contract_import_returns_empty() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2091,7 +2057,7 @@ mod tests {
     fn contract_export_returns_empty() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2120,7 +2086,7 @@ mod tests {
     fn non_controllable_generation_returns_empty() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2155,7 +2121,7 @@ mod tests {
     fn hydro_withdrawal_returns_empty() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2192,7 +2158,7 @@ mod tests {
     fn non_controllable_curtailment_returns_empty() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2227,7 +2193,7 @@ mod tests {
     fn missing_entity_id_returns_empty() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2264,7 +2230,7 @@ mod tests {
     fn bus_deficit_returns_one_entry_per_segment() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2302,7 +2268,7 @@ mod tests {
     fn bus_deficit_second_bus_block_1() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2338,7 +2304,7 @@ mod tests {
     fn bus_excess_maps_to_excess_column() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2372,7 +2338,7 @@ mod tests {
     fn line_direct_maps_to_fwd_column() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2404,7 +2370,7 @@ mod tests {
     fn line_reverse_maps_to_rev_column() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2439,7 +2405,7 @@ mod tests {
     fn line_exchange_maps_to_fwd_and_rev_columns() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2471,7 +2437,7 @@ mod tests {
     fn line_exchange_with_explicit_block() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2500,7 +2466,7 @@ mod tests {
     fn line_exchange_unknown_id_returns_empty() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2526,7 +2492,7 @@ mod tests {
 
     // ── AnticipatedDecision tests ─────────────────────────────────────────────
 
-    /// Build a `StageIndexer` with 2 thermals where thermal at system position 1
+    /// Build a `StageGeometry` with 2 thermals where thermal at system position 1
     /// is anticipated (local anticipated index 0).
     ///
     /// N=0 hydros, T=2 thermals (pos 0 = regular, pos 1 = anticipated), Ln=0,
@@ -2547,30 +2513,20 @@ mod tests {
     ///   line_rev: [9, 9) empty
     ///   deficit: [9, 9+1*1*2) = [9, 11)  (B=1, S=1, K=2)
     ///   excess:  [11, 11+1*2) = [11, 13)
-    fn make_indexer_with_anticipated() -> StageIndexer {
-        StageIndexer::with_equipment_and_evaporation(
-            &crate::indexer::EquipmentCounts {
-                hydro_count: 0,
-                max_par_order: 0,
+    fn make_indexer_with_anticipated() -> StageGeometry {
+        crate::indexer::test_fixtures::geometry(
+            &crate::indexer::test_fixtures::GeometryDims {
                 n_thermals: 2,
-                n_lines: 0,
                 n_buses: 1,
                 n_blks: 2,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
                 n_anticipated: 1,
                 k_max: 2,
-                anticipated_lead_stages: vec![2],
                 anticipated_thermal_indices: vec![1], // sys pos 1 is anticipated
-                n_pumping: 0,
+                ..Default::default()
             },
-            &crate::indexer::FphaColumnLayout {
-                hydro_indices: vec![],
-                planes_per_hydro: vec![],
-            },
-            &crate::indexer::EvapConfig {
-                hydro_indices: vec![],
-            },
+            vec![],
+            &[],
+            vec![],
         )
     }
 
@@ -2588,7 +2544,7 @@ mod tests {
         // `make_indexer_with_anticipated` places the anticipated plant at system
         // position 1 (local index 0), matching the reverse map the production
         // `StageLayout` builds.
-        let geom = make_geom(&indexer, &state, &[1]);
+        let geom = make_geom(&indexer, &state, 1, &[1]);
         let prod = ProductionModelSet::new(vec![], 0, 1);
         let hpos: BTreeMap<EntityId, usize> = BTreeMap::new();
         let tpos: BTreeMap<EntityId, usize> =
@@ -2631,7 +2587,7 @@ mod tests {
         let state = make_state_anticipated();
         // `make_indexer_with_anticipated` places the anticipated plant at system
         // position 1 (local index 0).
-        let geom = make_geom(&indexer, &state, &[1]);
+        let geom = make_geom(&indexer, &state, 1, &[1]);
         let prod = ProductionModelSet::new(vec![], 0, 1);
         let hpos: BTreeMap<EntityId, usize> = BTreeMap::new();
         let tpos: BTreeMap<EntityId, usize> =
@@ -2670,7 +2626,7 @@ mod tests {
         let state = make_state_anticipated();
         // Anticipated plant is at system position 1; querying a different thermal
         // must miss the populated reverse map and return empty.
-        let geom = make_geom(&indexer, &state, &[1]);
+        let geom = make_geom(&indexer, &state, 1, &[1]);
         let prod = ProductionModelSet::new(vec![], 0, 1);
         let hpos: BTreeMap<EntityId, usize> = BTreeMap::new();
         let tpos: BTreeMap<EntityId, usize> =
@@ -2703,7 +2659,7 @@ mod tests {
         let indexer = make_indexer_with_anticipated();
         let state = make_state_anticipated();
         // Anticipated plant is at system position 1 (populated reverse map).
-        let geom = make_geom(&indexer, &state, &[1]);
+        let geom = make_geom(&indexer, &state, 1, &[1]);
         let prod = ProductionModelSet::new(vec![], 0, 1);
         let hpos: BTreeMap<EntityId, usize> = BTreeMap::new();
         let tpos: BTreeMap<EntityId, usize> =
@@ -2732,14 +2688,14 @@ mod tests {
 
     // ── block_col_range tests ─────────────────────────────────────────────────
 
-    /// Each equipment/line family maps to its matching `StageIndexer` range, and
+    /// Each equipment/line family maps to its matching `StageGeometry` range, and
     /// the two contract families map to the empty `0..0` sentinel. This pins the
     /// family↔range pairing the resolver's `col_start` reads depend on.
     #[test]
     fn block_col_range_maps_each_family_to_its_geometry_range() {
         let idx = make_indexer();
         let state = make_state();
-        let geom = make_geom(&idx, &state, &[]);
+        let geom = make_geom(&idx, &state, 2, &[]);
 
         assert_eq!(block_col_range(&geom, ElementKind::Turbine), idx.turbine);
         assert_eq!(block_col_range(&geom, ElementKind::Spillage), idx.spillage);
@@ -2763,7 +2719,7 @@ mod tests {
     fn hydro_turbined_maps_to_turbine_column() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2793,7 +2749,7 @@ mod tests {
     fn hydro_spillage_maps_to_spillage_column() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2828,7 +2784,7 @@ mod tests {
     fn diversion_maps_to_diversion_column() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2877,7 +2833,7 @@ mod tests {
     fn hydro_inflow_two_upstream_canonical_order() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2925,7 +2881,7 @@ mod tests {
     fn hydro_inflow_none_matches_some_block_idx() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -2978,7 +2934,7 @@ mod tests {
     fn hydro_inflow_diversion_into_appends_diversion_column() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -3031,7 +2987,7 @@ mod tests {
     fn hydro_inflow_headwater_resolves_to_z_inflow_only() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();
@@ -3070,7 +3026,7 @@ mod tests {
         let state = make_state_anticipated();
         // Keep `study_dims` faithful to the indexer's anticipated plant at
         // system position 1, though this test exercises only the hydro path.
-        let geom = make_geom(&indexer, &state, &[1]);
+        let geom = make_geom(&indexer, &state, 1, &[1]);
         let prod = ProductionModelSet::new(vec![], 0, 1);
         let hpos: BTreeMap<EntityId, usize> = BTreeMap::new();
         let tpos: BTreeMap<EntityId, usize> = BTreeMap::new();
@@ -3107,7 +3063,7 @@ mod tests {
     fn hydro_inflow_unknown_id_returns_empty() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, &[]);
+        let geom = make_geom(&indexer, &state, 2, &[]);
         let prod = make_production_models();
         let hpos = make_hydro_pos();
         let tpos = make_thermal_pos();

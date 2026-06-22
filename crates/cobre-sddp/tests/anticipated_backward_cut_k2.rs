@@ -515,7 +515,6 @@ fn three_stage_k2_anticipated_cut_coefficient_propagates_correctly() {
     // For n_hydros = 0 and max_par_order = 0 the block starts at 0, with
     // layout `start + slot * n_anticipated + plant`. Here n_anticipated = 1
     // and plant = 0, so slot 0 lives at `start + 0` and slot 1 at `start + 1`.
-    let _indexer = setup.stage_indexer();
     let state = setup.stage_state();
     let ant_state_start = state.anticipated_state.start;
     let slot0_idx = ant_state_start; // slot 0, plant 0

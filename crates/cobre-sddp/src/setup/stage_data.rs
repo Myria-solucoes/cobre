@@ -3,7 +3,7 @@
 use cobre_core::{Stage, temporal::StageLagTransition};
 
 use crate::{
-    indexer::{StageIndexer, StateLayout, StudyDimensions},
+    indexer::{StateLayout, StudyDimensions},
     lp_builder::StageTemplates,
     scaling_report::ScalingReport,
     simulation::EntityCounts,
@@ -20,9 +20,6 @@ pub struct StageData {
     /// LP skeleton templates, one per study stage.
     pub stage_templates: StageTemplates,
 
-    /// Stage indexer: LP column/row offsets and equipment counts.
-    pub(crate) indexer: StageIndexer,
-
     /// Canonical stage-invariant state-vector layout (role (a)): the state /
     /// cut column ranges and the two layout-derived caches
     /// (`state_to_lp_column_map`, `nonzero_state_indices`).
@@ -33,16 +30,16 @@ pub struct StageData {
     /// the hot path — the state-fixing patch
     /// (`PatchBuffer::fill_col_state_patches`), the cut-row build and dual
     /// extraction (`cut::row`, `cut::dcs`, the delta-cut and `duals_extraction`
-    /// consumers), and the simulation extraction's state columns.
-    /// [`Self::indexer`] carries role-(b) geometry only.
+    /// consumers), and the simulation extraction's state columns. The role-(b)
+    /// equipment geometry lives per stage on [`crate::lp_builder::StageGeometry`].
     pub(crate) state: StateLayout,
 
     /// Single owner of the study-invariant, non-state LP shape: the non-state
     /// entity counts, the optional-column presence flags, and the
     /// anticipated-thermal identity list.
     ///
-    /// Built once in [`super::build_wired_indexer`] alongside [`Self::indexer`]
-    /// and [`Self::state`]. Borrowed into `TrainingContext::study_dims` and
+    /// Built once in [`super::build_wired_indexer`] alongside [`Self::state`].
+    /// Borrowed into `TrainingContext::study_dims` and
     /// `StageExtractionSpec::study_dims`; every reader of one of these facts
     /// resolves it here. The state-defining dims live on [`Self::state`] and the
     /// per-stage `n_blks` lives on the per-stage geometry, so neither is carried

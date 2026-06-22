@@ -46,7 +46,7 @@ use cobre_sddp::{
     energy_conversion::{EnergyConversion, EnergyConversionSet},
     forward::{ForwardResult, sync_forward},
     horizon_mode::HorizonMode,
-    indexer::{StageIndexer, StateLayout},
+    indexer::StateLayout,
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
     risk_measure::RiskMeasure,
@@ -84,60 +84,10 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     )
 }
 
-/// Build the `StudyDimensions` matching a built `StageIndexer`'s non-state shape.
-///
-/// Mirrors the gated `indexer::test_fixtures::study_dims_for` body via the public
-/// `StudyDimensions` fields, so this external test crate (which does not see the
-/// parent crate's `#[cfg(test)]` surface) carries the identical non-state facts the
-/// production `build_wired_indexer` derives from the same counts bag.
-///
-/// `has_ncs` is `false`: NCS presence is set only by the production NCS wiring,
-/// never by `EquipmentCounts` or by any test fixture here.
-fn study_dims_for(
-    counts: &cobre_sddp::indexer::EquipmentCounts,
-) -> cobre_sddp::indexer::StudyDimensions {
-    cobre_sddp::indexer::StudyDimensions {
-        n_thermals: counts.n_thermals,
-        n_lines: counts.n_lines,
-        n_buses: counts.n_buses,
-        max_deficit_segments: counts.max_deficit_segments,
-        has_ncs: false,
-        has_inflow_penalty: counts.has_inflow_penalty,
-        has_withdrawal: counts.hydro_count > 0,
-        has_operational_violations: counts.hydro_count != 0,
-        anticipated_thermal_indices: counts.anticipated_thermal_indices.clone(),
-        n_pumping: counts.n_pumping,
-    }
-}
-
-/// Build a role-(b) `StageIndexer` geometry descriptor (no equipment, no
-/// anticipated thermals) via the public `with_equipment_and_evaporation`
-/// constructor, for the `TrainingContext.indexer` slot.
-fn geom(_hydro_count: usize, _max_par_order: usize) -> StageIndexer {
-    StageIndexer::with_equipment_and_evaporation(
-        &cobre_sddp::indexer::EquipmentCounts {
-            hydro_count: 0,
-            max_par_order: 0,
-            n_thermals: 0,
-            n_lines: 0,
-            n_buses: 0,
-            n_blks: 0,
-            has_inflow_penalty: false,
-            max_deficit_segments: 0,
-            n_anticipated: 0,
-            k_max: 0,
-            anticipated_lead_stages: vec![],
-            anticipated_thermal_indices: vec![],
-            n_pumping: 0,
-        },
-        &cobre_sddp::indexer::FphaColumnLayout {
-            hydro_indices: vec![],
-            planes_per_hydro: vec![],
-        },
-        &cobre_sddp::indexer::EvapConfig {
-            hydro_indices: vec![],
-        },
-    )
+/// Build the default all-zero `StudyDimensions` (every count `0`, every flag
+/// `false`), matching the empty non-state shape these toy fixtures imply.
+fn study_dims() -> cobre_sddp::indexer::StudyDimensions {
+    cobre_sddp::indexer::StudyDimensions::default()
 }
 
 struct StubComm;
@@ -188,7 +138,7 @@ impl Communicator for StubComm {
 // ===========================================================================
 // Mock solver for N=3 hydros, L=0 PAR
 //
-// Column layout for StageIndexer::new(3, 0):
+// Column layout for the N=3, L=0 state vector:
 //   storage      = 0..3
 //   inflow_lags  = 3..3  (empty, L=0)
 //   z_inflow     = 3..6
@@ -524,7 +474,6 @@ struct Fixture3H {
     n_stages: usize,
     templates: Vec<StageTemplate>,
     base_rows: Vec<usize>,
-    indexer: StageIndexer,
     state: StateLayout,
     initial_state: Vec<f64>,
     stochastic: StochasticContext,
@@ -543,7 +492,6 @@ impl Fixture3H {
     fn with_branching(branching_factor: usize) -> Self {
         let n_stages = 5;
         // N=3 hydros, L=0 PAR order
-        let indexer = geom(3, 0);
         let state = state_layout_for(3, 0);
         let templates = vec![template_3h(); n_stages];
         // base_row: water-balance rows start at row_water_balance_start = n_state + n_hydros = 3 + 3 = 6.
@@ -559,7 +507,6 @@ impl Fixture3H {
             n_stages,
             templates,
             base_rows,
-            indexer,
             state,
             initial_state,
             stochastic,
@@ -657,9 +604,8 @@ fn run_training(
                 &stage_ctx,
                 &TrainingContext {
                     horizon: &fx.horizon,
-                    indexer: &fx.indexer,
                     state: &fx.state,
-                    study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+                    study_dims: &study_dims(),
                     inflow_method: &InflowNonNegativityMethod::None,
                     stochastic: &fx.stochastic,
                     initial_state: &fx.initial_state,
@@ -791,9 +737,8 @@ fn run_simulation(
                 fcf,
                 &TrainingContext {
                     horizon: &fx.horizon,
-                    indexer: &fx.indexer,
                     state: &fx.state,
-                    study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+                    study_dims: &study_dims(),
                     inflow_method: &InflowNonNegativityMethod::None,
                     stochastic: &fx.stochastic,
                     initial_state: &fx.initial_state,

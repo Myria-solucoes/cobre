@@ -64,8 +64,8 @@ use crate::{
     energy_conversion::{EnergyConversionSet, build_energy_conversion_set},
     error::SddpError,
     horizon_mode::HorizonMode,
-    hydro_models::{EvaporationModel, PrepareHydroModelsResult, ResolvedProductionModel},
-    indexer::{StageIndexer, StateLayout, StudyDimensions},
+    hydro_models::PrepareHydroModelsResult,
+    indexer::{StateLayout, StudyDimensions},
     lp_builder::build_stage_templates,
     risk_measure::RiskMeasure,
     simulation::EntityCounts,
@@ -271,9 +271,9 @@ impl StudySetup {
     /// ranks). It performs the expensive computation steps that cannot be serialised:
     ///
     /// 1. `build_stage_templates` — constructs LP skeletons for each stage
-    /// 2. `StateLayout::new` + `StageIndexer::with_equipment_and_evaporation` —
-    ///    compute the role-(a) state column/cache layout and the role-(b)
-    ///    equipment column/row offsets
+    /// 2. `StateLayout::new` — computes the role-(a) state column/cache layout
+    ///    (the role-(b) equipment column/row offsets live per stage on
+    ///    `StageLayout`/`StageGeometry`)
     /// 3. `build_initial_state` — extracts initial storage and past inflows from system IC
     /// 4. `max_iterations_from_rules` — sizes the FCF cut pool
     /// 5. `FutureCostFunction::new` — pre-allocates cut storage
@@ -344,13 +344,8 @@ impl StudySetup {
             &scalar_parameters,
         )?;
 
-        let (indexer, state_layout, study_dims) = build_wired_indexer(
-            system,
-            &stage_templates,
-            inflow_method,
-            &hydro_models,
-            &stochastic,
-        );
+        let (state_layout, study_dims) =
+            build_wired_indexer(system, &stage_templates, inflow_method, &stochastic);
 
         let initial_state = build_initial_state(system, &study_dims, &state_layout);
 
@@ -435,7 +430,6 @@ impl StudySetup {
         Ok(Self {
             stage_data: stage_data::StageData {
                 stage_templates,
-                indexer,
                 state: state_layout,
                 study_dims,
                 stages,
@@ -679,57 +673,24 @@ fn build_energy_and_templates(
     })
 }
 
-/// Build the fully-wired [`StageIndexer`], the canonical [`StateLayout`], and
-/// the [`StudyDimensions`] from the stage-0 LP layout.
+/// Build the canonical [`StateLayout`] and the [`StudyDimensions`] from the
+/// stage-0 LP layout.
 ///
-/// Derives equipment counts, FPHA/evaporation column layouts, and the
-/// anticipated-thermal lead-stage map from the system and the (representative)
-/// stage-0 template, wires the NCS column range from the LP builder's stage-0
-/// layout, and sets the cut sparse-mask non-zero pattern from the PAR effective
-/// lag counts. The returned [`StateLayout`] is built from the same state
-/// dimensions and effective lag counts that finalize the indexer's role-(a)
-/// caches, so it is byte-identical to the role-(a) embedded in the indexer. The
-/// returned [`StudyDimensions`] reads its non-state study shape from the same
-/// `indexer`/`eq_counts` values, so it carries the identical facts. All inputs
-/// are read-only; the returned indexer owns its full layout.
+/// Derives the state-vector dimensions, the non-state study shape (entity counts,
+/// presence flags, anticipated-thermal identity list), and the cut sparse-mask
+/// non-zero pattern from the system, the (representative) stage-0 template, and
+/// the PAR effective lag counts. The returned [`StateLayout`] is built from the
+/// state dimensions and effective lag counts and finalizes both role-(a) caches.
+/// All inputs are read-only.
 fn build_wired_indexer(
     system: &System,
     stage_templates: &crate::lp_builder::StageTemplates,
     inflow_method: crate::InflowNonNegativityMethod,
-    hydro_models: &PrepareHydroModelsResult,
     stochastic: &StochasticContext,
-) -> (StageIndexer, StateLayout, StudyDimensions) {
+) -> (StateLayout, StudyDimensions) {
     let stage_templates_ref = &stage_templates.templates;
-    // `n_blks_stage0` is the single global block count for the whole study: it is
-    // read from stage 0 and fed to the one global indexer below, which strides its
-    // equipment column ranges by it. The layout presumes every stage shares this
-    // count. `StageLayout` is the per-stage authority — it reads each stage's own
-    // `stage.blocks.len()` — so a stage whose block count differs from stage 0's
-    // diverges from this global stride. NCS columns are exempt: they are addressed
-    // per-stage via `StageContext::ncs_col_starts`, not strided from here.
-    let n_blks_stage0 = system.stages().first().map_or(1, |s| s.blocks.len().max(1));
     let has_inflow_penalty =
         inflow_method.has_slack_columns() && stage_templates_ref[0].n_hydro > 0;
-
-    // Compute FPHA and evaporation hydro indices at stage 0 (representative).
-    let n_hydros = system.hydros().len();
-    let mut fpha_hydro_indices: Vec<usize> = Vec::new();
-    let mut fpha_planes: Vec<usize> = Vec::new();
-    let mut evap_hydro_indices: Vec<usize> = Vec::new();
-    for h_idx in 0..n_hydros {
-        if let ResolvedProductionModel::Fpha { planes, .. } =
-            hydro_models.production.model(h_idx, 0)
-        {
-            fpha_hydro_indices.push(h_idx);
-            fpha_planes.push(planes.len());
-        }
-        if matches!(
-            hydro_models.evaporation.model(h_idx),
-            EvaporationModel::Linearized { .. }
-        ) {
-            evap_hydro_indices.push(h_idx);
-        }
-    }
 
     let max_deficit_segments = system
         .buses()
@@ -748,69 +709,46 @@ fn build_wired_indexer(
     }
     let n_anticipated = anticipated_thermal_indices.len();
     let k_max: usize = anticipated_lead_stages.iter().copied().max().unwrap_or(0);
-    let eq_counts = crate::indexer::EquipmentCounts {
-        hydro_count: stage_templates_ref[0].n_hydro,
-        max_par_order: stage_templates_ref[0].max_par_order,
-        n_thermals: system.thermals().len(),
-        n_lines: system.lines().len(),
-        n_buses: system.buses().len(),
-        n_blks: n_blks_stage0,
-        has_inflow_penalty,
-        max_deficit_segments,
-        n_anticipated,
-        k_max,
-        n_pumping: system.n_pumping_stations(),
-        anticipated_lead_stages,
-        anticipated_thermal_indices,
-    };
-    let fpha_cfg = crate::indexer::FphaColumnLayout {
-        hydro_indices: fpha_hydro_indices,
-        planes_per_hydro: fpha_planes,
-    };
-    let evap_cfg = crate::indexer::EvapConfig {
-        hydro_indices: evap_hydro_indices,
-    };
-    let indexer = StageIndexer::with_equipment_and_evaporation(&eq_counts, &fpha_cfg, &evap_cfg);
+    let hydro_count = stage_templates_ref[0].n_hydro;
+    let max_par_order = stage_templates_ref[0].max_par_order;
 
-    // Single owner of the study-invariant, non-state LP shape. Each fact is read
-    // from the value that derives it: the scalars and `has_inflow_penalty` from
-    // `eq_counts`; the presence flags from the same `hydro_count`/`ncs_col_starts`
-    // predicates the role-(b) constructor uses (`has_withdrawal == hydro_count > 0`,
-    // `has_operational_violations == hydro_count != 0`); the anticipated identity
-    // list from the `eq_counts` input the constructor clones; and `has_ncs` from
-    // the NCS column presence — the per-(ncs, block) column base is read per stage
-    // from `StageContext::ncs_col_starts`, never from a global handle. `n_blks` is
+    // Single owner of the study-invariant, non-state LP shape. The presence flags
+    // use the same `hydro_count`/`ncs_col_starts` predicates the per-stage geometry
+    // applies (`has_withdrawal == hydro_count > 0`,
+    // `has_operational_violations == hydro_count != 0`); `has_ncs` reads the NCS
+    // column presence — the per-(ncs, block) column base is read per stage from
+    // `StageContext::ncs_col_starts`, never from a global handle. `n_blks` is
     // deliberately absent: it is per-stage and owned by the per-stage geometry,
     // never study-global.
     let study_dims = crate::indexer::StudyDimensions {
-        n_thermals: eq_counts.n_thermals,
-        n_lines: eq_counts.n_lines,
-        n_buses: eq_counts.n_buses,
-        max_deficit_segments: eq_counts.max_deficit_segments,
+        n_thermals: system.thermals().len(),
+        n_lines: system.lines().len(),
+        n_buses: system.buses().len(),
+        max_deficit_segments,
         has_ncs: !stage_templates.ncs_col_starts.is_empty(),
-        has_inflow_penalty: eq_counts.has_inflow_penalty,
-        has_withdrawal: eq_counts.hydro_count > 0,
-        has_operational_violations: eq_counts.hydro_count != 0,
-        anticipated_thermal_indices: eq_counts.anticipated_thermal_indices.clone(),
-        n_pumping: eq_counts.n_pumping,
+        has_inflow_penalty,
+        has_withdrawal: hydro_count > 0,
+        has_operational_violations: hydro_count != 0,
+        anticipated_thermal_indices,
+        n_pumping: system.n_pumping_stations(),
     };
 
     // z-inflow lives at the fixed offset N*(1+L): the column range is owned by
-    // `StateLayout` (role a), the row range by `StageIndexer`'s
-    // `with_equipment_and_evaporation` (role b); no per-stage wiring needed.
+    // `StateLayout` (role a), the row range by the per-stage geometry (role b);
+    // no per-stage wiring needed here.
 
     // Per-hydro lag-state-slot count for the cut sparse mask. When PAR(p)-A annual
     // is active on a hydro this is `max_par_order` (the widened psi stride);
     // otherwise it is the classical AR order. Using `par.order(h)` here would
     // silently truncate the cut row's state coefficients on lag slots that carry
     // the annual `ψ̂/12` term and produce over-estimating cuts.
-    let effective_lag_counts: Vec<usize> = if eq_counts.max_par_order > 0 {
+    let effective_lag_counts: Vec<usize> = if max_par_order > 0 {
         let par = stochastic.par();
         (0..par.n_hydros())
             .map(|h| par.effective_lag_count(h))
             .collect()
     } else {
-        vec![0; eq_counts.hydro_count]
+        vec![0; hydro_count]
     };
 
     // Build the single canonical `StateLayout` (role (a)) from the state
@@ -819,18 +757,18 @@ fn build_wired_indexer(
     // in its constructor — populating the mask unconditionally so every production
     // study (storage-only ⇒ [0, n_state) ascending; pure-thermal ⇒ empty) has a
     // finalized mask for the single-path mask-driven cut-row loop. `StateLayout`
-    // is the sole role-(a) owner; the role-(b) geometry descriptor `indexer`
-    // carries no state-vector caches.
+    // is the sole role-(a) owner; the per-stage geometry carries no state-vector
+    // caches.
     let state = StateLayout::new(
-        eq_counts.hydro_count,
-        eq_counts.max_par_order,
+        hydro_count,
+        max_par_order,
         n_anticipated,
         k_max,
-        eq_counts.anticipated_lead_stages.clone(),
+        anticipated_lead_stages,
         &effective_lag_counts,
     );
 
-    (indexer, state, study_dims)
+    (state, study_dims)
 }
 
 /// Grouped output of [`precompute_lag_data`].
@@ -1268,7 +1206,7 @@ mod tests {
     use crate::hydro_models::{
         PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel,
     };
-    use crate::indexer::{StageIndexer, StateLayout};
+    use crate::indexer::StateLayout;
 
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, HydroStageBounds,
@@ -3757,33 +3695,28 @@ mod tests {
     // build_initial_state — anticipated_state seed
     // -----------------------------------------------------------------------
 
-    /// Build a `StageIndexer` that has N=1 hydro, L=0 lags, and the given
-    /// anticipated-thermal metadata, using `with_equipment_and_evaporation`.
+    /// Build the `GeometryDims` for N=1 hydro, L=0 lags, and the given
+    /// anticipated-thermal metadata.
     ///
     /// This gives a non-zero `anticipated_state` block in the state vector. The
-    /// anticipated `build_initial_state` tests build their role-(b) descriptor
-    /// from these same counts, so the geometry and the non-state
-    /// `StudyDimensions` (via `study_dims_for`) stay aligned from one source.
+    /// anticipated `build_initial_state` tests derive their non-state
+    /// `StudyDimensions` from these dims (via `study_dims_for`), so the geometry
+    /// and the study shape stay aligned from one source.
     fn counts_with_anticipated(
         n_anticipated: usize,
         k_values: &[usize],
         thermal_indices: &[usize],
-    ) -> crate::indexer::EquipmentCounts {
+    ) -> crate::indexer::test_fixtures::GeometryDims {
         let k_max = k_values.iter().copied().max().unwrap_or(0);
-        crate::indexer::EquipmentCounts {
+        crate::indexer::test_fixtures::GeometryDims {
             hydro_count: 1,
-            max_par_order: 0,
             n_thermals: n_anticipated, // at least cover the anticipated plants
-            n_lines: 0,
             n_buses: 1,
             n_blks: 1,
-            has_inflow_penalty: false,
-            max_deficit_segments: 1,
             n_anticipated,
             k_max,
-            n_pumping: 0,
-            anticipated_lead_stages: k_values.to_vec(),
             anticipated_thermal_indices: thermal_indices.to_vec(),
+            ..Default::default()
         }
     }
 
@@ -6187,11 +6120,11 @@ mod tests {
     /// [`StateLayout`] built independently from the same state-vector dimensions.
     ///
     /// The role-(a) concern lives solely on `StateLayout`; the role-(b)
-    /// `StageData.indexer` carries none of it, so there is no indexer half to
-    /// compare against. This checks that `build_wired_indexer`'s `StateLayout`
-    /// finalizes both caches and reproduces a fresh `StateLayout::new` over the
-    /// same `(N, L, A, k_max, leads)` byte-for-byte — the property the
-    /// single-owner extraction guarantees.
+    /// equipment geometry lives per stage on `StageGeometry`, so there is no
+    /// state half there to compare against. This checks that
+    /// `build_wired_indexer`'s `StateLayout` finalizes both caches and reproduces
+    /// a fresh `StateLayout::new` over the same `(N, L, A, k_max, leads)`
+    /// byte-for-byte — the property the single-owner extraction guarantees.
     fn assert_state_layout_finalized(state: &StateLayout) {
         assert_eq!(
             state.state_to_lp_column_map.len(),
@@ -6267,13 +6200,15 @@ mod tests {
         assert_state_layout_finalized(&setup.stage_data.state);
     }
 
-    /// Descriptor byte-identity: the slim role-(b) `StageData.indexer` built by
-    /// `build_wired_indexer` is byte-identical to an independent
-    /// `with_equipment_and_evaporation` build from the same `EquipmentCounts`
-    /// (the role-(b) analogue of `assert_state_layout_finalized`). A divergence
-    /// means the role-(b) geometry extraction drifted from the production build.
+    /// Geometry byte-identity: the production stage-0 `StageGeometry` (built by
+    /// `StageGeometry::from_layout` and stored in `StageTemplates::geometry_per_stage[0]`)
+    /// is byte-identical to an independent `test_fixtures::geometry` build from
+    /// the same equipment dimensions (the role-(b) analogue of
+    /// `assert_state_layout_finalized`). A divergence means the per-stage geometry
+    /// the `StageLayout` produces drifted from the column/row arithmetic the
+    /// fixture reproduces.
     #[test]
-    fn stage_data_indexer_role_b_matches_reference_build() {
+    fn stage_data_geometry_role_b_matches_reference_build() {
         let system = minimal_system(3);
         let config = minimal_config(2, 10);
         let stochastic = build_stochastic_context(
@@ -6299,83 +6234,71 @@ mod tests {
         )
         .expect("setup");
 
-        let indexer = &setup.stage_data.indexer;
+        // The production stage-0 geometry, built per stage by `from_layout`.
+        let geometry = &setup.stage_data.stage_templates.geometry_per_stage[0];
         let study_dims = &setup.stage_data.study_dims;
-        // Rebuild the role-(b) descriptor from the same counts the production
-        // `build_wired_indexer` derived. The non-state scalars / flags / anticipated
-        // identity list now live on `study_dims` (the single owner), so the
-        // reference reads them from there; the surviving role-(b) stride scalars
-        // (`n_blks`, `max_deficit_segments`) and the per-stage identity lists are
-        // read off the built descriptor's own fields.
-        let counts = crate::indexer::EquipmentCounts {
-            hydro_count: indexer.water_balance.len(),
+        // Rebuild an independent reference geometry from the same equipment
+        // dimensions: the non-state scalars / flags / anticipated identity list
+        // from `study_dims` (the single owner); the surviving stride scalar
+        // `n_blks`, the hydro count (`water_balance.len()`), and the per-stage
+        // FPHA / evaporation identity lists from the built geometry's own fields.
+        let dims = crate::indexer::test_fixtures::GeometryDims {
+            hydro_count: geometry.water_balance.len(),
             max_par_order: 0, // role-(b) ranges do not depend on L
             n_thermals: study_dims.n_thermals,
             n_lines: study_dims.n_lines,
             n_buses: study_dims.n_buses,
-            n_blks: indexer.n_blks,
+            n_blks: geometry.n_blks,
             has_inflow_penalty: study_dims.has_inflow_penalty,
-            max_deficit_segments: indexer.max_deficit_segments,
+            max_deficit_segments: study_dims.max_deficit_segments,
             n_anticipated: study_dims.anticipated_thermal_indices.len(),
             k_max: 0,
-            n_pumping: 0,
-            anticipated_lead_stages: vec![],
             anticipated_thermal_indices: study_dims.anticipated_thermal_indices.clone(),
         };
-        let fpha = crate::indexer::FphaColumnLayout {
-            hydro_indices: indexer.fpha_hydro_indices.clone(),
-            planes_per_hydro: indexer
-                .fpha_rows
-                .iter()
-                .map(|r| r.planes_per_block)
-                .collect(),
-        };
-        let evap = crate::indexer::EvapConfig {
-            hydro_indices: indexer.evap_hydro_indices.clone(),
-        };
-        let reference = StageIndexer::with_equipment_and_evaporation(&counts, &fpha, &evap);
+        let reference = crate::indexer::test_fixtures::geometry(
+            &dims,
+            geometry.fpha_hydro_indices.clone(),
+            // minimal_system has no FPHA planes; mirror the built geometry's
+            // FPHA-hydro count with a placeholder plane count per hydro.
+            &vec![1usize; geometry.fpha_hydro_indices.len()],
+            geometry.evap_hydro_indices.clone(),
+        );
 
         // Role-(b) equipment/slack column ranges.
-        assert_eq!(reference.turbine, indexer.turbine, "turbine range");
-        assert_eq!(reference.spillage, indexer.spillage, "spillage range");
-        assert_eq!(reference.diversion, indexer.diversion, "diversion range");
-        assert_eq!(reference.thermal, indexer.thermal, "thermal range");
+        assert_eq!(reference.turbine, geometry.turbine, "turbine range");
+        assert_eq!(reference.spillage, geometry.spillage, "spillage range");
+        assert_eq!(reference.diversion, geometry.diversion, "diversion range");
+        assert_eq!(reference.thermal, geometry.thermal, "thermal range");
         assert_eq!(
-            reference.anticipated_decision, indexer.anticipated_decision,
+            reference.anticipated_decision, geometry.anticipated_decision,
             "anticipated_decision range"
         );
-        assert_eq!(reference.line_fwd, indexer.line_fwd, "line_fwd range");
-        assert_eq!(reference.line_rev, indexer.line_rev, "line_rev range");
-        assert_eq!(reference.deficit, indexer.deficit, "deficit range");
-        assert_eq!(reference.excess, indexer.excess, "excess range");
-        assert_eq!(reference.generation, indexer.generation, "generation range");
+        assert_eq!(reference.line_fwd, geometry.line_fwd, "line_fwd range");
+        assert_eq!(reference.line_rev, geometry.line_rev, "line_rev range");
+        assert_eq!(reference.deficit, geometry.deficit, "deficit range");
+        assert_eq!(reference.excess, geometry.excess, "excess range");
         assert_eq!(
-            reference.withdrawal_slack_neg, indexer.withdrawal_slack_neg,
+            reference.withdrawal_slack_neg, geometry.withdrawal_slack_neg,
             "withdrawal_slack_neg range"
         );
         assert_eq!(
-            reference.withdrawal_slack_pos, indexer.withdrawal_slack_pos,
+            reference.withdrawal_slack_pos, geometry.withdrawal_slack_pos,
             "withdrawal_slack_pos range"
         );
         // Role-(b) constraint row ranges + surviving stride scalars.
         assert_eq!(
-            reference.water_balance, indexer.water_balance,
+            reference.water_balance, geometry.water_balance,
             "water_balance"
         );
-        assert_eq!(reference.load_balance, indexer.load_balance, "load_balance");
         assert_eq!(
-            reference.z_inflow_rows, indexer.z_inflow_rows,
-            "z_inflow_rows"
+            reference.load_balance, geometry.load_balance,
+            "load_balance"
         );
         assert_eq!(
-            reference.z_inflow_row_start, indexer.z_inflow_row_start,
+            reference.z_inflow_row_start, geometry.z_inflow_row_start,
             "z_inflow_row_start"
         );
-        assert_eq!(reference.n_blks, indexer.n_blks, "n_blks");
-        assert_eq!(
-            reference.max_deficit_segments, indexer.max_deficit_segments,
-            "max_deficit_segments"
-        );
+        assert_eq!(reference.n_blks, geometry.n_blks, "n_blks");
     }
 
     /// AC#1 (anticipated): `StageData.state` is byte-identical to the indexer's
@@ -6422,7 +6345,7 @@ mod tests {
     /// `StateLayout`, the mask, `theta`, and `lp_column_for_state` reads resolve
     /// to the same LP columns and the same negated-scaled coefficients.
     #[test]
-    fn cut_row_from_state_matches_cut_row_from_indexer() {
+    fn cut_row_from_state_matches_reference_loop() {
         use crate::cut::FutureCostFunction;
         use crate::cut::row::build_cut_row_batch;
 

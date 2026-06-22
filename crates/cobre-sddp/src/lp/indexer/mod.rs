@@ -1,8 +1,11 @@
 //! LP layout index map for SDDP stage subproblems.
 //!
-//! [`StageIndexer`] centralises all column and row offset arithmetic for a
-//! single-stage LP, eliminating magic index numbers throughout the forward
-//! pass, backward pass, and LP construction code.
+//! The state-vector column layout is owned by [`StateLayout`]; the per-stage
+//! equipment column/row geometry is owned by
+//! [`StageLayout`](crate::lp_builder)/[`StageGeometry`](crate::lp_builder::StageGeometry);
+//! the non-state study shape is owned by [`StudyDimensions`]. Together they
+//! eliminate magic index numbers throughout the forward pass, backward pass, and
+//! LP construction code. The full column/row layout is documented below.
 //!
 //! ## Column layout (Solver Abstraction SS2.1)
 //!
@@ -21,8 +24,8 @@
 //! across those plants. When `A == 0` the layout collapses to the
 //! pre-anticipated form: `z_inflow` at `N*(1+L)`, `theta` at `N*(3+L)`.
 //!
-//! When built with [`StageIndexer::with_equipment_and_evaporation`], the following
-//! equipment columns follow immediately after `theta`:
+//! The following equipment columns follow immediately after `theta` (laid out
+//! per stage by [`StageLayout`](crate::lp_builder)):
 //!
 //! ```text
 //! [theta+1,                                  theta+1+H*K)                turbine                — turbined flow (m³/s)
@@ -120,10 +123,9 @@
 //!
 //! # Submodule layout
 //!
-//! - `layout` — the [`StageIndexer`] role-(b) geometry descriptor, the satellite
-//!   types ([`EvaporationIndices`], [`FphaRowRange`], [`EquipmentCounts`],
-//!   [`FphaColumnLayout`], [`EvapConfig`]), the small layout accessors, and the
-//!   compile-time `Send + Sync` assertion.
+//! - `layout` — the per-stage geometry satellite types [`EvaporationIndices`]
+//!   and [`FphaRowRange`] (locating one hydro's evaporation columns/row and FPHA
+//!   row block within a stage LP).
 //! - `block_grid` — the [`BlockGrid`] typed block-stride address primitive and
 //!   its three shape methods ([`BlockGrid::flat`], [`BlockGrid::fpha_plane`],
 //!   [`BlockGrid::deficit`]).
@@ -135,15 +137,14 @@
 //!   [`StateLayout::lp_column_for_state`], [`StateLayout::set_nonzero_mask`]). It
 //!   finalizes both caches in its single constructor; downstream code threads a
 //!   handle to it.
-//! - `constructors` — the single role-(b) constructor and the private
-//!   column/row range build helpers.
+//! - `study_dimensions` — the [`StudyDimensions`] type, the single owner of the
+//!   study-invariant non-state LP shape.
 //!
-//! Every public symbol is re-exported here so both the curated flat surface in
-//! `lib.rs` and the `cobre_sddp::indexer::Symbol` / `crate::indexer::Symbol`
-//! module path resolve to the same item regardless of which submodule owns it.
+//! Every public symbol is re-exported here so the `cobre_sddp::indexer::Symbol`
+//! and `crate::indexer::Symbol` module paths resolve to the same item regardless
+//! of which submodule owns it.
 
 mod block_grid;
-mod constructors;
 mod layout;
 mod state_layout;
 mod study_dimensions;
@@ -151,8 +152,6 @@ mod study_dimensions;
 pub mod test_fixtures;
 
 pub use block_grid::BlockGrid;
-pub use layout::{
-    EquipmentCounts, EvapConfig, EvaporationIndices, FphaColumnLayout, FphaRowRange, StageIndexer,
-};
+pub use layout::{EvaporationIndices, FphaRowRange};
 pub use state_layout::StateLayout;
 pub use study_dimensions::StudyDimensions;

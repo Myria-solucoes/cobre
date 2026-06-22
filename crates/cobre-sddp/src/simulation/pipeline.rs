@@ -103,8 +103,8 @@ pub struct SimulationOutputSpec<'a> {
     ///
     /// `pumping_col_starts[stage]` is the column index of the first pumping-flow
     /// variable at that stage, sourced from `StageLayout::col_pumping_start` (via
-    /// `StageTemplates`) — never from `StageIndexer::pumping_flow`, which is a
-    /// permanent `0..0` sentinel.
+    /// `StageTemplates`). The per-stage `StageLayout` is the sole owner of the
+    /// pumping-flow column base.
     pub pumping_col_starts: &'a [usize],
 
     /// Per-stage pumping-station counts.
@@ -117,10 +117,10 @@ pub struct SimulationOutputSpec<'a> {
     ///
     /// `geometry_per_stage[stage]` holds the stage-correct column and row
     /// ranges for the block-major equipment families, sourced from the per-stage
-    /// `StageLayout` (via `StageTemplates`) — never from the global stage-0
-    /// `StageIndexer`, whose `n_blks`-striped bases/lengths misread any stage
-    /// with a differing block count. Resolved at the stage being extracted and
-    /// threaded into `StageExtractionSpec::geometry`.
+    /// `StageLayout` (via `StageTemplates`). A single global stage-0 geometry
+    /// would carry `n_blks`-striped bases/lengths that misread any stage with a
+    /// differing block count. Resolved at the stage being extracted and threaded
+    /// into `StageExtractionSpec::geometry`.
     pub geometry_per_stage: &'a [crate::lp_builder::StageGeometry],
 
     /// Per-station pumping power-consumption rate \[MW/(m³/s)\], ID-sorted to
@@ -316,7 +316,7 @@ impl SimLookups {
     /// simulation run. The thermal lookup reads the study-invariant anticipated
     /// identity list from `study_dims`; the per-stage hydro lookups read the
     /// stage-correct FPHA/evaporation identity lists from `geometry_per_stage`,
-    /// never the global stage-0 `StageIndexer`.
+    /// the per-stage geometry owner.
     pub(crate) fn build(
         study_dims: &crate::indexer::StudyDimensions,
         geometry_per_stage: &[crate::lp_builder::StageGeometry],
@@ -457,7 +457,6 @@ fn solve_simulation_stage<S: SolverInterface>(
     // ws.scratch.ncs_col_upper_buf are populated by the caller
     // (process_scenario_stages) via the transform_* functions.
     let TrainingContext {
-        indexer,
         state,
         study_dims,
         stochastic,
@@ -471,8 +470,8 @@ fn solve_simulation_stage<S: SolverInterface>(
     // DCS path the cut-free base `ctx.templates[t]` is loaded instead, so the
     // lazy loop's fresh CutRowMap owns the resident cut subset; loading the
     // baked template would double-append the embedded cut rows. The shared patch
-    // block below references `ctx.templates[t]` scales and indexer columns, so it
-    // is load-target-agnostic.
+    // block below references `ctx.templates[t]` scales and per-stage geometry
+    // columns, so it is load-target-agnostic.
     if dcs.is_some() {
         ws.solver.load_model(&ctx.templates[t]);
     } else {
@@ -498,11 +497,12 @@ fn solve_simulation_stage<S: SolverInterface>(
         &ctx.templates[t].row_scale,
     );
     // Per-stage geometry handle: the stage-correct row ranges and block count the
-    // patch strides below address, sourced from this stage's `StageLayout` table
-    // rather than the global stage-0 `indexer`. The production table is transposed
-    // one entry per study stage; a synthetic test that omits it falls back to the
-    // all-empty `Default`, matching the empty-slice fallback the sibling
-    // `ncs_col_starts` / `pumping_col_starts` tables use.
+    // patch strides below address, sourced from this stage's `StageLayout` table.
+    // A single global stage-0 geometry would mis-stride any stage with a differing
+    // block count. The production table is transposed one entry per study stage; a
+    // synthetic test that omits it falls back to the all-empty `Default`, matching
+    // the empty-slice fallback the sibling `ncs_col_starts` / `pumping_col_starts`
+    // tables use.
     debug_assert!(
         output.geometry_per_stage.is_empty()
             || output.geometry_per_stage.len() == ctx.templates.len(),
@@ -514,9 +514,9 @@ fn solve_simulation_stage<S: SolverInterface>(
         .get(t)
         .unwrap_or(&geometry_default);
     if ctx.n_load_buses > 0 {
-        // Per-stage grid: it must carry this stage's block count, not the global
-        // `indexer.n_blks`. `max_deficit_segments` is study-invariant, so it reads
-        // from the single `study_dims` owner, not the global stage-0 `indexer`.
+        // Per-stage grid: it must carry this stage's block count, not a global
+        // stage-0 block count. `max_deficit_segments` is study-invariant, so it
+        // reads from the single `study_dims` owner.
         let grid = BlockGrid::new(
             ctx.block_counts_per_stage[t],
             study_dims.max_deficit_segments,
@@ -531,7 +531,7 @@ fn solve_simulation_stage<S: SolverInterface>(
     }
     // z-inflow rows start at the per-stage `geometry.z_inflow_row_start` (always 0:
     // state pinning uses column bounds, so no rows precede the z-inflow block),
-    // read from the per-stage geometry rather than the global stage-0 `indexer`.
+    // read from the per-stage geometry owner.
     ws.patch_buf.fill_z_inflow_patches(
         geometry.z_inflow_row_start,
         &ws.scratch.z_inflow_rhs_buf,
@@ -621,8 +621,8 @@ fn solve_simulation_stage<S: SolverInterface>(
         // `>= template_num_rows` (the structural row count of `ctx.templates[t]`).
         // This is harmless because the downstream reader,
         // `extract_stage_result_with_lookups`, reads duals ONLY at structural-row
-        // indices (`< template_num_rows`, derived from `indexer.*_rows`) and
-        // always via `.get(idx).unwrap_or(0.0)` / a `row_idx < dual.len()` guard,
+        // indices (`< template_num_rows`, the per-stage geometry's structural row
+        // ranges) and always via `.get(idx).unwrap_or(0.0)` / a `row_idx < dual.len()` guard,
         // never at cut-row indices. The trailing cut-row entries are therefore
         // ignored. Do NOT truncate this slice or add a length check that assumes
         // `dual.len() == template_num_rows`: that assumption holds on the baked
@@ -670,7 +670,6 @@ fn solve_simulation_stage<S: SolverInterface>(
         view_objective,
         ctx,
         output,
-        indexer,
         state,
         study_dims,
         ids,
@@ -785,7 +784,6 @@ fn extract_sim_stage_result(
     view_objective: f64,
     ctx: &StageContext<'_>,
     output: &SimulationOutputSpec<'_>,
-    indexer: &crate::indexer::StageIndexer,
     state: &crate::indexer::StateLayout,
     study_dims: &crate::indexer::StudyDimensions,
     ids: &SimStageIds,
@@ -838,16 +836,17 @@ fn extract_sim_stage_result(
     let ncs_col_start = output.ncs_col_starts.get(t).copied().unwrap_or(0);
     let stage_n_blks = ctx.block_counts_per_stage.get(t).copied().unwrap_or(0);
     // Pumping-flow column base for this stage. Sourced from `StageLayout` via
-    // `StageTemplates::pumping_col_starts`, never from `StageIndexer::pumping_flow`
-    // (a permanent `0..0` sentinel).
+    // `StageTemplates::pumping_col_starts`, the sole owner of the pumping-flow
+    // column base.
     let pumping_col_start = output.pumping_col_starts.get(t).copied().unwrap_or(0);
     let n_pumping = output.n_pumping_per_stage.get(t).copied().unwrap_or(0);
     // Per-stage equipment geometry: the stage-correct column and row ranges every
     // block-major family read below addresses, sourced from this stage's
-    // `StageLayout` rather than the global stage-0 `indexer`. The production
-    // table is transposed one entry per study stage; a synthetic test that omits
-    // it falls back to the all-empty `Default`, matching the empty-slice fallback
-    // the sibling `ncs_col_starts` / `pumping_col_starts` tables use.
+    // `StageLayout`. A single global stage-0 geometry would mis-stride any stage
+    // with a differing block count. The production table is transposed one entry
+    // per study stage; a synthetic test that omits it falls back to the all-empty
+    // `Default`, matching the empty-slice fallback the sibling `ncs_col_starts` /
+    // `pumping_col_starts` tables use.
     debug_assert!(
         output.geometry_per_stage.is_empty()
             || output.geometry_per_stage.len() == ctx.templates.len(),
@@ -926,7 +925,6 @@ fn extract_sim_stage_result(
             row_lower: row_lower_ref,
         },
         &StageExtractionSpec {
-            indexer,
             state,
             study_dims,
             n_blks: stage_n_blks,
@@ -1956,7 +1954,6 @@ mod tests {
 
         let n_load_buses = 1usize;
         let stochastic = make_stochastic_context_1_hydro_1_load_bus_sim(300.0, 30.0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
         let config = SimulationConfig {
             n_scenarios: 1,
@@ -2052,7 +2049,6 @@ mod tests {
             &fcf,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
@@ -2167,7 +2163,6 @@ mod tests {
         let base_rows = vec![0usize];
 
         let stochastic = make_stochastic_context(n_stages);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
         let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
         let config = SimulationConfig {
@@ -2215,7 +2210,6 @@ mod tests {
             &fcf,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
@@ -2309,7 +2303,6 @@ mod tests {
 
         let n_load_buses = 1usize;
         let stochastic = make_stochastic_context_1_hydro_1_load_bus_sim(300.0, 30.0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
         let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
         let config = SimulationConfig {
@@ -2403,7 +2396,6 @@ mod tests {
             &fcf,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
@@ -2727,7 +2719,6 @@ mod tests {
         let base_rows = vec![0_usize];
         let noise_scale = vec![noise_scale_val];
 
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
         let fcf = FutureCostFunction::new(n_stages, state.n_state, 1, 10, &vec![0; n_stages]);
         let config = SimulationConfig {
@@ -2775,7 +2766,6 @@ mod tests {
             &fcf,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::Truncation,
@@ -2856,7 +2846,6 @@ mod tests {
         let base_rows = vec![0_usize];
         let noise_scale = vec![noise_scale_val];
 
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
         let fcf = FutureCostFunction::new(n_stages, state.n_state, 1, 10, &vec![0; n_stages]);
         let config = SimulationConfig {
@@ -2903,7 +2892,6 @@ mod tests {
             &fcf,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
@@ -3132,7 +3120,6 @@ mod tests {
             dcs: Option<DcsParams>,
             baked: &StageTemplate,
         ) -> (f64, SimulationStageResult) {
-            let indexer = crate::indexer::test_fixtures::geom(1, 0);
             let state = crate::indexer::test_fixtures::state_layout(1, 0);
             let core = sim_core_template();
             let templates = vec![core.clone()];
@@ -3193,7 +3180,6 @@ mod tests {
             let study_dims = crate::indexer::test_fixtures::study_dims();
             let training_ctx = TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &study_dims,
                 inflow_method: &InflowNonNegativityMethod::None,

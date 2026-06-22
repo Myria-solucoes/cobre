@@ -6,7 +6,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     energy_conversion::EnergyConversionSet,
-    indexer::{StageIndexer, StateLayout},
+    indexer::StateLayout,
     simulation::SimulationConfig,
     workspace::CapturedBasis,
 };
@@ -72,22 +72,6 @@ impl StudySetup {
         &self.simulation_config
     }
 
-    /// Return a reference to the per-stage role-(b) LP geometry descriptor.
-    ///
-    /// Provides the equipment / slack column and constraint-row ranges for every
-    /// entity class (turbine, spillage, thermal, anticipated decision, deficit,
-    /// …) plus the entity-count scalars and presence flags, so callers can locate
-    /// equipment primal entries without hard-coding offsets. The state-vector
-    /// concern (storage / lag / anticipated-state columns, `theta`, `n_state`)
-    /// lives on [`Self::stage_state`].
-    ///
-    /// The same descriptor applies to every stage whose block count equals stage
-    /// 0's; the per-stage layout is the authority where block counts vary.
-    #[must_use]
-    pub fn stage_indexer(&self) -> &StageIndexer {
-        &self.stage_data.indexer
-    }
-
     /// Return a reference to the stage-invariant role-(a) state-vector layout.
     ///
     /// Provides the state-region column ranges (`storage`, `inflow_lags`,
@@ -147,7 +131,6 @@ impl StudySetup {
         let tr = &self.scenario_libraries.training;
         TrainingContext {
             horizon: &self.methodology.horizon,
-            indexer: &self.stage_data.indexer,
             state: &self.stage_data.state,
             study_dims: &self.stage_data.study_dims,
             inflow_method: &self.methodology.inflow_method,
@@ -216,7 +199,6 @@ impl StudySetup {
 
         TrainingContext {
             horizon: &self.methodology.horizon,
-            indexer: &self.stage_data.indexer,
             state: &self.stage_data.state,
             study_dims: &self.stage_data.study_dims,
             inflow_method: &self.methodology.inflow_method,

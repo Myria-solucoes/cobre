@@ -750,8 +750,8 @@ mod tests {
     use crate::{
         context::{StageContext, TrainingContext},
         horizon_mode::HorizonMode,
-        indexer::StageIndexer,
         inflow_method::InflowNonNegativityMethod,
+        lp_builder::StageGeometry,
         noise::{
             active_ncs_slot_count, build_active_ncs_col_indices, compute_effective_eta,
             gather_active_ncs_bounds, shift_anticipated_state, shift_lag_state,
@@ -1123,8 +1123,7 @@ mod tests {
     #[test]
     fn test_transform_inflow_noise_none_method() {
         let stochastic = make_one_hydro_stochastic(1);
-        // StageIndexer: 1 hydro, 0 PAR lags → n_state = 1
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        // State layout: 1 hydro, 0 PAR lags → n_state = 1
         let layout = crate::indexer::test_fixtures::state_layout(1, 0);
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
         let current_state = vec![0.0; layout.n_state];
@@ -1162,7 +1161,6 @@ mod tests {
         let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &study_dims,
             inflow_method: &inflow_method,
@@ -1206,7 +1204,6 @@ mod tests {
     fn test_transform_inflow_noise_truncation_clamps() {
         let stochastic = make_one_hydro_stochastic(1);
         // 1 hydro, 0 PAR lags
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let layout = crate::indexer::test_fixtures::state_layout(1, 0);
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
         let current_state = vec![0.0; layout.n_state];
@@ -1243,7 +1240,6 @@ mod tests {
         let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &study_dims,
             inflow_method: &inflow_method,
@@ -1287,7 +1283,6 @@ mod tests {
     #[test]
     fn test_transform_inflow_noise_truncation_passthrough() {
         let stochastic = make_one_hydro_stochastic(1);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let layout = crate::indexer::test_fixtures::state_layout(1, 0);
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
         let current_state = vec![0.0; layout.n_state];
@@ -1324,7 +1319,6 @@ mod tests {
         let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &study_dims,
             inflow_method: &inflow_method,
@@ -1497,36 +1491,29 @@ mod tests {
 
     // ── shift_anticipated_state tests ────────────────────────────────────────
 
-    /// Build a StageIndexer with anticipated thermals using with_equipment_and_evaporation.
+    /// Build a `StageGeometry` with anticipated thermals.
+    ///
+    /// `_anticipated_lead_stages` is accepted for call-site symmetry but is not
+    /// read: the role-(b) geometry depends only on `n_anticipated` and `k_max`
+    /// (the per-plant lead stages drive the role-(a) `StateLayout`, not the
+    /// anticipated-decision column block).
     fn make_anticipated_indexer(
         n_anticipated: usize,
         k_max: usize,
-        anticipated_lead_stages: Vec<usize>,
-    ) -> StageIndexer {
-        use crate::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout};
-        StageIndexer::with_equipment_and_evaporation(
-            &EquipmentCounts {
-                hydro_count: 0,
-                max_par_order: 0,
-                n_thermals: 0,
-                n_lines: 0,
+        _anticipated_lead_stages: Vec<usize>,
+    ) -> StageGeometry {
+        crate::indexer::test_fixtures::geometry(
+            &crate::indexer::test_fixtures::GeometryDims {
                 n_buses: 1,
                 n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
                 n_anticipated,
                 k_max,
-                anticipated_lead_stages,
                 anticipated_thermal_indices: (0..n_anticipated).collect(),
-                n_pumping: 0,
+                ..Default::default()
             },
-            &FphaColumnLayout {
-                hydro_indices: vec![],
-                planes_per_hydro: vec![],
-            },
-            &EvapConfig {
-                hydro_indices: vec![],
-            },
+            vec![],
+            &[],
+            vec![],
         )
     }
 
@@ -1678,32 +1665,22 @@ mod tests {
     #[test]
     fn shift_anticipated_state_preserves_storage_and_lag() {
         // Build a StateLayout (role a: storage + lag + anticipated slots) and a
-        // StageIndexer geometry descriptor (role b: the anticipated_decision column),
+        // StageGeometry descriptor (role b: the anticipated_decision column),
         // then build a combined state vector spanning hydro state AND anticipated state.
-        use crate::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout};
-        let indexer = StageIndexer::with_equipment_and_evaporation(
-            &EquipmentCounts {
+        let indexer = crate::indexer::test_fixtures::geometry(
+            &crate::indexer::test_fixtures::GeometryDims {
                 hydro_count: 2,
                 max_par_order: 1,
-                n_thermals: 0,
-                n_lines: 0,
                 n_buses: 1,
                 n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
                 n_anticipated: 1,
                 k_max: 2,
-                anticipated_lead_stages: vec![2],
                 anticipated_thermal_indices: vec![0],
-                n_pumping: 0,
+                ..Default::default()
             },
-            &FphaColumnLayout {
-                hydro_indices: vec![],
-                planes_per_hydro: vec![],
-            },
-            &EvapConfig {
-                hydro_indices: vec![],
-            },
+            vec![],
+            &[],
+            vec![],
         );
         let layout = crate::indexer::test_fixtures::state_layout_full(2, 1, 1, 2, vec![2]);
         // n_state = N*(1+L) + A*K = 2*(1+1) + 1*2 = 6

@@ -7,7 +7,7 @@ use cobre_stochastic::{ExternalScenarioLibrary, HistoricalScenarioLibrary, Stoch
 use crate::{
     dcs::DcsParams,
     horizon_mode::HorizonMode,
-    indexer::{StageIndexer, StateLayout, StudyDimensions},
+    indexer::{StateLayout, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::StageGeometry,
     noise_key_diag::NoiseKeyDiag,
@@ -26,9 +26,9 @@ pub struct StageContext<'a> {
     /// Per-stage equipment geometry (one entry per study stage).
     ///
     /// `geometry_per_stage[t]` holds the stage-correct column and row ranges for
-    /// stage `t`, sourced from that stage's `StageLayout` — never the global
-    /// stage-0 `StageIndexer`, whose `n_blks`-striped bases misread any stage with
-    /// a differing block count. The hot patch path reads the per-stage row bases
+    /// stage `t`, sourced from that stage's `StageLayout`. A single global
+    /// stage-0 geometry would carry `n_blks`-striped bases that misread any stage
+    /// with a differing block count. The hot patch path reads the per-stage row bases
     /// (e.g. `z_inflow_row_start`) through this table, mirroring the sibling
     /// per-stage slices (`base_rows`, `load_balance_row_starts`, `ncs_col_starts`).
     /// Empty `&[]` in tests that drive a sub-path without a real stage table; the
@@ -54,9 +54,9 @@ pub struct StageContext<'a> {
     /// commissions/decommissions mid-horizon or block counts vary, so the
     /// forward/backward bound patch strides from this per-stage base — never a
     /// single global stage-0 NCS base, which would address the wrong columns for
-    /// non-uniform geometries. The `StageIndexer` carries only `has_ncs` (a
-    /// presence flag), not a column base. Empty when the study has no NCS columns
-    /// (the patch is guarded off in that case).
+    /// non-uniform geometries. NCS presence is a `has_ncs` flag on
+    /// [`StudyDimensions`]; there is no global NCS column base. Empty when the
+    /// study has no NCS columns (the patch is guarded off in that case).
     pub ncs_col_starts: &'a [usize],
     /// Per-stage stochastic-slot → active-local-column map for NCS bound patching.
     ///
@@ -146,25 +146,21 @@ impl StageContext<'_> {
 pub struct TrainingContext<'a> {
     /// Horizon mode (finite/infinite) determining stage count.
     pub horizon: &'a HorizonMode,
-    /// Role-(b) geometry descriptor: the equipment/slack/row ranges, entity
-    /// counts, and presence flags. Carries no role-(a) state layout.
-    pub indexer: &'a StageIndexer,
     /// Stage-invariant state-vector layout (role (a)): the single owner of the
     /// state column ranges, `n_state`, the resolvers, and the mask.
     ///
-    /// Every hot-path role-(a) read resolves through this handle, not through
-    /// [`Self::indexer`]: the state-fixing column patch
-    /// (`PatchBuffer::fill_col_state_patches`), the cut-row build and dual
-    /// extraction (`cut::row`, `cut::dcs`, `duals_extraction`, the delta-cut
-    /// consumer), and the lower-bound / simulation-extraction state reads.
+    /// Every hot-path role-(a) read resolves through this handle: the
+    /// state-fixing column patch (`PatchBuffer::fill_col_state_patches`), the
+    /// cut-row build and dual extraction (`cut::row`, `cut::dcs`,
+    /// `duals_extraction`, the delta-cut consumer), and the lower-bound /
+    /// simulation-extraction state reads.
     pub state: &'a StateLayout,
     /// Single owner of the study-invariant, non-state LP shape (non-state entity
     /// counts, optional-column presence flags, anticipated-thermal identity list).
     ///
-    /// Reads of these facts resolve here, not through [`Self::indexer`]. Nested
-    /// contexts that already borrow this `TrainingContext` (the forward worker
-    /// spec, the session) reach it transitively as `training_ctx.study_dims`
-    /// rather than carrying an independent handle.
+    /// Nested contexts that already borrow this `TrainingContext` (the forward
+    /// worker spec, the session) reach it transitively as
+    /// `training_ctx.study_dims` rather than carrying an independent handle.
     pub study_dims: &'a StudyDimensions,
     /// Inflow non-negativity enforcement strategy.
     pub inflow_method: &'a InflowNonNegativityMethod,

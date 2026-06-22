@@ -867,7 +867,6 @@ mod tests {
     fn ac_train_completes_with_iteration_limit() {
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -932,7 +931,6 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
@@ -972,7 +970,6 @@ mod tests {
     fn ac_train_returns_partial_on_infeasible() {
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1037,7 +1034,6 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
@@ -1094,7 +1090,6 @@ mod tests {
     fn ac_train_emits_correct_event_sequence() {
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1161,7 +1156,6 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
@@ -1301,7 +1295,6 @@ mod tests {
 
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1368,7 +1361,6 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
@@ -1479,7 +1471,6 @@ mod tests {
     fn ac_train_result_fields_populated() {
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1544,7 +1535,6 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
@@ -1582,7 +1572,6 @@ mod tests {
     fn ac_train_with_no_event_sender() {
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1647,7 +1636,6 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
@@ -1682,7 +1670,6 @@ mod tests {
     fn ac_total_time_ms_is_non_negative() {
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1747,7 +1734,6 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
@@ -1788,7 +1774,6 @@ mod tests {
     fn cut_selection_none_skips_step() {
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1855,7 +1840,6 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
@@ -1903,7 +1887,6 @@ mod tests {
 
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1973,7 +1956,6 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
@@ -2031,7 +2013,6 @@ mod tests {
 
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -2101,7 +2082,6 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
@@ -2175,7 +2155,6 @@ mod tests {
     fn existing_train_tests_pass_with_none() {
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -2240,7 +2219,6 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
@@ -2282,7 +2260,6 @@ mod tests {
     fn ac_train_partial_result_on_mid_iteration_failure() {
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -2353,7 +2330,6 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
@@ -2410,7 +2386,6 @@ mod tests {
     fn start_iteration_resumes_from_offset() {
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -2475,7 +2450,6 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
@@ -2513,7 +2487,6 @@ mod tests {
     fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -2578,7 +2551,6 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
@@ -3244,7 +3216,6 @@ mod tests {
     fn template_bake_event_emitted() {
         let n_stages = 2;
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -3312,7 +3283,6 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
                 state: &state,
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,

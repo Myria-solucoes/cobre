@@ -96,7 +96,6 @@ impl StudySetup {
         let tr = &self.scenario_libraries.training;
         let training_ctx = TrainingContext {
             horizon: &self.methodology.horizon,
-            indexer: &self.stage_data.indexer,
             state: &self.stage_data.state,
             study_dims: &self.stage_data.study_dims,
             inflow_method: &self.methodology.inflow_method,

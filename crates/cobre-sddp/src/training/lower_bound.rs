@@ -104,10 +104,10 @@ pub struct LbEvalSpec<'a> {
     ///
     /// Always `0`: state pinning uses column bounds, so no rows precede the
     /// z-inflow block. Sourced from the per-stage `StageContext::geometry_per_stage[0]`
-    /// (the stage-0 `StageGeometry`) — never the global stage-0 `StageIndexer`, since
-    /// the lower bound evaluates stage 0 only and the per-stage geometry is the single
-    /// owner of the row layout, mirroring how `block_count`/`ncs_generation` are
-    /// sourced from the stage-0 `StageContext` slices.
+    /// (the stage-0 `StageGeometry`), the single owner of the row layout, since
+    /// the lower bound evaluates stage 0 only — mirroring how
+    /// `block_count`/`ncs_generation` are sourced from the stage-0 `StageContext`
+    /// slices.
     pub z_inflow_row_start: usize,
     /// Inflow non-negativity treatment method.
     ///

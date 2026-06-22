@@ -6,7 +6,7 @@
 //! called with the argument order of another. [`BlockGrid`] is a zero-cost
 //! [`Copy`] value type carrying only the two stride constants the three shapes
 //! need beyond their per-call args (`n_blks` and `max_deficit_segments`); obtain
-//! it from [`StageIndexer::block_grid`](super::StageIndexer::block_grid).
+//! it from [`BlockGrid::new`] with the per-stage block count.
 //!
 //! ## Single owner of the three block-index shapes
 //!
@@ -50,18 +50,18 @@
 //! misbuilt. The only field accessor is the read-only count [`n_blks`](BlockGrid::n_blks);
 //! the entity count `n_entities` the transpose needs is not carried, and there is
 //! no generic stride method, so a caller cannot reconstruct the transposed stride
-//! by hand without deliberately bypassing the type and re-deriving the arithmetic
-//! from [`StageIndexer`](super::StageIndexer) fields directly. The
-//! `block_grid_forbids_transposed_shape` test in this module pins that there is
-//! no `(blk, n_entities, entity)`-ordered method.
+//! by hand without deliberately bypassing the type and re-deriving the
+//! block-major arithmetic directly. The `block_grid_forbids_transposed_shape`
+//! test in this module pins that there is no `(blk, n_entities, entity)`-ordered
+//! method.
 
 /// Typed block-stride address calculator for one SDDP stage LP.
 ///
 /// Carries the two stage constants (`n_blks` and `max_deficit_segments`) that the
 /// three block-stride shapes need beyond their per-call arguments. Constructed by
-/// [`StageIndexer::block_grid`](super::StageIndexer::block_grid); it is a cheap
-/// `Copy` value with no allocation and no lifetime, so passing it by value across
-/// fill closures costs nothing.
+/// [`new`](Self::new) with the per-stage block count; it is a cheap `Copy` value
+/// with no allocation and no lifetime, so passing it by value across fill
+/// closures costs nothing.
 ///
 /// The three shapes — [`flat`](Self::flat), [`fpha_plane`](Self::fpha_plane), and
 /// [`deficit`](Self::deficit) — have opposite block-nesting orders, so each gets
@@ -70,9 +70,8 @@
 /// and silently address the wrong cell.
 ///
 /// It is `pub` because the public [`PatchBuffer::fill_load_patches`](super::super::builder::PatchBuffer)
-/// API accepts it by value (mirroring how that API also accepts the public
-/// [`StageIndexer`](super::StageIndexer)); callers outside the crate construct a
-/// per-stage grid with [`new`](Self::new).
+/// API accepts it by value; callers outside the crate construct a per-stage grid
+/// with [`new`](Self::new).
 #[derive(Debug, Clone, Copy)]
 pub struct BlockGrid {
     /// Number of operating blocks per stage (K), the per-entity stride of the
@@ -86,9 +85,9 @@ pub struct BlockGrid {
 impl BlockGrid {
     /// Construct a [`BlockGrid`] from its two stride constants.
     ///
-    /// Prefer [`StageIndexer::block_grid`](super::StageIndexer::block_grid) at
-    /// call sites — it sources both constants from the single owning indexer so
-    /// the grid cannot disagree with the LP it addresses.
+    /// Source `n_blks` from the per-stage block count the LP was built with (the
+    /// per-stage `StageLayout` / `block_counts_per_stage[t]`) so the grid cannot
+    /// disagree with the LP it addresses.
     #[inline]
     #[must_use]
     pub fn new(n_blks: usize, max_deficit_segments: usize) -> Self {
@@ -204,7 +203,6 @@ impl BlockGrid {
 #[cfg(test)]
 mod tests {
     use super::BlockGrid;
-    use crate::indexer::StageIndexer;
 
     // Flat shape: 9 + 1*3 + 2 = 14, with n_blks = 3.
     #[test]
@@ -236,39 +234,10 @@ mod tests {
         assert_eq!(grid.deficit(61, 0, 1, 0), 64);
     }
 
-    // The grid returned by StageIndexer carries the indexer's stride constants,
-    // so addresses computed through it match the indexer's own layout.
-    #[test]
-    fn block_grid_from_indexer_carries_strides() {
-        use crate::indexer::test_fixtures::{eq, evap, fpha};
-        // N=1 hydro, L=0, T=2 thermals, L_n=1 line, B=2 buses, K=2 blocks; the
-        // `eq` fixture sets max_deficit_segments = 1.
-        let counts = eq(1, 0, 2, 1, 2, 2, false);
-        let indexer = StageIndexer::with_equipment_and_evaporation(
-            &counts,
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-        let grid = indexer.block_grid();
-        // The grid carries the indexer's stride constants verbatim.
-        assert_eq!(grid.n_blks, indexer.n_blks);
-        assert_eq!(grid.max_deficit_segments, indexer.max_deficit_segments);
-        // flat() reproduces the indexer's thermal column stride (entity-outer).
-        assert_eq!(
-            grid.flat(indexer.thermal.start, 1, 0),
-            indexer.thermal.start + indexer.n_blks
-        );
-        // deficit() reproduces the indexer's deficit column stride.
-        assert_eq!(
-            grid.deficit(indexer.deficit.start, 1, 0, 0),
-            indexer.deficit.start + indexer.max_deficit_segments * indexer.n_blks
-        );
-    }
-
     // Contract guard: BlockGrid exposes no method that takes the transposed
     // argument order, so the wrong-but-compiling transpose of each shape cannot be
     // expressed through the type — a caller would have to bypass it and re-derive
-    // the stride from StageIndexer fields by hand. This positive test pins the
+    // the stride by hand. This positive test pins the
     // forbidden alternative per shape by computing the CORRECT address and
     // asserting it differs from what the transpose would land on, using asymmetric
     // factors so any swap is detectable (symmetric indices can collide by accident

@@ -60,7 +60,7 @@
 //! state-fixing row at slot `s` flows back to the predecessor's LP column via
 //! `state_to_lp_column`'s branch decision (Less / Equal / Greater), which maps
 //! slot `K_p-1` to the decision column and slot `i < K_p-1` to slot `i+1`.
-//! See the `StageIndexer::state_to_lp_column` rustdoc for the slot-to-column
+//! See the `StateLayout::state_to_lp_column` rustdoc for the slot-to-column
 //! branch mapping that drives the dual chain.
 //!
 //! The backward pass does not call `shift_anticipated_state`. The trial point

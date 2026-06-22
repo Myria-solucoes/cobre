@@ -32,7 +32,7 @@ use cobre_sddp::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     horizon_mode::HorizonMode,
-    indexer::{StageIndexer, StateLayout},
+    indexer::StateLayout,
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
     simulation::{EntityCounts, SimulationConfig, SimulationOutputSpec},
@@ -59,57 +59,10 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     )
 }
 
-/// Build the `StudyDimensions` matching a built `StageIndexer`'s non-state shape.
-///
-/// Mirrors the gated `indexer::test_fixtures::study_dims_for` body via the public
-/// `StudyDimensions` fields, so this external test crate (which does not see the
-/// parent crate's `#[cfg(test)]` surface) carries the identical non-state facts the
-/// `indexer` does for the `TrainingContext` / `StageExtractionSpec` slot.
-fn study_dims_for(
-    counts: &cobre_sddp::indexer::EquipmentCounts,
-) -> cobre_sddp::indexer::StudyDimensions {
-    cobre_sddp::indexer::StudyDimensions {
-        n_thermals: counts.n_thermals,
-        n_lines: counts.n_lines,
-        n_buses: counts.n_buses,
-        max_deficit_segments: counts.max_deficit_segments,
-        has_ncs: false,
-        has_inflow_penalty: counts.has_inflow_penalty,
-        has_withdrawal: counts.hydro_count > 0,
-        has_operational_violations: counts.hydro_count != 0,
-        anticipated_thermal_indices: counts.anticipated_thermal_indices.clone(),
-        n_pumping: counts.n_pumping,
-    }
-}
-
-/// Build a role-(b) `StageIndexer` geometry descriptor (no equipment, no
-/// anticipated thermals) via the public `with_equipment_and_evaporation`
-/// constructor, for the `TrainingContext.indexer` slot.
-fn geom(_hydro_count: usize, _max_par_order: usize) -> StageIndexer {
-    StageIndexer::with_equipment_and_evaporation(
-        &cobre_sddp::indexer::EquipmentCounts {
-            hydro_count: 0,
-            max_par_order: 0,
-            n_thermals: 0,
-            n_lines: 0,
-            n_buses: 0,
-            n_blks: 0,
-            has_inflow_penalty: false,
-            max_deficit_segments: 0,
-            n_anticipated: 0,
-            k_max: 0,
-            anticipated_lead_stages: vec![],
-            anticipated_thermal_indices: vec![],
-            n_pumping: 0,
-        },
-        &cobre_sddp::indexer::FphaColumnLayout {
-            hydro_indices: vec![],
-            planes_per_hydro: vec![],
-        },
-        &cobre_sddp::indexer::EvapConfig {
-            hydro_indices: vec![],
-        },
-    )
+/// Build the default all-zero `StudyDimensions` (every count `0`, every flag
+/// `false`), matching the empty non-state shape these toy fixtures imply.
+fn study_dims() -> cobre_sddp::indexer::StudyDimensions {
+    cobre_sddp::indexer::StudyDimensions::default()
 }
 
 /// Single-rank stub communicator for pipeline tests.
@@ -585,7 +538,6 @@ fn simulate_single_rank_4_scenarios_produces_4_results() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = geom(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
     let config = SimulationConfig {
@@ -633,9 +585,8 @@ fn simulate_single_rank_4_scenarios_produces_4_results() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -710,7 +661,6 @@ fn simulate_infeasible_returns_lp_infeasible_error() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = geom(1, 0);
     let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
@@ -759,9 +709,8 @@ fn simulate_infeasible_returns_lp_infeasible_error() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -826,7 +775,6 @@ fn simulate_infeasible_at_scenario2_stage3() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = geom(1, 0);
     let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
@@ -875,9 +823,8 @@ fn simulate_infeasible_at_scenario2_stage3() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -939,7 +886,6 @@ fn simulate_channel_closed_returns_error() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = geom(1, 0);
     let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
@@ -989,9 +935,8 @@ fn simulate_channel_closed_returns_error() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1050,7 +995,6 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = geom(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
     let config = SimulationConfig {
@@ -1105,9 +1049,8 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1169,7 +1112,6 @@ fn simulate_cost_buffer_scenario_ids_match_assigned_range() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = geom(1, 0);
     let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
@@ -1218,9 +1160,8 @@ fn simulate_cost_buffer_scenario_ids_match_assigned_range() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1283,7 +1224,6 @@ fn simulate_channel_receives_results_in_scenario_order() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = geom(1, 0);
     let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
@@ -1331,9 +1271,8 @@ fn simulate_channel_receives_results_in_scenario_order() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1391,7 +1330,6 @@ fn test_simulation_parallel_cost_determinism() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = geom(1, 0);
     let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
@@ -1441,9 +1379,8 @@ fn test_simulation_parallel_cost_determinism() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1528,9 +1465,8 @@ fn test_simulation_parallel_cost_determinism() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1619,7 +1555,6 @@ fn simulate_emits_progress_events() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = geom(1, 0);
     let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
@@ -1668,9 +1603,8 @@ fn simulate_emits_progress_events() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1754,7 +1688,6 @@ fn simulate_no_events_when_sender_is_none() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = geom(1, 0);
     let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
@@ -1802,9 +1735,8 @@ fn simulate_no_events_when_sender_is_none() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1872,7 +1804,6 @@ fn simulate_progress_events_received_before_return() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = geom(1, 0);
     let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
@@ -1921,9 +1852,8 @@ fn simulate_progress_events_received_before_return() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1999,7 +1929,6 @@ fn simulate_progress_scenario_cost_equals_total_cost() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = geom(1, 0);
     let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
@@ -2051,9 +1980,8 @@ fn simulate_progress_scenario_cost_equals_total_cost() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2131,7 +2059,6 @@ fn simulate_emits_simulation_finished_as_last_event() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = geom(1, 0);
     let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
@@ -2180,9 +2107,8 @@ fn simulate_emits_simulation_finished_as_last_event() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2274,7 +2200,6 @@ fn simulate_progress_scenario_cost_is_finite() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = geom(1, 0);
     let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
@@ -2324,9 +2249,8 @@ fn simulate_progress_scenario_cost_is_finite() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2402,7 +2326,6 @@ fn simulate_baked_path_issues_zero_add_rows() {
     let baked: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = geom(1, 0);
     let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
@@ -2449,9 +2372,8 @@ fn simulate_baked_path_issues_zero_add_rows() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2530,7 +2452,6 @@ fn simulate_fallback_path_issues_expected_add_rows() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = geom(1, 0);
     let state = state_layout_for(1, 0);
     // FCF with 0 cuts — cut_batch.num_rows will be 0 for every stage.
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
@@ -2578,9 +2499,8 @@ fn simulate_fallback_path_issues_expected_add_rows() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2649,7 +2569,6 @@ fn simulate_baked_length_mismatch_returns_error() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = geom(1, 0);
     let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
@@ -2700,9 +2619,8 @@ fn simulate_baked_length_mismatch_returns_error() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2788,7 +2706,6 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
     let templates: Vec<StageTemplate> = vec![minimal_template_1_0()];
     let base_rows: Vec<usize> = vec![2]; // 2 structural rows in the template
 
-    let indexer = geom(1, 0);
     let state = state_layout_for(1, 0);
 
     // Build an FCF with 3 active cuts at slots 10, 11, 12 for stage 0.
@@ -2870,9 +2787,8 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2984,7 +2900,6 @@ fn simulate_with_empty_stage_bases_cold_starts() {
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
-    let indexer = geom(1, 0);
     let state = state_layout_for(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
@@ -3031,9 +2946,8 @@ fn simulate_with_empty_stage_bases_cold_starts() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
-            study_dims: &study_dims_for(&cobre_sddp::indexer::EquipmentCounts::default()),
+            study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,

@@ -239,8 +239,6 @@ pub use production::hydro_models::{
     build_evaporation_model_rows, build_fpha_deviation_point_rows, build_hydro_model_summary,
     prepare_hydro_models,
 };
-// ── indexer ───────────────────────────────────────────────────────────────────
-pub use lp::indexer::{EquipmentCounts, FphaColumnLayout, StageIndexer};
 // ── inflow_method ─────────────────────────────────────────────────────────────
 pub use stochastic::inflow_method::InflowNonNegativityMethod;
 // ── lp_builder ────────────────────────────────────────────────────────────────

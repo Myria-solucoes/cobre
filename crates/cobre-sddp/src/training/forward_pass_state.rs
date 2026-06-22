@@ -878,7 +878,7 @@ mod tests {
         context::{StageContext, TrainingContext},
         cut::FutureCostFunction,
         horizon_mode::HorizonMode,
-        indexer::{StageIndexer, StateLayout},
+        indexer::StateLayout,
         inflow_method::InflowNonNegativityMethod,
         trajectory::TrajectoryRecord,
         workspace::{BackwardAccumulators, BasisStore, SolverWorkspace},
@@ -1215,7 +1215,6 @@ mod tests {
     struct ForwardFixture {
         n_stages: usize,
         n_scenarios: usize,
-        indexer: StageIndexer,
         state: StateLayout,
         templates: Vec<StageTemplate>,
         base_rows: Vec<usize>,
@@ -1234,7 +1233,6 @@ mod tests {
         fn new() -> Self {
             let n_stages = 2_usize;
             let n_scenarios = 2_usize;
-            let indexer = crate::indexer::test_fixtures::geom(1, 0);
             let state = crate::indexer::test_fixtures::state_layout(1, 0);
             let stochastic = make_stochastic_context_2_stages();
             let stages = make_stages_2();
@@ -1261,7 +1259,6 @@ mod tests {
             Self {
                 n_stages,
                 n_scenarios,
-                indexer,
                 state,
                 templates,
                 base_rows,
@@ -1323,7 +1320,6 @@ mod tests {
         let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
-            indexer: &fx.indexer,
             state: &fx.state,
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1396,7 +1392,6 @@ mod tests {
         let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
-            indexer: &fx.indexer,
             state: &fx.state,
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1520,7 +1515,6 @@ mod tests {
         let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
-            indexer: &fx.indexer,
             state: &fx.state,
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1645,7 +1639,6 @@ mod tests {
         let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
-            indexer: &fx.indexer,
             state: &fx.state,
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,

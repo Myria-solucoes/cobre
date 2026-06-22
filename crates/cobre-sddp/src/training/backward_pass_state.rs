@@ -1533,7 +1533,6 @@ mod tests {
         let n_stages = 2_usize;
         let n_openings = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
         let templates = vec![minimal_template_1_0(); n_stages];
         // Production carries a separate baked-template buffer alongside
@@ -1581,7 +1580,6 @@ mod tests {
         let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1669,7 +1667,6 @@ mod tests {
         let n_stages = 2_usize;
         let n_openings = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
         let templates = vec![minimal_template_1_0(); n_stages];
         let baked_templates = templates.clone();
@@ -1714,7 +1711,6 @@ mod tests {
         let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,

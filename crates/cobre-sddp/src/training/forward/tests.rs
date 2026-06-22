@@ -663,9 +663,8 @@ fn make_stages_3() -> Vec<Stage> {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn ac_two_scenarios_three_stages_fixed_solution() {
-    // StageIndexer: N=1, L=0 → n_state=1, theta=3, num_cols=4
+    // State layout: N=1, L=0 → n_state=1, theta=3, num_cols=4
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let solver = MockSolver::always_ok(solution);
     let fcf = FutureCostFunction::new(3, state.n_state, 2, 100, &[0; 3]);
@@ -740,7 +739,6 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -793,7 +791,6 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
 #[allow(clippy::too_many_lines)]
 fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     // Stage-first loop: with 2 scenarios and 3 stages, the solve order is
     // (s0,t0), (s1,t0), (s0,t1), (s1,t1), ... — the 3rd call (index 2)
@@ -871,7 +868,6 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -933,7 +929,6 @@ fn ac_global_scenario_index_rank1_scenario0() {
 #[allow(clippy::too_many_lines)]
 fn cost_statistics_accumulated_correctly() {
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let solver = MockSolver::always_ok(solution);
     let fcf = FutureCostFunction::new(3, state.n_state, 2, 100, &[0; 3]);
@@ -1008,7 +1003,6 @@ fn cost_statistics_accumulated_correctly() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1390,7 +1384,6 @@ fn run_one_iteration(
     basis_store: &mut BasisStore,
 ) -> Result<(), crate::SddpError> {
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let fcf = FutureCostFunction::new(3, state.n_state, 1, 100, &[0; 3]);
     let config = TrainingConfig {
         loop_config: LoopConfig {
@@ -1460,7 +1453,6 @@ fn run_one_iteration(
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1592,7 +1584,6 @@ fn basis_invalidated_on_solver_error() {
 #[allow(clippy::too_many_lines)]
 fn test_forward_pass_parallel_cost_agreement() {
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let stochastic = make_stochastic_context_1_hydro_3_stages();
     let stages = make_stages_3();
@@ -1640,7 +1631,6 @@ fn test_forward_pass_parallel_cost_agreement() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1684,7 +1674,6 @@ fn test_forward_pass_parallel_cost_agreement() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1749,7 +1738,6 @@ fn test_forward_pass_parallel_cost_agreement() {
 #[test]
 fn test_forward_pass_work_distribution() {
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let stochastic = make_stochastic_context_1_hydro_3_stages();
     let stages = make_stages_3();
@@ -1800,7 +1788,6 @@ fn test_forward_pass_work_distribution() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -2057,7 +2044,6 @@ fn run_single_stage_forward(
     noise_scale_val: f64,
 ) -> Vec<f64> {
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let solution = fixed_solution(4, 0.0, state.theta, 0.0);
     let solver = MockSolver::always_ok(solution);
     let fcf = FutureCostFunction::new(1, state.n_state, 1, 10, &[0; 1]);
@@ -2122,7 +2108,6 @@ fn run_single_stage_forward(
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &inflow_method,
@@ -2248,7 +2233,6 @@ fn truncation_no_clamp_when_inflow_positive() {
 #[allow(clippy::too_many_lines)]
 fn none_method_unchanged_with_truncation_code_present() {
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let solver = MockSolver::always_ok(solution);
     let fcf = FutureCostFunction::new(3, state.n_state, 2, 100, &[0; 3]);
@@ -2322,7 +2306,6 @@ fn none_method_unchanged_with_truncation_code_present() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -2513,7 +2496,6 @@ fn make_stochastic_context_1_hydro_1_load_bus(mean_mw: f64, std_mw: f64) -> Stoc
 #[test]
 fn test_forward_pass_parallel_infeasibility() {
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let stochastic = make_stochastic_context_1_hydro_3_stages();
     let stages = make_stages_3();
@@ -2575,7 +2557,6 @@ fn test_forward_pass_parallel_infeasibility() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -2647,7 +2628,6 @@ fn forward_pass_load_noise_positive_realization() {
     let n_load_buses = 1usize;
     let stochastic = make_stochastic_context_1_hydro_1_load_bus(300.0, 30.0);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0);
     let mut ws = SolverWorkspace {
         rank: 0,
@@ -2736,7 +2716,6 @@ fn forward_pass_load_noise_positive_realization() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -2803,7 +2782,6 @@ fn forward_pass_load_noise_clamped_to_zero() {
     let n_load_buses = 1usize;
     let stochastic = make_stochastic_context_1_hydro_1_load_bus(-1000.0, 1.0);
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0);
     let mut ws = SolverWorkspace {
         rank: 0,
@@ -2892,7 +2870,6 @@ fn forward_pass_load_noise_clamped_to_zero() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -2955,7 +2932,6 @@ fn forward_pass_no_load_buses_unchanged() {
     let stochastic = make_stochastic_context_1_hydro_3_stages();
     let stages = make_stages_3();
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let indexer = crate::indexer::test_fixtures::geom(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let mut ws = single_workspace(MockSolver::always_ok(solution), &state);
 
@@ -2999,7 +2975,6 @@ fn forward_pass_no_load_buses_unchanged() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
@@ -3193,7 +3168,7 @@ fn test_build_delta_matches_full_batch_when_pool_has_only_current_iter() {
 
 #[test]
 fn test_build_delta_sparse_path() {
-    // StageIndexer with non-empty nonzero_state_indices (sparse path).
+    // State layout with non-empty nonzero_state_indices (sparse path).
     // Verify that the emitted col_indices for the cut contain exactly
     // nonzero_state_indices.len() + 1 entries (mask entries plus theta).
     //
@@ -3516,7 +3491,6 @@ mod dcs_forward {
         // real witness instead of a coincidence.
         let dcs = dcs.filter(|p| p.is_active(iteration));
         let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let indexer = crate::indexer::test_fixtures::geom(1, 0);
         let core = fwd_core_template();
         let templates = vec![core.clone(), core.clone()];
         let base_rows = vec![0_usize, 0_usize];
@@ -3558,7 +3532,6 @@ mod dcs_forward {
         let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
             state: &state,
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,

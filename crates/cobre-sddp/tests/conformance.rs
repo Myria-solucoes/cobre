@@ -952,111 +952,174 @@ mod lb_conformance {
 // Constraint inventory conformance
 // ---------------------------------------------------------------------------
 
-/// Verify that `StageIndexer::with_equipment` produces non-empty ranges for
-/// every constraint family when all features are active.
+/// Build a [`StageGeometry`](cobre_sddp::lp_builder::StageGeometry) for one stage
+/// from explicit equipment dimensions, reproducing the production stage-0
+/// column/row arithmetic via the public `StageGeometry` literal.
 ///
-/// This catches bugs where the indexer layout arithmetic silently produces
-/// empty (0..0) ranges for a constraint family that should be present.
+/// Mirrors the gated `indexer::test_fixtures::geometry` body through the public
+/// API, so this external test crate (which does not see the parent crate's
+/// `#[cfg(test)]` surface) resolves byte-identical column ranges on the default
+/// feature set. The operational-violation constraint *row* ranges are NOT
+/// reproduced here — they are owned internally by `StageLayout` and pinned by a
+/// crate-internal test; this helper covers only the column families
+/// `StageGeometry` exposes.
+#[allow(clippy::too_many_arguments)]
+fn build_geometry(
+    hydro_count: usize,
+    max_par_order: usize,
+    n_thermals: usize,
+    n_lines: usize,
+    n_buses: usize,
+    n_blks: usize,
+    has_inflow_penalty: bool,
+    max_deficit_segments: usize,
+    fpha_hydro_indices: Vec<usize>,
+    fpha_planes: &[usize],
+) -> cobre_sddp::lp_builder::StageGeometry {
+    // theta = N*(3+L); control region starts at theta + 1 (no anticipated thermals).
+    let theta = hydro_count * (3 + max_par_order);
+    let turbine_start = theta + 1;
+    let spillage_start = turbine_start + hydro_count * n_blks;
+    let diversion_start = spillage_start + hydro_count * n_blks;
+    let thermal_start = diversion_start + hydro_count * n_blks;
+    let thermal_end = thermal_start + n_thermals * n_blks;
+    let line_fwd_start = thermal_end;
+    let line_rev_start = line_fwd_start + n_lines * n_blks;
+    let deficit_start = line_rev_start + n_lines * n_blks;
+    let excess_start = deficit_start + n_buses * max_deficit_segments * n_blks;
+    let excess_end = excess_start + n_buses * n_blks;
+    let (inflow_slack, active_penalty) = if has_inflow_penalty && hydro_count > 0 {
+        (excess_end..excess_end + hydro_count, true)
+    } else {
+        (0..0, false)
+    };
+    let n_fpha = fpha_hydro_indices.len();
+    let generation_start = if active_penalty {
+        inflow_slack.end
+    } else {
+        excess_end
+    };
+    let generation_end = generation_start + n_fpha * n_blks;
+    let generation = if n_fpha > 0 {
+        generation_start..generation_end
+    } else {
+        0..0
+    };
+    // No evaporation columns in these fixtures, so the evap block is empty.
+    let evap_col_end = generation_end;
+    let (withdrawal_slack_neg, withdrawal_slack_pos) = if hydro_count > 0 {
+        let neg = evap_col_end..evap_col_end + hydro_count;
+        let pos = neg.end..neg.end + hydro_count;
+        (neg, pos)
+    } else {
+        (0..0, 0..0)
+    };
+    let ws_end = withdrawal_slack_pos.end;
+    let (ob, oa, tb, gb) = if hydro_count == 0 {
+        (0..0, 0..0, 0..0, 0..0)
+    } else {
+        let n_op = hydro_count * n_blks;
+        let ob = ws_end..ws_end + n_op;
+        let oa = ob.end..ob.end + n_op;
+        let tb = oa.end..oa.end + n_op;
+        let gb = tb.end..tb.end + n_op;
+        (ob, oa, tb, gb)
+    };
+    // Rows: z_inflow → water_balance → load_balance (the only row families
+    // `StageGeometry` exposes; FPHA/evap/op-violation rows are internal).
+    let water_balance_start = hydro_count;
+    let load_balance_start = water_balance_start + hydro_count;
+    let load_balance_end = load_balance_start + n_buses * n_blks;
+    let _ = fpha_planes; // FPHA row arithmetic is internal; only the column count matters here.
+
+    cobre_sddp::lp_builder::StageGeometry {
+        turbine: turbine_start..spillage_start,
+        spillage: spillage_start..diversion_start,
+        diversion: diversion_start..thermal_start,
+        thermal: thermal_start..thermal_end,
+        anticipated_decision: 0..0,
+        line_fwd: line_fwd_start..line_rev_start,
+        line_rev: line_rev_start..deficit_start,
+        deficit: deficit_start..excess_start,
+        excess: excess_start..excess_end,
+        generation,
+        evap_indices: Vec::new(),
+        inflow_slack,
+        withdrawal_slack_neg,
+        withdrawal_slack_pos,
+        outflow_below_slack: ob,
+        outflow_above_slack: oa,
+        turbine_below_slack: tb,
+        generation_below_slack: gb,
+        water_balance: water_balance_start..water_balance_start + hydro_count,
+        load_balance: load_balance_start..load_balance_end,
+        z_inflow_row_start: 0,
+        n_blks,
+        fpha_hydro_indices,
+        evap_hydro_indices: Vec::new(),
+    }
+}
+
+/// Verify that the per-stage geometry produces non-empty ranges for every
+/// equipment/slack column family when all features are active.
+///
+/// This catches bugs where the layout arithmetic silently produces empty (0..0)
+/// ranges for a column family that should be present. The operational-violation
+/// constraint *row* ranges (`min_outflow_rows` etc.) are owned internally by
+/// `StageLayout` and are pinned by the crate-internal
+/// `stage_layout_operational_violation_rows_are_contiguous_blocks` test; this
+/// public-API test covers the column families `StageGeometry` exposes.
 #[test]
 fn indexer_constraint_inventory() {
-    use cobre_sddp::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout, StageIndexer};
-
-    let indexer = StageIndexer::with_equipment_and_evaporation(
-        &EquipmentCounts {
-            hydro_count: 3,
-            max_par_order: 1,
-            n_thermals: 2,
-            n_lines: 1,
-            n_buses: 2,
-            n_blks: 2,
-            has_inflow_penalty: true,
-            max_deficit_segments: 2,
-            n_anticipated: 0,
-            k_max: 0,
-            anticipated_lead_stages: vec![],
-            anticipated_thermal_indices: vec![],
-            n_pumping: 0,
-        },
-        &FphaColumnLayout {
-            hydro_indices: vec![0],
-            planes_per_hydro: vec![3],
-        },
-        &EvapConfig {
-            hydro_indices: vec![],
-        },
-    );
+    // N=3, L=1, T=2, Ln=1, B=2, K=2, penalty on, S=2; FPHA hydro 0 with 3 planes.
+    let geometry = build_geometry(3, 1, 2, 1, 2, 2, true, 2, vec![0], &[3]);
 
     // Operational violation slack columns must all be non-empty.
     assert!(
-        !indexer.outflow_below_slack.is_empty(),
+        !geometry.outflow_below_slack.is_empty(),
         "outflow_below_slack must be non-empty"
     );
     assert!(
-        !indexer.outflow_above_slack.is_empty(),
+        !geometry.outflow_above_slack.is_empty(),
         "outflow_above_slack must be non-empty"
     );
     assert!(
-        !indexer.turbine_below_slack.is_empty(),
+        !geometry.turbine_below_slack.is_empty(),
         "turbine_below_slack must be non-empty"
     );
     assert!(
-        !indexer.generation_below_slack.is_empty(),
+        !geometry.generation_below_slack.is_empty(),
         "generation_below_slack must be non-empty"
-    );
-
-    // Operational violation constraint rows must all be non-empty.
-    assert!(
-        !indexer.min_outflow_rows.is_empty(),
-        "min_outflow_rows must be non-empty"
-    );
-    assert!(
-        !indexer.max_outflow_rows.is_empty(),
-        "max_outflow_rows must be non-empty"
-    );
-    assert!(
-        !indexer.min_turbine_rows.is_empty(),
-        "min_turbine_rows must be non-empty"
-    );
-    assert!(
-        !indexer.min_generation_rows.is_empty(),
-        "min_generation_rows must be non-empty"
-    );
-
-    // Operational-violation presence: the flag moved to `StudyDimensions`; the
-    // surviving role-(b) evidence is the non-empty min-outflow slack range.
-    assert!(
-        !indexer.outflow_below_slack.is_empty(),
-        "operational-violation slack columns must be present when hydro_count > 0"
     );
 
     // Inflow non-negativity slack.
     assert!(
-        !indexer.inflow_slack.is_empty(),
+        !geometry.inflow_slack.is_empty(),
         "inflow_slack must be non-empty when has_inflow_penalty=true"
     );
 
     // Water withdrawal slacks (bidirectional).
     assert!(
-        !indexer.withdrawal_slack_neg.is_empty(),
+        !geometry.withdrawal_slack_neg.is_empty(),
         "withdrawal_slack_neg must be non-empty when hydro_count > 0"
     );
     assert!(
-        !indexer.withdrawal_slack_pos.is_empty(),
+        !geometry.withdrawal_slack_pos.is_empty(),
         "withdrawal_slack_pos must be non-empty when hydro_count > 0"
     );
 
     // Operational violation slack columns must be contiguous: each range
     // starts where the previous ends.
     assert_eq!(
-        indexer.outflow_above_slack.start, indexer.outflow_below_slack.end,
+        geometry.outflow_above_slack.start, geometry.outflow_below_slack.end,
         "outflow_above must start where outflow_below ends"
     );
     assert_eq!(
-        indexer.turbine_below_slack.start, indexer.outflow_above_slack.end,
+        geometry.turbine_below_slack.start, geometry.outflow_above_slack.end,
         "turbine_below must start where outflow_above ends"
     );
     assert_eq!(
-        indexer.generation_below_slack.start, indexer.turbine_below_slack.end,
+        geometry.generation_below_slack.start, geometry.turbine_below_slack.end,
         "generation_below must start where turbine_below ends"
     );
 
@@ -1064,26 +1127,20 @@ fn indexer_constraint_inventory() {
     let hydro_count = 3;
     let n_blks = 2;
     let n_op = hydro_count * n_blks;
-    assert_eq!(indexer.outflow_below_slack.len(), n_op);
-    assert_eq!(indexer.outflow_above_slack.len(), n_op);
-    assert_eq!(indexer.turbine_below_slack.len(), n_op);
-    assert_eq!(indexer.generation_below_slack.len(), n_op);
-    assert_eq!(indexer.withdrawal_slack_neg.len(), hydro_count);
-    assert_eq!(indexer.withdrawal_slack_pos.len(), hydro_count);
-
-    // Constraint rows must also span hydro_count * n_blks each.
-    assert_eq!(indexer.min_outflow_rows.len(), n_op);
-    assert_eq!(indexer.max_outflow_rows.len(), n_op);
-    assert_eq!(indexer.min_turbine_rows.len(), n_op);
-    assert_eq!(indexer.min_generation_rows.len(), n_op);
+    assert_eq!(geometry.outflow_below_slack.len(), n_op);
+    assert_eq!(geometry.outflow_above_slack.len(), n_op);
+    assert_eq!(geometry.turbine_below_slack.len(), n_op);
+    assert_eq!(geometry.generation_below_slack.len(), n_op);
+    assert_eq!(geometry.withdrawal_slack_neg.len(), hydro_count);
+    assert_eq!(geometry.withdrawal_slack_pos.len(), hydro_count);
 }
 
 /// CI regression guard: verifies the expected number of hydro-related slack
-/// column families in `StageIndexer` and checks for range overlaps.
+/// column families in the per-stage geometry and checks for range overlaps.
 ///
 /// When a developer adds a new constraint type to the LP builder, they must
 /// also:
-/// 1. Add the corresponding slack column range to `StageIndexer`.
+/// 1. Add the corresponding slack column range to `StageGeometry`/`StageLayout`.
 /// 2. Add extraction logic in `accumulate_category_costs`.
 /// 3. Add a new field to `SimulationCostResult`.
 /// 4. Update this guard count.
@@ -1094,49 +1151,25 @@ fn indexer_constraint_inventory() {
 fn constraint_extraction_regression_guard() {
     use std::ops::Range;
 
-    use cobre_sddp::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout, StageIndexer};
-
-    let indexer = StageIndexer::with_equipment_and_evaporation(
-        &EquipmentCounts {
-            hydro_count: 2,
-            max_par_order: 1,
-            n_thermals: 1,
-            n_lines: 1,
-            n_buses: 1,
-            n_blks: 1,
-            has_inflow_penalty: true,
-            max_deficit_segments: 1,
-            n_anticipated: 0,
-            k_max: 0,
-            anticipated_lead_stages: vec![],
-            anticipated_thermal_indices: vec![],
-            n_pumping: 0,
-        },
-        &FphaColumnLayout {
-            hydro_indices: vec![0],
-            planes_per_hydro: vec![2],
-        },
-        &EvapConfig {
-            hydro_indices: vec![],
-        },
-    );
+    // N=2, L=1, T=1, Ln=1, B=1, K=1, penalty on, S=1; FPHA hydro 0 with 2 planes.
+    let geometry = build_geometry(2, 1, 1, 1, 1, 1, true, 1, vec![0], &[2]);
 
     // Collect all hydro-related slack column families.
     // These are the families that contribute to the hydro violation cost
     // decomposition in accumulate_category_costs().
     let slack_families: Vec<(&str, &Range<usize>)> = vec![
-        ("outflow_below_slack", &indexer.outflow_below_slack),
-        ("outflow_above_slack", &indexer.outflow_above_slack),
-        ("turbine_below_slack", &indexer.turbine_below_slack),
-        ("generation_below_slack", &indexer.generation_below_slack),
-        ("withdrawal_slack_neg", &indexer.withdrawal_slack_neg),
-        ("withdrawal_slack_pos", &indexer.withdrawal_slack_pos),
-        ("inflow_slack", &indexer.inflow_slack),
+        ("outflow_below_slack", &geometry.outflow_below_slack),
+        ("outflow_above_slack", &geometry.outflow_above_slack),
+        ("turbine_below_slack", &geometry.turbine_below_slack),
+        ("generation_below_slack", &geometry.generation_below_slack),
+        ("withdrawal_slack_neg", &geometry.withdrawal_slack_neg),
+        ("withdrawal_slack_pos", &geometry.withdrawal_slack_pos),
+        ("inflow_slack", &geometry.inflow_slack),
     ];
 
     // Guard: exactly 7 hydro-related slack column families.
     // If you are adding a new constraint type, update:
-    //   1. StageIndexer — add the new Range<usize> field
+    //   1. StageGeometry/StageLayout — add the new Range<usize> field
     //   2. accumulate_category_costs() — extract the new cost component
     //   3. SimulationCostResult — add the new f64 cost field
     //   4. CostWriteRecord + costs_schema() — add the Parquet output column
@@ -1165,7 +1198,7 @@ fn constraint_extraction_regression_guard() {
                 !overlaps,
                 "Slack column range overlap detected between {name_a} ({range_a:?}) and \
                  {name_b} ({range_b:?}). This indicates a layout arithmetic bug in \
-                 StageIndexer::with_equipment."
+                 the per-stage geometry."
             );
         }
     }

@@ -1,22 +1,74 @@
-//! Shared `EquipmentCounts` / `FphaColumnLayout` / `EvapConfig` builders for the
-//! sibling indexer unit tests.
+//! Shared role-(a) [`StateLayout`], role-(b) [`StageGeometry`], and
+//! [`StudyDimensions`] builders for the indexer / extraction / patch unit tests.
 //!
-//! Single owner of the `eq` / `eq_with_anticipated` / `fpha` / `evap` fixtures
-//! that the `constructors` test module and downstream `test-support` consumers
-//! use. The named `eq` / `eq_with_anticipated` builders set
-//! `max_deficit_segments: 1` (a non-degenerate deficit stride), which is **not**
-//! the `EquipmentCounts::default()` value `0`; use `..Default::default()`
-//! directly when an all-zero count is wanted instead.
+//! These reproduce the production stage-0 geometry arithmetic from explicit
+//! equipment dimensions so a test can build the exact `StageGeometry`,
+//! `StateLayout`, and `StudyDimensions` a study with those dimensions would
+//! produce, without constructing a full `StudySetup`.
 //!
 //! Compiled under `#[cfg(any(test, feature = "test-support"))]` so plain
 //! `cargo test` and downstream integration tests (via `test-support`) both
 //! reach the same builders.
 
-use super::layout::{EquipmentCounts, EvapConfig, FphaColumnLayout, StageIndexer};
+use crate::lp_builder::{
+    EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET, StageGeometry,
+};
+
+use super::layout::EvaporationIndices;
 use super::state_layout::StateLayout;
 use super::study_dimensions::StudyDimensions;
 
-/// Build `EquipmentCounts` with the seven scalar entity counts set and no
+/// Equipment dimensions for the [`geometry`] / [`study_dims_for`] test builders.
+///
+/// Mirrors the entity-count inputs a study's stage-0 LP layout is built from.
+/// `Default` yields all-zero counts with `max_deficit_segments == 1` (a
+/// non-degenerate deficit stride), matching what the named [`eq`] /
+/// [`eq_with_anticipated`] builders set.
+#[derive(Debug, Clone)]
+pub struct GeometryDims {
+    /// Number of hydro plants.
+    pub hydro_count: usize,
+    /// Maximum PAR model order across all hydros.
+    pub max_par_order: usize,
+    /// Number of thermal units.
+    pub n_thermals: usize,
+    /// Number of transmission lines.
+    pub n_lines: usize,
+    /// Number of buses.
+    pub n_buses: usize,
+    /// Number of demand blocks in the stage.
+    pub n_blks: usize,
+    /// Whether to include inflow penalty slack columns.
+    pub has_inflow_penalty: bool,
+    /// Maximum number of deficit segments across all buses.
+    pub max_deficit_segments: usize,
+    /// Number of anticipated thermals.
+    pub n_anticipated: usize,
+    /// Maximum `lead_stages` across the anticipated thermals.
+    pub k_max: usize,
+    /// Mapping from anticipated-local position to global thermal index.
+    pub anticipated_thermal_indices: Vec<usize>,
+}
+
+impl Default for GeometryDims {
+    fn default() -> Self {
+        Self {
+            hydro_count: 0,
+            max_par_order: 0,
+            n_thermals: 0,
+            n_lines: 0,
+            n_buses: 0,
+            n_blks: 0,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_thermal_indices: Vec::new(),
+        }
+    }
+}
+
+/// Build [`GeometryDims`] with the seven scalar entity counts set and no
 /// anticipated thermals.
 #[must_use]
 pub fn eq(
@@ -27,8 +79,8 @@ pub fn eq(
     n_buses: usize,
     n_blks: usize,
     has_inflow_penalty: bool,
-) -> EquipmentCounts {
-    EquipmentCounts {
+) -> GeometryDims {
+    GeometryDims {
         hydro_count,
         max_par_order,
         n_thermals,
@@ -36,49 +88,203 @@ pub fn eq(
         n_buses,
         n_blks,
         has_inflow_penalty,
-        max_deficit_segments: 1,
-        n_anticipated: 0,
-        k_max: 0,
-        anticipated_lead_stages: vec![],
-        anticipated_thermal_indices: vec![],
-        n_pumping: 0,
+        ..Default::default()
     }
 }
 
-/// Build an `FphaColumnLayout` from per-hydro indices and plane counts.
-#[must_use]
-pub fn fpha(hydro_indices: Vec<usize>, planes_per_hydro: Vec<usize>) -> FphaColumnLayout {
-    FphaColumnLayout {
-        hydro_indices,
-        planes_per_hydro,
-    }
-}
-
-/// Build an `EvapConfig` covering the given hydro indices.
-#[must_use]
-pub fn evap(hydro_indices: Vec<usize>) -> EvapConfig {
-    EvapConfig { hydro_indices }
-}
-
-/// Build a role-(b) [`StageIndexer`] geometry descriptor with **no equipment**,
-/// matching the empty-equipment geometry the pre-slim test-only `StageIndexer::new`
-/// produced.
+/// Build [`GeometryDims`] with explicit anticipated-thermal fields.
 ///
-/// The descriptor carries the role-(b) slots a `TrainingContext.indexer` /
-/// `StageExtractionSpec.indexer` consumer needs (`z_inflow_row_start`, `has_ncs`,
-/// `max_deficit_segments`) with every equipment / slack / withdrawal range empty
-/// (`has_withdrawal == false`, `has_operational_violations == false`). The
-/// state-region columns the study implies are owned by the separate
-/// [`state_layout`] handle, so the `_hydro_count` / `_max_par_order` arguments are
-/// accepted for call-site symmetry but do not add equipment columns here — the
-/// geometry is empty exactly as `new` left it.
+/// The anticipated identity list defaults to `0..n_anticipated`.
 #[must_use]
-pub fn geom(_hydro_count: usize, _max_par_order: usize) -> StageIndexer {
-    StageIndexer::with_equipment_and_evaporation(
-        &eq(0, 0, 0, 0, 0, 0, false),
-        &fpha(vec![], vec![]),
-        &evap(vec![]),
-    )
+pub fn eq_with_anticipated(
+    hydro_count: usize,
+    max_par_order: usize,
+    n_thermals: usize,
+    n_lines: usize,
+    n_buses: usize,
+    n_blks: usize,
+    has_inflow_penalty: bool,
+    n_anticipated: usize,
+    k_max: usize,
+) -> GeometryDims {
+    GeometryDims {
+        hydro_count,
+        max_par_order,
+        n_thermals,
+        n_lines,
+        n_buses,
+        n_blks,
+        has_inflow_penalty,
+        n_anticipated,
+        k_max,
+        anticipated_thermal_indices: (0..n_anticipated).collect(),
+        ..Default::default()
+    }
+}
+
+/// Build the role-(b) [`StageGeometry`] for a single stage from explicit
+/// equipment dimensions, FPHA plane counts, and evaporation hydro indices.
+///
+/// Reproduces the production stage-0 column/row arithmetic
+/// (`build_single_stage_template` / `StageLayout`): `theta = N*(3+L) + A*k_max + A`
+/// anchors the control region at `theta + 1`, equipment columns follow in the
+/// canonical order (turbine, spillage, diversion, thermal, `anticipated_decision`,
+/// lines, deficit, excess, `inflow_slack`, generation, evaporation, withdrawal
+/// slacks, operational-violation slacks), and rows follow z-inflow → water
+/// balance → load balance → FPHA → evaporation. The returned geometry is correct
+/// for a single stage whose block count is `dims.n_blks`.
+///
+/// `fpha_hydro_indices` / `fpha_planes` describe the FPHA hydros at this stage
+/// (parallel, equal length); `evap_hydro_indices` lists the evaporation hydros.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+// Rationale: single cohesive LP column/row layout reproduction; every local
+// binding contributes to the `StageGeometry { .. }` literal that closes the
+// function. Splitting into sub-helpers would scatter the offset derivation order
+// and obscure the one-shot build contract where each offset derives from the
+// previous.
+pub fn geometry(
+    dims: &GeometryDims,
+    fpha_hydro_indices: Vec<usize>,
+    fpha_planes: &[usize],
+    evap_hydro_indices: Vec<usize>,
+) -> StageGeometry {
+    let GeometryDims {
+        hydro_count,
+        max_par_order,
+        n_thermals,
+        n_lines,
+        n_buses,
+        n_blks,
+        has_inflow_penalty,
+        max_deficit_segments,
+        n_anticipated,
+        k_max,
+        ..
+    } = *dims;
+    let n_ant_state = n_anticipated * k_max;
+
+    // theta = N*(3+L) + A*k_max + A; control region starts at theta + 1.
+    let theta = hydro_count * (3 + max_par_order) + n_ant_state + n_anticipated;
+    let decision_start = theta + 1;
+
+    let z_inflow_row_start = 0_usize;
+
+    let turbine_start = decision_start;
+    let spillage_start = turbine_start + hydro_count * n_blks;
+    let diversion_start = spillage_start + hydro_count * n_blks;
+    let thermal_start = diversion_start + hydro_count * n_blks;
+    let thermal_end = thermal_start + n_thermals * n_blks;
+    let anticipated_decision = if n_anticipated > 0 {
+        thermal_end..thermal_end + n_anticipated
+    } else {
+        0..0
+    };
+    let line_fwd_start = thermal_end + n_anticipated;
+    let line_rev_start = line_fwd_start + n_lines * n_blks;
+    let deficit_start = line_rev_start + n_lines * n_blks;
+    let excess_start = deficit_start + n_buses * max_deficit_segments * n_blks;
+    let excess_end = excess_start + n_buses * n_blks;
+
+    let (inflow_slack, active_penalty) = if has_inflow_penalty && hydro_count > 0 {
+        (excess_end..excess_end + hydro_count, true)
+    } else {
+        (0..0, false)
+    };
+
+    let n_fpha_hydros = fpha_hydro_indices.len();
+    let generation_start = if active_penalty {
+        inflow_slack.end
+    } else {
+        excess_end
+    };
+    let generation_end = generation_start + n_fpha_hydros * n_blks;
+    let generation = if n_fpha_hydros > 0 {
+        generation_start..generation_end
+    } else {
+        0..0
+    };
+
+    let n_evap_hydros = evap_hydro_indices.len();
+    let evap_col_start = generation_end;
+
+    // Rows: z-inflow → water balance → load balance → FPHA → evaporation.
+    let water_balance_start = z_inflow_row_start + hydro_count;
+    let load_balance_start = water_balance_start + hydro_count;
+    let load_balance_end = load_balance_start + n_buses * n_blks;
+
+    let mut fpha_row_cursor = load_balance_end;
+    for &planes in fpha_planes {
+        fpha_row_cursor += planes * n_blks;
+    }
+
+    let evap_indices: Vec<EvaporationIndices> = (0..n_evap_hydros)
+        .map(|i| EvaporationIndices {
+            evaporation_flow_col: evap_col_start + i * EVAP_COLS_PER_HYDRO + EVAP_FLOW_OFFSET,
+            f_evap_plus_col: evap_col_start + i * EVAP_COLS_PER_HYDRO + EVAP_F_PLUS_OFFSET,
+            f_evap_minus_col: evap_col_start + i * EVAP_COLS_PER_HYDRO + EVAP_F_MINUS_OFFSET,
+            evap_row: fpha_row_cursor + i,
+        })
+        .collect();
+    let evap_col_end = evap_col_start + n_evap_hydros * EVAP_COLS_PER_HYDRO;
+
+    let (withdrawal_slack_neg, withdrawal_slack_pos) = if hydro_count > 0 {
+        let neg = evap_col_end..evap_col_end + hydro_count;
+        let pos = neg.end..neg.end + hydro_count;
+        (neg, pos)
+    } else {
+        (0..0, 0..0)
+    };
+
+    let ws_end = withdrawal_slack_pos.end;
+    let (outflow_below_slack, outflow_above_slack, turbine_below_slack, generation_below_slack) =
+        if hydro_count == 0 {
+            (0..0, 0..0, 0..0, 0..0)
+        } else {
+            let n_op = hydro_count * n_blks;
+            let ob = ws_end..ws_end + n_op;
+            let oa = ob.end..ob.end + n_op;
+            let tb = oa.end..oa.end + n_op;
+            let gb = tb.end..tb.end + n_op;
+            (ob, oa, tb, gb)
+        };
+
+    StageGeometry {
+        turbine: turbine_start..spillage_start,
+        spillage: spillage_start..diversion_start,
+        diversion: diversion_start..thermal_start,
+        thermal: thermal_start..thermal_end,
+        anticipated_decision,
+        line_fwd: line_fwd_start..line_rev_start,
+        line_rev: line_rev_start..deficit_start,
+        deficit: deficit_start..excess_start,
+        excess: excess_start..excess_end,
+        generation,
+        evap_indices,
+        inflow_slack,
+        withdrawal_slack_neg,
+        withdrawal_slack_pos,
+        outflow_below_slack,
+        outflow_above_slack,
+        turbine_below_slack,
+        generation_below_slack,
+        water_balance: water_balance_start..water_balance_start + hydro_count,
+        load_balance: load_balance_start..load_balance_end,
+        z_inflow_row_start,
+        n_blks,
+        fpha_hydro_indices,
+        evap_hydro_indices,
+    }
+}
+
+/// Build the empty-equipment role-(b) [`StageGeometry`] (every range `0..0`).
+///
+/// The `_hydro_count` / `_max_par_order` arguments are accepted for call-site
+/// symmetry but add no equipment columns — the state-region columns the study
+/// implies are owned by the separate [`StateLayout`] handle.
+#[must_use]
+pub fn geom(_hydro_count: usize, _max_par_order: usize) -> StageGeometry {
+    StageGeometry::default()
 }
 
 /// Build a finalized storage+lag [`StateLayout`] (no anticipated thermals) with
@@ -128,117 +334,36 @@ pub fn state_layout_full(
     )
 }
 
-/// Build the role-(a) [`StateLayout`] matching a role-(b) [`StageIndexer`]'s
-/// implied state dimensions, recovered from its equipment geometry.
-///
-/// The slim role-(b) descriptor no longer stores the state-vector dimensions, so
-/// they are recovered: `hydro_count` from the per-block stride of the `turbine`
-/// range (`turbine.len() / n_blks`), `max_par_order` from the descriptor's
-/// `theta`-anchored control-region start. Test sites that already know the
-/// dimensions should prefer [`state_layout`] / [`state_layout_full`]; this bridge
-/// exists for sites that hold only a built indexer.
-///
-/// Anticipated thermals are recovered from the `anticipated_decision` column
-/// range (its length = `n_anticipated`); the per-plant lead stages are NOT
-/// stored on the descriptor, so this bridge assumes none and is valid only for
-/// non-anticipated indexers. Anticipated test sites must use
-/// [`state_layout_full`].
-#[must_use]
-pub fn state_layout_for(indexer: &StageIndexer) -> StateLayout {
-    debug_assert!(
-        indexer.anticipated_decision.is_empty(),
-        "state_layout_for assumes no anticipated thermals; use state_layout_full instead"
-    );
-    let n_blks = indexer.n_blks.max(1);
-    let hydro_count = indexer.turbine.len() / n_blks;
-    // control_region_start == theta + 1 == turbine.start; theta == N*(3+L) for a
-    // non-anticipated layout, so L == theta / N − 3 when N > 0.
-    let theta = indexer.turbine.start.saturating_sub(1);
-    let max_par_order = if hydro_count > 0 {
-        (theta / hydro_count).saturating_sub(3)
-    } else {
-        0
-    };
-    state_layout(hydro_count, max_par_order)
-}
-
 /// Build an all-default [`StudyDimensions`] (every count `0`, every flag
 /// `false`, empty anticipated list).
-///
-/// Matches the empty non-state shape that the [`geom`] fixture's empty-equipment
-/// [`StageIndexer`] implies, for the common test site that builds a `geom`
-/// indexer. Sites whose indexer carries real equipment should use
-/// [`study_dims_for`] so the non-state facts stay aligned with the indexer.
 #[must_use]
 pub fn study_dims() -> StudyDimensions {
     StudyDimensions::default()
 }
 
-/// Build the [`StudyDimensions`] matching the [`EquipmentCounts`] a test built
-/// its [`StageIndexer`] from, so the bridged `study_dims` carries the identical
-/// non-state facts the production `build_wired_indexer` derives from the same
-/// counts bag.
+/// Build the [`StudyDimensions`] matching the [`GeometryDims`] a test built its
+/// stage geometry from, so the non-state shape stays aligned with the geometry.
 ///
-/// The non-state scalars come straight off `counts`; the presence flags use the
-/// same predicates the role-(b) constructor applies (`has_inflow_penalty` is the
-/// counts flag, `has_withdrawal == hydro_count > 0`,
-/// `has_operational_violations == hydro_count != 0`); the anticipated identity
-/// list is the counts input the constructor clones. `n_pumping` is `0` on the
-/// non-state shape these fixtures imply.
+/// The non-state scalars come straight off `dims`; the presence flags use the
+/// production predicates (`has_inflow_penalty` is the flag, `has_withdrawal ==
+/// hydro_count > 0`, `has_operational_violations == hydro_count != 0`).
 ///
 /// `has_ncs` is `false`: NCS presence is set only by the production NCS wiring
-/// (`!ncs_col_starts.is_empty()`), never by `EquipmentCounts` or by any test
-/// fixture — every fixture-built indexer is NCS-inactive, so the constant
-/// matches what the deleted `StageIndexer::has_ncs` carried at every bridge site.
+/// (`!ncs_col_starts.is_empty()`), never by these fixtures — every fixture-built
+/// stage is NCS-inactive. `n_pumping` is `0` on the non-state shape these
+/// fixtures imply.
 #[must_use]
-pub fn study_dims_for(counts: &EquipmentCounts) -> StudyDimensions {
+pub fn study_dims_for(dims: &GeometryDims) -> StudyDimensions {
     StudyDimensions {
-        n_thermals: counts.n_thermals,
-        n_lines: counts.n_lines,
-        n_buses: counts.n_buses,
-        max_deficit_segments: counts.max_deficit_segments,
+        n_thermals: dims.n_thermals,
+        n_lines: dims.n_lines,
+        n_buses: dims.n_buses,
+        max_deficit_segments: dims.max_deficit_segments,
         has_ncs: false,
-        has_inflow_penalty: counts.has_inflow_penalty,
-        has_withdrawal: counts.hydro_count > 0,
-        has_operational_violations: counts.hydro_count != 0,
-        anticipated_thermal_indices: counts.anticipated_thermal_indices.clone(),
-        n_pumping: counts.n_pumping,
-    }
-}
-
-/// Test helper: build `EquipmentCounts` with explicit anticipated thermal
-/// fields.
-#[must_use]
-pub fn eq_with_anticipated(
-    hydro_count: usize,
-    max_par_order: usize,
-    n_thermals: usize,
-    n_lines: usize,
-    n_buses: usize,
-    n_blks: usize,
-    has_inflow_penalty: bool,
-    n_anticipated: usize,
-    k_max: usize,
-) -> EquipmentCounts {
-    // Default the per-plant K_i array to a uniform `k_max` of length
-    // `n_anticipated` so debug asserts on per-plant lead-stage
-    // bookkeeping hold. Tests that need a mixed K_i array must construct
-    // `EquipmentCounts` directly.
-    let anticipated_lead_stages = vec![k_max; n_anticipated];
-    let anticipated_thermal_indices = (0..n_anticipated).collect();
-    EquipmentCounts {
-        hydro_count,
-        max_par_order,
-        n_thermals,
-        n_lines,
-        n_buses,
-        n_blks,
-        has_inflow_penalty,
-        max_deficit_segments: 1,
-        n_anticipated,
-        k_max,
-        anticipated_lead_stages,
-        anticipated_thermal_indices,
+        has_inflow_penalty: dims.has_inflow_penalty,
+        has_withdrawal: dims.hydro_count > 0,
+        has_operational_violations: dims.hydro_count != 0,
+        anticipated_thermal_indices: dims.anticipated_thermal_indices.clone(),
         n_pumping: 0,
     }
 }
