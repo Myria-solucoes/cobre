@@ -1,7 +1,17 @@
 # `crates/cobre-sddp/src/lp/` — Post-Redesign Assessment: Collapsing the Duplicated Layout Bags
 
-> **Status: design approved (disjoint-owner model). No code yet beyond this
-> blueprint.** Post-redesign continuation of
+> **Status: IMPLEMENTED** (branch `feat/lp-architecture-simplification`, commits
+> `9d097a22..e48e14f0`). `StudyDimensions` + per-stage `StageGeometry` introduced;
+> `StageIndexer` + `EquipmentCounts` deleted; each layout fact now has one owner
+> (`StateLayout` / `StudyDimensions` / `StageGeometry`, with the ephemeral
+> `StageLayout` builder). Three stage-0/`n_blks` latent bugs were removed by
+> construction along the way — the `shift_anticipated_state` decision-column read
+> was found **active** on D34 (re-baselined under sddp sign-off); the rest is
+> hash-neutral (20/20 parity). The forks below were resolved as: A1 (minimal
+> fields), F1 (single-owner `max_deficit_segments`), B1 (thread geometry onto
+> `StageContext`), C1 (per-stage `HydroReverseLookup`), `EquipmentCounts` retired
+> with `StageIndexer`, op-violation row assertions relocated in-crate. The
+> assessment below is retained as the design record. Post-redesign continuation of
 > `lp-architecture-degradation-assessment.md` (§D1, §6, §7) and
 > `lp-indexer-simplification-assessment.md` (§8). The role-(a) `StateLayout`
 > extraction, the `anticipated_state_out` relocation, and the per-stage
