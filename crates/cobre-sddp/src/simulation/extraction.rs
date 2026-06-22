@@ -431,20 +431,25 @@ pub struct StageExtractionSpec<'a> {
     pub ncs_col_upper: &'a [f64],
     /// Column index of the first pumping-flow variable at this stage.
     ///
-    /// Pumping columns are laid out block-major as
-    /// `pumping_col_start + p_idx * n_blks + blk`. Sourced from
-    /// `StageLayout::col_pumping_start` (via `StageTemplates::pumping_col_starts`),
-    /// the sole owner of the pumping-flow column base. Zero when no pumping
-    /// stations are active.
+    /// Pumping columns are laid out block-major over the stage's ACTIVE stations
+    /// as `pumping_col_start + p_local * n_blks + blk`, where `p_local` is the
+    /// position within `geometry.active_pumping_indices` (an inactive station has
+    /// no column this stage). Sourced from `StageLayout::col_pumping_start` (via
+    /// `StageTemplates::pumping_col_starts`), the sole owner of the pumping-flow
+    /// column base. Zero when no pumping stations are active.
     pub pumping_col_start: usize,
-    /// Number of pumping stations contributing columns at this stage.
+    /// Number of pumping stations ACTIVE (contributing columns) at this stage —
+    /// the commissioning-gated count, equal to `geometry.active_pumping_indices.len()`.
     pub n_pumping: usize,
     /// Per-station pumping power-consumption rate \[MW/(m³/s)\].
     ///
-    /// Length equals `n_pumping`, ID-sorted to match
-    /// `entity_counts.pumping_station_ids`. Used to compute
-    /// `power_consumption_mw = pumped_flow_m3s * consumption`. Empty when no
-    /// pumping stations are active.
+    /// The FULL ID-sorted list (length = total stations), parallel to
+    /// `entity_counts.pumping_station_ids` and indexed by the SYSTEM station index
+    /// — NOT the active-local index. Extraction recovers the system index via
+    /// `geometry.active_pumping_indices[p_local]` before reading this, mirroring
+    /// how NCS extraction maps its local index through `ncs_entity_ids`. Used to
+    /// compute `power_consumption_mw = pumped_flow_m3s * consumption`. Empty when
+    /// there are no pumping stations.
     pub pumping_consumption_mw_per_m3s: &'a [f64],
     /// Mapping from target hydro ID to source hydro indices that divert to it.
     ///
@@ -1599,17 +1604,27 @@ fn extract_non_controllables(
     (results, total_curtailment_cost)
 }
 
-/// Extract one [`SimulationPumpingResult`] per (station, block) from the solved
-/// pumping-flow primals.
+/// Extract one [`SimulationPumpingResult`] per (active station, block) from the
+/// solved pumping-flow primals.
 ///
-/// Reads `view.primal[pumping_col_start + p_idx * n_blks + blk]` for the pumped
+/// Reads `view.primal[pumping_col_start + p_local * n_blks + blk]` for the pumped
 /// flow — block-major, mirroring [`extract_non_controllables`]' per-block read.
 /// `view.primal` is already unscaled (the extraction boundary unscales upstream),
 /// so the flow is NOT divided by `col_scale` — consistent with the NCS
 /// `generation_mw` read. The per-block power term is
-/// `power_consumption_mw = pumped_flow_m3s * consumption[p_idx]`, using the same
+/// `power_consumption_mw = pumped_flow_m3s * consumption[p_sys]`, using the same
 /// `consumption_mw_per_m3s` coefficient the `PumpingPower` resolver arm applies
 /// on the bus load-balance row.
+///
+/// Commissioning gating makes the LP allocate one column block per ACTIVE station
+/// (`n_pumping` is the active count), so the enumeration index `p_local` is the
+/// active-local column position and the station identity is recovered at the
+/// SYSTEM index `p_sys = active_pumping_indices[p_local]` — exactly how
+/// [`extract_non_controllables`] maps its local index through `ncs_entity_ids`.
+/// Indexing the full ID-sorted `pumping_station_ids`/`consumption` lists at
+/// `p_local` instead would report the wrong station id (and consumption) at any
+/// stage where an earlier station is commissioning-inactive. An inactive station
+/// has no column block this stage, so no row is emitted for it.
 ///
 /// `pumping_cost` is imputed as `0.0` here (finalized downstream by the output
 /// writer). `block_id` is `Some(blk)` for every row.
@@ -1628,17 +1643,12 @@ fn extract_pumping_stations(
     }
 
     let col_start = spec.pumping_col_start;
+    let active = &spec.geometry.active_pumping_indices;
     debug_assert_eq!(
-        spec.entity_counts.pumping_station_ids.len(),
+        active.len(),
         n_pumping,
-        "pumping_station_ids len {} != n_pumping {n_pumping}",
-        spec.entity_counts.pumping_station_ids.len()
-    );
-    debug_assert_eq!(
-        spec.pumping_consumption_mw_per_m3s.len(),
-        n_pumping,
-        "pumping_consumption_mw_per_m3s len {} != n_pumping {n_pumping}",
-        spec.pumping_consumption_mw_per_m3s.len()
+        "active_pumping_indices len {} != n_pumping {n_pumping}",
+        active.len()
     );
     debug_assert!(
         view.primal.len() >= col_start + n_pumping * n_blks,
@@ -1649,10 +1659,16 @@ fn extract_pumping_stations(
 
     let grid = spec.block_grid();
     let mut results = Vec::with_capacity(n_pumping * n_blks);
-    for (p_idx, &pumping_station_id) in spec.entity_counts.pumping_station_ids.iter().enumerate() {
-        let consumption = spec.pumping_consumption_mw_per_m3s[p_idx];
+    for (p_local, &p_sys) in active.iter().enumerate() {
+        debug_assert!(
+            p_sys < spec.entity_counts.pumping_station_ids.len(),
+            "active pumping system index {p_sys} out of bounds for pumping_station_ids len {}",
+            spec.entity_counts.pumping_station_ids.len()
+        );
+        let pumping_station_id = spec.entity_counts.pumping_station_ids[p_sys];
+        let consumption = spec.pumping_consumption_mw_per_m3s[p_sys];
         for blk in 0..n_blks {
-            let col = grid.flat(col_start, p_idx, blk);
+            let col = grid.flat(col_start, p_local, blk);
             let pumped_flow_m3s = view.primal[col];
             #[allow(clippy::cast_possible_truncation)]
             results.push(SimulationPumpingResult {
@@ -5695,11 +5711,13 @@ mod tests {
 
     /// Build a `StageExtractionSpec` whose only meaningful fields are the
     /// pumping inputs; all other fields are inert defaults.  The spec's `n_blks`
-    /// is taken from `geometry.n_blks`.
+    /// is taken from `geometry.n_blks`, and `extract_pumping_stations` maps each
+    /// active-local pumping column back to its station id through
+    /// `geometry.active_pumping_indices`, so the caller must populate that list
+    /// on the supplied `geometry` to match `n_pumping`.
     // Rationale: this helper assembles a single inert-default StageExtractionSpec
-    // for the pumping tests, which exercise only `extract_pumping_stations` (a
-    // path that never reads `geometry`); its parameter list mirrors the spec's
-    // borrowed inputs, so bundling them would obscure rather than clarify.
+    // for the pumping tests; its parameter list mirrors the spec's borrowed
+    // inputs, so bundling them would obscure rather than clarify.
     #[allow(clippy::too_many_arguments)]
     fn pumping_only_spec<'a>(
         study_dims: &'a StudyDimensions,
@@ -5770,6 +5788,8 @@ mod tests {
 
         let equipment = StageGeometry {
             n_blks: 2,
+            // One active station whose system index is 0 (the only station, id 42).
+            active_pumping_indices: vec![0],
             ..StageGeometry::default()
         };
         let study_dims = crate::indexer::test_fixtures::study_dims();

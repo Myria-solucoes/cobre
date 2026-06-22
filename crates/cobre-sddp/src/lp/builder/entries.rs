@@ -209,9 +209,13 @@ pub(super) fn fill_state_and_water_entries(
 /// across the two sites; computing a differently-rounded τ would desynchronise
 /// pumping from the cascade water terms.
 ///
-/// Stations are iterated in `ctx.pumping_stations` slot order (the canonical
-/// ID-sorted slice). A source or destination hydro id absent from `ctx.hydro_pos`
-/// skips only that side's entry — the present side is still written, and no panic
+/// Stations are iterated in `layout.active_pumping_indices` order (the stage's
+/// commissioning-active subset, in canonical ID-sorted order), mirroring how the
+/// NCS column fill iterates `active_ncs_indices`. The enumeration index `p_local`
+/// is the column-block position; the station record is read at the SYSTEM index
+/// `p_sys` the entry carries (column local, entity global — exactly the NCS
+/// split). A source or destination hydro id absent from `ctx.hydro_pos` skips
+/// only that side's entry — the present side is still written, and no panic
 /// occurs (semantic validation of the references is a separate concern).
 pub(super) fn fill_pumping_water_entries(
     ctx: &TemplateBuildCtx<'_>,
@@ -222,7 +226,8 @@ pub(super) fn fill_pumping_water_entries(
     let n_blks = layout.n_blks;
     let grid = layout.block_grid();
     let row_water = layout.row_water_balance_start();
-    for (p_idx, station) in ctx.pumping_stations.iter().enumerate() {
+    for (p_local, &p_sys) in layout.active_pumping_indices.iter().enumerate() {
+        let station = &ctx.pumping_stations[p_sys];
         // `validate_pumping_station_refs` (run from `SystemBuilder::build()`)
         // guarantees both refs resolve on a validated `System`, so on the
         // production path both `Option`s are `Some`. The per-side `if let
@@ -234,7 +239,7 @@ pub(super) fn fill_pumping_water_entries(
         let destination = ctx.hydro_pos.get(&station.destination_hydro_id).copied();
         for blk in 0..n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
-            let col = grid.flat(layout.col_pumping_start, p_idx, blk);
+            let col = grid.flat(layout.col_pumping_start, p_local, blk);
             if let Some(s_idx) = source {
                 col_entries[col].push((row_water + s_idx, tau_h));
             }
@@ -336,14 +341,18 @@ pub(super) fn fill_load_balance_entries(
     }
 
     // Pumping power: negative injection on the station's bus. Iterate the
-    // canonical ID-sorted `pumping_stations` slice so `p_idx` matches the
-    // column block; a bus id absent from `bus_pos` skips that station with no
-    // entry (semantic validation is a separate concern).
-    for (p_idx, station) in ctx.pumping_stations.iter().enumerate() {
+    // stage's commissioning-active subset `active_pumping_indices` (canonical
+    // ID-sorted order) so the enumeration index `p_local` matches the column
+    // block; the station record is read at the SYSTEM index `p_sys` the entry
+    // carries (column local, entity global — the same split the NCS fill uses).
+    // A bus id absent from `bus_pos` skips that station with no entry (semantic
+    // validation is a separate concern).
+    for (p_local, &p_sys) in layout.active_pumping_indices.iter().enumerate() {
+        let station = &ctx.pumping_stations[p_sys];
         if let Some(&b_idx) = ctx.bus_pos.get(&station.bus_id) {
             for blk in 0..n_blks {
                 let row = grid.flat(row_load, b_idx, blk);
-                let col = grid.flat(layout.col_pumping_start, p_idx, blk);
+                let col = grid.flat(layout.col_pumping_start, p_local, blk);
                 col_entries[col].push((row, -station.consumption_mw_per_m3s));
             }
         }

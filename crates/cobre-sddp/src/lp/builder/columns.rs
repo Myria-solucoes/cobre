@@ -714,17 +714,21 @@ fn fill_ncs_columns(
     }
 }
 
-/// Pumping-flow columns per station per block.
+/// Pumping-flow columns per ACTIVE station per block.
 ///
-/// One column per ID-sorted pumping station per block, block-major
-/// (`col_pumping_start + p_idx * n_blks + blk`). Bounds are the resolved
-/// `[min_flow_m3s, max_flow_m3s]` for the `(station, stage)` pair; objective
-/// cost is zero (pumping carries no direct cost — its electrical cost enters
-/// through the bus load balance in the power-coupling pass, not here).
+/// One column per active (commissioning-gated) pumping station per block,
+/// block-major (`col_pumping_start + p_local * n_blks + blk`). Bounds are the
+/// resolved `[min_flow_m3s, max_flow_m3s]` for the `(station, stage)` pair;
+/// objective cost is zero (pumping carries no direct cost — its electrical cost
+/// enters through the bus load balance in the power-coupling pass, not here).
 ///
-/// Iterates `ctx.pumping_stations` in slot order — the canonical ID-sorted slice
-/// from `System::pumping_stations` — so the local index `p_idx` matches both the
-/// column-block position and the `ctx.resolved.bounds.pumping_bounds(p_idx, …)` slot. This
+/// Iterates `layout.active_pumping_indices` (the stage's active subset, in
+/// canonical ID-sorted order) exactly as `fill_ncs_columns` iterates
+/// `active_ncs_indices`. The enumeration index `p_local` is the column-block
+/// position; the bounds slot is the SYSTEM station index `p_sys` the entry
+/// carries — `pumping_bounds(p_sys, …)` is indexed by the global station index
+/// (it is built for every station regardless of its window), so reading it at
+/// `p_local` would fetch the wrong station's bounds at any gated stage. This
 /// upholds the declaration-order bit-determinism rule without depending on
 /// declaration order.
 pub(super) fn fill_pumping_columns(
@@ -733,12 +737,12 @@ pub(super) fn fill_pumping_columns(
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
-    for p_idx in 0..ctx.pumping_stations.len() {
-        let pb = ctx.resolved.bounds.pumping_bounds(p_idx, stage_idx);
+    for (p_local, &p_sys) in layout.active_pumping_indices.iter().enumerate() {
+        let pb = ctx.resolved.bounds.pumping_bounds(p_sys, stage_idx);
         for blk in 0..layout.n_blks {
             let col = layout
                 .block_grid()
-                .flat(layout.col_pumping_start, p_idx, blk);
+                .flat(layout.col_pumping_start, p_local, blk);
             bufs.col_lower[col] = pb.min_flow_m3s;
             bufs.col_upper[col] = pb.max_flow_m3s;
             // objective[col] = 0.0 — already zero from vec initialisation.

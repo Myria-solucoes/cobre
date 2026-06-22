@@ -101,10 +101,20 @@ pub(crate) struct TemplateBuildCtx<'a> {
     pub(crate) pumping_pos: BTreeMap<EntityId, usize>,
     /// Number of pumping stations (`pumping_stations.len()`).
     ///
-    /// The authoritative station count: the layout reserves `n_pumping * n_blks`
-    /// pumping-flow columns from it. Asserted equal to `bounds.n_pumping()` at ctx
-    /// construction — a divergence means the resolved-bounds table and the entity
-    /// slice disagree on station count.
+    /// The authoritative FULL station count, asserted equal to
+    /// `bounds.n_pumping()` at ctx construction — a divergence means the
+    /// resolved-bounds table and the entity slice disagree on station count. It is
+    /// NOT the per-stage column-block stride: commissioning gating reserves columns
+    /// per ACTIVE station (`StageLayout::n_pumping == active_pumping_indices.len()`,
+    /// computed from `identify_active_pumping`), which is `<= ctx.n_pumping` and may
+    /// shrink stage-to-stage. The full count is retained as the construction-time
+    /// consistency anchor the `build_template_build_ctx` test validates against the
+    /// bounds table.
+    // Rationale: read only by the ctx-construction consistency tests; the per-stage
+    // active count (`identify_active_pumping(...).len()`) drives the column block,
+    // so this full count has no production reader. Kept as the authoritative
+    // station-count anchor the construction test pins against `bounds.n_pumping()`.
+    #[allow(dead_code)]
     pub(crate) n_pumping: usize,
     /// Mapping from target hydro ID to source hydro indices that divert to it.
     ///
@@ -277,26 +287,42 @@ pub(crate) struct StageLayout<'a> {
     pub(crate) active_ncs_indices: Vec<usize>,
     /// Start of pumping-flow columns (after the NCS region, before generic-slack columns).
     ///
-    /// One column per pumping station per block, block-major:
-    /// `col_pumping_start + station_local_idx * n_blks + blk`.
+    /// One column per ACTIVE pumping station per block, block-major:
+    /// `col_pumping_start + station_local_idx * n_blks + blk`, where
+    /// `station_local_idx` is the position within [`Self::active_pumping_indices`]
+    /// (NOT the system station index — an inactive station emits no column).
     /// When `n_pumping == 0` the block is empty and `col_pumping_start` equals
     /// `col_ncs_end`, leaving every downstream `col_*_start` and `num_cols`
     /// byte-identical to a station-free system.
     ///
     /// Read by `fill_pumping_columns` (column bounds) and
-    /// `fill_pumping_water_entries` (water-balance ±τ coupling), which address the
-    /// per-station per-block column as `col_pumping_start + p_idx * n_blks + blk`.
+    /// `fill_pumping_water_entries` (water-balance ±τ coupling), which iterate the
+    /// active subset and address the per-station per-block column as
+    /// `col_pumping_start + p_local * n_blks + blk`.
     pub(crate) col_pumping_start: usize,
-    /// Number of pumping stations contributing columns at this stage.
+    /// Number of pumping stations ACTIVE (contributing columns) at this stage.
     ///
-    /// Each station contributes `n_blks` columns. Sourced from `ctx.n_pumping`.
-    /// The column count is the full station count at every stage: pumping
-    /// `entry_stage_id`/`exit_stage_id` are parsed but not applied to the LP, so
-    /// no commissioning gating shrinks or zeroes this block per stage (that gating
-    /// is unimplemented). Read by `build_single_stage_template` to populate
+    /// Each active station contributes `n_blks` columns. Commissioning gating IS
+    /// applied: a station's `entry_stage_id`/`exit_stage_id` window omits it from
+    /// the active set at any stage outside `[entry, exit)`, so this is the active
+    /// count (`active_pumping_indices.len()`), NOT the full `ctx.n_pumping`. A
+    /// station with no window is active at every stage, so a station-set with no
+    /// windows keeps this equal to the full count and the layout byte-identical to
+    /// an ungated build. Read by `build_single_stage_template` to populate
     /// `StageTemplates::n_pumping_per_stage`, which the simulation extraction
     /// pipeline uses to bound the per-(station, block) primal read.
     pub(crate) n_pumping: usize,
+    /// Indices (into `ctx.pumping_stations`) of stations active at this stage.
+    ///
+    /// In canonical ID-sorted slot order, mirroring [`Self::active_ncs_indices`].
+    /// Entry `p_local` is the system station index of the `p_local`-th active
+    /// station; the column block addresses stations by this active-local position
+    /// while per-station data (bounds, source/destination hydro, bus,
+    /// consumption) is read at the system index this entry carries. Persisted into
+    /// the per-stage [`StageGeometry`](super::template::StageGeometry) so
+    /// simulation extraction maps each active-local pumping index back to its
+    /// station id.
+    pub(crate) active_pumping_indices: Vec<usize>,
     pub(crate) num_cols: usize,
     /// Start of generic constraint rows (after operational violation rows).
     ///
@@ -550,6 +576,27 @@ fn identify_active_ncs(ctx: &TemplateBuildCtx<'_>, stage: &Stage) -> Vec<usize> 
         .filter_map(|(i, ncs)| {
             let ok = ncs.entry_stage_id.is_none_or(|e| e <= stage.id)
                 && ncs.exit_stage_id.is_none_or(|e| stage.id < e);
+            ok.then_some(i)
+        })
+        .collect()
+}
+
+/// Collect indices of pumping stations that are active at this stage.
+///
+/// A station is active when the stage is at or after the entry stage (if any)
+/// and strictly before the exit stage (if any) — the same commissioning gate
+/// `identify_active_ncs` applies. Returned in `ctx.pumping_stations` slot order
+/// (the canonical ID-sorted order), so the active subset preserves
+/// declaration-order invariance. The returned vector feeds this stage's
+/// [`StageLayout`], which reserves one per-block column per ENTRY in this list
+/// (not per system station): an inactive station emits no column that stage.
+fn identify_active_pumping(ctx: &TemplateBuildCtx<'_>, stage: &Stage) -> Vec<usize> {
+    ctx.pumping_stations
+        .iter()
+        .enumerate()
+        .filter_map(|(i, station)| {
+            let ok = station.entry_stage_id.is_none_or(|e| e <= stage.id)
+                && station.exit_stage_id.is_none_or(|e| stage.id < e);
             ok.then_some(i)
         })
         .collect()
@@ -936,13 +983,18 @@ impl<'a> StageLayout<'a> {
             row_anticipated_state_out_def_start + n_anticipated_state_out_def_rows;
 
         // Pumping-flow columns sit between the NCS region and the generic-slack
-        // columns, block-major (`col_pumping_start + p * n_blks + blk`). The
-        // station count is the ctx's authoritative `n_pumping` (the entity-slice
-        // length), asserted equal to `bounds.n_pumping()` at ctx construction.
-        // When `n_pumping == 0` the block is empty, so `col_pumping_end ==
-        // col_ncs_end` and every downstream cursor (generic-slack, z-inflow,
-        // `num_cols`) is unshifted.
-        let n_pumping = ctx.n_pumping;
+        // columns, block-major (`col_pumping_start + p_local * n_blks + blk`).
+        // The station count is the count of stations ACTIVE at this stage
+        // (commissioning-gated, mirroring NCS): an inactive station emits no
+        // column, so the reserved width strides only the active subset and the
+        // per-station column address is the active-local index, NOT the system
+        // index. When the active set is empty the block is empty, so
+        // `col_pumping_end == col_ncs_end` and every downstream cursor
+        // (generic-slack, z-inflow, `num_cols`) is unshifted; with no
+        // entry/exit windows the active set is the full id-sorted slice in
+        // original order, leaving the layout byte-identical to an ungated build.
+        let active_pumping_indices = identify_active_pumping(ctx, stage);
+        let n_pumping = active_pumping_indices.len();
         let col_pumping_start = col_ncs_end;
         let col_pumping_end = col_pumping_start + n_pumping * n_blks;
 
@@ -1002,6 +1054,7 @@ impl<'a> StageLayout<'a> {
             active_ncs_indices,
             col_pumping_start,
             n_pumping,
+            active_pumping_indices,
             num_cols,
             row_generic_start,
             num_rows,
@@ -1570,10 +1623,10 @@ mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
         Block, BlockMode, BoundsCountsSpec, BoundsDefaults, CascadeTopology, ContractStageBounds,
-        HydroStageBounds, LineStageBounds, NoiseMethod, PumpingStageBounds, ResolvedBounds,
-        ResolvedExchangeFactors, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
-        ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ScenarioSourceConfig, Stage,
-        StageRiskConfig, StageStateConfig, ThermalStageBounds,
+        EntityId, HydroStageBounds, LineStageBounds, NoiseMethod, PumpingStageBounds,
+        PumpingStation, ResolvedBounds, ResolvedExchangeFactors, ResolvedGenericConstraintBounds,
+        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
+        ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -1584,7 +1637,7 @@ mod tests {
     use super::super::test_support::state_layout_for;
     use super::{
         EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET,
-        ResolvedTables, StageLayout, TemplateBuildCtx,
+        ResolvedTables, StageLayout, TemplateBuildCtx, identify_active_pumping,
     };
 
     // ── Fixture helpers ───────────────────────────────────────────────────────
@@ -2519,10 +2572,33 @@ mod tests {
         resolved_parameters: ResolvedParameters,
         production_models: ProductionModelSet,
         evaporation_models: EvaporationModelSet,
+        /// Windowless stations (always active) so `identify_active_pumping`
+        /// returns the full set; the column-reservation probe exercises the same
+        /// active-path arithmetic the production builder runs.
+        stations: Vec<PumpingStation>,
     }
 
     impl PumpingFixtures {
         fn new(n_pumping: usize, n_stages: usize) -> Self {
+            // One windowless station per reserved slot, ids in slot order. No
+            // entry/exit window ⇒ active at every stage ⇒ the active set is the
+            // full count, so `StageLayout::n_pumping == n_pumping` matches the
+            // bounds-derived count this fixture pins.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let stations = (0..n_pumping)
+                .map(|i| PumpingStation {
+                    id: EntityId(i as i32),
+                    name: format!("P{i}"),
+                    bus_id: EntityId(0),
+                    source_hydro_id: EntityId(0),
+                    destination_hydro_id: EntityId(1),
+                    entry_stage_id: None,
+                    exit_stage_id: None,
+                    consumption_mw_per_m3s: 0.5,
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 10.0,
+                })
+                .collect();
             Self {
                 par_lp: PrecomputedPar::default(),
                 cascade: CascadeTopology::build(&[]),
@@ -2539,6 +2615,7 @@ mod tests {
                 },
                 production_models: ProductionModelSet::new(vec![], 0, 1),
                 evaporation_models: EvaporationModelSet::new(vec![]),
+                stations,
             }
         }
 
@@ -2570,13 +2647,13 @@ mod tests {
                 evaporation_models: &self.evaporation_models,
                 generic_constraints: &[],
                 non_controllable_sources: &[],
-                // This fixture probes only the column-reservation arithmetic, which
-                // consumes `n_pumping` (not the entity slice). The station slice is
-                // left empty while `n_pumping` is sourced from the pumping-aware
-                // `ResolvedBounds` so `StageLayout::new` reserves the right block;
-                // the slice/`pumping_pos` threading is covered by the
+                // Windowless stations (always active), so the per-stage active set
+                // equals the full count and `StageLayout::new` reserves a column
+                // block of exactly `bounds.n_pumping()` stations. The active-path
+                // reservation arithmetic is what this fixture probes; the
+                // slice/`pumping_pos` threading is covered by the
                 // `build_template_build_ctx` tests in `template.rs`.
-                pumping_stations: &[],
+                pumping_stations: &self.stations,
                 pumping_pos: BTreeMap::new(),
                 n_pumping: self.bounds.n_pumping(),
                 diversion_upstream: HashMap::new(),
@@ -2720,6 +2797,204 @@ mod tests {
             layout.col_pumping_start + n_pumping * n_blks,
             "the 6-column block ends at num_cols (no generic-slack columns here)"
         );
+    }
+
+    // ── Pumping commissioning gating (identify_active_pumping) ──────────────────
+
+    /// Owns the station slice + inert fixtures for an `identify_active_pumping`
+    /// probe. The predicate reads only `ctx.pumping_stations`, so every other
+    /// fixture field is an empty/zero placeholder; `n_pumping` is set to the slice
+    /// length only for ctx-construction consistency (the predicate ignores it).
+    struct PumpingGatingFixtures {
+        par_lp: PrecomputedPar,
+        cascade: CascadeTopology,
+        bounds: ResolvedBounds,
+        penalties: ResolvedPenalties,
+        resolved_generic_bounds: ResolvedGenericConstraintBounds,
+        resolved_load_factors: ResolvedLoadFactors,
+        resolved_exchange_factors: ResolvedExchangeFactors,
+        resolved_ncs_bounds: ResolvedNcsBounds,
+        resolved_ncs_factors: ResolvedNcsFactors,
+        resolved_parameters: ResolvedParameters,
+        production_models: ProductionModelSet,
+        evaporation_models: EvaporationModelSet,
+        stations: Vec<PumpingStation>,
+    }
+
+    impl PumpingGatingFixtures {
+        fn new(stations: Vec<PumpingStation>) -> Self {
+            Self {
+                par_lp: PrecomputedPar::default(),
+                cascade: CascadeTopology::build(&[]),
+                bounds: ResolvedBounds::empty(),
+                penalties: ResolvedPenalties::empty(),
+                resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
+                resolved_load_factors: ResolvedLoadFactors::empty(),
+                resolved_exchange_factors: ResolvedExchangeFactors::empty(),
+                resolved_ncs_bounds: ResolvedNcsBounds::empty(),
+                resolved_ncs_factors: ResolvedNcsFactors::empty(),
+                resolved_parameters: ResolvedParameters {
+                    per_param: vec![],
+                    id_to_slot: vec![],
+                },
+                production_models: ProductionModelSet::new(vec![], 0, 1),
+                evaporation_models: EvaporationModelSet::new(vec![]),
+                stations,
+            }
+        }
+
+        fn make_ctx(&self) -> TemplateBuildCtx<'_> {
+            TemplateBuildCtx {
+                hydros: &[],
+                thermals: &[],
+                lines: &[],
+                buses: &[],
+                load_models: &[],
+                cascade: &self.cascade,
+                resolved: ResolvedTables {
+                    bounds: &self.bounds,
+                    penalties: &self.penalties,
+                    resolved_generic_bounds: &self.resolved_generic_bounds,
+                    resolved_load_factors: &self.resolved_load_factors,
+                    resolved_exchange_factors: &self.resolved_exchange_factors,
+                    resolved_ncs_bounds: &self.resolved_ncs_bounds,
+                    resolved_ncs_factors: &self.resolved_ncs_factors,
+                    resolved_parameters: &self.resolved_parameters,
+                },
+                hydro_pos: BTreeMap::new(),
+                thermal_pos: BTreeMap::new(),
+                line_pos: BTreeMap::new(),
+                bus_pos: BTreeMap::new(),
+                par_lp: &self.par_lp,
+                production_models: &self.production_models,
+                evaporation_models: &self.evaporation_models,
+                generic_constraints: &[],
+                non_controllable_sources: &[],
+                pumping_stations: &self.stations,
+                pumping_pos: BTreeMap::new(),
+                n_pumping: self.stations.len(),
+                diversion_upstream: HashMap::new(),
+                n_hydros: 0,
+                n_thermals: 0,
+                n_lines: 0,
+                n_buses: 0,
+                max_par_order: 0,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
+                has_penalty: false,
+                cumulative_discount_factors: vec![1.0],
+                total_hours_per_stage: vec![744.0],
+            }
+        }
+    }
+
+    /// A `PumpingStation` with the given id and commissioning window. Only the id
+    /// and the entry/exit window matter to `identify_active_pumping`; the
+    /// remaining fields are inert placeholders.
+    fn gating_station(
+        id: i32,
+        entry_stage_id: Option<i32>,
+        exit_stage_id: Option<i32>,
+    ) -> PumpingStation {
+        PumpingStation {
+            id: EntityId(id),
+            name: format!("P{id}"),
+            bus_id: EntityId(0),
+            source_hydro_id: EntityId(0),
+            destination_hydro_id: EntityId(1),
+            entry_stage_id,
+            exit_stage_id,
+            consumption_mw_per_m3s: 0.5,
+            min_flow_m3s: 0.0,
+            max_flow_m3s: 10.0,
+        }
+    }
+
+    /// A `Stage` whose `id` is the commissioning key the predicate compares
+    /// against (`entry <= id < exit`); one block, otherwise minimal.
+    fn stage_with_id(id: i32) -> Stage {
+        Stage {
+            id,
+            ..minimal_stage()
+        }
+    }
+
+    /// `identify_active_pumping` mirrors the NCS commissioning gate
+    /// `entry_stage_id <= stage.id < exit_stage_id`, returns active system indices
+    /// in canonical (`ctx.pumping_stations`) slot order, and OMITS a station whose
+    /// stage falls outside its window. Covers the five windows the NCS gate
+    /// distinguishes — no window (always active), entry-only, exit-only, both, and
+    /// a stage outside the window — over one station slice so the slot-order /
+    /// subset behaviour is exercised together.
+    ///
+    /// Slice (canonical id order): p0 no window, p1 entry=2, p2 exit=3,
+    /// p3 entry=1 & exit=4. The forbidden alternative — gating on `stage_idx`
+    /// instead of `stage.id`, or returning the full index set — would either fire
+    /// the wrong predicate or never omit an inactive station, silently allocating
+    /// a column for a decommissioned station.
+    #[test]
+    fn identify_active_pumping_gates_on_stage_id_and_preserves_slot_order() {
+        let fixtures = PumpingGatingFixtures::new(vec![
+            gating_station(0, None, None),       // p0: always active
+            gating_station(1, Some(2), None),    // p1: active when id >= 2
+            gating_station(2, None, Some(3)),    // p2: active when id < 3
+            gating_station(3, Some(1), Some(4)), // p3: active when 1 <= id < 4
+        ]);
+        let ctx = fixtures.make_ctx();
+
+        // No-window station p0 is active at every stage; the windowed stations
+        // switch on `stage.id`. Active sets are in slot order (0,1,2,3), so an
+        // earlier inactive station does NOT shift a later active station's
+        // position in the returned vector.
+        assert_eq!(
+            identify_active_pumping(&ctx, &stage_with_id(0)),
+            vec![0, 2],
+            "stage 0: p0 (no window) and p2 (exit=3) active; p1 (entry=2) and p3 (entry=1) not yet"
+        );
+        assert_eq!(
+            identify_active_pumping(&ctx, &stage_with_id(1)),
+            vec![0, 2, 3],
+            "stage 1: p3 enters (entry=1); p1 still pre-entry"
+        );
+        assert_eq!(
+            identify_active_pumping(&ctx, &stage_with_id(2)),
+            vec![0, 1, 2, 3],
+            "stage 2: all active — p1 enters (entry=2), p2 still pre-exit, p3 in window"
+        );
+        assert_eq!(
+            identify_active_pumping(&ctx, &stage_with_id(3)),
+            vec![0, 1, 3],
+            "stage 3: p2 exits (exit=3, strict upper); p1 and p3 still active"
+        );
+        assert_eq!(
+            identify_active_pumping(&ctx, &stage_with_id(4)),
+            vec![0, 1],
+            "stage 4: p3 exits (exit=4); only p0 and the entry-only p1 remain"
+        );
+    }
+
+    /// A station slice with no commissioning windows is active at every stage,
+    /// returning the full index set in original slot order — the hash-neutrality
+    /// guarantee for the no-window path (the only shipped pumping case has no
+    /// window, so its layout must be byte-identical to an ungated build).
+    #[test]
+    fn identify_active_pumping_no_windows_returns_full_set_in_order() {
+        let fixtures = PumpingGatingFixtures::new(vec![
+            gating_station(10, None, None),
+            gating_station(20, None, None),
+            gating_station(30, None, None),
+        ]);
+        let ctx = fixtures.make_ctx();
+
+        for id in [0, 1, 7, 100] {
+            assert_eq!(
+                identify_active_pumping(&ctx, &stage_with_id(id)),
+                vec![0, 1, 2],
+                "no-window stations are all active in slot order at stage id {id}"
+            );
+        }
     }
 
     // ── block-major column-accessor arithmetic equivalence ─────────────────────

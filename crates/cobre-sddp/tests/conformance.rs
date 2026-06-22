@@ -1057,6 +1057,8 @@ fn build_geometry(
         n_blks,
         fpha_hydro_indices,
         evap_hydro_indices: Vec::new(),
+        // These fixtures model no pumping stations, so no station is active.
+        active_pumping_indices: Vec::new(),
     }
 }
 

@@ -109,8 +109,9 @@ pub struct SimulationOutputSpec<'a> {
 
     /// Per-stage pumping-station counts.
     ///
-    /// `n_pumping_per_stage[stage]` is the number of pumping stations
-    /// contributing columns at that stage.
+    /// `n_pumping_per_stage[stage]` is the number of pumping stations ACTIVE
+    /// (contributing columns) at that stage — the commissioning-gated count,
+    /// equal to `geometry_per_stage[stage].active_pumping_indices.len()`.
     pub n_pumping_per_stage: &'a [usize],
 
     /// Per-stage equipment geometry for extraction.
@@ -123,11 +124,13 @@ pub struct SimulationOutputSpec<'a> {
     /// into `StageExtractionSpec::geometry`.
     pub geometry_per_stage: &'a [crate::lp_builder::StageGeometry],
 
-    /// Per-station pumping power-consumption rate \[MW/(m³/s)\], ID-sorted to
-    /// match `entity_counts.pumping_station_ids`.
+    /// Per-station pumping power-consumption rate \[MW/(m³/s)\], the FULL
+    /// ID-sorted list parallel to `entity_counts.pumping_station_ids` and indexed
+    /// by the SYSTEM station index (not the active-local index).
     ///
     /// Used by the extraction pipeline to compute
-    /// `power_consumption_mw = pumped_flow_m3s * consumption_mw_per_m3s`.
+    /// `power_consumption_mw = pumped_flow_m3s * consumption_mw_per_m3s`, reading
+    /// the system index recovered from `geometry.active_pumping_indices[p_local]`.
     pub pumping_consumption_mw_per_m3s: &'a [f64],
 
     /// Per-stage active NCS entity IDs, in ID-sorted order.

@@ -101,13 +101,17 @@ pub struct StageTemplates {
     /// `pumping_col_starts[stage_idx]` is the column index of the first
     /// pumping-flow variable for that stage, sourced from
     /// `StageLayout::col_pumping_start`, the sole owner of the pumping-flow column
-    /// base. Pumping columns are block-major:
-    /// `pumping_col_starts[stage_idx] + p_idx * n_blks + blk`.
+    /// base. Pumping columns are block-major over the stage's ACTIVE stations:
+    /// `pumping_col_starts[stage_idx] + p_local * n_blks + blk`, where `p_local`
+    /// is the position within `geometry_per_stage[stage_idx].active_pumping_indices`
+    /// (an inactive station has no column this stage), NOT the system index.
     pub pumping_col_starts: Vec<usize>,
     /// Per-stage pumping-station counts.
     ///
-    /// `n_pumping_per_stage[stage_idx]` is the number of pumping stations
-    /// contributing columns at that stage, sourced from `StageLayout::n_pumping`.
+    /// `n_pumping_per_stage[stage_idx]` is the number of pumping stations ACTIVE
+    /// (contributing columns) at that stage, sourced from `StageLayout::n_pumping`
+    /// (the commissioning-gated active count, `<=` the full station count). Equals
+    /// the length of `geometry_per_stage[stage_idx].active_pumping_indices`.
     pub n_pumping_per_stage: Vec<usize>,
     /// Per-stage equipment geometry for simulation extraction.
     ///
@@ -348,6 +352,16 @@ pub struct StageGeometry {
     /// order. Parallel to `evap_indices`; carried per stage for the same
     /// per-stage-membership reason as `fpha_hydro_indices`.
     pub evap_hydro_indices: Vec<usize>,
+    /// System pumping-station indices active at this stage, in canonical
+    /// ID-sorted slot order. Entry `p_local` is the system index of the
+    /// `p_local`-th active station, mirroring how `active_ncs_indices`
+    /// carries the active NCS system indices per stage. Pumping commissioning
+    /// gating omits a station outside its `[entry, exit)` window from the active
+    /// set, so this list — not the full system station slice — is what maps the
+    /// pumped-flow column local index back to a station id during extraction; a
+    /// missing list would force extraction to assume `p_local == p_sys` and
+    /// misreport the wrong station id at any gated stage.
+    pub active_pumping_indices: Vec<usize>,
 }
 
 impl StageGeometry {
@@ -400,6 +414,7 @@ impl StageGeometry {
             n_blks: layout.n_blks,
             fpha_hydro_indices: layout.fpha_hydro_indices.clone(),
             evap_hydro_indices: layout.evap_hydro_indices.clone(),
+            active_pumping_indices: layout.active_pumping_indices.clone(),
         }
     }
 }
@@ -432,8 +447,8 @@ pub(super) struct StageBuildOutput {
     /// Column index of the first pumping-flow variable (sourced from
     /// `StageLayout::col_pumping_start`).
     pub pumping_col_start: usize,
-    /// Number of pumping stations contributing columns at the stage (sourced
-    /// from [`StageLayout::n_pumping`]).
+    /// Number of pumping stations ACTIVE (contributing columns) at the stage
+    /// (the commissioning-gated count, sourced from [`StageLayout::n_pumping`]).
     pub n_pumping: usize,
     /// Stage-correct equipment column ranges for simulation extraction, computed
     /// from this stage's [`StageLayout`].
