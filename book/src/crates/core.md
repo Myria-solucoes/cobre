@@ -17,7 +17,7 @@ conditions, generic constraints, and pre-resolved penalty/bound tables.
 
 | Module               | Purpose                                                                                                                                                                                                                                                                                                                                    |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `entities`           | Entity types: Bus, Line, Hydro, Thermal, and stub types                                                                                                                                                                                                                                                                                    |
+| `entities`           | Entity types: Bus, Line, Hydro, Thermal, PumpingStation, NonControllableSource, and EnergyContract (stub)                                                                                                                                                                                                                                                                                    |
 | `entity_id`          | `EntityId` newtype wrapper                                                                                                                                                                                                                                                                                                                 |
 | `error`              | `ValidationError` enum                                                                                                                                                                                                                                                                                                                     |
 | `generic_constraint` | User-defined linear constraints over LP variables                                                                                                                                                                                                                                                                                          |
@@ -56,7 +56,7 @@ be shared across threads without synchronization.
 
 ### Fully modeled entities
 
-These four entity types contribute LP variables and constraints in optimization
+These six entity types contribute LP variables and constraints in optimization
 and simulation procedures.
 
 #### Bus
@@ -167,18 +167,31 @@ and optional cascade connectivity. It has 22 fields.
 | ----------- | ---------------- | --------------------------------------------------------- |
 | `penalties` | `HydroPenalties` | Pre-resolved penalty costs from the global-entity cascade |
 
-### Stub entities
-
-These three entity types are data-complete but do not contribute LP variables or
-constraints in the minimal viable implementation. Their type definitions exist in
-the registry so analysis code can iterate over all entity types uniformly.
-
 #### PumpingStation
 
-Transfers water between hydro reservoirs while consuming electrical power.
+A pumped-storage or water-transfer installation. Contributes a per-block pumped-flow
+decision variable that is subtracted from the source reservoir water-balance row and
+added to the destination reservoir water-balance row. Power drawn from the bus equals
+`consumption_mw_per_m3s × flow`. Supports commissioning windows via `entry_stage_id`
+and `exit_stage_id`.
 Fields: `id`, `name`, `bus_id`, `source_hydro_id`, `destination_hydro_id`,
 `entry_stage_id`, `exit_stage_id`, `consumption_mw_per_m3s`, `min_flow_m3s`,
 `max_flow_m3s`.
+
+#### NonControllableSource
+
+Intermittent generation (wind, solar, run-of-river) dispatched at available capacity
+with a curtailment penalty. Contributes one generation LP variable per block bounded
+by `[0, available_generation_mw × block_factor]`. Supports stochastic availability
+and commissioning windows.
+Fields: `id`, `name`, `bus_id`, `entry_stage_id`, `exit_stage_id`,
+`max_generation_mw`, `curtailment_cost` (pre-resolved).
+
+### Stub entities
+
+This entity type is data-complete but does not contribute LP variables or
+constraints. Its type definition exists in the registry so analysis code can
+iterate over all seven entity types uniformly.
 
 #### EnergyContract
 
@@ -186,12 +199,6 @@ A bilateral energy agreement with an entity outside the modeled system.
 Fields: `id`, `name`, `bus_id`, `contract_type` (`ContractType::Import` or
 `ContractType::Export`), `entry_stage_id`, `exit_stage_id`, `price_per_mwh`,
 `min_mw`, `max_mw`. Negative `price_per_mwh` represents export revenue.
-
-#### NonControllableSource
-
-Intermittent generation (wind, solar, run-of-river) that cannot be dispatched.
-Fields: `id`, `name`, `bus_id`, `entry_stage_id`, `exit_stage_id`,
-`max_generation_mw`, `curtailment_cost` (pre-resolved).
 
 ## Supporting types
 

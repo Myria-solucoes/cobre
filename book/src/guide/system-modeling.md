@@ -23,24 +23,22 @@ appear in the input files.
 
 ## Entity Types
 
-Cobre models seven entity types. Five are fully implemented and contribute LP
-variables and constraints. Two are registered stubs that appear in the entity
-model but do not yet contribute LP variables in the current release.
+Cobre models seven entity types. Six contribute LP variables and constraints in
+optimization and simulation. One is a registered stub that appears in the entity
+model but does not contribute LP variables.
 
-| Entity Type      | Status | JSON File                              | Description                                                                                                                                        |
-| ---------------- | ------ | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Bus              | Full   | `system/buses.json`                    | Electrical node. Power balance constraint per stage per block. See [Network Topology](./network-topology.md).                                      |
-| Line             | Full   | `system/lines.json`                    | Transmission interconnection between two buses with flow limits and losses. See [Network Topology](./network-topology.md).                         |
-| Hydro            | Full   | `system/hydros.json`                   | Reservoir-turbine-spillway system with cascade linkage. See [Hydro Plants](./hydro-plants.md).                                                     |
-| Thermal          | Full   | `system/thermals.json`                 | Dispatchable generator with piecewise-linear cost curve. See [Thermal Units](./thermal-units.md).                                                  |
-| Contract         | Stub   | `system/energy_contracts.json`         | Energy purchase or sale obligation. Entity exists in registry; no LP variables in this release.                                                    |
-| Pumping Station  | Stub   | `system/pumping_stations.json`         | Pumped-storage or water-transfer station. Entity exists in registry; no LP variables in this release.                                              |
-| Non-Controllable | Full   | `system/non_controllable_sources.json` | Variable renewable source (wind, solar, run-of-river). Generation variable bounded by available capacity × block factor, with curtailment penalty. |
+| Entity Type      | Status | JSON File                              | Description                                                                                                                                                                                                |
+| ---------------- | ------ | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Bus              | Full   | `system/buses.json`                    | Electrical node. Power balance constraint per stage per block. See [Network Topology](./network-topology.md).                                                                                              |
+| Line             | Full   | `system/lines.json`                    | Transmission interconnection between two buses with flow limits and losses. See [Network Topology](./network-topology.md).                                                                                 |
+| Hydro            | Full   | `system/hydros.json`                   | Reservoir-turbine-spillway system with cascade linkage. See [Hydro Plants](./hydro-plants.md).                                                                                                             |
+| Thermal          | Full   | `system/thermals.json`                 | Dispatchable generator with piecewise-linear cost curve. See [Thermal Units](./thermal-units.md).                                                                                                          |
+| Pumping Station  | Full   | `system/pumping_stations.json`         | Pumped-storage or water-transfer station. Contributes a per-block pumped-flow variable; withdraws water from a source reservoir and injects it into a destination reservoir, consuming power from its bus. |
+| Non-Controllable | Full   | `system/non_controllable_sources.json` | Variable renewable source (wind, solar, run-of-river). Generation variable bounded by available capacity × block factor, with curtailment penalty.                                                         |
+| Contract         | Stub   | `system/energy_contracts.json`         | Energy purchase or sale obligation. Entity exists in registry; no LP variables.                                                                                                                            |
 
-The two remaining stub types (Contract and Pumping Station) are registered in
-the entity model so that LP construction code can iterate over all seven types
-consistently. Adding LP contributions for these entities is planned for future
-releases.
+The one remaining stub type (Contract) is registered in the entity model so that
+LP construction code can iterate over all seven types consistently.
 
 ---
 
@@ -77,6 +75,33 @@ Simulation output is written to `simulation/non_controllables/` with columns
 for `generation_mw`, `available_mw`, `curtailment_mw`, and `curtailment_cost`
 per (stage, block, source) triplet. See the
 [Output Format Reference](../reference/output-format.md) for the complete schema.
+
+---
+
+## Pumping Stations
+
+A pumping station represents a pumped-storage or water-transfer installation that
+moves water from a source hydro reservoir uphill to a destination hydro reservoir,
+consuming electrical power in the process.
+
+Each pumping station contributes one per-block pumped-flow decision variable,
+bounded by `[min_m3s, max_m3s]`. The pumped flow appears with opposite signs in
+the two reservoir water-balance rows: it is subtracted from the source reservoir
+and added to the destination reservoir. The power drawn from the station's bus is:
+
+```
+power_consumed_mw = consumption_mw_per_m3s × flow_m3s
+```
+
+This power appears as a load on the bus power-balance row, identical in structure
+to a bus load demand. Simulation output is written to `simulation/pumping_stations/`
+and the associated cost is reported in the `pumping_cost` column.
+
+Pumping stations support the same commissioning window available on other entity
+types: when `entry_stage_id` and `exit_stage_id` are set, the station contributes
+LP variables only at stages in `[entry_stage_id, exit_stage_id)`. Outside that
+window the station contributes no columns. A worked example is available at
+`examples/deterministic/d32-reversible-plant`.
 
 ---
 
@@ -171,10 +196,10 @@ Entities can enter service or be decommissioned at specified stages using
 | `entry_stage_id` | integer or null | Stage index at which the entity enters service (inclusive). `null` = available from stage 0  |
 | `exit_stage_id`  | integer or null | Stage index at which the entity is decommissioned (inclusive). `null` = never decommissioned |
 
-These fields are available on `Hydro`, `Thermal`, and `Line` entities. When a plant
-has `entry_stage_id: 12`, the LP does not include any variables for that plant in
-stages 0 through 11. From stage 12 onward, the plant appears in every sub-problem
-as normal.
+These fields are available on `Hydro`, `Thermal`, `Line`, `NonControllableSource`,
+and `PumpingStation` entities. When a plant has `entry_stage_id: 12`, the LP does
+not include any variables for that plant in stages 0 through 11. From stage 12
+onward, the plant appears in every sub-problem as normal.
 
 Lifecycle fields are useful for planning studies that span commissioning or retirement
 events: new thermal plants coming online mid-horizon, or aging hydro units being

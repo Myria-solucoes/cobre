@@ -650,6 +650,55 @@ Thermal plant registry. Each entry defines a dispatchable generation unit.
 
 ---
 
+### `system/pumping_stations.json`
+
+Pumping station registry. Each entry defines a pumped-storage or water-transfer
+installation that withdraws water from a source hydro reservoir, injects it into a
+destination hydro reservoir, and consumes electrical power from a bus. The file is
+optional; when absent, no pumping stations are modeled.
+
+| Field                                              | Required | Description                                                                          |
+| -------------------------------------------------- | -------- | ------------------------------------------------------------------------------------ |
+| `pumping_stations[].id`                            | Yes      | Station identifier (integer, unique)                                                 |
+| `pumping_stations[].name`                          | Yes      | Human-readable station name (string)                                                 |
+| `pumping_stations[].bus_id`                        | Yes      | Bus from which electrical power is consumed                                          |
+| `pumping_stations[].source_hydro_id`               | Yes      | Hydro plant from whose reservoir water is extracted                                  |
+| `pumping_stations[].destination_hydro_id`          | Yes      | Hydro plant into whose reservoir water is injected                                   |
+| `pumping_stations[].consumption_mw_per_m3s`        | Yes      | Power drawn per unit of pumped flow [MW/(m³/s)]; must be >= 0                        |
+| `pumping_stations[].entry_stage_id`                | No       | Stage when the station enters service; `null` or absent = present from stage 0       |
+| `pumping_stations[].exit_stage_id`                 | No       | Stage when the station is decommissioned; `null` or absent = never                   |
+| `pumping_stations[].flow`                          | Yes      | Nested object with `min_m3s` and `max_m3s` (see below)                              |
+| `pumping_stations[].flow.min_m3s`                  | Yes      | Minimum pumped flow [m³/s]; must be >= 0                                             |
+| `pumping_stations[].flow.max_m3s`                  | Yes      | Maximum pumped flow (installed pump capacity) [m³/s]; must be >= `flow.min_m3s`     |
+
+The pumped flow variable is bounded by `[flow.min_m3s, flow.max_m3s]` in the LP.
+At each stage within `[entry_stage_id, exit_stage_id)`, the flow appears with
+a negative sign in the source reservoir water-balance row and a positive sign in
+the destination reservoir water-balance row. Power consumed equals
+`consumption_mw_per_m3s × flow_m3s` and is charged as load on the station's bus.
+Stage-varying flow bounds can be overridden via `constraints/pumping_bounds.parquet`.
+
+**Minimal valid example:**
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/pumping_stations.schema.json",
+  "pumping_stations": [
+    {
+      "id": 0,
+      "name": "Bombeamento Serra da Mesa",
+      "bus_id": 10,
+      "source_hydro_id": 3,
+      "destination_hydro_id": 5,
+      "consumption_mw_per_m3s": 0.5,
+      "flow": { "min_m3s": 0.0, "max_m3s": 150.0 }
+    }
+  ]
+}
+```
+
+---
+
 ### `system/hydro_geometry.parquet`
 
 Volume-Height-Area (VHA) curves for hydro reservoirs. Required when any hydro is

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- next-header -->
 
+## [Unreleased]
+
+### Added
+
+- **Pumping stations now participate in dispatch.** A `system/pumping_stations.json`
+  station (a pumped-storage / reversible plant) contributes a per-block pumped-flow
+  decision bounded by `flow.min_m3s`/`flow.max_m3s` that transfers water from its
+  `source_hydro_id` reservoir to its `destination_hydro_id` reservoir and draws
+  `consumption_mw_per_m3s × flow` of electrical power on its `bus_id`. Stations honor
+  a commissioning window (`entry_stage_id`/`exit_stage_id`): a station is active only
+  at stages in `[entry, exit)` and contributes no LP columns outside it. Simulation
+  writes a new `simulation/pumping_stations/` output (pumped flow, volume, power,
+  energy, cost, and operative state per station per block) plus a `pumping_cost`
+  cost column — both emitted by the CLI and the Python bindings.
+
+### Changed
+
+- **`constraints/pumping_bounds.parquet` override rows are validated for domain
+  sanity.** A pumped-flow override row is now rejected when a bound is negative or
+  when `min_m3s > max_m3s`, matching the checks already enforced on the
+  `system/pumping_stations.json` entity path.
+
 ## [0.8.2] - 2026-06-17
 
 ### Added
