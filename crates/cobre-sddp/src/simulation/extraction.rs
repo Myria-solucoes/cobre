@@ -800,7 +800,6 @@ fn extract_hydro_per_block<'a>(
     hydro_id: i32,
     stage_id: u32,
 ) -> impl Iterator<Item = SimulationHydroResult> + 'a {
-    let indexer = spec.indexer;
     let study_dims = spec.study_dims;
     let n_blks = spec.n_blks;
     let grid = spec.block_grid();
@@ -813,10 +812,11 @@ fn extract_hydro_per_block<'a>(
     let div_sources = spec.diversion_upstream.get(&hydro_entity_id);
 
     (0..n_blks).map(move |b| {
-        // turbine.start is the stage-invariant control-region start (`theta + 1`),
-        // so it reads correctly off the indexer at every stage; the families after
-        // it ride on the per-stage equipment geometry.
-        let t_col = grid.flat(indexer.turbine.start, h, b);
+        // `turbine.start` (= `theta + 1`) is the stage-invariant control-region
+        // start, so it reads correctly at every stage; it is taken from the
+        // per-stage `geometry`, the single source every sibling family read below
+        // already uses, rather than the global stage-0 indexer.
+        let t_col = grid.flat(spec.geometry.turbine.start, h, b);
         let s_col = grid.flat(spec.geometry.spillage.start, h, b);
         let turbined = view.primal[t_col];
         let spillage = view.primal[s_col];
@@ -909,8 +909,7 @@ fn extract_hydros(
     stage_id: u32,
     lookup: &HydroReverseLookup,
 ) -> Vec<SimulationHydroResult> {
-    let indexer = spec.indexer;
-    if indexer.turbine.is_empty() || spec.n_blks == 0 {
+    if spec.geometry.turbine.is_empty() || spec.n_blks == 0 {
         spec.entity_counts
             .hydro_ids
             .iter()
@@ -938,9 +937,8 @@ fn extract_thermals(
     stage_id: u32,
     lookup: &ThermalReverseLookup,
 ) -> Vec<SimulationThermalResult> {
-    let indexer = spec.indexer;
     let n_blks = spec.n_blks;
-    if indexer.thermal.is_empty() || n_blks == 0 {
+    if spec.geometry.thermal.is_empty() || n_blks == 0 {
         spec.entity_counts
             .thermal_ids
             .iter()
@@ -996,9 +994,8 @@ fn extract_exchanges(
     spec: &StageExtractionSpec<'_>,
     stage_id: u32,
 ) -> Vec<SimulationExchangeResult> {
-    let indexer = spec.indexer;
     let n_blks = spec.n_blks;
-    if indexer.line_fwd.is_empty() || n_blks == 0 {
+    if spec.geometry.line_fwd.is_empty() || n_blks == 0 {
         spec.entity_counts
             .line_ids
             .iter()
@@ -1050,9 +1047,8 @@ fn extract_buses(
     spec: &StageExtractionSpec<'_>,
     stage_id: u32,
 ) -> Vec<SimulationBusResult> {
-    let indexer = spec.indexer;
     let n_blks = spec.n_blks;
-    if indexer.deficit.is_empty() || n_blks == 0 {
+    if spec.geometry.deficit.is_empty() || n_blks == 0 {
         spec.entity_counts
             .bus_ids
             .iter()
