@@ -15,6 +15,7 @@
 //! | 5 | `min_generation_mw <= max_generation_mw` (hydro)  | `system/hydros.json`                  | `InvalidValue`         |
 //! | 6 | `entry_stage_id < exit_stage_id` (when both Some) | all six entity types                  | `InvalidValue`         |
 //! | 7 | Filling `start_stage_id` in study stage set       | `system/hydros.json`                  | `InvalidValue`         |
+//! | 7a| Filling guards: entry⟺filling paired, `start_stage_id < entry_stage_id`, `entry_stage_id < horizon`, seed in `[0, min_storage_hm3)`, no `exit_stage_id` on a filling hydro | `system/hydros.json` | `InvalidValue` |
 //! | 8 | Geometry `volume_hm3` strictly increasing         | `system/hydro_geometry.parquet`       | `BusinessRuleViolation`|
 //! | 9 | Geometry `height_m` non-decreasing                | `system/hydro_geometry.parquet`       | `BusinessRuleViolation`|
 //! |10 | Geometry `area_km2` non-decreasing                | `system/hydro_geometry.parquet`       | `BusinessRuleViolation`|
@@ -27,7 +28,7 @@
 //! |17 | `anticipated_decision(N)` in generic constraint targets an anticipated thermal | `constraints/generic_constraints.json` | `BusinessRuleViolation` |
 //! |18 | `thermal_generation(N)` in generic constraint when `N` is anticipated (warn) | `constraints/generic_constraints.json` | `SemanticAmbiguity` (warning) |
 //! |19 | Pumping `source_hydro_id != destination_hydro_id`  | `system/pumping_stations.json`        | `InvalidValue`         |
-//! |20 | Hydro or contract sets `entry_stage_id`/`exit_stage_id` (parsed, not applied; thermal/line/NCS/pumping windows ARE applied) | `system/hydros.json`, `system/energy_contracts.json` | `ModelQuality` (warning) |
+//! |20 | Non-filling hydro or contract sets `entry_stage_id`/`exit_stage_id` (parsed, not applied; filling hydros, thermal/line/NCS/pumping windows ARE applied) | `system/hydros.json`, `system/energy_contracts.json` | `ModelQuality` (warning) |
 //!
 //! ## Layer 5b rules (stages, penalties, and scenario domain) — `validate_semantic_stages_penalties_scenarios`
 //!
@@ -87,6 +88,7 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     hydro::check_lifecycle_consistency_remaining(data, ctx);
     hydro::warn_commissioning_parsed_not_applied(data, ctx);
     hydro::check_filling_config(data, ctx);
+    hydro::check_filling_guards(data, ctx);
     hydro::check_geometry_monotonicity(data, ctx);
     hydro::check_evaporation_geometry_coverage(data, ctx);
     hydro::check_fpha_constraints(data, ctx);

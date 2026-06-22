@@ -32,17 +32,45 @@ pub struct DiversionChannel {
     pub max_flow_m3s: f64,
 }
 
-/// Configuration for reservoir filling operations.
+/// Configuration for a commissioned reservoir that impounds water toward its
+/// dead volume before it begins generating.
 ///
-/// Filling is an operational mode where a reservoir is intentionally filled
-/// from a fixed inflow source (e.g., diversion works) during a defined stage
-/// window.
+/// A hydro carrying a `FillingConfig` (paired with [`Hydro::entry_stage_id`])
+/// passes through three phases keyed on the stage id, where `id` is the study
+/// `stage.id` being evaluated (the stage's own id, not [`Hydro::id`]):
+///
+/// - `PreFilling` (`start_stage_id > 0` and `id < start_stage_id`): the dam
+///   does not exist yet; the river flows past its site.
+/// - `Filling` (`start_stage_id <= id < entry_stage_id`): the reservoir
+///   exists and impounds water toward the dead volume `min_storage_hm3`, but is
+///   not yet a generating plant.
+/// - `Operating` (`id >= entry_stage_id`): a normal plant.
+///
+/// The filling target is the dead volume `min_storage_hm3`; there is no
+/// separate target field. A hydro with no `FillingConfig` is Operating at every
+/// stage.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FillingConfig {
-    /// Stage index at which filling begins (inclusive).
+    /// Stage id (inclusive) at which the Filling phase begins.
+    ///
+    /// `start_stage_id == 0` means the study starts mid-filling: there is no
+    /// `PreFilling` phase, Filling runs from stage 0, and the stage-0 level is
+    /// seeded by `InitialConditions::filling_storage` (a partially-filled level
+    /// in `[0, min_storage_hm3)`). `start_stage_id > 0` means a `PreFilling` phase
+    /// exists and the seed is `0` (empty pit), held frozen until this stage.
     pub start_stage_id: i32,
-    /// Constant inflow applied during filling \[m³/s\].
+    /// Per-stage cap on the portion of natural inflow impounded during Filling
+    /// \[m³/s\].
+    ///
+    /// This is the retained portion of the reservoir's own natural inflow that
+    /// is removed (impounded) from the cascade to raise storage; the remainder
+    /// passes downstream as spillage. PAR and AR-lag coupling remain normal
+    /// during Filling — this is **not** an external or replacement inflow that
+    /// overrides the natural-inflow RHS. It is a cap, not an equality: at most
+    /// this much is impounded per stage and the excess spills, so when natural
+    /// inflow is short the reservoir rises by less and the terminal target
+    /// catches the cumulative shortfall.
     pub filling_inflow_m3s: f64,
 }
 
@@ -50,8 +78,6 @@ pub struct FillingConfig {
 ///
 /// All penalties are pre-resolved from the three-tier cascade (global → entity → stage).
 /// A `HydroPenalties` instance always contains final, ready-to-use values.
-///
-/// Penalties are resolved via the three-tier cascade (global → entity → stage).
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HydroPenalties {

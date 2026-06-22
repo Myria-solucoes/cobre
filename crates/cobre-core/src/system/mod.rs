@@ -1274,7 +1274,8 @@ mod tests {
 
     #[test]
     fn test_filling_negative_inflow() {
-        // Filling config with filling_inflow_m3s <= 0.0.
+        // Filling config with filling_inflow_m3s < 0.0 (a negative cap is rejected;
+        // zero is valid and tested separately).
         use crate::entities::FillingConfig;
         let bus = make_bus(0);
         let mut hydro = make_hydro(1);
@@ -1296,13 +1297,39 @@ mod tests {
         let errors = result.unwrap_err();
         let has_error = errors.iter().any(|e| match e {
             ValidationError::InvalidFillingConfig { hydro_id, reason } => {
-                *hydro_id == EntityId(1) && reason.contains("filling_inflow_m3s must be positive")
+                *hydro_id == EntityId(1)
+                    && reason.contains("filling_inflow_m3s must be non-negative")
             }
             _ => false,
         });
         assert!(
             has_error,
-            "expected InvalidFillingConfig with positive inflow reason, got: {errors:?}"
+            "expected InvalidFillingConfig with non-negative inflow reason, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_filling_zero_inflow_accepted() {
+        // A zero cap is valid: impound nothing, pass everything downstream and
+        // rely on natural accumulation. It must NOT produce an inflow error.
+        use crate::entities::FillingConfig;
+        let bus = make_bus(0);
+        let mut hydro = make_hydro(1);
+        hydro.entry_stage_id = Some(10);
+        hydro.filling = Some(FillingConfig {
+            start_stage_id: 10,
+            filling_inflow_m3s: 0.0,
+        });
+
+        let result = SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![hydro])
+            .build();
+
+        assert!(
+            result.is_ok(),
+            "expected Ok for zero filling_inflow_m3s, got: {:?}",
+            result.unwrap_err()
         );
     }
 

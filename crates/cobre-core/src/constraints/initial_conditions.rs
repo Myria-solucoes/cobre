@@ -49,7 +49,9 @@ use crate::EntityId;
 /// For operating hydros, `value_hm3` must be within
 /// `[min_storage_hm3, max_storage_hm3]` (validated by `cobre-io`).
 /// For filling hydros (present in [`InitialConditions::filling_storage`]),
-/// `value_hm3` must be within `[0.0, min_storage_hm3]`.
+/// `value_hm3` must be within `[0.0, min_storage_hm3)` — strictly below the
+/// dead volume (validated by `cobre-io`). Equality with `min_storage_hm3`
+/// belongs to neither the filling range nor the operating range.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HydroStorage {
@@ -187,6 +189,13 @@ pub struct InitialConditions {
     /// Initial storage for operating hydros, in hm³ per hydro.
     pub storage: Vec<HydroStorage>,
     /// Initial storage for filling hydros (below dead volume), in hm³ per hydro.
+    ///
+    /// The seed value is tied to the hydro's
+    /// [`FillingConfig::start_stage_id`](crate::FillingConfig::start_stage_id):
+    /// when `start_stage_id == 0` the study starts mid-filling and this is the
+    /// partially-filled stage-0 level in `[0, min_storage_hm3)`; when
+    /// `start_stage_id > 0` a `PreFilling` phase exists and this is `0` (empty
+    /// pit), held frozen until Filling begins.
     pub filling_storage: Vec<HydroStorage>,
     /// Past inflow values for PAR(p) lag initialization, in m³/s per hydro.
     ///

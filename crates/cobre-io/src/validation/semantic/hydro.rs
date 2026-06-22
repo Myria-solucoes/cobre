@@ -243,14 +243,20 @@ pub(super) fn check_lifecycle_consistency_remaining(
     }
 }
 
-/// Warns when a hydro or energy contract sets `entry_stage_id`/`exit_stage_id`.
+/// Warns when a non-filling hydro or an energy contract sets
+/// `entry_stage_id`/`exit_stage_id`.
 ///
-/// These are the two entity types whose commissioning windows are parsed but
-/// still not honored by the LP: a hydro window is a later phase, and energy
-/// contracts are a stub. For both, an entity that sets either field is modeled
-/// fully active at every stage, so this emits one `ModelQuality` warning per
-/// such entity to signal the gap. The all-`None` case is the correct inert
-/// default and stays silent — emitting there would warn every shipped case.
+/// These are the windows still not honored by the LP: a non-filling hydro
+/// window (one without a `FillingConfig`) and an energy contract (a stub) are
+/// modeled fully active at every stage, so each such entity earns one
+/// `ModelQuality` warning to signal the gap. The all-`None` case is the correct
+/// inert default and stays silent — emitting there would warn every shipped
+/// case.
+///
+/// A filling hydro (`hydro.filling.is_some()`) is excluded: its window IS
+/// applied — the `FillingConfig` carries the reservoir through its
+/// pre-filling/filling/operating lifecycle, so warning for it would be a false
+/// signal.
 ///
 /// The other four window-bearing entity types — thermals, lines, NCS, and
 /// pumping stations — APPLY their windows at the LP fill site (a dormant
@@ -282,6 +288,12 @@ pub(super) fn warn_commissioning_parsed_not_applied(
     }
 
     for hydro in &data.hydros {
+        // A filling hydro's window IS applied: the FillingConfig carries the
+        // reservoir through its pre-filling/filling/operating lifecycle, so it
+        // is not an unapplied window and warning for it would be a false signal.
+        if hydro.filling.is_some() {
+            continue;
+        }
         warn_if_set(
             ctx,
             hydro.entry_stage_id,
@@ -324,6 +336,159 @@ pub(super) fn check_filling_config(data: &ParsedData, ctx: &mut ValidationContex
                     filling.start_stage_id
                 ),
             );
+        }
+    }
+}
+
+/// Enforces the structural guards a filling hydro must satisfy beyond the
+/// start-stage-validity check in [`check_filling_config`].
+///
+/// A filling hydro is one carrying a `FillingConfig` (`hydro.filling.is_some()`)
+/// and an `entry_stage_id`; it passes through a `PreFilling`/`Filling`/`Operating`
+/// lifecycle keyed on stage id. These guards reject the ill-formed combinations
+/// that would otherwise produce a meaningless or infeasible lifecycle:
+///
+/// 1. `entry_stage_id.is_some()` ⟺ `filling.is_some()` — entry and filling are a
+///    pair; one without the other has no meaning (a filling reservoir that never
+///    becomes a plant, or an entry stage with no filling physics behind it).
+/// 2. `start_stage_id < entry_stage_id` — filling must begin strictly before the
+///    plant enters operation, otherwise the `Filling` phase is empty.
+/// 3. `entry_stage_id < horizon` — the reservoir must operate at least one stage;
+///    an entry at or past the last stage means it never generates. `horizon` is
+///    the study stage count, consistent with the thermal-horizon checks.
+/// 4. the seed in `filling_storage` lies in `[0, min_storage_hm3)` — strictly
+///    below the dead volume. Equality with `min_storage_hm3` belongs to neither
+///    the filling range nor the operating `.storage` range (validated
+///    `[min_storage, max_storage]`), so it is rejected.
+/// 5. a filling hydro carries no `exit_stage_id` — hydro is entry-only; an exit
+///    is physically ill-posed for a state-carrying reservoir.
+/// 6. when `start_stage_id > 0` (a `PreFilling` phase exists), the
+///    `filling_storage` seed is `0` (empty pit). A `PreFilling` phase freezes
+///    storage at the seed before the dam exists, so a nonzero seed would assert
+///    impounded water in a reservoir that has not yet been built. A nonzero
+///    seed is only valid when `start_stage_id == 0` (the study starts
+///    mid-filling, guard 4's open range).
+///
+/// Infallible — every violation accumulates into `ctx`; the loop runs over all
+/// hydros regardless of earlier failures.
+pub(super) fn check_filling_guards(data: &ParsedData, ctx: &mut ValidationContext) {
+    let horizon =
+        i32::try_from(data.stages.stages.iter().filter(|s| s.id >= 0).count()).unwrap_or(i32::MAX);
+
+    for hydro in &data.hydros {
+        let entity_str = format!("Hydro {}", hydro.id.0);
+
+        // Guard 1: entry_stage_id and filling are a matched pair.
+        if hydro.entry_stage_id.is_some() != hydro.filling.is_some() {
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "system/hydros.json",
+                Some(&entity_str),
+                format!(
+                    "{entity_str}: entry_stage_id ({:?}) and filling ({}) must be set together; \
+                     a hydro entry requires a filling config and vice-versa",
+                    hydro.entry_stage_id,
+                    if hydro.filling.is_some() {
+                        "present"
+                    } else {
+                        "absent"
+                    },
+                ),
+            );
+        }
+
+        if let Some(filling) = &hydro.filling {
+            // Guard 2: filling must begin strictly before operation.
+            if let Some(entry) = hydro.entry_stage_id
+                && filling.start_stage_id >= entry
+            {
+                ctx.add_error(
+                    ErrorKind::InvalidValue,
+                    "system/hydros.json",
+                    Some(&entity_str),
+                    format!(
+                        "{entity_str}: filling.start_stage_id ({}) must be less than \
+                         entry_stage_id ({entry}); the filling phase must precede operation",
+                        filling.start_stage_id
+                    ),
+                );
+            }
+
+            // Guard 3: the hydro must operate at least one stage.
+            if let Some(entry) = hydro.entry_stage_id
+                && entry >= horizon
+            {
+                ctx.add_error(
+                    ErrorKind::InvalidValue,
+                    "system/hydros.json",
+                    Some(&entity_str),
+                    format!(
+                        "{entity_str}: entry_stage_id ({entry}) is not less than the study \
+                         horizon ({horizon}); the hydro must operate at least one stage"
+                    ),
+                );
+            }
+
+            // Guard 4: the filling seed must lie strictly below the dead volume.
+            if let Some(seed) = data
+                .initial_conditions
+                .filling_storage
+                .iter()
+                .find(|s| s.hydro_id == hydro.id)
+                && !(seed.value_hm3 >= 0.0 && seed.value_hm3 < hydro.min_storage_hm3)
+            {
+                ctx.add_error(
+                    ErrorKind::InvalidValue,
+                    "system/hydros.json",
+                    Some(&entity_str),
+                    format!(
+                        "{entity_str}: filling_storage seed ({}) must lie in \
+                         [0, min_storage_hm3) = [0, {}); the seed must be strictly below \
+                         the dead volume",
+                        seed.value_hm3, hydro.min_storage_hm3
+                    ),
+                );
+            }
+
+            // Guard 5: a filling hydro is entry-only; exit is rejected.
+            if let Some(exit) = hydro.exit_stage_id {
+                ctx.add_error(
+                    ErrorKind::InvalidValue,
+                    "system/hydros.json",
+                    Some(&entity_str),
+                    format!(
+                        "{entity_str}: exit_stage_id ({exit}) is set on a filling hydro; \
+                         a filling hydro is entry-only and exit is ill-posed for a \
+                         state-carrying reservoir"
+                    ),
+                );
+            }
+
+            // Guard 6: when a PreFilling phase exists (start_stage_id > 0), the
+            // seed must be 0 (empty pit). PreFilling freezes storage at the seed
+            // before the dam is built, so a nonzero seed asserts impounded water
+            // in a reservoir that does not yet exist. A nonzero seed is only
+            // valid mid-filling (start_stage_id == 0).
+            if filling.start_stage_id > 0
+                && let Some(seed) = data
+                    .initial_conditions
+                    .filling_storage
+                    .iter()
+                    .find(|s| s.hydro_id == hydro.id)
+                && seed.value_hm3 != 0.0
+            {
+                ctx.add_error(
+                    ErrorKind::InvalidValue,
+                    "system/hydros.json",
+                    Some(&entity_str),
+                    format!(
+                        "{entity_str}: filling_storage seed ({}) must be 0 (empty pit) \
+                         when start_stage_id ({}) > 0; a PreFilling phase freezes storage \
+                         at the seed before the dam exists",
+                        seed.value_hm3, filling.start_stage_id
+                    ),
+                );
+            }
         }
     }
 }
@@ -707,16 +872,17 @@ mod tests {
         );
     }
 
-    /// Hydro with only entry_stage_id set (no exit) produces no lifecycle error.
+    /// An entity with only `entry_stage_id` set (no exit) produces no lifecycle
+    /// ordering error. A line carries the generic `entry/exit` ordering check
+    /// without the hydro-specific filling guards, so it is the carrier for the
+    /// ordering-only assertion (a hydro entry now requires a filling config).
     #[test]
-    fn test_hydro_lifecycle_only_entry_no_error() {
-        let mut hydro = make_hydro(8, None);
-        hydro.entry_stage_id = Some(5);
-        hydro.exit_stage_id = None;
+    fn test_lifecycle_only_entry_no_error() {
+        let line = make_windowed_line(8, Some(5), None);
         let data = make_data(
-            vec![hydro],
+            vec![make_hydro(1, None), make_hydro(2, None)],
             vec![],
-            vec![],
+            vec![line],
             make_stages(vec![0]),
             vec![],
             vec![],
@@ -730,16 +896,17 @@ mod tests {
         );
     }
 
-    /// Hydro with valid entry < exit produces no lifecycle error.
+    /// An entity with valid `entry < exit` produces no lifecycle ordering error.
+    /// A line is the carrier (see [`test_lifecycle_only_entry_no_error`]): the
+    /// generic ordering check accepts a window with `entry < exit`, while a hydro
+    /// with both fields would now be rejected as entry-only.
     #[test]
-    fn test_hydro_lifecycle_valid() {
-        let mut hydro = make_hydro(9, None);
-        hydro.entry_stage_id = Some(0);
-        hydro.exit_stage_id = Some(10);
+    fn test_lifecycle_valid() {
+        let line = make_windowed_line(9, Some(0), Some(10));
         let data = make_data(
-            vec![hydro],
+            vec![make_hydro(1, None), make_hydro(2, None)],
             vec![],
-            vec![],
+            vec![line],
             make_stages(vec![0]),
             vec![],
             vec![],
@@ -891,14 +1058,53 @@ mod tests {
         assert!(errs[0].message.contains("EnergyContract 9"));
     }
 
-    /// An entity setting only `entry_stage_id` (exit None) emits a ModelQuality
-    /// warning about commissioning being parsed-but-not-applied, and the case
-    /// still loads (`has_errors()` is false).
+    /// A filling hydro's window IS applied (the `FillingConfig` drives its
+    /// lifecycle), so it emits NO parsed-not-applied `ModelQuality` warning, and
+    /// the case still loads (`has_errors()` is false). The filling pairing keeps
+    /// the hydro guard-clean (a bare entry without filling would now be
+    /// rejected), isolating the commissioning behavior under test.
     #[test]
-    fn test_commissioning_set_emits_warning_no_error() {
-        let mut hydro = make_hydro(3, None);
-        hydro.entry_stage_id = Some(2);
-        hydro.exit_stage_id = None;
+    fn test_filling_hydro_emits_no_warning() {
+        // start (1) < entry (2) < horizon (3); no exit; seed left empty (no
+        // filling_storage entry ⇒ guard 4 does not fire).
+        let hydro = make_filling_hydro(3, 1, 2, 10.0);
+        let data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0, 1, 2]),
+            vec![],
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            !ctx.has_errors(),
+            "a well-formed filling hydro must not produce an error, got: {:?}",
+            ctx.errors()
+        );
+        let warnings: Vec<_> = ctx
+            .warnings()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::ModelQuality)
+            .collect();
+        assert!(
+            warnings.is_empty(),
+            "a filling hydro's window is applied; no parsed-not-applied warning \
+             is expected, got: {:?}",
+            warnings.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    /// A non-filling hydro with `exit_stage_id` set (and `filling = None`) still
+    /// has an unapplied window — the entity is modeled active at every stage —
+    /// so it emits exactly one parsed-not-applied `ModelQuality` warning. Exit
+    /// alone (no entry) clears both the `entry >= exit` ordering check and the
+    /// filling guards, isolating the commissioning warning.
+    #[test]
+    fn test_non_filling_hydro_with_exit_emits_warning() {
+        let mut hydro = make_hydro(7, None);
+        hydro.exit_stage_id = Some(10);
         let data = make_data(
             vec![hydro],
             vec![],
@@ -911,7 +1117,7 @@ mod tests {
         validate_semantic_hydro_thermal(&data, &mut ctx);
         assert!(
             !ctx.has_errors(),
-            "setting entry/exit must not produce an error, got: {:?}",
+            "a non-filling exit-only hydro must not produce an error, got: {:?}",
             ctx.errors()
         );
         let warnings: Vec<_> = ctx
@@ -926,7 +1132,7 @@ mod tests {
             warnings.iter().map(|e| &e.message).collect::<Vec<_>>()
         );
         assert!(
-            warnings[0].message.contains("Hydro 3") && warnings[0].message.contains("not applied"),
+            warnings[0].message.contains("Hydro 7") && warnings[0].message.contains("not applied"),
             "warning should name the entity and state it is not applied, got: {}",
             warnings[0].message
         );
@@ -977,8 +1183,8 @@ mod tests {
 
     /// A windowed thermal, line, NCS, and pumping station each have their
     /// commissioning window APPLIED at the LP fill site, so none of them emits
-    /// the parsed-not-applied ModelQuality warning. Only the windowed hydro and
-    /// energy contract — whose windows are still unapplied — warn.
+    /// the parsed-not-applied ModelQuality warning. Only a non-filling windowed
+    /// hydro and an energy contract — whose windows are still unapplied — warn.
     #[test]
     fn test_applied_window_entities_emit_no_warning() {
         let thermal = cobre_core::entities::Thermal {
@@ -1041,6 +1247,369 @@ mod tests {
             model_quality.iter().map(|e| &e.message).collect::<Vec<_>>()
         );
         assert!(model_quality[0].message.contains("EnergyContract 5"));
+    }
+
+    // ── Filling guard tests ───────────────────────────────────────────────────
+
+    use cobre_core::HydroStorage;
+    use cobre_core::entities::{FillingConfig, Hydro};
+
+    /// Build a well-formed filling hydro: `start < entry < horizon`, an inflow
+    /// cap of `inflow`, and an entry stage paired with the filling config.
+    fn make_filling_hydro(id: i32, start_stage_id: i32, entry_stage_id: i32, inflow: f64) -> Hydro {
+        let mut h = make_hydro(id, None);
+        h.entry_stage_id = Some(entry_stage_id);
+        h.filling = Some(FillingConfig {
+            start_stage_id,
+            filling_inflow_m3s: inflow,
+        });
+        h
+    }
+
+    /// Pull only the `system/hydros.json` `InvalidValue` errors out of `ctx`.
+    fn hydro_invalid_value_messages(ctx: &ValidationContext) -> Vec<String> {
+        ctx.errors()
+            .into_iter()
+            .filter(|e| {
+                e.kind == ErrorKind::InvalidValue
+                    && e.file.to_string_lossy() == "system/hydros.json"
+            })
+            .map(|e| e.message.clone())
+            .collect()
+    }
+
+    /// Guard 1 (violating): `entry_stage_id = Some` with `filling = None` yields an
+    /// `InvalidValue` stating entry requires a filling config.
+    #[test]
+    fn test_filling_guard_entry_without_filling_errors() {
+        let mut hydro = make_hydro(1, None);
+        hydro.entry_stage_id = Some(4);
+        hydro.filling = None;
+        let data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0, 1, 2, 3, 4, 5]),
+            vec![],
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let msgs = hydro_invalid_value_messages(&ctx);
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("Hydro 1") && m.contains("must be set together")),
+            "expected entry-requires-filling error, got: {msgs:?}"
+        );
+    }
+
+    /// Guard 1 (well-formed): neither `entry_stage_id` nor `filling` set produces
+    /// no filling-attributable error.
+    #[test]
+    fn test_filling_guard_neither_set_no_error() {
+        let data = make_data(
+            vec![make_hydro(1, None)],
+            vec![],
+            vec![],
+            make_stages(vec![0, 1, 2, 3]),
+            vec![],
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            hydro_invalid_value_messages(&ctx).is_empty(),
+            "no filling and no entry should produce no error, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Guard 2 (violating): `start_stage_id (4) >= entry_stage_id (2)` yields an
+    /// `InvalidValue` stating `start_stage_id` must be less than `entry_stage_id`.
+    #[test]
+    fn test_filling_guard_start_not_before_entry_errors() {
+        let hydro = make_filling_hydro(1, 4, 2, 10.0);
+        let data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0, 1, 2, 3, 4, 5]),
+            vec![],
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let msgs = hydro_invalid_value_messages(&ctx);
+        assert!(
+            msgs.iter().any(|m| m.contains("Hydro 1")
+                && m.contains("must be less than")
+                && m.contains("entry_stage_id")),
+            "expected start<entry error, got: {msgs:?}"
+        );
+    }
+
+    /// Guard 2 (well-formed): `start_stage_id (1) < entry_stage_id (3)` produces no
+    /// error.
+    #[test]
+    fn test_filling_guard_start_before_entry_no_error() {
+        let hydro = make_filling_hydro(1, 1, 3, 10.0);
+        let data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0, 1, 2, 3, 4, 5]),
+            vec![],
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            hydro_invalid_value_messages(&ctx).is_empty(),
+            "start < entry should produce no error, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Guard 3 (violating): `entry_stage_id (6)` equal to the 6-stage horizon
+    /// leaves no operating stage and yields an `InvalidValue` stating the hydro
+    /// must operate at least one stage.
+    #[test]
+    fn test_filling_guard_entry_at_horizon_errors() {
+        // Six stages (ids 0..=5) ⇒ horizon = 6; entry at 6 has no operating stage.
+        let hydro = make_filling_hydro(1, 1, 6, 10.0);
+        let data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0, 1, 2, 3, 4, 5]),
+            vec![],
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let msgs = hydro_invalid_value_messages(&ctx);
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("Hydro 1") && m.contains("must operate at least one stage")),
+            "expected entry<horizon error, got: {msgs:?}"
+        );
+    }
+
+    /// Guard 3 (well-formed): `entry_stage_id (4)` strictly below the 6-stage
+    /// horizon leaves an operating stage and produces no error.
+    #[test]
+    fn test_filling_guard_entry_below_horizon_no_error() {
+        let hydro = make_filling_hydro(1, 1, 4, 10.0);
+        let data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0, 1, 2, 3, 4, 5]),
+            vec![],
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            hydro_invalid_value_messages(&ctx).is_empty(),
+            "entry below horizon should produce no error, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Guard 4 (violating): a seed equal to `min_storage_hm3` is rejected; the
+    /// upper bound of the filling range is strict.
+    #[test]
+    fn test_filling_guard_seed_at_min_storage_errors() {
+        let mut hydro = make_filling_hydro(1, 1, 4, 10.0);
+        hydro.min_storage_hm3 = 200.0;
+        let mut data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0, 1, 2, 3, 4, 5]),
+            vec![],
+            vec![],
+        );
+        data.initial_conditions.filling_storage = vec![HydroStorage {
+            hydro_id: EntityId::from(1),
+            value_hm3: 200.0, // == min_storage_hm3 ⇒ rejected (strict upper bound)
+        }];
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let msgs = hydro_invalid_value_messages(&ctx);
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("Hydro 1") && m.contains("filling_storage seed")),
+            "expected seed-range error at min_storage, got: {msgs:?}"
+        );
+    }
+
+    /// Guard 4 (well-formed): a seed strictly inside `[0, min_storage_hm3)`
+    /// produces no error. `start_stage_id == 0` (study starts mid-filling) is
+    /// the only setting where a nonzero seed is valid; under `start_stage_id > 0`
+    /// guard 6 would require the empty-pit seed `0`.
+    #[test]
+    fn test_filling_guard_seed_in_range_no_error() {
+        let mut hydro = make_filling_hydro(1, 0, 4, 10.0);
+        hydro.min_storage_hm3 = 200.0;
+        let mut data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0, 1, 2, 3, 4, 5]),
+            vec![],
+            vec![],
+        );
+        data.initial_conditions.filling_storage = vec![HydroStorage {
+            hydro_id: EntityId::from(1),
+            value_hm3: 50.0, // strictly in [0, 200)
+        }];
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            hydro_invalid_value_messages(&ctx).is_empty(),
+            "seed in range should produce no error, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Guard 5 (violating): `exit_stage_id` set on a filling hydro yields an
+    /// `InvalidValue` stating exit is rejected for filling hydros.
+    #[test]
+    fn test_filling_guard_exit_on_filling_errors() {
+        let mut hydro = make_filling_hydro(1, 1, 4, 10.0);
+        hydro.exit_stage_id = Some(10);
+        let data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0, 1, 2, 3, 4, 5]),
+            vec![],
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let msgs = hydro_invalid_value_messages(&ctx);
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("Hydro 1") && m.contains("entry-only")),
+            "expected exit-rejected error, got: {msgs:?}"
+        );
+    }
+
+    /// Guard 5 (well-formed): a filling hydro with no `exit_stage_id` produces no
+    /// error.
+    #[test]
+    fn test_filling_guard_no_exit_no_error() {
+        let hydro = make_filling_hydro(1, 1, 4, 10.0);
+        let data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0, 1, 2, 3, 4, 5]),
+            vec![],
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            hydro_invalid_value_messages(&ctx).is_empty(),
+            "no exit on a filling hydro should produce no error, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// A fully well-formed filling hydro (`start < entry < horizon`, seed in
+    /// range, no exit, zero inflow cap) produces zero errors AND zero warnings.
+    /// `start_stage_id == 0` (study starts mid-filling) lets the nonzero in-range
+    /// seed coexist with guard 6's empty-pit rule. A filling hydro is excluded
+    /// from the commissioning parsed-not-applied check (its window IS applied via
+    /// the `FillingConfig`), so no `ModelQuality` warning is emitted either.
+    #[test]
+    fn test_filling_guard_well_formed_no_error() {
+        let mut hydro = make_filling_hydro(1, 0, 4, 0.0); // inflow cap 0.0 is valid
+        hydro.min_storage_hm3 = 200.0;
+        let mut data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0, 1, 2, 3, 4, 5]),
+            vec![],
+            vec![],
+        );
+        data.initial_conditions.filling_storage = vec![HydroStorage {
+            hydro_id: EntityId::from(1),
+            value_hm3: 50.0,
+        }];
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            !ctx.has_errors(),
+            "a well-formed filling hydro should produce no errors, got: {:?}",
+            ctx.errors()
+        );
+        assert!(
+            ctx.warnings().is_empty(),
+            "a filling hydro's window is applied, so no warning is expected, got: {:?}",
+            ctx.warnings()
+        );
+    }
+
+    /// Guard 6 (violating): `start_stage_id > 0` (a `PreFilling` phase exists)
+    /// with a nonzero `filling_storage` seed yields an `InvalidValue` stating the
+    /// seed must be the empty-pit `0`.
+    #[test]
+    fn test_filling_guard_start_above_zero_nonzero_seed_errors() {
+        let mut hydro = make_filling_hydro(1, 2, 4, 10.0); // start (2) > 0 ⇒ PreFilling
+        hydro.min_storage_hm3 = 200.0;
+        let mut data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0, 1, 2, 3, 4, 5]),
+            vec![],
+            vec![],
+        );
+        data.initial_conditions.filling_storage = vec![HydroStorage {
+            hydro_id: EntityId::from(1),
+            value_hm3: 50.0, // nonzero ⇒ rejected when a PreFilling phase exists
+        }];
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let msgs = hydro_invalid_value_messages(&ctx);
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("Hydro 1") && m.contains("must be 0 (empty pit)")),
+            "expected empty-pit seed error, got: {msgs:?}"
+        );
+    }
+
+    /// Guard 6 (well-formed): `start_stage_id > 0` with the empty-pit seed `0`
+    /// produces no error.
+    #[test]
+    fn test_filling_guard_start_above_zero_empty_pit_no_error() {
+        let mut hydro = make_filling_hydro(1, 2, 4, 10.0); // start (2) > 0 ⇒ PreFilling
+        hydro.min_storage_hm3 = 200.0;
+        let mut data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0, 1, 2, 3, 4, 5]),
+            vec![],
+            vec![],
+        );
+        data.initial_conditions.filling_storage = vec![HydroStorage {
+            hydro_id: EntityId::from(1),
+            value_hm3: 0.0, // empty pit ⇒ valid when a PreFilling phase exists
+        }];
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            hydro_invalid_value_messages(&ctx).is_empty(),
+            "empty-pit seed with a PreFilling phase should produce no error, got: {:?}",
+            ctx.errors()
+        );
     }
 
     // ── Geometry monotonicity tests ───────────────────────────────────────────
