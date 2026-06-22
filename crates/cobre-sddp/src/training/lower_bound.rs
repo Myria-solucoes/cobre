@@ -76,21 +76,30 @@ pub struct LbEvalSpec<'a> {
     /// Per-stochastic-NCS curtailment policy, aligned 1:1 with
     /// [`Self::ncs_max_gen`]. `false` pins the column to availability.
     pub ncs_allow_curtailment: &'a [bool],
-    /// Stage-0 stochastic-slot → active-local-column map for NCS bound patching.
+    /// Stage-invariant stochastic-slot → dense NCS column index map.
     ///
-    /// `ncs_active_slot_to_local[slot]` is `Some(ncs_local)` when the stochastic
-    /// NCS at `slot` (id-sorted order, the order `transform_ncs_noise` emits its
-    /// bound buffers) is active at stage 0; `ncs_local` is its column position
-    /// within `active_ncs_indices[0]`, so its LP column block is
-    /// `ncs_generation.start + ncs_local * block_count + blk`. `None` means the
-    /// slot is inactive at stage 0 and contributes no column and no bound — the
-    /// lower bound is evaluated at the first study stage, so an NCS that
-    /// commissions after it makes the lb stage itself a strict subset. The patch
-    /// strides by `ncs_local`, never the raw slot, which would overrun the stage-0
-    /// NCS column block. Sourced from
-    /// [`crate::context::StageContext::ncs_active_slot_to_local`]`[0]`. Empty when
+    /// `ncs_stochastic_dense_col[slot]` is the slot's NCS system index (the dense
+    /// column position) of the stochastic NCS at `slot` (id-sorted order, the order
+    /// `transform_ncs_noise` emits its bound buffers), so its LP column block is
+    /// `ncs_generation.start + ncs_stochastic_dense_col[slot] * block_count + blk`.
+    /// Sourced from
+    /// [`crate::context::StageContext::ncs_stochastic_dense_col`]. Empty when
     /// stage 0 has no NCS columns (patching is then skipped).
-    pub ncs_active_slot_to_local: &'a [Option<usize>],
+    pub ncs_stochastic_dense_col: &'a [usize],
+    /// Stage-invariant commissioning window per stochastic NCS slot.
+    ///
+    /// `ncs_stochastic_windows[slot] = (entry, exit)`; the gather computes dormancy
+    /// inline at `stage_id` via the shared
+    /// `commissioning_active` predicate
+    /// and forces `[0, 0]` for a dormant slot, exactly as the forward and backward
+    /// patch sites do — keeping the three identical is the `.claude/rules/sddp.md`
+    /// "patch NCS identically" contract (a divergence understates the bound, the
+    /// D15 bug class). Sourced from
+    /// [`crate::context::StageContext::ncs_stochastic_windows`].
+    pub ncs_stochastic_windows: &'a [(Option<i32>, Option<i32>)],
+    /// Stage id of the lower-bound stage (the first study stage). The commissioning
+    /// key the dormancy predicate compares the windows against.
+    pub stage_id: i32,
     /// Number of blocks at stage 0.
     pub block_count: usize,
     /// Column range for NCS generation variables in the stage-0 LP.
@@ -274,19 +283,18 @@ fn lb_init_rank0<S: SolverInterface>(
     scratch.ncs_col_lower_buf.clear();
 
     // Pre-populate the indices buffer for the stage-0 **active** NCS columns.
-    // Indices are constant across openings (same stage, same active set, same
-    // block count) so we build them once here. They stride by `ncs_local` within
-    // `active_ncs_indices[0]` via `spec.ncs_active_slot_to_local` — an NCS
-    // inactive at stage 0 (it commissions later) contributes no index; striding
-    // by the raw slot would overrun the stage-0 NCS column block. The per-opening
-    // bound buffers (`transform_ncs_noise` output) are gathered to the active
-    // slots inside the opening loop, since both bounds scale with the per-scenario
-    // availability realization.
+    // Indices are constant across openings (same stage, same dense columns, same
+    // block count) so we build them once here. They stride by
+    // `ncs_stochastic_dense_col[slot]` (the slot's NCS system index — the dense
+    // column position) for every slot. The per-opening bound buffers
+    // (`transform_ncs_noise` output) are gathered inside the opening loop with a
+    // `[0, 0]` cap for dormant slots, since both bounds scale with the
+    // per-scenario availability realization.
     if let Some(stoch) = spec.stochastic {
         let n_stochastic_ncs = stoch.n_stochastic_ncs();
         if n_stochastic_ncs > 0 && !spec.ncs_generation.is_empty() {
-            crate::noise::build_active_ncs_col_indices(
-                spec.ncs_active_slot_to_local,
+            crate::noise::build_dense_ncs_col_indices(
+                spec.ncs_stochastic_dense_col,
                 spec.ncs_generation.start,
                 spec.block_count,
                 &mut scratch.ncs_col_indices_buf,
@@ -501,13 +509,15 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
                     &mut scratch.ncs_col_upper_buf,
                 );
                 // `ncs_col_indices_buf` was pre-populated in `lb_init_rank0`
-                // (constant across openings, stage-0 active columns only). The
-                // bounds above are in full stochastic-slot order; gather only the
-                // active slots' bounds so they run parallel to the active index
-                // buffer — passing the slot-order buffers verbatim would over-feed
-                // the call when stage 0 is a strict subset.
-                crate::noise::gather_active_ncs_bounds(
-                    spec.ncs_active_slot_to_local,
+                // (constant across openings, dense stage-0 columns). The bounds
+                // above are in full stochastic-slot order; the gather copies every
+                // slot's bounds parallel to the dense index buffer, forcing
+                // `[0, 0]` for a slot whose window excludes the lower-bound stage
+                // id (dormancy computed inline) — the same zeroing the
+                // forward/backward patch sites apply.
+                crate::noise::gather_dense_ncs_bounds(
+                    spec.ncs_stochastic_windows,
+                    spec.stage_id,
                     spec.block_count,
                     &scratch.ncs_col_lower_buf,
                     &scratch.ncs_col_upper_buf,
@@ -1027,7 +1037,9 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
-            ncs_active_slot_to_local: &[],
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            stage_id: 0,
             block_count: 1,
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
@@ -1083,7 +1095,9 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
-            ncs_active_slot_to_local: &[],
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            stage_id: 0,
             block_count: 1,
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
@@ -1146,7 +1160,9 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
-            ncs_active_slot_to_local: &[],
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            stage_id: 0,
             block_count: 1,
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
@@ -1206,7 +1222,9 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
-            ncs_active_slot_to_local: &[],
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            stage_id: 0,
             block_count: 1,
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
@@ -1262,7 +1280,9 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
-            ncs_active_slot_to_local: &[],
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            stage_id: 0,
             block_count: 1,
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
@@ -1316,7 +1336,9 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
-            ncs_active_slot_to_local: &[],
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            stage_id: 0,
             block_count: 1,
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
@@ -1377,7 +1399,9 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
-            ncs_active_slot_to_local: &[],
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            stage_id: 0,
             block_count: 1,
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
@@ -1435,7 +1459,9 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
-            ncs_active_slot_to_local: &[],
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            stage_id: 0,
             block_count: 1,
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
@@ -1519,7 +1545,9 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
-            ncs_active_slot_to_local: &[],
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            stage_id: 0,
             block_count: 1,
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
@@ -1579,7 +1607,9 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
-            ncs_active_slot_to_local: &[],
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            stage_id: 0,
             block_count: 1,
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
@@ -1633,7 +1663,9 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
-            ncs_active_slot_to_local: &[],
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            stage_id: 0,
             block_count: 1,
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
@@ -1837,8 +1869,11 @@ mod tests {
         let state = crate::indexer::test_fixtures::state_layout(0, 0);
         let ncs_max_gen = vec![100.0_f64; n_ncs];
         let ncs_allow_curtailment = vec![true; n_ncs];
-        // All n_ncs stochastic NCS are active at stage 0, in slot order.
-        let ncs_active_slot_to_local: Vec<Option<usize>> = (0..n_ncs).map(Some).collect();
+        // Dense: every stochastic slot maps to its own NCS column (slot order ==
+        // system order here), and every slot is windowless (active at every stage),
+        // so none is commissioning-dormant at stage 0.
+        let ncs_stochastic_dense_col: Vec<usize> = (0..n_ncs).collect();
+        let ncs_stochastic_windows: Vec<(Option<i32>, Option<i32>)> = vec![(None, None); n_ncs];
 
         let spec = LbEvalSpec {
             template: &template,
@@ -1851,7 +1886,9 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &ncs_max_gen,
             ncs_allow_curtailment: &ncs_allow_curtailment,
-            ncs_active_slot_to_local: &ncs_active_slot_to_local,
+            ncs_stochastic_dense_col: &ncs_stochastic_dense_col,
+            ncs_stochastic_windows: &ncs_stochastic_windows,
+            stage_id: 0,
             block_count,
             ncs_generation: 0..block_count,
             z_inflow_row_start: 0,
@@ -1938,7 +1975,9 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
-            ncs_active_slot_to_local: &[],
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            stage_id: 0,
             block_count: 1,
             ncs_generation: 0..0,
             z_inflow_row_start: 0,

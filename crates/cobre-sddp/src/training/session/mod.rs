@@ -1186,23 +1186,25 @@ where
         // The lower bound evaluates stage 0 only, so its NCS column base is the
         // per-stage `StageContext::ncs_col_starts[0]` — never a single global
         // stage-0 NCS base (`StudyDimensions` carries only `has_ncs`, no column
-        // base). The range spans only the stage-0 **active** NCS columns
-        // (`active_ncs_indices[0].len() * block_count[0]`), not a full
-        // `n_stochastic_ncs` block — at a strict-subset stage 0 (an NCS that
-        // commissions later) the LP has fewer columns. The range is empty when the
-        // study has no stage-0 NCS columns, which guards the patch off via
-        // `LbEvalSpec::ncs_generation` emptiness in `lb_init_rank0`. The active
-        // slot map (`ncs_active_slot_to_local[0]`) drives the actual column
-        // strides; only `.start` and emptiness of this range are consumed.
+        // base). Under the dense layout every NCS keeps a column at every stage, so
+        // the range spans the full NCS block (the scalar `n_ncs * block_count[0]`);
+        // a dormant NCS keeps its column and is zeroed inline via the windows. The
+        // range is empty when the study has no stage-0 NCS columns, which guards
+        // the patch off via `LbEvalSpec::ncs_generation` emptiness in
+        // `lb_init_rank0`. The stage-invariant `ncs_stochastic_dense_col` map drives
+        // the column strides; only `.start` and emptiness of this range are
+        // consumed.
         let block_count_stage0 = self.stage_ctx.block_counts_per_stage[0];
-        let slot_to_local_stage0 = self
-            .stage_ctx
-            .ncs_active_slot_to_local
+        let n_ncs = self.stage_ctx.n_ncs;
+        // Stage id of the first study stage — the commissioning key for dormancy.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let stage0_id = self
+            .training_ctx
+            .stages
             .first()
-            .map_or(&[][..], Vec::as_slice);
-        let active_ncs_stage0 = crate::noise::active_ncs_slot_count(slot_to_local_stage0);
+            .map_or(0_i32, |stage| stage.id);
         let ncs_generation = match self.stage_ctx.ncs_col_starts.first() {
-            Some(&start) => start..(start + active_ncs_stage0 * block_count_stage0),
+            Some(&start) => start..(start + n_ncs * block_count_stage0),
             None => 0..0,
         };
 
@@ -1217,7 +1219,9 @@ where
             n_load_buses: self.stage_ctx.n_load_buses,
             ncs_max_gen: self.stage_ctx.ncs_max_gen,
             ncs_allow_curtailment: self.stage_ctx.ncs_allow_curtailment,
-            ncs_active_slot_to_local: slot_to_local_stage0,
+            ncs_stochastic_dense_col: self.stage_ctx.ncs_stochastic_dense_col,
+            ncs_stochastic_windows: self.stage_ctx.ncs_stochastic_windows,
+            stage_id: stage0_id,
             block_count: block_count_stage0,
             ncs_generation,
             // z-inflow rows start at row 0 (state pinning uses column bounds);
@@ -1686,7 +1690,9 @@ mod tests {
             load_bus_indices: &[],
             block_counts_per_stage: block_counts,
             ncs_col_starts: &[],
-            ncs_active_slot_to_local: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],

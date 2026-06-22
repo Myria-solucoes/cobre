@@ -209,14 +209,15 @@ pub(super) fn fill_state_and_water_entries(
 /// across the two sites; computing a differently-rounded τ would desynchronise
 /// pumping from the cascade water terms.
 ///
-/// Stations are iterated in `layout.active_pumping_indices` order (the stage's
-/// commissioning-active subset, in canonical ID-sorted order), mirroring how the
-/// NCS column fill iterates `active_ncs_indices`. The enumeration index `p_local`
-/// is the column-block position; the station record is read at the SYSTEM index
-/// `p_sys` the entry carries (column local, entity global — exactly the NCS
-/// split). A source or destination hydro id absent from `ctx.hydro_pos` skips
-/// only that side's entry — the present side is still written, and no panic
-/// occurs (semantic validation of the references is a separate concern).
+/// Stations are iterated dense by SYSTEM index `p_sys` (the dense column
+/// position), mirroring how the NCS column fill iterates NCS. The structural ±τ
+/// entries are written for every station regardless of its commissioning window:
+/// a dormant station's pumping column is forced to `[0, 0]` in
+/// [`super::columns::fill_pumping_columns`], so its ±τ terms multiply a zero
+/// column and contribute nothing (and presolve away). A source or destination
+/// hydro id absent from `ctx.hydro_pos` skips only that side's entry — the
+/// present side is still written, and no panic occurs (semantic validation of the
+/// references is a separate concern).
 pub(super) fn fill_pumping_water_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -226,8 +227,7 @@ pub(super) fn fill_pumping_water_entries(
     let n_blks = layout.n_blks;
     let grid = layout.block_grid();
     let row_water = layout.row_water_balance_start();
-    for (p_local, &p_sys) in layout.active_pumping_indices.iter().enumerate() {
-        let station = &ctx.pumping_stations[p_sys];
+    for (p_sys, station) in ctx.pumping_stations.iter().enumerate() {
         // `validate_pumping_station_refs` (run from `SystemBuilder::build()`)
         // guarantees both refs resolve on a validated `System`, so on the
         // production path both `Option`s are `Some`. The per-side `if let
@@ -239,7 +239,7 @@ pub(super) fn fill_pumping_water_entries(
         let destination = ctx.hydro_pos.get(&station.destination_hydro_id).copied();
         for blk in 0..n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
-            let col = grid.flat(layout.col_pumping_start, p_local, blk);
+            let col = grid.flat(layout.col_pumping_start, p_sys, blk);
             if let Some(s_idx) = source {
                 col_entries[col].push((row_water + s_idx, tau_h));
             }
@@ -340,19 +340,18 @@ pub(super) fn fill_load_balance_entries(
         }
     }
 
-    // Pumping power: negative injection on the station's bus. Iterate the
-    // stage's commissioning-active subset `active_pumping_indices` (canonical
-    // ID-sorted order) so the enumeration index `p_local` matches the column
-    // block; the station record is read at the SYSTEM index `p_sys` the entry
-    // carries (column local, entity global — the same split the NCS fill uses).
-    // A bus id absent from `bus_pos` skips that station with no entry (semantic
-    // validation is a separate concern).
-    for (p_local, &p_sys) in layout.active_pumping_indices.iter().enumerate() {
-        let station = &ctx.pumping_stations[p_sys];
+    // Pumping power: negative injection on the station's bus. Iterate ALL
+    // stations dense by SYSTEM index `p_sys` (the dense column position), the
+    // same split the NCS fill uses. The structural entry is written for every
+    // station regardless of its commissioning window: a dormant station's pumping
+    // column is `[0, 0]`, so this `-consumption` term multiplies a zero column and
+    // contributes no bus injection. A bus id absent from `bus_pos` skips that
+    // station with no entry (semantic validation is a separate concern).
+    for (p_sys, station) in ctx.pumping_stations.iter().enumerate() {
         if let Some(&b_idx) = ctx.bus_pos.get(&station.bus_id) {
             for blk in 0..n_blks {
                 let row = grid.flat(row_load, b_idx, blk);
-                let col = grid.flat(layout.col_pumping_start, p_local, blk);
+                let col = grid.flat(layout.col_pumping_start, p_sys, blk);
                 col_entries[col].push((row, -station.consumption_mw_per_m3s));
             }
         }
@@ -692,22 +691,25 @@ pub(super) fn fill_generic_constraint_entries(
 
 /// Fill NCS generation entries into the load balance constraint rows.
 ///
-/// For each active NCS `r` at block `k`, injects `+1.0` at the load balance
-/// row of the connected bus, identical to thermal generation injection.
+/// For each NCS `r` at block `k`, injects `+1.0` at the load balance row of the
+/// connected bus, identical to thermal generation injection. Iterates ALL NCS
+/// dense by SYSTEM index (the dense column position). The structural `+1.0` is
+/// written for every NCS regardless of its commissioning window: a dormant NCS's
+/// generation column is forced to `[0, 0]`, so the injection multiplies a zero
+/// column and contributes nothing.
 pub(super) fn fill_ncs_load_balance_entries(
     ctx: &TemplateBuildCtx<'_>,
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
     let grid = layout.block_grid();
-    for (ncs_local, &ncs_sys_idx) in layout.active_ncs_indices.iter().enumerate() {
-        let ncs = &ctx.non_controllable_sources[ncs_sys_idx];
+    for (ncs_sys_idx, ncs) in ctx.non_controllable_sources.iter().enumerate() {
         let Some(&bus_idx) = ctx.bus_pos.get(&ncs.bus_id) else {
             // Unknown bus — should not happen with valid data, but defensive skip.
             continue;
         };
         for blk in 0..layout.n_blks {
-            let col = grid.flat(layout.col_ncs_start, ncs_local, blk);
+            let col = grid.flat(layout.col_ncs_start, ncs_sys_idx, blk);
             let row = grid.flat(layout.row_load_balance_start(), bus_idx, blk);
             col_entries[col].push((row, 1.0));
         }
@@ -2640,7 +2642,7 @@ mod pumping_water_tests {
             objective: &mut objective,
         };
 
-        fill_pumping_columns(&ctx, 0, &layout, &mut bufs);
+        fill_pumping_columns(&ctx, &stage, 0, &layout, &mut bufs);
 
         let n_blks = layout.n_blks;
         for (p_idx, s) in ctx.pumping_stations.iter().enumerate() {

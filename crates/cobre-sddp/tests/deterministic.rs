@@ -1860,23 +1860,26 @@ fn d15_non_controllable_source() {
     );
 }
 
-/// D18 per-stage active-NCS set varies across the commissioning window.
+/// D18 per-stage NCS commissioning dormancy varies across the window.
 ///
 /// The fixture declares two NCS sources on a 3-stage horizon: NCS0 with
 /// `entry_stage_id = 1` (commissions at stage 1) and NCS1 with
-/// `exit_stage_id = 2` (decommissions at stage 2). `identify_active_ncs`
-/// therefore yields a different active set per stage:
+/// `exit_stage_id = 2` (decommissions at stage 2). Under the dense layout both
+/// NCS keep a column at every stage; the per-stage dormancy mask computed by
+/// `StudySetup::ncs_stochastic_dormant_for_test` (applying the commissioning
+/// predicate to the stored windows, keyed by stochastic slot) marks which is
+/// commissioning-dormant:
 ///
-/// - stage 0 → `[1]`     (only NCS1; NCS0 not yet commissioned)
-/// - stage 1 → `[0, 1]`  (both active)
-/// - stage 2 → `[0]`     (only NCS0; NCS1 decommissioned)
+/// - stage 0 → exactly one slot dormant (NCS0 not yet commissioned)
+/// - stage 1 → no slot dormant (both active)
+/// - stage 2 → exactly one slot dormant (NCS1 decommissioned)
 ///
-/// This guards the per-stage NCS column-base path: a uniform-NCS case (every
-/// stage shares one active set, as in D15) cannot detect an NCS availability
-/// bound written onto the wrong stage's columns, because all stages share the
-/// same NCS column base. Asserting the active set genuinely differs across
-/// stages confirms the fixture exercises that path rather than collapsing to a
-/// uniform set.
+/// and the dormant slot at stage 0 differs from the dormant slot at stage 2.
+/// This guards the per-stage NCS patch path: a uniform-NCS case (no dormancy at
+/// any stage, as in D15) cannot detect an availability bound zeroed onto the
+/// wrong stage's columns. Asserting the dormancy genuinely varies across stages
+/// confirms the fixture exercises that path rather than collapsing to a uniform
+/// (no-dormancy) mask.
 ///
 /// This assertion only builds the stage templates — it does not train — so it
 /// runs under the default `cargo test` profile, unconditionally.
@@ -1899,22 +1902,26 @@ fn d18_ncs_commissioning_active_set_varies() {
         hydro_models,
     );
 
-    let active = &setup.stage_data.stage_templates.active_ncs_indices;
-    assert_eq!(active.len(), 3, "D18: expected 3 study stages");
-    assert_eq!(active[0], vec![1], "D18 stage 0: only NCS1 active");
-    assert_eq!(active[1], vec![0, 1], "D18 stage 1: both NCS active");
-    assert_eq!(active[2], vec![0], "D18 stage 2: only NCS0 active");
+    let dormant = setup.ncs_stochastic_dormant_for_test();
+    assert_eq!(dormant.len(), 3, "D18: expected 3 study stages");
 
-    // The load-bearing per-stage property: the active set is not uniform across
-    // the horizon — stage 0 differs from the commissioned stage, and stage 1
-    // differs from stage 2 (the shrinking direction).
+    // The dense column count is the full NCS count (2) at every stage; the
+    // dormancy mask, not an active-subset list, carries the per-stage variance.
+    let dormant_count = |s: usize| dormant[s].iter().filter(|&&d| d).count();
+    assert_eq!(dormant_count(0), 1, "D18 stage 0: exactly one NCS dormant");
+    assert_eq!(dormant_count(1), 0, "D18 stage 1: both NCS active");
+    assert_eq!(dormant_count(2), 1, "D18 stage 2: exactly one NCS dormant");
+
+    // The load-bearing per-stage property: the dormant set is not uniform across
+    // the horizon — stage 0 differs from the fully-commissioned stage, and the
+    // dormant slot at stage 0 (NCS0 pre-entry) differs from stage 2 (NCS1 exit).
     assert_ne!(
-        active[0], active[1],
-        "D18: active NCS set must differ between stage 0 and the commissioned stage"
+        dormant[0], dormant[1],
+        "D18: dormancy must differ between stage 0 and the commissioned stage"
     );
     assert_ne!(
-        active[1], active[2],
-        "D18: active NCS set must shrink between stage 1 and stage 2"
+        dormant[0], dormant[2],
+        "D18: the dormant NCS at stage 0 (pre-entry) must differ from stage 2 (post-exit)"
     );
 }
 

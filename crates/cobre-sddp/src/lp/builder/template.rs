@@ -90,29 +90,31 @@ pub struct StageTemplates {
     /// Per-stage NCS column start indices.
     ///
     /// `ncs_col_starts[stage_idx]` is the column index of the first NCS generation
-    /// variable for that stage.
+    /// variable for that stage. The base shifts per stage with `n_blks`, so it is
+    /// legitimate per-stage geometry; the COUNT it strides is the scalar
+    /// [`Self::n_ncs`].
     pub ncs_col_starts: Vec<usize>,
-    /// Per-stage active NCS counts.
+    /// NCS column count — the full system NCS count, identical at every stage.
     ///
-    /// `n_ncs_per_stage[stage_idx]` is the number of active NCS entities at that stage.
-    pub n_ncs_per_stage: Vec<usize>,
+    /// Under the dense layout every NCS keeps a column at every stage, so the count
+    /// is a single scalar, not a per-stage Vec; a commissioning-dormant NCS keeps
+    /// its column (pinned to `[0, 0]`).
+    pub n_ncs: usize,
     /// Per-stage pumping-flow column start indices.
     ///
     /// `pumping_col_starts[stage_idx]` is the column index of the first
     /// pumping-flow variable for that stage, sourced from
     /// `StageLayout::col_pumping_start`, the sole owner of the pumping-flow column
-    /// base. Pumping columns are block-major over the stage's ACTIVE stations:
-    /// `pumping_col_starts[stage_idx] + p_local * n_blks + blk`, where `p_local`
-    /// is the position within `geometry_per_stage[stage_idx].active_pumping_indices`
-    /// (an inactive station has no column this stage), NOT the system index.
+    /// base. Pumping columns are block-major over ALL system stations (dense):
+    /// `pumping_col_starts[stage_idx] + p_sys * n_blks + blk`, where `p_sys` is the
+    /// SYSTEM station index. The base shifts per stage with `n_blks`, so it is
+    /// legitimate per-stage geometry; the COUNT it strides is the scalar
+    /// [`Self::n_pumping`]. A commissioning-dormant station keeps its column
+    /// (pinned to `[0, 0]`).
     pub pumping_col_starts: Vec<usize>,
-    /// Per-stage pumping-station counts.
-    ///
-    /// `n_pumping_per_stage[stage_idx]` is the number of pumping stations ACTIVE
-    /// (contributing columns) at that stage, sourced from `StageLayout::n_pumping`
-    /// (the commissioning-gated active count, `<=` the full station count). Equals
-    /// the length of `geometry_per_stage[stage_idx].active_pumping_indices`.
-    pub n_pumping_per_stage: Vec<usize>,
+    /// Pumping-station column count — the full system station count, identical at
+    /// every stage (dense). A commissioning-dormant station keeps its column.
+    pub n_pumping: usize,
     /// Per-stage equipment geometry for simulation extraction.
     ///
     /// `geometry_per_stage[stage_idx]` holds the stage-correct column and row
@@ -123,11 +125,6 @@ pub struct StageTemplates {
     /// `StageExtractionSpec` so the simulation read-path addresses the columns the
     /// solved primal occupies at the stage being extracted.
     pub geometry_per_stage: Vec<StageGeometry>,
-    /// Per-stage active NCS system indices.
-    ///
-    /// `active_ncs_indices[stage_idx]` lists the system-level NCS indices active at
-    /// that stage, in entity-ID order.
-    pub active_ncs_indices: Vec<Vec<usize>>,
     /// Mapping from target hydro ID to source hydro indices that divert to it.
     ///
     /// Used by the simulation extraction pipeline to compute `diverted_inflow_m3s`.
@@ -195,11 +192,10 @@ impl StageTemplates {
             load_bus_indices: Vec::new(),
             generic_constraint_row_entries: Vec::new(),
             ncs_col_starts: Vec::new(),
-            n_ncs_per_stage: Vec::new(),
+            n_ncs: 0,
             pumping_col_starts: Vec::new(),
-            n_pumping_per_stage: Vec::new(),
+            n_pumping: 0,
             geometry_per_stage: Vec::new(),
-            active_ncs_indices: Vec::new(),
             diversion_upstream: HashMap::new(),
             hydro_productivities_per_stage: Vec::new(),
             discount_factors: Vec::new(),
@@ -352,16 +348,6 @@ pub struct StageGeometry {
     /// order. Parallel to `evap_indices`; carried per stage for the same
     /// per-stage-membership reason as `fpha_hydro_indices`.
     pub evap_hydro_indices: Vec<usize>,
-    /// System pumping-station indices active at this stage, in canonical
-    /// ID-sorted slot order. Entry `p_local` is the system index of the
-    /// `p_local`-th active station, mirroring how `active_ncs_indices`
-    /// carries the active NCS system indices per stage. Pumping commissioning
-    /// gating omits a station outside its `[entry, exit)` window from the active
-    /// set, so this list — not the full system station slice — is what maps the
-    /// pumped-flow column local index back to a station id during extraction; a
-    /// missing list would force extraction to assume `p_local == p_sys` and
-    /// misreport the wrong station id at any gated stage.
-    pub active_pumping_indices: Vec<usize>,
 }
 
 impl StageGeometry {
@@ -414,7 +400,6 @@ impl StageGeometry {
             n_blks: layout.n_blks,
             fpha_hydro_indices: layout.fpha_hydro_indices.clone(),
             evap_hydro_indices: layout.evap_hydro_indices.clone(),
-            active_pumping_indices: layout.active_pumping_indices.clone(),
         }
     }
 }
@@ -440,10 +425,8 @@ pub(super) struct StageBuildOutput {
     pub gc_entries: Vec<GenericConstraintRowEntry>,
     /// Column index of the first NCS generation variable.
     pub ncs_col_start: usize,
-    /// Number of active NCS entities at the stage.
+    /// Number of NCS entities at the stage — the full system count (dense).
     pub ncs_count: usize,
-    /// System-level indices of the active NCS entities, in entity-ID order.
-    pub ncs_active: Vec<usize>,
     /// Column index of the first pumping-flow variable (sourced from
     /// `StageLayout::col_pumping_start`).
     pub pumping_col_start: usize,
@@ -550,8 +533,8 @@ pub(super) fn build_single_stage_template(
     };
 
     // Snapshot the per-stage equipment geometry BEFORE moving `layout`'s owned
-    // Vec fields (`generic_constraint_rows`, `active_ncs_indices`) into the
-    // output: `from_layout` only borrows, so it must run while `layout` is intact.
+    // `generic_constraint_rows` Vec into the output: `from_layout` only borrows,
+    // so it must run while `layout` is intact.
     let equipment_geometry = StageGeometry::from_layout(&layout);
 
     StageBuildOutput {
@@ -561,7 +544,6 @@ pub(super) fn build_single_stage_template(
         gc_entries: layout.generic_constraint_rows,
         ncs_col_start: layout.col_ncs_start,
         ncs_count: layout.n_ncs,
-        ncs_active: layout.active_ncs_indices,
         pumping_col_start: layout.col_pumping_start,
         n_pumping: layout.n_pumping,
         equipment_geometry,
@@ -1025,22 +1007,35 @@ fn assemble_stage_templates_output(
     let mut load_balance_row_starts = Vec::with_capacity(n_study);
     let mut generic_constraint_row_entries = Vec::with_capacity(n_study);
     let mut ncs_col_starts = Vec::with_capacity(n_study);
-    let mut n_ncs_per_stage = Vec::with_capacity(n_study);
     let mut pumping_col_starts = Vec::with_capacity(n_study);
-    let mut n_pumping_per_stage = Vec::with_capacity(n_study);
     let mut geometry_per_stage = Vec::with_capacity(n_study);
-    let mut active_ncs_indices_per_stage = Vec::with_capacity(n_study);
-    for out in stage_outputs {
+    // The dense NCS/pumping counts are constant across stages (every entity keeps
+    // a column at every stage), so they collapse to scalars; the column STARTS
+    // remain per-stage because they ride this stage's `n_blks`. The first output
+    // seeds the scalars; later outputs must agree (the dense invariant).
+    let mut n_ncs: usize = 0;
+    let mut n_pumping: usize = 0;
+    for (s, out) in stage_outputs.into_iter().enumerate() {
         templates.push(out.template);
         base_rows.push(out.stage_base_row);
         load_balance_row_starts.push(out.load_balance_row_start);
         generic_constraint_row_entries.push(out.gc_entries);
         ncs_col_starts.push(out.ncs_col_start);
-        n_ncs_per_stage.push(out.ncs_count);
         pumping_col_starts.push(out.pumping_col_start);
-        n_pumping_per_stage.push(out.n_pumping);
+        if s == 0 {
+            n_ncs = out.ncs_count;
+            n_pumping = out.n_pumping;
+        } else {
+            debug_assert_eq!(
+                out.ncs_count, n_ncs,
+                "dense NCS count must be constant across stages",
+            );
+            debug_assert_eq!(
+                out.n_pumping, n_pumping,
+                "dense pumping count must be constant across stages",
+            );
+        }
         geometry_per_stage.push(out.equipment_geometry);
-        active_ncs_indices_per_stage.push(out.ncs_active);
     }
 
     let (noise_scale, zeta_per_stage, block_hours_per_stage) =
@@ -1070,11 +1065,10 @@ fn assemble_stage_templates_output(
         load_bus_indices,
         generic_constraint_row_entries,
         ncs_col_starts,
-        n_ncs_per_stage,
+        n_ncs,
         pumping_col_starts,
-        n_pumping_per_stage,
+        n_pumping,
         geometry_per_stage,
-        active_ncs_indices: active_ncs_indices_per_stage,
         diversion_upstream: diversion_upstream_output,
         hydro_productivities_per_stage,
         // Discount factors are 1.0-placeholders here; the real per-stage and
@@ -1574,8 +1568,9 @@ mod tests {
 
     /// `build_stage_templates` records the layout-owned pumping column base for
     /// every stage: `pumping_col_starts[t]` equals
-    /// `StageLayout::new(..).col_pumping_start`, and `n_pumping_per_stage[t]`
-    /// equals `StageLayout::new(..).n_pumping`.
+    /// `StageLayout::new(..).col_pumping_start`, and the scalar `n_pumping`
+    /// equals `StageLayout::new(..).n_pumping` (constant across stages under the
+    /// dense layout).
     ///
     /// This pins the threading contract the simulation extraction pipeline reads
     /// from: the column base is sourced from the layout, the sole owner of the
@@ -1613,7 +1608,10 @@ mod tests {
         let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
 
         assert_eq!(templates.pumping_col_starts.len(), study_stages.len());
-        assert_eq!(templates.n_pumping_per_stage.len(), study_stages.len());
+        assert_eq!(
+            templates.n_pumping, 2,
+            "two stations were declared; the dense count is a scalar"
+        );
         for (t, stage) in study_stages.iter().enumerate() {
             let state = state_layout_for(&ctx);
             let layout = super::super::layout::StageLayout::new(&ctx, &state, stage, t);
@@ -1622,12 +1620,8 @@ mod tests {
                 "stage {t}: pumping_col_starts must equal layout.col_pumping_start"
             );
             assert_eq!(
-                templates.n_pumping_per_stage[t], layout.n_pumping,
-                "stage {t}: n_pumping_per_stage must equal layout.n_pumping"
-            );
-            assert_eq!(
-                templates.n_pumping_per_stage[t], 2,
-                "stage {t}: two stations were declared"
+                templates.n_pumping, layout.n_pumping,
+                "stage {t}: scalar n_pumping must equal layout.n_pumping",
             );
         }
     }
@@ -2352,10 +2346,9 @@ mod tests {
             "generic_constraint_row_entries"
         );
         assert!(empty.ncs_col_starts.is_empty(), "ncs_col_starts");
-        assert!(empty.n_ncs_per_stage.is_empty(), "n_ncs_per_stage");
+        assert_eq!(empty.n_ncs, 0, "n_ncs");
         assert!(empty.pumping_col_starts.is_empty(), "pumping_col_starts");
-        assert!(empty.n_pumping_per_stage.is_empty(), "n_pumping_per_stage");
-        assert!(empty.active_ncs_indices.is_empty(), "active_ncs_indices");
+        assert_eq!(empty.n_pumping, 0, "n_pumping");
         assert!(empty.diversion_upstream.is_empty(), "diversion_upstream");
         assert!(
             empty.hydro_productivities_per_stage.is_empty(),

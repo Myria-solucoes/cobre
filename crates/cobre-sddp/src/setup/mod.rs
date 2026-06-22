@@ -101,21 +101,31 @@ pub struct StudySetup {
     pub hydro_models: PrepareHydroModelsResult,
 
     pub(crate) ncs_entity_ids_per_stage: Vec<Vec<i32>>,
-    /// Per-stage stochastic-slot → active-local-column map for NCS bound patching.
+    /// Stage-invariant stochastic-slot → dense NCS column index map.
     ///
-    /// `ncs_active_slot_to_local[s][slot]` is `Some(ncs_local)` when stochastic
-    /// NCS `slot` (in `StochasticContext::ncs_entity_ids` id-sorted order) is
-    /// active at stage `s`, where `ncs_local` is its position within
-    /// `active_ncs_indices[s]` — so its LP column block is
-    /// `ncs_col_starts[s] + ncs_local * n_blks_s + blk`. `None` means the slot's
-    /// NCS is **not active** at stage `s` (it has no column there; its
-    /// `transform_ncs_noise` buffer entries are skipped). The three NCS bound
-    /// patch sites stride from `ncs_local`, never from the raw stochastic slot:
-    /// at a strict-subset stage the LP allocates only `active_ncs_indices[s].len()`
-    /// NCS columns, so addressing all `n_stochastic_ncs` slots would overrun the
-    /// NCS column block. Inner length equals `n_stochastic_ncs`; outer length
-    /// equals the study stage count. Empty when the study has no stochastic NCS.
-    pub(crate) ncs_active_slot_to_local: Vec<Vec<Option<usize>>>,
+    /// `ncs_stochastic_dense_col[slot]` is the system NCS index (the dense column
+    /// position) of stochastic slot `slot` (in `StochasticContext::ncs_entity_ids`
+    /// id-sorted order). Under the dense layout every NCS keeps a column at every
+    /// stage, so this map is the same at every stage — there is no per-stage
+    /// active-local remap. The NCS bound patch sites stride the per-opening cap
+    /// onto `ncs_col_starts[s] + ncs_stochastic_dense_col[slot] * n_blks_s + blk`.
+    /// Length equals `n_stochastic_ncs`; empty when the study has no stochastic NCS.
+    pub(crate) ncs_stochastic_dense_col: Vec<usize>,
+    /// Stage-invariant commissioning window per stochastic NCS slot.
+    ///
+    /// `ncs_stochastic_windows[slot] = (entry_stage_id, exit_stage_id)` for the
+    /// stochastic NCS at `slot` (id-sorted to match `ncs_stochastic_dense_col` and
+    /// the `transform_ncs_noise` buffer order). The NCS bound patch sites compute
+    /// dormancy inline at each stage via the shared
+    /// `commissioning_active` predicate
+    /// (`entry <= stage_id < exit`) and force a `[0, 0]` cap for a dormant slot —
+    /// the zero-influence convention the column fill applies, kept identical across
+    /// the forward, backward, and lower-bound patch sites (the
+    /// `.claude/rules/sddp.md` "Lower-bound evaluation must patch NCS" contract; a
+    /// divergence understates the bound, the D15 bug class). Storing the windows,
+    /// not a per-stage dormancy mask, keeps activity out of per-stage storage.
+    /// Length equals `n_stochastic_ncs`; empty when no stochastic NCS.
+    pub(crate) ncs_stochastic_windows: Vec<(Option<i32>, Option<i32>)>,
     /// Max generation \[MW\] per stochastic NCS entity, sorted by entity ID.
     pub(crate) ncs_max_gen: Vec<f64>,
     /// Whether each stochastic NCS entity may be curtailed, sorted by entity
@@ -376,7 +386,8 @@ impl StudySetup {
         let NcsEntityData {
             entity_counts,
             ncs_entity_ids_per_stage,
-            ncs_active_slot_to_local,
+            ncs_stochastic_dense_col,
+            ncs_stochastic_windows,
             ncs_max_gen,
             ncs_allow_curtailment,
         } = build_ncs_entity_data(system, &stage_templates, &stochastic)?;
@@ -445,7 +456,8 @@ impl StudySetup {
             initial_state,
             hydro_models,
             ncs_entity_ids_per_stage,
-            ncs_active_slot_to_local,
+            ncs_stochastic_dense_col,
+            ncs_stochastic_windows,
             ncs_max_gen,
             ncs_allow_curtailment,
             scenario_libraries,
@@ -492,20 +504,24 @@ impl StudySetup {
 struct NcsEntityData {
     entity_counts: EntityCounts,
     ncs_entity_ids_per_stage: Vec<Vec<i32>>,
-    ncs_active_slot_to_local: Vec<Vec<Option<usize>>>,
+    ncs_stochastic_dense_col: Vec<usize>,
+    ncs_stochastic_windows: Vec<(Option<i32>, Option<i32>)>,
     ncs_max_gen: Vec<f64>,
     ncs_allow_curtailment: Vec<bool>,
 }
 
-/// Build entity counts and the per-stochastic-NCS max-generation / curtailment
-/// vectors from the system and stage templates.
+/// Build entity counts and the dense NCS column/window maps from the system.
 ///
-/// `ncs_entity_ids_per_stage` maps each active NCS column to its system entity
-/// id; `ncs_max_gen` and `ncs_allow_curtailment` are aligned 1:1 in stochastic
-/// NCS-entity order. `ncs_active_slot_to_local` bridges the stochastic-slot
-/// order (the order `transform_ncs_noise` emits its bound buffers) to the
-/// per-stage active-local column position — see
-/// [`StudySetup::ncs_active_slot_to_local`].
+/// Under the dense layout every NCS keeps a column at every stage, so
+/// `ncs_entity_ids_per_stage` is the full id-sorted NCS id list repeated once per
+/// study stage (extraction reads the per-stage slice by dense system index).
+/// `ncs_max_gen`, `ncs_allow_curtailment`, and `ncs_stochastic_windows` are
+/// aligned 1:1 in stochastic NCS-entity (slot) order. `ncs_stochastic_dense_col`
+/// is the stage-invariant slot → dense-column map; `ncs_stochastic_windows`
+/// carries each slot's `(entry, exit)` commissioning window so the patch sites
+/// compute dormancy inline per stage — see
+/// [`StudySetup::ncs_stochastic_dense_col`] and
+/// [`StudySetup::ncs_stochastic_windows`].
 ///
 /// # Errors
 ///
@@ -518,63 +534,60 @@ fn build_ncs_entity_data(
 ) -> Result<NcsEntityData, SddpError> {
     let entity_counts = build_entity_counts(system);
 
-    let ncs_entity_ids_per_stage: Vec<Vec<i32>> = stage_templates
-        .active_ncs_indices
-        .iter()
-        .map(|stage_indices| {
-            stage_indices
-                .iter()
-                .map(|&sys_idx| entity_counts.non_controllable_ids[sys_idx])
-                .collect()
-        })
-        .collect();
+    let n_study = stage_templates.templates.len();
 
-    // Per-stage stochastic-slot → active-local-column map. For each stage the
-    // map is derived by entity-id matching: stochastic slot → its entity id
-    // (`ncs_entity_ids()[slot]`) → its position in the stage's active NCS column
-    // list (`ncs_entity_ids_per_stage[s]`, which is `active_ncs_indices[s]`
-    // mapped to entity ids). The position IS the active-local column index, so
-    // the patch sites stride by it; a slot whose NCS is inactive at the stage
-    // maps to `None`. Bridging via entity id (not assuming `ncs_local == slot`)
-    // is what makes the map correct when the active set is a strict subset or
-    // its order diverges from the id-sorted slot order. Derived from the already
-    // declaration-order-canonical `active_ncs_indices` and id-sorted slot order,
-    // so it preserves declaration-order invariance.
+    // Dense: every stage lists all NCS system ids, in canonical id-sorted system
+    // order. The list is stage-invariant; extraction reads the per-stage slice by
+    // dense system index, so a dormant NCS still occupies its slot and reports a
+    // zero row rather than being absent.
+    let ncs_entity_ids_per_stage: Vec<Vec<i32>> =
+        vec![entity_counts.non_controllable_ids.clone(); n_study];
+
     let stoch_ncs_ids = stochastic.ncs_entity_ids();
 
-    let mut ncs_active_slot_to_local: Vec<Vec<Option<usize>>> =
-        Vec::with_capacity(ncs_entity_ids_per_stage.len());
-    for stage_active_ids in &ncs_entity_ids_per_stage {
-        let mut stage_map = Vec::with_capacity(stoch_ncs_ids.len());
-        for slot_id in stoch_ncs_ids {
-            stage_map.push(stage_active_ids.iter().position(|&id| id == slot_id.0));
-        }
-        ncs_active_slot_to_local.push(stage_map);
+    // One pass over the id-sorted stochastic slots resolves, per slot: the dense
+    // column index (its position in the full id-sorted NCS system list — the dense
+    // column position, identical at every stage; bridging via entity id keeps the
+    // map correct when only a subset of NCS are stochastic or the orders diverge),
+    // the stage-invariant commissioning window (the patch sites apply the predicate
+    // inline per stage), the max generation, and the curtailment policy. All four
+    // outputs are slot-aligned. Declaration-order invariant: keyed on the id-sorted
+    // slot order, not entity declaration order.
+    let mut ncs_stochastic_dense_col: Vec<usize> = Vec::with_capacity(stoch_ncs_ids.len());
+    let mut ncs_stochastic_windows: Vec<(Option<i32>, Option<i32>)> =
+        Vec::with_capacity(stoch_ncs_ids.len());
+    let mut ncs_max_gen: Vec<f64> = Vec::with_capacity(stoch_ncs_ids.len());
+    let mut ncs_allow_curtailment: Vec<bool> = Vec::with_capacity(stoch_ncs_ids.len());
+    for slot_id in stoch_ncs_ids {
+        let dense_col = entity_counts
+            .non_controllable_ids
+            .iter()
+            .position(|&id| id == slot_id.0)
+            .ok_or_else(|| {
+                SddpError::Validation(format!(
+                    "stochastic NCS entity {slot_id:?} not found in system non_controllable_sources"
+                ))
+            })?;
+        let ncs = system
+            .non_controllable_sources()
+            .iter()
+            .find(|n| n.id == *slot_id)
+            .ok_or_else(|| {
+                SddpError::Validation(format!(
+                    "stochastic NCS entity {slot_id:?} not found in system non_controllable_sources"
+                ))
+            })?;
+        ncs_stochastic_dense_col.push(dense_col);
+        ncs_stochastic_windows.push((ncs.entry_stage_id, ncs.exit_stage_id));
+        ncs_max_gen.push(ncs.max_generation_mw);
+        ncs_allow_curtailment.push(ncs.allow_curtailment);
     }
-
-    let (ncs_max_gen, ncs_allow_curtailment): (Vec<f64>, Vec<bool>) = {
-        let mut max_v = Vec::with_capacity(stoch_ncs_ids.len());
-        let mut allow_v = Vec::with_capacity(stoch_ncs_ids.len());
-        for ncs_id in stoch_ncs_ids {
-            let ncs = system
-                .non_controllable_sources()
-                .iter()
-                .find(|n| n.id == *ncs_id)
-                .ok_or_else(|| {
-                    SddpError::Validation(format!(
-                        "stochastic NCS entity {ncs_id:?} not found in system non_controllable_sources"
-                    ))
-                })?;
-            max_v.push(ncs.max_generation_mw);
-            allow_v.push(ncs.allow_curtailment);
-        }
-        (max_v, allow_v)
-    };
 
     Ok(NcsEntityData {
         entity_counts,
         ncs_entity_ids_per_stage,
-        ncs_active_slot_to_local,
+        ncs_stochastic_dense_col,
+        ncs_stochastic_windows,
         ncs_max_gen,
         ncs_allow_curtailment,
     })

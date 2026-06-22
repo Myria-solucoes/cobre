@@ -248,13 +248,14 @@ fn case_dir(label: &str) -> std::path::PathBuf {
         "D34" => "d34-anticipated-varying-blocks",
         // Pumping commissioning gating: the reversible plant of D32 carries an
         // `entry_stage_id`/`exit_stage_id` window so it is active only at the
-        // interior stage 1 (omitted at stages 0 and 2). Because `flow.min_m3s > 0`
+        // interior stage 1 (dormant at stages 0 and 2). Because `flow.min_m3s > 0`
         // forces a transfer on every active solve, gating removes that forced
-        // transfer at the two omitted stages — a station active at every stage
+        // transfer at the two dormant stages — a station active at every stage
         // (as in D32) cannot detect a window that is parsed but never applied to
-        // the LP. The omitted stages contribute no pumping column, so their
-        // storage trajectories and water values diverge from the always-active
-        // D32 baseline.
+        // the LP. Under the dense (zero-influence) layout the dormant stages keep
+        // the pumping column pinned to `[0, 0]` and emit a zero output row, so
+        // their storage trajectories and water values diverge from the
+        // always-active D32 baseline.
         "D35" => "d35-pumping-commissioning",
         other => panic!("unknown case label: {other}"),
     };

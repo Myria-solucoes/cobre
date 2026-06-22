@@ -137,6 +137,32 @@ pub use template::{StageGeometry, StageTemplates, build_stage_templates};
 pub(crate) use scaling::{apply_col_scale, apply_row_scale, compute_col_scale, compute_row_scale};
 
 // ---------------------------------------------------------------------------
+// Commissioning window
+// ---------------------------------------------------------------------------
+
+/// Whether an entity is operationally commissioned at `stage_id`.
+///
+/// An entity is active when the stage is at or after its `entry` (if any) and
+/// strictly before its `exit` (if any): `entry <= stage_id < exit`. The exit
+/// bound is half-open — a stage equal to `exit` is decommissioned. `None`
+/// entry/exit means "no lower/upper bound", so a window-free entity is active
+/// at every stage.
+///
+/// This is the single owner of the commissioning predicate shared by every
+/// equipment family. Under the dense layout an inactive entity keeps its LP
+/// column at every stage but contributes nothing: callers force its
+/// operational bounds to `[0, 0]` (the zero-influence convention) rather than
+/// omitting the column. Returning `true`/`false` here, not an active-subset
+/// index, is what removes the per-stage active-set bookkeeping and the
+/// local↔system column remap; the dense column position is the entity's system
+/// index at every stage.
+#[inline]
+#[must_use]
+pub(crate) fn commissioning_active(entry: Option<i32>, exit: Option<i32>, stage_id: i32) -> bool {
+    entry.is_none_or(|e| e <= stage_id) && exit.is_none_or(|e| stage_id < e)
+}
+
+// ---------------------------------------------------------------------------
 // Shared constants
 // ---------------------------------------------------------------------------
 

@@ -58,22 +58,38 @@ pub struct StageContext<'a> {
     /// [`StudyDimensions`]; there is no global NCS column base. Empty when the
     /// study has no NCS columns (the patch is guarded off in that case).
     pub ncs_col_starts: &'a [usize],
-    /// Per-stage stochastic-slot → active-local-column map for NCS bound patching.
+    /// NCS column count — the full system NCS count, identical at every stage.
     ///
-    /// `ncs_active_slot_to_local[stage][slot]` is `Some(ncs_local)` when the
-    /// stochastic NCS at `slot` (id-sorted `StochasticContext::ncs_entity_ids`
-    /// order, the order `transform_ncs_noise` emits its bound buffers) is active
-    /// at that stage; `ncs_local` is its column position within
-    /// `active_ncs_indices[stage]`, so its LP column block is
-    /// `ncs_col_starts[stage] + ncs_local * n_blks + blk`. `None` means the slot
-    /// is inactive at that stage and contributes no column and no bound entry.
-    /// The forward/backward NCS bound patch strides by `ncs_local`, never by the
-    /// raw stochastic slot — a strict-subset stage allocates only
-    /// `active_ncs_indices[stage].len()` NCS columns, so addressing all
-    /// `n_stochastic_ncs` slots would overrun the block. Empty when the study has
-    /// no stochastic NCS columns (the patch is guarded off in that case).
-    /// Built once at setup in `StudySetup` (the per-stage active-slot map).
-    pub ncs_active_slot_to_local: &'a [Vec<Option<usize>>],
+    /// Under the dense layout every NCS keeps a column at every stage, so the count
+    /// is a single scalar, not a per-stage slice (a dormant NCS keeps its column).
+    /// Consumed by the lower-bound `ncs_generation` range; `0` when the study has
+    /// no NCS.
+    pub n_ncs: usize,
+    /// Stage-invariant stochastic-slot → dense NCS column index map.
+    ///
+    /// `ncs_stochastic_dense_col[slot]` is the system NCS index (the dense column
+    /// position) of the stochastic NCS at `slot` (id-sorted
+    /// `StochasticContext::ncs_entity_ids` order, the order `transform_ncs_noise`
+    /// emits its bound buffers). Under the dense layout every NCS keeps a column at
+    /// every stage, so this map is identical at every stage; the NCS bound patch
+    /// strides the per-opening cap onto
+    /// `ncs_col_starts[stage] + ncs_stochastic_dense_col[slot] * n_blks + blk`.
+    /// Length equals `n_stochastic_ncs`; empty when the study has no stochastic
+    /// NCS. Built once at setup in `StudySetup`.
+    pub ncs_stochastic_dense_col: &'a [usize],
+    /// Stage-invariant commissioning window per stochastic NCS slot.
+    ///
+    /// `ncs_stochastic_windows[slot] = (entry, exit)` for the stochastic NCS at
+    /// `slot` (id-sorted to match [`Self::ncs_stochastic_dense_col`] and the
+    /// `transform_ncs_noise` buffer order). The NCS bound patch sites compute
+    /// dormancy inline at each stage via the shared
+    /// `commissioning_active` predicate
+    /// and force a `[0, 0]` cap for a dormant slot — the zero-influence convention,
+    /// applied identically across the forward, backward, and lower-bound patch
+    /// sites. Length equals `n_stochastic_ncs`; empty when the study has no
+    /// stochastic NCS. Built once at setup in `StudySetup`. Carrying the windows,
+    /// not a per-stage dormancy mask, keeps activity out of per-stage storage.
+    pub ncs_stochastic_windows: &'a [(Option<i32>, Option<i32>)],
     /// Maximum generation (MW) per stochastic NCS entity, sorted by entity ID.
     /// Length equals the number of stochastic NCS entities. Empty when none exist.
     pub ncs_max_gen: &'a [f64],

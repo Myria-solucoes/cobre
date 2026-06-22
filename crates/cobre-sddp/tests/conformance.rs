@@ -868,7 +868,9 @@ mod lb_conformance {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
-            ncs_active_slot_to_local: &[],
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            stage_id: 0,
             block_count: 1,
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
@@ -1057,8 +1059,6 @@ fn build_geometry(
         n_blks,
         fpha_hydro_indices,
         evap_hydro_indices: Vec::new(),
-        // These fixtures model no pumping stations, so no station is active.
-        active_pumping_indices: Vec::new(),
     }
 }
 

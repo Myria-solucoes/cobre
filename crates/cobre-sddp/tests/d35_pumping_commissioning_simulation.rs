@@ -3,13 +3,13 @@
 //! ## What the parity hash cannot see
 //!
 //! The declaration-order parity baseline hashes hydro storage / water values
-//! and cuts; it does NOT hash pumping-output columns. The local→system index
-//! mapping `extract_pumping_stations` applies — turning the active-local column
-//! position `p_local` back into a `pumping_station_id` via
-//! `geometry.active_pumping_indices` — is therefore invisible to the hash. A
-//! gating bug that emitted a pumping row at an omitted stage, or stamped the
-//! wrong station id, would still hash-match. This test exercises that mapping
-//! directly through the full train+simulate pipeline.
+//! and cuts; it does NOT hash pumping-output columns. The dense per-station
+//! extraction `extract_pumping_stations` applies — and the zero-influence
+//! convention that a commissioning-dormant station emits a ZERO row rather than
+//! being absent — is therefore invisible to the hash. A gating bug that let a
+//! dormant station pump, or stamped the wrong station id, would still hash-match.
+//! This test exercises that path directly through the full train+simulate
+//! pipeline.
 //!
 //! ## Fixture (`d35-pumping-commissioning`)
 //!
@@ -17,13 +17,15 @@
 //! `entry_stage_id = 1`, `exit_stage_id = 2` over a 3-stage horizon (0, 1, 2),
 //! single block each. The commissioning gate
 //! (`entry <= stage.id && stage.id < exit`) makes the station ACTIVE only at
-//! stage 1 and OMITTED at stages 0 and 2. Because `flow.min_m3s = 2.0` forces a
-//! transfer on every active solve, stage 1 must pump at least 2.0 m³/s.
+//! stage 1 and DORMANT at stages 0 and 2. Because `flow.min_m3s = 2.0` forces a
+//! transfer on every active solve, stage 1 must pump at least 2.0 m³/s; under the
+//! dense layout the dormant stages keep the column but pin it to `[0, 0]`.
 //!
 //! ## Assertions
 //!
 //! - Stage 1 emits exactly one pumping row: `station_id` 0, `pumped_flow_m3s >= 2.0`.
-//! - Stages 0 and 2 emit NO pumping rows (the station contributes no column there).
+//! - Stages 0 and 2 emit a ZERO pumping row (`pumped_flow_m3s == 0`): the dormant
+//!   station keeps its dense column but is pinned to `[0, 0]`.
 
 #![allow(
     clippy::unwrap_used,
@@ -168,19 +170,40 @@ fn pumping_commissioning_window_gates_simulation_output() {
         "one stage record per study stage (horizon 0, 1, 2)",
     );
 
-    // Stage 0: omitted (stage.id 0 < entry 1) — no pumping column, no row.
-    assert!(
-        scenario.stages[0].pumping_stations.is_empty(),
-        "stage 0 is before the entry window: no pumping rows, got {:?}",
-        scenario.stages[0].pumping_stations,
+    // Stage 0: dormant (stage.id 0 < entry 1) — the dense column is kept but
+    // pinned to [0, 0], so the station emits exactly one ZERO row.
+    let stage0 = &scenario.stages[0].pumping_stations;
+    assert_eq!(
+        stage0.len(),
+        1,
+        "stage 0 keeps the dense pumping column: one (zeroed) row, got {stage0:?}",
+    );
+    assert_eq!(
+        stage0[0].pumping_station_id, 0,
+        "dormant stage 0 row must still map to system station id 0",
+    );
+    assert_eq!(
+        stage0[0].pumped_flow_m3s, 0.0,
+        "stage 0 is before the entry window: dormant column pinned to 0, got {}",
+        stage0[0].pumped_flow_m3s,
     );
 
-    // Stage 2: omitted (stage.id 2 == exit 2, gate is `stage.id < exit`) —
-    // no pumping column, no row.
-    assert!(
-        scenario.stages[2].pumping_stations.is_empty(),
-        "stage 2 is at the exit boundary (decommissioned): no pumping rows, got {:?}",
-        scenario.stages[2].pumping_stations,
+    // Stage 2: dormant (stage.id 2 == exit 2, gate is `stage.id < exit`) — the
+    // dense column is kept but pinned to [0, 0], so the station emits a ZERO row.
+    let stage2 = &scenario.stages[2].pumping_stations;
+    assert_eq!(
+        stage2.len(),
+        1,
+        "stage 2 keeps the dense pumping column: one (zeroed) row, got {stage2:?}",
+    );
+    assert_eq!(
+        stage2[0].pumping_station_id, 0,
+        "decommissioned stage 2 row must still map to system station id 0",
+    );
+    assert_eq!(
+        stage2[0].pumped_flow_m3s, 0.0,
+        "stage 2 is at the exit boundary (decommissioned): dormant column pinned to 0, got {}",
+        stage2[0].pumped_flow_m3s,
     );
 
     // Stage 1: active — exactly one (station, block) row mapped to station id 0,

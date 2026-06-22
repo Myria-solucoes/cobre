@@ -52,7 +52,7 @@ pub(super) fn fill_stage_columns(
     fill_withdrawal_slack_columns(ctx, stage_idx, layout, total_stage_hours, b);
     fill_operational_slack_columns(ctx, stage, stage_idx, layout, b);
     fill_ncs_columns(ctx, stage, stage_idx, layout, b);
-    fill_pumping_columns(ctx, stage_idx, layout, b);
+    fill_pumping_columns(ctx, stage, stage_idx, layout, b);
     fill_z_inflow_columns(layout, b);
 
     (col_lower, col_upper, objective)
@@ -668,22 +668,30 @@ fn fill_block_family(
     }
 }
 
-/// NCS generation columns: one per active NCS per block.
+/// NCS generation columns: one per NCS per block, dense and system-indexed.
 ///
 /// `col_lower[col] = if ncs.allow_curtailment { 0 } else { col_upper[col] }`.
 /// `col_upper[col] = available_gen * ncs_factor`.
 /// `objective[col] = -curtailment_cost * block_hours` (negative incentivises generation).
 ///
-/// These template values govern only when NCS noise is **non-stochastic**
-/// (`n_stochastic_ncs == 0`). When stochastic NCS is active, both bounds
-/// are rebuilt per scenario by `transform_ncs_noise` to scale with the
-/// realized availability ratio `α = clamp(mean + std·η, 0, 1)`; the
-/// template values are overwritten via `set_col_bounds` before each stage
-/// solve. With `allow_curtailment == true` (the default) the column is
-/// fully curtailable (bit-identical to the pre-flag behaviour); with
-/// `allow_curtailment == false` the column is pinned to the available
-/// level on every stage (must-run: non-simulated aggregate generation
-/// pre-netted from load).
+/// Iterates ALL NCS by system index (the dense column position). A
+/// commissioning-dormant NCS (`commissioning_active == false`) keeps its column
+/// but has BOTH bounds forced to `[0, 0]` (the zero-influence convention), so it
+/// contributes nothing to the dispatch and produces a zero output row, uniform
+/// with thermal/line. The forbidden alternative — leaving the dormant must-run
+/// lower bound at `upper > 0` — would force generation from a not-yet-commissioned
+/// source.
+///
+/// For an active NCS these template values govern only when NCS noise is
+/// **non-stochastic** (`n_stochastic_ncs == 0`). When stochastic NCS is active,
+/// both bounds are rebuilt per scenario by `transform_ncs_noise` to scale with
+/// the realized availability ratio `α = clamp(mean + std·η, 0, 1)`; the template
+/// values are overwritten via `set_col_bounds` before each stage solve (the patch
+/// path zeroes dormant stochastic NCS the same way). With
+/// `allow_curtailment == true` (the default) an active column is fully
+/// curtailable; with `allow_curtailment == false` it is pinned to the available
+/// level on every stage (must-run: non-simulated aggregate generation pre-netted
+/// from load).
 fn fill_ncs_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -691,8 +699,12 @@ fn fill_ncs_columns(
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
-    for (ncs_local, &ncs_sys_idx) in layout.active_ncs_indices.iter().enumerate() {
-        let ncs = &ctx.non_controllable_sources[ncs_sys_idx];
+    for (ncs_sys_idx, ncs) in ctx.non_controllable_sources.iter().enumerate() {
+        let active = crate::lp_builder::commissioning_active(
+            ncs.entry_stage_id,
+            ncs.exit_stage_id,
+            stage.id,
+        );
         let avail_gen = ctx
             .resolved
             .resolved_ncs_bounds
@@ -700,51 +712,64 @@ fn fill_ncs_columns(
         for blk in 0..layout.n_blks {
             let col = layout
                 .block_grid()
-                .flat(layout.col_ncs_start, ncs_local, blk);
-            let factor = ctx
-                .resolved
-                .resolved_ncs_factors
-                .factor(ncs_sys_idx, stage_idx, blk);
-            let upper = avail_gen * factor;
-            bufs.col_upper[col] = upper;
-            bufs.col_lower[col] = if ncs.allow_curtailment { 0.0 } else { upper };
+                .flat(layout.col_ncs_start, ncs_sys_idx, blk);
+            if active {
+                let factor = ctx
+                    .resolved
+                    .resolved_ncs_factors
+                    .factor(ncs_sys_idx, stage_idx, blk);
+                let upper = avail_gen * factor;
+                bufs.col_upper[col] = upper;
+                bufs.col_lower[col] = if ncs.allow_curtailment { 0.0 } else { upper };
+            } else {
+                bufs.col_upper[col] = 0.0;
+                bufs.col_lower[col] = 0.0;
+            }
             let block_hours = stage.blocks[blk].duration_hours;
             bufs.objective[col] = -ncs.curtailment_cost * block_hours;
         }
     }
 }
 
-/// Pumping-flow columns per ACTIVE station per block.
+/// Pumping-flow columns: one per station per block, dense and system-indexed.
 ///
-/// One column per active (commissioning-gated) pumping station per block,
-/// block-major (`col_pumping_start + p_local * n_blks + blk`). Bounds are the
+/// Block-major (`col_pumping_start + p_sys * n_blks + blk`). Bounds are the
 /// resolved `[min_flow_m3s, max_flow_m3s]` for the `(station, stage)` pair;
 /// objective cost is zero (pumping carries no direct cost — its electrical cost
 /// enters through the bus load balance in the power-coupling pass, not here).
 ///
-/// Iterates `layout.active_pumping_indices` (the stage's active subset, in
-/// canonical ID-sorted order) exactly as `fill_ncs_columns` iterates
-/// `active_ncs_indices`. The enumeration index `p_local` is the column-block
-/// position; the bounds slot is the SYSTEM station index `p_sys` the entry
-/// carries — `pumping_bounds(p_sys, …)` is indexed by the global station index
-/// (it is built for every station regardless of its window), so reading it at
-/// `p_local` would fetch the wrong station's bounds at any gated stage. This
-/// upholds the declaration-order bit-determinism rule without depending on
-/// declaration order.
+/// Iterates ALL stations by system index, exactly as `fill_ncs_columns` iterates
+/// NCS. A commissioning-dormant station (`commissioning_active == false`) keeps
+/// its column but has BOTH bounds forced to `[0, 0]`: the forced minimum
+/// (`min_flow_m3s`) must be zeroed too, or a `[min > 0, max = 0]` pair is
+/// infeasible — exactly like a thermal must-run floor under decommissioning. The
+/// per-station bounds slot is the SYSTEM station index `p_sys` (the dense column
+/// position), so `pumping_bounds(p_sys, …)` reads the matching station.
 pub(super) fn fill_pumping_columns(
     ctx: &TemplateBuildCtx<'_>,
+    stage: &Stage,
     stage_idx: usize,
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
-    for (p_local, &p_sys) in layout.active_pumping_indices.iter().enumerate() {
+    for (p_sys, station) in ctx.pumping_stations.iter().enumerate() {
+        let active = crate::lp_builder::commissioning_active(
+            station.entry_stage_id,
+            station.exit_stage_id,
+            stage.id,
+        );
         let pb = ctx.resolved.bounds.pumping_bounds(p_sys, stage_idx);
         for blk in 0..layout.n_blks {
             let col = layout
                 .block_grid()
-                .flat(layout.col_pumping_start, p_local, blk);
-            bufs.col_lower[col] = pb.min_flow_m3s;
-            bufs.col_upper[col] = pb.max_flow_m3s;
+                .flat(layout.col_pumping_start, p_sys, blk);
+            if active {
+                bufs.col_lower[col] = pb.min_flow_m3s;
+                bufs.col_upper[col] = pb.max_flow_m3s;
+            } else {
+                bufs.col_lower[col] = 0.0;
+                bufs.col_upper[col] = 0.0;
+            }
             // objective[col] = 0.0 — already zero from vec initialisation.
         }
     }

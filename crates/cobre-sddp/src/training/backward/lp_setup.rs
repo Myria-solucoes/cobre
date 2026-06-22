@@ -134,40 +134,49 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
         &ws.patch_buf.lower[..pc],
         &ws.patch_buf.upper[..pc],
     );
-    // Patch NCS availability bounds onto this stage's **active** NCS columns,
-    // indexed by `ncs_local` within `active_ncs_indices[s]` via the per-stage
-    // `ctx.ncs_active_slot_to_local[s]` map — a stochastic NCS inactive at this
-    // stage contributes no column and no bound. `transform_ncs_noise` above wrote
-    // the bound buffers in full stochastic-slot order; the gather copies only the
-    // active slots' bounds, because a subset stage allocates only `(active
-    // stochastic NCS) * n_blks` columns and a full `n_stochastic_ncs` block would
-    // overrun. Index buffer rebuilt lazily on a stage transition (when the
-    // per-stage NCS column start or the active-subset length changes); bounds
-    // gathered every opening.
+    // Patch NCS availability bounds onto this stage's dense NCS columns, indexed
+    // by `ncs_stochastic_dense_col[slot]` (the slot's NCS system index — the dense
+    // column position, identical at every stage). `transform_ncs_noise` above wrote
+    // the bound buffers in full stochastic-slot order; the gather copies every
+    // slot's bounds, forcing `[0, 0]` for a slot whose
+    // `ncs_stochastic_windows[slot]` excludes this stage's id (dormancy computed
+    // inline by the gather). This is the same zeroing the forward and lower-bound
+    // patch sites apply — keeping the three identical is the
+    // `.claude/rules/sddp.md` "patch NCS identically" contract (a divergence
+    // understates the bound). Index buffer rebuilt lazily on a stage transition
+    // (when the per-stage NCS column start changes); bounds gathered every opening.
     if n_stochastic_ncs > 0 && training_ctx.study_dims.has_ncs {
         let n_blks_stage = ctx.block_counts_per_stage[s];
-        let slot_to_local = &ctx.ncs_active_slot_to_local[s];
+        let dense_col = ctx.ncs_stochastic_dense_col;
+        let windows = ctx.ncs_stochastic_windows;
+        // Stage id is the dormancy key (NOT the index `s`; filtered placeholder
+        // stages can shift the id off the index).
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let stage_id = training_ctx
+            .stages
+            .get(s)
+            .map_or(s as i32, |stage| stage.id);
         let ncs_col_start = ctx.ncs_col_starts[s];
-        let expected_len = crate::noise::active_ncs_slot_count(slot_to_local) * n_blks_stage;
+        let expected_len = dense_col.len() * n_blks_stage;
         // The index buffer must be rebuilt when the per-stage NCS column **start**
         // changes, not only when its length changes: `ncs_col_starts[s]` varies per
-        // stage, so two stages can share `active_count * n_blks` yet address
-        // different columns. Keying on length alone (the forbidden alternative)
-        // would retain the previous stage's indices and set bounds on the wrong
-        // columns.
+        // stage, so two stages can share the same length yet address different
+        // columns. Keying on length alone (the forbidden alternative) would retain
+        // the previous stage's indices and set bounds on the wrong columns.
         if ws.scratch.last_ncs_col_start != ncs_col_start
             || ws.scratch.ncs_col_indices_buf.len() != expected_len
         {
-            crate::noise::build_active_ncs_col_indices(
-                slot_to_local,
+            crate::noise::build_dense_ncs_col_indices(
+                dense_col,
                 ncs_col_start,
                 n_blks_stage,
                 &mut ws.scratch.ncs_col_indices_buf,
             );
             ws.scratch.last_ncs_col_start = ncs_col_start;
         }
-        crate::noise::gather_active_ncs_bounds(
-            slot_to_local,
+        crate::noise::gather_dense_ncs_bounds(
+            windows,
+            stage_id,
             n_blks_stage,
             &ws.scratch.ncs_col_lower_buf,
             &ws.scratch.ncs_col_upper_buf,

@@ -630,60 +630,64 @@ pub(crate) fn transform_ncs_noise(
     }
 }
 
-/// Rebuild the NCS column-index buffer for one stage's **active** NCS columns.
+/// Rebuild the NCS column-index buffer for one stage's stochastic NCS columns.
 ///
-/// `slot_to_local[slot]` is `Some(ncs_local)` when the stochastic NCS at `slot`
-/// (id-sorted `StochasticContext::ncs_entity_ids` order) is active at this stage,
-/// `None` otherwise. The pushed column index strides by `ncs_local` — the slot's
-/// position within `active_ncs_indices[stage]`, the order the LP allocated NCS
-/// columns — never by the raw stochastic slot. Striding by the slot would address
-/// `n_stochastic_ncs` columns; at a strict-subset stage the LP allocates only
-/// `(active stochastic NCS) * block_count` NCS columns, so a slot-strided index
-/// overruns the NCS column block and the solver rejects the set-bounds call. An
-/// inactive slot (`None`) contributes no index.
+/// Under the dense layout every NCS keeps a column at every stage, so every
+/// stochastic slot contributes a block: the pushed column index strides by
+/// `dense_col[slot]` — the slot's NCS **system index** (the dense column
+/// position), identical at every stage — for every slot. The forbidden
+/// alternative (striding by the raw slot index) misaddresses the column whenever
+/// only a subset of NCS are stochastic or the orders diverge, because the dense
+/// column block is system-indexed, not stochastic-slot-indexed.
 ///
 /// The buffer is cleared then refilled; callers rebuild it lazily on a stage
-/// transition — when the per-stage NCS column start or the expected active length
-/// changes (see the patch sites). No heap allocation beyond the initial capacity
-/// growth.
-pub(crate) fn build_active_ncs_col_indices(
-    slot_to_local: &[Option<usize>],
+/// transition — when the per-stage NCS column start changes (see the patch
+/// sites). No heap allocation beyond the initial capacity growth.
+pub(crate) fn build_dense_ncs_col_indices(
+    dense_col: &[usize],
     ncs_col_start: usize,
     block_count: usize,
     indices_out: &mut Vec<usize>,
 ) {
     indices_out.clear();
-    for &maybe_local in slot_to_local {
-        if let Some(ncs_local) = maybe_local {
-            for blk in 0..block_count {
-                indices_out.push(ncs_col_start + ncs_local * block_count + blk);
-            }
+    for &col in dense_col {
+        for blk in 0..block_count {
+            indices_out.push(ncs_col_start + col * block_count + blk);
         }
     }
 }
 
-/// Gather the **active** slots' NCS column bounds from the full slot-order buffers.
+/// Gather the stochastic slots' NCS column bounds, zeroing dormant slots.
 ///
 /// `lower_src` / `upper_src` are the verbatim `transform_ncs_noise` outputs — one
-/// `block_count`-wide block per stochastic slot, in slot order, **including
-/// inactive slots**. This copies only the active slots' blocks (those with
-/// `Some(ncs_local)` in `slot_to_local`) into `lower_out` / `upper_out`, in slot
-/// order, so the gathered buffers run parallel to the index buffer built by
-/// [`build_active_ncs_col_indices`] and the set-bounds call receives index/lower/
-/// upper buffers of equal length. Passing `lower_src` / `upper_src` verbatim on a
-/// subset stage would feed inactive slots' bounds into the call and over-length
-/// it. When every slot is active the gather reproduces the source buffers exactly
-/// (hash-neutral for the all-active case). Cleared then refilled each call; the
-/// bounds change every opening, so unlike the index buffer this cannot be cached.
+/// `block_count`-wide block per stochastic slot, in slot order. Under the dense
+/// layout every slot has a column, so this copies every slot's block into
+/// `lower_out` / `upper_out`, EXCEPT a commissioning-dormant slot — one whose
+/// `windows[slot] = (entry, exit)` excludes `stage_id` per
+/// `commissioning_active` — whose block
+/// is forced to `[0, 0]` to override the stochastic availability cap, the
+/// zero-influence convention that makes a dormant NCS contribute nothing. The
+/// dormancy is computed inline from the stage-invariant `windows` and the stage's
+/// own `stage_id` (no per-stage dormancy mask is stored): the result is constant
+/// within a stage, so it is effectively computed once per stage. The forbidden
+/// alternative (copying the stochastic cap for a dormant slot) would let a
+/// not-yet-commissioned source dispatch. The gathered buffers run parallel to the
+/// index buffer built by [`build_dense_ncs_col_indices`], so the set-bounds call
+/// receives index/lower/upper buffers of equal length (`windows.len() *
+/// block_count`). When no slot is dormant the gather reproduces the source buffers
+/// exactly (hash-neutral for the no-window case). Cleared then refilled each call;
+/// the bounds change every opening, so unlike the index buffer this cannot be
+/// cached.
 ///
 /// # Panics
 ///
 /// Panics in debug builds when `lower_src` or `upper_src` is shorter than
-/// `slot_to_local.len() * block_count` — the highest slot's block at
+/// `windows.len() * block_count` — the highest slot's block at
 /// `slot * block_count..slot * block_count + block_count` would otherwise read
 /// out of range.
-pub(crate) fn gather_active_ncs_bounds(
-    slot_to_local: &[Option<usize>],
+pub(crate) fn gather_dense_ncs_bounds(
+    windows: &[(Option<i32>, Option<i32>)],
+    stage_id: i32,
     block_count: usize,
     lower_src: &[f64],
     upper_src: &[f64],
@@ -693,29 +697,25 @@ pub(crate) fn gather_active_ncs_bounds(
     lower_out.clear();
     upper_out.clear();
     debug_assert!(
-        lower_src.len() >= slot_to_local.len() * block_count,
-        "lower_src too short for slot_to_local: every slot strides by block_count",
+        lower_src.len() >= windows.len() * block_count,
+        "lower_src too short for windows: every slot strides by block_count",
     );
     debug_assert!(
-        upper_src.len() >= slot_to_local.len() * block_count,
-        "upper_src too short for slot_to_local: every slot strides by block_count",
+        upper_src.len() >= windows.len() * block_count,
+        "upper_src too short for windows: every slot strides by block_count",
     );
-    for (slot, &maybe_local) in slot_to_local.iter().enumerate() {
-        if maybe_local.is_some() {
+    for (slot, &(entry, exit)) in windows.iter().enumerate() {
+        if crate::lp_builder::commissioning_active(entry, exit, stage_id) {
             let base = slot * block_count;
             lower_out.extend_from_slice(&lower_src[base..base + block_count]);
             upper_out.extend_from_slice(&upper_src[base..base + block_count]);
+        } else {
+            for _ in 0..block_count {
+                lower_out.push(0.0);
+                upper_out.push(0.0);
+            }
         }
     }
-}
-
-/// Count the active stochastic NCS slots at one stage.
-///
-/// The active-subset column/bound buffers have length `count * block_count`; the
-/// patch sites key their lazy index-buffer rebuild on this length, not on
-/// `n_stochastic_ncs`.
-pub(crate) fn active_ncs_slot_count(slot_to_local: &[Option<usize>]) -> usize {
-    slot_to_local.iter().filter(|s| s.is_some()).count()
 }
 
 // ---------------------------------------------------------------------------
@@ -753,9 +753,8 @@ mod tests {
         inflow_method::InflowNonNegativityMethod,
         lp_builder::StageGeometry,
         noise::{
-            active_ncs_slot_count, build_active_ncs_col_indices, compute_effective_eta,
-            gather_active_ncs_bounds, shift_anticipated_state, shift_lag_state,
-            transform_inflow_noise, transform_load_noise,
+            build_dense_ncs_col_indices, compute_effective_eta, gather_dense_ncs_bounds,
+            shift_anticipated_state, shift_lag_state, transform_inflow_noise, transform_load_noise,
         },
         workspace::ScratchBuffers,
     };
@@ -1149,7 +1148,9 @@ mod tests {
             load_bus_indices: &[],
             block_counts_per_stage: &[1],
             ncs_col_starts: &[],
-            ncs_active_slot_to_local: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1228,7 +1229,9 @@ mod tests {
             load_bus_indices: &[],
             block_counts_per_stage: &[1],
             ncs_col_starts: &[],
-            ncs_active_slot_to_local: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1307,7 +1310,9 @@ mod tests {
             load_bus_indices: &[],
             block_counts_per_stage: &[1],
             ncs_col_starts: &[],
-            ncs_active_slot_to_local: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -2852,70 +2857,70 @@ mod tests {
         assert_eq!(state[ant_start + 1], 50.0);
     }
 
-    // ── active-subset NCS column/bound mapping ───────────────────────────────
+    // ── dense NCS column/bound mapping ───────────────────────────────────────
 
-    /// Strict-subset stage: slot 0 inactive (`None`), slots 1,2 active at local
-    /// columns 0,1. The emitted index/bound buffers have length
-    /// `active_stochastic_ncs * n_blks = 2 * 2 = 4`, NOT `n_stochastic_ncs *
-    /// n_blks = 3 * 2 = 6` — the inactive slot contributes zero entries.
-    /// Indices stride by `ncs_local` from the per-stage base, and the gathered
-    /// bounds copy only the active slots' blocks from the full slot-order buffers.
+    /// Dormant stage: slot 0's window excludes the stage, slots 1,2 windowless.
+    /// Under the dense layout every slot keeps a column, so the index buffer
+    /// strides all three by their dense column position (here slot == dense
+    /// column). The gather computes dormancy inline from the windows and the
+    /// stage id, copying the active slots' bounds verbatim and forcing `[0, 0]`
+    /// for the dormant slot — the buffers are full length `n_stochastic_ncs * n_blks`.
     #[test]
-    fn active_ncs_subset_buffers_have_active_length() {
+    fn dense_ncs_dormant_slot_is_zeroed() {
         let n_blks = 2_usize;
         let ncs_col_start = 100_usize;
-        // slot 0: inactive; slot 1 → local 0; slot 2 → local 1.
-        let slot_to_local = vec![None, Some(0_usize), Some(1_usize)];
-        assert_eq!(active_ncs_slot_count(&slot_to_local), 2);
+        let dense_col = vec![0_usize, 1, 2];
+        let stage_id = 0_i32;
+        // slot 0 enters at stage 1 (dormant at stage 0); slots 1,2 windowless.
+        let windows = vec![(Some(1_i32), None), (None, None), (None, None)];
 
         let mut indices = Vec::new();
-        build_active_ncs_col_indices(&slot_to_local, ncs_col_start, n_blks, &mut indices);
-        // local 0 → cols 100,101; local 1 → cols 102,103. Inactive slot 0: nothing.
-        assert_eq!(indices, vec![100, 101, 102, 103]);
-        assert_eq!(indices.len(), 2 * n_blks, "index buffer is active*n_blks");
+        build_dense_ncs_col_indices(&dense_col, ncs_col_start, n_blks, &mut indices);
+        // Every slot contributes a block: 100,101 | 102,103 | 104,105.
+        assert_eq!(indices, vec![100, 101, 102, 103, 104, 105]);
+        assert_eq!(indices.len(), dense_col.len() * n_blks);
 
-        // Full slot-order bounds: one 2-block stride per stochastic slot (3 slots).
         let lower_src = vec![0.0, 0.0, 10.0, 11.0, 20.0, 21.0];
         let upper_src = vec![1.0, 2.0, 13.0, 14.0, 23.0, 24.0];
         let mut lower_out = Vec::new();
         let mut upper_out = Vec::new();
-        gather_active_ncs_bounds(
-            &slot_to_local,
+        gather_dense_ncs_bounds(
+            &windows,
+            stage_id,
             n_blks,
             &lower_src,
             &upper_src,
             &mut lower_out,
             &mut upper_out,
         );
-        // Only slots 1,2 are gathered (slot 0 skipped): blocks [10,11,20,21] /
-        // [13,14,23,24].
-        assert_eq!(lower_out, vec![10.0, 11.0, 20.0, 21.0]);
-        assert_eq!(upper_out, vec![13.0, 14.0, 23.0, 24.0]);
-        assert_eq!(lower_out.len(), 2 * n_blks);
+        // Slot 0 forced to [0,0]; slots 1,2 copied verbatim.
+        assert_eq!(lower_out, vec![0.0, 0.0, 10.0, 11.0, 20.0, 21.0]);
+        assert_eq!(upper_out, vec![0.0, 0.0, 13.0, 14.0, 23.0, 24.0]);
         assert_eq!(upper_out.len(), indices.len(), "bounds parallel to indices");
     }
 
-    /// All-active, slot order == active order: the gathered bounds and built
-    /// indices are bit-identical to a verbatim full `n_stochastic_ncs` block —
-    /// the hash-neutrality contract for every existing case.
+    /// No-window case: every slot windowless (active at every stage) and slot
+    /// order == dense column order — the gathered bounds and built indices are
+    /// bit-identical to a verbatim full `n_stochastic_ncs` block, the
+    /// hash-neutrality contract for every existing case.
     #[test]
-    fn active_ncs_full_set_is_slot_order_identical() {
+    fn dense_ncs_no_dormancy_is_slot_order_identical() {
         let n_blks = 2_usize;
         let ncs_col_start = 0_usize;
-        let slot_to_local = vec![Some(0_usize), Some(1_usize), Some(2_usize)];
-        assert_eq!(active_ncs_slot_count(&slot_to_local), 3);
+        let dense_col = vec![0_usize, 1, 2];
+        let windows = vec![(None, None), (None, None), (None, None)];
 
         let mut indices = Vec::new();
-        build_active_ncs_col_indices(&slot_to_local, ncs_col_start, n_blks, &mut indices);
-        // Identical to the old `for slot { for blk { start + slot*n_blks + blk }}`.
+        build_dense_ncs_col_indices(&dense_col, ncs_col_start, n_blks, &mut indices);
         assert_eq!(indices, vec![0, 1, 2, 3, 4, 5]);
 
         let lower_src = vec![0.0, 0.0, 1.0, 1.0, 2.0, 2.0];
         let upper_src = vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         let mut lower_out = Vec::new();
         let mut upper_out = Vec::new();
-        gather_active_ncs_bounds(
-            &slot_to_local,
+        gather_dense_ncs_bounds(
+            &windows,
+            7,
             n_blks,
             &lower_src,
             &upper_src,
@@ -2927,19 +2932,19 @@ mod tests {
         assert_eq!(upper_out, upper_src);
     }
 
-    /// Two stages with **equal** `active_count * n_blks` but **different**
-    /// `ncs_col_start` must rebuild the index buffer on the second stage. This
-    /// pins the invariant: the patch-site guard keys the lazy rebuild on
-    /// `(last_ncs_col_start, len)`, not on `len` alone. A length-only guard (the
-    /// forbidden alternative) would not fire here — both stages have length
-    /// `2 * 2 = 4` — and would leave the previous stage's indices in place, writing
-    /// `set_col_bounds` onto the wrong LP columns.
+    /// Two stages with **equal** length but **different** `ncs_col_start` must
+    /// rebuild the index buffer on the second stage. This pins the invariant: the
+    /// patch-site guard keys the lazy rebuild on `(last_ncs_col_start, len)`, not
+    /// on `len` alone. A length-only guard (the forbidden alternative) would not
+    /// fire here — both stages have length `2 * 2 = 4` — and would leave the
+    /// previous stage's indices in place, writing `set_col_bounds` onto the wrong
+    /// LP columns.
     #[test]
     fn index_buffer_rebuilds_on_ncs_col_start_change_at_equal_length() {
         let n_blks = 2_usize;
-        // Same active set / same length at both stages: 2 active slots × 2 blocks.
-        let slot_to_local = vec![Some(0_usize), Some(1_usize)];
-        let expected_len = active_ncs_slot_count(&slot_to_local) * n_blks;
+        // Same dense column set / same length at both stages: 2 slots × 2 blocks.
+        let dense_col = vec![0_usize, 1];
+        let expected_len = dense_col.len() * n_blks;
         assert_eq!(expected_len, 4);
 
         // Reproduce the patch-site guard verbatim: rebuild iff the stored start
@@ -2948,7 +2953,7 @@ mod tests {
         let mut last_ncs_col_start = usize::MAX;
         let rebuild = |start: usize, buf: &mut Vec<usize>, last: &mut usize| {
             if *last != start || buf.len() != expected_len {
-                build_active_ncs_col_indices(&slot_to_local, start, n_blks, buf);
+                build_dense_ncs_col_indices(&dense_col, start, n_blks, buf);
                 *last = start;
                 true
             } else {

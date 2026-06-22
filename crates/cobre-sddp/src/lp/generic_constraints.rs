@@ -814,9 +814,16 @@ fn resolve_anticipated_decision(
 /// bus-balance coupling coefficient.
 ///
 /// Column arithmetic: the flat block-major address
-/// `grid.flat(col_pumping_start, p_idx, eff_blk)` where
-/// `eff_blk = block_id.unwrap_or(block_idx)`. For `block_id = None` the caller
-/// loop supplies the effective block via `block_idx` (one resolver call per
+/// `grid.flat(col_pumping_start, p_idx, eff_blk)` where `p_idx` is the station's
+/// SYSTEM index (`pumping_pos.get(station_id)`) and `eff_blk =
+/// block_id.unwrap_or(block_idx)`. Under the dense layout the pumping column block
+/// is system-indexed, so this system index IS the correct column-block position at
+/// every stage — a commissioning-dormant station keeps its (zeroed) column, so the
+/// address is well-defined regardless of the station's window. (Under the prior
+/// active-subset layout the column block was strided by active-local index while
+/// this resolver used the system index, mismatching at any gated stage; the dense
+/// layout removes that latent bug by construction.) For `block_id = None` the
+/// caller loop supplies the effective block via `block_idx` (one resolver call per
 /// block), mirroring [`resolve_block_variable`]; this function returns a single
 /// pair per call regardless of `block_id`.
 ///

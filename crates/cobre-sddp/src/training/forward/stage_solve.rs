@@ -167,41 +167,48 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         &ws.patch_buf.lower[..pc],
         &ws.patch_buf.upper[..pc],
     );
-    // Patch NCS availability bounds onto this stage's **active** NCS columns,
-    // indexed by `ncs_local` within `active_ncs_indices[t]` via the per-stage
-    // `ctx.ncs_active_slot_to_local[t]` map — a stochastic NCS inactive at this
-    // stage contributes no column and no bound. `transform_ncs_noise` above wrote
+    // Patch NCS availability bounds onto this stage's dense NCS columns, indexed
+    // by `ncs_stochastic_dense_col[slot]` (the slot's NCS system index — the dense
+    // column position, identical at every stage). `transform_ncs_noise` above wrote
     // `ncs_col_{lower,upper}_buf` in full stochastic-slot order; the gather copies
-    // only the active slots' bounds (parallel to the index buffer), since a subset
-    // stage allocates only `(active stochastic NCS) * n_blks` columns and a full
-    // `n_stochastic_ncs` block would overrun. The index buffer is constant across
-    // openings, so it is rebuilt lazily on a stage transition (when the per-stage
-    // NCS column start or the active-subset length changes); the bounds change
-    // every scenario, so they are gathered every solve.
+    // every slot's bounds (parallel to the index buffer), forcing `[0, 0]` for a
+    // slot whose `ncs_stochastic_windows[slot]` excludes this stage's id (dormancy
+    // computed inline by the gather) so a not-yet-commissioned source dispatches
+    // nothing. The index buffer is constant across openings, so it is rebuilt
+    // lazily on a stage transition (when the per-stage NCS column start changes);
+    // the bounds change every scenario, so they are gathered every solve.
     if n_stochastic_ncs > 0 && study_dims.has_ncs {
         let n_blks = ctx.block_counts_per_stage[t];
-        let slot_to_local = &ctx.ncs_active_slot_to_local[t];
+        let dense_col = ctx.ncs_stochastic_dense_col;
+        let windows = ctx.ncs_stochastic_windows;
+        // Stage id is the dormancy key (NOT the index `t`; filtered placeholder
+        // stages can shift the id off the index).
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let stage_id = training_ctx
+            .stages
+            .get(t)
+            .map_or(t as i32, |stage| stage.id);
         let ncs_col_start = ctx.ncs_col_starts[t];
-        let expected_len = crate::noise::active_ncs_slot_count(slot_to_local) * n_blks;
+        let expected_len = dense_col.len() * n_blks;
         // The index buffer must be rebuilt when the per-stage NCS column **start**
         // changes, not only when its length changes: `ncs_col_starts[t]` varies per
-        // stage, so two stages can share `active_count * n_blks` yet address
-        // different columns. Keying on length alone (the forbidden alternative)
-        // would retain the previous stage's indices and set bounds on the wrong
-        // columns.
+        // stage, so two stages can share the same length yet address different
+        // columns. Keying on length alone (the forbidden alternative) would retain
+        // the previous stage's indices and set bounds on the wrong columns.
         if ws.scratch.last_ncs_col_start != ncs_col_start
             || ws.scratch.ncs_col_indices_buf.len() != expected_len
         {
-            crate::noise::build_active_ncs_col_indices(
-                slot_to_local,
+            crate::noise::build_dense_ncs_col_indices(
+                dense_col,
                 ncs_col_start,
                 n_blks,
                 &mut ws.scratch.ncs_col_indices_buf,
             );
             ws.scratch.last_ncs_col_start = ncs_col_start;
         }
-        crate::noise::gather_active_ncs_bounds(
-            slot_to_local,
+        crate::noise::gather_dense_ncs_bounds(
+            windows,
+            stage_id,
             n_blks,
             &ws.scratch.ncs_col_lower_buf,
             &ws.scratch.ncs_col_upper_buf,

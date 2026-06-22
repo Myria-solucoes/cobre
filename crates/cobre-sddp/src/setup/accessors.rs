@@ -96,6 +96,34 @@ impl StudySetup {
         self.methodology.horizon.num_stages()
     }
 
+    /// Per-stage stochastic-NCS dormancy mask, computed for the D18
+    /// commissioning-window integration test.
+    ///
+    /// The dormancy mask is no longer stored — the patch path applies the shared
+    /// commissioning predicate inline to the stage-invariant
+    /// `ncs_stochastic_windows`. This accessor reconstructs the per-stage mask the
+    /// same way (window vs each study stage id) and returns it owned, so the
+    /// out-of-crate `tests/` harness can assert the per-stage variance without the
+    /// crate-private predicate. Outer index is the study stage; inner is the
+    /// stochastic slot (id-sorted `StochasticContext::ncs_entity_ids` order).
+    /// `true` marks a commissioning-dormant slot whose dense NCS column is zeroed
+    /// at that stage.
+    #[must_use]
+    pub fn ncs_stochastic_dormant_for_test(&self) -> Vec<Vec<bool>> {
+        self.stage_data
+            .stages
+            .iter()
+            .map(|stage| {
+                self.ncs_stochastic_windows
+                    .iter()
+                    .map(|&(entry, exit)| {
+                        !crate::lp_builder::commissioning_active(entry, exit, stage.id)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
     /// Construct a [`StageContext`] borrowing from this setup.
     #[must_use]
     pub fn stage_ctx(&self) -> StageContext<'_> {
@@ -110,7 +138,9 @@ impl StudySetup {
             load_bus_indices: &self.stage_data.stage_templates.load_bus_indices,
             block_counts_per_stage: &self.stage_data.block_counts_per_stage,
             ncs_col_starts: &self.stage_data.stage_templates.ncs_col_starts,
-            ncs_active_slot_to_local: &self.ncs_active_slot_to_local,
+            n_ncs: self.stage_data.stage_templates.n_ncs,
+            ncs_stochastic_dense_col: &self.ncs_stochastic_dense_col,
+            ncs_stochastic_windows: &self.ncs_stochastic_windows,
             ncs_max_gen: &self.ncs_max_gen,
             ncs_allow_curtailment: &self.ncs_allow_curtailment,
             discount_factors: self.stage_data.stage_templates.discount_factors(),

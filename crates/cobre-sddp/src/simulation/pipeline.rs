@@ -94,10 +94,11 @@ pub struct SimulationOutputSpec<'a> {
     /// variable at that stage.
     pub ncs_col_starts: &'a [usize],
 
-    /// Per-stage active NCS entity counts.
+    /// NCS column count — the full system NCS count, identical at every stage.
     ///
-    /// `n_ncs_per_stage[stage]` is the number of active NCS entities at that stage.
-    pub n_ncs_per_stage: &'a [usize],
+    /// Under the dense layout every NCS keeps a column at every stage, so the count
+    /// is a single scalar, not a per-stage slice (a dormant NCS keeps its column).
+    pub n_ncs: usize,
 
     /// Per-stage pumping-flow column start indices.
     ///
@@ -107,12 +108,10 @@ pub struct SimulationOutputSpec<'a> {
     /// pumping-flow column base.
     pub pumping_col_starts: &'a [usize],
 
-    /// Per-stage pumping-station counts.
-    ///
-    /// `n_pumping_per_stage[stage]` is the number of pumping stations ACTIVE
-    /// (contributing columns) at that stage — the commissioning-gated count,
-    /// equal to `geometry_per_stage[stage].active_pumping_indices.len()`.
-    pub n_pumping_per_stage: &'a [usize],
+    /// Pumping-station column count — the full system station count, identical at
+    /// every stage (dense). A commissioning-dormant station keeps its column
+    /// (pinned to `[0, 0]`).
+    pub n_pumping: usize,
 
     /// Per-stage equipment geometry for extraction.
     ///
@@ -124,16 +123,17 @@ pub struct SimulationOutputSpec<'a> {
     /// into `StageExtractionSpec::geometry`.
     pub geometry_per_stage: &'a [crate::lp_builder::StageGeometry],
 
-    /// Per-station pumping power-consumption rate \[MW/(m³/s)\], the FULL
-    /// ID-sorted list parallel to `entity_counts.pumping_station_ids` and indexed
-    /// by the SYSTEM station index (not the active-local index).
+    /// Per-station pumping power-consumption rate \[MW/(m³/s)\], the ID-sorted
+    /// list parallel to `entity_counts.pumping_station_ids` and indexed by the
+    /// SYSTEM station index — which, under the dense layout, IS the column-block
+    /// position.
     ///
     /// Used by the extraction pipeline to compute
-    /// `power_consumption_mw = pumped_flow_m3s * consumption_mw_per_m3s`, reading
-    /// the system index recovered from `geometry.active_pumping_indices[p_local]`.
+    /// `power_consumption_mw = pumped_flow_m3s * consumption_mw_per_m3s`, read
+    /// directly at the dense enumeration index.
     pub pumping_consumption_mw_per_m3s: &'a [f64],
 
-    /// Per-stage active NCS entity IDs, in ID-sorted order.
+    /// Per-stage NCS entity IDs, in ID-sorted system order (dense — all NCS).
     ///
     /// `ncs_entity_ids_per_stage[stage]` lists the entity IDs of NCS sources
     /// active at that stage.
@@ -333,7 +333,7 @@ impl SimLookups {
     }
 }
 
-/// Patch NCS availability bounds onto this stage's **active** NCS columns.
+/// Patch NCS availability bounds onto this stage's dense NCS columns.
 ///
 /// Called after `set_row_bounds` and before `solve`. The `ncs_col_lower_buf` and
 /// `ncs_col_upper_buf` in the workspace scratch must already be populated by
@@ -341,42 +341,44 @@ impl SimLookups {
 /// availability ratio), in full stochastic-slot order. `ncs_col_start` is the
 /// per-stage base column of the first NCS generation variable at this stage
 /// (sourced from `SimulationOutputSpec::ncs_col_starts[t]`), never a single
-/// global stage-0 NCS base — per-stage block counts and mid-horizon commissioning
-/// make the stage bases diverge. `slot_to_local[slot]` is `Some(ncs_local)` when
-/// the stochastic NCS at `slot` is active at this stage; the index strides by
-/// `ncs_local` within `active_ncs_indices[t]`, never the raw slot — a subset stage
-/// allocates only `(active stochastic NCS) * n_blks` columns and a full
-/// `n_stochastic_ncs` block would overrun. The bounds are gathered to the active
-/// slots so the set-bounds call gets index/lower/upper buffers of equal length.
-/// The index buffer is rebuilt lazily on a stage transition (when the per-stage
-/// NCS column start or the active length changes); the bounds are gathered every
-/// solve.
+/// global stage-0 NCS base — per-stage block counts make the stage bases diverge.
+/// `dense_col[slot]` is the slot's NCS system index (the dense column position,
+/// identical at every stage); the index strides by it for every slot. The bounds
+/// are gathered for every slot, forcing `[0, 0]` for a slot dormant at this stage
+/// — dormancy computed inline by the gather from the stage-invariant `windows`
+/// and `stage_id`, the same zeroing the training patch sites apply, keeping the
+/// `.claude/rules/sddp.md` "patch NCS identically" contract. The index buffer is
+/// rebuilt lazily on a stage transition (when the per-stage NCS column start
+/// changes); the bounds are gathered every solve.
 fn apply_ncs_col_bounds<S: SolverInterface>(
     solver: &mut S,
     scratch: &mut crate::workspace::ScratchBuffers,
     ncs_col_start: usize,
-    slot_to_local: &[Option<usize>],
+    dense_col: &[usize],
+    windows: &[(Option<i32>, Option<i32>)],
+    stage_id: i32,
     n_blks: usize,
 ) {
-    let expected_len = crate::noise::active_ncs_slot_count(slot_to_local) * n_blks;
+    let expected_len = dense_col.len() * n_blks;
     // The index buffer must be rebuilt when the per-stage NCS column **start**
     // changes, not only when its length changes: `ncs_col_start` varies per stage,
-    // so two stages can share `active_count * n_blks` yet address different
-    // columns. Keying on length alone (the forbidden alternative) would retain the
-    // previous stage's indices and set bounds on the wrong columns.
+    // so two stages can share the same length yet address different columns.
+    // Keying on length alone (the forbidden alternative) would retain the previous
+    // stage's indices and set bounds on the wrong columns.
     if scratch.last_ncs_col_start != ncs_col_start
         || scratch.ncs_col_indices_buf.len() != expected_len
     {
-        crate::noise::build_active_ncs_col_indices(
-            slot_to_local,
+        crate::noise::build_dense_ncs_col_indices(
+            dense_col,
             ncs_col_start,
             n_blks,
             &mut scratch.ncs_col_indices_buf,
         );
         scratch.last_ncs_col_start = ncs_col_start;
     }
-    crate::noise::gather_active_ncs_bounds(
-        slot_to_local,
+    crate::noise::gather_dense_ncs_bounds(
+        windows,
+        stage_id,
         n_blks,
         &scratch.ncs_col_lower_buf,
         &scratch.ncs_col_upper_buf,
@@ -554,13 +556,24 @@ fn solve_simulation_stage<S: SolverInterface>(
     );
     // Patch NCS column upper bounds with per-scenario stochastic availability.
     // ncs_col_upper_buf was populated by transform_ncs_noise in the caller.
+    // Stage id is the commissioning key the dormancy predicate compares the NCS
+    // windows against (NOT the stage index `t`, which may differ from the id when
+    // negative-id placeholder stages are filtered out). Resolved once and shared by
+    // the patch and the extraction-buffer fill below.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let stage_id = training_ctx
+        .stages
+        .get(t)
+        .map_or(t as i32, |stage| stage.id);
     let n_stochastic_ncs = stochastic.n_stochastic_ncs();
     if n_stochastic_ncs > 0 && study_dims.has_ncs {
         apply_ncs_col_bounds(
             &mut ws.solver,
             &mut ws.scratch,
             output.ncs_col_starts.get(t).copied().unwrap_or(0),
-            &ctx.ncs_active_slot_to_local[t],
+            ctx.ncs_stochastic_dense_col,
+            ctx.ncs_stochastic_windows,
+            stage_id,
             ctx.block_counts_per_stage[t],
         );
     }
@@ -676,6 +689,7 @@ fn solve_simulation_stage<S: SolverInterface>(
         state,
         study_dims,
         ids,
+        stage_id,
         n_stochastic_ncs,
         lookups,
     );
@@ -790,6 +804,7 @@ fn extract_sim_stage_result(
     state: &crate::indexer::StateLayout,
     study_dims: &crate::indexer::StudyDimensions,
     ids: &SimStageIds,
+    stage_id: i32,
     n_stochastic_ncs: usize,
     lookups: &SimLookups,
 ) -> (f64, SimulationStageResult) {
@@ -833,16 +848,17 @@ fn extract_sim_stage_result(
         load_n_blks,
         ctx.load_bus_indices,
     );
-    // NCS column upper bounds for extraction, in **active-local column** order
-    // (`ncs_local * stage_n_blks + blk`), length `ncs_n * stage_n_blks`.
-    let ncs_n = output.n_ncs_per_stage.get(t).copied().unwrap_or(0);
+    // NCS column upper bounds for extraction, in dense system-column order
+    // (`ncs_sys * stage_n_blks + blk`), length `ncs_n * stage_n_blks`. `n_ncs` is
+    // the scalar full system count (constant across stages under the dense layout).
+    let ncs_n = output.n_ncs;
     let ncs_col_start = output.ncs_col_starts.get(t).copied().unwrap_or(0);
     let stage_n_blks = ctx.block_counts_per_stage.get(t).copied().unwrap_or(0);
     // Pumping-flow column base for this stage. Sourced from `StageLayout` via
     // `StageTemplates::pumping_col_starts`, the sole owner of the pumping-flow
     // column base.
     let pumping_col_start = output.pumping_col_starts.get(t).copied().unwrap_or(0);
-    let n_pumping = output.n_pumping_per_stage.get(t).copied().unwrap_or(0);
+    let n_pumping = output.n_pumping;
     // Per-stage equipment geometry: the stage-correct column and row ranges every
     // block-major family read below addresses, sourced from this stage's
     // `StageLayout`. A single global stage-0 geometry would mis-stride any stage
@@ -860,15 +876,17 @@ fn extract_sim_stage_result(
         .geometry_per_stage
         .get(t)
         .unwrap_or(&geometry_default);
-    // Build the per-active-local-column upper bounds: start from the template
-    // `col_upper` (covers any deterministic NCS active column), then overwrite each
-    // stochastic active column's block with the per-scenario realized availability
-    // from `ncs_col_upper_buf` (full stochastic-slot order). At a strict-subset
-    // stage `n_stochastic_ncs != ncs_n`, so the patched buffer in slot order does
-    // not align with active-local columns — gathering by `ncs_local` is what lets
-    // extraction report the realized availability instead of the unscaled template
-    // value. When every active NCS is stochastic and slot order equals active
-    // order, this reproduces today's patched buffer exactly.
+    // Build the per-(dense-column) upper bounds: start from the template
+    // `col_upper` (which already holds the realized cap for deterministic NCS and
+    // `0` for commissioning-dormant NCS), then overwrite each non-dormant
+    // stochastic column's block with the per-scenario realized availability from
+    // `ncs_col_upper_buf` (full stochastic-slot order). The destination block is
+    // the slot's dense column position `ncs_stochastic_dense_col[slot]`, identical
+    // at every stage. A DORMANT stochastic slot (its window excludes `stage_id`) is
+    // skipped, so its template `0` survives — copying its stochastic cap (the
+    // forbidden alternative) would report a nonzero available for a column the LP
+    // pinned to `0`. When no slot is dormant this reproduces the all-active patched
+    // buffer exactly.
     let ncs_col_upper: &[f64] = if ncs_n > 0 && stage_n_blks > 0 {
         let start = ncs_col_start;
         let end = start + ncs_n * stage_n_blks;
@@ -879,22 +897,25 @@ fn extract_sim_stage_result(
             ncs_col_upper_extract_buf.resize(ncs_n * stage_n_blks, 0.0);
         }
         if n_stochastic_ncs > 0 && !ncs_col_upper_buf.is_empty() {
-            let slot_to_local = &ctx.ncs_active_slot_to_local[t];
-            for (slot, &maybe_local) in slot_to_local.iter().enumerate() {
-                if let Some(ncs_local) = maybe_local {
-                    let dst = ncs_local * stage_n_blks;
-                    let src = slot * stage_n_blks;
-                    debug_assert!(
-                        dst + stage_n_blks <= ncs_col_upper_extract_buf.len(),
-                        "ncs extract dst out of range: ncs_local < ncs_n by construction",
-                    );
-                    debug_assert!(
-                        src + stage_n_blks <= ncs_col_upper_buf.len(),
-                        "ncs extract src out of range: slot < n_stochastic_ncs by construction",
-                    );
-                    ncs_col_upper_extract_buf[dst..dst + stage_n_blks]
-                        .copy_from_slice(&ncs_col_upper_buf[src..src + stage_n_blks]);
+            let dense_col = ctx.ncs_stochastic_dense_col;
+            let windows = ctx.ncs_stochastic_windows;
+            for (slot, &col) in dense_col.iter().enumerate() {
+                let (entry, exit) = windows[slot];
+                if !crate::lp_builder::commissioning_active(entry, exit, stage_id) {
+                    continue;
                 }
+                let dst = col * stage_n_blks;
+                let src = slot * stage_n_blks;
+                debug_assert!(
+                    dst + stage_n_blks <= ncs_col_upper_extract_buf.len(),
+                    "ncs extract dst out of range: dense_col < ncs_n by construction",
+                );
+                debug_assert!(
+                    src + stage_n_blks <= ncs_col_upper_buf.len(),
+                    "ncs extract src out of range: slot < n_stochastic_ncs by construction",
+                );
+                ncs_col_upper_extract_buf[dst..dst + stage_n_blks]
+                    .copy_from_slice(&ncs_col_upper_buf[src..src + stage_n_blks]);
             }
         }
         ncs_col_upper_extract_buf.as_slice()
@@ -2040,7 +2061,9 @@ mod tests {
                 load_bus_indices: &load_bus_indices,
                 block_counts_per_stage: &block_counts_per_stage,
                 ncs_col_starts: &[],
-                ncs_active_slot_to_local: &[],
+                n_ncs: 0,
+                ncs_stochastic_dense_col: &[],
+                ncs_stochastic_windows: &[],
                 ncs_max_gen: &[],
                 ncs_allow_curtailment: &[],
                 discount_factors: &[],
@@ -2078,9 +2101,9 @@ mod tests {
                 entity_counts: &entity_counts,
                 generic_constraint_row_entries: &[],
                 ncs_col_starts: &[],
-                n_ncs_per_stage: &[],
+                n_ncs: 0,
                 pumping_col_starts: &[],
-                n_pumping_per_stage: &[],
+                n_pumping: 0,
                 geometry_per_stage: &[],
                 pumping_consumption_mw_per_m3s: &[],
                 ncs_entity_ids_per_stage: &[],
@@ -2201,7 +2224,9 @@ mod tests {
                 load_bus_indices: &[],
                 block_counts_per_stage: &[1],
                 ncs_col_starts: &[],
-                ncs_active_slot_to_local: &[],
+                n_ncs: 0,
+                ncs_stochastic_dense_col: &[],
+                ncs_stochastic_windows: &[],
                 ncs_max_gen: &[],
                 ncs_allow_curtailment: &[],
                 discount_factors: &[],
@@ -2239,9 +2264,9 @@ mod tests {
                 entity_counts: &entity_counts,
                 generic_constraint_row_entries: &[],
                 ncs_col_starts: &[],
-                n_ncs_per_stage: &[],
+                n_ncs: 0,
                 pumping_col_starts: &[],
-                n_pumping_per_stage: &[],
+                n_pumping: 0,
                 geometry_per_stage: &[],
                 pumping_consumption_mw_per_m3s: &[],
                 ncs_entity_ids_per_stage: &[],
@@ -2387,7 +2412,9 @@ mod tests {
                 load_bus_indices: &load_bus_indices,
                 block_counts_per_stage: &block_counts_per_stage,
                 ncs_col_starts: &[],
-                ncs_active_slot_to_local: &[],
+                n_ncs: 0,
+                ncs_stochastic_dense_col: &[],
+                ncs_stochastic_windows: &[],
                 ncs_max_gen: &[],
                 ncs_allow_curtailment: &[],
                 discount_factors: &[],
@@ -2425,9 +2452,9 @@ mod tests {
                 entity_counts: &entity_counts,
                 generic_constraint_row_entries: &[],
                 ncs_col_starts: &[],
-                n_ncs_per_stage: &[],
+                n_ncs: 0,
                 pumping_col_starts: &[],
-                n_pumping_per_stage: &[],
+                n_pumping: 0,
                 geometry_per_stage: &[],
                 pumping_consumption_mw_per_m3s: &[],
                 ncs_entity_ids_per_stage: &[],
@@ -2757,7 +2784,9 @@ mod tests {
                 load_bus_indices: &[],
                 block_counts_per_stage: &[n_stages],
                 ncs_col_starts: &[],
-                ncs_active_slot_to_local: &[],
+                n_ncs: 0,
+                ncs_stochastic_dense_col: &[],
+                ncs_stochastic_windows: &[],
                 ncs_max_gen: &[],
                 ncs_allow_curtailment: &[],
                 discount_factors: &[],
@@ -2795,9 +2824,9 @@ mod tests {
                 entity_counts: &entity_counts,
                 generic_constraint_row_entries: &[],
                 ncs_col_starts: &[],
-                n_ncs_per_stage: &[],
+                n_ncs: 0,
                 pumping_col_starts: &[],
-                n_pumping_per_stage: &[],
+                n_pumping: 0,
                 geometry_per_stage: &[],
                 pumping_consumption_mw_per_m3s: &[],
                 ncs_entity_ids_per_stage: &[],
@@ -2883,7 +2912,9 @@ mod tests {
                 load_bus_indices: &[],
                 block_counts_per_stage: &[n_stages],
                 ncs_col_starts: &[],
-                ncs_active_slot_to_local: &[],
+                n_ncs: 0,
+                ncs_stochastic_dense_col: &[],
+                ncs_stochastic_windows: &[],
                 ncs_max_gen: &[],
                 ncs_allow_curtailment: &[],
                 discount_factors: &[],
@@ -2921,9 +2952,9 @@ mod tests {
                 entity_counts: &entity_counts,
                 generic_constraint_row_entries: &[],
                 ncs_col_starts: &[],
-                n_ncs_per_stage: &[],
+                n_ncs: 0,
                 pumping_col_starts: &[],
-                n_pumping_per_stage: &[],
+                n_pumping: 0,
                 geometry_per_stage: &[],
                 pumping_consumption_mw_per_m3s: &[],
                 ncs_entity_ids_per_stage: &[],
@@ -3171,7 +3202,9 @@ mod tests {
                 load_bus_indices: &[],
                 block_counts_per_stage: &[1usize],
                 ncs_col_starts: &[],
-                ncs_active_slot_to_local: &[],
+                n_ncs: 0,
+                ncs_stochastic_dense_col: &[],
+                ncs_stochastic_windows: &[],
                 ncs_max_gen: &[],
                 ncs_allow_curtailment: &[],
                 discount_factors: &[],
@@ -3211,9 +3244,9 @@ mod tests {
                 entity_counts: &entity_counts,
                 generic_constraint_row_entries: &[],
                 ncs_col_starts: &[],
-                n_ncs_per_stage: &[],
+                n_ncs: 0,
                 pumping_col_starts: &[],
-                n_pumping_per_stage: &[],
+                n_pumping: 0,
                 geometry_per_stage: &[],
                 pumping_consumption_mw_per_m3s: &[],
                 ncs_entity_ids_per_stage: &[],
