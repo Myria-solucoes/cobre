@@ -435,14 +435,15 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
         .perm_scratch
         .resize(params.config.n_scenarios.max(1) as usize, 0_usize);
 
-    // Build the study-invariant reverse-lookup tables once per worker thread.
-    // Both lookups depend only on the indexer and entity counts, which are
-    // constant across all scenarios and all stages.  This eliminates the
-    // per-(scenario, stage) allocation that would otherwise occur inside
-    // extract_thermals / extract_hydros (600k allocs for 10k scenarios × 60 stages).
+    // Build the reverse-lookup tables once per worker thread. The thermal lookup is
+    // study-invariant; the hydro lookups are one-per-stage (FPHA/evap membership is
+    // per-`(hydro, stage)`), sourced from the per-stage geometry table. Building
+    // them all up front eliminates the per-(scenario, stage) allocation that would
+    // otherwise occur inside extract_thermals / extract_hydros (600k allocs for 10k
+    // scenarios × 60 stages).
     let lookups = SimLookups::build(
         params.training_ctx.study_dims,
-        params.training_ctx.indexer,
+        params.ctx.geometry_per_stage,
         params.output.entity_counts.thermal_ids.len(),
         params.output.entity_counts.hydro_ids.len(),
     );

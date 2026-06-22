@@ -285,37 +285,47 @@ impl<'a> SimScenarioLoadSpec<'a> {
     }
 }
 
-/// Pre-built study-invariant reverse-lookup tables for simulation extraction.
+/// Pre-built reverse-lookup tables for simulation extraction.
 ///
-/// Both lookups depend only on the study's [`crate::indexer::StageIndexer`] and
-/// entity counts, which are constant across all scenarios and all stages.
-/// Build once per simulation run (or per worker thread) via
-/// [`SimLookups::build`] and pass by reference into every per-stage extraction
-/// call to eliminate per-`(scenario, stage)` allocations on the hot path.
+/// Built once per simulation run (or per worker thread) via [`SimLookups::build`]
+/// and passed by reference into every per-stage extraction call to eliminate
+/// per-`(scenario, stage)` allocations on the hot path.
+///
+/// The two lookups differ in stage-variance, by their identity-list owners:
+/// anticipated-thermal membership is study-invariant (one `ThermalReverseLookup`
+/// for the whole run), but FPHA/evaporation membership is per-`(hydro, stage)`
+/// (one [`HydroReverseLookup`] per stage, indexed by stage at extraction). Reading
+/// a single global hydro lookup for every stage would misclassify any stage whose
+/// FPHA/evap membership differs from stage 0's — which is exactly the per-stage
+/// vector below prevents.
 pub(crate) struct SimLookups {
-    /// Reverse-lookup table for anticipated thermal indices.
+    /// Reverse-lookup table for anticipated thermal indices (study-invariant).
     pub(crate) thermal: ThermalReverseLookup,
-    /// Reverse-lookup table for hydro FPHA and evaporation indices.
-    pub(crate) hydro: HydroReverseLookup,
+    /// Per-stage reverse-lookup tables for hydro FPHA and evaporation indices.
+    ///
+    /// `hydro_per_stage[t]` is the lookup for stage `t`; length equals the number
+    /// of study stages. Indexed by stage at the extraction call site.
+    pub(crate) hydro_per_stage: Vec<HydroReverseLookup>,
 }
 
 impl SimLookups {
-    /// Build both reverse-lookup tables from the study's dimensions, indexer, and
-    /// entity counts.
+    /// Build the reverse-lookup tables from the study's dimensions, the per-stage
+    /// geometry table, and entity counts.
     ///
     /// Allocates once; the returned value is then used read-only for the entire
-    /// simulation run. The thermal lookup reads the anticipated identity list from
-    /// `study_dims`; the hydro lookup reads the per-stage FPHA/evaporation identity
-    /// lists from `indexer`.
+    /// simulation run. The thermal lookup reads the study-invariant anticipated
+    /// identity list from `study_dims`; the per-stage hydro lookups read the
+    /// stage-correct FPHA/evaporation identity lists from `geometry_per_stage`,
+    /// never the global stage-0 `StageIndexer`.
     pub(crate) fn build(
         study_dims: &crate::indexer::StudyDimensions,
-        indexer: &crate::indexer::StageIndexer,
+        geometry_per_stage: &[crate::lp_builder::StageGeometry],
         n_thermals: usize,
         n_hydros: usize,
     ) -> Self {
         Self {
             thermal: ThermalReverseLookup::build(study_dims, n_thermals),
-            hydro: HydroReverseLookup::build(indexer, n_hydros),
+            hydro_per_stage: HydroReverseLookup::build_per_stage(geometry_per_stage, n_hydros),
         }
     }
 }
@@ -889,6 +899,24 @@ fn extract_sim_stage_result(
     } else {
         &[]
     };
+    // Per-stage hydro FPHA/evap lookup: indexed by stage `t`, since membership is
+    // per-`(hydro, stage)`. Production always has one entry per study stage; a
+    // synthetic test with an empty geometry table falls back to an all-`None`
+    // default sized to the entity hydro count (no hydro classified FPHA/evap),
+    // matching the sibling empty-slice fallbacks. The default is sized to the same
+    // `hydro_ids.len()` the hydro extraction loop iterates, so `lookup.fpha[h]` /
+    // `lookup.evap[h]` stay in bounds. Built only on that empty path, never on the
+    // production hot path where `hydro_per_stage[t]` is present.
+    let hydro_lookup_default;
+    let hydro_lookup = if let Some(l) = lookups.hydro_per_stage.get(t) {
+        l
+    } else {
+        hydro_lookup_default = crate::simulation::extraction::HydroReverseLookup::build(
+            &crate::lp_builder::StageGeometry::default(),
+            output.entity_counts.hydro_ids.len(),
+        );
+        &hydro_lookup_default
+    };
     let result = extract_stage_result_with_lookups(
         &SolutionView {
             primal: unscaled_primal,
@@ -938,7 +966,7 @@ fn extract_sim_stage_result(
             n_stages: ctx.templates.len(),
         },
         ids.stage_id_u32,
-        &lookups.hydro,
+        hydro_lookup,
         &lookups.thermal,
     );
     (immediate_cost, result)
@@ -3216,7 +3244,7 @@ mod tests {
                 warm_basis: None,
             };
             let lookups =
-                SimLookups::build(&crate::indexer::test_fixtures::study_dims(), &indexer, 0, 1);
+                SimLookups::build(&crate::indexer::test_fixtures::study_dims(), &[], 0, 1);
 
             let (immediate, result) = solve_simulation_stage(
                 &mut ws,

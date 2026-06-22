@@ -45,35 +45,56 @@ use crate::simulation::types::{
 };
 
 /// Pre-computed reverse lookups from system hydro index to local FPHA/evaporation
-/// index.
+/// index, for **one stage**.
 ///
-/// Build once per simulation run via [`HydroReverseLookup::build`] and reuse
-/// across all (scenario, stage) pairs.  The lookup depends only on the
-/// study-invariant [`StageIndexer`] and `n_hydros`; it never changes between
-/// stages or scenarios.
+/// FPHA/evaporation membership is per-`(hydro, stage)` — the resolved production
+/// model can change which hydros are FPHA from stage to stage — so this lookup is
+/// stage-specific, NOT study-invariant. It is built from the per-stage
+/// [`StageGeometry`] (the stage-correct identity lists), never the global stage-0
+/// `StageIndexer`, whose lists describe stage 0 only and misclassify any stage
+/// whose membership differs. Build one per stage once per simulation run via
+/// [`HydroReverseLookup::build_per_stage`] and index by stage at extraction.
 pub(crate) struct HydroReverseLookup {
-    /// `fpha[h]` is `Some(local_idx)` if hydro `h` is FPHA, `None` otherwise.
+    /// `fpha[h]` is `Some(local_idx)` if hydro `h` is FPHA at this stage, `None` otherwise.
     pub(crate) fpha: Vec<Option<usize>>,
-    /// `evap[h]` is `Some(local_idx)` if hydro `h` has evaporation, `None` otherwise.
+    /// `evap[h]` is `Some(local_idx)` if hydro `h` has evaporation at this stage, `None` otherwise.
     pub(crate) evap: Vec<Option<usize>>,
 }
 
 impl HydroReverseLookup {
-    /// Build the reverse lookup table for hydro FPHA and evaporation indices.
+    /// Build the reverse lookup for one stage from its [`StageGeometry`].
     ///
-    /// Allocates two `Vec<Option<usize>>` of length `n_hydros`. Call this once
-    /// per simulation run (or once per worker) and pass the result by reference
-    /// into each per-stage extraction call.
-    pub(crate) fn build(indexer: &StageIndexer, n_hydros: usize) -> Self {
+    /// Allocates two `Vec<Option<usize>>` of length `n_hydros`, populated from the
+    /// per-stage `fpha_hydro_indices` / `evap_hydro_indices`. Reads the stage-correct
+    /// lists from `geometry`, never the global stage-0 `StageIndexer` — using the
+    /// stage-0 lists for a stage whose FPHA/evap membership differs IS the defect
+    /// this per-stage build exists to forbid.
+    pub(crate) fn build(geometry: &crate::lp_builder::StageGeometry, n_hydros: usize) -> Self {
         let mut fpha = vec![None; n_hydros];
-        for (local, &sys) in indexer.fpha_hydro_indices.iter().enumerate() {
+        for (local, &sys) in geometry.fpha_hydro_indices.iter().enumerate() {
             fpha[sys] = Some(local);
         }
         let mut evap = vec![None; n_hydros];
-        for (local, &sys) in indexer.evap_hydro_indices.iter().enumerate() {
+        for (local, &sys) in geometry.evap_hydro_indices.iter().enumerate() {
             evap[sys] = Some(local);
         }
         Self { fpha, evap }
+    }
+
+    /// Build one [`HydroReverseLookup`] per stage from the per-stage geometry table.
+    ///
+    /// Allocates the full `Vec<HydroReverseLookup>` once per simulation run (or per
+    /// worker) so the per-`(scenario, stage)` extraction reads a pre-built lookup by
+    /// stage index — never reallocating on the hot path. Length equals
+    /// `geometry_per_stage.len()`.
+    pub(crate) fn build_per_stage(
+        geometry_per_stage: &[crate::lp_builder::StageGeometry],
+        n_hydros: usize,
+    ) -> Vec<Self> {
+        geometry_per_stage
+            .iter()
+            .map(|g| Self::build(g, n_hydros))
+            .collect()
     }
 }
 
@@ -1131,7 +1152,7 @@ pub fn extract_stage_result(
 ) -> SimulationStageResult {
     let n_hydros = spec.entity_counts.hydro_ids.len();
     let n_thermals = spec.entity_counts.thermal_ids.len();
-    let hydro_lookup = HydroReverseLookup::build(spec.indexer, n_hydros);
+    let hydro_lookup = HydroReverseLookup::build(spec.geometry, n_hydros);
     let thermal_lookup = ThermalReverseLookup::build(spec.study_dims, n_thermals);
     extract_stage_result_with_lookups(view, spec, stage_id, &hydro_lookup, &thermal_lookup)
 }
@@ -1141,16 +1162,17 @@ pub fn extract_stage_result(
 /// Identical to [`extract_stage_result`] but avoids building the
 /// [`HydroReverseLookup`] and [`ThermalReverseLookup`] tables on every call.
 ///
-/// The lookup tables depend only on the study-invariant [`StageIndexer`] and entity
-/// counts; they never change between stages or scenarios.  Build them once per
-/// simulation run (or per worker thread) and pass them by reference here to
+/// `thermal_lookup` is study-invariant (one for the whole run); `hydro_lookup` is
+/// the lookup for **this stage** (FPHA/evap membership is per-`(hydro, stage)`).
+/// Build the thermal lookup and the per-stage hydro lookups once per simulation
+/// run (or per worker thread) and pass the stage's entries by reference here to
 /// eliminate per-`(scenario, stage)` allocations on the hot path.
 ///
 /// # Preconditions
 ///
 /// Same as [`extract_stage_result`] plus:
-/// - `hydro_lookup` was built from the same `(indexer, n_hydros)` pair used here.
-/// - `thermal_lookup` was built from the same `(indexer, n_thermals)` pair used here.
+/// - `hydro_lookup` was built from this stage's [`StageGeometry`] and `n_hydros`.
+/// - `thermal_lookup` was built from the same `(study_dims, n_thermals)` pair used here.
 pub(crate) fn extract_stage_result_with_lookups(
     view: &SolutionView<'_>,
     spec: &StageExtractionSpec<'_>,
@@ -1800,12 +1822,66 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        EntityCounts, SolutionView, StageExtractionSpec, accumulate_category_costs,
-        assign_scenarios, extract_pumping_stations, extract_stage_result,
+        EntityCounts, HydroReverseLookup, SolutionView, StageExtractionSpec,
+        accumulate_category_costs, assign_scenarios, extract_pumping_stations,
+        extract_stage_result,
     };
     use crate::indexer::{StageIndexer, StudyDimensions};
     use crate::lp_builder::StageGeometry;
     use crate::simulation::types::{ScenarioCategoryCosts, SimulationCostResult};
+
+    // -------------------------------------------------------------------------
+    // HydroReverseLookup per-stage membership
+    // -------------------------------------------------------------------------
+
+    /// FPHA/evaporation membership is per-`(hydro, stage)`: a hydro can be FPHA at
+    /// one stage and not another (the resolved production model varies by stage).
+    /// `build_per_stage` must therefore yield a distinct lookup per stage, reading
+    /// each stage's own `StageGeometry.fpha_hydro_indices` — never a single global
+    /// stage-0 list applied to every stage. This test pins exactly that distinction:
+    /// hydro 1 is FPHA only at stage 1, so the stage-0 lookup classifies it `None`
+    /// while the stage-1 lookup classifies it `Some(local)`. A once-per-run lookup
+    /// built from stage 0 would return the same value for both stages and so could
+    /// not satisfy the `stage 0 == None` / `stage 1 == Some` split asserted here.
+    #[test]
+    fn build_per_stage_resolves_stage_varying_fpha_membership() {
+        let n_hydros = 2;
+
+        // Stage 0: only hydro 0 is FPHA. Stage 1: hydros 0 and 1 are both FPHA,
+        // so hydro 1's FPHA-local slot is 1. The `generation` range is the stage's
+        // FPHA-generation column block (one column per FPHA hydro here, n_blks = 1);
+        // its base differs per stage but only the membership lists drive the lookup.
+        let geom_stage0 = StageGeometry {
+            fpha_hydro_indices: vec![0],
+            generation: 100..101,
+            ..StageGeometry::default()
+        };
+        let geom_stage1 = StageGeometry {
+            fpha_hydro_indices: vec![0, 1],
+            generation: 200..202,
+            ..StageGeometry::default()
+        };
+        let geometry_per_stage = vec![geom_stage0, geom_stage1];
+
+        let hydro_per_stage = HydroReverseLookup::build_per_stage(&geometry_per_stage, n_hydros);
+        assert_eq!(hydro_per_stage.len(), 2);
+
+        // Hydro 1 is absent from stage 0's FPHA list and present at FPHA-local slot
+        // 1 in stage 1's — the membership genuinely differs by stage.
+        assert_eq!(hydro_per_stage[0].fpha[1], None);
+        assert_eq!(hydro_per_stage[1].fpha[1], Some(1));
+
+        // Hydro 0 is FPHA at both stages, always at FPHA-local slot 0.
+        assert_eq!(hydro_per_stage[0].fpha[0], Some(0));
+        assert_eq!(hydro_per_stage[1].fpha[0], Some(0));
+
+        // The stage-1 FPHA-local slot for hydro 1 is the index an extraction read at
+        // stage 1 uses into `geometry[1].generation`: slot 1 addresses column
+        // `generation.start + 1` (= 201), the column the solved primal occupies. A
+        // stage-0 lookup would have reported `None` and skipped this read entirely.
+        let stage1_local = hydro_per_stage[1].fpha[1].expect("hydro 1 is FPHA at stage 1");
+        assert_eq!(geometry_per_stage[1].generation.start + stage1_local, 201);
+    }
 
     // -------------------------------------------------------------------------
     // assign_scenarios
@@ -4088,7 +4164,7 @@ mod tests {
 
         // Pre-built path: lookup built once, reused across calls (hot-path pattern).
         let thermal_lookup = ThermalReverseLookup::build(&study_dims, counts.thermal_ids.len());
-        let hydro_lookup = HydroReverseLookup::build(&indexer, counts.hydro_ids.len());
+        let hydro_lookup = HydroReverseLookup::build(spec.geometry, counts.hydro_ids.len());
         let result_prebuilt =
             extract_stage_result_with_lookups(&view, &spec, 2, &hydro_lookup, &thermal_lookup);
 
