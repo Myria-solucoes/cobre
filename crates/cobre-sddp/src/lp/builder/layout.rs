@@ -133,6 +133,24 @@ pub(crate) struct TemplateBuildCtx<'a> {
     /// Length `n_anticipated`. Entry `i` is the position within `ctx.thermals`
     /// of the `i`-th anticipated plant. Mirrors the FPHA `fpha_hydro_indices` pattern.
     pub(crate) anticipated_thermal_indices: Vec<usize>,
+    /// Per-plant commissioning window `(entry_stage_id, exit_stage_id)` for the
+    /// anticipated thermals.
+    ///
+    /// Length `n_anticipated`, indexed by anticipated-local position to match
+    /// `anticipated_lead_stages` / `anticipated_thermal_indices`. Threaded into
+    /// [`StateLayout::is_anticipated_decision_active`] so the decision gate keys
+    /// on the DELIVERY stage's operation window; carrying the windows (not a
+    /// per-stage activity mask) keeps entity data out of the layout carrier,
+    /// mirroring `StageContext::ncs_stochastic_windows`.
+    pub(crate) anticipated_windows: Vec<(Option<i32>, Option<i32>)>,
+    /// Study-stage id for each study stage index (`study_stage_ids[t] = stage.id`).
+    ///
+    /// Length `n_study_stages`. The decision gate keys the operation-window clause
+    /// on the delivery stage's commissioning id (`stage.id`, NOT the stage index),
+    /// so the gate maps the delivery stage index `t + K_i` to its `stage.id`
+    /// through this slice. The strict horizon clause guarantees `t + K_i` is in
+    /// range before this slice is indexed.
+    pub(crate) study_stage_ids: Vec<i32>,
     pub(crate) has_penalty: bool,
     /// Cumulative discount factor at each stage for NPV cost computation.
     ///
@@ -915,7 +933,13 @@ impl<'a> StageLayout<'a> {
         let n_stages = ctx.resolved.bounds.n_stages();
         let n_anticipated_state_out_def_rows = (0..ctx.n_anticipated)
             .filter(|&local_idx| {
-                state.is_anticipated_decision_active(local_idx, stage_idx, n_stages)
+                state.is_anticipated_decision_active(
+                    local_idx,
+                    stage_idx,
+                    n_stages,
+                    &ctx.anticipated_windows,
+                    &ctx.study_stage_ids,
+                )
             })
             .count();
         let row_anticipated_state_out_def_start =
@@ -1068,10 +1092,14 @@ impl<'a> StageLayout<'a> {
     /// Whether anticipated plant `local_idx` is active at `stage_idx`.
     ///
     /// Builder-side accessor that delegates to the cross-module single owner of
-    /// the strict horizon gate, [`StateLayout::is_anticipated_decision_active`].
-    /// The per-stage column/row counts in [`Self::new`] and the column/row fills
-    /// resolve activity through this method, which holds the role-(a) handle
-    /// (`self.state`) the leaf owner reads — so the active set is defined once.
+    /// the anticipated-decision gate,
+    /// [`StateLayout::is_anticipated_decision_active`] (horizon clause ∧
+    /// delivery-stage operation-window clause). The per-stage column/row counts
+    /// in [`Self::new`] and the column/row fills resolve activity through this
+    /// method, which holds the role-(a) handle (`self.state`) the leaf owner
+    /// reads — so the active set is defined once. The per-plant windows and the
+    /// study-stage-id map flow through from the caller (sourced from the build
+    /// context), never stored on `StageLayout`.
     #[inline]
     #[must_use]
     pub(crate) fn is_anticipated_decision_active(
@@ -1079,9 +1107,16 @@ impl<'a> StageLayout<'a> {
         local_idx: usize,
         stage_idx: usize,
         n_stages: usize,
+        anticipated_windows: &[(Option<i32>, Option<i32>)],
+        study_stage_ids: &[i32],
     ) -> bool {
-        self.state
-            .is_anticipated_decision_active(local_idx, stage_idx, n_stages)
+        self.state.is_anticipated_decision_active(
+            local_idx,
+            stage_idx,
+            n_stages,
+            anticipated_windows,
+            study_stage_ids,
+        )
     }
 
     /// Turbine-flow column for hydro `h_idx`, block `blk`.
@@ -1667,6 +1702,14 @@ mod tests {
                 n_anticipated,
                 k_max,
                 anticipated_lead_stages,
+                // Windowless: one `(None, None)` per anticipated plant. With no
+                // window the operation-window clause is identically true, so the
+                // decision gate reduces to the strict horizon clause — the
+                // behaviour these layout tests assert. `study_stage_ids` is sized
+                // to the bounds' study-stage count so the gate's in-range
+                // delivery-stage lookup never indexes out of bounds.
+                anticipated_windows: vec![(None, None); n_anticipated],
+                study_stage_ids: (0..i32::try_from(self.bounds.n_stages()).unwrap_or(0)).collect(),
                 anticipated_thermal_indices,
                 has_penalty: false,
                 // Tests that use ZeroEntityFixtures don't exercise discount
@@ -1833,6 +1876,8 @@ mod tests {
                 k_max: 0,
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
+                anticipated_windows: vec![],
+                study_stage_ids: vec![],
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0],
                 total_hours_per_stage: vec![744.0],
@@ -2347,6 +2392,11 @@ mod tests {
                 k_max,
                 anticipated_lead_stages,
                 anticipated_thermal_indices,
+                // Windowless: one `(None, None)` per plant, so the decision gate
+                // reduces to the strict horizon clause. `study_stage_ids` covers
+                // the study-stage count so the in-range delivery lookup is safe.
+                anticipated_windows: vec![(None, None); n_anticipated],
+                study_stage_ids: (0..i32::try_from(n_stages).unwrap_or(0)).collect(),
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0; n_stages],
                 total_hours_per_stage: vec![744.0; n_stages],
@@ -2601,6 +2651,8 @@ mod tests {
                 k_max: 0,
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
+                anticipated_windows: vec![],
+                study_stage_ids: vec![],
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0; n_stages],
                 total_hours_per_stage: vec![744.0; n_stages],

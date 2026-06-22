@@ -135,6 +135,28 @@ pub struct StudySetup {
     /// scenario; non-simulated aggregate generation pre-netted from load).
     pub(crate) ncs_allow_curtailment: Vec<bool>,
 
+    /// Stage-invariant commissioning window per anticipated thermal.
+    ///
+    /// `anticipated_windows[i] = (entry_stage_id, exit_stage_id)` for the i-th
+    /// anticipated thermal, in anticipated-local order matching
+    /// `stage_data.study_dims.anticipated_thermal_indices`. Threaded into the
+    /// simulation [`StageExtractionSpec`](crate::simulation::extraction::StageExtractionSpec)
+    /// so the anticipated-decision read gates on the same horizon-∧-operation-window
+    /// predicate the LP builder used (`StateLayout::is_anticipated_decision_active`),
+    /// keying its operation-window clause on the DELIVERY stage's `stage.id`.
+    /// Carrying the windows, not a per-stage activity mask, keeps activity out of
+    /// per-stage storage — the same convention as `ncs_stochastic_windows`. Empty
+    /// when there are no anticipated thermals.
+    pub(crate) anticipated_windows: Vec<(Option<i32>, Option<i32>)>,
+
+    /// Study-stage commissioning id for each study stage index
+    /// (`study_stage_ids[t] = stage.id`). Length equals the number of study
+    /// stages. The anticipated-decision gate keys its operation-window clause on
+    /// the DELIVERY stage's `stage.id`, so the simulation context borrows this
+    /// slice to map a delivery stage index to its commissioning id. Built once at
+    /// setup from the study stages.
+    pub(crate) study_stage_ids: Vec<i32>,
+
     /// Sampling schemes and pre-built libraries for training and simulation phases.
     ///
     /// Access via `scenario_libraries.training.<field>` or
@@ -406,6 +428,8 @@ impl StudySetup {
             .filter(|s| s.id >= 0)
             .cloned()
             .collect();
+        let study_stage_ids: Vec<i32> = stages.iter().map(|s| s.id).collect();
+        let anticipated_windows = build_anticipated_windows(system);
 
         let LagData {
             stage_lag_transitions,
@@ -460,6 +484,8 @@ impl StudySetup {
             ncs_stochastic_windows,
             ncs_max_gen,
             ncs_allow_curtailment,
+            anticipated_windows,
+            study_stage_ids,
             scenario_libraries,
             loop_params: crate::config::LoopParams {
                 seed,
@@ -1096,6 +1122,22 @@ fn build_pumping_consumption(system: &System) -> Vec<f64> {
         .pumping_stations()
         .iter()
         .map(|p| p.consumption_mw_per_m3s)
+        .collect()
+}
+
+/// Build the per-plant commissioning windows for the anticipated thermals.
+///
+/// One `(entry_stage_id, exit_stage_id)` per anticipated thermal, in
+/// anticipated-local declaration order — the same order
+/// `anticipated_thermal_indices` and the LP-builder `anticipated_windows` use, so
+/// the simulation decision gate reads the matching window per anticipated-local
+/// index. Empty when there are no anticipated thermals.
+fn build_anticipated_windows(system: &System) -> Vec<(Option<i32>, Option<i32>)> {
+    system
+        .thermals()
+        .iter()
+        .filter(|t| t.anticipated_config.is_some())
+        .map(|t| (t.entry_stage_id, t.exit_stage_id))
         .collect()
 }
 

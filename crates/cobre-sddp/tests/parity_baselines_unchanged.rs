@@ -144,6 +144,19 @@ const EXPECTED_HASHES: &[(&str, &str)] = &[
         "D36",
         "ea73313186c94b872aa8a755c1c00d9537688be74971dd1bebb6bb0d35376e62",
     ),
+    // Anticipated thermal under a commissioning window AND a per-stage-varying
+    // block schedule: a K=2 anticipated thermal with window `[entry=2, exit=4)`
+    // over a 6-stage horizon. The decision gate (`is_anticipated_decision_active`)
+    // is active only when the DELIVERY stage `t + 2` lands in `[2, 4)`, so the
+    // pre-entry decision at stage 0 delivers at the first operating stage 2 and the
+    // ring buffer drains to 0 within K stages after exit. This is the only case
+    // combining an anticipated thermal with a commissioning window. This guard pins
+    // only the HiGHS `D37.sha256`; the CLP `D37.sha256` is verified by the
+    // slow-gated CLP `parity_hash_d37`.
+    (
+        "D37",
+        "c709a7433e5a2f1ceac3bb0030806ccdd85ee3ecbc2578e66a156dd3bfce7bd0",
+    ),
 ];
 
 // ---------------------------------------------------------------------------

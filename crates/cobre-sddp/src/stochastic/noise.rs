@@ -238,18 +238,23 @@ fn shift_lag_state_from_inflows(
 ///
 /// No-op when `n_anticipated == 0` or `k_max == 0`.  Zero heap allocations.
 ///
-/// ## Inactive plants (horizon boundary)
+/// ## Inactive plants (horizon boundary and operation window)
 ///
 /// This function does not gate per-plant on the decision-active predicate
-/// (`stage_idx + K_i < n_stages`, the `is_anticipated_decision_active` predicate).
-/// Inactive plants — those at stages where the LP did not emit a real
-/// decision column — rely on the LP builder pinning their decision column
-/// bounds to `[0.0, 0.0]` (the LP-builder `fill_anticipated_columns` pass).
-/// The unscaled primal at that column is therefore `0.0`, and writing `0.0`
-/// into slot `K_i - 1` is the correct ring-buffer transition: no new
-/// commitment was placed, so slot `K_i - 1` should hold zero. If a future
-/// change relaxes the `[0, 0]` invariant for inactive columns, this
-/// function must be updated to gate on the activation predicate.
+/// (`is_anticipated_decision_active`: horizon clause ∧ delivery-stage operation
+/// window). Inactive plants — those at stages where the LP did not emit a real
+/// decision column, whether because the delivery stage falls outside the horizon
+/// OR outside the plant's commissioning window — rely on the LP builder pinning
+/// their decision column bounds to `[0.0, 0.0]` (the LP-builder
+/// `fill_anticipated_columns` pass). The window case upholds the same `[0, 0]`
+/// contract as the horizon-boundary case: a dormant decision is pinned to
+/// `[0, 0]` exactly like a beyond-horizon one, so the unscaled primal at that
+/// column is `0.0`, and writing `0.0` into slot `K_i - 1` is the correct
+/// ring-buffer transition (no new commitment was placed, so slot `K_i - 1`
+/// should hold zero). A decommissioned plant therefore drains its ring buffer to
+/// `0` within `K_i` stages. If a future change relaxes the `[0, 0]` invariant for
+/// inactive columns, this function must be updated to gate on the activation
+/// predicate.
 ///
 /// # Panics (debug only)
 ///
@@ -1151,6 +1156,8 @@ mod tests {
             n_ncs: 0,
             ncs_stochastic_dense_col: &[],
             ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1232,6 +1239,8 @@ mod tests {
             n_ncs: 0,
             ncs_stochastic_dense_col: &[],
             ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1313,6 +1322,8 @@ mod tests {
             n_ncs: 0,
             ncs_stochastic_dense_col: &[],
             ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],

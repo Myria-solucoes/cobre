@@ -159,14 +159,19 @@ fn compute_anticipated_decision_mw(
     thermal_local: usize,
 ) -> Option<f64> {
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
-    // Gate on the cross-module single owner of the strict horizon predicate,
+    // Gate on the cross-module single owner of the anticipated-decision predicate
+    // (horizon clause ∧ delivery-stage operation window),
     // [`StateLayout::is_anticipated_decision_active`], so the simulation read
     // cannot drift off the LP-build geometry. Inactive ⇒ the decision column is
-    // absent from the LP, so return `None` (the early-`None` contract).
-    if !spec
-        .state
-        .is_anticipated_decision_active(local_idx, spec.stage_index, spec.n_stages)
-    {
+    // absent from the LP (pinned to `[0, 0]`), so return `None` (the early-`None`
+    // contract).
+    if !spec.state.is_anticipated_decision_active(
+        local_idx,
+        spec.stage_index,
+        spec.n_stages,
+        spec.anticipated_windows,
+        spec.study_stage_ids,
+    ) {
         return None;
     }
     // `anticipated_decision` is the control-region priced column whose base is the
@@ -498,6 +503,23 @@ pub struct StageExtractionSpec<'a> {
     /// anticipated-thermal extraction to evaluate the horizon-boundary predicate
     /// `t + K_i <= n_stages`.
     pub n_stages: usize,
+    /// Per-plant commissioning window `(entry_stage_id, exit_stage_id)` for the
+    /// anticipated thermals, indexed by anticipated-local position.
+    ///
+    /// Threaded into [`StateLayout::is_anticipated_decision_active`] so the
+    /// simulation read gates the anticipated-decision column on the same
+    /// horizon-∧-operation-window predicate the LP builder used; reading the
+    /// column when the gate is `false` would report a decision for a stage whose
+    /// decision column was pinned to `[0, 0]`. Empty when there are no
+    /// anticipated thermals.
+    pub anticipated_windows: &'a [(Option<i32>, Option<i32>)],
+    /// Study-stage commissioning id for each study stage index
+    /// (`study_stage_ids[t] = stage.id`).
+    ///
+    /// The gate keys its operation-window clause on the DELIVERY stage's
+    /// `stage.id`, so it maps the delivery stage index `t + K_i` to its id
+    /// through this slice. Length equals `n_stages`.
+    pub study_stage_ids: &'a [i32],
 }
 
 impl StageExtractionSpec<'_> {
@@ -2052,6 +2074,8 @@ mod tests {
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             3,
         );
@@ -2107,6 +2131,8 @@ mod tests {
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -2162,6 +2188,8 @@ mod tests {
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -2219,6 +2247,8 @@ mod tests {
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -2288,6 +2318,8 @@ mod tests {
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             2,
         );
@@ -2339,6 +2371,8 @@ mod tests {
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             stage_id,
         );
@@ -2396,6 +2430,8 @@ mod tests {
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -2557,6 +2593,8 @@ mod tests {
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -2705,6 +2743,8 @@ mod tests {
                 hydro_min_storage_hm3: &[],
                 stage_index: 0,
                 n_stages: 2,
+                anticipated_windows: &[(None, None)],
+                study_stage_ids: &[0, 1, 2, 3, 4, 5],
             },
             0,
         );
@@ -2806,6 +2846,8 @@ mod tests {
                 hydro_min_storage_hm3: &[],
                 stage_index: 0,
                 n_stages: 2,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -2924,6 +2966,8 @@ mod tests {
                 hydro_min_storage_hm3: &[],
                 stage_index: 0,
                 n_stages: 3,
+                anticipated_windows: &[(None, None)],
+                study_stage_ids: &[0, 1, 2, 3, 4, 5],
             },
             0,
         );
@@ -2997,6 +3041,8 @@ mod tests {
                 hydro_min_storage_hm3: &[],
                 stage_index: 1,
                 n_stages: 3,
+                anticipated_windows: &[(None, None)],
+                study_stage_ids: &[0, 1, 2, 3, 4, 5],
             },
             0,
         );
@@ -3068,6 +3114,8 @@ mod tests {
                 hydro_min_storage_hm3: &[],
                 stage_index: 2,
                 n_stages: 3,
+                anticipated_windows: &[(None, None)],
+                study_stage_ids: &[0, 1, 2, 3, 4, 5],
             },
             0,
         );
@@ -3156,6 +3204,8 @@ mod tests {
                 hydro_min_storage_hm3: &[],
                 stage_index: 0,
                 n_stages: 2,
+                anticipated_windows: &[(None, None)],
+                study_stage_ids: &[0, 1, 2, 3, 4, 5],
             },
             0,
         );
@@ -3244,6 +3294,8 @@ mod tests {
                 hydro_min_storage_hm3: &[],
                 stage_index: 0,
                 n_stages: 2,
+                anticipated_windows: &[(None, None)],
+                study_stage_ids: &[0, 1, 2, 3, 4, 5],
             },
             0,
         );
@@ -3374,6 +3426,8 @@ mod tests {
             hydro_min_storage_hm3: &[],
             stage_index: 2,
             n_stages: 3,
+            anticipated_windows: &[(None, None)],
+            study_stage_ids: &[0, 1, 2, 3, 4, 5],
         };
         let view = SolutionView {
             primal: &primal,
@@ -3436,6 +3490,8 @@ mod tests {
                 hydro_min_storage_hm3: &[],
                 stage_index: 2,
                 n_stages: 3,
+                anticipated_windows: &[(None, None)],
+                study_stage_ids: &[0, 1, 2, 3, 4, 5],
             },
             0,
         );
@@ -3524,6 +3580,8 @@ mod tests {
                 hydro_min_storage_hm3: &[],
                 stage_index: 1,
                 n_stages: 3,
+                anticipated_windows: &[(None, None)],
+                study_stage_ids: &[0, 1, 2, 3, 4, 5],
             },
             0,
         );
@@ -3597,6 +3655,8 @@ mod tests {
                 hydro_min_storage_hm3: &[],
                 stage_index: 2, // k_i == stage_index: boundary acceptance
                 n_stages: 3,
+                anticipated_windows: &[(None, None)],
+                study_stage_ids: &[0, 1, 2, 3, 4, 5],
             },
             0,
         );
@@ -3688,6 +3748,8 @@ mod tests {
                 hydro_min_storage_hm3: &[],
                 stage_index: 2, // delivery stage for thermal 20
                 n_stages: 3,
+                anticipated_windows: &[(None, None)],
+                study_stage_ids: &[0, 1, 2, 3, 4, 5],
             },
             0,
         );
@@ -3772,6 +3834,8 @@ mod tests {
             hydro_min_storage_hm3: &[],
             stage_index: 1,
             n_stages: 2,
+            anticipated_windows: &[(None, None)],
+            study_stage_ids: &[0, 1, 2, 3, 4, 5],
         };
         // In the no-block branch the fishing-constraint LHS sum vanishes; Category 6
         // pins slot 0 to incoming (0.0 here), so the helper returns Some(0.0) — same
@@ -3841,6 +3905,8 @@ mod tests {
                 hydro_min_storage_hm3: &[],
                 stage_index: 1, // delivery stage
                 n_stages: 2,
+                anticipated_windows: &[(None, None)],
+                study_stage_ids: &[0, 1, 2, 3, 4, 5],
             },
             0,
         );
@@ -3924,6 +3990,8 @@ mod tests {
                 hydro_min_storage_hm3: &[],
                 stage_index: 0, // before delivery
                 n_stages: 2,
+                anticipated_windows: &[(None, None)],
+                study_stage_ids: &[0, 1, 2, 3, 4, 5],
             },
             0,
         );
@@ -4023,6 +4091,8 @@ mod tests {
             hydro_min_storage_hm3: &[],
             stage_index: 2, // delivery stage (k_i=1, stage_index=2 > k_i)
             n_stages: 3,
+            anticipated_windows: &[(None, None)],
+            study_stage_ids: &[0, 1, 2, 3, 4, 5],
         };
 
         // Standard path: builds the lookup internally on every call.
@@ -4119,6 +4189,8 @@ mod tests {
                 hydro_min_storage_hm3: &[0.0],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -4397,6 +4469,8 @@ mod tests {
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -4495,6 +4569,8 @@ mod tests {
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -4604,6 +4680,8 @@ mod tests {
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -4724,6 +4802,8 @@ mod tests {
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -4807,6 +4887,8 @@ mod tests {
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -4920,6 +5002,8 @@ mod tests {
                 hydro_min_storage_hm3: &[0.0],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -5004,6 +5088,8 @@ mod tests {
                 hydro_min_storage_hm3: &[0.0],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -5094,6 +5180,8 @@ mod tests {
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -5178,6 +5266,8 @@ mod tests {
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -5280,6 +5370,8 @@ mod tests {
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -5404,6 +5496,8 @@ mod tests {
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -5541,6 +5635,8 @@ mod tests {
                 hydro_min_storage_hm3: &[100.0],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -5610,6 +5706,8 @@ mod tests {
                 hydro_min_storage_hm3: &[100.0],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -5668,6 +5766,8 @@ mod tests {
                 hydro_min_storage_hm3: &[100.0],
                 stage_index: 0,
                 n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
             },
             0,
         );
@@ -5746,6 +5846,8 @@ mod tests {
             hydro_min_storage_hm3: &[],
             stage_index: 0,
             n_stages: 1,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
         }
     }
 

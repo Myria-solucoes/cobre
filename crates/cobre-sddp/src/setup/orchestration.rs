@@ -83,6 +83,8 @@ impl StudySetup {
             n_ncs: self.stage_data.stage_templates.n_ncs,
             ncs_stochastic_dense_col: &self.ncs_stochastic_dense_col,
             ncs_stochastic_windows: &self.ncs_stochastic_windows,
+            anticipated_windows: &self.anticipated_windows,
+            study_stage_ids: &self.study_stage_ids,
             ncs_max_gen: &self.ncs_max_gen,
             ncs_allow_curtailment: &self.ncs_allow_curtailment,
             discount_factors: self.stage_data.stage_templates.discount_factors(),

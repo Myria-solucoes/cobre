@@ -248,6 +248,8 @@ mod tests {
             n_ncs: 0,
             ncs_stochastic_dense_col: &[],
             ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],

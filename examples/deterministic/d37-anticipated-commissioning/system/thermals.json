@@ -1,0 +1,28 @@
+{
+  "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/thermals.schema.json",
+  "thermals": [
+    {
+      "id": 0,
+      "name": "T0_backup",
+      "bus_id": 0,
+      "generation": {
+        "min_mw": 0.0,
+        "max_mw": 200.0
+      },
+      "cost_per_mwh": 100.0
+    },
+    {
+      "id": 1,
+      "name": "T1_anticipated",
+      "bus_id": 0,
+      "generation": {
+        "min_mw": 0.0,
+        "max_mw": 150.0
+      },
+      "cost_per_mwh": 5.0,
+      "anticipated_config": { "lead_stages": 2 },
+      "entry_stage_id": 2,
+      "exit_stage_id": 4
+    }
+  ]
+}

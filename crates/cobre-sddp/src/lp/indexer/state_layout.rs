@@ -459,18 +459,41 @@ impl StateLayout {
     /// Whether anticipated plant `local_idx` emits a decision column and an
     /// `anticipated_state_out_def` row at `stage_idx`.
     ///
-    /// The single cross-module owner of the strict horizon gate: active iff the
-    /// commitment delivered `K_i` stages later still falls **inside** the horizon,
-    /// `stage_idx + K_i < n_stages`. The `<` is strict and load-bearing — a `<=`
-    /// gate would price a commitment delivered at `stage_idx + K_i == n_stages`,
-    /// whose delivery stage falls outside `[0, n_stages)` and has no delivery LP.
-    /// The LP-builder column/row counts (via the `lp::builder` `StageLayout`
-    /// method that delegates here) and the simulation read
-    /// (`compute_anticipated_decision_mw`) both resolve activity through this one
-    /// method, so the active set is defined in exactly one place.
+    /// The single cross-module owner of the anticipated-decision gate, the
+    /// conjunction of two clauses on the **delivery** stage `t + K_i`:
+    ///
+    /// 1. **Strict horizon clause** — the commitment delivered `K_i` stages later
+    ///    still falls **inside** the horizon, `stage_idx + K_i < n_stages`. The
+    ///    `<` is strict and load-bearing: a `<=` gate would price a commitment
+    ///    delivered at `stage_idx + K_i == n_stages`, whose delivery stage falls
+    ///    outside `[0, n_stages)` and has no delivery LP.
+    /// 2. **Operation-window clause** — the delivery stage is commissioning-active
+    ///    for this plant, `commissioning_active(entry_i, exit_i, id(t + K_i))`. A
+    ///    decision priced now matures at `t + K_i`; if that stage is outside the
+    ///    plant's `[entry, exit)` operation window the matured generation column is
+    ///    pinned to `[0, 0]`, so committing to it would buy generation that can
+    ///    never be delivered. Keying on the DELIVERY stage (not the decision stage
+    ///    `t`) is the shift the commissioning window needs: the decision is placed
+    ///    `K_i` stages ahead of the first generating stage, so a decision at
+    ///    `entry − K_i` (pre-entry) legitimately delivers at `entry`.
+    ///
+    /// The horizon clause is evaluated first and short-circuits, so the
+    /// delivery-stage lookup `study_stage_ids[stage_idx + K_i]` is only reached
+    /// when the index is in range.
+    ///
+    /// `StateLayout` stores neither the per-plant windows nor the stage-id map —
+    /// both flow in by reference from the caller, mirroring how the shared
+    /// `commissioning_active` predicate reaches the column fills. This keeps the
+    /// type a pure layout carrier while the gate
+    /// logic lives in exactly one place: the LP-builder column/row counts (via the
+    /// `lp::builder` `StageLayout` method that delegates here) and the simulation
+    /// read (`compute_anticipated_decision_mw`) both resolve activity through this
+    /// one method, so the active set is defined once.
     ///
     /// `local_idx` is the anticipated-local plant index (`0..n_anticipated`),
-    /// reading `self.anticipated_lead_stages[local_idx]`.
+    /// reading `self.anticipated_lead_stages[local_idx]`. `anticipated_windows`
+    /// and `study_stage_ids` are indexed by anticipated-local position and study
+    /// stage index respectively.
     #[inline]
     #[must_use]
     pub fn is_anticipated_decision_active(
@@ -478,13 +501,31 @@ impl StateLayout {
         local_idx: usize,
         stage_idx: usize,
         n_stages: usize,
+        anticipated_windows: &[(Option<i32>, Option<i32>)],
+        study_stage_ids: &[i32],
     ) -> bool {
         debug_assert!(
             local_idx < self.anticipated_lead_stages.len(),
             "local_idx {local_idx} out of bounds (n_anticipated = {})",
             self.anticipated_lead_stages.len(),
         );
-        stage_idx.saturating_add(self.anticipated_lead_stages[local_idx]) < n_stages
+        debug_assert_eq!(
+            anticipated_windows.len(),
+            self.anticipated_lead_stages.len(),
+            "anticipated_windows must have one entry per anticipated plant",
+        );
+        let delivery_stage = stage_idx.saturating_add(self.anticipated_lead_stages[local_idx]);
+        if delivery_stage >= n_stages {
+            return false;
+        }
+        debug_assert!(
+            delivery_stage < study_stage_ids.len(),
+            "delivery_stage {delivery_stage} out of bounds for study_stage_ids \
+             (len {})",
+            study_stage_ids.len(),
+        );
+        let (entry, exit) = anticipated_windows[local_idx];
+        crate::lp_builder::commissioning_active(entry, exit, study_stage_ids[delivery_stage])
     }
 
     /// Compute and store the nonzero state index mask from per-hydro
@@ -676,30 +717,71 @@ mod tests {
 
     // ── is_anticipated_decision_active tests ───────────────────────────────────
 
-    /// The strict horizon gate is active iff `stage_idx + K_i < n_stages`:
+    /// The strict horizon clause is active iff `stage_idx + K_i < n_stages`:
     /// active strictly inside the horizon, inactive at the `==` boundary and
     /// beyond. The `==` boundary must be inactive (a `<=` gate would price a
-    /// commitment whose delivery stage falls outside `[0, n_stages)`).
+    /// commitment whose delivery stage falls outside `[0, n_stages)`). With
+    /// windowless plants `(None, None)` the operation-window clause is always
+    /// `true`, so this isolates the horizon clause.
     #[test]
     fn is_anticipated_decision_active_strict_horizon_gate() {
         // Two plants: K_0 = 1, K_1 = 2; k_max = 2; n_stages = 5.
         let idx = finalized(0, 0, 2, 2, vec![1, 2]);
         let n_stages = 5;
+        // Windowless: the operation-window clause is identically true.
+        let windows = [(None, None); 2];
+        let stage_ids = [0, 1, 2, 3, 4];
 
         // Plant 0 (K=1): active while stage_idx + 1 < 5, i.e. stage_idx <= 3.
-        assert!(idx.is_anticipated_decision_active(0, 0, n_stages));
-        assert!(idx.is_anticipated_decision_active(0, 3, n_stages));
+        assert!(idx.is_anticipated_decision_active(0, 0, n_stages, &windows, &stage_ids));
+        assert!(idx.is_anticipated_decision_active(0, 3, n_stages, &windows, &stage_ids));
         // == boundary (stage_idx + K_i == n_stages): inactive.
-        assert!(!idx.is_anticipated_decision_active(0, 4, n_stages));
+        assert!(!idx.is_anticipated_decision_active(0, 4, n_stages, &windows, &stage_ids));
         // Beyond the boundary: inactive.
-        assert!(!idx.is_anticipated_decision_active(0, 5, n_stages));
+        assert!(!idx.is_anticipated_decision_active(0, 5, n_stages, &windows, &stage_ids));
 
         // Plant 1 (K=2): active while stage_idx + 2 < 5, i.e. stage_idx <= 2.
-        assert!(idx.is_anticipated_decision_active(1, 2, n_stages));
+        assert!(idx.is_anticipated_decision_active(1, 2, n_stages, &windows, &stage_ids));
         // == boundary: inactive.
-        assert!(!idx.is_anticipated_decision_active(1, 3, n_stages));
+        assert!(!idx.is_anticipated_decision_active(1, 3, n_stages, &windows, &stage_ids));
         // Beyond: inactive.
-        assert!(!idx.is_anticipated_decision_active(1, 4, n_stages));
+        assert!(!idx.is_anticipated_decision_active(1, 4, n_stages, &windows, &stage_ids));
+    }
+
+    /// The operation-window clause gates on the DELIVERY stage's `stage.id`, not
+    /// the decision stage. A single plant (K=2) with window `[entry=2, exit=4)`
+    /// over a 6-stage horizon (stage ids `[0..6)`):
+    ///
+    /// - decision at `t=0` delivers at `id(2)=2` ∈ `[2,4)` → ACTIVE (pre-entry
+    ///   decision: priced at `entry − K`),
+    /// - decision at `t=1` delivers at `id(3)=3` ∈ `[2,4)` → ACTIVE,
+    /// - decision at `t=2` delivers at `id(4)=4` ∉ `[2,4)` (half-open exit) →
+    ///   INACTIVE (post-exit drain begins),
+    /// - decision at `t=3` delivers at `id(5)=5` ∉ `[2,4)` → INACTIVE,
+    /// - decision at `t < 0` not applicable; decision at `t=4` (`t+K=6 == n`) is
+    ///   horizon-inactive regardless of window.
+    ///
+    /// The forbidden alternative — keying on the decision stage `t` — would make
+    /// `t=2` (inside `[2,4)`) active and `t=0` (outside) inactive, the exact
+    /// inversion the shift exists to prevent.
+    #[test]
+    fn is_anticipated_decision_active_delivery_stage_window_gate() {
+        // One plant, K=2, k_max=2; n_stages=6; window [entry=2, exit=4).
+        let idx = finalized(0, 0, 1, 2, vec![2]);
+        let n_stages = 6;
+        let windows = [(Some(2), Some(4))];
+        let stage_ids = [0, 1, 2, 3, 4, 5];
+
+        // Pre-entry decision (t=0): delivers at id 2 ∈ [2,4) → active.
+        assert!(idx.is_anticipated_decision_active(0, 0, n_stages, &windows, &stage_ids));
+        // t=1: delivers at id 3 ∈ [2,4) → active.
+        assert!(idx.is_anticipated_decision_active(0, 1, n_stages, &windows, &stage_ids));
+        // t=2: delivers at id 4 ∉ [2,4) (half-open exit) → inactive (drain).
+        assert!(!idx.is_anticipated_decision_active(0, 2, n_stages, &windows, &stage_ids));
+        // t=3: delivers at id 5 ∉ [2,4) → inactive.
+        assert!(!idx.is_anticipated_decision_active(0, 3, n_stages, &windows, &stage_ids));
+        // t=4: t+K=6 == n_stages → horizon-inactive (short-circuits before window).
+        assert!(!idx.is_anticipated_decision_active(0, 4, n_stages, &windows, &stage_ids));
     }
 
     // ── state_to_lp_column tests ──────────────────────────────────────────────

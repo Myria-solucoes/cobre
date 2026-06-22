@@ -72,7 +72,13 @@ pub(super) fn fill_anticipated_state_out_def_entries(
     let n_stages = ctx.resolved.bounds.n_stages();
     let mut active_pos: usize = 0;
     for local_idx in 0..ctx.n_anticipated {
-        if !layout.is_anticipated_decision_active(local_idx, stage_idx, n_stages) {
+        if !layout.is_anticipated_decision_active(
+            local_idx,
+            stage_idx,
+            n_stages,
+            &ctx.anticipated_windows,
+            &ctx.study_stage_ids,
+        ) {
             continue;
         }
         let row = layout.anticipated.row_anticipated_state_out_def_start + active_pos;
@@ -1633,6 +1639,11 @@ mod zero_cost_tests {
                 k_max,
                 anticipated_lead_stages,
                 anticipated_thermal_indices,
+                // Windowless: one `(None, None)` per plant, so the decision gate
+                // reduces to the strict horizon clause. `study_stage_ids` lists the
+                // study-stage ids so the in-range delivery lookup is safe.
+                anticipated_windows: vec![(None, None); n_anticipated],
+                study_stage_ids: (0..i32::try_from(self.bounds.n_stages()).unwrap_or(0)).collect(),
                 has_penalty: false,
                 // Sized to cover every active plant's delivery stage
                 // (`stage_idx + K_i < n_stages`); `fill_anticipated_columns`
@@ -2612,6 +2623,8 @@ mod pumping_water_tests {
                 k_max: 0,
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
+                anticipated_windows: vec![],
+                study_stage_ids: vec![],
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0; N_STAGES],
                 total_hours_per_stage: vec![744.0; N_STAGES],

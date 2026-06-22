@@ -280,6 +280,15 @@ fn case_dir(label: &str) -> std::path::PathBuf {
         // B1's load must lean on H1 + deficit instead of imported B0 power,
         // shifting both reservoirs' trajectories relative to an always-active case.
         "D36" => "d36-thermal-line-commissioning",
+        // Anticipated thermal under a commissioning window AND a per-stage-varying
+        // block schedule: a K=2 anticipated thermal with window `[entry=2, exit=4)`
+        // over a 6-stage horizon. The decision gate is active only when the
+        // DELIVERY stage `t + 2` lands in `[2, 4)`, so the pre-entry decision at
+        // stage 0 delivers at the first operating stage 2 and the ring buffer drains
+        // to 0 within K stages after exit. The only case combining an anticipated
+        // thermal with a commissioning window, exercising the shifted decision gate
+        // on top of the D34 n_blks-dependent decision-base surface.
+        "D37" => "d37-anticipated-commissioning",
         other => panic!("unknown case label: {other}"),
     };
     // Integration tests run from the crate root; fixtures live at
@@ -607,4 +616,13 @@ fn parity_hash_d35() {
 )]
 fn parity_hash_d36() {
     run_case("D36");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d37() {
+    run_case("D37");
 }

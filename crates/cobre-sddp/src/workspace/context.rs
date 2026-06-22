@@ -90,6 +90,27 @@ pub struct StageContext<'a> {
     /// stochastic NCS. Built once at setup in `StudySetup`. Carrying the windows,
     /// not a per-stage dormancy mask, keeps activity out of per-stage storage.
     pub ncs_stochastic_windows: &'a [(Option<i32>, Option<i32>)],
+    /// Stage-invariant commissioning window per anticipated thermal.
+    ///
+    /// `anticipated_windows[i] = (entry, exit)` for the i-th anticipated thermal,
+    /// in anticipated-local order (matching `StudyDimensions::anticipated_thermal_indices`).
+    /// Threaded into the simulation
+    /// [`StageExtractionSpec`](crate::simulation::extraction::StageExtractionSpec)
+    /// so the anticipated-decision read gates on the same horizon-∧-operation-window
+    /// predicate the LP builder used; the gate keys its operation-window clause on
+    /// the DELIVERY stage's `stage.id`. Carrying the windows, not a per-stage
+    /// activity mask, keeps activity out of per-stage storage — the same convention
+    /// as [`Self::ncs_stochastic_windows`]. Empty when there are no anticipated
+    /// thermals.
+    pub anticipated_windows: &'a [(Option<i32>, Option<i32>)],
+    /// Study-stage commissioning id for each study stage index
+    /// (`study_stage_ids[t] = stage.id`).
+    ///
+    /// The anticipated decision gate keys its operation-window clause on the
+    /// DELIVERY stage's `stage.id` (not the stage index), so it maps the delivery
+    /// stage index `t + K_i` to its id through this slice. Length equals the number
+    /// of study stages.
+    pub study_stage_ids: &'a [i32],
     /// Maximum generation (MW) per stochastic NCS entity, sorted by entity ID.
     /// Length equals the number of stochastic NCS entities. Empty when none exist.
     pub ncs_max_gen: &'a [f64],

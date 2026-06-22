@@ -300,7 +300,13 @@ pub(super) fn fill_anticipated_state_out_def_rows(
     let n_stages = ctx.resolved.bounds.n_stages();
     let mut active_pos: usize = 0;
     for local_idx in 0..ctx.n_anticipated {
-        if !layout.is_anticipated_decision_active(local_idx, stage_idx, n_stages) {
+        if !layout.is_anticipated_decision_active(
+            local_idx,
+            stage_idx,
+            n_stages,
+            &ctx.anticipated_windows,
+            &ctx.study_stage_ids,
+        ) {
             continue;
         }
         let row = layout.anticipated.row_anticipated_state_out_def_start + active_pos;

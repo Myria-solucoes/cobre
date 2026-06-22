@@ -224,9 +224,13 @@ fn fill_diversion_columns(
 /// leave `[min > 0, 0]` — an infeasible pair that makes the whole LP infeasible
 /// rather than retiring the plant. The objective coefficient then multiplies a
 /// forced-0 column, which is inert. Commissioning keys on `stage.id` (the
-/// stage's commissioning identifier), not the stage index. Anticipated thermals
-/// never reach a window here — a commissioning window on an anticipated thermal
-/// is rejected at validation.
+/// stage's commissioning identifier), not the stage index. This GENERATION
+/// column carries the operation-window gate for every thermal, anticipated or
+/// not: an anticipated thermal's delivery-stage generation is zeroed here when
+/// the stage is outside its `[entry, exit)` window, exactly like a plain thermal.
+/// The SHIFTED gate (decision priced `K` stages early, keyed on the delivery
+/// stage's window) lives on the anticipated DECISION / `anticipated_state_out`
+/// columns in `fill_anticipated_columns`, not here.
 pub(super) fn fill_thermal_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -316,7 +320,13 @@ pub(super) fn fill_anticipated_columns(
     for local_idx in 0..ctx.n_anticipated {
         let state_out_col = layout.anticipated.col_anticipated_state_out_start + local_idx;
         let decision_col = layout.anticipated.col_anticipated_decision_start + local_idx;
-        if layout.is_anticipated_decision_active(local_idx, stage_idx, n_stages) {
+        if layout.is_anticipated_decision_active(
+            local_idx,
+            stage_idx,
+            n_stages,
+            &ctx.anticipated_windows,
+            &ctx.study_stage_ids,
+        ) {
             active_count += 1;
             let delivery_stage = stage_idx + ctx.anticipated_lead_stages[local_idx];
             let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
@@ -1082,6 +1092,8 @@ mod diversion_bound_tests {
                 k_max: 0,
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
+                anticipated_windows: vec![],
+                study_stage_ids: vec![],
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0],
                 total_hours_per_stage: vec![744.0],
@@ -1312,6 +1324,11 @@ mod anticipated_objective_tests {
                 k_max: K_MAX,
                 anticipated_lead_stages: vec![K_MAX],
                 anticipated_thermal_indices: vec![0],
+                // Windowless single plant: the decision gate reduces to the
+                // strict horizon clause. `study_stage_ids` lists the N_STAGES
+                // study-stage ids so the in-range delivery lookup is safe.
+                anticipated_windows: vec![(None, None)],
+                study_stage_ids: (0..N_STAGES as i32).collect(),
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0, 0.9, 0.81, 0.729, 0.6561, 0.59049],
                 total_hours_per_stage: vec![744.0; N_STAGES],
@@ -1779,6 +1796,8 @@ mod block_family_slack_tests {
                 k_max: 0,
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
+                anticipated_windows: vec![],
+                study_stage_ids: vec![],
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0],
                 total_hours_per_stage: vec![BLOCK_HOURS[0] + BLOCK_HOURS[1]],

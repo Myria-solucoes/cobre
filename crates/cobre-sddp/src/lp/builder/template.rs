@@ -868,14 +868,19 @@ fn build_template_build_ctx<'a>(
 
     // Compute anticipated-thermal metadata in declaration order.
     // For each thermal with `anticipated_config.is_some()`, record its global
-    // index and per-plant lead_stages (K_i).
+    // index, per-plant lead_stages (K_i), and commissioning window. The window
+    // is carried so the decision gate keys its operation-window clause on the
+    // delivery stage; an anticipated thermal without a declared window has
+    // `(None, None)` and is active at every delivery stage inside the horizon.
     let mut anticipated_thermal_indices: Vec<usize> = Vec::new();
     let mut anticipated_lead_stages: Vec<usize> = Vec::new();
+    let mut anticipated_windows: Vec<(Option<i32>, Option<i32>)> = Vec::new();
     for (t_idx, thermal) in system.thermals().iter().enumerate() {
         if let Some(cfg) = thermal.anticipated_config.as_ref() {
             anticipated_thermal_indices.push(t_idx);
             // u32 always fits in usize on supported 32-bit and 64-bit targets.
             anticipated_lead_stages.push(cfg.lead_stages as usize);
+            anticipated_windows.push((thermal.entry_stage_id, thermal.exit_stage_id));
         }
     }
     let n_anticipated = anticipated_thermal_indices.len();
@@ -925,6 +930,12 @@ fn build_template_build_ctx<'a>(
         "total_hours_per_stage length must equal n_study_stages"
     );
 
+    // Study-stage commissioning ids, indexed by study stage index. The
+    // anticipated decision gate keys its operation-window clause on the
+    // DELIVERY stage's `stage.id` (not the stage index), so it maps the
+    // delivery stage index `t + K_i` to its commissioning id through this slice.
+    let study_stage_ids: Vec<i32> = study_stages.iter().map(|s| s.id).collect();
+
     let ctx = TemplateBuildCtx {
         hydros,
         thermals: system.thermals(),
@@ -964,6 +975,8 @@ fn build_template_build_ctx<'a>(
         k_max,
         anticipated_lead_stages,
         anticipated_thermal_indices,
+        anticipated_windows,
+        study_stage_ids,
         has_penalty: n_hydros > 0 && inflow_method.has_slack_columns(),
         cumulative_discount_factors,
         total_hours_per_stage,
@@ -2236,6 +2249,10 @@ mod tests {
                 ctx_a.anticipated_thermal_indices[1],
                 ctx_a.anticipated_thermal_indices[0],
             ],
+            // Swap the windows in lockstep with the index/lead permutation so the
+            // per-plant window stays aligned with its anticipated-local position.
+            anticipated_windows: vec![ctx_a.anticipated_windows[1], ctx_a.anticipated_windows[0]],
+            study_stage_ids: ctx_a.study_stage_ids.clone(),
             has_penalty: ctx_a.has_penalty,
             cumulative_discount_factors: ctx_a.cumulative_discount_factors.clone(),
             total_hours_per_stage: ctx_a.total_hours_per_stage.clone(),
