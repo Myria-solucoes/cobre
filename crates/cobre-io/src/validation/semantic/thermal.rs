@@ -30,14 +30,20 @@ pub(super) fn check_thermal_generation_bounds(data: &ParsedData, ctx: &mut Valid
 ///
 /// Enforces:
 ///
-/// 1. **Per-plant horizon window** — for each thermal with
+/// 1. **Per-plant lead-stage horizon** — for each thermal with
 ///    `anticipated_config: Some(AnticipatedConfig { lead_stages: K })`:
 ///    - `K == 0` is rejected (defence in depth; parse-time also rejects this).
 ///    - `K > n_stages` — the plant can never deliver within the study horizon.
-///    - `entry_stage_id = Some(e)` and `e + K > n_stages` — delivery window
-///      starts after the study horizon ends (hard rejection, not a warning).
-///    - `exit_stage_id = Some(x)` and `x < K` — the plant exits before its
-///      earliest possible delivery at stage `K`.
+///    - **Commissioning window rejection** — an anticipated thermal that sets
+///      `entry_stage_id` or `exit_stage_id` is rejected. Anticipated thermals
+///      carry the `A·K` anticipated-state column block, a ring buffer of past
+///      commitments, and a `K`-stage delivery lookahead; a commissioning window
+///      on them needs a separate design and is out of scope. This blanket
+///      rejection SUPERSEDES the earlier horizon-edge window checks
+///      (`entry + K > n_stages` and `exit < K`): both only fired when a window
+///      was set, which is now rejected outright, so they were unreachable and
+///      are removed. The dispatch-side zeroing of dormant thermal columns
+///      therefore never sees an anticipated thermal.
 ///
 /// 2. **Past-commitments registry correspondence** — validates the bijection
 ///    between anticipated thermals and `ic.past_anticipated_commitments`:
@@ -59,7 +65,7 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
     // delivery targets for anticipated commitments.
     let n_stages = data.stages.stages.iter().filter(|s| s.id >= 0).count();
 
-    // ── 1. Per-plant horizon window ───────────────────────────────────────────
+    // ── 1. Per-plant lead-stage horizon ───────────────────────────────────────
 
     for thermal in &data.thermals {
         let Some(ref cfg) = thermal.anticipated_config else {
@@ -96,39 +102,21 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
             );
         }
 
-        // entry_stage_id + lead_stages > n_stages
-        if let Some(e) = thermal.entry_stage_id {
-            let e_i = i64::from(e);
-            let k_i = i64::from(k);
-            let n_i = i64::try_from(n_stages).unwrap_or(i64::MAX);
-            let sum = e_i + k_i;
-            if sum > n_i {
-                ctx.add_error(
-                    ErrorKind::BusinessRuleViolation,
-                    "system/thermals.json",
-                    Some(&entity_str),
-                    format!(
-                        "Thermal {thermal_id}: entry_stage_id + lead_stages > n_stages \
-                         ({e} + {k} = {sum} > {n_stages}); \
-                         the anticipated configuration cannot produce a valid delivery \
-                         within the study horizon"
-                    ),
-                );
-            }
-        }
-
-        // exit_stage_id < lead_stages
-        if let Some(x) = thermal.exit_stage_id
-            && i64::from(x) < i64::from(k)
-        {
+        // A commissioning window on an anticipated thermal is rejected outright:
+        // the anticipated-state column block, the past-commitment ring buffer, and
+        // the K-stage delivery lookahead are not designed to interact with a window,
+        // so dispatch never zeroes a dormant anticipated thermal. This supersedes
+        // the former entry+K>n_stages / exit<K horizon-edge window checks.
+        if thermal.entry_stage_id.is_some() || thermal.exit_stage_id.is_some() {
+            let window_entity = format!("thermals[id={thermal_id}]");
             ctx.add_error(
                 ErrorKind::BusinessRuleViolation,
                 "system/thermals.json",
-                Some(&entity_str),
+                Some(&window_entity),
                 format!(
-                    "Thermal {thermal_id}: exit_stage_id ({x}) < lead_stages ({k}); \
-                         the plant exits before its earliest possible delivery at stage {k}, \
-                         so the anticipated configuration cannot produce a valid delivery"
+                    "Thermal {thermal_id}: commissioning windows \
+                     (entry_stage_id/exit_stage_id) are not supported on anticipated \
+                     thermals; remove the window or the anticipated_config"
                 ),
             );
         }
@@ -646,13 +634,15 @@ mod tests {
         );
     }
 
-    // ── AC-7: entry_stage_id + lead_stages > n_stages ────────────────────────
+    // ── AC-7: entry_stage_id window on an anticipated thermal is rejected ─────
 
-    /// Given lead_stages=3, entry_stage_id=Some(4), n_stages=5:
-    /// 4 + 3 = 7 > 5 — hard rejection with message containing
-    /// "entry_stage_id + lead_stages > n_stages".
+    /// An anticipated thermal that sets `entry_stage_id` is rejected with the
+    /// blanket "commissioning windows ... are not supported on anticipated
+    /// thermals" message. This supersedes the former `entry + K > n_stages`
+    /// horizon-edge check: any window on an anticipated thermal is now rejected
+    /// outright, regardless of where its edge lands relative to the horizon.
     #[test]
-    fn test_entry_plus_lead_exceeds_horizon_error() {
+    fn test_entry_window_on_anticipated_thermal_rejected() {
         let thermal = make_anticipated_thermal(1, 3, Some(4), None);
         let history = AnticipatedCommitmentHistory {
             thermal_id: EntityId::from(1),
@@ -667,32 +657,35 @@ mod tests {
             .iter()
             .filter(|e| {
                 e.kind == ErrorKind::BusinessRuleViolation
-                    && e.message
-                        .contains("entry_stage_id + lead_stages > n_stages")
+                    && e.message.contains("not supported on anticipated thermals")
             })
             .collect();
         assert!(
             !relevant.is_empty(),
-            "expected BusinessRuleViolation with 'entry_stage_id + lead_stages > n_stages', got: {errors:?}"
+            "expected BusinessRuleViolation rejecting the window, got: {errors:?}"
         );
         assert_eq!(
             relevant[0].severity,
             crate::validation::Severity::Error,
             "must be an error"
         );
-        let msg = &relevant[0].message;
+        // The former entry+K>n_stages arithmetic check is removed: no error
+        // should carry that wording any more.
         assert!(
-            msg.contains("4 + 3") && msg.contains('7') && msg.contains('5'),
-            "message should show '4 + 3 = 7 > 5', got: {msg}"
+            !errors.iter().any(|e| e
+                .message
+                .contains("entry_stage_id + lead_stages > n_stages")),
+            "the superseded entry+K>n_stages check must not fire, got: {errors:?}"
         );
     }
 
-    // ── AC-8: exit_stage_id < lead_stages ────────────────────────────────────
+    // ── AC-8: exit_stage_id window on an anticipated thermal is rejected ──────
 
-    /// Given lead_stages=3 and exit_stage_id=Some(2): the plant exits before
-    /// its earliest possible delivery at stage 3. Returns Err with "exit_stage_id".
+    /// An anticipated thermal that sets `exit_stage_id` is rejected with the
+    /// blanket window-rejection message. This supersedes the former `exit < K`
+    /// horizon-edge check.
     #[test]
-    fn test_exit_before_earliest_delivery_error() {
+    fn test_exit_window_on_anticipated_thermal_rejected() {
         let thermal = make_anticipated_thermal(1, 3, None, Some(2));
         let history = AnticipatedCommitmentHistory {
             thermal_id: EntityId::from(1),
@@ -706,12 +699,71 @@ mod tests {
         let relevant: Vec<_> = errors
             .iter()
             .filter(|e| {
-                e.kind == ErrorKind::BusinessRuleViolation && e.message.contains("exit_stage_id")
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message.contains("not supported on anticipated thermals")
             })
             .collect();
         assert!(
             !relevant.is_empty(),
-            "expected a BusinessRuleViolation mentioning 'exit_stage_id', got: {errors:?}"
+            "expected a BusinessRuleViolation rejecting the window, got: {errors:?}"
+        );
+    }
+
+    // ── Commissioning window on a PLAIN thermal is accepted (applied, not warned) ─
+
+    /// A non-anticipated thermal that sets a commissioning window is accepted:
+    /// the window is now applied at the LP fill site (dormant column pinned to
+    /// `[0, 0]`), so the anticipated-only rejection must NOT fire and no error
+    /// is emitted.
+    #[test]
+    fn test_window_on_plain_thermal_accepted() {
+        let thermal = cobre_core::entities::Thermal {
+            entry_stage_id: Some(1),
+            exit_stage_id: Some(2),
+            ..make_thermal(1, 0.0, 100.0)
+        };
+        let data = make_data(
+            vec![],
+            vec![thermal],
+            vec![],
+            make_stages(vec![0, 1, 2]),
+            vec![],
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            !ctx.has_errors(),
+            "a window on a plain (non-anticipated) thermal must not error, got: {:?}",
+            ctx.errors()
+        );
+        assert!(
+            !ctx.errors()
+                .iter()
+                .any(|e| e.message.contains("not supported on anticipated thermals")),
+            "the anticipated-only window rejection must not fire for a plain thermal"
+        );
+    }
+
+    /// An anticipated thermal with NO commissioning window is accepted: the
+    /// rejection is gated on a window being set, so a windowless anticipated
+    /// plant passes (regression guard against a blanket reject).
+    #[test]
+    fn test_anticipated_thermal_without_window_accepted() {
+        let thermal = make_anticipated_thermal(1, 2, None, None);
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(1),
+            values_mw: vec![0.0, 0.0],
+        };
+        let data = make_data_anticipated(vec![thermal], 5, vec![history]);
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            !ctx.errors()
+                .iter()
+                .any(|e| e.message.contains("not supported on anticipated thermals")),
+            "a windowless anticipated thermal must not be rejected, got: {:?}",
+            ctx.errors()
         );
     }
 

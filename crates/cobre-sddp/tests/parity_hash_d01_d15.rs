@@ -257,6 +257,20 @@ fn case_dir(label: &str) -> std::path::PathBuf {
         // their storage trajectories and water values diverge from the
         // always-active D32 baseline.
         "D35" => "d35-pumping-commissioning",
+        // Thermal + line commissioning gating: a plain (non-anticipated) thermal
+        // with a must-run floor (`min_mw > 0`) carries an
+        // `entry_stage_id`/`exit_stage_id` window so it is active only at stage 1
+        // (dormant at 0 and 2), and a line carries an `entry_stage_id` so it is
+        // dormant at stage 0 and active at stages 1 and 2. Under the dense
+        // (zero-influence) layout a dormant thermal pins BOTH bounds to `[0, 0]`
+        // (the must-run floor zeroes too, so the windowed-out plant cannot make
+        // the LP infeasible) and a dormant line pins `col_upper` to 0 on both
+        // directions. The parity hash covers hydro storage/water/cuts/convergence,
+        // not thermal/line output directly, so it reflects the gating only through
+        // the dispatch coupling: with T0 off and the inter-bus line cut at stage 0,
+        // B1's load must lean on H1 + deficit instead of imported B0 power,
+        // shifting both reservoirs' trajectories relative to an always-active case.
+        "D36" => "d36-thermal-line-commissioning",
         other => panic!("unknown case label: {other}"),
     };
     // Integration tests run from the crate root; fixtures live at
@@ -582,4 +596,13 @@ fn parity_hash_d34() {
 )]
 fn parity_hash_d35() {
     run_case("D35");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d36() {
+    run_case("D36");
 }

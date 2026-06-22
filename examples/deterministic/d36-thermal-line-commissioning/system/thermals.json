@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/thermals.schema.json",
+  "thermals": [
+    {
+      "id": 0,
+      "name": "T0 (must-run, commissioned stage 1 only)",
+      "bus_id": 0,
+      "entry_stage_id": 1,
+      "exit_stage_id": 2,
+      "generation": {
+        "min_mw": 10.0,
+        "max_mw": 100.0
+      },
+      "cost_per_mwh": 50.0
+    }
+  ]
+}

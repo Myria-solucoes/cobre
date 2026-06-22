@@ -243,15 +243,19 @@ pub(super) fn check_lifecycle_consistency_remaining(
     }
 }
 
-/// Warns whenever any entity sets `entry_stage_id` or `exit_stage_id`.
+/// Warns when a hydro or energy contract sets `entry_stage_id`/`exit_stage_id`.
 ///
-/// All six entity types carrying these fields (hydros, lines, thermals, pumping
-/// stations, non-controllable sources, energy contracts) parse commissioning
-/// windows, but the LP does not honor them: an entity that sets either field is
-/// modeled fully active at every stage. The user gets no signal otherwise, so
-/// this emits one `ModelQuality` warning per such entity. The all-`None` case is
-/// the correct inert default and stays silent — emitting there would warn every
-/// shipped case.
+/// These are the two entity types whose commissioning windows are parsed but
+/// still not honored by the LP: a hydro window is a later phase, and energy
+/// contracts are a stub. For both, an entity that sets either field is modeled
+/// fully active at every stage, so this emits one `ModelQuality` warning per
+/// such entity to signal the gap. The all-`None` case is the correct inert
+/// default and stays silent — emitting there would warn every shipped case.
+///
+/// The other four window-bearing entity types — thermals, lines, NCS, and
+/// pumping stations — APPLY their windows at the LP fill site (a dormant
+/// entity's operational column bounds are pinned to `[0, 0]`), so warning for
+/// them would be a false signal and they are deliberately excluded here.
 ///
 /// Infallible — every warning accumulates into `ctx`.
 pub(super) fn warn_commissioning_parsed_not_applied(
@@ -284,42 +288,6 @@ pub(super) fn warn_commissioning_parsed_not_applied(
             hydro.exit_stage_id,
             "system/hydros.json",
             &format!("Hydro {}", hydro.id.0),
-        );
-    }
-    for line in &data.lines {
-        warn_if_set(
-            ctx,
-            line.entry_stage_id,
-            line.exit_stage_id,
-            "system/lines.json",
-            &format!("Line {}", line.id.0),
-        );
-    }
-    for thermal in &data.thermals {
-        warn_if_set(
-            ctx,
-            thermal.entry_stage_id,
-            thermal.exit_stage_id,
-            "system/thermals.json",
-            &format!("Thermal {}", thermal.id.0),
-        );
-    }
-    for station in &data.pumping_stations {
-        warn_if_set(
-            ctx,
-            station.entry_stage_id,
-            station.exit_stage_id,
-            "system/pumping_stations.json",
-            &format!("PumpingStation {}", station.id.0),
-        );
-    }
-    for source in &data.non_controllable_sources {
-        warn_if_set(
-            ctx,
-            source.entry_stage_id,
-            source.exit_stage_id,
-            "system/non_controllable_sources.json",
-            &format!("NonControllableSource {}", source.id.0),
         );
     }
     for contract in &data.energy_contracts {
@@ -985,6 +953,94 @@ mod tests {
             "no entity sets entry/exit, so no ModelQuality warning is expected, got: {:?}",
             ctx.warnings()
         );
+    }
+
+    /// Build a windowed `Line` (entry < exit) for the parsed-not-applied tests.
+    fn make_windowed_line(
+        id: i32,
+        entry: Option<i32>,
+        exit: Option<i32>,
+    ) -> cobre_core::entities::Line {
+        cobre_core::entities::Line {
+            id: EntityId::from(id),
+            name: format!("Line_{id}"),
+            source_bus_id: EntityId::from(1),
+            target_bus_id: EntityId::from(2),
+            entry_stage_id: entry,
+            exit_stage_id: exit,
+            direct_capacity_mw: 100.0,
+            reverse_capacity_mw: 100.0,
+            losses_percent: 0.0,
+            exchange_cost: 0.01,
+        }
+    }
+
+    /// A windowed thermal, line, NCS, and pumping station each have their
+    /// commissioning window APPLIED at the LP fill site, so none of them emits
+    /// the parsed-not-applied ModelQuality warning. Only the windowed hydro and
+    /// energy contract — whose windows are still unapplied — warn.
+    #[test]
+    fn test_applied_window_entities_emit_no_warning() {
+        let thermal = cobre_core::entities::Thermal {
+            entry_stage_id: Some(1),
+            exit_stage_id: Some(2),
+            ..make_thermal(1, 0.0, 100.0)
+        };
+        let line = make_windowed_line(1, Some(1), Some(2));
+        let mut data = make_data(
+            vec![make_hydro(1, None), make_hydro(2, None)],
+            vec![thermal],
+            vec![line],
+            make_stages(vec![0, 1, 2]),
+            vec![],
+            vec![],
+        );
+        data.non_controllable_sources = vec![make_ncs_lc(3, Some(1), Some(2))];
+        data.pumping_stations = vec![make_pumping_lc(4, Some(1), Some(2))];
+
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let model_quality: Vec<_> = ctx
+            .warnings()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::ModelQuality)
+            .collect();
+        assert!(
+            model_quality.is_empty(),
+            "thermal/line/NCS/pumping windows are applied; no parsed-not-applied \
+             warning is expected, got: {:?}",
+            model_quality.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    /// A windowed energy contract still emits the parsed-not-applied warning:
+    /// contract windows remain unapplied (contracts are a stub), so the warning
+    /// is correct for them even after thermal/line/NCS/pumping were removed.
+    #[test]
+    fn test_windowed_contract_still_warns() {
+        let mut data = make_data(
+            vec![make_hydro(1, None)],
+            vec![],
+            vec![],
+            make_stages(vec![0, 1, 2]),
+            vec![],
+            vec![],
+        );
+        data.energy_contracts = vec![make_contract_lc(5, Some(1), Some(2))];
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let model_quality: Vec<_> = ctx
+            .warnings()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::ModelQuality)
+            .collect();
+        assert_eq!(
+            model_quality.len(),
+            1,
+            "a windowed energy contract must still warn, got: {:?}",
+            model_quality.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        assert!(model_quality[0].message.contains("EnergyContract 5"));
     }
 
     // ── Geometry monotonicity tests ───────────────────────────────────────────

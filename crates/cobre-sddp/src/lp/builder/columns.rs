@@ -216,6 +216,17 @@ fn fill_diversion_columns(
 /// Anticipated plants are detected via `layout.anticipated_local_by_sys_pos`,
 /// the reverse map global-thermal-position → anticipated-local index; a
 /// non-anticipated thermal is simply not in the map and is priced normally.
+///
+/// A commissioning-dormant thermal (`commissioning_active == false`) keeps its
+/// dense, system-indexed column but has BOTH bounds forced to `[0, 0]` (the
+/// zero-influence convention). Both must drop: `min_generation_mw` is a hard
+/// must-run floor written to `col_lower`, so zeroing only `col_upper` would
+/// leave `[min > 0, 0]` — an infeasible pair that makes the whole LP infeasible
+/// rather than retiring the plant. The objective coefficient then multiplies a
+/// forced-0 column, which is inert. Commissioning keys on `stage.id` (the
+/// stage's commissioning identifier), not the stage index. Anticipated thermals
+/// never reach a window here — a commissioning window on an anticipated thermal
+/// is rejected at validation.
 pub(super) fn fill_thermal_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -223,7 +234,12 @@ pub(super) fn fill_thermal_columns(
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
-    for (t_idx, _thermal) in ctx.thermals.iter().enumerate() {
+    for (t_idx, thermal) in ctx.thermals.iter().enumerate() {
+        let active = crate::lp_builder::commissioning_active(
+            thermal.entry_stage_id,
+            thermal.exit_stage_id,
+            stage.id,
+        );
         let tb = ctx.resolved.bounds.thermal_bounds(t_idx, stage_idx);
         let marginal_cost_per_mwh = tb.cost_per_mwh;
         let is_anticipated = layout.anticipated_local_by_sys_pos.contains_key(&t_idx);
@@ -231,8 +247,13 @@ pub(super) fn fill_thermal_columns(
             let col = layout
                 .block_grid()
                 .flat(layout.col_thermal_start(), t_idx, blk);
-            bufs.col_lower[col] = tb.min_generation_mw;
-            bufs.col_upper[col] = tb.max_generation_mw;
+            if active {
+                bufs.col_lower[col] = tb.min_generation_mw;
+                bufs.col_upper[col] = tb.max_generation_mw;
+            } else {
+                bufs.col_lower[col] = 0.0;
+                bufs.col_upper[col] = 0.0;
+            }
             if !is_anticipated {
                 let block_hours = stage.blocks[blk].duration_hours;
                 bufs.objective[col] = marginal_cost_per_mwh * block_hours;
@@ -332,6 +353,14 @@ pub(super) fn fill_anticipated_columns(
 ///
 /// Exchange factors from `exchange_factors.json` scale the stage-level
 /// capacity bounds per block. Default factor is `(1.0, 1.0)` (no scaling).
+///
+/// A commissioning-dormant line (`commissioning_active == false`) keeps its
+/// dense, system-indexed forward and reverse columns but has `col_upper` forced
+/// to `0` on both directions (the zero-influence convention). `col_lower` is
+/// already `0` for lines (no transmission floor), so only the cap drops; the
+/// exchange-factor multiply `direct_mw * df` becomes `0 * df = 0`, clean.
+/// Commissioning keys on `stage.id` (the stage's commissioning identifier), not
+/// the stage index.
 fn fill_line_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -339,7 +368,12 @@ fn fill_line_columns(
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
-    for (l_idx, _line) in ctx.lines.iter().enumerate() {
+    for (l_idx, line) in ctx.lines.iter().enumerate() {
+        let active = crate::lp_builder::commissioning_active(
+            line.entry_stage_id,
+            line.exit_stage_id,
+            stage.id,
+        );
         let lb = ctx.resolved.bounds.line_bounds(l_idx, stage_idx);
         let lp = ctx.resolved.penalties.line_penalties(l_idx, stage_idx);
         for blk in 0..layout.n_blks {
@@ -349,8 +383,13 @@ fn fill_line_columns(
                 .factors(l_idx, stage_idx, blk);
             let col_fwd = layout.line_fwd_col(l_idx, blk);
             let col_rev = layout.line_rev_col(l_idx, blk);
-            bufs.col_upper[col_fwd] = lb.direct_mw * df;
-            bufs.col_upper[col_rev] = lb.reverse_mw * rf;
+            if active {
+                bufs.col_upper[col_fwd] = lb.direct_mw * df;
+                bufs.col_upper[col_rev] = lb.reverse_mw * rf;
+            } else {
+                bufs.col_upper[col_fwd] = 0.0;
+                bufs.col_upper[col_rev] = 0.0;
+            }
             let block_hours = stage.blocks[blk].duration_hours;
             bufs.objective[col_fwd] = lp.exchange_cost * block_hours;
             bufs.objective[col_rev] = lp.exchange_cost * block_hours;

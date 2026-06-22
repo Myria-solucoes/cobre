@@ -130,6 +130,20 @@ const EXPECTED_HASHES: &[(&str, &str)] = &[
         "D35",
         "ebd271e4504810723f9a380130d5ca20662ddfd88194c5418555b26d3a80d977",
     ),
+    // Thermal + line commissioning gating: a plain (non-anticipated) thermal
+    // with a must-run floor (`min_mw > 0`) is active only at stage 1, and a line
+    // is dormant at stage 0 and active at stages 1 and 2. Under the dense
+    // (zero-influence) layout a dormant thermal pins BOTH bounds to `[0, 0]` (the
+    // must-run floor zeroes too, so the windowed-out plant stays feasible) and a
+    // dormant line pins `col_upper` to 0 both directions. With T0 off and the
+    // inter-bus line cut at stage 0, B1's load leans on H1 + deficit instead of
+    // imported B0 power, shifting both reservoirs' trajectories. This guard pins
+    // only the HiGHS `D36.sha256`; the CLP `D36.sha256` is verified by the
+    // slow-gated CLP `parity_hash_d36`.
+    (
+        "D36",
+        "ea73313186c94b872aa8a755c1c00d9537688be74971dd1bebb6bb0d35376e62",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
