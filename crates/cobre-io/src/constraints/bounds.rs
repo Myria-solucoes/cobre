@@ -73,12 +73,16 @@
 //!
 //! - Required key columns (`*_id`, `stage_id`) must be present with Int32 type.
 //! - Any provided (non-null) optional Float64 value must be finite — NaN and ±Inf are rejected.
+//! - Some parsers additionally enforce domain constraints on their own values:
+//!   `pumping_bounds` rejects negative flows and `min_m3s > max_m3s` (matching the
+//!   `pumping_stations.json` entity-reader checks); `thermal_bounds` rejects a
+//!   negative `cost_per_mwh`.
 //!
 //! Deferred validations (not performed here):
 //!
 //! - Entity ID existence in registries — Layer 3.
 //! - Duplicate `(entity_id, stage_id)` pairs — deferred.
-//! - Semantic cross-validation (e.g., min < max) — deferred.
+//! - Cross-field validation for the remaining bounds types — deferred.
 
 use arrow::array::Array;
 use cobre_core::EntityId;
@@ -812,6 +816,38 @@ pub fn parse_pumping_bounds(path: &Path) -> Result<Vec<PumpingBoundsRow>, LoadEr
 
             validate_optional_finite(min_m3s, "pumping_bounds", row_idx, "min_m3s", path)?;
             validate_optional_finite(max_m3s, "pumping_bounds", row_idx, "max_m3s", path)?;
+
+            // Mirror the `pumping_stations.json` entity-reader checks: a pumped-flow
+            // override is non-negative and `min <= max`. The finiteness gate above
+            // would otherwise pass a negative or inverted row through to an
+            // infeasible per-stage bound.
+            if let Some(v) = min_m3s
+                && v < 0.0
+            {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: format!("pumping_bounds[{row_idx}].min_m3s"),
+                    message: format!("value must be >= 0.0, got {v}"),
+                });
+            }
+            if let Some(v) = max_m3s
+                && v < 0.0
+            {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: format!("pumping_bounds[{row_idx}].max_m3s"),
+                    message: format!("value must be >= 0.0, got {v}"),
+                });
+            }
+            if let (Some(min), Some(max)) = (min_m3s, max_m3s)
+                && min > max
+            {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: format!("pumping_bounds[{row_idx}].max_m3s"),
+                    message: format!("max_m3s ({max}) must be >= min_m3s ({min})"),
+                });
+            }
 
             rows.push(PumpingBoundsRow {
                 station_id,
@@ -1746,6 +1782,54 @@ mod tests {
                 assert!(message.contains("finite"), "got: {message}");
             }
             other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// AC: negative `min_m3s` -> SchemaError mentioning "min_m3s" and ">= 0.0".
+    #[test]
+    fn test_pumping_negative_min_m3s() {
+        let batch = make_pumping_batch(&[1], &[0], vec![Some(-1.0)], vec![Some(10.0)]);
+        let tmp = write_parquet(&batch);
+        let err = parse_pumping_bounds(tmp.path()).unwrap_err();
+
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(field.contains("min_m3s"), "got: {field}");
+                assert!(message.contains(">= 0.0"), "got: {message}");
+            }
+            other => panic!("expected SchemaError for negative min, got: {other:?}"),
+        }
+    }
+
+    /// AC: negative `max_m3s` -> SchemaError mentioning "max_m3s" and ">= 0.0".
+    #[test]
+    fn test_pumping_negative_max_m3s() {
+        let batch = make_pumping_batch(&[1], &[0], vec![None], vec![Some(-5.0)]);
+        let tmp = write_parquet(&batch);
+        let err = parse_pumping_bounds(tmp.path()).unwrap_err();
+
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(field.contains("max_m3s"), "got: {field}");
+                assert!(message.contains(">= 0.0"), "got: {message}");
+            }
+            other => panic!("expected SchemaError for negative max, got: {other:?}"),
+        }
+    }
+
+    /// AC: `min_m3s > max_m3s` (both present) -> SchemaError mentioning "max_m3s".
+    #[test]
+    fn test_pumping_min_exceeds_max() {
+        let batch = make_pumping_batch(&[1], &[0], vec![Some(80.0)], vec![Some(10.0)]);
+        let tmp = write_parquet(&batch);
+        let err = parse_pumping_bounds(tmp.path()).unwrap_err();
+
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(field.contains("max_m3s"), "got: {field}");
+                assert!(message.contains("must be >= min_m3s"), "got: {message}");
+            }
+            other => panic!("expected SchemaError for inverted bounds, got: {other:?}"),
         }
     }
 

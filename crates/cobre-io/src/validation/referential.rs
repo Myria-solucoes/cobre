@@ -881,9 +881,11 @@ struct EntityIdSets<'a> {
 
 /// Helper for Rule 33: validate that a [`VariableRef`] references an existing entity.
 ///
-/// Emits an error if the entity ID does not exist in the corresponding registry.
-/// Emits a warning for stub entity types (pumping, contracts, non-controllable)
-/// that have no LP effect.
+/// A reference to a non-existent entity is an [`ErrorKind::InvalidReference`] error
+/// for every modeled entity type. The `Contract` type is the sole remaining stub
+/// (data-complete but contributing no LP variables), so a dangling `Contract`
+/// reference is downgraded to an [`ErrorKind::UnusedEntity`] warning rather than an
+/// error.
 fn validate_variable_ref_entity(
     var: &cobre_core::VariableRef,
     label: &str,
@@ -948,12 +950,12 @@ fn validate_variable_ref_entity(
         VariableRef::PumpingFlow { station_id, .. }
         | VariableRef::PumpingPower { station_id, .. } => {
             if !ids.pumping.contains(&station_id.0) {
-                ctx.add_warning(
-                    ErrorKind::UnusedEntity,
+                ctx.add_error(
+                    ErrorKind::InvalidReference,
                     file,
                     Some(label.to_string()),
                     format!(
-                        "{label} references PumpingStation {} which is a stub entity with no LP effect",
+                        "{label} references non-existent PumpingStation {}",
                         station_id.0
                     ),
                 );
@@ -976,12 +978,12 @@ fn validate_variable_ref_entity(
         VariableRef::NonControllableGeneration { source_id, .. }
         | VariableRef::NonControllableCurtailment { source_id, .. } => {
             if !ids.ncs.contains(&source_id.0) {
-                ctx.add_warning(
-                    ErrorKind::UnusedEntity,
+                ctx.add_error(
+                    ErrorKind::InvalidReference,
                     file,
                     Some(label.to_string()),
                     format!(
-                        "{label} references NonControllableSource {} which is a stub entity with no LP effect",
+                        "{label} references non-existent NonControllableSource {}",
                         source_id.0
                     ),
                 );
