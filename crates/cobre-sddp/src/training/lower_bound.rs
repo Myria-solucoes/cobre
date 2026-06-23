@@ -431,7 +431,6 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             );
         }
 
-        // Compute effective eta (clamped or raw).
         compute_effective_eta(
             raw_noise,
             n_hydros,
@@ -2041,6 +2040,619 @@ mod tests {
             cap_after_second, cap_after_first,
             "noise_buf capacity must be stable across calls (first={cap_after_first}, second={cap_after_second}); \
              a decrease indicates reallocation on the lower-bound hot path"
+        );
+    }
+
+    // ── Filling phase-gating inheritance (template-driven, no per-opening patch) ─
+    //
+    // These three tests discharge the §4-trap-5 obligation that
+    // `evaluate_lower_bound` applies the SAME phase gating as the forward/backward
+    // passes for a filling hydro. Unlike NCS — whose availability is a per-OPENING
+    // stochastic draw, so the lower bound must re-run `transform_ncs_noise` per
+    // opening (the `sddp.md` "Lower-bound evaluation must patch NCS" contract,
+    // pinned by `lb_evaluate_stage_0_patches_ncs_bounds_per_opening`) — filling
+    // gating is STAGE-DETERMINISTIC: it is a pure function of `stage.id` and the
+    // hydro's `FillingConfig`. So all of it is carried in the per-stage
+    // `StageTemplate` (the three filling row families) and in the `noise_scale`
+    // vector (zeroed for a PreFilling hydro by `compute_noise_scale`). The lower
+    // bound loads the SAME `templates[0]` and reads the SAME `noise_scale` the
+    // forward/backward passes use, so it inherits filling structure by
+    // construction — no per-opening filling patch exists or is needed. A future
+    // edit that hand-wires a filling patch into the lower bound would duplicate
+    // the template structure into the hot path and risk drift; the source-text
+    // guard below makes that fail.
+
+    /// Build the per-stage templates for a study whose hydros exercise filling at
+    /// stage 0, via the SAME `build_stage_templates` (`geometry_per_stage`) path
+    /// the training loop uses.
+    ///
+    /// Two filling hydros, both white-noise (`max_par_order = 0`), independent (no
+    /// cascade), on a single bus:
+    /// - `H_A` (id 3): `start_stage_id = 0`, `entry_stage_id = 1`. At stage 0 it is
+    ///   in the terminal `Filling` stage (`entry − 1 == 0`), so stage 0 carries
+    ///   BOTH the `filling_retention` row family and the `filling_target`/`σ_fill`
+    ///   row+column family. Its noise is NOT zeroed (Filling keeps PAR noise).
+    /// - `H_B` (id 4): `start_stage_id = 2`, `entry_stage_id = 4`. At stage 0
+    ///   (`id 0 < start 2`) it is `PreFilling`, so `compute_noise_scale` zeros its
+    ///   stage-0 `noise_scale` entry.
+    ///
+    /// Returns the built [`StageTemplates`] plus the system indices of the two
+    /// hydros (id-sorted, so `H_A`→0, `H_B`→1).
+    // Rationale: this is a verbose `System`-builder fixture (bounds, penalties,
+    // inflow models, two hydros over five stages); the nested default-bounds /
+    // default-penalties `fn` helpers keep the per-field defaults local to the
+    // fixture. Splitting it or hoisting the helpers out would scatter the fixture
+    // without making it clearer — the same allow-set the sibling `minimal_system`
+    // fixtures in `setup` carry.
+    #[allow(
+        clippy::too_many_lines,
+        clippy::items_after_statements,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap
+    )]
+    fn filling_study_templates() -> (crate::lp_builder::StageTemplates, usize, usize) {
+        use chrono::NaiveDate;
+        use cobre_core::scenario::InflowModel;
+        use cobre_core::{
+            Block, BlockMode, BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties,
+            ContractStageBounds, DeficitSegment, EntityId, FillingConfig, Hydro,
+            HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStagePenalties,
+            LineStageBounds, LineStagePenalties, NcsStagePenalties, NoiseMethod,
+            PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
+            ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
+            SystemBuilder, ThermalStageBounds,
+        };
+        use cobre_stochastic::par::precompute::PrecomputedPar;
+
+        let n_hydros = 2_usize;
+        // Five study stages (ids 0..=4) span every filling phase of both hydros.
+        let n_stages = 5_usize;
+
+        fn zero_hydro_penalties() -> HydroPenalties {
+            HydroPenalties {
+                spillage_cost: 0.0,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 0.0,
+            }
+        }
+
+        // A filling hydro with the given start/entry stage ids. ConstantProductivity
+        // keeps the LP simple (no FPHA rows); the soft-floor/target slacks come from
+        // the filling family, not the generation model.
+        let filling_hydro = |id: i32, start_stage_id: i32, entry: i32| Hydro {
+            id: EntityId(id),
+            name: format!("H{id}"),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            entry_stage_id: Some(entry),
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: Some(FillingConfig {
+                start_stage_id,
+                filling_inflow_m3s: 0.0,
+            }),
+            penalties: zero_hydro_penalties(),
+        };
+
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+
+        // H_A is terminal-Filling at stage 0 (entry − 1 == 0); H_B is PreFilling at
+        // stage 0 (id 0 < start 2).
+        let hydros = vec![filling_hydro(3, 0, 1), filling_hydro(4, 2, 4)];
+
+        let stages: Vec<Stage> = (0..n_stages)
+            .map(|i| Stage {
+                index: i,
+                id: i as i32,
+                start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                season_id: Some(0),
+                blocks: vec![Block {
+                    index: 0,
+                    name: "S".to_string(),
+                    duration_hours: 744.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            })
+            .collect();
+
+        // White-noise inflow models (non-zero std so the Operating/Filling
+        // noise_scale is non-zero where the PreFilling zeroing is the contrast).
+        let inflow_models: Vec<InflowModel> = (0..n_stages)
+            .flat_map(|s| {
+                [EntityId(3), EntityId(4)]
+                    .into_iter()
+                    .map(move |hid| InflowModel {
+                        hydro_id: hid,
+                        stage_id: s as i32,
+                        mean_m3s: 80.0,
+                        std_m3s: 20.0,
+                        ar_coefficients: vec![],
+                        residual_std_ratio: 1.0,
+                        annual: None,
+                    })
+            })
+            .collect();
+
+        fn default_hydro_bounds() -> HydroStageBounds {
+            HydroStageBounds {
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 200.0,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 100.0,
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: None,
+                min_generation_mw: 0.0,
+                max_generation_mw: 250.0,
+                max_diversion_m3s: None,
+                filling_inflow_m3s: 0.0,
+                water_withdrawal_m3s: 0.0,
+            }
+        }
+
+        fn default_hydro_penalties() -> HydroStagePenalties {
+            HydroStagePenalties {
+                spillage_cost: 0.0,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 500.0,
+                filling_target_violation_cost: 100.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 0.0,
+            }
+        }
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages,
+            },
+            &PenaltiesDefaults {
+                hydro: default_hydro_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        let system = SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(hydros)
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .build()
+            .expect("filling_study_templates: valid system");
+
+        // Every fixture stage has id >= 0, so the full slices match the study-stage
+        // filter `build_stage_templates` applies internally (it filters id >= 0 too).
+        let par_lp = PrecomputedPar::build(
+            system.inflow_models(),
+            system.stages(),
+            &[EntityId(3), EntityId(4)],
+            None,
+        )
+        .expect("white-noise PrecomputedPar build");
+        let normal_lp = cobre_stochastic::normal::precompute::PrecomputedNormal::default();
+        let hydro_models =
+            crate::hydro_models::PrepareHydroModelsResult::default_from_system(&system);
+        let resolved_params = crate::resolved_parameters::ResolvedParameters {
+            per_param: vec![],
+            id_to_slot: vec![],
+        };
+
+        let templates = crate::lp_builder::build_stage_templates(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &normal_lp,
+            &hydro_models.production,
+            &hydro_models.evaporation,
+            &resolved_params,
+        )
+        .expect("build_stage_templates: filling system");
+
+        // Id-sorted: H_A (id 3) → 0, H_B (id 4) → 1.
+        (templates, 0, 1)
+    }
+
+    /// Build a stage-0 [`OpeningTree`] for the two filling hydros (ids 3, 4) with
+    /// `n_openings` openings, matching the inflow noise dimension the
+    /// [`filling_study_templates`] system carries (`dim = 2`).
+    ///
+    /// The per-opening noise vector must have at least `n_hydros` entries because
+    /// `lb_evaluate_stage_0` slices `raw_noise[..n_hydros]`; a 1-hydro tree (the
+    /// sibling `simple_opening_tree`) would under-size it. Identity correlation
+    /// between the two inflow entities keeps the tree shape trivial.
+    fn filling_opening_tree(n_openings: usize) -> OpeningTree {
+        use chrono::NaiveDate;
+        use cobre_core::{
+            EntityId,
+            scenario::{CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile},
+            temporal::{
+                Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+                StageStateConfig,
+            },
+        };
+        use cobre_stochastic::correlation::resolve::DecomposedCorrelation;
+        use std::collections::BTreeMap;
+
+        let stage = Stage {
+            index: 0,
+            id: 0,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "S".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: n_openings,
+                noise_method: NoiseMethod::Saa,
+            },
+        };
+
+        let entity_order = vec![EntityId(3), EntityId(4)];
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            "default".to_string(),
+            CorrelationProfile {
+                groups: vec![CorrelationGroup {
+                    name: "g_inflow".to_string(),
+                    entities: vec![
+                        CorrelationEntity {
+                            entity_type: "inflow".to_string(),
+                            id: EntityId(3),
+                        },
+                        CorrelationEntity {
+                            entity_type: "inflow".to_string(),
+                            id: EntityId(4),
+                        },
+                    ],
+                    matrix: vec![vec![1.0, 0.0], vec![0.0, 1.0]],
+                }],
+            },
+        );
+        let corr_model = CorrelationModel {
+            method: "spectral".to_string(),
+            profiles,
+            schedule: vec![],
+        };
+        let decomposed = DecomposedCorrelation::build(&corr_model).unwrap();
+
+        cobre_stochastic::tree::generate::generate_opening_tree(
+            42,
+            &[stage],
+            2, // dim = 2 hydros
+            &decomposed,
+            &entity_order,
+            cobre_stochastic::ClassDimensions {
+                n_hydros: 2,
+                n_load_buses: 0,
+                n_ncs: 0,
+            },
+            &cobre_stochastic::tree::generate::OpeningTreeGenerationInputs::default(),
+        )
+        .unwrap()
+    }
+
+    /// AC1: the lower-bound `StageTemplate` (= forward/backward `templates[0]`)
+    /// carries the filling row families present in the production template, and the
+    /// `PreFilling` hydro's stage-0 `noise_scale` entry is `0.0`.
+    ///
+    /// The lower bound's `LbEvalSpec.template` is bound to `stage_ctx.templates[0]`
+    /// and its `noise_scale` to `stage_ctx.noise_scale` — the SAME objects the
+    /// forward/backward passes load. So inspecting the `build_stage_templates`
+    /// output IS inspecting what the lower bound consumes: there is no separate
+    /// lower-bound template build to diverge.
+    #[test]
+    fn lower_bound_template_matches_forward_for_filling_stage() {
+        let (templates, h_a, h_b) = filling_study_templates();
+        let n_hydros = templates.n_hydros;
+        assert_eq!(n_hydros, 2, "fixture has two filling hydros");
+
+        // Stage 0 is H_A's terminal Filling stage: the per-stage geometry the
+        // template was baked with must carry the filling_retention AND
+        // filling_target (σ_fill) row families, plus the σ_fill slack column.
+        let geom0 = &templates.geometry_per_stage[0];
+        assert!(
+            !geom0.filling_retention.is_empty(),
+            "stage 0 (H_A terminal Filling) must carry a filling_retention row, got {:?}",
+            geom0.filling_retention
+        );
+        assert!(
+            !geom0.filling_target.is_empty(),
+            "stage 0 (H_A entry − 1) must carry a filling_target/σ_fill row, got {:?}",
+            geom0.filling_target
+        );
+        assert!(
+            !geom0.filling_target_col.is_empty(),
+            "stage 0 must carry the σ_fill slack column, got {:?}",
+            geom0.filling_target_col
+        );
+
+        // The filling families must lie INSIDE the structural region of the same
+        // `templates[0]` the lower bound loads — i.e. they are real rows/columns of
+        // the LP `evaluate_lower_bound` solves, not phantom geometry. (A row at
+        // `>= num_rows` would alias a cut row.)
+        let tpl0 = &templates.templates[0];
+        assert!(
+            geom0.filling_retention.end <= tpl0.num_rows
+                && geom0.filling_target.end <= tpl0.num_rows,
+            "filling rows must lie within templates[0].num_rows ({}): retention {:?}, target {:?}",
+            tpl0.num_rows,
+            geom0.filling_retention,
+            geom0.filling_target
+        );
+        assert!(
+            geom0.filling_target_col.end <= tpl0.num_cols,
+            "σ_fill column must lie within templates[0].num_cols ({}): {:?}",
+            tpl0.num_cols,
+            geom0.filling_target_col
+        );
+
+        // A later Operating stage of H_B (id 4 == entry) must carry the
+        // filling_floor/σ^{v-} family — proving the third filling row family is
+        // template-driven too (it just does not fire at stage 0 for these hydros).
+        let geom4 = &templates.geometry_per_stage[4];
+        assert!(
+            !geom4.filling_floor.is_empty(),
+            "stage 4 (H_B Operating) must carry a filling_floor/σ^{{v-}} row, got {:?}",
+            geom4.filling_floor
+        );
+
+        // PreFilling noise-scale zeroing: H_B is PreFilling at stage 0 (id 0 <
+        // start 2), so its stage-0 noise_scale entry is exactly 0.0 — the
+        // frozen-storage-identity freeze the lower bound inherits via
+        // `spec.noise_scale`. H_A is Filling at stage 0 (not PreFilling), so its
+        // entry is NOT zeroed — the contrast that makes the zeroing non-vacuous.
+        let stage0_noise_a = templates.noise_scale[h_a];
+        let stage0_noise_b = templates.noise_scale[h_b];
+        assert_eq!(
+            stage0_noise_b, 0.0,
+            "PreFilling hydro H_B must have a zeroed stage-0 noise_scale, got {stage0_noise_b}"
+        );
+        assert!(
+            stage0_noise_a > 0.0,
+            "control: Filling hydro H_A keeps a non-zero stage-0 noise_scale ({stage0_noise_a}) \
+             so the PreFilling zeroing is a real contrast, not vacuous"
+        );
+    }
+
+    /// AC2: the lower-bound evaluation code references NO filling-specific symbol —
+    /// filling structure arrives ONLY via the loaded template and the `noise_scale`
+    /// vector, never via a hand-written per-opening patch.
+    ///
+    /// Modeled on the `lp_builder_never_references_dual_extraction` guard: a
+    /// future "simplification" that hand-wires a filling patch into `lb_init_rank0`
+    /// / `lb_evaluate_stage_0` (mirroring the NCS per-opening patch, which filling
+    /// does NOT need because it is stage-deterministic) would re-introduce the
+    /// filling symbols here and fail. The needles are assembled from char fragments
+    /// so this guard's own source text does not contain the literals (else the test
+    /// would flag itself), exactly as that guard's source-text scan does — the
+    /// filling families are template-driven, not gated by hand-written code here.
+    #[test]
+    fn lower_bound_never_references_filling_gating() {
+        // Filling-gating symbols assembled from fragments so they are absent from
+        // this file's own bytes (the source text scanned below is this very file).
+        let needles: [String; 5] = [
+            ["filling", "_phase"].concat(),
+            ["Phase", "::"].concat(),
+            ["filling", "_retention"].concat(),
+            ["sigma", "_fill"].concat(),
+            ["filling", "_floor"].concat(),
+        ];
+
+        // The full lower-bound module source. Only the PRODUCTION region (above the
+        // `#[cfg(test)] mod tests`) is the code under test; the test module legitimately
+        // names filling symbols (this guard, the fixture, the AC1/AC3 assertions), so
+        // scanning the whole file would flag the tests themselves. Split on the test
+        // module attribute and scan only the production prefix.
+        let src = include_str!("lower_bound.rs");
+        let prod_src = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("module has a production region before the test module");
+
+        let mut offenders: Vec<&str> = Vec::new();
+        for needle in &needles {
+            if prod_src.contains(needle.as_str()) {
+                offenders.push(needle.as_str());
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "lower-bound production code must reference NO filling-gating symbol (filling \
+             structure arrives only via the loaded template + noise_scale vector, never a \
+             hand-written per-opening patch); offending symbols: {offenders:?}"
+        );
+    }
+
+    /// AC3: `evaluate_lower_bound` returns a finite, valid bound for a filling-hydro
+    /// system whose stage-0 LP carries the filling slack columns (`σ_fill`/`σ^{v-}`).
+    ///
+    /// Runs against the REAL solver (`ActiveSolver`) loading the production
+    /// `templates[0]`, so the solve genuinely sees the filling-structured LP — a
+    /// `MockSolver` would ignore the template and prove nothing about the LP shape.
+    /// The assertion is structural/qualitative (finite, valid minorant; filling
+    /// slack columns present); no numeric bound is pinned, because the HiGHS/CLP
+    /// floating-point result is not reproducible across backends/hosts.
+    #[test]
+    fn evaluate_lower_bound_uses_filling_structured_template() {
+        let (templates, _h_a, _h_b) = filling_study_templates();
+
+        // Precondition: stage 0 carries the σ_fill slack column block, so the LP the
+        // lower bound solves is the filling-structured LP (not an un-gated one).
+        let geom0 = &templates.geometry_per_stage[0];
+        assert!(
+            !geom0.filling_target_col.is_empty(),
+            "stage 0 must carry the σ_fill slack column for this test to be meaningful"
+        );
+        let tpl0 = &templates.templates[0];
+        assert!(
+            geom0.filling_target_col.end <= tpl0.num_cols,
+            "σ_fill slack column must be a real column of templates[0]"
+        );
+
+        // Real solver + communicator. The lower bound loads the production
+        // `templates[0]`, so the solve genuinely sees the filling-structured LP.
+        // n_hydros = 2 matches the system; the per-opening water-balance noise patch
+        // reads `spec.noise_scale` — including H_B's PreFilling-zeroed stage-0 entry
+        // — exactly as the forward/backward passes do, so the bound is computed
+        // against the same constraints those passes see at stage 0.
+        let mut solver = cobre_solver::ActiveSolver::new().expect("ActiveSolver::new");
+        let comm = LocalComm;
+
+        // 2 storage states (one per hydro), white noise ⇒ max_par_order = 0.
+        let state = crate::indexer::test_fixtures::state_layout(2, 0);
+        let fcf = make_fcf(templates.templates.len(), state.n_state);
+        let initial_state = vec![0.0_f64; state.n_state];
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
+        let opening_tree = filling_opening_tree(1);
+        let rm = RiskMeasure::Expectation;
+
+        let spec = LbEvalSpec {
+            template: &templates.templates[0],
+            base_row: templates.base_rows[0],
+            noise_scale: &templates.noise_scale,
+            n_hydros: 2,
+            opening_tree: &opening_tree,
+            risk_measure: &rm,
+            stochastic: None,
+            n_load_buses: 0,
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            stage_id: 0,
+            block_count: 1,
+            ncs_generation: 0..0,
+            z_inflow_row_start: templates.geometry_per_stage[0].z_inflow_row_start,
+            inflow_method: &InflowNonNegativityMethod::None,
+        };
+        let (mut row_batch, mut lb_scratch) = make_lb_locals();
+        let mut bundle = LbEvalScratchBundle::from_scratch_fields(
+            &mut patch_buf,
+            &mut row_batch,
+            None,
+            &mut lb_scratch,
+        );
+
+        let lb = evaluate_lower_bound(
+            &mut solver,
+            &fcf,
+            &initial_state,
+            &state,
+            &mut bundle,
+            &spec,
+            &comm,
+        );
+
+        let lb = lb.expect("filling-structured stage-0 LP must be feasible (penalty recourse)");
+        assert!(
+            lb.is_finite(),
+            "lower bound over the filling-structured LP must be finite, got {lb}"
         );
     }
 }

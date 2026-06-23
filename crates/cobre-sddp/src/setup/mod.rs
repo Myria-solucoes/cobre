@@ -162,7 +162,6 @@ pub struct StudySetup {
     /// Access via `scenario_libraries.training.<field>` or
     /// `scenario_libraries.simulation.<field>`.
     pub scenario_libraries: ScenarioLibraries,
-
     /// Iteration-loop parameters projected from [`crate::config::LoopConfig`].
     ///
     /// Holds the five pure-data fields of [`crate::config::LoopConfig`] that are stable
@@ -204,7 +203,7 @@ pub struct StudySetup {
     /// pass and simulation pipeline instead of zero-filling the accumulator.
     ///
     /// When `recent_observations` is empty, this is an all-zero seed and the
-    /// behavior is identical to the previous zero-reset.
+    /// trajectory start is a plain zero reset.
     pub(crate) recent_observation_seed: crate::lag_transition::RecentObservationSeed,
 
     /// PAR order of the downstream (coarser) resolution model.
@@ -1157,6 +1156,11 @@ fn build_anticipated_windows(system: &System) -> Vec<(Option<i32>, Option<i32>)>
 ///
 /// Each `HydroStorage` entry in `initial_conditions.storage` is matched to
 /// its positional index among the system's hydros (both sorted by `hydro_id`).
+///
+/// Filling hydros are seeded the same way from `initial_conditions.filling_storage`:
+/// each entry is matched to its hydro's positional index and written to the same
+/// dense storage coordinate, a value-only write distinct from the `storage` source
+/// collection.
 fn build_initial_state(
     system: &System,
     study_dims: &StudyDimensions,
@@ -1168,6 +1172,22 @@ fn build_initial_state(
 
     for hs in &ic.storage {
         // Both hydros() and ic.storage are sorted by hydro_id.
+        if let Ok(idx) = hydros.binary_search_by_key(&hs.hydro_id.0, |h| h.id.0) {
+            state[idx] = hs.value_hm3;
+        }
+    }
+
+    for hs in &ic.filling_storage {
+        // Both hydros() and ic.filling_storage are sorted by hydro_id (the
+        // binary_search_by_key below requires it, mirroring the ic.storage loop).
+        // Filling hydros carry their stage-0 seed here, never in `ic.storage`
+        // (a validated invariant: a hydro appears in exactly one of the two
+        // collections). The storage column is dense at the hydro's system index
+        // in every phase, so the storage state index equals the hydro's position
+        // in `hydros()` and the seed is a value-only write to the same coordinate
+        // the PreFilling pin (`fill_prefilling_shortcircuit`) freezes to
+        // `[seed, seed]`. Do not merge the two collections or re-index the column:
+        // a separate index would silently desync from that pin.
         if let Ok(idx) = hydros.binary_search_by_key(&hs.hydro_id.0, |h| h.id.0) {
             state[idx] = hs.value_hm3;
         }
@@ -3659,6 +3679,444 @@ mod tests {
             state[s + 1].abs() < 1e-10,
             "lag 1 should be 0.0 when past_inflows is absent, got {}",
             state[s + 1]
+        );
+    }
+
+    /// Build a 2-hydro system (IDs 1, 2) where hydro 2 carries a `FillingConfig`
+    /// (a filling hydro) and hydro 1 is operating, with caller-supplied
+    /// `initial_conditions`.
+    ///
+    /// Mirrors [`minimal_system_2_hydros_with_past_inflows`] but exposes the full
+    /// `InitialConditions` so a test can populate `storage` and `filling_storage`
+    /// independently. `start_stage_id` sets hydro 2's filling start stage (0 =
+    /// mid-filling seed; >0 = empty pit).
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::items_after_statements
+    )]
+    fn filling_system_2_hydros(
+        n_stages: usize,
+        start_stage_id: i32,
+        initial_conditions: cobre_core::InitialConditions,
+    ) -> cobre_core::System {
+        use chrono::NaiveDate;
+
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+
+        let make_hydro = |id: i32, name: &str, filling: Option<cobre_core::FillingConfig>| Hydro {
+            id: EntityId(id),
+            name: name.to_string(),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            // A filling hydro requires `entry_stage_id` (the operating-handoff
+            // stage) to be `Some`; the system builder rejects `filling` without
+            // it. Operating hydros leave it `None`.
+            entry_stage_id: filling.as_ref().map(|f| f.start_stage_id + 1),
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling,
+            penalties: HydroPenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        };
+
+        let n_st = n_stages.max(1);
+        let stages: Vec<Stage> = (0..n_stages)
+            .map(|i| Stage {
+                index: i,
+                id: i as i32,
+                start_date: NaiveDate::from_ymd_opt(2020, (i % 12 + 1) as u32, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(
+                    if (i % 12 + 1) == 12 { 2021 } else { 2020 },
+                    ((i % 12 + 1) % 12 + 1) as u32,
+                    1,
+                )
+                .unwrap(),
+                season_id: Some(i),
+                blocks: vec![Block {
+                    index: 0,
+                    name: "S".to_string(),
+                    duration_hours: 744.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: true,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            })
+            .collect();
+
+        let inflow_models: Vec<InflowModel> = (0..n_stages)
+            .flat_map(|i| {
+                [1_i32, 2].map(|hid| InflowModel {
+                    hydro_id: EntityId(hid),
+                    stage_id: i as i32,
+                    mean_m3s: 80.0,
+                    std_m3s: 20.0,
+                    ar_coefficients: vec![0.5, 0.3],
+                    residual_std_ratio: 0.8,
+                    annual: None,
+                })
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..n_stages)
+            .map(|i| LoadModel {
+                bus_id: EntityId(1),
+                stage_id: i as i32,
+                mean_mw: 100.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        fn default_hydro_bounds() -> HydroStageBounds {
+            HydroStageBounds {
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 200.0,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 100.0,
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: None,
+                min_generation_mw: 0.0,
+                max_generation_mw: 250.0,
+                max_diversion_m3s: None,
+                filling_inflow_m3s: 0.0,
+                water_withdrawal_m3s: 0.0,
+            }
+        }
+
+        fn default_hydro_penalties() -> HydroStagePenalties {
+            HydroStagePenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 500.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            }
+        }
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 2,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: n_st,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 2,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: n_st,
+            },
+            &PenaltiesDefaults {
+                hydro: default_hydro_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        let filling = Some(cobre_core::FillingConfig {
+            start_stage_id,
+            filling_inflow_m3s: 50.0,
+        });
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(vec![])
+            .hydros(vec![
+                make_hydro(1, "H1", None),
+                make_hydro(2, "H2_FILL", filling),
+            ])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .initial_conditions(initial_conditions)
+            .build()
+            .expect("filling_system_2_hydros: valid")
+    }
+
+    /// Given a `filling_storage` entry with a non-zero mid-fill seed for the
+    /// filling hydro (id=2, system index 1), `build_initial_state` writes the
+    /// seed at the hydro's storage coordinate.
+    #[test]
+    fn build_initial_state_seeds_filling_storage() {
+        use super::build_initial_state;
+
+        let seed = 120.0_f64;
+        let ic = cobre_core::InitialConditions {
+            storage: vec![],
+            filling_storage: vec![cobre_core::HydroStorage {
+                hydro_id: EntityId(2),
+                value_hm3: seed,
+            }],
+            past_inflows: vec![],
+            past_anticipated_commitments: vec![],
+            recent_observations: vec![],
+        };
+        let system = filling_system_2_hydros(1, 0, ic);
+        let layout = layout_for_lag_test(2, 2);
+
+        let state = build_initial_state(
+            &system,
+            &crate::indexer::test_fixtures::study_dims(),
+            &layout,
+        );
+
+        // Hydro id=2 is at system index 1; its storage coordinate is state[1].
+        assert!(
+            (state[1] - seed).abs() < 1e-10,
+            "filling hydro storage coordinate should carry the seed {seed}, got {}",
+            state[1]
+        );
+        // The operating hydro (id=1) had no storage IC, so its coordinate is 0.
+        assert!(
+            state[0].abs() < 1e-10,
+            "non-seeded operating hydro storage should be 0.0, got {}",
+            state[0]
+        );
+    }
+
+    /// Given a filling hydro whose `start_stage_id > 0` so `filling_storage`
+    /// holds `value_hm3 == 0.0` (empty pit, Guard 6), `build_initial_state`
+    /// leaves the coordinate at 0.0 and fires no debug-assert.
+    #[test]
+    fn build_initial_state_filling_empty_pit_is_zero() {
+        use super::build_initial_state;
+
+        let ic = cobre_core::InitialConditions {
+            storage: vec![],
+            filling_storage: vec![cobre_core::HydroStorage {
+                hydro_id: EntityId(2),
+                value_hm3: 0.0,
+            }],
+            past_inflows: vec![],
+            past_anticipated_commitments: vec![],
+            recent_observations: vec![],
+        };
+        let system = filling_system_2_hydros(1, 1, ic);
+        let layout = layout_for_lag_test(2, 2);
+
+        let state = build_initial_state(
+            &system,
+            &crate::indexer::test_fixtures::study_dims(),
+            &layout,
+        );
+
+        assert!(
+            state[1].abs() < 1e-10,
+            "empty-pit filling hydro storage should be 0.0, got {}",
+            state[1]
+        );
+    }
+
+    /// Given a `filling_storage` entry whose `hydro_id` matches no hydro in the
+    /// system, `build_initial_state` returns without panic and every state slot
+    /// is unchanged from the no-filling baseline.
+    #[test]
+    fn build_initial_state_unknown_filling_hydro_skipped() {
+        use super::build_initial_state;
+
+        let layout = layout_for_lag_test(2, 2);
+        let study_dims = crate::indexer::test_fixtures::study_dims();
+
+        let baseline_ic = cobre_core::InitialConditions {
+            storage: vec![],
+            filling_storage: vec![],
+            past_inflows: vec![],
+            past_anticipated_commitments: vec![],
+            recent_observations: vec![],
+        };
+        let baseline_system = filling_system_2_hydros(1, 0, baseline_ic);
+        let baseline = build_initial_state(&baseline_system, &study_dims, &layout);
+
+        let ic = cobre_core::InitialConditions {
+            storage: vec![],
+            filling_storage: vec![cobre_core::HydroStorage {
+                hydro_id: EntityId(99),
+                value_hm3: 150.0,
+            }],
+            past_inflows: vec![],
+            past_anticipated_commitments: vec![],
+            recent_observations: vec![],
+        };
+        let system = filling_system_2_hydros(1, 0, ic);
+        let state = build_initial_state(&system, &study_dims, &layout);
+
+        assert_eq!(
+            state, baseline,
+            "an unknown filling hydro_id must be silently skipped, leaving the \
+             no-filling baseline state unchanged"
+        );
+    }
+
+    /// Given both `storage` (operating hydro id=1) and `filling_storage`
+    /// (filling hydro id=2) populated alongside `past_inflows`,
+    /// `build_initial_state` seeds both storage coordinates and the AR-lag slots
+    /// identically to the operating-only path (filling hydros share the lag
+    /// path).
+    #[test]
+    fn build_initial_state_mixed_operating_and_filling_seeds() {
+        use super::build_initial_state;
+
+        let operating_seed = 175.0_f64;
+        let filling_seed = 90.0_f64;
+        let past_inflows = vec![
+            cobre_core::HydroPastInflows {
+                hydro_id: EntityId(1),
+                values_m3s: vec![600.0, 500.0],
+                season_ids: None,
+            },
+            cobre_core::HydroPastInflows {
+                hydro_id: EntityId(2),
+                values_m3s: vec![200.0, 100.0],
+                season_ids: None,
+            },
+        ];
+        let ic = cobre_core::InitialConditions {
+            storage: vec![cobre_core::HydroStorage {
+                hydro_id: EntityId(1),
+                value_hm3: operating_seed,
+            }],
+            filling_storage: vec![cobre_core::HydroStorage {
+                hydro_id: EntityId(2),
+                value_hm3: filling_seed,
+            }],
+            past_inflows,
+            past_anticipated_commitments: vec![],
+            recent_observations: vec![],
+        };
+        let system = filling_system_2_hydros(1, 0, ic);
+        let layout = layout_for_lag_test(2, 2);
+
+        let state = build_initial_state(
+            &system,
+            &crate::indexer::test_fixtures::study_dims(),
+            &layout,
+        );
+
+        // Both storage coordinates carry their respective seeds.
+        assert!(
+            (state[0] - operating_seed).abs() < 1e-10,
+            "operating hydro storage should be {operating_seed}, got {}",
+            state[0]
+        );
+        assert!(
+            (state[1] - filling_seed).abs() < 1e-10,
+            "filling hydro storage should be {filling_seed}, got {}",
+            state[1]
+        );
+
+        // AR-lag slots are seeded by the shared `past_inflows` path, identical to
+        // the operating-only case (lag-major: slot = s + lag * N + h, N = 2).
+        let s = layout.inflow_lags.start;
+        assert!(
+            (state[s] - 600.0).abs() < 1e-10,
+            "lag0 hydro 0: expected 600.0, got {}",
+            state[s]
+        );
+        assert!(
+            (state[s + 1] - 200.0).abs() < 1e-10,
+            "lag0 hydro 1: expected 200.0, got {}",
+            state[s + 1]
+        );
+        assert!(
+            (state[s + 2] - 500.0).abs() < 1e-10,
+            "lag1 hydro 0: expected 500.0, got {}",
+            state[s + 2]
+        );
+        assert!(
+            (state[s + 3] - 100.0).abs() < 1e-10,
+            "lag1 hydro 1: expected 100.0, got {}",
+            state[s + 3]
         );
     }
 
