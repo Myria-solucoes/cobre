@@ -301,6 +301,17 @@ fn case_dir(label: &str) -> std::path::PathBuf {
         // filling soft-penalty slacks are checked by the focused simulation test,
         // not by this baseline.
         "D38" => "d38-dead-volume-filling",
+        // PreFilling hydro directly upstream of a Filling hydro: cascade
+        // `U (id 1, filling) → D (id 0, filling) → H3 (id 2, real sink)` plus an
+        // off-cascade control H4. U commissions LATER than D
+        // (`start_U = 3 > start_D = 1`), so at stages 1–2 D is Filling while U is
+        // still PreFilling. U's absent dam routes its (large) realized inflow onto
+        // D's water-balance row AND onto D's impound-retention cap, so D must
+        // release the excess rather than over-impound. D03/D38 cannot exercise a
+        // PreFilling-upstream-of-Filling adjacency; the parity hash covers
+        // storage/water/cuts/convergence, so it reflects the retention-cap routing
+        // through the cascade coupling.
+        "D39" => "d39-prefilling-upstream-of-filling",
         other => panic!("unknown case label: {other}"),
     };
     // Integration tests run from the crate root; fixtures live at
@@ -653,4 +664,13 @@ fn parity_hash_d37() {
 )]
 fn parity_hash_d38() {
     run_case("D38");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d39() {
+    run_case("D39");
 }

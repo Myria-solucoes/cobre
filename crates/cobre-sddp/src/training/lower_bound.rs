@@ -647,13 +647,12 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
         // Phase 3: risk-measure aggregation + broadcast. `objectives_buf` and
         // `uniform_prob_buf` are disjoint fields of `lb_scratch`, borrowed
         // immutably and mutably respectively.
-        lb = lb_aggregate_and_broadcast(
+        return lb_aggregate_and_broadcast(
             &scratch.lb_scratch.objectives_buf,
             spec.risk_measure,
             &mut scratch.lb_scratch.uniform_prob_buf,
             comm,
-        )?;
-        return Ok(lb);
+        );
     }
 
     comm.broadcast(std::slice::from_mut(&mut lb), 0)
@@ -2045,9 +2044,8 @@ mod tests {
 
     // ── Filling phase-gating inheritance (template-driven, no per-opening patch) ─
     //
-    // These three tests discharge the §4-trap-5 obligation that
-    // `evaluate_lower_bound` applies the SAME phase gating as the forward/backward
-    // passes for a filling hydro. Unlike NCS — whose availability is a per-OPENING
+    // These three tests verify that `evaluate_lower_bound` applies the SAME phase
+    // gating as the forward/backward passes for a filling hydro. Unlike NCS — whose availability is a per-OPENING
     // stochastic draw, so the lower bound must re-run `transform_ncs_noise` per
     // opening (the `sddp.md` "Lower-bound evaluation must patch NCS" contract,
     // pinned by `lb_evaluate_stage_0_patches_ncs_bounds_per_opening`) — filling

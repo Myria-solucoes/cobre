@@ -121,8 +121,8 @@ pub struct StudySetup {
     /// (`entry <= stage_id < exit`) and force a `[0, 0]` cap for a dormant slot —
     /// the zero-influence convention the column fill applies, kept identical across
     /// the forward, backward, and lower-bound patch sites (the
-    /// `.claude/rules/sddp.md` "Lower-bound evaluation must patch NCS" contract; a
-    /// divergence understates the bound, the D15 bug class). Storing the windows,
+    /// `evaluate_lower_bound` "patch NCS per opening" contract; a divergence
+    /// understates the bound, the D15 bug class). Storing the windows,
     /// not a per-stage dormancy mask, keeps activity out of per-stage storage.
     /// Length equals `n_stochastic_ncs`; empty when no stochastic NCS.
     pub(crate) ncs_stochastic_windows: Vec<(Option<i32>, Option<i32>)>,
@@ -3966,7 +3966,7 @@ mod tests {
     }
 
     /// Given a filling hydro whose `start_stage_id > 0` so `filling_storage`
-    /// holds `value_hm3 == 0.0` (empty pit, Guard 6), `build_initial_state`
+    /// holds `value_hm3 == 0.0` (empty pit), `build_initial_state`
     /// leaves the coordinate at 0.0 and fires no debug-assert.
     #[test]
     fn build_initial_state_filling_empty_pit_is_zero() {

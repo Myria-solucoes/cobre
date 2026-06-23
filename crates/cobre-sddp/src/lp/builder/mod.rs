@@ -172,14 +172,6 @@ pub(crate) fn commissioning_active(entry: Option<i32>, exit: Option<i32>, stage_
 /// house rule for a fixed variant set; no trait-object indirection). Derived by
 /// [`filling_phase`], which is the single owner of the derivation — see its
 /// doc-comment.
-// Rationale: the column/row gating sites that match on this enum (per-phase
-// generation/turbine/diversion bounds, FPHA exclusion, the cascade
-// short-circuit, the filling retention row, and the `σ_fill`/`σ^{v-}` slacks in
-// `columns.rs`, `entries.rs`, `rows.rs`, `layout.rs`) are not yet wired; the
-// `#[cfg(test)] mod tests` use does not count toward dead_code, so the lint
-// fires until a production caller lands. It refires the moment such a caller is
-// removed, keeping this seam honest.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
     /// Before `start_stage_id`: the dam does not exist; the river flows past its
@@ -226,9 +218,6 @@ pub(crate) enum Phase {
 /// and `hydro.entry_stage_id` directly — taking the config avoids re-deriving
 /// `start_stage_id` at every site, matching `commissioning_active`'s `Option`
 /// convention.
-// Rationale: unused until the gating sites enumerated on [`Phase`] call it; same
-// Intent/Seam suppression, refires when a production caller is removed.
-#[allow(dead_code)]
 #[inline]
 #[must_use]
 pub(crate) fn filling_phase(

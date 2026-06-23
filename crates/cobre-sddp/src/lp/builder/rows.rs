@@ -371,7 +371,7 @@ fn fill_evaporation_rows(
 ///
 /// The base is the deterministic PAR base inflow (before noise), NOT multiplied
 /// by ζ and NOT reduced by withdrawal. The noise component (sigma · eta) is added
-/// at solve time via `PatchBuffer` Category 5.
+/// at solve time via [`PatchBuffer::fill_z_inflow_patches`].
 fn fill_z_inflow_rows(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,

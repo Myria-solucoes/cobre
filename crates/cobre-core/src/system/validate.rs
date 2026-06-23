@@ -319,6 +319,15 @@ fn validate_ncs_refs(
 ///   meaning "impound nothing, pass everything downstream and rely on natural
 ///   accumulation"; only a negative (or NaN) cap is rejected.
 /// - `entry_stage_id` must be set (`Some`), since filling requires a known start stage.
+/// - `start_stage_id` must be strictly less than `entry_stage_id`: the filling
+///   phase must precede operation. This is a mirror of the cobre-io ordering guard,
+///   enforced here so a `System` built directly via `SystemBuilder` (bypassing
+///   cobre-io's semantic layer, which `SystemBuilder` being a public export allows)
+///   still rejects an inverted config — an inverted `start >= entry` otherwise
+///   mis-phases the reservoir in the solver with no error. Validating
+///   `start_stage_id` against the study stage SET stays in cobre-io, which alone
+///   holds the horizon; only the intra-entity `start < entry` relation is checkable
+///   without it and belongs here as the last line of defense.
 ///
 /// All violations are appended to `errors` — no short-circuiting on first error.
 pub(crate) fn validate_filling_configs(hydros: &[Hydro], errors: &mut Vec<ValidationError>) {
@@ -334,6 +343,14 @@ pub(crate) fn validate_filling_configs(hydros: &[Hydro], errors: &mut Vec<Valida
                 errors.push(ValidationError::InvalidFillingConfig {
                     hydro_id: hydro.id,
                     reason: "filling requires entry_stage_id to be set".to_string(),
+                });
+            }
+            if let Some(entry) = hydro.entry_stage_id
+                && filling.start_stage_id >= entry
+            {
+                errors.push(ValidationError::InvalidFillingConfig {
+                    hydro_id: hydro.id,
+                    reason: "filling start_stage_id must be less than entry_stage_id".to_string(),
                 });
             }
         }

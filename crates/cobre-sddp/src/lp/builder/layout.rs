@@ -469,12 +469,13 @@ pub(crate) struct StageLayout<'a> {
     /// index here in the cursor chain.
     pub(crate) row_filling_target_start: usize,
     /// First `σ_fill` terminal-target slack column. The `filling_target` column
-    /// block is the LAST per-stage column family (after the generic-slack columns),
-    /// so its presence/absence cannot shift any other family's column start. One
+    /// block sits after the generic-slack columns and before the `σ^{v-}`
+    /// `filling_floor` columns — the second-to-last per-stage column family. One
     /// stage-level slack column per filling hydro whose `entry_stage_id − 1 ==
-    /// stage.id` at this stage. Empty (`col_filling_target_start == num_cols` minus
-    /// the block width) at every non-terminal stage and for a non-filling system,
-    /// leaving every other `col_*_start` and `num_cols` byte-identical.
+    /// stage.id` at this stage. Empty (zero width) at every non-terminal stage and
+    /// for a non-filling system; both filling column blocks are empty for a
+    /// non-filling system, so every prior `col_*_start` and `num_cols` stay
+    /// byte-identical to a build without these families.
     pub(crate) col_filling_target_start: usize,
     /// System hydro indices (into `ctx.hydros`) emitting a terminal `σ_fill` target
     /// at this stage (`entry_stage_id − 1 == stage.id`), in ascending order.
@@ -693,7 +694,7 @@ fn identify_evap_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<usize>
 /// `Operating` at every stage, so the set is empty for a build with no filling
 /// hydros — and the `filling_retention` block collapses to zero rows, leaving
 /// `num_rows` bit-identical to a build without this family (the parity-neutrality
-/// contract: the 29 existing deterministic cases keep their row counts).
+/// contract: existing non-filling deterministic cases keep their row counts).
 fn identify_filling_retention_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<usize> {
     (0..ctx.n_hydros)
         .filter(|&h_idx| {
@@ -731,8 +732,8 @@ fn identify_filling_retention_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) 
 /// filling by validation) never matches, so the set is empty for a build with no
 /// filling hydros — and both the `filling_target` row block and the `σ_fill`
 /// column block collapse to zero, leaving `num_rows`/`num_cols` bit-identical to a
-/// build without this family (the parity-neutrality contract: the 29 existing
-/// deterministic cases keep their row/column counts). `stage_id` is the study
+/// build without this family (the parity-neutrality contract: existing
+/// non-filling deterministic cases keep their row/column counts). `stage_id` is the study
 /// `stage.id`, mirroring [`identify_filling_retention_hydros`].
 fn identify_filling_target_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<usize> {
     (0..ctx.n_hydros)
@@ -1254,9 +1255,9 @@ impl<'a> StageLayout<'a> {
         let generic =
             enumerate_generic_constraint_rows(ctx, stage, n_blks, col_generic_slack_start);
 
-        // Terminal `σ_fill` slack columns: the LAST per-stage column family, placed
-        // after the generic-slack columns so its presence/absence cannot shift any
-        // other family's column start. One stage-level slack per filling hydro whose
+        // Terminal `σ_fill` slack columns: the second-to-last per-stage column
+        // family, placed after the generic-slack columns and before the `σ^{v-}`
+        // `filling_floor` columns. One stage-level slack per filling hydro whose
         // `entry − 1` is this stage; addressed `col_filling_target_start + local_idx`
         // over `filling_target_hydro_indices`. The block is empty at every
         // non-terminal stage and for a non-filling system, so `num_cols` stays
@@ -2573,7 +2574,7 @@ mod tests {
     /// `num_rows` is bit-identical across every stage id (the cut-row region anchor
     /// is unmoved). The forbidden alternative — reserving a target row for every
     /// hydro unconditionally — would shift `num_rows` and alias the append-only cut
-    /// rows for the 29 existing deterministic cases.
+    /// rows for the existing non-filling deterministic cases.
     #[test]
     fn non_filling_system_no_filling_target_num_rows_unchanged() {
         // `FphaMixFixtures` hydros are all non-filling.

@@ -350,6 +350,16 @@ pub(super) fn fill_state_and_water_entries(
 ///   Diversion-into-`h` columns are routed the same way (the "all water interactions
 ///   transfer to `d`" principle, §3.2), conserving water that would otherwise vanish.
 ///
+/// When `d` is itself in the Filling phase, those same pieces ALSO land on `d`'s
+/// impound-retention row (`row_filling_retention_start() + local`): that row caps
+/// `d`'s per-stage impounding to `ζ·F_d` against the natural inflow into `d`, which
+/// includes `h`'s routed water. Without it the cap would read only `d`'s own `z_d`
+/// (the retention row's `upstream(d)` release terms reference `h`'s pinned-zero
+/// columns), understating the inflow and letting `d` over-impound — a too-weak
+/// constraint, not a wrong cut. A non-Filling `d` owns no retention row and receives
+/// nothing extra, so for every case with no `PreFilling` hydro upstream of a
+/// Filling hydro (all existing cases + d38) the emitted matrix is bit-identical.
+///
 /// `h`'s withdrawal DEMAND transfers to `d` via `d`'s RHS (served by `d`'s existing
 /// withdrawal slacks); that is an RHS adjustment owned by
 /// `super::rows::fill_water_balance_rows`, which MUST resolve the SAME `d` via
@@ -377,25 +387,43 @@ fn fill_prefilling_shortcircuit(
     let zeta = layout.zeta;
     let row_d = layout.row_water_balance_start() + d_idx;
 
+    // If `d` is in the Filling phase this stage it owns an impound-retention row;
+    // the routed inflow must land there too (see the doc-comment). The walk already
+    // skipped every PreFilling link, so a Filling `d` is the resolved target, located
+    // by its position in `filling_retention_hydro_indices`. `None` for a non-Filling
+    // `d` (including every existing non-filling case), keeping `route` identical to a
+    // single `row_d` push there.
+    let row_d_retention = layout
+        .filling_retention_hydro_indices
+        .iter()
+        .position(|&h| h == d_idx)
+        .map(|local| layout.row_filling_retention_start() + local);
+    let mut route = |col: usize, coeff: f64| {
+        col_entries[col].push((row_d, coeff));
+        if let Some(retention) = row_d_retention {
+            col_entries[col].push((retention, coeff));
+        }
+    };
+
     // `h`'s realized incremental inflow arrives at `d`: the `z_h` column with `−ζ`
     // (inflow sign), identical to how `fill_filling_retention_entries` references
     // the realized-inflow column. `z_h` is a stage-level column (not per-block).
-    col_entries[layout.col_z_inflow_start() + h_idx].push((row_d, -zeta));
+    route(layout.col_z_inflow_start() + h_idx, -zeta);
 
     for blk in 0..n_blks {
         let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
         // Upstream releases re-routed `upstream(h)→d` with `−τ_h` (inflow to `d`).
         for &up_id in ctx.cascade.upstream(hydro.id) {
             if let Some(&u_idx) = ctx.hydro_pos.get(&up_id) {
-                col_entries[layout.turbine_col(u_idx, blk)].push((row_d, -tau_h));
-                col_entries[layout.spillage_col(u_idx, blk)].push((row_d, -tau_h));
+                route(layout.turbine_col(u_idx, blk), -tau_h);
+                route(layout.spillage_col(u_idx, blk), -tau_h);
             }
         }
         // Diversion-into-`h` re-routed to `d` with `−τ_h`, same sign as upstream
         // releases — the absent `h`'s diversion inflow now reaches `d` directly.
         if let Some(sources) = ctx.diversion_upstream.get(&hydro.id) {
             for &src_idx in sources {
-                col_entries[layout.diversion_col(src_idx, blk)].push((row_d, -tau_h));
+                route(layout.diversion_col(src_idx, blk), -tau_h);
             }
         }
     }
@@ -4194,6 +4222,126 @@ mod pumping_water_tests {
             off.ret_row,
             off.ret_row + off.n_ret_rows,
             num_rows
+        );
+    }
+
+    // ── PreFilling upstream of a Filling downstream (retention-cap routing) ──────
+
+    /// Like [`ret_hydro`] (filling) but with a caller-chosen filling
+    /// `start_stage_id`, so an upstream filling hydro can begin its `PreFilling`
+    /// phase LATER than a downstream filling hydro — the topology where the
+    /// downstream is Filling while the upstream is still `PreFilling` at the same
+    /// stage.
+    fn ret_hydro_start(
+        id: i32,
+        downstream: Option<i32>,
+        entry: Option<i32>,
+        start_stage_id: i32,
+    ) -> Hydro {
+        let mut h = ret_hydro(id, downstream, entry, false);
+        h.filling = Some(FillingConfig {
+            start_stage_id,
+            filling_inflow_m3s: 0.0,
+        });
+        h
+    }
+
+    struct PfuOffsets {
+        zeta: f64,
+        n_ret_rows: usize,
+        ret_row: usize,
+        z_u: usize,
+        z_d: usize,
+        water_row_u: usize,
+        water_row_d: usize,
+        storage_in_u: usize,
+    }
+
+    /// Build `U(H1) → D(H2)` where BOTH are filling but the upstream U commissions
+    /// LATER than the downstream D, evaluated at stage 2 where D is Filling
+    /// (`start_D = 2 ≤ 2 < entry_D = 4`) and U is still `PreFilling`
+    /// (`2 < start_U = 3`).
+    #[allow(clippy::type_complexity)]
+    fn build_prefilling_upstream_of_filling_case() -> ((Vec<i32>, Vec<i32>, Vec<f64>), PfuOffsets) {
+        let stage_id = 2;
+        let fixtures = PumpFixtures::new(
+            vec![
+                ret_hydro_start(1, Some(2), Some(5), 3), // U: PreFilling at 0,1,2; Filling at 3,4
+                ret_hydro_start(2, None, Some(4), 2),    // D: Filling at 2,3; downstream of U
+            ],
+            Vec::new(),
+        );
+        let ctx = fixtures.make_ctx();
+        let stage_index = usize::try_from(stage_id).expect("non-negative");
+        let stage = two_block_stage(stage_index, [300.0, 444.0]);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+        let csc = {
+            let mut entries = build_stage_matrix_entries(&ctx, &stage, 0, &layout);
+            for col in &mut entries {
+                col.sort_unstable_by_key(|&(row, _)| row);
+            }
+            assemble_csc(&entries)
+        };
+        let u_idx = fixtures.hydro_pos[&EntityId(1)];
+        let d_idx = fixtures.hydro_pos[&EntityId(2)];
+        let offsets = PfuOffsets {
+            zeta: layout.zeta,
+            n_ret_rows: layout.filling_retention_hydro_indices.len(),
+            ret_row: layout.row_filling_retention_start(),
+            z_u: layout.col_z_inflow_start() + u_idx,
+            z_d: layout.col_z_inflow_start() + d_idx,
+            water_row_u: layout.row_water_balance_start() + u_idx,
+            water_row_d: layout.row_water_balance_start() + d_idx,
+            storage_in_u: layout.col_storage_in_start() + u_idx,
+        };
+        (csc, offsets)
+    }
+
+    /// Regression: when a `PreFilling` hydro U is the direct upstream of a Filling
+    /// hydro D at the same stage, D's impound-retention row must capture U's routed
+    /// natural inflow (`z_U` at `−ζ`), not just D's own `z_D`. U's release columns are
+    /// pinned `[0, 0]`/cost-minimised and carry none of U's water — it arrives via the
+    /// short-circuit on `z_U`. Without routing `z_U` onto the cap, the per-stage
+    /// impound limit under-counts the inflow and D can over-impound past `ζ·F_D`.
+    #[test]
+    fn retention_row_captures_prefilling_upstream_inflow() {
+        let (csc, off) = build_prefilling_upstream_of_filling_case();
+        assert_eq!(
+            off.n_ret_rows, 1,
+            "exactly one retention row (only D is Filling)"
+        );
+
+        // The fix: U's realized inflow z_U is routed onto D's retention row at −ζ.
+        // Pre-fix this entry was absent (0.0), so the cap counted only z_D.
+        assert_eq!(
+            csc_at(&csc, off.z_u, off.ret_row),
+            -off.zeta,
+            "z_U must enter D's retention row at −ζ (PreFilling-upstream inflow counts toward the cap)"
+        );
+        // D's own inflow z_D is still on the cap.
+        assert_eq!(
+            csc_at(&csc, off.z_d, off.ret_row),
+            -off.zeta,
+            "z_D remains on D's retention row at −ζ"
+        );
+        // Routing-target consistency: the same z_U also lands on D's standard balance.
+        assert_eq!(
+            csc_at(&csc, off.z_u, off.water_row_d),
+            -off.zeta,
+            "z_U is routed onto D's standard water-balance row as well (short-circuit target)"
+        );
+        // U's own row is the frozen identity: z_U is relocated OFF it, only the
+        // incoming-storage −1 remains.
+        assert_eq!(
+            csc_at(&csc, off.z_u, off.water_row_u),
+            0.0,
+            "z_U is relocated off U's frozen-identity row (PreFilling)"
+        );
+        assert_eq!(
+            csc_at(&csc, off.storage_in_u, off.water_row_u),
+            -1.0,
+            "U's frozen-identity row keeps its incoming-storage −1 entry"
         );
     }
 

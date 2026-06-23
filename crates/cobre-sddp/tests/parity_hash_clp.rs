@@ -301,6 +301,11 @@ fn case_dir(label: &str) -> std::path::PathBuf {
         // block-count changes. The parity hash reflects the short-circuit and the
         // phase transitions through the cascade coupling on storage/water/cuts.
         "D38" => "d38-dead-volume-filling",
+        // PreFilling hydro directly upstream of a Filling hydro (U→D→H3): U
+        // commissions after D, so at stages 1–2 D is Filling while U is PreFilling
+        // and U's routed inflow must count toward D's impound-retention cap. See the
+        // HiGHS harness for the full topology note.
+        "D39" => "d39-prefilling-upstream-of-filling",
         other => panic!("unknown case label: {other}"),
     };
     // Integration tests run from the crate root; fixtures live at
@@ -646,4 +651,13 @@ fn parity_hash_d37() {
 )]
 fn parity_hash_d38() {
     run_case("D38");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d39() {
+    run_case("D39");
 }

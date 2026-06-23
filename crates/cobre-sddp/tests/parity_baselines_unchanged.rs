@@ -173,6 +173,17 @@ const EXPECTED_HASHES: &[(&str, &str)] = &[
         "D38",
         "585c33665773bdc1fef78a65a09aec57ec16e9079d11a5e7ce97dbdbc28f4511",
     ),
+    // PreFilling hydro directly upstream of a Filling hydro: cascade
+    // `U (filling) → D (filling) → H3 (real sink)` plus an off-cascade control.
+    // U commissions after D (`start_U = 3 > start_D = 1`), so at stages 1–2 D is
+    // Filling while U is PreFilling; U's routed PreFilling inflow must count toward
+    // D's impound-retention cap, so D releases the excess rather than over-impound.
+    // This guard pins only the HiGHS `D39.sha256`; the CLP `D39.sha256` is verified
+    // by the slow-gated CLP `parity_hash_d39`.
+    (
+        "D39",
+        "f250e89d7706f4b9ac8f256b640b60e3567894c280ee916a3264e81c7a576e38",
+    ),
 ];
 
 // ---------------------------------------------------------------------------

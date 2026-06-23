@@ -1317,7 +1317,7 @@ mod tests {
         let mut hydro = make_hydro(1);
         hydro.entry_stage_id = Some(10);
         hydro.filling = Some(FillingConfig {
-            start_stage_id: 10,
+            start_stage_id: 9,
             filling_inflow_m3s: 0.0,
         });
 
@@ -1341,7 +1341,7 @@ mod tests {
         let mut hydro = make_hydro(1);
         hydro.entry_stage_id = Some(10);
         hydro.filling = Some(FillingConfig {
-            start_stage_id: 10,
+            start_stage_id: 9,
             filling_inflow_m3s: 100.0,
         });
 
@@ -1354,6 +1354,43 @@ mod tests {
             result.is_ok(),
             "expected Ok for valid filling config, got: {:?}",
             result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn test_filling_start_not_before_entry_rejected() {
+        // start_stage_id must be strictly less than entry_stage_id. An inverted
+        // (or equal) ordering is rejected at the SystemBuilder boundary, so a
+        // System built directly (bypassing cobre-io) cannot reach the solver with
+        // a config that would silently mis-phase the reservoir.
+        use crate::entities::FillingConfig;
+        let bus = make_bus(0);
+        let mut hydro = make_hydro(1);
+        hydro.entry_stage_id = Some(5);
+        hydro.filling = Some(FillingConfig {
+            start_stage_id: 5,
+            filling_inflow_m3s: 100.0,
+        });
+
+        let result = SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![hydro])
+            .build();
+
+        assert!(
+            result.is_err(),
+            "expected Err for start_stage_id >= entry_stage_id"
+        );
+        let errors = result.unwrap_err();
+        let has_error = errors.iter().any(|e| match e {
+            ValidationError::InvalidFillingConfig { hydro_id, reason } => {
+                *hydro_id == EntityId(1) && reason.contains("less than entry_stage_id")
+            }
+            _ => false,
+        });
+        assert!(
+            has_error,
+            "expected InvalidFillingConfig with ordering reason, got: {errors:?}"
         );
     }
 
