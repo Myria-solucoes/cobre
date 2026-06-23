@@ -38,7 +38,9 @@ The FPHA generation constraint is
 `g ≤ γ₀ + (γᵥ/2)·(V_in + V_out) + γ_q·q (+ γ_s·s)`. The `−γᵥ/2` coefficient
 appears on **both** the incoming and outgoing storage columns — not on `V_out`
 alone. (Discovered during deterministic case D06.)
-Read: `lp/builder/matrix.rs`, `lp/builder/template.rs`.
+Read: `lp/builder/entries.rs` (`fill_fpha_entries` — pushes `−γᵥ/2` onto both the
+incoming- and outgoing-storage columns), `lp/builder/rows.rs` (`fill_fpha_rows`),
+and `lp/builder/template.rs`.
 
 ## Cut pool is append-only; basis matches by slot identity
 

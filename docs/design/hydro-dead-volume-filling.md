@@ -1,8 +1,10 @@
 # Hydro dead-volume filling and commissioning
 
-> **Status**: Locked design — not yet implemented. Authoritative specification
-> for commissioning windows on hydro reservoirs and the dead-volume filling
-> lifecycle. Hydro is the last and hardest of the six commissionable entity
+> **Status**: Shipped (v1). Authoritative specification for commissioning windows
+> on hydro reservoirs and the dead-volume filling lifecycle. A proposed successor,
+> `hydro-filling-volume-target-reformulation.md`, supersedes §3.1, §3.3, §3.4,
+> §3.7, and §5.3 of this document; the rest remains current.
+> Hydro is the last and hardest of the six commissionable entity
 > types: its storage is a Benders **state coordinate**, so it cannot use the
 > column-omission/zero-influence mechanism the other five use — it must keep its
 > column and suspend only its _operation_, and it carries a real filling feature
@@ -161,8 +163,9 @@ stage via `geometry_per_stage`):
 v_h + σ_fill ≥ min_storage_hm3,   σ_fill ≥ 0,   cost = filling_target_violation_cost
 ```
 
-`filling_target_violation_cost` is the highest penalty in the system (a resolved
-validation already enforces it exceeds `storage_violation_below_cost`). The
+`filling_target_violation_cost` is the highest penalty in the system (a
+semantic-validator check warns — non-blocking — when it does not exceed
+`storage_violation_below_cost`; the ordering is advised, not hard-enforced). The
 per-stage impound cap (§3.1) rate-limits the fill, so a single terminal target is
 sufficient — no per-stage trajectory target is needed.
 

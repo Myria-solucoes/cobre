@@ -149,8 +149,9 @@ pub(crate) struct CascadeRefs<'a> {
     /// iterates it in a fixed, input-ordering-independent sequence.
     pub cascade: &'a CascadeTopology,
     /// Target hydro id to the **system indices** of plants diverting into it,
-    /// built in canonical hydro order (the same representation `matrix.rs`
-    /// iterates for the storage-balance diversion-inflow term).
+    /// built in canonical hydro order (the same representation
+    /// `fill_state_and_water_entries` iterates for the storage-balance
+    /// diversion-inflow term).
     pub diversion_upstream: &'a HashMap<EntityId, Vec<usize>>,
 }
 
@@ -540,7 +541,7 @@ fn resolve_hydro_storage(
 /// address `grid.flat(col_start, pos, eff_blk)` with
 /// `eff_blk = block_id.unwrap_or(block_idx)`.
 /// The column set mirrors the cascade/diversion loops of
-/// `matrix.rs::fill_state_and_water_entries`: upstream releases iterate
+/// `fill_state_and_water_entries`: upstream releases iterate
 /// `cascade.upstream(h)` resolved via `hydro_pos`; diverted inflow iterates
 /// `diversion_upstream[h]`, whose values are already **system indices**. Both are
 /// in canonical (ID-sorted / canonical-hydro) order at build time, so the emitted
@@ -598,7 +599,7 @@ fn resolve_hydro_inflow(
 
     // Diverted inflow: the diversion column of each plant diverting into `h`.
     // `diversion_upstream[h]` already holds system indices, so no `hydro_pos`
-    // lookup is needed (mirrors the matrix.rs diversion-inflow loop).
+    // lookup is needed (mirrors the `fill_state_and_water_entries` diversion-inflow loop).
     let diversion = block_col_range(geom, ElementKind::Diversion);
     if !diversion.is_empty() {
         for &d_idx in diversion_into {
@@ -1244,7 +1245,8 @@ mod tests {
     /// Resolve a `PumpingFlow`/`PumpingPower` ref with an explicit pumping
     /// context (column start, block stride, station slice, position map).
     ///
-    /// Threads real pumping data the way the matrix.rs caller does — sourcing
+    /// Threads real pumping data the way the production `fill_pumping_water_entries`
+    /// caller does — sourcing
     /// `col_pumping_start` from a `StageLayout`-style reserved range — so the
     /// pumping arms exercise their real column arithmetic and consumption-rate
     /// coefficient instead of the empty fixture used by [`call`].

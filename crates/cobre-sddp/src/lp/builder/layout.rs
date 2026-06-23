@@ -209,9 +209,10 @@ pub(crate) struct AnticipatedLayout {
     /// (strict gate). Zero when `n_anticipated == 0` or when no plant is
     /// active at this stage. Used by the matrix-fill helpers to drive the
     /// active-row iteration.
-    // Rationale: read by `matrix.rs` debug_assert_eq! guards at three production call
-    // sites; the dead_code lint fires here because the field is defined in this sibling
-    // `layout` module and the lint analyser does not see cross-module field access.
+    // Rationale: read by `debug_assert_eq!` guards in the per-stage matrix-fill helpers
+    // (`entries.rs`, `rows.rs`, `columns.rs`) at three production call sites; the
+    // dead_code lint fires here because the field is defined in this sibling `layout`
+    // module and the lint analyser does not see cross-module field access.
     #[allow(dead_code)]
     pub(crate) n_anticipated_state_out_def_rows: usize,
     /// Start of anticipated-fishing constraint rows (after operational violation rows).
