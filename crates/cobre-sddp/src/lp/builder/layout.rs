@@ -16,7 +16,7 @@ use crate::indexer::{BlockGrid, EvaporationIndices, StateLayout};
 
 use super::{
     EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET,
-    GenericConstraintRowEntry, M3S_TO_HM3,
+    GenericConstraintRowEntry, M3S_TO_HM3, Phase, filling_phase,
 };
 
 /// Pre-resolved bound, penalty, and factor tables shared across all stages.
@@ -441,6 +441,80 @@ pub(crate) struct StageLayout<'a> {
     /// (`fpha_rows_end + n_evap_hydros`). The four operational-violation row
     /// families collapse onto this single cursor when `n_h == 0`.
     pub(crate) post_equipment_row_start: usize,
+    /// First impound-retention row; the `filling_retention` block follows the
+    /// operational-violation rows and precedes the fishing/anticipated/generic
+    /// rows. One row per Filling-phase hydro at this stage (the count is
+    /// `filling_retention_hydro_indices.len()`). The block is empty when no hydro
+    /// is Filling, in which case this cursor equals `row_anticipated_fishing_start`
+    /// and `num_rows` is unchanged. Lives strictly below `num_rows`, ahead of the
+    /// append-only cut rows.
+    pub(crate) row_filling_retention_start: usize,
+    /// System hydro indices (into `ctx.hydros`) in the Filling phase at this
+    /// stage, in ascending order. Parallel to the `filling_retention` row block:
+    /// local retention-row index `i` maps to system hydro
+    /// `filling_retention_hydro_indices[i]`, at row
+    /// `row_filling_retention_start + i`. Empty for a non-filling system.
+    pub(crate) filling_retention_hydro_indices: Vec<usize>,
+    /// First terminal `σ_fill`-target row; the `filling_target` block follows the
+    /// `filling_retention` block as a SIBLING in the pre-cut region (after the
+    /// operational-violation rows, before fishing/anticipated/generic). One row per
+    /// filling hydro whose `entry_stage_id − 1 == stage.id` at this stage (the count
+    /// is `filling_target_hydro_indices.len()`). The block is empty (zero rows) at
+    /// every stage except the single terminal stage of a filling hydro, in which
+    /// case this cursor equals `row_anticipated_fishing_start` and `num_rows` is
+    /// unchanged. Lives strictly below `num_rows`, ahead of the append-only cut
+    /// rows: a `filling_target` row written at any index `>= num_rows` would alias
+    /// the appended cut rows (slot-identity warm-start reconstruction matches cut
+    /// rows from `num_rows`) and corrupt every cut, so the family MUST reserve its
+    /// index here in the cursor chain.
+    pub(crate) row_filling_target_start: usize,
+    /// First `σ_fill` terminal-target slack column. The `filling_target` column
+    /// block is the LAST per-stage column family (after the generic-slack columns),
+    /// so its presence/absence cannot shift any other family's column start. One
+    /// stage-level slack column per filling hydro whose `entry_stage_id − 1 ==
+    /// stage.id` at this stage. Empty (`col_filling_target_start == num_cols` minus
+    /// the block width) at every non-terminal stage and for a non-filling system,
+    /// leaving every other `col_*_start` and `num_cols` byte-identical.
+    pub(crate) col_filling_target_start: usize,
+    /// System hydro indices (into `ctx.hydros`) emitting a terminal `σ_fill` target
+    /// at this stage (`entry_stage_id − 1 == stage.id`), in ascending order.
+    /// Parallel to BOTH the `filling_target` row block and the `σ_fill` column
+    /// block: local target index `i` maps to system hydro
+    /// `filling_target_hydro_indices[i]`, at row `row_filling_target_start + i` and
+    /// column `col_filling_target_start + i`. Empty except at a filling hydro's
+    /// terminal stage.
+    pub(crate) filling_target_hydro_indices: Vec<usize>,
+    /// First soft `σ^{v-}` operating-floor row; the `filling_floor` block follows
+    /// the `filling_target` block as a SIBLING in the pre-cut region (after the
+    /// operational-violation rows, before fishing/anticipated/generic). One row per
+    /// filling hydro in the Operating phase at this stage (the count is
+    /// `filling_floor_hydro_indices.len()`). The block is empty (zero rows) at every
+    /// non-operating stage of a filling hydro and for a non-filling system, in which
+    /// case this cursor equals `row_anticipated_fishing_start` and `num_rows` is
+    /// unchanged. Lives strictly below `num_rows`, ahead of the append-only cut
+    /// rows: a `filling_floor` row written at any index `>= num_rows` would alias
+    /// the appended cut rows (slot-identity warm-start reconstruction matches cut
+    /// rows from `num_rows`) and corrupt every cut, so the family MUST reserve its
+    /// index here in the cursor chain.
+    pub(crate) row_filling_floor_start: usize,
+    /// First soft `σ^{v-}` operating-floor slack column. The `filling_floor` column
+    /// block is the LAST per-stage column family (after the `σ_fill`
+    /// `filling_target` columns), so its presence/absence cannot shift any other
+    /// family's column start. One stage-level slack column per filling hydro in the
+    /// Operating phase at this stage. Empty (`col_filling_floor_start == num_cols`
+    /// minus the block width) at every non-operating stage of a filling hydro and
+    /// for a non-filling system, leaving every other `col_*_start` and `num_cols`
+    /// byte-identical.
+    pub(crate) col_filling_floor_start: usize,
+    /// System hydro indices (into `ctx.hydros`) emitting a soft `σ^{v-}`
+    /// operating-floor row + column at this stage (filling hydros in the Operating
+    /// phase), in ascending order. Parallel to BOTH the `filling_floor` row block
+    /// and the `σ^{v-}` column block: local floor index `i` maps to system hydro
+    /// `filling_floor_hydro_indices[i]`, at row `row_filling_floor_start + i` and
+    /// column `col_filling_floor_start + i`. DISTINCT from
+    /// `filling_target_hydro_indices` (`σ_fill`, terminal Filling stage only); the
+    /// two never overlap. Empty except at an operating stage of a filling hydro.
+    pub(crate) filling_floor_hydro_indices: Vec<usize>,
 
     // ── Role-(b) anticipated identity maps (own fields) ──────────────────────
     /// Reverse map: global thermal position → anticipated-local index. Built once
@@ -530,10 +604,36 @@ fn build_evap_indices(
 /// The returned vectors feed this stage's [`StageLayout`], which owns the FPHA
 /// column and row offsets; this helper only enumerates which hydros use FPHA,
 /// never their offsets.
-fn identify_fpha_hydros(ctx: &TemplateBuildCtx<'_>, stage_idx: usize) -> (Vec<usize>, Vec<usize>) {
+///
+/// A filling hydro is dropped from the FPHA set at every stage where its
+/// [`filling_phase`] is `PreFilling` **or** `Filling`: a non-operating plant has
+/// zero productivity, and the operating-range hyperplane fit is invalid below
+/// `min_storage` where a filling reservoir sits. Because the FPHA generation
+/// column block is densely packed by FPHA-local index (sized from this set's
+/// length in [`StageLayout::new`]), dropping a hydro here removes its generation
+/// column entirely — there is no orphaned `[0, max]` column for an unconstrained
+/// solve to exploit. The complementary `[0, 0]` column-bound gate in
+/// `fill_fpha_generation_columns` only fires for the stages a hydro is *still*
+/// iterated (it never is during filling once excluded here). `stage_id` is the
+/// study `stage.id`, not the stage index — [`filling_phase`] keys on the
+/// commissioning id, which diverges from the index under multi-resolution stages.
+/// A non-filling hydro is `Operating` at every stage, so the exclusion never
+/// fires and the set is bit-identical to a build without this gate.
+fn identify_fpha_hydros(
+    ctx: &TemplateBuildCtx<'_>,
+    stage_idx: usize,
+    stage_id: i32,
+) -> (Vec<usize>, Vec<usize>) {
     let mut fpha_hydro_indices: Vec<usize> = Vec::new();
     let mut fpha_planes_per_hydro: Vec<usize> = Vec::new();
     for h_idx in 0..ctx.n_hydros {
+        let hydro = &ctx.hydros[h_idx];
+        if matches!(
+            filling_phase(hydro.filling.as_ref(), hydro.entry_stage_id, stage_id),
+            Phase::PreFilling | Phase::Filling
+        ) {
+            continue;
+        }
         if let ResolvedProductionModel::Fpha { planes, .. } =
             ctx.production_models.model(h_idx, stage_idx)
         {
@@ -549,13 +649,142 @@ fn identify_fpha_hydros(ctx: &TemplateBuildCtx<'_>, stage_idx: usize) -> (Vec<us
 /// The returned vector feeds this stage's [`StageLayout`], which owns the
 /// evaporation column and row offsets; this helper only enumerates which hydros
 /// use evaporation, never their offsets.
-fn identify_evap_hydros(ctx: &TemplateBuildCtx<'_>) -> Vec<usize> {
+///
+/// A filling hydro is dropped from the evaporation set only when its
+/// [`filling_phase`] is `PreFilling`: before `start_stage_id` the dam does not
+/// exist, so there is no reservoir surface to evaporate from. Evaporation is
+/// **kept** during `Filling` — the impounding reservoir does have a surface —
+/// which is the opposite of the FPHA rule (excluded in `PreFilling` *and*
+/// `Filling`); the two must not be unified. `stage_id` is the study `stage.id`,
+/// mirroring [`identify_fpha_hydros`]. A non-filling hydro is `Operating` at
+/// every stage, so the exclusion never fires and the set is bit-identical to a
+/// build without this gate.
+fn identify_evap_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<usize> {
     (0..ctx.n_hydros)
         .filter(|&h_idx| {
+            let hydro = &ctx.hydros[h_idx];
+            if matches!(
+                filling_phase(hydro.filling.as_ref(), hydro.entry_stage_id, stage_id),
+                Phase::PreFilling
+            ) {
+                return false;
+            }
             matches!(
                 ctx.evaporation_models.model(h_idx),
                 EvaporationModel::Linearized { .. }
             )
+        })
+        .collect()
+}
+
+/// Collect the indices of hydros that emit an impound-retention row at this stage.
+///
+/// Membership is exactly the hydros whose [`filling_phase`] is `Phase::Filling`
+/// at `stage_id` — a per-stage, per-hydro derivation with no cached mask. The
+/// returned vector feeds this stage's [`StageLayout`], which owns the retention
+/// row offset (`row_filling_retention_start`); this helper only enumerates which
+/// hydros impound at this stage, never their offsets. The count drives the
+/// `filling_retention` row block sized in [`StageLayout::new`].
+///
+/// `PreFilling` and `Operating` are excluded: before `start_stage_id` the dam
+/// does not exist (no impounding), and at/after `entry` the plant operates
+/// normally (no impound cap). `stage_id` is the study `stage.id`, mirroring
+/// [`identify_fpha_hydros`]/[`identify_evap_hydros`]. A non-filling hydro is
+/// `Operating` at every stage, so the set is empty for a build with no filling
+/// hydros — and the `filling_retention` block collapses to zero rows, leaving
+/// `num_rows` bit-identical to a build without this family (the parity-neutrality
+/// contract: the 29 existing deterministic cases keep their row counts).
+fn identify_filling_retention_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<usize> {
+    (0..ctx.n_hydros)
+        .filter(|&h_idx| {
+            let hydro = &ctx.hydros[h_idx];
+            matches!(
+                filling_phase(hydro.filling.as_ref(), hydro.entry_stage_id, stage_id),
+                Phase::Filling
+            )
+        })
+        .collect()
+}
+
+/// Collect the indices of hydros that emit a terminal `σ_fill` target row +
+/// column at this stage.
+///
+/// Membership is exactly the filling hydros (`filling.is_some()`) whose
+/// `entry_stage_id − 1 == stage_id` — the single TERMINAL Filling stage, derived
+/// inline with no cached mask. The returned vector feeds this stage's
+/// [`StageLayout`], which owns the `filling_target` row offset
+/// (`row_filling_target_start`) and the `σ_fill` slack column offset
+/// (`col_filling_target_start`); this helper only enumerates which hydros emit the
+/// terminal target here, never their offsets. The count drives both the
+/// `filling_target` row block and the `σ_fill` column block sized in
+/// [`StageLayout::new`].
+///
+/// The stage at id `entry − 1` IS in the Filling phase
+/// (`start ≤ entry − 1 < entry`), so [`filling_phase`] is unnecessary to consult —
+/// the `entry − 1` arithmetic already pins the single terminal Filling stage.
+/// Terminal-only at `entry − 1` is sufficient because the `filling_retention`
+/// per-stage impound cap rate-limits the fill (storage can rise by at most `ζ·F_h` per
+/// stage), so a single terminal target catches the cumulative shortfall; the
+/// wrong-but-compiling over-elaboration is one `σ_fill` per Filling stage (an
+/// intermediate per-stage trajectory target), which the design explicitly
+/// rejects. `entry_stage_id.is_none()` (a non-filling hydro, since entry requires
+/// filling by validation) never matches, so the set is empty for a build with no
+/// filling hydros — and both the `filling_target` row block and the `σ_fill`
+/// column block collapse to zero, leaving `num_rows`/`num_cols` bit-identical to a
+/// build without this family (the parity-neutrality contract: the 29 existing
+/// deterministic cases keep their row/column counts). `stage_id` is the study
+/// `stage.id`, mirroring [`identify_filling_retention_hydros`].
+fn identify_filling_target_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<usize> {
+    (0..ctx.n_hydros)
+        .filter(|&h_idx| {
+            let hydro = &ctx.hydros[h_idx];
+            hydro.filling.is_some()
+                && hydro
+                    .entry_stage_id
+                    .is_some_and(|entry| entry - 1 == stage_id)
+        })
+        .collect()
+}
+
+/// Collect the indices of hydros that emit a soft `σ^{v-}` operating-floor row +
+/// column at this stage.
+///
+/// Membership is exactly the filling hydros (`filling.is_some()`) in the
+/// [`Phase::Operating`] phase at this stage (derived inline by [`filling_phase`],
+/// no cached mask). The returned vector feeds this stage's [`StageLayout`], which
+/// owns the `filling_floor` row offset (`row_filling_floor_start`) and the `σ^{v-}`
+/// slack column offset (`col_filling_floor_start`); this helper only enumerates
+/// which hydros emit the soft floor here, never their offsets. The count drives
+/// both the `filling_floor` row block and the `σ^{v-}` column block sized in
+/// [`StageLayout::new`].
+///
+/// This is DISTINCT from [`identify_filling_target_hydros`] (`σ_fill`): `σ^{v-}`
+/// fires at EVERY Operating stage of a filling hydro, whereas `σ_fill` fires only
+/// at the single terminal Filling stage (`entry − 1`). The two families never
+/// overlap (Operating vs the last Filling stage), carry different costs, and must
+/// not be conflated.
+///
+/// The soft floor is scoped to filling hydros DELIBERATELY. A non-filling hydro is
+/// [`Phase::Operating`] at every stage but `filling.is_none()`, so it never
+/// matches and keeps its hard `min_storage` floor (the relax in
+/// [`super::columns::fill_storage_columns`] is gated the same way). The
+/// wrong-but-compiling alternative — a GLOBAL soft floor that matched every
+/// Operating hydro regardless of `filling` — would let the optimizer cheaply
+/// violate dead volume system-wide, the system-wide softening §3.4 of the design
+/// explicitly rejects. For a build with no filling hydros the set is empty, so
+/// both the `filling_floor` row block and the `σ^{v-}` column block collapse to
+/// zero, leaving `num_rows`/`num_cols` bit-identical to a build without this
+/// family (the parity-neutrality contract: the existing deterministic cases keep
+/// their row/column counts). `stage_id` is the study `stage.id`, mirroring
+/// [`identify_filling_target_hydros`].
+fn identify_filling_floor_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<usize> {
+    (0..ctx.n_hydros)
+        .filter(|&h_idx| {
+            let hydro = &ctx.hydros[h_idx];
+            matches!(
+                filling_phase(hydro.filling.as_ref(), hydro.entry_stage_id, stage_id),
+                Phase::Operating
+            ) && hydro.filling.is_some()
         })
         .collect()
 }
@@ -743,8 +972,29 @@ impl<'a> StageLayout<'a> {
 
         // Identify FPHA and evaporation hydros at this stage; their per-stage
         // counts drive the generation/evap column and FPHA/evap row blocks below.
-        let (fpha_hydro_indices, fpha_planes_per_hydro) = identify_fpha_hydros(ctx, stage_idx);
-        let evap_hydro_indices = identify_evap_hydros(ctx);
+        // Both gate filling hydros out of membership by `stage.id` (the study
+        // stage id `filling_phase` keys on, not `stage_idx`): FPHA excludes
+        // PreFilling+Filling, evaporation excludes PreFilling only.
+        let (fpha_hydro_indices, fpha_planes_per_hydro) =
+            identify_fpha_hydros(ctx, stage_idx, stage.id);
+        let evap_hydro_indices = identify_evap_hydros(ctx, stage.id);
+        // Hydros in the Filling phase at this stage emit one impound-retention row
+        // each; the count sizes the `filling_retention` row block below. Keyed on
+        // `stage.id`, like FPHA/evap membership.
+        let filling_retention_hydro_indices = identify_filling_retention_hydros(ctx, stage.id);
+        // Filling hydros whose terminal Filling stage (`entry − 1`) is this stage
+        // emit one `σ_fill` target row + slack column each; the count sizes BOTH
+        // the `filling_target` row block (sibling to `filling_retention`, below)
+        // and the `σ_fill` column block (the last column family, below). Keyed on
+        // `stage.id`.
+        let filling_target_hydro_indices = identify_filling_target_hydros(ctx, stage.id);
+        // Filling hydros in the Operating phase at this stage emit one soft
+        // `σ^{v-}` operating-floor row + slack column each; the count sizes BOTH
+        // the `filling_floor` row block (sibling to `filling_target`, below) and
+        // the `σ^{v-}` column block (the last column family, after `filling_target`,
+        // below). DISTINCT from the `σ_fill` set (terminal Filling stage only);
+        // they never overlap. Keyed on `stage.id`.
+        let filling_floor_hydro_indices = identify_filling_floor_hydros(ctx, stage.id);
 
         // Inverse of `fpha_hydro_indices`: system hydro index → FPHA-local index.
         // Built once here so the matrix-fill helpers read the cached map instead of
@@ -922,9 +1172,49 @@ impl<'a> StageLayout<'a> {
             post_equipment_row_start
         };
 
+        // Impound-retention rows: one per hydro in the Filling phase at this
+        // stage. Placed AFTER the operational-violation row block and BEFORE the
+        // fishing/anticipated-state-out-def/generic blocks — i.e. strictly inside
+        // the structural row region `[0, num_rows)` and ahead of the append-only
+        // cut rows that start at `num_rows`. A retention row written at any index
+        // >= num_rows would alias the appended cut rows and corrupt every cut
+        // (slot-identity warm-start reconstruction matches cut rows from
+        // `num_rows`), so the family MUST reserve its index here in the cursor
+        // chain, not be bolted on past `num_rows`. The block is empty (zero rows)
+        // when no hydro is Filling, so `row_anticipated_fishing_start` and every
+        // downstream cursor are unshifted for a non-filling system — `num_rows`
+        // stays bit-identical to a build without this family. This is the first of
+        // the pre-cut filling-row families; `σ_fill` and `σ^{v-}` add sibling
+        // blocks in the same region after it.
+        let n_filling_retention_rows = filling_retention_hydro_indices.len();
+        let row_filling_retention_start = row_min_generation_start + n_op_rows;
+
+        // Terminal `σ_fill`-target rows: one per filling hydro whose `entry − 1`
+        // is this stage. Placed as a SIBLING immediately AFTER the
+        // `filling_retention` block and BEFORE the fishing/anticipated/generic
+        // blocks — same pre-cut region, same "row >= num_rows aliases the
+        // append-only cut rows" invariant. The block is empty (zero rows) at every
+        // stage except a filling hydro's terminal stage, so
+        // `row_anticipated_fishing_start` and every downstream row cursor are
+        // unshifted for a non-filling system — `num_rows` stays bit-identical to a
+        // build without this family.
+        let n_filling_target_rows = filling_target_hydro_indices.len();
+        let row_filling_target_start = row_filling_retention_start + n_filling_retention_rows;
+
+        // Soft `σ^{v-}` operating-floor rows: one per filling hydro in the Operating
+        // phase at this stage. Placed as a SIBLING immediately AFTER the
+        // `filling_target` block and BEFORE the fishing/anticipated/generic blocks —
+        // same pre-cut region, same "row >= num_rows aliases the append-only cut
+        // rows" invariant. The block is empty (zero rows) at every non-operating
+        // stage of a filling hydro and for a non-filling system, so
+        // `row_anticipated_fishing_start` and every downstream row cursor are
+        // unshifted — `num_rows` stays bit-identical to a build without this family.
+        let n_filling_floor_rows = filling_floor_hydro_indices.len();
+        let row_filling_floor_start = row_filling_target_start + n_filling_target_rows;
+
         // One fishing row per anticipated plant at every stage (always-active).
         let n_anticipated_fishing_rows = ctx.n_anticipated;
-        let row_anticipated_fishing_start = row_min_generation_start + n_op_rows;
+        let row_anticipated_fishing_start = row_filling_floor_start + n_filling_floor_rows;
 
         // Anticipated-state-out definition rows: one per ACTIVE plant. Active is
         // the single-owner gate `StateLayout::is_anticipated_decision_active`;
@@ -964,7 +1254,25 @@ impl<'a> StageLayout<'a> {
         let generic =
             enumerate_generic_constraint_rows(ctx, stage, n_blks, col_generic_slack_start);
 
-        let num_cols = col_generic_slack_start + generic.n_generic_slack_cols;
+        // Terminal `σ_fill` slack columns: the LAST per-stage column family, placed
+        // after the generic-slack columns so its presence/absence cannot shift any
+        // other family's column start. One stage-level slack per filling hydro whose
+        // `entry − 1` is this stage; addressed `col_filling_target_start + local_idx`
+        // over `filling_target_hydro_indices`. The block is empty at every
+        // non-terminal stage and for a non-filling system, so `num_cols` stays
+        // byte-identical to a build without this family.
+        let col_filling_target_start = col_generic_slack_start + generic.n_generic_slack_cols;
+
+        // Soft `σ^{v-}` operating-floor slack columns: the LAST per-stage column
+        // family, placed after the `σ_fill` `filling_target` columns so its
+        // presence/absence cannot shift any other family's column start. One
+        // stage-level slack per filling hydro in the Operating phase at this stage;
+        // addressed `col_filling_floor_start + local_idx` over
+        // `filling_floor_hydro_indices`. The block is empty at every non-operating
+        // stage of a filling hydro and for a non-filling system, so `num_cols` stays
+        // byte-identical to a build without this family.
+        let col_filling_floor_start = col_filling_target_start + filling_target_hydro_indices.len();
+        let num_cols = col_filling_floor_start + filling_floor_hydro_indices.len();
         let num_rows = row_generic_start + generic.n_generic_rows;
         let zeta = stage.blocks.iter().map(|b| b.duration_hours).sum::<f64>() * M3S_TO_HM3;
 
@@ -1055,6 +1363,14 @@ impl<'a> StageLayout<'a> {
             min_turbine_rows: oper.min_turbine_rows,
             min_generation_rows: oper.min_generation_rows,
             post_equipment_row_start,
+            row_filling_retention_start,
+            filling_retention_hydro_indices,
+            row_filling_target_start,
+            col_filling_target_start,
+            filling_target_hydro_indices,
+            row_filling_floor_start,
+            col_filling_floor_start,
+            filling_floor_hydro_indices,
             anticipated_local_by_sys_pos,
         }
     }
@@ -1577,6 +1893,71 @@ impl<'a> StageLayout<'a> {
             self.post_equipment_row_start
         }
     }
+
+    /// Start of impound-retention rows (one per Filling-phase hydro at this
+    /// stage); reads `self.row_filling_retention_start`.
+    ///
+    /// Layout: `row_filling_retention_start() + local_filling_idx`, where the
+    /// local index runs over `filling_retention_hydro_indices` in order. The block
+    /// is empty when no hydro is Filling — this cursor then equals
+    /// `row_anticipated_fishing_start` and carries no rows, so reading it for an
+    /// empty block yields the (unused) shared cursor rather than a stale `0`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn row_filling_retention_start(&self) -> usize {
+        self.row_filling_retention_start
+    }
+
+    /// Start of terminal `σ_fill`-target rows (one per filling hydro whose
+    /// `entry − 1` is this stage); reads `self.row_filling_target_start`.
+    ///
+    /// Layout: `row_filling_target_start() + local_target_idx`, where the local
+    /// index runs over `filling_target_hydro_indices` in order. The block is empty
+    /// at every non-terminal stage — this cursor then equals
+    /// `row_anticipated_fishing_start` and carries no rows.
+    #[inline]
+    #[must_use]
+    pub(crate) fn row_filling_target_start(&self) -> usize {
+        self.row_filling_target_start
+    }
+
+    /// Start of terminal `σ_fill`-target slack columns (one per filling hydro whose
+    /// `entry − 1` is this stage); reads `self.col_filling_target_start`.
+    ///
+    /// Layout: `col_filling_target_start() + local_target_idx`, parallel to
+    /// `row_filling_target_start()`. The block is empty at every non-terminal stage
+    /// — this cursor then equals `num_cols` and carries no columns.
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_filling_target_start(&self) -> usize {
+        self.col_filling_target_start
+    }
+
+    /// Start of soft `σ^{v-}` operating-floor rows (one per filling hydro in the
+    /// Operating phase at this stage); reads `self.row_filling_floor_start`.
+    ///
+    /// Layout: `row_filling_floor_start() + local_floor_idx`, where the local index
+    /// runs over `filling_floor_hydro_indices` in order. The block is empty at every
+    /// non-operating stage of a filling hydro — this cursor then equals
+    /// `row_anticipated_fishing_start` and carries no rows.
+    #[inline]
+    #[must_use]
+    pub(crate) fn row_filling_floor_start(&self) -> usize {
+        self.row_filling_floor_start
+    }
+
+    /// Start of soft `σ^{v-}` operating-floor slack columns (one per filling hydro
+    /// in the Operating phase at this stage); reads `self.col_filling_floor_start`.
+    ///
+    /// Layout: `col_filling_floor_start() + local_floor_idx`, parallel to
+    /// `row_filling_floor_start()`. The block is empty at every non-operating stage
+    /// of a filling hydro — this cursor then equals `num_cols` and carries no
+    /// columns.
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_filling_floor_start(&self) -> usize {
+        self.col_filling_floor_start
+    }
 }
 
 #[cfg(test)]
@@ -1593,10 +1974,11 @@ mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
         Block, BlockMode, BoundsCountsSpec, BoundsDefaults, CascadeTopology, ContractStageBounds,
-        EntityId, HydroStageBounds, LineStageBounds, NoiseMethod, PumpingStageBounds,
-        PumpingStation, ResolvedBounds, ResolvedExchangeFactors, ResolvedGenericConstraintBounds,
-        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
-        ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, ThermalStageBounds,
+        EntityId, FillingConfig, Hydro, HydroGenerationModel, HydroStageBounds, LineStageBounds,
+        NoiseMethod, PumpingStageBounds, PumpingStation, ResolvedBounds, ResolvedExchangeFactors,
+        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
+        ResolvedNcsFactors, ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig, ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -1604,7 +1986,7 @@ mod tests {
 
     use crate::resolved_parameters::ResolvedParameters;
 
-    use super::super::test_support::state_layout_for;
+    use super::super::test_support::{state_layout_for, zero_hydro_penalties};
     use super::{
         EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET,
         ResolvedTables, StageLayout, TemplateBuildCtx,
@@ -1722,9 +2104,18 @@ mod tests {
 
     /// Build a minimal `Stage` with one block of 744 hours.
     fn minimal_stage() -> Stage {
+        stage_with_id(0)
+    }
+
+    /// Build a one-block `Stage` whose `id` (the study stage id `filling_phase`
+    /// keys on) equals `stage_id`. `index` is held at `0` because the per-stage
+    /// FPHA/evaporation/bounds lookups in these fixtures are indexed by
+    /// `stage_idx = 0`, while the phase gate reads `stage.id` alone — decoupling
+    /// the two lets one bounds/model row serve every phase under test.
+    fn stage_with_id(stage_id: i32) -> Stage {
         Stage {
             index: 0,
-            id: 0,
+            id: stage_id,
             start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
             season_id: Some(0),
@@ -1743,6 +2134,50 @@ mod tests {
                 branching_factor: 1,
                 noise_method: NoiseMethod::Saa,
             },
+        }
+    }
+
+    /// Build a single hydro for the FPHA/evaporation membership fixtures.
+    ///
+    /// `filling`/`entry` drive the [`filling_phase`] gate; `generation_model`
+    /// follows `fpha`. All other fields are inert defaults — these fixtures
+    /// exercise per-stage row *membership* (`identify_fpha_hydros` /
+    /// `identify_evap_hydros`), not column values.
+    fn membership_hydro(
+        id: i32,
+        fpha: bool,
+        filling: Option<FillingConfig>,
+        entry: Option<i32>,
+    ) -> Hydro {
+        Hydro {
+            id: EntityId(id),
+            name: format!("H{id}"),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            entry_stage_id: entry,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: if fpha {
+                HydroGenerationModel::Fpha
+            } else {
+                HydroGenerationModel::ConstantProductivity
+            },
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 50.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 45.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling,
+            penalties: zero_hydro_penalties(),
         }
     }
 
@@ -1785,6 +2220,7 @@ mod tests {
     /// productivity), so `StageLayout::new` derives `fpha_hydro_indices == [1]`.
     struct FphaMixFixtures {
         par_lp: PrecomputedPar,
+        hydros: Vec<Hydro>,
         cascade: CascadeTopology,
         bounds: ResolvedBounds,
         penalties: ResolvedPenalties,
@@ -1813,9 +2249,19 @@ mod tests {
             };
             // models[hydro][stage]: hydro 1 is FPHA, hydros 0 and 2 are constant.
             let models = vec![vec![constant.clone()], vec![fpha], vec![constant]];
+            // All three hydros are non-filling: `filling_phase` is `Operating` at
+            // every stage, so the filling exclusion never fires and these fixtures
+            // assert the same FPHA membership a pre-gate build would (parity-neutral).
+            let hydros = vec![
+                membership_hydro(1, false, None, None),
+                membership_hydro(2, true, None, None),
+                membership_hydro(3, false, None, None),
+            ];
+            let cascade = CascadeTopology::build(&hydros);
             Self {
                 par_lp: PrecomputedPar::default(),
-                cascade: CascadeTopology::build(&[]),
+                hydros,
+                cascade,
                 bounds: ResolvedBounds::empty(),
                 penalties: ResolvedPenalties::empty(),
                 resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
@@ -1838,7 +2284,7 @@ mod tests {
 
         fn make_ctx(&self) -> TemplateBuildCtx<'_> {
             TemplateBuildCtx {
-                hydros: &[],
+                hydros: &self.hydros,
                 thermals: &[],
                 lines: &[],
                 buses: &[],
@@ -1906,6 +2352,535 @@ mod tests {
             vec![None, Some(0), None],
             "fpha_local_index inverts fpha_hydro_indices over n_h = 3"
         );
+    }
+
+    // ── Per-stage FPHA / evaporation filling exclusion ───────────────────────
+
+    /// Owns a two-hydro `TemplateBuildCtx` for the filling-phase membership
+    /// tests. Hydro 0 is an FPHA **filling** hydro; hydro 1 is a non-FPHA
+    /// **filling** hydro carrying a linearized evaporation model. Both share the
+    /// filling window `start_stage_id = 1`, `entry_stage_id = 3`, so a single
+    /// fixture exercises every phase by varying only `stage.id`:
+    /// `0` ⇒ `PreFilling`, `1`/`2` ⇒ `Filling`, `≥ 3` ⇒ `Operating`.
+    struct FillingMembershipFixtures {
+        par_lp: PrecomputedPar,
+        hydros: Vec<Hydro>,
+        cascade: CascadeTopology,
+        bounds: ResolvedBounds,
+        penalties: ResolvedPenalties,
+        resolved_generic_bounds: ResolvedGenericConstraintBounds,
+        resolved_load_factors: ResolvedLoadFactors,
+        resolved_exchange_factors: ResolvedExchangeFactors,
+        resolved_ncs_bounds: ResolvedNcsBounds,
+        resolved_ncs_factors: ResolvedNcsFactors,
+        resolved_parameters: ResolvedParameters,
+        production_models: ProductionModelSet,
+        evaporation_models: EvaporationModelSet,
+    }
+
+    impl FillingMembershipFixtures {
+        const START_STAGE_ID: i32 = 1;
+        const ENTRY_STAGE_ID: i32 = 3;
+
+        /// `filling`/`fpha` flags: hydro 0 is FPHA + filling, hydro 1 is
+        /// non-FPHA + filling-with-evaporation. Both hydros use the same filling
+        /// window so the phase is a pure function of `stage.id` under test.
+        fn new() -> Self {
+            use crate::hydro_models::{
+                EvaporationModel, FphaPlane, LinearizedEvaporation, ResolvedProductionModel,
+            };
+
+            let filling = || {
+                Some(FillingConfig {
+                    start_stage_id: Self::START_STAGE_ID,
+                    filling_inflow_m3s: 0.0,
+                })
+            };
+            let entry = Some(Self::ENTRY_STAGE_ID);
+            let hydros = vec![
+                membership_hydro(1, true, filling(), entry),
+                membership_hydro(2, false, filling(), entry),
+            ];
+            let cascade = CascadeTopology::build(&hydros);
+
+            // Production: hydro 0 is FPHA at stage 0; hydro 1 is constant.
+            let fpha = ResolvedProductionModel::Fpha {
+                planes: vec![FphaPlane {
+                    intercept: 0.0,
+                    gamma_v: 0.0,
+                    gamma_q: 0.0,
+                    gamma_s: 0.0,
+                }],
+            };
+            let constant = ResolvedProductionModel::ConstantProductivity { productivity: 0.0 };
+            let models = vec![vec![fpha], vec![constant]];
+
+            // Evaporation: hydro 0 has none; hydro 1 is linearized. The
+            // `Linearized` variant is per-hydro, so membership does not depend on
+            // `stage_idx`.
+            let evaporation_models = EvaporationModelSet::new(vec![
+                EvaporationModel::None,
+                EvaporationModel::Linearized {
+                    coefficients: vec![LinearizedEvaporation {
+                        intercept_m3s: 0.0,
+                        volume_slope_m3s_per_hm3: 0.0,
+                    }],
+                    reference_volumes_hm3: vec![0.0],
+                },
+            ]);
+
+            Self {
+                par_lp: PrecomputedPar::default(),
+                hydros,
+                cascade,
+                bounds: ResolvedBounds::empty(),
+                penalties: ResolvedPenalties::empty(),
+                resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
+                resolved_load_factors: ResolvedLoadFactors::empty(),
+                resolved_exchange_factors: ResolvedExchangeFactors::empty(),
+                resolved_ncs_bounds: ResolvedNcsBounds::empty(),
+                resolved_ncs_factors: ResolvedNcsFactors::empty(),
+                resolved_parameters: ResolvedParameters {
+                    per_param: vec![],
+                    id_to_slot: vec![],
+                },
+                production_models: ProductionModelSet::new(models, 2, 1),
+                evaporation_models,
+            }
+        }
+
+        fn make_ctx(&self) -> TemplateBuildCtx<'_> {
+            TemplateBuildCtx {
+                hydros: &self.hydros,
+                thermals: &[],
+                lines: &[],
+                buses: &[],
+                load_models: &[],
+                cascade: &self.cascade,
+                resolved: ResolvedTables {
+                    bounds: &self.bounds,
+                    penalties: &self.penalties,
+                    resolved_generic_bounds: &self.resolved_generic_bounds,
+                    resolved_load_factors: &self.resolved_load_factors,
+                    resolved_exchange_factors: &self.resolved_exchange_factors,
+                    resolved_ncs_bounds: &self.resolved_ncs_bounds,
+                    resolved_ncs_factors: &self.resolved_ncs_factors,
+                    resolved_parameters: &self.resolved_parameters,
+                },
+                hydro_pos: BTreeMap::new(),
+                thermal_pos: BTreeMap::new(),
+                line_pos: BTreeMap::new(),
+                bus_pos: BTreeMap::new(),
+                par_lp: &self.par_lp,
+                production_models: &self.production_models,
+                evaporation_models: &self.evaporation_models,
+                generic_constraints: &[],
+                non_controllable_sources: &[],
+                pumping_stations: &[],
+                pumping_pos: BTreeMap::new(),
+                n_pumping: 0,
+                diversion_upstream: HashMap::new(),
+                n_hydros: 2,
+                n_thermals: 0,
+                n_lines: 0,
+                n_buses: 0,
+                max_par_order: 0,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
+                anticipated_windows: vec![],
+                study_stage_ids: vec![],
+                has_penalty: false,
+                cumulative_discount_factors: vec![1.0],
+                total_hours_per_stage: vec![744.0],
+            }
+        }
+
+        /// `fpha_hydro_indices` for a stage built at `stage_id` (`stage_idx` held
+        /// at 0 so the single FPHA/evaporation model row serves every phase).
+        fn fpha_indices_at(&self, stage_id: i32) -> Vec<usize> {
+            let ctx = self.make_ctx();
+            let stage = stage_with_id(stage_id);
+            let state = state_layout_for(&ctx);
+            StageLayout::new(&ctx, &state, &stage, 0).fpha_hydro_indices
+        }
+
+        /// `evap_hydro_indices` for a stage built at `stage_id`.
+        fn evap_indices_at(&self, stage_id: i32) -> Vec<usize> {
+            let ctx = self.make_ctx();
+            let stage = stage_with_id(stage_id);
+            let state = state_layout_for(&ctx);
+            StageLayout::new(&ctx, &state, &stage, 0).evap_hydro_indices
+        }
+
+        /// `filling_target_hydro_indices` for a stage built at `stage_id`.
+        fn filling_target_indices_at(&self, stage_id: i32) -> Vec<usize> {
+            let ctx = self.make_ctx();
+            let stage = stage_with_id(stage_id);
+            let state = state_layout_for(&ctx);
+            StageLayout::new(&ctx, &state, &stage, 0).filling_target_hydro_indices
+        }
+
+        /// `filling_floor_hydro_indices` for a stage built at `stage_id`.
+        fn filling_floor_indices_at(&self, stage_id: i32) -> Vec<usize> {
+            let ctx = self.make_ctx();
+            let stage = stage_with_id(stage_id);
+            let state = state_layout_for(&ctx);
+            StageLayout::new(&ctx, &state, &stage, 0).filling_floor_hydro_indices
+        }
+
+        /// `num_rows` for a stage built at `stage_id` — the structural row count
+        /// the append-only cut rows begin at.
+        fn num_rows_at(&self, stage_id: i32) -> usize {
+            let ctx = self.make_ctx();
+            let stage = stage_with_id(stage_id);
+            let state = state_layout_for(&ctx);
+            StageLayout::new(&ctx, &state, &stage, 0).num_rows
+        }
+    }
+
+    /// The terminal `σ_fill` target is emitted only at the single stage with id
+    /// `entry − 1`. Both filling hydros share `entry = ENTRY_STAGE_ID = 3`, so
+    /// `entry − 1 == 2` is the only stage carrying the target — for BOTH of them.
+    /// The wrong-but-compiling over-elaboration is one target per Filling stage
+    /// (id 1 and id 2 here); this test pins terminal-only.
+    #[test]
+    fn filling_target_emitted_only_at_entry_minus_one() {
+        let fixtures = FillingMembershipFixtures::new();
+
+        // entry − 1 = 2 (with entry = 3): both filling hydros (system indices 0, 1)
+        // carry the target.
+        assert_eq!(
+            fixtures.filling_target_indices_at(2),
+            vec![0, 1],
+            "both filling hydros carry the σ_fill target at id entry − 1"
+        );
+
+        // Every other stage id — PreFilling (0, 1 is start), other Filling stages,
+        // and Operating — emits NO target. id 1 is a Filling stage (start) but not
+        // the terminal one, so it must be empty: terminal-only, not per-stage.
+        for stage_id in [0, 1, 3, 4] {
+            assert_eq!(
+                fixtures.filling_target_indices_at(stage_id),
+                Vec::<usize>::new(),
+                "no σ_fill target at id {stage_id} (only id entry − 1 = 2 carries it)"
+            );
+        }
+    }
+
+    /// Parity-neutrality: a non-filling system never emits a `σ_fill` target, so
+    /// `num_rows` is bit-identical across every stage id (the cut-row region anchor
+    /// is unmoved). The forbidden alternative — reserving a target row for every
+    /// hydro unconditionally — would shift `num_rows` and alias the append-only cut
+    /// rows for the 29 existing deterministic cases.
+    #[test]
+    fn non_filling_system_no_filling_target_num_rows_unchanged() {
+        // `FphaMixFixtures` hydros are all non-filling.
+        let fixtures = FphaMixFixtures::new();
+        let layout_at = |stage_id: i32| {
+            let ctx = fixtures.make_ctx();
+            let stage = stage_with_id(stage_id);
+            let state = state_layout_for(&ctx);
+            let layout = StageLayout::new(&ctx, &state, &stage, 0);
+            (layout.filling_target_hydro_indices.clone(), layout.num_rows)
+        };
+        let (reference_targets, reference_num_rows) = layout_at(0);
+        assert_eq!(
+            reference_targets,
+            Vec::<usize>::new(),
+            "non-filling system emits no σ_fill target"
+        );
+        for stage_id in [1, 2, 3, 7] {
+            let (targets, num_rows) = layout_at(stage_id);
+            assert_eq!(
+                targets,
+                Vec::<usize>::new(),
+                "non-filling σ_fill target empty at id {stage_id}"
+            );
+            assert_eq!(
+                num_rows, reference_num_rows,
+                "non-filling num_rows unchanged at id {stage_id}"
+            );
+        }
+    }
+
+    /// The terminal `σ_fill` row block lands STRICTLY BELOW `num_rows` (the pre-cut
+    /// region), ahead of the append-only cut rows that begin at `num_rows`. A row
+    /// at index `>= num_rows` would alias a cut row and corrupt slot-identity
+    /// warm-start reconstruction. The `σ_fill` column likewise lands strictly below
+    /// `num_cols`. This is the same invariant the `filling_retention` family upholds.
+    #[test]
+    fn filling_target_row_and_col_below_structural_bounds() {
+        let fixtures = FillingMembershipFixtures::new();
+        let ctx = fixtures.make_ctx();
+        let stage = stage_with_id(2); // entry − 1: the terminal stage.
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let n_targets = layout.filling_target_hydro_indices.len();
+        assert_eq!(n_targets, 2, "both filling hydros carry the target at id 2");
+
+        // Every σ_fill row index is strictly below num_rows (pre-cut region).
+        let row_start = layout.row_filling_target_start();
+        for local_idx in 0..n_targets {
+            assert!(
+                row_start + local_idx < layout.num_rows,
+                "σ_fill row {} must be < num_rows {}",
+                row_start + local_idx,
+                layout.num_rows
+            );
+        }
+        // The σ_fill rows sit immediately after the retention block (sibling
+        // placement) and before the fishing rows — i.e. inside the pre-cut region.
+        assert_eq!(
+            row_start,
+            layout.row_filling_retention_start() + layout.filling_retention_hydro_indices.len(),
+            "σ_fill rows follow the retention block as a sibling"
+        );
+
+        // Every σ_fill column index is strictly below num_cols.
+        let col_start = layout.col_filling_target_start();
+        for local_idx in 0..n_targets {
+            assert!(
+                col_start + local_idx < layout.num_cols,
+                "σ_fill col {} must be < num_cols {}",
+                col_start + local_idx,
+                layout.num_cols
+            );
+        }
+        // At the terminal Filling stage (id 2) no hydro is Operating, so the
+        // sibling σ^{v-} `filling_floor` column block (the true last column family)
+        // is empty: its start coincides with num_cols and the σ_fill block is the
+        // last occupied family, so num_cols = col_filling_target_start + n_targets.
+        assert_eq!(
+            layout.col_filling_floor_start(),
+            layout.num_cols,
+            "σ^{{v-}} column block empty at the terminal Filling stage"
+        );
+        assert_eq!(
+            layout.num_cols,
+            col_start + n_targets,
+            "num_cols = col_filling_target_start + n_targets (σ^{{v-}} block empty here)"
+        );
+    }
+
+    /// A non-filling stage of a filling system keeps `num_rows` equal to the same
+    /// system with the filling configs stripped — the target family adds rows ONLY
+    /// at id `entry − 1`. This isolates the row-count delta to the single terminal
+    /// stage.
+    #[test]
+    fn filling_target_adds_rows_only_at_terminal_stage() {
+        let fixtures = FillingMembershipFixtures::new();
+        // Non-terminal stages: retention may add rows (Filling stages), but the
+        // σ_fill TARGET adds none. Confirm the target block is empty there by
+        // checking the fishing-row start coincides with the target-row start.
+        for stage_id in [0, 1, 3, 4] {
+            let ctx = fixtures.make_ctx();
+            let stage = stage_with_id(stage_id);
+            let state = state_layout_for(&ctx);
+            let layout = StageLayout::new(&ctx, &state, &stage, 0);
+            assert!(
+                layout.filling_target_hydro_indices.is_empty(),
+                "no σ_fill target rows at non-terminal id {stage_id}"
+            );
+            // Anchor unaffected: same fixture exercised in num_rows_at below.
+            let _ = fixtures.num_rows_at(stage_id);
+        }
+        // The terminal stage adds exactly 2 target rows (one per filling hydro).
+        assert_eq!(fixtures.filling_target_indices_at(2).len(), 2);
+    }
+
+    /// The soft `σ^{v-}` operating floor is emitted at EVERY `Operating` stage of a
+    /// filling hydro (id ≥ entry = 3), for BOTH filling hydros — distinct from the
+    /// terminal-only `σ_fill` target. `PreFilling` (id 0) and `Filling` (id 1, 2)
+    /// emit none. This pins the `Operating`-only scope and the `σ^{v-}`/`σ_fill`
+    /// stage split.
+    #[test]
+    fn filling_floor_emitted_at_every_operating_stage() {
+        let fixtures = FillingMembershipFixtures::new();
+
+        // Operating (id >= entry = 3): both filling hydros carry the floor at every
+        // stage, not just one terminal stage.
+        for stage_id in [3, 4, 7] {
+            assert_eq!(
+                fixtures.filling_floor_indices_at(stage_id),
+                vec![0, 1],
+                "both filling hydros carry σ^{{v-}} at Operating id {stage_id}"
+            );
+        }
+
+        // PreFilling (id 0) and Filling (id 1, 2 = the σ_fill terminal): no floor.
+        for stage_id in [0, 1, 2] {
+            assert_eq!(
+                fixtures.filling_floor_indices_at(stage_id),
+                Vec::<usize>::new(),
+                "no σ^{{v-}} at non-operating id {stage_id}"
+            );
+        }
+
+        // Mutual exclusivity at the boundary: id 2 (entry − 1) carries σ_fill but
+        // NOT σ^{v-}; id 3 (entry) carries σ^{v-} but NOT σ_fill.
+        assert_eq!(fixtures.filling_target_indices_at(2), vec![0, 1]);
+        assert!(fixtures.filling_floor_indices_at(2).is_empty());
+        assert!(fixtures.filling_target_indices_at(3).is_empty());
+        assert_eq!(fixtures.filling_floor_indices_at(3), vec![0, 1]);
+    }
+
+    /// Parity-neutrality: a non-filling system never emits a `σ^{v-}` floor, so
+    /// `num_rows` is bit-identical across every stage id. The forbidden GLOBAL soft
+    /// floor — reserving a floor row for every Operating hydro regardless of
+    /// `filling` — would shift `num_rows` and alias the append-only cut rows for the
+    /// existing deterministic cases.
+    #[test]
+    fn non_filling_system_no_filling_floor_num_rows_unchanged() {
+        let fixtures = FphaMixFixtures::new();
+        let layout_at = |stage_id: i32| {
+            let ctx = fixtures.make_ctx();
+            let stage = stage_with_id(stage_id);
+            let state = state_layout_for(&ctx);
+            let layout = StageLayout::new(&ctx, &state, &stage, 0);
+            (layout.filling_floor_hydro_indices.clone(), layout.num_rows)
+        };
+        let (reference_floors, reference_num_rows) = layout_at(0);
+        assert_eq!(
+            reference_floors,
+            Vec::<usize>::new(),
+            "non-filling system emits no σ^{{v-}} floor"
+        );
+        for stage_id in [1, 2, 3, 7] {
+            let (floors, num_rows) = layout_at(stage_id);
+            assert_eq!(
+                floors,
+                Vec::<usize>::new(),
+                "non-filling σ^{{v-}} floor empty at id {stage_id}"
+            );
+            assert_eq!(
+                num_rows, reference_num_rows,
+                "non-filling num_rows unchanged at id {stage_id}"
+            );
+        }
+    }
+
+    /// A filling FPHA hydro is excluded from `fpha_hydro_indices` while
+    /// `Filling` (its FPHA fit is invalid below `min_storage`), and re-included
+    /// once `Operating`. The forbidden alternative — leaving it in the set during
+    /// filling — would emit an FPHA production row over an invalid operating-range
+    /// fit and a generation column with no constraining row.
+    #[test]
+    fn filling_fpha_hydro_excluded_while_filling_present_when_operating() {
+        let fixtures = FillingMembershipFixtures::new();
+
+        // Filling (stage_id 1 and 2 are in `[start_stage_id, entry_stage_id)`):
+        // hydro 0 (the FPHA hydro) is absent.
+        assert_eq!(
+            fixtures.fpha_indices_at(1),
+            Vec::<usize>::new(),
+            "FPHA filling hydro absent from fpha_hydro_indices during Filling"
+        );
+        assert_eq!(
+            fixtures.fpha_indices_at(2),
+            Vec::<usize>::new(),
+            "FPHA filling hydro absent at the last Filling stage"
+        );
+
+        // Operating (stage_id >= entry_stage_id): hydro 0 re-enters.
+        assert_eq!(
+            fixtures.fpha_indices_at(3),
+            vec![0],
+            "FPHA filling hydro present from the first Operating stage"
+        );
+        assert_eq!(
+            fixtures.fpha_indices_at(4),
+            vec![0],
+            "FPHA filling hydro present at later Operating stages"
+        );
+
+        // PreFilling (stage_id < start_stage_id): the dam does not exist yet, so
+        // the FPHA hydro is also excluded.
+        assert_eq!(
+            fixtures.fpha_indices_at(0),
+            Vec::<usize>::new(),
+            "FPHA filling hydro absent during PreFilling"
+        );
+    }
+
+    /// A filling hydro with evaporation is excluded from `evap_hydro_indices`
+    /// only during `PreFilling` (no reservoir surface), and present during
+    /// `Filling` and `Operating` (the impounding reservoir has a surface). This
+    /// is the opposite of the FPHA rule, which also excludes during `Filling` —
+    /// the two exclusions must not be unified.
+    #[test]
+    fn filling_evap_hydro_excluded_only_in_prefilling() {
+        let fixtures = FillingMembershipFixtures::new();
+
+        // PreFilling (stage_id < start_stage_id): hydro 1 (evaporation) is absent.
+        assert_eq!(
+            fixtures.evap_indices_at(0),
+            Vec::<usize>::new(),
+            "evaporation filling hydro absent during PreFilling (no reservoir surface)"
+        );
+
+        // Filling: evaporation is normal — the reservoir already has a surface.
+        assert_eq!(
+            fixtures.evap_indices_at(1),
+            vec![1],
+            "evaporation filling hydro present during Filling"
+        );
+        assert_eq!(
+            fixtures.evap_indices_at(2),
+            vec![1],
+            "evaporation filling hydro present at the last Filling stage"
+        );
+
+        // Operating: evaporation remains normal.
+        assert_eq!(
+            fixtures.evap_indices_at(3),
+            vec![1],
+            "evaporation filling hydro present once Operating"
+        );
+    }
+
+    /// Parity-neutrality contract: a non-filling hydro is `Operating` at every
+    /// stage, so neither exclusion fires — its membership in both
+    /// `fpha_hydro_indices` and `evap_hydro_indices` is bit-identical across all
+    /// stages, matching a build without the filling gate.
+    #[test]
+    fn non_filling_hydro_membership_bit_identical_across_stages() {
+        // The `FphaMixFixtures` hydros are all non-filling (one FPHA at system
+        // index 1, two constant), so its membership must be invariant to stage_id.
+        let fixtures = FphaMixFixtures::new();
+        let reference_fpha = {
+            let ctx = fixtures.make_ctx();
+            let stage = stage_with_id(0);
+            let state = state_layout_for(&ctx);
+            StageLayout::new(&ctx, &state, &stage, 0).fpha_hydro_indices
+        };
+        let reference_evap = {
+            let ctx = fixtures.make_ctx();
+            let stage = stage_with_id(0);
+            let state = state_layout_for(&ctx);
+            StageLayout::new(&ctx, &state, &stage, 0).evap_hydro_indices
+        };
+
+        // The non-filling FPHA hydro is at system index 1; evaporation is empty.
+        assert_eq!(reference_fpha, vec![1]);
+        assert_eq!(reference_evap, Vec::<usize>::new());
+
+        for stage_id in [1, 2, 3, 7] {
+            let ctx = fixtures.make_ctx();
+            let stage = stage_with_id(stage_id);
+            let state = state_layout_for(&ctx);
+            let layout = StageLayout::new(&ctx, &state, &stage, 0);
+            assert_eq!(
+                layout.fpha_hydro_indices, reference_fpha,
+                "non-filling fpha_hydro_indices must be stage-invariant (stage_id {stage_id})"
+            );
+            assert_eq!(
+                layout.evap_hydro_indices, reference_evap,
+                "non-filling evap_hydro_indices must be stage-invariant (stage_id {stage_id})"
+            );
+        }
     }
 
     // ── Operational-violation row ranges ─────────────────────────────────────

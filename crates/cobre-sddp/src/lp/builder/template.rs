@@ -330,6 +330,67 @@ pub struct StageGeometry {
     /// non-uniform schedule a single global stage-0 range would misread this
     /// stage's rows — this per-stage range carries the stage-correct extent.
     pub load_balance: Range<usize>,
+    /// Impound-retention row range (one row per Filling-phase hydro at this
+    /// stage). Empty (`start..start`, a zero-length range at the cursor, not `0..0`) for a non-filling stage. Carried per stage for the
+    /// same per-stage-membership reason as the FPHA/evap carriers: the count and
+    /// base both vary per stage, so a single global stage-0 range would misread
+    /// any stage with a differing filling set or block-major prefix.
+    // Rationale: the retention rows carry no extracted primal (no slack/decision
+    // columns), so no read site consumes this range yet; it is the per-stage
+    // carrier the sibling `σ_fill`/`σ^{v-}` filling-row families will extend, and
+    // it keeps `StageGeometry` a faithful mirror of the per-stage row shape. The
+    // `#[allow(dead_code)]` refires if the seam is removed before those callers
+    // land.
+    #[allow(dead_code)]
+    pub filling_retention: Range<usize>,
+    /// Terminal `σ_fill`-target row range (one row per filling hydro whose
+    /// `entry − 1` is this stage). Empty (`start..start`, a zero-length range at the cursor, not `0..0`) at every non-terminal stage.
+    /// Carried per stage for the same per-stage-membership reason as the
+    /// `filling_retention` sibling: the count and base both vary per stage.
+    // Rationale: the `σ_fill` rows carry no extracted primal yet (the slack column
+    // value is not read by simulation extraction at this point), so no read site
+    // consumes this range; it is the per-stage carrier that keeps `StageGeometry` a
+    // faithful mirror of the per-stage row shape, mirroring the `filling_retention`
+    // seam. The `#[allow(dead_code)]` refires if the seam is removed before a
+    // reader lands.
+    #[allow(dead_code)]
+    pub filling_target: Range<usize>,
+    /// Terminal `σ_fill`-target slack column range (one column per filling hydro
+    /// whose `entry − 1` is this stage). Empty (`start..start`, a zero-length range at the cursor, not `0..0`) at every non-terminal
+    /// stage. Carried per stage alongside `filling_target` (the row range) so the
+    /// per-stage geometry mirrors both the row and column shape of the family.
+    // Rationale: the `σ_fill` slack column value is not read by simulation
+    // extraction yet, so no read site consumes this range; it is the per-stage
+    // carrier that keeps `StageGeometry` a faithful mirror of the per-stage column
+    // shape. The `#[allow(dead_code)]` refires if the seam is removed before a
+    // reader lands.
+    #[allow(dead_code)]
+    pub filling_target_col: Range<usize>,
+    /// Soft `σ^{v-}` operating-floor row range (one row per filling hydro in the
+    /// Operating phase at this stage). Empty (`start..start`, a zero-length range at the cursor, not `0..0`) at every non-operating stage
+    /// of a filling hydro. Carried per stage for the same per-stage-membership
+    /// reason as the `filling_target` sibling: the count and base both vary per
+    /// stage.
+    // Rationale: the `σ^{v-}` rows carry no extracted primal yet (the slack column
+    // value is not read by simulation extraction at this point), so no read site
+    // consumes this range; it is the per-stage carrier that keeps `StageGeometry` a
+    // faithful mirror of the per-stage row shape, mirroring the `filling_target`
+    // seam. The `#[allow(dead_code)]` refires if the seam is removed before a
+    // reader lands.
+    #[allow(dead_code)]
+    pub filling_floor: Range<usize>,
+    /// Soft `σ^{v-}` operating-floor slack column range (one column per filling
+    /// hydro in the Operating phase at this stage). Empty (`start..start`, a zero-length range at the cursor, not `0..0`) at every
+    /// non-operating stage of a filling hydro. Carried per stage alongside
+    /// `filling_floor` (the row range) so the per-stage geometry mirrors both the
+    /// row and column shape of the family.
+    // Rationale: the `σ^{v-}` slack column value is not read by simulation
+    // extraction yet, so no read site consumes this range; it is the per-stage
+    // carrier that keeps `StageGeometry` a faithful mirror of the per-stage column
+    // shape. The `#[allow(dead_code)]` refires if the seam is removed before a
+    // reader lands.
+    #[allow(dead_code)]
+    pub filling_floor_col: Range<usize>,
     /// Row index of the first z-inflow definition constraint. Always `0`: state
     /// pinning uses column bounds, so no state-fixing rows precede the z-inflow
     /// block. Carried per stage to mirror `StageLayout::z_inflow_row_start`.
@@ -360,12 +421,17 @@ impl StageGeometry {
     /// resolve the dedicated empty-block cursor rather than a bare `0` when the
     /// family collapses to `0..0`, matching the indexer convention.
     fn from_layout(layout: &StageLayout<'_>) -> Self {
-        // Every range below is a `StageLayout` own field, already normalised to
+        // Most ranges below are `StageLayout` own fields, already normalised to
         // `0..0` for an empty family (so a collapsed family yields an empty range
         // rather than a stale offset). The four operational-violation slack
         // ranges and the two withdrawal-slack ranges are likewise own fields, so
         // there is no need to reconstruct them from the empty-block-cursor
-        // accessors here.
+        // accessors here. The `filling_*` families are the exception: they are
+        // built inline as `start..start + indices.len()`, so an empty family is
+        // `start..start` (a zero-length range at the cursor position, not `0..0`).
+        // Both forms are empty (`is_empty()` true); only the recorded offset
+        // differs, which the simulation read-path never dereferences for an empty
+        // range.
         // Anticipated-decision: A=`n_anticipated` stage-level columns starting at
         // the per-stage `thermal.end` cursor; `0..0` when no anticipated thermals,
         // matching the empty-block convention the indexer uses.
@@ -396,6 +462,16 @@ impl StageGeometry {
             generation_below_slack: layout.generation_below_slack.clone(),
             water_balance: layout.water_balance.clone(),
             load_balance: layout.load_balance.clone(),
+            filling_retention: layout.row_filling_retention_start
+                ..layout.row_filling_retention_start + layout.filling_retention_hydro_indices.len(),
+            filling_target: layout.row_filling_target_start
+                ..layout.row_filling_target_start + layout.filling_target_hydro_indices.len(),
+            filling_target_col: layout.col_filling_target_start
+                ..layout.col_filling_target_start + layout.filling_target_hydro_indices.len(),
+            filling_floor: layout.row_filling_floor_start
+                ..layout.row_filling_floor_start + layout.filling_floor_hydro_indices.len(),
+            filling_floor_col: layout.col_filling_floor_start
+                ..layout.col_filling_floor_start + layout.filling_floor_hydro_indices.len(),
             z_inflow_row_start: layout.z_inflow_row_start,
             n_blks: layout.n_blks,
             fpha_hydro_indices: layout.fpha_hydro_indices.clone(),
@@ -1052,7 +1128,7 @@ fn assemble_stage_templates_output(
     }
 
     let (noise_scale, zeta_per_stage, block_hours_per_stage) =
-        scaling::compute_noise_scale(study_stages, n_hydros, par_lp);
+        scaling::compute_noise_scale(study_stages, ctx.hydros, n_hydros, par_lp);
 
     // Build per-stage productivity arrays for simulation extraction.
     let hydro_productivities_per_stage: Vec<Vec<f64>> = (0..n_study)

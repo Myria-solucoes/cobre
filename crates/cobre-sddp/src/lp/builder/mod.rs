@@ -115,7 +115,7 @@
 //!
 //! Total row patches: 6 = N + N.  Total column patches: 9 = N*(1+L).
 
-use cobre_core::ConstraintSense;
+use cobre_core::{ConstraintSense, FillingConfig};
 
 mod columns;
 mod entries;
@@ -160,6 +160,92 @@ pub(crate) use scaling::{apply_col_scale, apply_row_scale, compute_col_scale, co
 #[must_use]
 pub(crate) fn commissioning_active(entry: Option<i32>, exit: Option<i32>, stage_id: i32) -> bool {
     entry.is_none_or(|e| e <= stage_id) && exit.is_none_or(|e| stage_id < e)
+}
+
+// ---------------------------------------------------------------------------
+// Filling lifecycle phase
+// ---------------------------------------------------------------------------
+
+/// Lifecycle phase of a commissioned reservoir at one stage.
+///
+/// A closed three-variant set the LP builder matches on by enum dispatch (the
+/// house rule for a fixed variant set; no trait-object indirection). Derived by
+/// [`filling_phase`], which is the single owner of the derivation — see its
+/// doc-comment.
+// Rationale: the column/row gating sites that match on this enum (per-phase
+// generation/turbine/diversion bounds, FPHA exclusion, the cascade
+// short-circuit, the filling retention row, and the `σ_fill`/`σ^{v-}` slacks in
+// `columns.rs`, `entries.rs`, `rows.rs`, `layout.rs`) are not yet wired; the
+// `#[cfg(test)] mod tests` use does not count toward dead_code, so the lint
+// fires until a production caller lands. It refires the moment such a caller is
+// removed, keeping this seam honest.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Phase {
+    /// Before `start_stage_id`: the dam does not exist; the river flows past its
+    /// site. Reached only when `start_stage_id > 0`.
+    PreFilling,
+    /// `start_stage_id <= stage_id < entry`: the reservoir impounds water toward
+    /// the dead volume but is not yet a generating plant.
+    Filling,
+    /// `stage_id >= entry`, and the all-stages phase of a hydro with no
+    /// `FillingConfig`: a normal operating plant.
+    Operating,
+}
+
+/// The lifecycle [`Phase`] of a hydro at `stage_id`.
+///
+/// Keyed on `stage_id` — the study **stage id** (`stage.id`), never the stage
+/// index. The two coincide for a simple single-resolution horizon but diverge
+/// under multi-resolution / decomposition stages; keying on the index there
+/// would assign the wrong phase. This mirrors [`commissioning_active`]'s
+/// `stage_id: i32` convention.
+///
+/// `filling.is_none()` ⇒ [`Phase::Operating`] at every stage — the
+/// parity-neutrality contract: a hydro with no `FillingConfig` is bit-identical
+/// to a normal operating hydro regardless of `entry`. (Entry without filling is
+/// rejected upstream by filling validation, so a `None` filling is a normal
+/// hydro whatever `entry` holds.)
+///
+/// With a `FillingConfig { start_stage_id, .. }` and `entry = Some(e)`:
+/// `start_stage_id > 0 && stage_id < start_stage_id` ⇒ `PreFilling`;
+/// `start_stage_id <= stage_id < e` ⇒ `Filling`; `stage_id >= e` ⇒ `Operating`.
+/// `start_stage_id == 0` has **no** `PreFilling` — Filling begins at stage 0
+/// (how a study that starts mid-filling is expressed).
+///
+/// Single owner of the phase derivation. Every per-phase gating site (column
+/// bounds, row emission, FPHA exclusion) derives the phase inline by calling
+/// this; no caller may cache a per-stage `Phase` mask (the dense-layout
+/// no-per-stage-activity-mask rule — like [`commissioning_active`], the phase is
+/// recomputed per stage at each site, not stored). A total function: every input
+/// maps to a `Phase`, no panic.
+///
+/// The parameter shape is `Option<&FillingConfig>` + `entry: Option<i32>`
+/// (rather than the `(start, entry, stage_id)` scalar triple the design prose
+/// sketches) because call sites hold the `Hydro` and pass `hydro.filling.as_ref()`
+/// and `hydro.entry_stage_id` directly — taking the config avoids re-deriving
+/// `start_stage_id` at every site, matching `commissioning_active`'s `Option`
+/// convention.
+// Rationale: unused until the gating sites enumerated on [`Phase`] call it; same
+// Intent/Seam suppression, refires when a production caller is removed.
+#[allow(dead_code)]
+#[inline]
+#[must_use]
+pub(crate) fn filling_phase(
+    filling: Option<&FillingConfig>,
+    entry: Option<i32>,
+    stage_id: i32,
+) -> Phase {
+    let Some(config) = filling else {
+        return Phase::Operating;
+    };
+    if config.start_stage_id > 0 && stage_id < config.start_stage_id {
+        return Phase::PreFilling;
+    }
+    match entry {
+        Some(e) if stage_id < e => Phase::Filling,
+        _ => Phase::Operating,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -284,4 +370,81 @@ pub struct GenericConstraintRowEntry {
     /// Column index of the negative-violation slack (`slack_minus`) when
     /// `slack.enabled = true` and `sense == Equal`.  `None` otherwise.
     pub slack_minus_col: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FillingConfig, Phase, filling_phase};
+
+    /// Builds a `FillingConfig` with the given `start_stage_id`; the impound cap
+    /// is irrelevant to phase derivation, so any non-negative value is fine.
+    fn config(start_stage_id: i32) -> FillingConfig {
+        FillingConfig {
+            start_stage_id,
+            filling_inflow_m3s: 0.0,
+        }
+    }
+
+    /// `filling.is_none()` ⇒ `Operating` at every stage, for any `entry` — the
+    /// parity-neutrality contract. The forbidden alternative — letting a stray
+    /// `entry` push a filling-free hydro into `Filling`/`PreFilling` — would
+    /// silently change a normal hydro's physics.
+    #[test]
+    fn none_filling_is_operating_for_any_entry_and_stage() {
+        for entry in [None, Some(0), Some(4)] {
+            for stage_id in [-1, 0, 1, 4, 100] {
+                assert_eq!(
+                    filling_phase(None, entry, stage_id),
+                    Phase::Operating,
+                    "none filling at entry={entry:?}, stage_id={stage_id}"
+                );
+            }
+        }
+    }
+
+    /// With `start_stage_id = 2` and `entry = 4`, the three phases at their exact
+    /// transition ids: `stage_id == entry - 1` is the last Filling stage and
+    /// `stage_id == entry` is the first Operating stage (the half-open `< entry`
+    /// boundary — a non-strict `<= entry` would keep the reservoir Filling one
+    /// stage too long).
+    #[test]
+    fn three_phases_at_exact_boundaries() {
+        let f = config(2);
+        let entry = Some(4);
+        // PreFilling: start_stage_id > 0 and stage_id < start_stage_id.
+        assert_eq!(filling_phase(Some(&f), entry, 0), Phase::PreFilling);
+        assert_eq!(filling_phase(Some(&f), entry, 1), Phase::PreFilling);
+        // Filling: start_stage_id <= stage_id < entry. stage_id == start.
+        assert_eq!(filling_phase(Some(&f), entry, 2), Phase::Filling);
+        // stage_id == entry - 1 (last Filling stage).
+        assert_eq!(filling_phase(Some(&f), entry, 3), Phase::Filling);
+        // Operating: stage_id == entry (first Operating stage).
+        assert_eq!(filling_phase(Some(&f), entry, 4), Phase::Operating);
+        assert_eq!(filling_phase(Some(&f), entry, 5), Phase::Operating);
+    }
+
+    /// `start_stage_id == 0` ⇒ no `PreFilling`: Filling runs from stage 0 (how a
+    /// study that starts mid-filling is expressed). The forbidden alternative —
+    /// treating `stage_id < start_stage_id` without the `start_stage_id > 0`
+    /// guard — is moot here (no stage is below 0), but stage 0 must be Filling,
+    /// not `PreFilling`.
+    #[test]
+    fn start_zero_is_filling_at_stage_zero() {
+        let f = config(0);
+        let entry = Some(4);
+        assert_eq!(filling_phase(Some(&f), entry, 0), Phase::Filling);
+        assert_eq!(filling_phase(Some(&f), entry, 3), Phase::Filling);
+        assert_eq!(filling_phase(Some(&f), entry, 4), Phase::Operating);
+    }
+
+    /// A `FillingConfig` with `entry = None` is never Filling/Operating-by-entry:
+    /// before `start_stage_id` it is `PreFilling`, at/after it falls through to
+    /// `Operating` (the `_` match arm), since there is no entry boundary to cross.
+    #[test]
+    fn filling_with_none_entry_falls_through_to_operating() {
+        let f = config(2);
+        assert_eq!(filling_phase(Some(&f), None, 1), Phase::PreFilling);
+        assert_eq!(filling_phase(Some(&f), None, 2), Phase::Operating);
+        assert_eq!(filling_phase(Some(&f), None, 5), Phase::Operating);
+    }
 }

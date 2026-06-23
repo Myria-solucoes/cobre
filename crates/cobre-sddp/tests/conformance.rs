@@ -1055,6 +1055,13 @@ fn build_geometry(
         generation_below_slack: gb,
         water_balance: water_balance_start..water_balance_start + hydro_count,
         load_balance: load_balance_start..load_balance_end,
+        // This conformance geometry models no filling hydros, so the retention,
+        // terminal-target, and operating-floor blocks are empty.
+        filling_retention: 0..0,
+        filling_target: 0..0,
+        filling_target_col: 0..0,
+        filling_floor: 0..0,
+        filling_floor_col: 0..0,
         z_inflow_row_start: 0,
         n_blks,
         fpha_hydro_indices,
