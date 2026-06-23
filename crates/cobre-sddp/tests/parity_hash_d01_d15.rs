@@ -284,6 +284,23 @@ fn case_dir(label: &str) -> std::path::PathBuf {
         // column (the D34 prior-bug surface), which a windowless anticipated case
         // (D34) and a windowed plain-thermal case (D36) each cover only half of.
         "D37" => "d37-anticipated-commissioning",
+        // Mid-cascade dead-volume filling: a cascade
+        // `H1 → H2 (filling) → H3 (real fed downstream)` plus an off-cascade
+        // control H4. H2 carries `entry_stage_id = 4` with
+        // `filling { start_stage_id = 2 }`, so over the 6-stage horizon it is
+        // PreFilling at stages 0–1, Filling at 2–3, and Operating at 4–5. During
+        // PreFilling the dam is absent from the LP, so its inflow short-circuits
+        // onto its real downstream H3's water-balance row instead of into a sink —
+        // a routing the always-present cascade cases (D03) cannot exercise. Block
+        // counts change at BOTH phase boundaries (schedule 1/1/3/2/3/1: 1→3 at the
+        // PreFilling→Filling boundary, 2→3 at the Filling→Operating boundary), so
+        // the per-stage geometry and per-stage `τ` are read across phase
+        // transitions that also straddle block-count changes. The parity hash
+        // covers hydro storage/water/cuts/convergence, so it reflects the
+        // short-circuit and the phase transitions through the cascade coupling; the
+        // filling soft-penalty slacks are checked by the focused simulation test,
+        // not by this baseline.
+        "D38" => "d38-dead-volume-filling",
         other => panic!("unknown case label: {other}"),
     };
     // Integration tests run from the crate root; fixtures live at
@@ -627,4 +644,13 @@ fn parity_hash_d36() {
 )]
 fn parity_hash_d37() {
     run_case("D37");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d38() {
+    run_case("D38");
 }

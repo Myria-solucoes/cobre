@@ -359,12 +359,8 @@ pub struct StageGeometry {
     /// whose `entry − 1` is this stage). Empty (`start..start`, a zero-length range at the cursor, not `0..0`) at every non-terminal
     /// stage. Carried per stage alongside `filling_target` (the row range) so the
     /// per-stage geometry mirrors both the row and column shape of the family.
-    // Rationale: the `σ_fill` slack column value is not read by simulation
-    // extraction yet, so no read site consumes this range; it is the per-stage
-    // carrier that keeps `StageGeometry` a faithful mirror of the per-stage column
-    // shape. The `#[allow(dead_code)]` refires if the seam is removed before a
-    // reader lands.
-    #[allow(dead_code)]
+    /// Simulation extraction reads the `σ_fill` primal at `start + local_idx` for a
+    /// filling hydro, resolving `local_idx` via `filling_target_hydro_indices`.
     pub filling_target_col: Range<usize>,
     /// Soft `σ^{v-}` operating-floor row range (one row per filling hydro in the
     /// Operating phase at this stage). Empty (`start..start`, a zero-length range at the cursor, not `0..0`) at every non-operating stage
@@ -384,12 +380,8 @@ pub struct StageGeometry {
     /// non-operating stage of a filling hydro. Carried per stage alongside
     /// `filling_floor` (the row range) so the per-stage geometry mirrors both the
     /// row and column shape of the family.
-    // Rationale: the `σ^{v-}` slack column value is not read by simulation
-    // extraction yet, so no read site consumes this range; it is the per-stage
-    // carrier that keeps `StageGeometry` a faithful mirror of the per-stage column
-    // shape. The `#[allow(dead_code)]` refires if the seam is removed before a
-    // reader lands.
-    #[allow(dead_code)]
+    /// Simulation extraction reads the `σ^{v-}` primal at `start + local_idx` for a
+    /// filling hydro, resolving `local_idx` via `filling_floor_hydro_indices`.
     pub filling_floor_col: Range<usize>,
     /// Row index of the first z-inflow definition constraint. Always `0`: state
     /// pinning uses column bounds, so no state-fixing rows precede the z-inflow
@@ -409,6 +401,22 @@ pub struct StageGeometry {
     /// order. Parallel to `evap_indices`; carried per stage for the same
     /// per-stage-membership reason as `fpha_hydro_indices`.
     pub evap_hydro_indices: Vec<usize>,
+    /// System hydro indices owning a terminal `σ_fill`-target slack column at this
+    /// stage (the filling hydros whose `entry − 1` is this stage), in slot order.
+    /// Parallel to `filling_target_col`: the `σ_fill` column for the system hydro at
+    /// slot `i` is `filling_target_col.start + i`. Empty at every non-terminal stage
+    /// and for a non-filling system. The family is SPARSE — one column per filling
+    /// hydro, not per hydro — so extraction resolves a system hydro's column via this
+    /// system→slot list (the `fpha_hydro_indices` / `evap_hydro_indices` pattern),
+    /// never by the dense system index `h`.
+    pub filling_target_hydro_indices: Vec<usize>,
+    /// System hydro indices owning a soft `σ^{v-}` operating-floor slack column at
+    /// this stage (the filling hydros in the Operating phase at this stage), in slot
+    /// order. Parallel to `filling_floor_col`: the `σ^{v-}` column for the system
+    /// hydro at slot `i` is `filling_floor_col.start + i`. Empty at every
+    /// non-operating stage of a filling hydro and for a non-filling system. SPARSE
+    /// like `filling_target_hydro_indices`; resolved the same way.
+    pub filling_floor_hydro_indices: Vec<usize>,
 }
 
 impl StageGeometry {
@@ -476,6 +484,8 @@ impl StageGeometry {
             n_blks: layout.n_blks,
             fpha_hydro_indices: layout.fpha_hydro_indices.clone(),
             evap_hydro_indices: layout.evap_hydro_indices.clone(),
+            filling_target_hydro_indices: layout.filling_target_hydro_indices.clone(),
+            filling_floor_hydro_indices: layout.filling_floor_hydro_indices.clone(),
         }
     }
 }

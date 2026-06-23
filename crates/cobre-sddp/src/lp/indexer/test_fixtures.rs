@@ -271,7 +271,8 @@ pub fn geometry(
         water_balance: water_balance_start..water_balance_start + hydro_count,
         load_balance: load_balance_start..load_balance_end,
         // This synthetic fixture models no filling hydros, so the retention,
-        // terminal-target, and operating-floor blocks are empty.
+        // terminal-target, and operating-floor blocks are empty — including the
+        // sparse `σ_fill` / `σ^{v-}` system→slot index vectors.
         filling_retention: 0..0,
         filling_target: 0..0,
         filling_target_col: 0..0,
@@ -281,6 +282,8 @@ pub fn geometry(
         n_blks,
         fpha_hydro_indices,
         evap_hydro_indices,
+        filling_target_hydro_indices: vec![],
+        filling_floor_hydro_indices: vec![],
     }
 }
 

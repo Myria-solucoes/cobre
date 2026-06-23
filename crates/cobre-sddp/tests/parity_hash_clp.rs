@@ -289,6 +289,18 @@ fn case_dir(label: &str) -> std::path::PathBuf {
         // thermal with a commissioning window, exercising the shifted decision gate
         // on top of the D34 n_blks-dependent decision-base surface.
         "D37" => "d37-anticipated-commissioning",
+        // Mid-cascade dead-volume filling: a cascade
+        // `H1 → H2 (filling) → H3 (real fed downstream)` plus an off-cascade
+        // control H4. H2 carries `entry_stage_id = 4` with
+        // `filling { start_stage_id = 2 }`, so it is PreFilling at stages 0–1,
+        // Filling at 2–3, and Operating at 4–5. During PreFilling the dam is absent
+        // from the LP, so its inflow short-circuits onto its real downstream H3's
+        // water-balance row instead of into a sink. Block counts change at BOTH
+        // phase boundaries (schedule 1/1/3/2/3/1), so the per-stage geometry and
+        // per-stage `τ` are read across phase transitions that also straddle
+        // block-count changes. The parity hash reflects the short-circuit and the
+        // phase transitions through the cascade coupling on storage/water/cuts.
+        "D38" => "d38-dead-volume-filling",
         other => panic!("unknown case label: {other}"),
     };
     // Integration tests run from the crate root; fixtures live at
@@ -625,4 +637,13 @@ fn parity_hash_d36() {
 )]
 fn parity_hash_d37() {
     run_case("D37");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d38() {
+    run_case("D38");
 }

@@ -157,6 +157,22 @@ const EXPECTED_HASHES: &[(&str, &str)] = &[
         "D37",
         "c709a7433e5a2f1ceac3bb0030806ccdd85ee3ecbc2578e66a156dd3bfce7bd0",
     ),
+    // Mid-cascade dead-volume filling: a cascade
+    // `H1 → H2 (filling) → H3 (real fed downstream)` plus an off-cascade control
+    // H4. H2 carries `entry_stage_id = 4` with `filling { start_stage_id = 2 }`,
+    // so it is PreFilling at stages 0–1, Filling at 2–3, and Operating at 4–5.
+    // During PreFilling the dam is absent from the LP, so its inflow short-circuits
+    // onto its real downstream H3's water-balance row instead of into a sink. Block
+    // counts change at BOTH phase boundaries (schedule 1/1/3/2/3/1). The parity hash
+    // reflects the short-circuit and the phase transitions through the cascade
+    // coupling on storage/water/cuts; the filling soft-penalty slacks are checked by
+    // the focused simulation test, not by this baseline. This guard pins only the
+    // HiGHS `D38.sha256`; the CLP `D38.sha256` is verified by the slow-gated CLP
+    // `parity_hash_d38`.
+    (
+        "D38",
+        "585c33665773bdc1fef78a65a09aec57ec16e9079d11a5e7ce97dbdbc28f4511",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
