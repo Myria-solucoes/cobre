@@ -240,11 +240,20 @@ filling_target_violation_cost   <   deficit_cost   ≤   storage_violation_below
 - **`filling_target_violation_cost`** (filling `σ_fill`): a softer, lower-priority
   schedule penalty; it can sit _below_ `deficit_cost` (do not shed load merely to keep
   a new reservoir on its fill schedule).
-- **Ordering check.** This **flips** v1's `check_penalty_ordering` (which asserted
-  `filling_target > storage_below`). The new assertion is
-  `storage_violation_below_cost ≥ filling_target_violation_cost`; promoting an
-  additional `storage_violation_below_cost ≥ deficit_cost` advisory is recommended so
-  the operating floor truly mimics the hard floor. Both penalty fields are **kept**.
+- **Ordering check.** v1's `check_penalty_ordering` is a strict tier chain
+  (`filling_target > storage_below > deficit > constraint > resource > 0`). **Reorder
+  it** to `storage_violation_below_cost > deficit_cost > filling_target_violation_cost`:
+  keep the existing `storage_below > deficit` and `deficit > constraint > resource > 0`
+  checks, and **replace** v1's `filling_target > storage_below` check with
+  `deficit_cost > filling_target_violation_cost` — the fill schedule is **not as hard as
+  load shedding**. `storage_below > filling_target` then holds transitively, and the
+  existing `storage_below > deficit` check already supplies the "mimics the hard floor"
+  comparison, so **no separate/duplicate deficit advisory is added**.
+  `filling_target`'s position relative to the operational-constraint tier is **left to
+  the study's calibration** (whether filling outranks routine operational slacks, or a
+  mandatory min-outflow-during-filling outranks filling, is regime-dependent — the
+  validator does not pin it). All checks stay `ModelQuality` (non-blocking); both
+  penalty fields are **kept**.
 - **Why not a single penalty.** Merging the two would force the fill schedule to be as
   sacred as the dead-volume floor: a single penalty high enough to mimic the hard
   operating floor would also make the optimizer shed load to stay on the fill
