@@ -3,7 +3,8 @@
 //! Scenario model existence, load-factor consistency, AR
 //! estimation prerequisites, external-scheme file existence,
 //! past-inflows coverage and season alignment, penalty cost
-//! ordering, and FPHA penalty-rule shape.
+//! ordering, FPHA penalty-rule shape, and filling-schedule
+//! sufficiency.
 
 use std::collections::{HashMap, HashSet};
 

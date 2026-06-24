@@ -92,9 +92,8 @@ pub struct LbEvalSpec<'a> {
     /// inline at `stage_id` via the shared
     /// `commissioning_active` predicate
     /// and forces `[0, 0]` for a dormant slot, exactly as the forward and backward
-    /// patch sites do — keeping the three identical is the `.claude/rules/sddp.md`
-    /// "patch NCS identically" contract (a divergence understates the bound, the
-    /// D15 bug class). Sourced from
+    /// patch sites do — keeping the three identical is the "patch NCS identically"
+    /// contract (a divergence understates the bound, the D15 bug class). Sourced from
     /// [`crate::context::StageContext::ncs_stochastic_windows`].
     pub ncs_stochastic_windows: &'a [(Option<i32>, Option<i32>)],
     /// Stage id of the lower-bound stage (the first study stage). The commissioning
@@ -1705,9 +1704,12 @@ mod tests {
     ///
     /// A real `StochasticContext` is built via `build_stochastic_context` with
     /// a minimal `System` containing one `NonControllableSource` and one
-    /// `NcsModel`. The `LbRank0State` is pre-populated to mirror the output of
+    /// `NcsModel`. The `LbEvalScratch` is pre-populated to mirror the output of
     /// `lb_init_rank0`. `lb_evaluate_stage_0` is called directly so that we can
     /// inspect the `MockSolver`'s `set_col_bounds_calls` counter afterwards.
+    // `clippy::too_many_lines`: the inline `System`/`StochasticContext` fixture and
+    // its per-opening assertions are one coherent scenario; splitting them into
+    // helpers would scatter the setup the assertions depend on and obscure the test.
     // `clippy::similar_names`: the role-(a) `state` handle reads next to `stage`-
     // named locals; both are established names.
     #[allow(clippy::too_many_lines, clippy::similar_names)]

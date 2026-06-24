@@ -2897,7 +2897,7 @@ mod tests {
         assert_eq!(
             layout.min_generation_rows.start,
             layout.max_outflow_rows.end + n_op,
-            "min_generation must follow min_turbine contiguously"
+            "min_generation must start one min_turbine block (n_op rows) after max_outflow ends"
         );
 
         // The block anchors at the post-equipment row cursor, mirrored by the

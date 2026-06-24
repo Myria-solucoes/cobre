@@ -172,16 +172,18 @@ fn fill_filling_target_rows(
     for (local_idx, &h_idx) in layout.filling_target_hydro_indices.iter().enumerate() {
         // Membership (`identify_filling_target_hydros`) and the precompute
         // (`build_filling_v_target`) share the Filling-phase predicate, so every
-        // enumerated `(h_idx, stage_id)` has a `V_target` entry; the
-        // `debug_assert` pins that coupling without a hot-path branch in release.
-        let v_target = ctx.filling_v_target.get(&(h_idx, stage_id)).copied();
-        debug_assert!(
-            v_target.is_some(),
-            "no V_target for filling hydro {h_idx} at stage id {stage_id}: \
-             filling_target membership and the V_target precompute disagree"
-        );
+        // enumerated `(h_idx, stage_id)` has a `V_target` entry. A lookup miss is
+        // a construction bug between those two sources; this fails loud rather
+        // than writing a `0.0` floor, which would make `v + σ_fill ≥ 0` trivially
+        // true and silently neutralize the filling constraint.
+        let Some(v_target) = ctx.filling_v_target.get(&(h_idx, stage_id)).copied() else {
+            unreachable!(
+                "no V_target for filling hydro {h_idx} at stage id {stage_id}: \
+                 filling_target membership and the V_target precompute disagree"
+            );
+        };
         let row = row_start + local_idx;
-        row_lower[row] = v_target.unwrap_or(0.0);
+        row_lower[row] = v_target;
         row_upper[row] = f64::INFINITY;
     }
 }

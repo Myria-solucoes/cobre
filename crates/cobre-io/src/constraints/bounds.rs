@@ -636,6 +636,24 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
                 path,
             )?;
 
+            // Mirror the entity-reader check in `validate_filling_configs`: a
+            // per-stage `filling_min_rate_m3s` override is non-negative. The
+            // filling-target backward fold (`build_filling_v_target`:
+            // `running -= ζ·rate`) and the sufficiency check
+            // (`check_filling_sufficiency`: `capacity += ζ·rate`) both assume
+            // `rate ≥ 0`; a negative override otherwise reverses the V_target
+            // floor and the feasibility budget. The finiteness gate above would
+            // pass a negative value straight through to those consumers.
+            if let Some(v) = filling_min_rate_m3s
+                && v < 0.0
+            {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: format!("hydro_bounds[{row_idx}].filling_min_rate_m3s"),
+                    message: format!("value must be >= 0.0, got {v}"),
+                });
+            }
+
             rows.push(HydroBoundsRow {
                 hydro_id,
                 stage_id,
@@ -1483,6 +1501,44 @@ mod tests {
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// AC: negative per-stage `filling_min_rate_m3s` override -> `SchemaError`.
+    /// Mirrors the entity-level non-negative check in `validate_filling_configs`;
+    /// the V_target backward fold and the filling-sufficiency budget both assume
+    /// `rate >= 0`.
+    #[test]
+    fn test_hydro_negative_filling_min_rate() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("hydro_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new("filling_min_rate_m3s", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1_i32])),
+                Arc::new(Int32Array::from(vec![0_i32])),
+                Arc::new(Float64Array::from(vec![Some(-5.0_f64)])),
+            ],
+        )
+        .unwrap();
+        let tmp = write_parquet(&batch);
+        let err = parse_hydro_bounds(tmp.path()).unwrap_err();
+
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(
+                    field.contains("filling_min_rate_m3s"),
+                    "field should contain 'filling_min_rate_m3s', got: {field}"
+                );
+                assert!(
+                    message.contains(">= 0.0"),
+                    "message should contain '>= 0.0', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError for negative filling rate, got: {other:?}"),
         }
     }
 

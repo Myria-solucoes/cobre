@@ -555,9 +555,19 @@ fn zero_hydro_stage_bounds() -> HydroStageBounds {
     clippy::doc_markdown
 )]
 mod tests {
-    use super::*;
-    use cobre_core::entities::{
-        ContractType, DiversionChannel, FillingConfig, HydroGenerationModel, HydroPenalties,
+    use std::collections::HashMap;
+
+    use cobre_core::{
+        EntityId,
+        entities::{
+            ContractType, DiversionChannel, EnergyContract, FillingConfig, Hydro,
+            HydroGenerationModel, HydroPenalties, Line, PumpingStation, Thermal,
+        },
+        resolved::ResolvedBounds,
+    };
+
+    use crate::constraints::{
+        ContractBoundsRow, HydroBoundsRow, LineBoundsRow, PumpingBoundsRow, ThermalBoundsRow,
     };
 
     /// Build a 0-based consecutive stage_index map: {0→0, 1→1, …, (n-1)→(n-1)}.
