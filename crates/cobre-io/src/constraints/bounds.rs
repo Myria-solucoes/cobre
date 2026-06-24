@@ -32,7 +32,7 @@
 //! | `min_generation_mw`   | DOUBLE | No       | Min generation (MW)                |
 //! | `max_generation_mw`   | DOUBLE | No       | Max generation (MW)                |
 //! | `max_diversion_m3s`   | DOUBLE | No       | Max diversion flow (m3/s)          |
-//! | `filling_inflow_m3s`  | DOUBLE | No       | Filling inflow override (m3/s)     |
+//! | `filling_min_rate_m3s`| DOUBLE | No       | Filling min-rate override (m3/s)   |
 //! | `water_withdrawal_m3s`| DOUBLE | No       | Water withdrawal (m3/s)            |
 //!
 //! ### `line_bounds`
@@ -164,7 +164,7 @@ pub struct ThermalBoundsRow {
 ///     min_generation_mw: None,
 ///     max_generation_mw: None,
 ///     max_diversion_m3s: None,
-///     filling_inflow_m3s: None,
+///     filling_min_rate_m3s: None,
 ///     water_withdrawal_m3s: None,
 /// };
 /// assert_eq!(row.min_turbined_m3s, Some(50.0));
@@ -195,8 +195,8 @@ pub struct HydroBoundsRow {
     pub max_generation_mw: Option<f64>,
     /// Maximum diversion override (m³/s).
     pub max_diversion_m3s: Option<f64>,
-    /// Filling inflow override (m³/s).
-    pub filling_inflow_m3s: Option<f64>,
+    /// Filling minimum accumulation rate override (m³/s).
+    pub filling_min_rate_m3s: Option<f64>,
     /// Water withdrawal override (m³/s).
     pub water_withdrawal_m3s: Option<f64>,
 }
@@ -511,7 +511,7 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
         let min_gen_col = extract_optional_float64(&batch, "min_generation_mw", path)?;
         let max_gen_col = extract_optional_float64(&batch, "max_generation_mw", path)?;
         let max_diversion_col = extract_optional_float64(&batch, "max_diversion_m3s", path)?;
-        let filling_inflow_col = extract_optional_float64(&batch, "filling_inflow_m3s", path)?;
+        let filling_min_rate_col = extract_optional_float64(&batch, "filling_min_rate_m3s", path)?;
         let water_withdrawal_col = extract_optional_float64(&batch, "water_withdrawal_m3s", path)?;
 
         let n = batch.num_rows();
@@ -551,7 +551,7 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
             let max_diversion_m3s = max_diversion_col
                 .filter(|col| !col.is_null(i))
                 .map(|col| col.value(i));
-            let filling_inflow_m3s = filling_inflow_col
+            let filling_min_rate_m3s = filling_min_rate_col
                 .filter(|col| !col.is_null(i))
                 .map(|col| col.value(i));
             let water_withdrawal_m3s = water_withdrawal_col
@@ -622,10 +622,10 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
                 path,
             )?;
             validate_optional_finite(
-                filling_inflow_m3s,
+                filling_min_rate_m3s,
                 "hydro_bounds",
                 row_idx,
-                "filling_inflow_m3s",
+                "filling_min_rate_m3s",
                 path,
             )?;
             validate_optional_finite(
@@ -648,7 +648,7 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
                 min_generation_mw,
                 max_generation_mw,
                 max_diversion_m3s,
-                filling_inflow_m3s,
+                filling_min_rate_m3s,
                 water_withdrawal_m3s,
             });
         }
@@ -1335,7 +1335,7 @@ mod tests {
             Field::new("min_generation_mw", DataType::Float64, true),
             Field::new("max_generation_mw", DataType::Float64, true),
             Field::new("max_diversion_m3s", DataType::Float64, true),
-            Field::new("filling_inflow_m3s", DataType::Float64, true),
+            Field::new("filling_min_rate_m3s", DataType::Float64, true),
             Field::new("water_withdrawal_m3s", DataType::Float64, true),
         ]))
     }
@@ -1357,7 +1357,7 @@ mod tests {
                 Arc::new(Float64Array::from(vec![None::<f64>])),    // min_gen: null
                 Arc::new(Float64Array::from(vec![Some(80.0_f64)])), // max_gen
                 Arc::new(Float64Array::from(vec![None::<f64>])),    // max_diversion: null
-                Arc::new(Float64Array::from(vec![Some(10.0_f64)])), // filling_inflow
+                Arc::new(Float64Array::from(vec![Some(10.0_f64)])), // filling_min_rate
                 Arc::new(Float64Array::from(vec![None::<f64>])),    // water_withdrawal: null
             ],
         )
@@ -1378,7 +1378,7 @@ mod tests {
         assert!(r.min_generation_mw.is_none());
         assert!((r.max_generation_mw.unwrap() - 80.0).abs() < f64::EPSILON);
         assert!(r.max_diversion_m3s.is_none());
-        assert!((r.filling_inflow_m3s.unwrap() - 10.0).abs() < f64::EPSILON);
+        assert!((r.filling_min_rate_m3s.unwrap() - 10.0).abs() < f64::EPSILON);
         assert!(r.water_withdrawal_m3s.is_none());
     }
 
@@ -1418,7 +1418,7 @@ mod tests {
         assert!(r.min_generation_mw.is_none());
         assert!((r.max_generation_mw.unwrap() - 150.0).abs() < f64::EPSILON);
         assert!(r.max_diversion_m3s.is_none());
-        assert!(r.filling_inflow_m3s.is_none());
+        assert!(r.filling_min_rate_m3s.is_none());
         assert!(r.water_withdrawal_m3s.is_none());
     }
 

@@ -92,7 +92,7 @@ fn default_hydro_bounds() -> HydroStageBounds {
         min_generation_mw: 0.0,
         max_generation_mw: 250.0,
         max_diversion_m3s: None,
-        filling_inflow_m3s: 0.0,
+        filling_min_rate_m3s: 0.0,
         water_withdrawal_m3s: 0.0,
     }
 }
@@ -925,7 +925,7 @@ fn fpha_system_with_turbined_cost(
                 min_generation_mw: 0.0,
                 max_generation_mw: 300.0,
                 max_diversion_m3s: None,
-                filling_inflow_m3s: 0.0,
+                filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 0.0,
             },
             thermal: ThermalStageBounds {
@@ -2303,7 +2303,7 @@ fn one_fpha_hydro_system(n_planes: usize) -> (cobre_core::System, ProductionMode
                 min_generation_mw: 0.0,
                 max_generation_mw: 300.0,
                 max_diversion_m3s: None,
-                filling_inflow_m3s: 0.0,
+                filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 0.0,
             },
             thermal: ThermalStageBounds {
@@ -4347,7 +4347,7 @@ fn evap_hydro_system_with_violation_cost(
                 min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
                 max_diversion_m3s: None,
-                filling_inflow_m3s: 0.0,
+                filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 0.0,
             },
             thermal: ThermalStageBounds {
@@ -5442,7 +5442,7 @@ fn one_hydro_system_with_withdrawal(
                 min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
                 max_diversion_m3s: None,
-                filling_inflow_m3s: 0.0,
+                filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s,
             },
             thermal: ThermalStageBounds {
@@ -5905,7 +5905,7 @@ fn two_hydro_withdrawal_slack_entries_per_hydro() {
         min_generation_mw: 0.0,
         max_generation_mw: 250.0,
         max_diversion_m3s: None,
-        filling_inflow_m3s: 0.0,
+        filling_min_rate_m3s: 0.0,
         water_withdrawal_m3s: 0.0,
     };
     let mut bounds = ResolvedBounds::new(
@@ -6179,7 +6179,7 @@ fn three_hydro_num_cols_includes_three_withdrawal_slacks() {
                 min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
                 max_diversion_m3s: None,
-                filling_inflow_m3s: 0.0,
+                filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 5.0,
             },
             thermal: ThermalStageBounds {
@@ -7912,7 +7912,7 @@ fn one_hydro_active_violations(n_stages: usize) -> cobre_core::System {
                 min_generation_mw: 5.0,
                 max_generation_mw: 250.0,
                 max_diversion_m3s: None,
-                filling_inflow_m3s: 0.0,
+                filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 0.0,
             },
             thermal: ThermalStageBounds {

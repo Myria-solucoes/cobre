@@ -1444,7 +1444,7 @@ mod parameter_resolution_tests {
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             max_diversion_m3s: None,
-            filling_inflow_m3s: 0.0,
+            filling_min_rate_m3s: 0.0,
             water_withdrawal_m3s: 0.0,
         }
     }
@@ -1971,7 +1971,7 @@ mod zero_cost_tests {
                         min_generation_mw: 0.0,
                         max_generation_mw: 0.0,
                         max_diversion_m3s: None,
-                        filling_inflow_m3s: 0.0,
+                        filling_min_rate_m3s: 0.0,
                         water_withdrawal_m3s: 0.0,
                     },
                     thermal: ThermalStageBounds {
@@ -2657,7 +2657,7 @@ mod pumping_water_tests {
                 min_generation_mw: 0.0,
                 max_generation_mw: 45.0,
                 max_diversion_m3s: None,
-                filling_inflow_m3s: 0.0,
+                filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 0.0,
             },
             thermal: ThermalStageBounds {
@@ -3947,14 +3947,14 @@ mod pumping_water_tests {
             diversion: None,
             filling: filling.then_some(FillingConfig {
                 start_stage_id: RET_START_STAGE_ID,
-                filling_inflow_m3s: 0.0,
+                filling_min_rate_m3s: 0.0,
             }),
             penalties: zero_hydro_penalties(),
         }
     }
 
     /// Build an `H1 → H2` cascade (H2 the filling hydro) at the given `stage_id`,
-    /// with the resolved per-stage `filling_inflow_m3s` of H2 set to `f_h`. Returns
+    /// with the resolved per-stage `filling_min_rate_m3s` of H2 set to `f_h`. Returns
     /// the assembled CSC triple, the `(row_lower, row_upper)` vectors, the layout's
     /// `num_rows`, and the resolved offsets the assertions read.
     #[allow(clippy::type_complexity)]
@@ -3980,7 +3980,7 @@ mod pumping_water_tests {
         fixtures
             .bounds
             .hydro_bounds_mut(h2_idx, 0)
-            .filling_inflow_m3s = f_h;
+            .filling_min_rate_m3s = f_h;
         let ctx = fixtures.make_ctx();
         let stage_index = usize::try_from(stage_id).expect("non-negative");
         let stage = two_block_stage(stage_index, [300.0, 444.0]);
@@ -4241,7 +4241,7 @@ mod pumping_water_tests {
         let mut h = ret_hydro(id, downstream, entry, false);
         h.filling = Some(FillingConfig {
             start_stage_id,
-            filling_inflow_m3s: 0.0,
+            filling_min_rate_m3s: 0.0,
         });
         h
     }

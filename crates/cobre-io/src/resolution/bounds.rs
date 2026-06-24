@@ -141,7 +141,7 @@ pub struct BoundsOverrides<'a> {
 ///     min_generation_mw: None,
 ///     max_generation_mw: None,
 ///     max_diversion_m3s: None,
-///     filling_inflow_m3s: None,
+///     filling_min_rate_m3s: None,
 ///     water_withdrawal_m3s: None,
 /// };
 ///
@@ -412,8 +412,8 @@ pub fn resolve_bounds(
         if let Some(v) = row.max_diversion_m3s {
             cell.max_diversion_m3s = Some(v);
         }
-        if let Some(v) = row.filling_inflow_m3s {
-            cell.filling_inflow_m3s = v;
+        if let Some(v) = row.filling_min_rate_m3s {
+            cell.filling_min_rate_m3s = v;
         }
         if let Some(v) = row.water_withdrawal_m3s {
             cell.water_withdrawal_m3s = v;
@@ -507,7 +507,7 @@ pub fn resolve_bounds(
 /// - `min_generation_mw` / `max_generation_mw` — direct field copy
 /// - `max_diversion_m3s` — `hydro.diversion.as_ref().map(|d| d.max_flow_m3s)`;
 ///   `None` when no diversion channel is configured
-/// - `filling_inflow_m3s` — `hydro.filling.map_or(0.0, |f| f.filling_inflow_m3s)`;
+/// - `filling_min_rate_m3s` — `hydro.filling.map_or(0.0, |f| f.filling_min_rate_m3s)`;
 ///   defaults to `0.0` when no filling configuration is present
 /// - `water_withdrawal_m3s` — always `0.0` (no per-entity default; overrides only)
 #[inline]
@@ -522,7 +522,7 @@ fn hydro_base_bounds(hydro: &Hydro) -> HydroStageBounds {
         min_generation_mw: hydro.min_generation_mw,
         max_generation_mw: hydro.max_generation_mw,
         max_diversion_m3s: hydro.diversion.as_ref().map(|d| d.max_flow_m3s),
-        filling_inflow_m3s: hydro.filling.map_or(0.0, |f| f.filling_inflow_m3s),
+        filling_min_rate_m3s: hydro.filling.map_or(0.0, |f| f.filling_min_rate_m3s),
         water_withdrawal_m3s: 0.0,
     }
 }
@@ -540,7 +540,7 @@ fn zero_hydro_stage_bounds() -> HydroStageBounds {
         min_generation_mw: 0.0,
         max_generation_mw: 0.0,
         max_diversion_m3s: None,
-        filling_inflow_m3s: 0.0,
+        filling_min_rate_m3s: 0.0,
         water_withdrawal_m3s: 0.0,
     }
 }
@@ -734,7 +734,7 @@ mod tests {
             min_generation_mw: None,
             max_generation_mw: None,
             max_diversion_m3s: None,
-            filling_inflow_m3s: None,
+            filling_min_rate_m3s: None,
             water_withdrawal_m3s: None,
         }
     }
@@ -863,7 +863,7 @@ mod tests {
     // ── Test: hydro with diversion and filling ─────────────────────────────────
 
     /// Given a hydro with a diversion channel and filling config, base bounds correctly
-    /// derive max_diversion_m3s and filling_inflow_m3s.
+    /// derive max_diversion_m3s and filling_min_rate_m3s.
     #[test]
     fn test_hydro_with_diversion_and_filling() {
         let diversion = DiversionChannel {
@@ -872,7 +872,7 @@ mod tests {
         };
         let filling = FillingConfig {
             start_stage_id: 0,
-            filling_inflow_m3s: 30.0,
+            filling_min_rate_m3s: 30.0,
         };
         let hydros = vec![make_hydro(
             0,
@@ -887,14 +887,14 @@ mod tests {
 
         let b = result.hydro_bounds(0, 0);
         assert_eq!(b.max_diversion_m3s, Some(50.0));
-        assert!((b.filling_inflow_m3s - 30.0).abs() < f64::EPSILON);
+        assert!((b.filling_min_rate_m3s - 30.0).abs() < f64::EPSILON);
         assert!((b.water_withdrawal_m3s - 0.0).abs() < f64::EPSILON);
     }
 
     // ── Test: hydro without diversion ─────────────────────────────────────────
 
     /// Given a hydro with no diversion channel and no filling config, base bounds
-    /// have max_diversion_m3s = None and filling_inflow_m3s = 0.0.
+    /// have max_diversion_m3s = None and filling_min_rate_m3s = 0.0.
     #[test]
     fn test_hydro_without_diversion() {
         let hydros = vec![make_hydro(0, 10.0, 100.0, None, None, None)];
@@ -903,7 +903,7 @@ mod tests {
 
         let b = result.hydro_bounds(0, 0);
         assert!(b.max_diversion_m3s.is_none());
-        assert!((b.filling_inflow_m3s - 0.0).abs() < f64::EPSILON);
+        assert!((b.filling_min_rate_m3s - 0.0).abs() < f64::EPSILON);
         assert!((b.water_withdrawal_m3s - 0.0).abs() < f64::EPSILON);
     }
 
@@ -1215,7 +1215,7 @@ mod tests {
 
         let b = result.hydro_bounds(0, 0);
         assert_eq!(b.max_diversion_m3s, Some(50.0));
-        assert!((b.filling_inflow_m3s - 0.0).abs() < f64::EPSILON);
+        assert!((b.filling_min_rate_m3s - 0.0).abs() < f64::EPSILON);
         assert!((b.water_withdrawal_m3s - 0.0).abs() < f64::EPSILON);
     }
 

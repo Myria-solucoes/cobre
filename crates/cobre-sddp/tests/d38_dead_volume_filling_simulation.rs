@@ -17,7 +17,7 @@
 //!
 //! Cascade `H1 (id 0) → H2 (id 1, filling) → H3 (id 2, real fed downstream)` plus
 //! an off-cascade non-filling control `H4 (id 3)`. `H2` carries
-//! `entry_stage_id = 4` and `filling { start_stage_id = 2, filling_inflow_m3s = 10 }`,
+//! `entry_stage_id = 4` and `filling { start_stage_id = 2, filling_min_rate_m3s = 10 }`,
 //! so over the 6-stage horizon it is PreFilling at ids 0–1, Filling at ids 2–3,
 //! and Operating at ids 4–5. Block counts change at BOTH phase boundaries
 //! (schedule 1/1/3/2/3/1: 1→3 at stage 1→2, 2→3 at stage 3→4), exercising the
@@ -71,7 +71,7 @@ const H4_ID: i32 = 3;
 /// `system/hydros.json` `H2.reservoir.min_storage_hm3`.
 const H2_MIN_STORAGE_HM3: f64 = 60.0;
 /// `H2`'s per-stage impound cap `F_h` (m³/s). Mirrors `system/hydros.json`
-/// `H2.filling.filling_inflow_m3s`.
+/// `H2.filling.filling_min_rate_m3s`.
 const H2_FILLING_INFLOW_M3S: f64 = 10.0;
 /// `H4`'s reservoir bounds (hm³), mirroring `system/hydros.json`.
 const H4_MIN_STORAGE_HM3: f64 = 0.0;

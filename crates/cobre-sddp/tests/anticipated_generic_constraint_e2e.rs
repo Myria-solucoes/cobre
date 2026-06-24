@@ -266,7 +266,7 @@ fn build_system(
                 min_generation_mw: 0.0,
                 max_generation_mw: 0.0,
                 max_diversion_m3s: None,
-                filling_inflow_m3s: 0.0,
+                filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 0.0,
             },
             thermal: ThermalStageBounds {

@@ -348,10 +348,10 @@ pub(crate) struct RawDiversionChannel {
 pub(crate) struct RawFillingConfig {
     /// Stage index at which filling begins (inclusive).
     start_stage_id: i32,
-    /// Constant inflow applied during filling [m³/s].
-    /// Absent = passive filling (no active inflow, defaults to 0.0 per spec).
+    /// Minimum accumulation rate applied during filling [m³/s].
+    /// Absent = passive filling (no minimum rate, defaults to 0.0 per spec).
     #[serde(default)]
-    filling_inflow_m3s: f64,
+    filling_min_rate_m3s: f64,
 }
 
 /// Intermediate type for entity-level hydro penalty overrides.
@@ -732,7 +732,7 @@ fn convert_hydros(raw: RawHydroFile, global: &GlobalPenaltyDefaults) -> Vec<Hydr
             // Convert optional filling config.
             let filling = raw_hydro.filling.map(|f| FillingConfig {
                 start_stage_id: f.start_stage_id,
-                filling_inflow_m3s: f.filling_inflow_m3s,
+                filling_min_rate_m3s: f.filling_min_rate_m3s,
             });
 
             // Convert entity-level penalty overrides and resolve against global defaults.
@@ -1004,7 +1004,7 @@ mod tests {
       "efficiency": { "type": "constant", "value": 0.92 },
       "evaporation": { "coefficients_mm": [150, 130, 120, 90, 60, 40, 30, 40, 70, 100, 130, 150] },
       "diversion": { "downstream_id": 3, "max_flow_m3s": 200.0 },
-      "filling": { "start_stage_id": 48, "filling_inflow_m3s": 100.0 },
+      "filling": { "start_stage_id": 48, "filling_min_rate_m3s": 100.0 },
       "penalties": { "spillage_cost": 0.05 }
     }"#;
 
@@ -1071,8 +1071,8 @@ mod tests {
         // Filling
         assert!(matches!(
             &h0.filling,
-            Some(FillingConfig { start_stage_id: 48, filling_inflow_m3s })
-            if (filling_inflow_m3s - 100.0).abs() < f64::EPSILON
+            Some(FillingConfig { start_stage_id: 48, filling_min_rate_m3s })
+            if (filling_min_rate_m3s - 100.0).abs() < f64::EPSILON
         ));
         // Penalties: spillage_cost overridden to 0.05, rest from global
         assert!((h0.penalties.spillage_cost - 0.05).abs() < f64::EPSILON);
@@ -1335,11 +1335,11 @@ mod tests {
         );
     }
 
-    // ── AC: filling config with absent filling_inflow_m3s ─────────────────────
+    // ── AC: filling config with absent filling_min_rate_m3s ───────────────────
 
-    /// Filling config with no `filling_inflow_m3s` field defaults to 0.0 (passive filling).
+    /// Filling config with no `filling_min_rate_m3s` field defaults to 0.0 (passive filling).
     #[test]
-    fn test_filling_inflow_defaults_to_zero() {
+    fn test_filling_min_rate_defaults_to_zero() {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "Fill", "bus_id": 0,
@@ -1364,8 +1364,8 @@ mod tests {
             &hydros[0].filling,
             Some(FillingConfig {
                 start_stage_id: 10,
-                filling_inflow_m3s,
-            }) if (*filling_inflow_m3s - 0.0).abs() < f64::EPSILON
+                filling_min_rate_m3s,
+            }) if (*filling_min_rate_m3s - 0.0).abs() < f64::EPSILON
         ));
     }
 

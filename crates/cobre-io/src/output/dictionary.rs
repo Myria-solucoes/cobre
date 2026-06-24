@@ -1239,7 +1239,7 @@ mod tests {
             min_generation_mw: 0.0,
             max_generation_mw: 45.0,
             max_diversion_m3s: None,
-            filling_inflow_m3s: 0.0,
+            filling_min_rate_m3s: 0.0,
             water_withdrawal_m3s: 0.0,
         };
         let thermal_bounds_default = ThermalStageBounds {
@@ -1306,7 +1306,7 @@ mod tests {
             min_generation_mw: 0.0,
             max_generation_mw: 45.0,
             max_diversion_m3s: None,
-            filling_inflow_m3s: 0.0,
+            filling_min_rate_m3s: 0.0,
             water_withdrawal_m3s: 0.0,
         };
         let thermal_default = ThermalStageBounds {
@@ -1826,7 +1826,7 @@ mod tests {
                     min_generation_mw: 0.0,
                     max_generation_mw: 0.0,
                     max_diversion_m3s: None,
-                    filling_inflow_m3s: 0.0,
+                    filling_min_rate_m3s: 0.0,
                     water_withdrawal_m3s: 0.0,
                 },
                 thermal: thermal_bounds_default,
@@ -2005,7 +2005,7 @@ mod tests {
             min_generation_mw: 0.0,
             max_generation_mw: 45.0,
             max_diversion_m3s: None,
-            filling_inflow_m3s: 0.0,
+            filling_min_rate_m3s: 0.0,
             water_withdrawal_m3s: 0.0,
         };
         let thermal_bounds_default = ThermalStageBounds {

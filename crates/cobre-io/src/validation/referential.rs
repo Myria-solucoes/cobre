@@ -1746,7 +1746,7 @@ mod tests {
             min_generation_mw: None,
             max_generation_mw: None,
             max_diversion_m3s: None,
-            filling_inflow_m3s: None,
+            filling_min_rate_m3s: None,
             water_withdrawal_m3s: None,
         }];
         let mut ctx = ValidationContext::new();

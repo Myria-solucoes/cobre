@@ -19,7 +19,7 @@ entry_stage_id=4 (PreFilling 0-1, Filling 2-3, Operating 4-5).
 
 H2's mean_m3s schedule is the crux:
   - Filling (stages 2-3): SHORT (5.0 m3/s) so even at the per-stage impound
-    cap (filling_inflow_m3s = 10.0, cap rise = zeta * 10 = 25.92 hm3/stage with
+    cap (filling_min_rate_m3s = 10.0, cap rise = zeta * 10 = 25.92 hm3/stage with
     zeta = 720 h * 0.0036) the reservoir cannot reach the dead volume
     (min_storage_hm3 = 60.0) by the terminal Filling stage (id 3): the cap alone
     bounds two-stage accumulation to 51.84 hm3 < 60, and the short inflow holds it

@@ -140,9 +140,9 @@ fn fill_water_balance_rows(
 /// Σ_blk τ_h·(release_h) − Σ_blk τ_h·(upstream release) − ζ·z_h ≥ −ζ·F_h
 /// ```
 ///
-/// `F_h` is the RESOLVED per-stage `filling_inflow_m3s`
-/// (`hydro_bounds(h_idx, stage_idx).filling_inflow_m3s`), NOT the raw
-/// `FillingConfig.filling_inflow_m3s` scalar — the impound cap can vary per stage,
+/// `F_h` is the RESOLVED per-stage `filling_min_rate_m3s`
+/// (`hydro_bounds(h_idx, stage_idx).filling_min_rate_m3s`), NOT the raw
+/// `FillingConfig.filling_min_rate_m3s` scalar — the impound cap can vary per stage,
 /// so reading the entity field directly would silently drop any per-stage
 /// override. The realized incremental inflow rides the `z_h` column on the LHS
 /// (scenario-exact, see the entries doc), so the RHS carries ONLY the constant
@@ -167,7 +167,7 @@ fn fill_filling_retention_rows(
             .resolved
             .bounds
             .hydro_bounds(h_idx, stage_idx)
-            .filling_inflow_m3s;
+            .filling_min_rate_m3s;
         let row = row_start + local_idx;
         row_lower[row] = -zeta * f_h;
         row_upper[row] = f64::INFINITY;

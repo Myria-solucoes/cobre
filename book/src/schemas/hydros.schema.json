@@ -79,9 +79,9 @@
       "additionalProperties": false,
       "description": "Intermediate type for the `filling` sub-object.",
       "properties": {
-        "filling_inflow_m3s": {
+        "filling_min_rate_m3s": {
           "default": 0.0,
-          "description": "Constant inflow applied during filling [m³/s].\nAbsent = passive filling (no active inflow, defaults to 0.0 per spec).",
+          "description": "Minimum accumulation rate applied during filling [m³/s].\nAbsent = passive filling (no minimum rate, defaults to 0.0 per spec).",
           "format": "double",
           "type": "number"
         },

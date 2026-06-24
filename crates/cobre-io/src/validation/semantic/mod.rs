@@ -39,7 +39,7 @@
 //! | 3  | Cyclic graph: `annual_discount_rate > 0.0`                              | `stages.json`                                  | `InvalidValue`           |
 //! | 4  | Every `Block.duration_hours > 0.0`                                      | `stages.json`                                  | `InvalidValue`           |
 //! | 5  | CVaR: `alpha` in (0, 1], `lambda` in [0, 1]                             | `stages.json`                                  | `InvalidValue`           |
-//! | 6  | `filling_target_violation_cost > storage_violation_below_cost`          | `penalties.json`                               | `ModelQuality` (warning) |
+//! | 6  | `max(deficit_segment_costs) > filling_target_violation_cost`            | `penalties.json`                               | `ModelQuality` (warning) |
 //! | 7  | `storage_violation_below_cost > max(deficit_segment_costs)`             | `penalties.json`                               | `ModelQuality` (warning) |
 //! | 8  | `max(deficit_segment_costs) > max(constraint_violation_costs)`          | `penalties.json`                               | `ModelQuality` (warning) |
 //! | 9  | `min(constraint_violation_costs) > max(resource_costs)`                 | `penalties.json`                               | `ModelQuality` (warning) |
@@ -66,6 +66,7 @@
 //! |30  | Season defined in `season_definitions` but not referenced by any stage   | `stages.json`                                  | `ModelQuality` (warning) |
 //! |31  | Observation resolution must not be finer than season resolution          | `scenarios/inflow_history.parquet`             | `BusinessRuleViolation`  |
 //! |32  | Each `season_id` in `past_inflows[i].season_ids` must exist in `SeasonMap` | `initial_conditions.json`                    | `BusinessRuleViolation`  |
+//! |33  | Filling schedule reaches the dead volume: `Σ ζ_s·rate_s >= min_storage − seed` | `system/hydros.json`               | `BusinessRuleViolation`  |
 
 use super::{ValidationContext, schema::ParsedData};
 
@@ -128,6 +129,7 @@ pub(crate) fn validate_semantic_stages_penalties_scenarios(
     stages::check_stage_structure(data, ctx);
     sobol::check_sobol_power_of_2(data, ctx);
     scenarios::check_penalty_ordering(data, ctx);
+    scenarios::check_filling_sufficiency(data, ctx);
     scenarios::check_fpha_penalty_rule(data, ctx);
     scenarios::check_scenario_models(data, ctx);
     correlation::check_correlation_matrices(data, ctx);

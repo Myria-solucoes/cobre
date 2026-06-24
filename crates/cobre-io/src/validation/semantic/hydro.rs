@@ -1261,7 +1261,7 @@ mod tests {
         h.entry_stage_id = Some(entry_stage_id);
         h.filling = Some(FillingConfig {
             start_stage_id,
-            filling_inflow_m3s: inflow,
+            filling_min_rate_m3s: inflow,
         });
         h
     }

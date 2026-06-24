@@ -507,7 +507,7 @@ mod tests {
             diversion: None,
             filling: filling.then_some(FillingConfig {
                 start_stage_id: 2,
-                filling_inflow_m3s: 0.0,
+                filling_min_rate_m3s: 0.0,
             }),
             penalties: zero_hydro_penalties(),
         }

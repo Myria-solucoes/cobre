@@ -1247,7 +1247,7 @@ mod tests {
         hydro.entry_stage_id = None;
         hydro.filling = Some(FillingConfig {
             start_stage_id: 10,
-            filling_inflow_m3s: 100.0,
+            filling_min_rate_m3s: 100.0,
         });
 
         let result = SystemBuilder::new()
@@ -1273,16 +1273,16 @@ mod tests {
     }
 
     #[test]
-    fn test_filling_negative_inflow() {
-        // Filling config with filling_inflow_m3s < 0.0 (a negative cap is rejected;
-        // zero is valid and tested separately).
+    fn test_filling_negative_rate() {
+        // Filling config with filling_min_rate_m3s < 0.0 (a negative rate is
+        // rejected; zero is valid and tested separately).
         use crate::entities::FillingConfig;
         let bus = make_bus(0);
         let mut hydro = make_hydro(1);
         hydro.entry_stage_id = Some(10);
         hydro.filling = Some(FillingConfig {
             start_stage_id: 10,
-            filling_inflow_m3s: -5.0,
+            filling_min_rate_m3s: -5.0,
         });
 
         let result = SystemBuilder::new()
@@ -1292,33 +1292,33 @@ mod tests {
 
         assert!(
             result.is_err(),
-            "expected Err for negative filling_inflow_m3s"
+            "expected Err for negative filling_min_rate_m3s"
         );
         let errors = result.unwrap_err();
         let has_error = errors.iter().any(|e| match e {
             ValidationError::InvalidFillingConfig { hydro_id, reason } => {
                 *hydro_id == EntityId(1)
-                    && reason.contains("filling_inflow_m3s must be non-negative")
+                    && reason.contains("filling_min_rate_m3s must be non-negative")
             }
             _ => false,
         });
         assert!(
             has_error,
-            "expected InvalidFillingConfig with non-negative inflow reason, got: {errors:?}"
+            "expected InvalidFillingConfig with non-negative rate reason, got: {errors:?}"
         );
     }
 
     #[test]
-    fn test_filling_zero_inflow_accepted() {
-        // A zero cap is valid: impound nothing, pass everything downstream and
-        // rely on natural accumulation. It must NOT produce an inflow error.
+    fn test_filling_zero_rate_accepted() {
+        // A zero rate is valid: no minimum accumulation is required this stage.
+        // It must NOT produce a rate error.
         use crate::entities::FillingConfig;
         let bus = make_bus(0);
         let mut hydro = make_hydro(1);
         hydro.entry_stage_id = Some(10);
         hydro.filling = Some(FillingConfig {
             start_stage_id: 9,
-            filling_inflow_m3s: 0.0,
+            filling_min_rate_m3s: 0.0,
         });
 
         let result = SystemBuilder::new()
@@ -1328,21 +1328,21 @@ mod tests {
 
         assert!(
             result.is_ok(),
-            "expected Ok for zero filling_inflow_m3s, got: {:?}",
+            "expected Ok for zero filling_min_rate_m3s, got: {:?}",
             result.unwrap_err()
         );
     }
 
     #[test]
     fn test_valid_filling_config_passes() {
-        // Valid filling config: entry_stage_id set and filling_inflow_m3s positive.
+        // Valid filling config: entry_stage_id set and filling_min_rate_m3s positive.
         use crate::entities::FillingConfig;
         let bus = make_bus(0);
         let mut hydro = make_hydro(1);
         hydro.entry_stage_id = Some(10);
         hydro.filling = Some(FillingConfig {
             start_stage_id: 9,
-            filling_inflow_m3s: 100.0,
+            filling_min_rate_m3s: 100.0,
         });
 
         let result = SystemBuilder::new()
@@ -1369,7 +1369,7 @@ mod tests {
         hydro.entry_stage_id = Some(5);
         hydro.filling = Some(FillingConfig {
             start_stage_id: 5,
-            filling_inflow_m3s: 100.0,
+            filling_min_rate_m3s: 100.0,
         });
 
         let result = SystemBuilder::new()
@@ -1410,7 +1410,7 @@ mod tests {
         h1.entry_stage_id = None; // no entry_stage_id
         h1.filling = Some(FillingConfig {
             start_stage_id: 5,
-            filling_inflow_m3s: 50.0,
+            filling_min_rate_m3s: 50.0,
         });
 
         let result = SystemBuilder::new()

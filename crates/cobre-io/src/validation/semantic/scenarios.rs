@@ -31,35 +31,34 @@ pub(super) fn check_penalty_ordering(data: &ParsedData, ctx: &mut ValidationCont
         .fold(f64::NEG_INFINITY, f64::max)
         .max(0.0);
 
-    // For each hydro, collect the relevant cost groups.
-    // We aggregate violations per check across all hydros.
-
-    // Check 6: filling_target_violation_cost > storage_violation_below_cost
-    {
-        let mut violations: Vec<(i32, f64, f64)> = Vec::new(); // (id, higher, lower)
+    // Check 6: max(deficit_segment_costs) > filling_target_violation_cost.
+    // Load deficit dominates the fill schedule: filling is a best-effort obligation
+    // that must not be as hard as load shedding. Skipped when there are no deficit
+    // segments (max_deficit_cost == 0.0) because there is then no comparand, mirroring
+    // Check 8's empty-`data.hydros` handling.
+    if max_deficit_cost > 0.0 {
+        let mut violations: Vec<(i32, f64)> = Vec::new(); // (id, filling_target_cost)
         for hydro in &data.hydros {
-            let higher = hydro.penalties.filling_target_violation_cost;
-            let lower = hydro.penalties.storage_violation_below_cost;
-            if higher <= lower {
-                violations.push((hydro.id.0, higher, lower));
+            let filling = hydro.penalties.filling_target_violation_cost;
+            if filling >= max_deficit_cost {
+                violations.push((hydro.id.0, filling));
             }
         }
-        // Worst case: the hydro with the largest (lower - higher) gap.
-        if let Some(worst) = violations.iter().max_by(|a, b| {
-            (b.2 - b.1)
-                .partial_cmp(&(a.2 - a.1))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        }) {
+        // Worst case: the hydro with the largest filling_target_violation_cost.
+        if let Some(worst) = violations
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        {
             let count = violations.len();
             ctx.add_warning(
                 ErrorKind::ModelQuality,
                 "penalties.json",
                 None::<&str>,
                 format!(
-                    "Penalty ordering violation: filling_target_violation_cost ({}) should be > \
-                     storage_violation_below_cost ({}) -- {count} hydro(s) affected, \
-                     worst case: Hydro {}",
-                    worst.1, worst.2, worst.0
+                    "Penalty ordering violation: filling_target_violation_cost ({}) should be < \
+                     deficit_cost ({max_deficit_cost}) so filling is not as hard as load shedding \
+                     -- {count} hydro(s) affected, worst-case hydro {}",
+                    worst.1, worst.0
                 ),
             );
         }
@@ -762,6 +761,110 @@ pub(super) fn check_past_inflows_season_ids(data: &ParsedData, ctx: &mut Validat
     }
 }
 
+// ── Filling-schedule sufficiency ──────────────────────────────────────────────
+
+/// m³/s → hm³ conversion per stage-hour: `3600 s/h ÷ 1e6 m³/hm³`.
+///
+/// Defined locally so cobre-io does not depend on the solver crate
+/// (infrastructure-genericity hard rule). A solver-side copy of this same factor
+/// exists, but a shared dependency would violate that rule; the duplicated
+/// constant is redundancy-with-purpose, not drift.
+const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
+
+/// Checks that each filling hydro's minimum accumulation schedule can reach its
+/// dead volume before the entry stage.
+///
+/// For each hydro with both `filling: Some(_)` and `entry_stage_id: Some(entry)`,
+/// the cumulative minimum-rate gain over the filling window `[start_stage_id,
+/// entry)` must be at least the dead volume net of the seed:
+///
+/// ```text
+/// Σ_{s ∈ [start_stage_id, entry)} ζ_s · rate_s  ≥  (min_storage_hm3 − seed)
+/// ```
+///
+/// where `ζ_s = (Σ_b blocks[s].duration_hours) · M3S_TO_HM3` and `rate_s` is the
+/// per-stage `filling_min_rate_m3s` override from `hydro_bounds` when present,
+/// else the entity-level rate.
+///
+/// The check is one-sided: only *under*-provisioning is rejected. Over-provisioning
+/// is allowed because surplus capacity merely relaxes the earliest minimum floors
+/// to slack — rejecting it (a two-sided / exact-equality test) would forbid valid
+/// schedules. The comparison is therefore a strict `capacity < required`, never a
+/// float equality.
+///
+/// Stage ids index `data.stages.stages` by `Stage::id`, not by array position,
+/// because the per-stage override source (`HydroBoundsRow.stage_id`, from the
+/// parquet) is the domain identifier, as are `start_stage_id` / `entry_stage_id`.
+pub(super) fn check_filling_sufficiency(data: &ParsedData, ctx: &mut ValidationContext) {
+    // ζ_s by stage id: total block duration for the stage scaled to hm³ per m³/s.
+    let zeta_by_stage: HashMap<i32, f64> = data
+        .stages
+        .stages
+        .iter()
+        .map(|s| {
+            let duration_hours: f64 = s.blocks.iter().map(|b| b.duration_hours).sum();
+            (s.id, duration_hours * M3S_TO_HM3)
+        })
+        .collect();
+
+    // Per-stage rate overrides keyed by (hydro_id, stage_id), present only where
+    // a row supplies filling_min_rate_m3s.
+    let rate_override: HashMap<(i32, i32), f64> = data
+        .hydro_bounds
+        .iter()
+        .filter_map(|row| {
+            row.filling_min_rate_m3s
+                .map(|rate| ((row.hydro_id.0, row.stage_id), rate))
+        })
+        .collect();
+
+    // Seed level by hydro id; absent entries default to 0.0 (empty pit).
+    let seed_by_hydro: HashMap<i32, f64> = data
+        .initial_conditions
+        .filling_storage
+        .iter()
+        .map(|s| (s.hydro_id.0, s.value_hm3))
+        .collect();
+
+    for hydro in &data.hydros {
+        let (Some(filling), Some(entry)) = (hydro.filling.as_ref(), hydro.entry_stage_id) else {
+            continue;
+        };
+
+        let mut capacity = 0.0;
+        for stage_id in filling.start_stage_id..entry {
+            let Some(&zeta) = zeta_by_stage.get(&stage_id) else {
+                continue;
+            };
+            let rate = rate_override
+                .get(&(hydro.id.0, stage_id))
+                .copied()
+                .unwrap_or(filling.filling_min_rate_m3s);
+            capacity += zeta * rate;
+        }
+
+        let seed = seed_by_hydro.get(&hydro.id.0).copied().unwrap_or(0.0);
+        let required = hydro.min_storage_hm3 - seed;
+
+        // Strictly-less: over-provisioning (capacity >= required) is acceptable.
+        if capacity < required {
+            let entity_str = format!("Hydro {}", hydro.id.0);
+            ctx.add_error(
+                ErrorKind::BusinessRuleViolation,
+                "system/hydros.json",
+                Some(&entity_str),
+                format!(
+                    "{entity_str}: filling schedule is insufficient to reach the dead volume \
+                     before stage {entry}; cumulative minimum-rate capacity over stages \
+                     [{}, {entry}) is {capacity} hm3 but {required} hm3 \
+                     (min_storage {} - seed {seed}) is required",
+                    filling.start_stage_id, hydro.min_storage_hm3
+                ),
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -811,15 +914,110 @@ mod tests {
         }
     }
 
-    // ── Rule 6: Penalty ordering ──────────────────────────────────────────────
+    // ── Rules 6-7: Penalty ordering ───────────────────────────────────────────
 
-    /// `filling_target_violation_cost` <= `storage_violation_below_cost` produces
-    /// at least 1 `ModelQuality` warning whose message contains "filling" and "storage".
+    /// Check 6: `filling_target_violation_cost` (100) >= `max_deficit_cost` (50)
+    /// produces a `ModelQuality` warning that filling is not below load deficit.
     #[test]
-    fn test_5b_penalty_ordering_filling_less_than_storage_violation() {
+    fn test_5b_penalty_ordering_filling_not_below_deficit_warns() {
         let mut hydro = make_hydro_ordered_penalties(7);
         hydro.penalties.filling_target_violation_cost = 100.0;
-        hydro.penalties.storage_violation_below_cost = 200.0;
+        let data = make_data_5b(
+            vec![hydro],
+            make_stages_5b(vec![0]),
+            vec![make_bus_with_deficit(1, 50.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+        assert!(
+            !ctx.has_errors(),
+            "penalty-ordering checks are non-blocking warnings, not errors"
+        );
+        let warnings = ctx.warnings();
+        let check6: Vec<_> = warnings
+            .iter()
+            .filter(|w| {
+                w.kind == ErrorKind::ModelQuality && w.message.contains("should be < deficit_cost")
+            })
+            .collect();
+        assert_eq!(
+            check6.len(),
+            1,
+            "exactly 1 Check-6 ModelQuality warning expected"
+        );
+        let msg = &check6[0].message;
+        assert!(
+            msg.contains("filling_target_violation_cost"),
+            "message should contain 'filling_target_violation_cost', got: {msg}"
+        );
+        assert!(
+            msg.contains("not as hard as load shedding"),
+            "message should contain 'not as hard as load shedding', got: {msg}"
+        );
+    }
+
+    /// Check 6: `filling_target_violation_cost` (50) < `max_deficit_cost` (100)
+    /// emits no warning -- the fill schedule is softer than load shedding.
+    #[test]
+    fn test_5b_penalty_ordering_filling_below_deficit_no_warn() {
+        let mut hydro = make_hydro_ordered_penalties(7);
+        hydro.penalties.filling_target_violation_cost = 50.0;
+        let data = make_data_5b(
+            vec![hydro],
+            make_stages_5b(vec![0]),
+            vec![make_bus_with_deficit(1, 100.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+        let warnings = ctx.warnings();
+        let check6 = warnings
+            .iter()
+            .filter(|w| w.message.contains("should be < deficit_cost"))
+            .count();
+        assert_eq!(check6, 0, "no Check-6 warning expected, got {check6}");
+    }
+
+    /// Check 6: with no bus deficit segments (`max_deficit_cost == 0.0`) the check is
+    /// skipped -- there is no deficit comparand even though filling cost is high.
+    #[test]
+    fn test_5b_penalty_ordering_no_deficit_segment_skips_check6() {
+        let mut hydro = make_hydro_ordered_penalties(7);
+        hydro.penalties.filling_target_violation_cost = 1000.0;
+        let data = make_data_5b(
+            vec![hydro],
+            make_stages_5b(vec![0]),
+            vec![],
+            vec![],
+            vec![],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+        let warnings = ctx.warnings();
+        let check6 = warnings
+            .iter()
+            .filter(|w| w.message.contains("should be < deficit_cost"))
+            .count();
+        assert_eq!(
+            check6, 0,
+            "Check 6 must be skipped when max_deficit_cost == 0.0, got {check6}"
+        );
+    }
+
+    /// Check 7 (unchanged): `storage_violation_below_cost` (5) <= `max_deficit_cost` (10)
+    /// produces a `ModelQuality` warning that storage-below should outrank load deficit.
+    #[test]
+    fn test_5b_penalty_storage_below_deficit_warns() {
+        let mut hydro = make_hydro_ordered_penalties(7);
+        hydro.penalties.storage_violation_below_cost = 5.0;
+        // Keep filling below deficit so this isolates the Check-7 warning.
+        hydro.penalties.filling_target_violation_cost = 5.0;
         let data = make_data_5b(
             vec![hydro],
             make_stages_5b(vec![0]),
@@ -830,27 +1028,23 @@ mod tests {
         );
         let mut ctx = ValidationContext::new();
         validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+        assert!(
+            !ctx.has_errors(),
+            "penalty-ordering checks are non-blocking warnings, not errors"
+        );
         let warnings = ctx.warnings();
-        assert!(
-            !warnings.is_empty(),
-            "ordering violation should produce at least 1 warning"
-        );
-        let relevant: Vec<_> = warnings
+        let check7: Vec<_> = warnings
             .iter()
-            .filter(|w| w.kind == ErrorKind::ModelQuality)
+            .filter(|w| {
+                w.kind == ErrorKind::ModelQuality
+                    && w.message.contains("storage_violation_below_cost")
+                    && w.message.contains("max(deficit_segment_costs)")
+            })
             .collect();
-        assert!(
-            !relevant.is_empty(),
-            "should have ModelQuality warning for penalty ordering"
-        );
-        let msg = &relevant[0].message;
-        assert!(
-            msg.contains("filling"),
-            "message should contain 'filling', got: {msg}"
-        );
-        assert!(
-            msg.contains("storage"),
-            "message should contain 'storage', got: {msg}"
+        assert_eq!(
+            check7.len(),
+            1,
+            "exactly 1 Check-7 ModelQuality warning expected"
         );
     }
 
@@ -1808,6 +2002,192 @@ mod tests {
             external_errors.is_empty(),
             "no external-file errors expected when file is present, \
              got: {external_errors:?}"
+        );
+    }
+
+    // ── Rule 33: Filling-schedule sufficiency ─────────────────────────────────
+
+    /// Build a `StagesData` whose stages have ids `ids`, each carrying a single
+    /// block of `duration_hours`. The ζ for every stage is therefore
+    /// `duration_hours · M3S_TO_HM3`.
+    fn make_stages_with_block_duration(ids: &[i32], duration_hours: f64) -> StagesData {
+        let stages = ids
+            .iter()
+            .map(|&id| {
+                let mut stage = make_stage(id);
+                stage.blocks = vec![Block {
+                    index: 0,
+                    name: "FLAT".to_string(),
+                    duration_hours,
+                }];
+                stage
+            })
+            .collect();
+        StagesData {
+            stages,
+            policy_graph: PolicyGraph {
+                graph_type: PolicyGraphType::FiniteHorizon,
+                annual_discount_rate: 0.06,
+                transitions: vec![],
+                season_map: None,
+            },
+        }
+    }
+
+    /// Build a filling hydro with dead volume `min_storage_hm3`, filling window
+    /// `[start_stage_id, entry_stage_id)`, and entity-level `filling_min_rate_m3s`.
+    fn make_filling_hydro(
+        id: i32,
+        min_storage_hm3: f64,
+        start_stage_id: i32,
+        entry_stage_id: i32,
+        filling_min_rate_m3s: f64,
+    ) -> cobre_core::entities::Hydro {
+        use cobre_core::entities::FillingConfig;
+        let mut h = make_hydro_ordered_penalties(id);
+        h.min_storage_hm3 = min_storage_hm3;
+        h.entry_stage_id = Some(entry_stage_id);
+        h.filling = Some(FillingConfig {
+            start_stage_id,
+            filling_min_rate_m3s,
+        });
+        h
+    }
+
+    /// Under-provisioned: two filling stages (ζ = 0.0036·720 = 2.592 each) at
+    /// rate 1.0 give capacity 5.184 < 60.0 → one `BusinessRuleViolation`.
+    #[test]
+    fn test_filling_sufficiency_underprovisioned_errors() {
+        let hydro = make_filling_hydro(7, 60.0, 2, 4, 1.0);
+        let data = make_data_5b(
+            vec![hydro],
+            make_stages_with_block_duration(&[2, 3], 720.0),
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+
+        let relevant: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.file == std::path::Path::new("system/hydros.json")
+                    && e.message.contains("filling schedule is insufficient")
+            })
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly 1 sufficiency error, got: {:?}",
+            ctx.errors()
+        );
+        let msg = &relevant[0].message;
+        assert!(
+            msg.contains("Hydro 7"),
+            "message should name Hydro 7, got: {msg}"
+        );
+        assert!(
+            msg.contains("5.184"),
+            "message should contain the capacity 5.184, got: {msg}"
+        );
+        assert!(
+            msg.contains("60"),
+            "message should contain the required 60 shortfall, got: {msg}"
+        );
+    }
+
+    /// Sufficient: same two stages at rate 20.0 give capacity 103.68 >= 60.0 →
+    /// no sufficiency error.
+    #[test]
+    fn test_filling_sufficiency_sufficient_no_error() {
+        let hydro = make_filling_hydro(7, 60.0, 2, 4, 20.0);
+        let data = make_data_5b(
+            vec![hydro],
+            make_stages_with_block_duration(&[2, 3], 720.0),
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+
+        let relevant: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.message.contains("filling schedule is insufficient"))
+            .collect();
+        assert!(
+            relevant.is_empty(),
+            "capacity 103.68 >= 60.0 should emit no sufficiency error, got: {relevant:?}"
+        );
+    }
+
+    /// Over-provisioned: capacity strictly greater than `min_storage − seed`
+    /// must not be rejected (one-sided check).
+    #[test]
+    fn test_filling_sufficiency_overprovisioned_no_error() {
+        // Capacity = 2·2.592·100 = 518.4, far above min_storage 60.0.
+        let hydro = make_filling_hydro(7, 60.0, 2, 4, 100.0);
+        let data = make_data_5b(
+            vec![hydro],
+            make_stages_with_block_duration(&[2, 3], 720.0),
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+
+        let relevant: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.message.contains("filling schedule is insufficient"))
+            .collect();
+        assert!(
+            relevant.is_empty(),
+            "over-provisioning must never be rejected (one-sided), got: {relevant:?}"
+        );
+        assert!(
+            !ctx.has_errors(),
+            "an over-provisioned filling schedule should produce no errors at all, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// A non-filling hydro (`filling: None`) is ignored by the sufficiency check
+    /// even when its `min_storage_hm3` is large.
+    #[test]
+    fn test_filling_sufficiency_ignores_non_filling_hydro() {
+        let mut hydro = make_hydro_ordered_penalties(7);
+        // Large dead volume, but no filling config: the check must skip it.
+        hydro.min_storage_hm3 = 60.0;
+        hydro.entry_stage_id = Some(4);
+        assert!(hydro.filling.is_none());
+        let data = make_data_5b(
+            vec![hydro],
+            make_stages_with_block_duration(&[2, 3], 720.0),
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+
+        let relevant: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.message.contains("filling schedule is insufficient"))
+            .collect();
+        assert!(
+            relevant.is_empty(),
+            "non-filling hydro must emit no sufficiency diagnostic, got: {relevant:?}"
         );
     }
 }

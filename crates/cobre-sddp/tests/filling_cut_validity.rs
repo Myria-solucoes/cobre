@@ -274,7 +274,7 @@ fn build_system() -> cobre_core::System {
     let filling = || {
         Some(FillingConfig {
             start_stage_id: START_STAGE_ID,
-            filling_inflow_m3s: 50.0,
+            filling_min_rate_m3s: 50.0,
         })
     };
 
@@ -344,7 +344,7 @@ fn build_system() -> cobre_core::System {
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             max_diversion_m3s: None,
-            filling_inflow_m3s: 0.0,
+            filling_min_rate_m3s: 0.0,
             water_withdrawal_m3s: 0.0,
         }
     }
@@ -404,14 +404,16 @@ fn build_system() -> cobre_core::System {
     );
 
     // The per-stage Filling impound cap is read from the resolved bounds table
-    // (`hydro_bounds(h_idx, stage_idx).filling_inflow_m3s`), NOT the
+    // (`hydro_bounds(h_idx, stage_idx).filling_min_rate_m3s`), NOT the
     // `FillingConfig` scalar. Set it on the two filling hydros (positional
     // indices 0 = Hf1 and 1 = Hf2 in canonical id order) at every stage so the
     // Filling-phase row impounds water; the cap is inert at PreFilling/Operating
     // stages.
     for h_idx in [0_usize, 1] {
         for stage_idx in 0..N_STAGES {
-            bounds.hydro_bounds_mut(h_idx, stage_idx).filling_inflow_m3s = 50.0;
+            bounds
+                .hydro_bounds_mut(h_idx, stage_idx)
+                .filling_min_rate_m3s = 50.0;
         }
     }
 

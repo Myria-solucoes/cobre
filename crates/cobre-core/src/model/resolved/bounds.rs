@@ -36,7 +36,7 @@
 ///     min_generation_mw: 0.0,
 ///     max_generation_mw: 100.0,
 ///     max_diversion_m3s: None,
-///     filling_inflow_m3s: 0.0,
+///     filling_min_rate_m3s: 0.0,
 ///     water_withdrawal_m3s: 0.0,
 /// };
 /// assert!((b.min_storage_hm3 - 10.0).abs() < f64::EPSILON);
@@ -69,9 +69,11 @@ pub struct HydroStageBounds {
     pub max_generation_mw: f64,
     /// Maximum diversion flow \[m³/s\]. Hard upper bound. `None` = no diversion channel.
     pub max_diversion_m3s: Option<f64>,
-    /// Filling inflow retained for dead-volume filling during filling stages \[m³/s\].
-    /// Resolved from entity default → stage override cascade. Default `0.0`.
-    pub filling_inflow_m3s: f64,
+    /// Minimum accumulation rate during dead-volume filling stages \[m³/s\]: the
+    /// minimum rate at which the reservoir must fill, anchoring a per-stage
+    /// minimum target-storage trajectory on `min_storage_hm3`. Not an inflow and
+    /// not a cap. Resolved from entity default → stage override cascade. Default `0.0`.
+    pub filling_min_rate_m3s: f64,
     /// Water withdrawal from reservoir per stage \[m³/s\]. Positive = water removed;
     /// negative = external addition. Default `0.0`.
     pub water_withdrawal_m3s: f64,
@@ -208,7 +210,7 @@ pub struct ContractStageBounds {
 ///     min_outflow_m3s: 0.0, max_outflow_m3s: None,
 ///     min_generation_mw: 0.0, max_generation_mw: 30.0,
 ///     max_diversion_m3s: None,
-///     filling_inflow_m3s: 0.0, water_withdrawal_m3s: 0.0,
+///     filling_min_rate_m3s: 0.0, water_withdrawal_m3s: 0.0,
 /// };
 /// let thermal_default = ThermalStageBounds { min_generation_mw: 0.0, max_generation_mw: 100.0, cost_per_mwh: 50.0 };
 /// let line_default = LineStageBounds { direct_mw: 500.0, reverse_mw: 500.0 };
@@ -563,7 +565,7 @@ mod tests {
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             max_diversion_m3s: None,
-            filling_inflow_m3s: 0.0,
+            filling_min_rate_m3s: 0.0,
             water_withdrawal_m3s: 0.0,
         }
     }
@@ -1076,7 +1078,7 @@ mod tests {
             min_generation_mw: 0.0,
             max_generation_mw: 0.0,
             max_diversion_m3s: None,
-            filling_inflow_m3s: 0.0,
+            filling_min_rate_m3s: 0.0,
             water_withdrawal_m3s: 0.0,
         }
     }
@@ -1093,7 +1095,7 @@ mod tests {
             min_generation_mw: 7.0,
             max_generation_mw: 8.0,
             max_diversion_m3s: Some(9.0),
-            filling_inflow_m3s: 10.0,
+            filling_min_rate_m3s: 10.0,
             water_withdrawal_m3s: 11.0,
         };
         assert!((b.min_storage_hm3 - 1.0).abs() < f64::EPSILON);

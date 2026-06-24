@@ -1096,7 +1096,7 @@ mod diversion_bound_tests {
                     min_generation_mw: 0.0,
                     max_generation_mw: 250.0,
                     max_diversion_m3s: None,
-                    filling_inflow_m3s: 0.0,
+                    filling_min_rate_m3s: 0.0,
                     water_withdrawal_m3s: 0.0,
                 },
                 thermal: ThermalStageBounds {
@@ -1445,7 +1445,7 @@ mod filling_phase_gating_tests {
                     min_generation_mw: 0.0,
                     max_generation_mw: MAX_GENERATION_MW,
                     max_diversion_m3s: Some(MAX_DIVERSION_M3S),
-                    filling_inflow_m3s: 0.0,
+                    filling_min_rate_m3s: 0.0,
                     water_withdrawal_m3s: 0.0,
                 },
                 thermal: ThermalStageBounds {
@@ -1673,7 +1673,7 @@ mod filling_phase_gating_tests {
     fn filling_config() -> FillingConfig {
         FillingConfig {
             start_stage_id: START_STAGE_ID,
-            filling_inflow_m3s: 0.0,
+            filling_min_rate_m3s: 0.0,
         }
     }
 
@@ -2305,7 +2305,7 @@ mod anticipated_objective_tests {
                     min_generation_mw: 0.0,
                     max_generation_mw: 0.0,
                     max_diversion_m3s: None,
-                    filling_inflow_m3s: 0.0,
+                    filling_min_rate_m3s: 0.0,
                     water_withdrawal_m3s: 0.0,
                 },
                 thermal: ThermalStageBounds {
@@ -2549,7 +2549,7 @@ mod block_family_slack_tests {
             min_generation_mw: 0.0,
             max_generation_mw: 45.0,
             max_diversion_m3s: None,
-            filling_inflow_m3s: 0.0,
+            filling_min_rate_m3s: 0.0,
             water_withdrawal_m3s: 0.0,
         }
     }

@@ -1448,7 +1448,7 @@ mod tests {
                 min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
                 max_diversion_m3s: None,
-                filling_inflow_m3s: 0.0,
+                filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 0.0,
             }
         }
@@ -1685,7 +1685,7 @@ mod tests {
                     min_generation_mw: 0.0,
                     max_generation_mw: 250.0,
                     max_diversion_m3s: None,
-                    filling_inflow_m3s: 0.0,
+                    filling_min_rate_m3s: 0.0,
                     water_withdrawal_m3s: 0.0,
                 },
                 thermal: ThermalStageBounds {
@@ -3023,7 +3023,7 @@ mod tests {
                     min_generation_mw: 0.0,
                     max_generation_mw: 250.0,
                     max_diversion_m3s: None,
-                    filling_inflow_m3s: 0.0,
+                    filling_min_rate_m3s: 0.0,
                     water_withdrawal_m3s: 0.0,
                 },
                 thermal: ThermalStageBounds {
@@ -3461,7 +3461,7 @@ mod tests {
                 min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
                 max_diversion_m3s: None,
-                filling_inflow_m3s: 0.0,
+                filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 0.0,
             }
         }
@@ -3825,7 +3825,7 @@ mod tests {
                 min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
                 max_diversion_m3s: None,
-                filling_inflow_m3s: 0.0,
+                filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 0.0,
             }
         }
@@ -3904,7 +3904,7 @@ mod tests {
 
         let filling = Some(cobre_core::FillingConfig {
             start_stage_id,
-            filling_inflow_m3s: 50.0,
+            filling_min_rate_m3s: 50.0,
         });
 
         SystemBuilder::new()
@@ -4383,7 +4383,7 @@ mod tests {
                 min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
                 max_diversion_m3s: None,
-                filling_inflow_m3s: 0.0,
+                filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 0.0,
             }
         }
@@ -4874,7 +4874,7 @@ mod tests {
                 min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
                 max_diversion_m3s: None,
-                filling_inflow_m3s: 0.0,
+                filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 0.0,
             }
         }
@@ -5306,7 +5306,7 @@ mod tests {
                     min_generation_mw: 0.0,
                     max_generation_mw: 250.0,
                     max_diversion_m3s: None,
-                    filling_inflow_m3s: 0.0,
+                    filling_min_rate_m3s: 0.0,
                     water_withdrawal_m3s: 0.0,
                 },
                 thermal: ThermalStageBounds {
@@ -5576,7 +5576,7 @@ mod tests {
                     min_generation_mw: 0.0,
                     max_generation_mw: 250.0,
                     max_diversion_m3s: None,
-                    filling_inflow_m3s: 0.0,
+                    filling_min_rate_m3s: 0.0,
                     water_withdrawal_m3s: 0.0,
                 },
                 thermal: ThermalStageBounds {
@@ -5873,7 +5873,7 @@ mod tests {
                     min_generation_mw: 0.0,
                     max_generation_mw: 250.0,
                     max_diversion_m3s: None,
-                    filling_inflow_m3s: 0.0,
+                    filling_min_rate_m3s: 0.0,
                     water_withdrawal_m3s: 0.0,
                 },
                 thermal: ThermalStageBounds {
@@ -6139,7 +6139,7 @@ mod tests {
                     min_generation_mw: 0.0,
                     max_generation_mw: 250.0,
                     max_diversion_m3s: None,
-                    filling_inflow_m3s: 0.0,
+                    filling_min_rate_m3s: 0.0,
                     water_withdrawal_m3s: 0.0,
                 },
                 thermal: ThermalStageBounds {
@@ -6496,7 +6496,7 @@ mod tests {
                 min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
                 max_diversion_m3s: None,
-                filling_inflow_m3s: 0.0,
+                filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 0.0,
             }
         }

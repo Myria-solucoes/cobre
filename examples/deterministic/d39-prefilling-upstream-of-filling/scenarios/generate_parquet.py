@@ -29,7 +29,7 @@ water-balance row AND must also be counted on D's impound-retention cap. This
 case is the regression backstop for that retention-cap routing — U carries a
 large PreFilling inflow (50 m3/s) so the natural inflow arriving at D
 (z_D + z_U = 70 m3/s) far exceeds the per-stage impound cap
-(filling_inflow_m3s = 10.0, cap rise = zeta * 10 = 25.92 hm3/stage with
+(filling_min_rate_m3s = 10.0, cap rise = zeta * 10 = 25.92 hm3/stage with
 zeta = 720 h * 0.0036). With the cap correctly counting U's routed inflow, D
 must release the excess (spillage) instead of impounding it; omitting U's inflow
 from the cap would let D over-impound, so the storage trajectory (and the parity

@@ -315,9 +315,9 @@ fn validate_ncs_refs(
 /// Validate filling configurations for all hydros that have one.
 ///
 /// For each hydro with `filling: Some(config)`:
-/// - `filling_inflow_m3s` must be non-negative (>= 0.0). Zero is a valid cap
-///   meaning "impound nothing, pass everything downstream and rely on natural
-///   accumulation"; only a negative (or NaN) cap is rejected.
+/// - `filling_min_rate_m3s` must be non-negative (>= 0.0). Zero is a valid rate
+///   meaning "no minimum accumulation is required this stage"; only a negative
+///   (or NaN) rate is rejected.
 /// - `entry_stage_id` must be set (`Some`), since filling requires a known start stage.
 /// - `start_stage_id` must be strictly less than `entry_stage_id`: the filling
 ///   phase must precede operation. This is a mirror of the cobre-io ordering guard,
@@ -333,10 +333,10 @@ fn validate_ncs_refs(
 pub(crate) fn validate_filling_configs(hydros: &[Hydro], errors: &mut Vec<ValidationError>) {
     for hydro in hydros {
         if let Some(filling) = &hydro.filling {
-            if filling.filling_inflow_m3s.is_nan() || filling.filling_inflow_m3s < 0.0 {
+            if filling.filling_min_rate_m3s.is_nan() || filling.filling_min_rate_m3s < 0.0 {
                 errors.push(ValidationError::InvalidFillingConfig {
                     hydro_id: hydro.id,
-                    reason: "filling_inflow_m3s must be non-negative".to_string(),
+                    reason: "filling_min_rate_m3s must be non-negative".to_string(),
                 });
             }
             if hydro.entry_stage_id.is_none() {

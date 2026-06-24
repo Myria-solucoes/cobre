@@ -459,12 +459,12 @@ fn test_large_order_invariance() {
 #[test]
 fn test_invalid_filling_config_rejected() {
     let mut hydro = make_hydro(1, 1, None);
-    // Set a valid entry_stage_id but an invalid filling_inflow_m3s (must be >= 0;
-    // a negative cap is rejected, zero is valid).
+    // Set a valid entry_stage_id but an invalid filling_min_rate_m3s (must be >= 0;
+    // a negative rate is rejected, zero is valid).
     hydro.entry_stage_id = Some(0);
     hydro.filling = Some(FillingConfig {
         start_stage_id: 0,
-        filling_inflow_m3s: -5.0, // invalid: must be non-negative
+        filling_min_rate_m3s: -5.0, // invalid: must be non-negative
     });
 
     let result = SystemBuilder::new()

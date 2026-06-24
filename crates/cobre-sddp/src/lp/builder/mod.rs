@@ -370,7 +370,7 @@ mod tests {
     fn config(start_stage_id: i32) -> FillingConfig {
         FillingConfig {
             start_stage_id,
-            filling_inflow_m3s: 0.0,
+            filling_min_rate_m3s: 0.0,
         }
     }
 

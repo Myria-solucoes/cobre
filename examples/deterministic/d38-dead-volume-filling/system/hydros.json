@@ -28,7 +28,7 @@
       "bus_id": 0,
       "downstream_id": 2,
       "entry_stage_id": 4,
-      "filling": { "start_stage_id": 2, "filling_inflow_m3s": 10.0 },
+      "filling": { "start_stage_id": 2, "filling_min_rate_m3s": 10.0 },
       "reservoir": {
         "min_storage_hm3": 60.0,
         "max_storage_hm3": 200.0

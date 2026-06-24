@@ -60,18 +60,18 @@ pub struct FillingConfig {
     /// in `[0, min_storage_hm3)`). `start_stage_id > 0` means a `PreFilling` phase
     /// exists and the seed is `0` (empty pit), held frozen until this stage.
     pub start_stage_id: i32,
-    /// Per-stage cap on the portion of natural inflow impounded during Filling
-    /// \[m³/s\].
+    /// Per-stage minimum accumulation rate during Filling \[m³/s\].
     ///
-    /// This is the retained portion of the reservoir's own natural inflow that
-    /// is removed (impounded) from the cascade to raise storage; the remainder
-    /// passes downstream as spillage. PAR and AR-lag coupling remain normal
-    /// during Filling — this is **not** an external or replacement inflow that
-    /// overrides the natural-inflow RHS. It is a cap, not an equality: at most
-    /// this much is impounded per stage and the excess spills, so when natural
-    /// inflow is short the reservoir rises by less and the terminal target
-    /// catches the cumulative shortfall.
-    pub filling_inflow_m3s: f64,
+    /// The minimum rate at which the reservoir must fill: it generates a
+    /// per-stage minimum target-storage trajectory anchored on
+    /// `min_storage_hm3`, accumulating this rate over each stage's duration so
+    /// the reservoir is required to reach at least the running minimum level by
+    /// the end of every Filling stage. It is **not** an inflow and **not** a
+    /// cap: it does not override or retain any portion of the natural-inflow RHS
+    /// (PAR and AR-lag coupling stay normal during Filling), and it sets a floor
+    /// the storage must clear rather than a ceiling on what is impounded.
+    /// Validated `>= 0`.
+    pub filling_min_rate_m3s: f64,
 }
 
 /// Resolved penalty costs for a hydro plant.
@@ -407,7 +407,7 @@ mod tests {
             }),
             filling: Some(FillingConfig {
                 start_stage_id: 48,
-                filling_inflow_m3s: 100.0,
+                filling_min_rate_m3s: 100.0,
             }),
             penalties: penalties_all(1.0),
         };
@@ -488,11 +488,11 @@ mod tests {
     fn test_filling_config() {
         let config = FillingConfig {
             start_stage_id: 48,
-            filling_inflow_m3s: 100.0,
+            filling_min_rate_m3s: 100.0,
         };
 
         assert_eq!(config.start_stage_id, 48);
-        assert!((config.filling_inflow_m3s - 100.0).abs() < f64::EPSILON);
+        assert!((config.filling_min_rate_m3s - 100.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -578,7 +578,7 @@ mod tests {
             }),
             filling: Some(FillingConfig {
                 start_stage_id: 48,
-                filling_inflow_m3s: 100.0,
+                filling_min_rate_m3s: 100.0,
             }),
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
