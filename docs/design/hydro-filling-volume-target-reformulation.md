@@ -1,487 +1,340 @@
-# Hydro filling: volume-target reformulation
+# Hydro filling: per-stage volume-target model (DECOMP-aligned)
 
-> **Status**: Proposed reformulation — not yet implemented. Companion to
-> `hydro-dead-volume-filling.md` (the shipped v1 model). It **supersedes** that
-> document's §3.1 (impound cap), §3.3 (terminal `σ_fill`), §3.4 (`σ^{v-}` soft
-> operating floor), §3.7 (filling→operating handoff), and §5.3 (filling-inflow
-> semantics). It **keeps unchanged**: §1 lifecycle, §3.2 PreFilling cascade
-> short-circuit, §3.5 FPHA exclusion, §3.6 generation/turbine/diversion/evaporation
-> gating, and the §4 cut-validity invariants — except where §3.2 below adds a new
-> requirement (the state reset).
+> **Status**: Proposed — not yet implemented. This document **replaces the earlier
+> reset-based draft of the same file** (the entry-stage state-reset reformulation),
+> which is abandoned in favor of the DECOMP-aligned minimum-rate / continuous-handoff
+> model below. Companion to `hydro-dead-volume-filling.md` (the shipped v1).
 >
-> **Validation**: a formulation review against the live LP builder returned
-> SOUND-with-caveats. The caveats are not optional and are folded in below as hard
-> requirements — chiefly the state-reset realization (§3.2, including the
-> storage-only / AR-lag-continuous boundary) and the cut-validity trap (§5).
+> **Relative to v1** it supersedes §3.1 (impound cap → minimum-rate floors), §3.3
+> (terminal `σ_fill` → per-stage targets), §5.3 (`filling_inflow_m3s` semantics),
+> §5.4 (validation), and the §7/§8 entries for filling-inflow semantics and `σ_fill`
+> placement. It **keeps** v1's §3.2 (PreFilling short-circuit, minus the dropped
+> cap-row port), §3.4 (the soft operating floor — kept, family renamed, penalty
+> ordering flipped), §3.5 (FPHA exclusion), §3.6 (gating), §3.7 (continuous handoff),
+> §5.1 (no new field), and §5.2.
 >
-> **Contracts it must not disturb**: `.claude/rules/sddp.md` (Benders cut
-> sign/scale, column-bound state pinning, FPHA average storage, append-only cut
-> pool with slot-identity warm start) and the shared `commissioning_active` /
-> `filling_phase` predicates in `lp/builder/mod.rs`.
+> **Reference**: DECOMP's _enchimento de volume morto_ — Manual de Referência §4.5.9
+> and Manual do Usuário §3.4.6.10 (registers VM/DF). This model adopts DECOMP's
+> minimum-target-volume mechanism and continuous handoff. It deliberately does **not**
+> mirror DECOMP's separate DF (filling min-outflow) register — cobre's per-stage
+> `min_outflow_m3s` already covers it. CEPEL's Portuguese register/field names are
+> **not** inherited; cobre uses English identifiers throughout (§7).
+>
+> **Contracts it must not disturb**: `.claude/rules/sddp.md` (Benders cut sign/scale,
+> column-bound state pinning, append-only cut pool with slot-identity warm start) and
+> the `filling_phase` predicate in `lp/builder/mod.rs`.
 
 ## TL;DR
 
-The shipped model makes a plant that **went through filling** carry a soft
-storage floor (`σ^{v-}`) at **every** operating stage, across its whole operating
-horizon — so it can dip below its dead volume by paying
-`storage_violation_below_cost` _at any point in operation_, years after filling
-and unrelated to it. That soft floor is more permissive than intended (v1's own
-§3.4 warns a future reader not to globalize it), and it is the only soft-floor
-cushion in the system.
+A commissioned hydro fills toward its dead volume (`min_storage_hm3`) at a per-stage
+**minimum accumulation rate** (`filling_min_rate_m3s`). From that rate the model
+derives a per-stage **minimum target-storage trajectory** computed **backward** from
+`min_storage`; storage falling below the trajectory is penalized by a soft floor.
+Filling is **uncapped** — over-filling and catch-up are allowed (the reservoir may
+fill faster than the minimum schedule if inflow and future value warrant it).
 
-This reformulation **confines** the legitimate "below dead volume" state to the
-filling phase, where it belongs. The enabling idea: **guarantee that operation
-starts at a fixed fill target `v_fill ≥ min_storage`** (pin the operating-start
-storage to it), so the under-filled-start case that `σ^{v-}` existed to absorb
-cannot reach the operating phase. With that guarantee the operating phase uses a
-**hard** floor at `min_storage_hm3` — structurally identical to a never-filled
-plant. The filling phase is reframed as a **per-stage retention target with a
-below-slack** (modeled like water withdrawal), and the terminal `σ_fill`
-collapses into those per-stage slacks.
+At `entry_stage_id` the end-of-filling storage flows into operation **continuously**
+(no reset, no pin). In operation the hydro uses the **same `min_storage` threshold as
+every other hydro**, but realized as a **soft floor + high penalty** rather than a
+hard column bound — because, having just filled, it may legitimately enter operation
+near or (under genuine starvation) below the dead volume, and a hard bound would be
+infeasible there. The high penalty makes the soft floor behave like the hard floor in
+every feasible scenario, so the filled hydro is indistinguishable from a never-filled
+hydro in operation. This is the **only** asymmetry, and it is scoped to filled hydros
+and self-limiting (§3.3, §9).
 
-This is a **modeling trade-off, not a pure bug-fix.** v1 carries a genuine
-filling shortfall forward into operation and lets the plant recover via the soft
-floor — arguably the more physically faithful choice. This reformulation instead
-asserts operation begins at `v_fill` regardless and pays any shortfall as a
-filling-phase penalty; in a dry stochastic scenario it thereby _invents_ a small
-amount of boundary water (§6). The win is structural simplicity (the operating
-phase is now the normal-plant regime) and a tightly-scoped below-dead-volume
-window, not a strictly more accurate model.
+Two penalties, ordered so the operating floor dominates the fill schedule (§5):
+`storage_violation_below_cost ≥ filling_target_violation_cost`, with the operating
+floor ideally `≥ deficit_cost` (it mimics a hard floor); the fill schedule is a
+softer, lower-priority obligation.
 
-Net structural change: **retire two row/column families** (`σ_fill` terminal
-target and `σ^{v-}` operating floor) and the impound-cap row; **add one** per-stage
-target family and a boundary state-reset; **add one** input field
-(`initial_operating_volume_hm3`, the fill target `v_fill`, defaulting to the dead
-volume); **remove** `storage_violation_below_cost` (now unused).
+The model reuses cobre's existing inputs (no new field; `min_outflow_m3s` covers the
+filling period) and existing LP machinery (the `filling_target` row/column family,
+widened from terminal-only to per-stage; the renamed `filled_min_storage_floor`
+family). Cut validity is **v1's** — there is no reset, so no new dual-extraction trap.
 
 ---
 
-## 1. What changes, per mechanism
+## 1. Relationship to DECOMP
 
-| Mechanism                      | Shipped v1                                                                                  | Reformulation                                                                                        |
-| ------------------------------ | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| Filling impound                | per-stage **cap** `rise ≤ ζ·F_h` (inequality, no slack)                                     | per-stage **target** `(v_out − v_in) + σ_below = ζ·target` (equality with below-slack) (§3.1)        |
-| Filling shortfall penalty      | a single **terminal** `σ_fill` at id `entry−1`                                              | the **per-stage** `σ_below` slacks (their sum is the terminal deficit) (§3.1)                        |
-| Filling→operating handoff      | end-of-filling storage flows in via the pin chain (continuous)                              | operating-start storage **pinned to the fill target `v_fill`** — a storage-only reset (§3.2)         |
-| Fill target / start level      | implicitly the dead volume (v1 fills toward `min_storage`)                                  | a **configurable** `v_fill = initial_operating_volume_hm3 ≥ min_storage`, default = dead volume (§4) |
-| Operating storage floor        | **soft** `σ^{v-}` at every stage (filling hydros only)                                      | **hard** `min_storage_hm3`, identical to a normal plant — `σ^{v-}` family removed (§3.3)             |
-| PreFilling short-circuit       | routes the absent dam's water onto the downstream's balance + the impound-cap retention row | **unchanged**: only the balance-row routing applies; the v1 retention-row port is dropped (§3.4)     |
-| `filling_inflow_m3s`           | a single per-stage cap value                                                                | a **per-filling-stage schedule** (vector), uniform-flow default, strongly validated (§4)             |
-| `storage_violation_below_cost` | the `σ^{v-}` cost                                                                           | **removed** (the field and its ordering validation) (§7)                                             |
+DECOMP represents dead-volume filling through a per-stage **minimum storage flow rate**
+(register **VM**), from which it computes **minimum target volumes** such that the
+stored volume at each stage is _at least_ those values (Ref. §4.5.9: "calcula volumes
+meta mínimos de modo que o volume armazenado … seja, no mínimo, igual a estes
+valores"). The filling deadline is an input; a shortfall is reported, not erased.
 
-Unchanged: the three-phase lifecycle keyed on `stage.id`, the PreFilling
-frozen-identity row + cascade short-circuit, FPHA exclusion, the `[0,0]`
-generation/turbine/diversion gating, and the dense-storage-column / declaration-
-order invariants.
+| DECOMP                                                    | This model                                         | Decision                                       |
+| --------------------------------------------------------- | -------------------------------------------------- | ---------------------------------------------- |
+| Per-stage **minimum** fill rate (VM)                      | `filling_min_rate_m3s` (minimum accumulation rate) | **adopt** (flips v1's _cap_ semantics)         |
+| Cumulative **minimum target volumes** `≥` floor           | per-stage `V_target` soft floors, **uncapped**     | **adopt** (catch-up/over-fill allowed)         |
+| **Continuous** handoff into operation; shortfall reported | continuous handoff; soft operating floor           | **adopt** (no reset)                           |
+| Separate **filling min-outflow** (register DF)            | reuse the existing per-stage `min_outflow_m3s`     | **decline the duplicate** — one flexible field |
+| Filling deadline (prazo)                                  | `entry_stage_id`                                   | already present                                |
 
-## 2. Locked decisions
+The one place this model is _stricter_ than a naive DECOMP reading: the operating
+`min_storage` floor is driven by a high penalty so it behaves like the hard floor of
+a never-filled plant (DECOMP reports the violation; cobre additionally makes it
+expensive enough to avoid in practice — §3.3, §5).
 
-1. **Pin to the fill target.** Operation always begins at the fill target
-   `v_fill`; a filling shortfall is paid as a per-stage penalty and **not** carried
-   forward as a reduced operating-start storage. This is what licenses the hard
-   operating floor at `min_storage`.
-2. **The fill target is configurable, `≥ min_storage`.** `v_fill =
-initial_operating_volume_hm3` defaults to `min_storage_hm3` (fill exactly to the
-   dead volume, the v1 convention) but may be set higher to commission with a
-   buffer above the dead volume. The buffer `v_fill − min_storage` is also the
-   robustness mitigation for first-operating-stage feasibility (§3.3, the
-   resolution of v1 §7-Q1).
-3. **Target replaces the cap.** Each filling stage carries a retention target with
-   a below-slack; over-impounding is bounded by the target itself.
-4. **Per-stage user-supplied schedule, uniform default, strong validation.**
-   `filling_inflow_m3s` becomes a per-filling-stage schedule (a different value per
-   filling stage is allowed), defaulting to the internal uniform resolution, with
-   validation that the schedule is consistent with reaching `v_fill` (§4).
-5. **`storage_violation_below_cost` is removed.** With `σ^{v-}` gone the field and
-   its `< filling_target_violation_cost` ordering validation are deleted (§7 — a
-   breaking config change).
+## 2. What changes
+
+| Concern                 | Shipped v1                                                      | This model                                                                                |
+| ----------------------- | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `filling_inflow_m3s`    | per-stage retention **cap** (max impound)                       | `filling_min_rate_m3s` — per-stage **minimum** accumulation rate (§4)                     |
+| Filling schedule        | single terminal `σ_fill` at `entry−1`                           | per-stage **minimum target floors** `V_target[t]`, backward-anchored (§3.1)               |
+| Impound cap row         | retention cap (equality) + PreFilling-upstream port             | **removed** — uncapped; PreFilling routes onto the balance row only (§3.4)                |
+| Handoff                 | continuous (pin chain)                                          | **continuous (no reset)** — kept (§3.2)                                                   |
+| Operating floor         | soft `σ^{v-}`, `filling_floor` family                           | soft floor at `min_storage`, **`filled_min_storage_floor`** family — kept, renamed (§3.3) |
+| Filling min-outflow     | existing `min_outflow_m3s`                                      | **existing `min_outflow_m3s`** — kept (§4)                                                |
+| Penalties               | `filling_target_violation_cost`, `storage_violation_below_cost` | **both kept**, ordering **flipped** (§5)                                                  |
+| Fill anchor / new field | (implicitly `min_storage`)                                      | `min_storage_hm3` — **no new field** (§4)                                                 |
+
+Relative to the **abandoned reset-based draft**: this model **drops** the §3.2
+entry-stage reset / RHS-fold, **drops** the proposed `initial_operating_volume_hm3`
+field, **keeps** `storage_violation_below_cost` (the reset draft removed it), and uses
+a **minimum-floor `≥`** rather than an increment **equality**.
 
 ## 3. Formulation
 
-### 3.1 Filling: per-stage retention target with a below-slack
+The three-phase lifecycle (PreFilling → Filling → Operating), keyed on `stage.id`, is
+unchanged from v1 §1. The dense storage column, declaration-order invariance, and the
+subgradient contract (`extract_duals_from_view`: cut coefficient = incoming-storage
+reduced cost ÷ `col_scale`, never synthesized) all hold unchanged.
 
-Each filling stage `t` carries one equality, on the storage **rise**:
+### 3.1 Filling: per-stage minimum target floors (backward-anchored)
+
+`filling_min_rate_m3s` (`= rate[t]`, m³/s) is the **minimum rate at which the
+reservoir must accumulate storage** at filling stage `t`. With `ζ_t = layout.zeta` the
+per-stage m³/s→hm³ factor, the per-stage minimum target storage is computed **backward**
+from the dead volume. Let `L = entry_stage_id − 1` be the last filling stage:
 
 ```
-(v_out − v_in) + σ_below[t] = ζ_t · target[t],   σ_below[t] ≥ 0,
-cost(σ_below) = filling_target_violation_cost
+V_target[L] = min_storage_hm3
+V_target[t] = V_target[t+1] − ζ_{t+1} · rate[t+1]      (start_stage_id ≤ t < L)
+            = min_storage_hm3 − Σ_{s=t+1}^{L} ζ_s · rate_s
 ```
 
-with `ζ_t = layout.zeta` the per-stage m³/s→hm³ factor. Because `σ_below ≥ 0`,
-this both **caps** the rise at `ζ_t·target[t]` (no over-impound) and **penalizes**
-any shortfall — it unifies the v1 impound cap and the terminal `σ_fill` into one
-per-stage mechanism. Behavior:
+Each filling stage carries one soft floor on the **outgoing storage**:
 
-- **Wet stage** (impoundable inflow ≥ `ζ_t·target[t]`): rise = `ζ_t·target[t]`
-  exactly, `σ_below = 0`, the excess is released (spillage) — the cap behavior.
-- **Dry stage** (impoundable inflow < `ζ_t·target[t]`): rise = available inflow,
-  `σ_below = ζ_t·target[t] − rise > 0` — the shortfall is penalized.
+```
+v_out[t] + σ_fill[t] ≥ V_target[t],   σ_fill[t] ≥ 0,
+cost(σ_fill) = filling_target_violation_cost
+```
 
-> **Contract — filling-hydro spillage must stay unbounded above.** The wet-stage
-> cap behavior relies on the reservoir being able to spill the excess so the rise
-> can always be held down to `ζ_t·target[t]`. The equality `(v_out − v_in) +
-σ_below = ζ_t·target` with `σ_below ≥ 0` is well-posed (σ_below never forced
-> negative) **only because** the spillage column is unbounded above (`col_upper =
-+∞` in `fill_storage_columns`). If a future change bounds filling-hydro spillage,
-> an extremely wet stage could force the rise above the target with no σ_below to
-> absorb it ⇒ infeasible. Preserve the unbounded-spillage invariant for filling
-> hydros.
+- **Uncapped.** There is no upper bound on the rise. The reservoir may exceed
+  `V_target[t]` (fill ahead of schedule) and may catch up after a lagging stage; only
+  _falling below_ the trajectory is penalized. This mirrors DECOMP's `≥` minimum
+  targets and matches the physics (no reason to forbid filling faster when inflow and
+  the future water value warrant it; the floor guarantees minimum progress).
+- **Backward anchoring** makes the last floor exactly `min_storage` (the reservoir is
+  softly required to reach the dead volume by entry) without a separate sum-to-fill
+  check, and clips the trajectory at `min_storage` so over-provisioned rates relax the
+  _earliest_ floors to slack rather than demanding over-fill.
+- **Generation, turbine, FPHA, diversion** are off during Filling (v1 §3.6, unchanged).
+- **Min-outflow** during Filling is served via the existing `min_outflow_m3s` and its
+  `outflow_violation_below` slack (v1 §3.1, unchanged).
+- **Realization**: reuse v1's `filling_target` row/column family, widened from
+  terminal-only to **every filling stage** (`identify_filling_target_hydros` fires for
+  `start_stage_id ≤ id < entry_stage_id`), with per-stage RHS `V_target[t]`. v1's
+  impound-cap retention row (`fill_filling_retention_rows`) is **removed**.
 
-The per-stage slacks **replace** the v1 terminal `σ_fill`. **When the schedule is
-validated to sum to the fill (§4)** — `Σ_t ζ_t·target[t] = v_fill − seed` — the
-per-stage slacks telescope to the terminal deficit: `Σ_t σ_below[t] = v_fill −
-v_(entry−1)`, exactly what `σ_fill` measured. So penalizing the schedule loses
-nothing versus penalizing the terminal volume, at a smoother per-stage signal,
-**and this conservation identity depends on that §4 sum check** — a schedule that
-does not sum to `v_fill − seed` breaks it (§4 rejects such schedules). Keeping
-both the per-stage and a terminal penalty would **double-penalize** the same
-shortfall; use the **same cost field** (`filling_target_violation_cost`) so the
-aggregate penalty is conserved.
+### 3.2 Continuous handoff (no reset)
 
-#### The withdrawal analogy — and the one thing it pins down
+The end-of-filling storage flows into the first operating stage through the existing
+incoming-state pin chain (v1 §3.7) — **no reset, no pin to a fixed value**. The last
+filling floor (`V_target[L] = min_storage`) softly targets the reservoir to reach the
+dead volume by `entry_stage_id`; whatever it actually reaches is what operation starts
+from. The Benders storage coordinate is therefore **never decoupled** at the boundary,
+so the cut machinery is identical to any normal stage-to-stage transition (§6).
 
-The mechanism is the structural mirror of water withdrawal, and the analogy is
-load-bearing because it fixes **what the slack is anchored to**:
+### 3.3 Operating: soft `min_storage` floor for filled hydros (`filled_min_storage_floor`)
 
-| Water withdrawal                     | Filling retention                                          |
-| ------------------------------------ | ---------------------------------------------------------- |
-| demand `W` (schedule)                | target retention `target[t]` (schedule)                    |
-| served `w` (decision, moves balance) | **achieved retention = `v_out − v_in`** (moves balance)    |
-| slack = `W − w` (unmet demand)       | slack = `ζ_t·target[t] − (v_out − v_in)` (unmet retention) |
+A never-filled hydro pins `min_storage_hm3` as a **hard** column lower bound. A hydro
+that went through filling uses the **same `min_storage_hm3` threshold**, but realized
+as a **soft floor + slack**:
 
-The slack must sit on the **achieved retention (the storage rise)**, never on
-"did the scheduled natural inflow physically arrive." This is decisive **because
-we pin the operating-start volume regardless** (§3.2): if the slack were tied to
-raw inflow availability — a fixed number per scenario, independent of release —
-the optimizer could dump the inflow downstream for energy value, pay the same
-penalty as if it had filled, **and still start operation at `v_fill`**, banking
-the water's value twice. Anchoring the slack to the rise closes that arbitrage:
-releasing instead of retaining shrinks `v_out − v_in`, which grows `σ_below`,
-which costs. Done the withdrawal way (slack = schedule − actually-achieved), the
-penalty genuinely incentivizes filling.
+```
+v_out + σ^{v-} ≥ min_storage_hm3,   σ^{v-} ≥ 0,
+cost(σ^{v-}) = storage_violation_below_cost
+```
 
-`target[t]` is a **retention target on the natural inflow already in the
-balance** — not an extra inflow source added to it, and **not a term in the
-retention row** (the row touches only `v_out`, `v_in`, and `σ_below`; the inflow
-enters solely through the water-balance row). PAR and AR-lag coupling run normally
-during filling (carried over from v1 §3.1). That the retention row carries no
-inflow term is what makes §3.4's short-circuit routing a no-op.
+at **every** operating stage of the filled hydro. The threshold is not a new "recovery"
+level — it is the plant's actual `min_storage`. The floor is soft (not a hard bound)
+because, with no reset, the hydro may enter operation at or below `min_storage` under
+genuine starvation, where a hard bound would be infeasible at the first operating stage.
 
-### 3.2 The filling→operating boundary: pin to the fill target (state reset)
+> **Contract — `min_storage` is hard for every hydro EXCEPT one filled during the
+> study.** The discriminator is `hydro.filling.is_some()`, evaluated per-hydro; carry
+> it as a comment at the construction site. The high `storage_violation_below_cost`
+> (§5) drives `σ^{v-} → 0` in every feasible scenario, so the soft floor behaves like
+> the hard floor and the filled hydro is indistinguishable from a never-filled hydro
+> in operation. Do **not** globalize this soft floor to all hydros (it would let the
+> optimizer cheaply violate dead volume system-wide), and do **not** make it hard for
+> filled hydros (it would re-introduce first-operating-stage infeasibility).
 
-At the first operating stage (`id == entry_stage_id`), the incoming-storage state
-is set to the fill target `v_fill`, **decoupled** from the last filling stage's
-outgoing storage. So operation always starts at `v_fill` regardless of how filling
-actually went. No Benders cut crosses this boundary **in the storage coordinate** —
-the filling sub-tree and the operating sub-tree are independent in that dimension,
-exactly as the stage-0 seed roots the storage coordinate.
+Family: **`filled_min_storage_floor`** (was v1's `filling_floor`) — see §7.
 
-**The reset is storage-coordinate-only.** The Benders state is storage **plus
-AR-lag inflow memory**. The reset touches only the storage coordinate; the AR-lag
-state crosses the entry boundary **continuously** (the hydrology does not reset
-when the reservoir is declared full), and its subgradient `β` is harvested
-normally. The RHS-fold below touches only the storage column, so AR-lag coupling
-is preserved by construction — but do not "extend" the reset to zero the AR-lag
-coupling, which would discard the operating phase's dependence on filling-era
-inflows.
+### 3.4 PreFilling cascade short-circuit (cap-port dropped)
 
-**Hard requirement — realize the reset by RHS-fold, NOT as a column-bound
-pin.** `fill_col_state_patches` unconditionally pins every hydro's incoming-storage
-column to the forward-propagated trial point, and `extract_duals_from_view`
-unconditionally harvests that same column's reduced cost as the cut subgradient
-`β_h`, for **every** state coordinate. If the reset is realized by pinning the
-entry-stage incoming column to the constant `v_fill` via bounds, that column's
-reduced cost (the dual of `lb==ub`) is generally **nonzero**, and the cut machinery
-attaches it to the **last filling stage's** value function — a stale-nonzero slope
-on a coordinate whose true marginal value is zero. That is a wrong cut that
-compiles (the §5 trap-1 failure mode).
+The PreFilling short-circuit (`fill_prefilling_shortcircuit`) is unchanged from v1
+§3.2: the absent dam's incremental inflow, transitive upstream releases, and
+withdrawal route onto its first non-PreFilling downstream's **water-balance row**.
+Because the impound-cap row is removed (§3.1, §2), the v1 cap-row port (the commit that
+"counts PreFilling-upstream inflow in the impound cap") is **dropped** — routed inflow
+lands on the balance row only, and there is no cap row to receive it.
 
-The correct realization: **at the entry stage only, drop the `−1` coefficient on
-the incoming-storage column from the reservoir-balance row and fold the constant
-`v_fill` into that row's RHS**, so the incoming-storage column appears in no row
-and carries no objective cost ⇒ its reduced cost is structurally `0` ⇒ `β_h = 0`
-(a correct flat cut on the filling predecessor). The forward-propagated
-`current_state[h]` still flows in via the (now-harmless) pin but is ignored by the
-entry-stage LP.
+### 3.5 FPHA exclusion and generation/turbine/diversion/evaporation gating
 
-> **Not the same construction as PreFilling.** PreFilling makes the **whole**
-> balance row a frozen identity (no inflow/release/FPHA/evaporation terms at all),
-> which is what makes its storage column dead. The entry stage is a **full
-> operating stage**: keep its entire operating balance (releases, FPHA, evaporation)
-> and drop **only** the incoming-storage coefficient. Do not collapse the operating
-> balance to a frozen identity — that would zero out real operating physics. Same
-> `β_h = 0` outcome, different construction.
+Unchanged from v1 §3.5–§3.6: FPHA rows excluded at PreFilling/Filling; generation and
+turbine pinned `[0,0]` at PreFilling/Filling; diversion `[0,0]` for filling hydros in
+all phases; evaporation zero in PreFilling, normal in Filling and Operating.
 
-The storage column keeps its dense index at every stage (no omission, no relocation
-of the _column_ — only its row coupling changes at this one stage), so the
-dense-storage and declaration-order invariants hold.
+## 4. Input model
 
-### 3.3 Operating: hard floor, no `σ^{v-}`
-
-With operation guaranteed to start at `v_fill ≥ min_storage` (§3.2), the
-operating-phase storage floor is **hard** at `min_storage_hm3` — bit-identical to a
-never-filled plant. The entire `σ^{v-}` operating-floor row/column family is
-**removed**, and `storage_violation_below_cost` is removed with it (§7).
-
-Feasibility: at the first operating stage `v_in = v_fill ≥ min_storage`, so the
-hard floor `v_out ≥ min_storage` allows a net draw of up to `v_fill − min_storage`
-before it binds. The recourse set is **exactly the one a normal plant starting at
-`min_storage` has** — this is not a regression, it is the inherited normal-plant
-regime:
-
-- **evaporation** rides its own soft slack (the evaporation column is symmetric
-  `[−q_max, +q_max]` and the linearized loss carries `f_evap±` violation slacks in
-  `fill_evaporation_columns`), so the LP can under-realize evaporation at
-  `evaporation_violation_cost` rather than be forced below the floor — evaporation
-  is **not** an unconditional hard loss;
-- **min-outflow** is a soft `≥` riding the existing `outflow_violation_below` slack;
-- the **inflow slack** `σ_inf` can inject water into the balance — **but only when
-  the inflow method provides one** (`has_penalty` ⇒ `Penalty` /
-  `TruncationWithPenalty`; `None` / `Truncation` carry no inflow slack).
-
-So genuine first-operating-stage infeasibility is a **narrow corner**: `v_fill =
-min_storage` (no buffer) **and** a slack-free inflow method **and** the realized net
-of (deterministic balance + evaporation-at-slack + min-outflow-at-slack) still
-drives `v_out < min_storage`. The buffer `v_fill − min_storage` is the mitigation
-(§2 decision 2): choose `v_fill > min_storage` when the first operating stages may
-be dry, especially under a slack-free inflow method. A mid-operation drought beyond
-the buffer is handled exactly as for any normal plant — reduce outflow toward
-`min_outflow` and, ultimately, load deficit. The filled plant is genuinely in the
-normal-plant regime.
-
-> **Contract**: dropping `σ^{v-}` is sound **only** because the reset (§3.2)
-> guarantees operation starts at `v_fill ≥ min_storage`. Tie the two together with a
-> comment at the entry-stage reset site — weakening the reset back to inheriting the
-> (possibly short) filling storage would re-introduce first-operating-stage
-> infeasibility with no slack to absorb it.
-
-### 3.4 PreFilling short-circuit: balance-row routing only (no target-row port)
-
-The PreFilling cascade short-circuit (`fill_prefilling_shortcircuit`) routes an
-absent upstream dam's realized inflow (`z`), transitive upstream releases, and
-diversion onto its first non-PreFilling downstream's **water-balance row**. That
-routing is **unchanged** and remains phase-agnostic in the downstream `d`.
-
-v1 _additionally_ pushed the routed terms onto a Filling downstream's
-impound-retention row, because that row carried explicit inflow terms (`−ζ·z_h`
-and the upstream-release terms — see the shipped `fill_filling_retention_rows`,
-whose RHS is `−ζ·F_h` with the inflow on the LHS). The fix that wired this is the
-v1 commit that "counts PreFilling-upstream inflow in the impound cap."
-
-The reformulation's per-stage **target row** (§3.1) carries **no inflow or release
-term** — it touches only `v_out`, `v_in`, and `σ_below`. Routed inflow enters the
-water-balance row, the balance determines `v_out`, and the target row caps the
-resulting rise via `σ_below`. The routed inflow's entire effect on the Filling
-downstream is therefore already mediated through the balance, so **the v1
-retention-row port is dropped — there is no target-row term to update.** Re-adding
-it would be meaningless (the row has no inflow coefficient to receive the terms)
-and is explicitly _not_ required. This removes a v1 "hard requirement" and a
-migration step rather than adding one.
-
-## 4. Input model: fill target, per-stage schedule, validation
-
-### 4.1 The fill target `v_fill`
-
-A new field `initial_operating_volume_hm3` (`= v_fill`) on `FillingConfig` —
-**per-entity** commissioning config (per-system, not per-run), so it lives beside
-`start_stage_id` / `filling_inflow_m3s`, **not** in `InitialConditions` (which
-holds the per-run seed). Validation: `min_storage_hm3 ≤ initial_operating_volume_hm3
-≤ max_storage_hm3`. **Default when absent: `min_storage_hm3`** (the v1 convention —
-fill exactly to the dead volume), so omitting the field reproduces the dead-volume
-fill target. `v_fill` is used by the §3.2 pin and the §4.2 schedule validation.
-
-### 4.2 Per-stage filling schedule + validation
-
-`filling_inflow_m3s` becomes a **per-filling-stage schedule**. The resolved
-per-stage hydro bounds already carry `filling_inflow_m3s` per stage, so a per-stage
-vector needs no fundamentally new wiring — only the schema/parse surface and the
-validation change.
-
-- **Default — uniform flow.** When the user supplies no per-stage override, derive
-  a constant impound rate `target[t] = F` such that `F · Σ_t ζ_t = v_fill − seed`.
-  Uniform _flow_ (constant m³/s) is the physically natural default: the per-stage
-  volume `ζ_t·F` auto-scales with stage duration and block count, and it degrades
-  gracefully across phase boundaries where `ζ_t` changes. (Uniform _volume_ per
-  stage would impose a time-varying flow that spikes in short stages.)
-- **Per-stage overrides** are allowed (a different value per filling stage) and
-  must satisfy the sum below.
-- **Strong validation (hard error).** The schedule must land the trajectory exactly
-  at the fill target:
+- **`filling_min_rate_m3s`** (renamed from `filling_inflow_m3s`, on `FillingConfig`):
+  per-stage minimum accumulation rate (m³/s). Semantics: the minimum rate at which the
+  reservoir must fill; it generates the per-stage minimum target trajectory (§3.1).
+  Validated `≥ 0`. The resolved per-stage hydro bounds already carry this value
+  per stage, so a per-stage schedule needs no new wiring.
+- **No new field.** The fill anchor is `min_storage_hm3` (existing). The reset draft's
+  `initial_operating_volume_hm3` is **not** added; `min_storage` serves double duty as
+  both the backward-trajectory anchor (filling) and the floor threshold (operating).
+- **Seed**: `InitialConditions.filling_storage` (existing) — `0` (empty pit) when
+  `start_stage_id > 0`, or a partial level in `[0, min_storage)` when `start_stage_id
+== 0` (study starts mid-filling).
+- **Min-outflow during filling**: the existing per-stage `min_outflow_m3s`. A user who
+  wants a different minimum flow during filling than during operation sets different
+  per-stage values in that one field — no DF-style duplicate input.
+- **Validation — `≥` sufficiency check.** The minimum-rate schedule must be able to
+  reach the dead volume from the seed:
 
   ```
-  | Σ_t ζ_t · target[t] − (v_fill − seed) | ≤ ε_rel · |v_fill − seed|
+  Σ_{s=start_stage_id}^{entry_stage_id−1} ζ_s · rate_s  ≥  (min_storage_hm3 − seed)
   ```
 
-  using the **resolved per-stage** `ζ_t` (not a single global `ζ`) and a **relative
-  tolerance** (never a float `==`). Reject either side:
+  One-sided (over-provisioning is allowed — it relaxes the earliest floors to slack;
+  only under-provisioning is rejected, since backward folding would then demand more
+  gain than one minimum-rate stage provides). This replaces the reset draft's
+  two-sided exact-equality (no float `==`). It needs resolved per-stage `ζ_s`, so it
+  lives in the **ζ-aware** validation home — the cobre-io semantic validator or a
+  cobre-sddp setup check, **not** cobre-core (which is layout-agnostic by the
+  infra-genericity rule). The ζ-free guards (`start_stage_id < entry_stage_id`, seed
+  in `[0, min_storage)`, entry-only / no `exit_stage_id` for filling hydros) stay in
+  `validate_filling_configs`.
 
-  - A sum **below** the required fill leaves the reservoir structurally short of
-    `v_fill` with no slack able to recover it (the equality `rise + σ_below = ζ·target`
-    forbids exceeding the per-stage target, so a later wet stage cannot make up an
-    earlier shortfall).
-  - A sum **above** the required fill lets the reservoir **over-impound past
-    `v_fill` with `σ_below = 0` and no penalty signal** (when inflow permits), up to
-    `max_storage` — and that excess is then _discarded_ by the §3.2 reset (water
-    that could have served downstream energy, silently lost). It also breaks the
-    §3.1 conservation identity. (Note: a too-large sum does **not** force `σ_below >
-0`; the optimizer drives `σ_below → 0` whenever inflow allows, which is exactly
-    the over-impound case — so "reject sum-above" is about waste and well-posedness,
-    not about a forced penalty.)
+## 5. Penalties: two costs, operating floor dominant
 
-- `seed` is `InitialConditions.filling_storage` for the hydro: `0` (empty pit) when
-  `start_stage_id > 0`, or a partial level in `[0, min_storage)` when
-  `start_stage_id == 0` (study starts mid-filling).
-- **The denominator `v_fill − seed` is always strictly positive**, so the relative
-  tolerance is well-posed and the uniform-flow default `F = (v_fill − seed) / Σ_t
-ζ_t` is finite and nonzero: the seed is validated to `[0, min_storage)` and
-  `v_fill ≥ min_storage`, so `seed < min_storage ≤ v_fill`. No zero-fill /
-  divide-by-zero degenerate case is reachable, and the validator may rely on this
-  invariant. `validate_filling_configs` already guarantees `start_stage_id <
-entry_stage_id`, so at least one filling stage always exists.
+Two distinct events, two distinct penalties — kept separate, ordered so the operating
+floor is the most sacred:
 
-## 5. Cut validity: the new trap + parity obligations
+```
+filling_target_violation_cost   <   deficit_cost   ≤   storage_violation_below_cost
+       (best-effort fill schedule)                        (mimics the hard floor)
+```
 
-Extends the §4 trap checklist of the v1 document.
+- **`storage_violation_below_cost`** (operating `σ^{v-}`): should be the highest
+  relevant penalty — ideally `≥ deficit_cost` — so under scarcity the optimizer sheds
+  load before drawing a filled hydro below its dead volume, exactly as a never-filled
+  hydro's hard floor would force. This is what makes the filled hydro behave like the
+  others.
+- **`filling_target_violation_cost`** (filling `σ_fill`): a softer, lower-priority
+  schedule penalty; it can sit _below_ `deficit_cost` (do not shed load merely to keep
+  a new reservoir on its fill schedule).
+- **Ordering check.** This **flips** v1's `check_penalty_ordering` (which asserted
+  `filling_target > storage_below`). The new assertion is
+  `storage_violation_below_cost ≥ filling_target_violation_cost`; promoting an
+  additional `storage_violation_below_cost ≥ deficit_cost` advisory is recommended so
+  the operating floor truly mimics the hard floor. Both penalty fields are **kept**.
+- **Why not a single penalty.** Merging the two would force the fill schedule to be as
+  sacred as the dead-volume floor: a single penalty high enough to mimic the hard
+  operating floor would also make the optimizer shed load to stay on the fill
+  schedule — over-prioritizing a best-effort ramp against real load. Keeping them
+  separate lets the operating floor be hard-like while the schedule stays soft.
+- **Calibration.** A "very high" `storage_violation_below_cost` interacts with
+  `COST_SCALE_FACTOR`; choose it large enough to dominate, not so large it degrades LP
+  conditioning.
 
-1. **Stale-`β` at the entry boundary.** At `id == entry`, the state reset must zero
-   the harvested `β_h` by relocating `v_in` out of the entry-stage balance
-   (RHS-fold to `v_fill`), **not** by pinning the incoming column to a constant via
-   bounds — a bound-pin leaves a nonzero reduced cost that becomes a stale-nonzero
-   slope on the filling predecessor's value function (a wrong cut that compiles).
-   Mirrors the PreFilling absent-dam flat-cut construction. **The reset is
-   storage-coordinate-only: the AR-lag state and its `β` cross the boundary
-   unchanged** (§3.2) — do not zero them.
+## 6. Cut validity
 
-2. **Bake the reset into the per-stage template, not a solve-time patch.** Realize
-   the RHS-fold where PreFilling lives — in the per-stage `StageTemplate`
-   (matrix/RHS build), **not** as a forward/backward-only solve-time patch — so
-   every consumer (forward, backward, lower-bound) inherits it from the same baked
-   template. The lower bound is not at risk today (`evaluate_lower_bound` solves
-   **stage 0 only**, and the entry stage can never be stage 0 since `start_stage_id
-< entry_stage_id` forces `entry_stage_id ≥ 1`), so the v1-draft "verify the LB
-   applies the reset" framing was moot. The durable contract is the template
-   baking: a reset applied only on the forward/backward solve path would diverge
-   from any consumer that rebuilds from the template — the same template-vs-patch
-   discipline the cut pool and PreFilling already follow.
+Identical to v1 — there is no reset, so the riskiest mechanism of the abandoned draft
+(the entry-stage RHS-fold and its stale-`β` trap) **does not exist here**.
 
-No new dual-extraction trap is introduced: the target-row dual and the removed
-operating floor both stay within the "soft-row dual folds into the single
-incoming-storage reduced cost" contract that `extract_duals_from_view` already
-honors. The target row puts `+1` on `v_out` and `−1` on `v_in` (a difference row,
-unlike the v1 `σ_fill`/`σ^{v-}` rows that touch only `v_out`); the `−1` feeds `β_h`
-naturally through LP duality and needs no special handling — do **not** hand-extract
-the target-row dual.
+- The storage coordinate keeps its dense index and is never decoupled or relocated at
+  any phase boundary; the incoming-state column resolves through the same
+  `StateLayout::state_to_lp_incoming_column` map, so cut coefficients are
+  phase-invariant.
+- The per-stage filling floors (`σ_fill`) and the operating floor (`σ^{v-}`) both put
+  `+1` on `v_out` only (the same shape as v1's `σ_fill`/`σ^{v-}` rows). Their duals
+  fold into the **single** incoming-storage reduced cost that `extract_duals_from_view`
+  already harvests — never hand-extract a soft-row dual.
+- Continuous handoff means `β` crosses the entry boundary normally (the filling
+  predecessor's storage _does_ influence the future cost — through `σ_fill` within
+  filling and, on shortfall, through `σ^{v-}` after entry — which is physically
+  correct, unlike the reset's flat cut).
+- The append-only cut pool keeps every cut at a stable slot; no cut row is relocated by
+  a phase change, so slot-identity warm-start reconstruction is unaffected.
+- **Lower-bound parity**: `evaluate_lower_bound` must apply the same per-stage template
+  gating as forward/backward (the NCS-class precedent). All gating is template-driven
+  and stage-deterministic, so forward/backward/lower-bound/simulation inherit it from
+  the shared per-stage template — no solve-time patch.
 
-(The v1 reformulation draft listed a second trap — "target-row routing parity" —
-requiring the short-circuit to push routed inflow onto the target row. That trap is
-**retired**: the target row carries no inflow term, so there is nothing to route
-onto it; see §3.4.)
+## 7. Naming
 
-## 6. Accepted trade-offs
+CEPEL's Portuguese register names (VM, DF) and the term _meta_ (target/goal) are not
+inherited. Math symbols may stay terse/Greek; code identifiers must be unambiguous.
 
-- **Decoupling / no over-fill incentive.** The reset severs the storage-dimension
-  future-cost signal from operation into filling, so the optimizer never
-  voluntarily over-fills above `v_fill` (there is no reward), and the filling
-  sub-tree's cuts bound only its own within-filling costs (`σ_below`, withdrawal,
-  spillage). This matches the intent "operation always starts at `v_fill`
-  regardless of how filling went," and loses only the (second-order) marginal value
-  of ending filling above `v_fill`.
-- **The boundary is an asserted state, not an equivalence.** In a dry scenario
-  where filling falls short, the pin asserts a starting volume the reservoir did not
-  physically accumulate. v1 instead carries the real deficit into operation and
-  recovers via `σ^{v-}`; this reformulation pays the deficit as a filling penalty
-  (`Σ_t ζ_t·σ_below[t]`, at `filling_target_violation_cost` — expected to dominate
-  the other recourse penalties, anchored by §7's re-targeted ordering check) and
-  resets to `v_fill`.
-  These are **not equivalent**: a fixed filling penalty for the deficit volume is
-  not the same as operation actually starting low and incurring scenario-dependent
-  downstream deficit/recovery costs over the operating horizon. The reformulation is
-  a deliberate modeling choice (structural symmetry + a confined below-dead-volume
-  window), not a strictly more accurate model.
-- **When the reset is exact.** The pin is **bit-exact** in any scenario —
-  deterministic or stochastic — where the schedule is _achievable_, i.e. inflow
-  meets `ζ_t·target[t]` at every filling stage ⇒ `σ_below = 0` ⇒ `v_(entry−1) =
-v_fill` ⇒ the pin reasserts a value the physics already produced. Note that the §4
-  sum check guarantees the schedule _sums_ correctly but **not** that inflow meets
-  it stage-by-stage; a deterministic study with front-loaded targets and
-  back-loaded inflow can still leave `σ_below > 0` and invent a little boundary
-  water.
-- **Localized non-conservation.** The invented volume appears solely as the
-  entry-stage incoming-storage constant and is **never routed as release onto any
-  downstream row** (the entry-stage releases derive from `v_fill` like any operating
-  release), so cascade conservation downstream is intact — the discontinuity is
-  local to the reset boundary's own mass balance.
+| Concept                                                      | Identifier                                                             |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| Min accumulation-rate input                                  | `filling_min_rate_m3s` _(renamed from `filling_inflow_m3s`)_           |
+| Rising fill schedule (filling phase)                         | `filling_target` family _(kept; widened to per-stage)_                 |
+| Soft `min_storage` floor for filled hydros (operating phase) | **`filled_min_storage_floor`** family _(renamed from `filling_floor`)_ |
+| Per-stage target storage (math)                              | `V_target[t]`                                                          |
+| Filling shortfall slack (math)                               | `σ_fill[t]`                                                            |
+| Operating-floor slack (math)                                 | `σ^{v-}`                                                               |
+| Filling penalty (softer)                                     | `filling_target_violation_cost` _(kept)_                               |
+| Operating-floor penalty (dominant, `≥` deficit)              | `storage_violation_below_cost` _(kept)_                                |
 
-## 7. Resolved questions
+Unchanged, already-correct names: `filling_phase`, `fill_prefilling_shortcircuit`,
+`FillingConfig`, `InitialConditions.filling_storage`. Removed entirely (name moot):
+`fill_filling_retention_rows` (the impound-cap row).
 
-- **Fill-target level — RESOLVED (configurable).** v1 §7-Q1 is resolved in favor of
-  a separately-configurable fill target `v_fill = initial_operating_volume_hm3 ≥
-min_storage` (§4.1), defaulting to the dead volume. §3.2's pin and §4.2's
-  validation use `v_fill`; the operating **floor** stays hard at `min_storage`. The
-  buffer `v_fill − min_storage` is the robustness mitigation for §3.3
-  first-operating-stage feasibility.
-- **`storage_violation_below_cost` — RESOLVED (remove).** With `σ^{v-}` removed the
-  field is unused. **Remove it.** This is a **breaking config change** — bump
-  accordingly and call it out in the migration. (A future per-hydro soft-floor
-  option, if ever wanted, reintroduces its own field rather than relying on this
-  one.)
-- **Re-anchor the penalty ordering — do not just delete it.**
-  `storage_violation_below_cost` is the **only** comparand in the live
-  penalty-ordering check (`check_penalty_ordering`, a non-blocking `ModelQuality`
-  warning that asserts `filling_target_violation_cost > storage_violation_below_cost`).
-  Removing the field orphans that check, leaving `filling_target_violation_cost` —
-  the penalty the **entire filling mechanism depends on dominating** all other
-  recourse, so the optimizer fills rather than deficits or spills — with **zero**
-  ordering validation. "Highest penalty in the system" is asserted in prose
-  (`resolved::penalties`, `rows.rs`) but never hard-enforced. **Re-target the
-  check** to a direct `filling_target_violation_cost > deficit_cost` warning
-  (keeping the existing `ModelQuality`/warning severity convention); the owner may
-  promote it to a hard error if the dominance must be guaranteed rather than
-  advised. Shipping the dominant filling penalty ordering-unanchored is the one real
-  spec-completeness gap this removal would otherwise introduce.
-- **Filling cascades** (a Filling reservoir downstream of another Filling
-  reservoir, both in Filling at the same stage) — believed to need **no** special
-  handling. Each reservoir carries its own per-stage target + slack; they couple
-  only through the normal cascade releases (the upstream retains its target and
-  passes the rest, which the downstream sees as inflow on its **balance** row — and
-  per §3.4 the target row needs no inflow term, so no special routing is required
-  even when both are filling). A downstream that consequently falls short absorbs it
-  in its own `σ_below` — physically correct. Confirm with a cascade case (the d40
-  suggestion below).
+## 8. Migration
 
-## 8. Migration from the shipped model
+- **From v1**: rename `filling_inflow_m3s → filling_min_rate_m3s` and flip its
+  semantics (cap → minimum rate); widen `identify_filling_target_hydros` from terminal
+  to every filling stage and set the per-stage RHS to `V_target[t]`; remove
+  `fill_filling_retention_rows` (and its PreFilling-upstream port); rename the
+  `filling_floor` family → `filled_min_storage_floor`; flip `check_penalty_ordering`.
+  Keep continuous handoff, the soft operating floor, FPHA exclusion, gating, and the
+  PreFilling short-circuit.
+- **From the abandoned reset draft**: drop the entry-stage reset / RHS-fold; drop the
+  `initial_operating_volume_hm3` field; keep `storage_violation_below_cost` (do **not**
+  remove it); use the minimum-floor `≥` instead of the increment equality.
+- **Doc-comments**: rewrite `FillingConfig.filling_min_rate_m3s` (minimum accumulation
+  rate, not an inflow and not a cap); add the §3.3 `min_storage`-hard-except-filled
+  Contract at the `filled_min_storage_floor` construction site.
+- **Cases / baselines**: re-derive `d38` (per-stage `σ_fill` floors + continuous start,
+  no reset) and `d39` (PreFilling-upstream regression — routed inflow on the balance
+  row only); add a `d40` filling-cascade case (a Filling reservoir downstream of
+  another Filling reservoir — confirm each carries its own per-stage floor and they
+  couple only through normal cascade releases). Re-confirm parity-neutrality for the
+  non-filling world. Re-baseline both backends across the three pinned baseline
+  locations.
 
-- **Retire**: the impound-cap retention row (becomes the §3.1 target equality), the
-  terminal `σ_fill` column/row/geometry family (folds into per-stage `σ_below`), the
-  `σ^{v-}` operating-floor column/row/geometry family (removed entirely), and the
-  `storage_violation_below_cost` field (its ordering validation is **re-anchored**
-  onto the deficit cost, not merely deleted — §7).
-- **Add**: the per-stage target column/row/geometry family, the §3.2 entry-stage
-  RHS-fold reset, and the `initial_operating_volume_hm3` field (§4.1) on
-  `FillingConfig` with its `[min_storage, max_storage]` validation and dead-volume
-  default.
-- **Rework**: `fill_storage_columns` (operating floor goes back to hard for filling
-  hydros), the input schema/parse for the per-stage schedule and the new fill-target
-  field, and `validate_filling_configs` / the `cobre-io` semantic validator for the
-  §4.2 sum check (against `v_fill`) and the fill-target bounds, and **re-anchor**
-  `check_penalty_ordering` onto the deficit cost (§7). **No rework of
-  `fill_prefilling_shortcircuit`** beyond deleting its retention-row push (§3.4) —
-  the balance-row routing is unchanged.
-- **Re-derive** the deterministic cases and both-backend parity baselines: `d38`
-  (its `σ_fill`/`σ^{v-}` assertions change to per-stage `σ_below` + the pinned
-  operating start at `v_fill`) and `d39` (the PreFilling-upstream regression, now
-  asserting the routed inflow lands on the **balance** row only and the target row
-  is inflow-free). Add a `d40` filling-cascade case to discharge §7's cascade
-  question. Re-confirm parity-neutrality for the non-filling world.
-- **Doc-comment fixes**: `FillingConfig.filling_inflow_m3s` (now a per-stage
-  retention _target_, not a cap), the new `initial_operating_volume_hm3` doc, and
-  the entry-stage reset Contract (§3.2/§3.3).
-- **Preserve (do not regress)**: filling-hydro spillage stays unbounded above (§3.1
-  contract), and the reset is baked into the per-stage template rather than applied
-  as a solve-time-only patch (§5).
+## 9. Accepted trade-offs
 
-The new model touches the same sites the v1 implementation does
-(`lp/builder/{mod,entries,rows,columns,layout,template}.rs`, `setup/mod.rs`,
-`training/lower_bound.rs`, the validators, and the per-stage geometry), so it is a
-focused re-formulation rather than new architecture — but it is a real one, and the
-state-reset (§3.2) is the part to implement and review with the most care.
+- **One asymmetry, scoped and self-limiting.** A filled hydro carries a soft
+  `min_storage` floor in operation while every other hydro has a hard one (§3.3). This
+  is the price of the continuous handoff (no reset). It is scoped to filled hydros (the
+  only ones that can legitimately enter operation near the dead volume) and neutralized
+  in practice by the high `storage_violation_below_cost`, which keeps `σ^{v-} → 0`
+  except where a hard floor would itself be infeasible (genuine starvation). The
+  semantic validator can warn (`ModelQuality`) when a filled hydro's
+  `storage_violation_below_cost` is not large relative to `deficit_cost`.
+- **More faithful than the reset.** Unlike the abandoned reset draft, this model never
+  invents boundary water: a filling shortfall carries forward continuously and is paid
+  as a real recourse cost, matching DECOMP's continuous handoff and reported violation.
+- **Filling cascades** (a Filling reservoir downstream of another Filling reservoir):
+  no special handling — each carries its own per-stage floor; they couple only through
+  normal cascade releases (the upstream's release is the downstream's balance-row
+  inflow; the floor rows carry no inflow term). Confirm with the `d40` case (§8).

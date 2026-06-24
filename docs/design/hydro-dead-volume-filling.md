@@ -2,8 +2,16 @@
 
 > **Status**: Shipped (v1). Authoritative specification for commissioning windows
 > on hydro reservoirs and the dead-volume filling lifecycle. A proposed successor,
-> `hydro-filling-volume-target-reformulation.md`, supersedes §3.1, §3.3, §3.4,
-> §3.7, and §5.3 of this document; the rest remains current.
+> `hydro-filling-volume-target-reformulation.md`, supersedes the formulation
+> sections §3.1 (impound cap → minimum-rate floors) and §3.3 (terminal `σ_fill` →
+> per-stage targets); the input-model sections §5.3 (`filling_inflow_m3s` →
+> `filling_min_rate_m3s`) and §5.4 (validation); the §7 case assertions; and the two
+> §8 rows flagged **[Superseded]** below (filling-inflow semantics, `σ_fill`
+> placement). It **keeps** §3.2 (PreFilling short-circuit, minus the cap-row port),
+> §3.4 (the soft operating floor — kept, family renamed `filled_min_storage_floor`,
+> penalty ordering flipped), §3.5, §3.6, §3.7 (continuous handoff), §5.1 (no new
+> field), §5.2, and the remaining §8 decisions. **Until the successor ships, this
+> document is the live system**; the successor is design-only.
 > Hydro is the last and hardest of the six commissionable entity
 > types: its storage is a Benders **state coordinate**, so it cannot use the
 > column-omission/zero-influence mechanism the other five use — it must keep its
@@ -265,6 +273,11 @@ apply the _same_ phase gating as forward/backward (the NCS-class precedent).
 
 ### 5.1 Fields — no new field is needed
 
+> **[Still current under the successor.]** The successor adds **no** new field — it
+> renames `filling_inflow_m3s` → `filling_min_rate_m3s` and flips its semantics (§5.3),
+> and anchors the fill target on the existing `min_storage_hm3`. So "no new field is
+> needed" holds for both v1 and the successor.
+
 The model is fully specified by existing fields:
 
 - **`FillingConfig`** (on `Hydro.filling`): `start_stage_id`, `filling_inflow_m3s`.
@@ -307,6 +320,12 @@ external or replacement inflow._
 
 ### 5.4 Validation rules (no new fields, just guards)
 
+> **[Superseded in part]** The successor reinterprets `filling_min_rate_m3s` as a
+> per-stage minimum accumulation rate and adds a one-sided **`≥` sufficiency check**
+> (the minimum-rate trajectory must reach `min_storage`); it **keeps**
+> `storage_violation_below_cost` (only the penalty ordering flips). The guards below
+> otherwise describe the **shipped v1** model.
+
 - `entry_stage_id.is_some()` ⟺ `filling.is_some()` (entry requires filling and
   vice-versa).
 - `start_stage_id < entry_stage_id`.
@@ -314,8 +333,9 @@ external or replacement inflow._
 - `filling_storage ∈ [0, min_storage_hm3)`.
 - reject `exit_stage_id` on a filling hydro (hydro is entry-only — exit is
   physically ill-posed for a state-carrying reservoir).
-- `filling_inflow_m3s ≥ 0` (relax the current `> 0` check; a zero cap means "pass
-  everything, rely on natural accumulation").
+- `filling_inflow_m3s ≥ 0` (a zero cap means "pass everything, rely on natural
+  accumulation"). The original `> 0` check was relaxed to `≥ 0` during v1 and ships
+  that way — `validate_filling_configs` rejects only `< 0` (and NaN).
 
 ## 6. Implementation touch-points
 
@@ -339,7 +359,15 @@ template — but the lower-bound build must be verified to use the same template
 | Doc fixes                                     | `cobre-core/src/entities/hydro.rs` (§5.3, §5.2)                                                           |
 | Output parity                                 | if filling adds output columns, wire both the CLI and Python paths (Python-parity hard rule)              |
 
-## 7. Deterministic case: `d38-dead-volume-filling`
+## 7. Deterministic cases: `d38-dead-volume-filling`, `d39-prefilling-upstream-of-filling`
+
+> **[Assertions superseded]** Under the successor, the terminal `σ_fill` assertion
+> below becomes **per-stage minimum target floors** (`σ_fill[t]`); the operating start
+> is **continuous** (no reset/pin); and the `σ^{v-}` operating floor is **kept** (soft
+> `min_storage` floor, family renamed `filled_min_storage_floor`). The topology is
+> unchanged, and a d40 filling-cascade case is added. The companion d39 case keeps its
+> topology but its routed-inflow assertion moves from the impound-cap row to the
+> balance row (the cap row is removed — §3.4).
 
 A cascade where a **mid-cascade** hydro fills, so the short-circuit routes to a
 _real_ downstream (not a sink), with **varying block counts across the phase
@@ -366,19 +394,26 @@ Assertions:
 7. **Both-backend baselines** (HiGHS + CLP), with the no-filling control hydro
    confirming the formulation is parity-neutral for the normal hydro world.
 
+**Companion case — `d39-prefilling-upstream-of-filling`.** A regression where a
+PreFilling hydro sits **upstream** of a Filling hydro at the same stage, exercising
+the v1 fix that counts the absent upstream dam's routed inflow in the Filling
+downstream's impound-cap row (the retention-row port). The reformulation drops that
+port — its per-stage target row carries no inflow term (reformulation §3.4) — so
+d39's assertion changes to "routed inflow lands on the **balance** row only".
+
 ## 8. Confirmed design decisions
 
 The genuine forks raised during design, and how they were resolved:
 
-| Fork                                       | Decision                                                                                                                                                                                                                                                                                                                |
-| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Filling fidelity                           | **Full spec gradual filling** (not an instantaneous-fill MVP).                                                                                                                                                                                                                                                          |
-| FPHA neutralization                        | **Per-stage exclusion** of a non-operating hydro (zero-productivity FPH; fit unchanged per-hydro).                                                                                                                                                                                                                      |
-| Evaporation during filling                 | **Modeled normally** (the reservoir has a surface and loses water); zero only in PreFilling (no surface).                                                                                                                                                                                                               |
-| Hydro exit                                 | **Entry-only** — `exit_stage_id` rejected; exit is ill-posed for a state-carrying reservoir.                                                                                                                                                                                                                            |
-| Min-storage softening scope                | **Soft floor (`σ^{v-}`) only for hydros that went through filling**, across their whole operating horizon (self-limiting via the high penalty). Normal hydros keep the hard floor — a deliberate deviation from the spec's all-hydros-soft, scoped to the rare filling hydro to avoid a system-wide formulation change. |
-| Filling inflow semantics                   | **Retained portion** of natural inflow (impounded, removed from the cascade), cap not equality; PAR runs normally.                                                                                                                                                                                                      |
-| PreFilling cascade                         | **Short-circuit** — the absent dam's incremental inflow, upstream releases, and withdrawal transfer to its downstream; evaporation/diversion nil.                                                                                                                                                                       |
-| Entry without filling                      | **Rejected** — `entry_stage_id` requires a `FillingConfig`.                                                                                                                                                                                                                                                             |
-| `σ_fill` placement                         | **Terminal-only** at id `entry−1` (the per-stage impound cap rate-limits the fill, so no intermediate targets are needed).                                                                                                                                                                                              |
-| `filling_storage` for `start_stage_id > 0` | **Always `0`** (empty pit).                                                                                                                                                                                                                                                                                             |
+| Fork                                       | Decision                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Filling fidelity                           | **Full spec gradual filling** (not an instantaneous-fill MVP).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| FPHA neutralization                        | **Per-stage exclusion** of a non-operating hydro (zero-productivity FPH; fit unchanged per-hydro).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Evaporation during filling                 | **Modeled normally** (the reservoir has a surface and loses water); zero only in PreFilling (no surface).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Hydro exit                                 | **Entry-only** — `exit_stage_id` rejected; exit is ill-posed for a state-carrying reservoir.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Min-storage softening scope                | **Soft floor (`σ^{v-}`) only for hydros that went through filling**, across their whole operating horizon (self-limiting via the high penalty). Normal hydros keep the hard floor — a deliberate deviation from the spec's all-hydros-soft, scoped to the rare filling hydro to avoid a system-wide formulation change. **[Retained by the successor (§3.3) — the soft floor stays; family renamed `filling_floor` → `filled_min_storage_floor`, and the penalty ordering flips so the operating floor dominates the fill schedule and should be `≥ deficit_cost` (mimicking the hard floor). The reset-based draft that proposed removing it is abandoned.]** |
+| Filling inflow semantics                   | **Retained portion** of natural inflow (impounded, removed from the cascade), cap not equality; PAR runs normally. **[Superseded — successor §3.1: the per-stage _cap_ becomes a per-stage _minimum accumulation rate_ (uncapped, `≥` floors); `filling_inflow_m3s` → `filling_min_rate_m3s`. The retained-portion / PAR-normal semantics persist.]**                                                                                                                                                                                                                                                                                                          |
+| PreFilling cascade                         | **Short-circuit** — the absent dam's incremental inflow, upstream releases, and withdrawal transfer to its downstream; evaporation/diversion nil.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Entry without filling                      | **Rejected** — `entry_stage_id` requires a `FillingConfig`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `σ_fill` placement                         | **Terminal-only** at id `entry−1` (the per-stage impound cap rate-limits the fill, so no intermediate targets are needed). **[Superseded — successor §3.1: the cap is removed, so a per-stage schedule is needed; the terminal `σ_fill` becomes **per-stage minimum target floors** `V_target[t]`, backward-anchored to `min_storage`.]**                                                                                                                                                                                                                                                                                                                      |
+| `filling_storage` for `start_stage_id > 0` | **Always `0`** (empty pit).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
