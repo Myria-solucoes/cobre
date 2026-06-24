@@ -54,7 +54,7 @@ pub(super) fn fill_stage_columns(
     fill_ncs_columns(ctx, stage, stage_idx, layout, b);
     fill_pumping_columns(ctx, stage, stage_idx, layout, b);
     fill_filling_target_columns(ctx, stage_idx, layout, b);
-    fill_filling_floor_columns(ctx, stage_idx, layout, b);
+    fill_filled_min_storage_floor_columns(ctx, stage_idx, layout, b);
     fill_z_inflow_columns(layout, b);
 
     (col_lower, col_upper, objective)
@@ -73,8 +73,8 @@ pub(super) fn fill_stage_columns(
 /// floor stays soft so a hydro that finished filling short can recover from a
 /// deficient start without making the LP infeasible. The economic floor is
 /// supplied by the soft `σ^{v-}` operating-floor row emitted in
-/// [`fill_filling_floor_columns`] (and the terminal `σ_fill` target during
-/// Filling), not by the hard column bound. The upper bound stays
+/// [`fill_filled_min_storage_floor_columns`] (and the per-stage `σ_fill` target at every
+/// Filling stage), not by the hard column bound. The upper bound stays
 /// `max_storage_hm3` in every phase.
 ///
 /// The relax is gated on `hydro.filling.is_some()`, evaluated per-hydro. The
@@ -97,6 +97,23 @@ fn fill_storage_columns(
 ) {
     for h_idx in 0..layout.n_h {
         let hydro = &ctx.hydros[h_idx];
+        // INVARIANT: `min_storage` is a HARD outgoing-storage column lower bound for
+        // every hydro EXCEPT one that went through filling during the study
+        // (`hydro.filling.is_some()`), for which it relaxes to `0` here and is
+        // re-imposed as a SOFT floor by the `filled_min_storage_floor` family. The
+        // high resolved `storage_violation_below_cost` drives that family's `σ^{v-}`
+        // slack to `0` in every feasible scenario, so a filled hydro is
+        // indistinguishable from a never-filled one in operation.
+        //
+        // FORBIDDEN A — globalizing the soft floor to all hydros: it makes dead
+        // volume soft for every reservoir, letting the optimizer cheaply violate it
+        // system-wide.
+        // FORBIDDEN B — keeping `min_storage` hard for a filled hydro: it
+        // re-introduces first-operating-stage infeasibility when filling finished
+        // short, on a deficient start.
+        //
+        // Gated by `hydro.filling.is_some()`, mirroring
+        // `identify_filled_min_storage_floor_hydros`.
         let floor_off = hydro.filling.is_some();
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         bufs.col_lower[h_idx] = if floor_off { 0.0 } else { hb.min_storage_hm3 };
@@ -898,8 +915,8 @@ pub(super) fn fill_pumping_columns(
     }
 }
 
-/// Terminal `σ_fill`-target slack columns: one stage-level slack per filling hydro
-/// whose `entry_stage_id − 1 == stage.id` at this stage.
+/// Per-stage `σ_fill`-target slack columns: one stage-level slack per filling hydro
+/// in the Filling phase at this stage.
 ///
 /// `col_lower = 0`, `col_upper = +∞`, and the objective coefficient is the
 /// RESOLVED per-stage `filling_target_violation_cost`
@@ -921,7 +938,7 @@ pub(super) fn fill_pumping_columns(
 /// too cheaply. The `σ^{v-}` operating-floor slack (a sibling storage-volume
 /// $/hm³ penalty) follows this same no-hours convention.
 ///
-/// No-op at every non-terminal stage and for a non-filling system (the index list
+/// No-op at every non-Filling stage and for a non-filling system (the index list
 /// is empty), so `objective`/`col_lower`/`col_upper` are byte-identical to a build
 /// without this family (parity-neutral).
 fn fill_filling_target_columns(
@@ -963,22 +980,26 @@ fn fill_filling_target_columns(
 ///
 /// `σ^{v-}` is DISTINCT from `σ_fill` (`fill_filling_target_columns`): `σ^{v-}`
 /// fires at EVERY Operating stage of a filling hydro with cost
-/// `storage_violation_below_cost`, whereas `σ_fill` fires only at the single
-/// terminal Filling stage (`entry − 1`) with cost `filling_target_violation_cost`.
-/// They are separate columns, separate costs, separate stage scopes — never
-/// conflate them.
+/// `storage_violation_below_cost`, whereas `σ_fill` fires at every FILLING stage
+/// (`start ≤ id < entry`) with cost `filling_target_violation_cost`. They are
+/// separate columns, separate costs, separate stage scopes (Operating vs Filling,
+/// never overlapping) — never conflate them.
 ///
 /// No-op at every non-operating stage of a filling hydro and for a non-filling
 /// system (the index list is empty), so `objective`/`col_lower`/`col_upper` are
 /// byte-identical to a build without this family (parity-neutral).
-fn fill_filling_floor_columns(
+fn fill_filled_min_storage_floor_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
-    let col_start = layout.col_filling_floor_start();
-    for (local_idx, &h_idx) in layout.filling_floor_hydro_indices.iter().enumerate() {
+    let col_start = layout.col_filled_min_storage_floor_start();
+    for (local_idx, &h_idx) in layout
+        .filled_min_storage_floor_hydro_indices
+        .iter()
+        .enumerate()
+    {
         let col = col_start + local_idx;
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         bufs.col_lower[col] = 0.0;
@@ -1260,6 +1281,7 @@ mod diversion_bound_tests {
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0],
                 total_hours_per_stage: vec![744.0],
+                filling_v_target: BTreeMap::new(),
             }
         }
     }
@@ -1623,6 +1645,7 @@ mod filling_phase_gating_tests {
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0],
                 total_hours_per_stage: vec![744.0],
+                filling_v_target: BTreeMap::new(),
             }
         }
     }
@@ -1899,46 +1922,53 @@ mod filling_phase_gating_tests {
         )
     }
 
-    /// At the terminal Filling stage (`id == entry − 1 == 3`) a filling hydro gets
+    /// At a Filling stage (every `id` in `[start, entry)`) a filling hydro gets
     /// exactly ONE `σ_fill` column: `col_lower = 0`, `col_upper = +∞`, and the
     /// objective coefficient is the RESOLVED `filling_target_violation_cost`
     /// UNSCALED — NOT multiplied by stage hours. The hours-multiplication
     /// alternative (copied from the flow/power-rate slacks) would be a $·h/hm³ units
-    /// error on this storage-volume ($/hm³) penalty.
+    /// error on this storage-volume ($/hm³) penalty. Exercises BOTH Filling stages
+    /// (ids 2 and 3) to pin per-stage membership, not the v1 terminal-only rule.
     #[test]
-    fn filling_target_column_emitted_at_terminal_stage() {
-        // entry = 4 ⇒ terminal Filling stage id = 3 (= FILLING_ID).
-        let mut fixtures = Fixtures::new(Some(filling_config()), Some(ENTRY_STAGE_ID), false);
-        let (col_lower, col_upper, objective, col_start, n_targets, _num_cols) =
-            run_filling_target_fill(&mut fixtures, ENTRY_STAGE_ID - 1);
-        assert_eq!(n_targets, 1, "exactly one σ_fill column at id entry − 1");
-        let col = col_start;
-        assert_eq!(col_lower[col], 0.0, "σ_fill col_lower = 0");
-        assert_eq!(col_upper[col], f64::INFINITY, "σ_fill col_upper = +∞");
-        // Cost is UNSCALED here (the global /COST_SCALE_FACTOR pass runs later in
-        // build_single_stage_template) and carries NO hours factor.
-        assert_eq!(
-            objective[col], FILLING_TARGET_COST,
-            "σ_fill objective = filling_target_violation_cost (unscaled, no hours)"
-        );
+    fn filling_target_column_emitted_at_every_filling_stage() {
+        // start = 2, entry = 4 ⇒ Filling stages are ids 2 and 3.
+        for stage_id in [START_STAGE_ID, ENTRY_STAGE_ID - 1] {
+            let mut fixtures = Fixtures::new(Some(filling_config()), Some(ENTRY_STAGE_ID), false);
+            let (col_lower, col_upper, objective, col_start, n_targets, _num_cols) =
+                run_filling_target_fill(&mut fixtures, stage_id);
+            assert_eq!(
+                n_targets, 1,
+                "exactly one σ_fill column at Filling id {stage_id}"
+            );
+            let col = col_start;
+            assert_eq!(col_lower[col], 0.0, "σ_fill col_lower = 0 at id {stage_id}");
+            assert_eq!(
+                col_upper[col],
+                f64::INFINITY,
+                "σ_fill col_upper = +∞ at id {stage_id}"
+            );
+            // Cost is UNSCALED here (the global /COST_SCALE_FACTOR pass runs later in
+            // build_single_stage_template) and carries NO hours factor.
+            assert_eq!(
+                objective[col], FILLING_TARGET_COST,
+                "σ_fill objective = filling_target_violation_cost (unscaled, no hours) at id {stage_id}"
+            );
+        }
     }
 
-    /// No `σ_fill` column is emitted at any stage id `≠ entry − 1` — `PreFilling`, a
-    /// non-terminal `Filling` stage, or `Operating`. Terminal-only, not per-stage.
+    /// No `σ_fill` column is emitted off the Filling phase — `PreFilling` (id 1) or
+    /// `Operating` (id 4). Per-stage Filling membership, NOT the v1 terminal-only
+    /// rule.
     ///
-    /// At `PreFilling`/non-terminal `Filling` the `σ_fill` block being empty means
-    /// its cursor coincides with `num_cols` (`σ_fill` is the last occupied family
-    /// there, since `σ^{v-}` is also empty off `Operating`). At `Operating` the
-    /// `σ^{v-}` block legitimately occupies one column AFTER the (empty) `σ_fill`
-    /// block, so the faithful empty-`σ_fill` check is the zero block width
-    /// (`n_targets == 0`), not the `== num_cols` coincidence — which `σ^{v-}` now
-    /// breaks at `Operating`.
+    /// At `PreFilling` the `σ_fill` block being empty means its cursor coincides
+    /// with `num_cols` (`σ_fill` is the last occupied family there, since `σ^{v-}`
+    /// is also empty off `Operating`). At `Operating` the `σ^{v-}` block
+    /// legitimately occupies one column AFTER the (empty) `σ_fill` block, so the
+    /// faithful empty-`σ_fill` check is the zero block width (`n_targets == 0`), not
+    /// the `== num_cols` coincidence — which `σ^{v-}` breaks at `Operating`.
     #[test]
-    fn filling_target_column_absent_off_terminal_stage() {
-        // entry = 4 ⇒ terminal id = 3. PreFilling (1), Operating (4), and — to
-        // confirm terminal-only within Filling — there is no non-terminal Filling
-        // stage in this START=2/ENTRY=4 window other than id 2; exercise it too.
-        for stage_id in [PREFILLING_ID, 2, OPERATING_ID] {
+    fn filling_target_column_absent_off_filling_phase() {
+        for stage_id in [PREFILLING_ID, OPERATING_ID] {
             let mut fixtures = Fixtures::new(Some(filling_config()), Some(ENTRY_STAGE_ID), false);
             let (_, _, _, col_start, n_targets, num_cols) =
                 run_filling_target_fill(&mut fixtures, stage_id);
@@ -1991,11 +2021,11 @@ mod filling_phase_gating_tests {
     /// `FILLING_TARGET_COST` so a test that conflates the two costs fails.
     const STORAGE_BELOW_COST: f64 = 12_345.0;
 
-    /// Run `fill_filling_floor_columns` against the fixture at `stage_id` with the
+    /// Run `fill_filled_min_storage_floor_columns` against the fixture at `stage_id` with the
     /// resolved `storage_violation_below_cost` overridden to `STORAGE_BELOW_COST`,
     /// returning the column buffers and the `σ^{v-}` column start (which equals
     /// `num_cols` when the block is empty), the column count, and `num_cols`.
-    fn run_filling_floor_fill(
+    fn run_filled_min_storage_floor_fill(
         fixtures: &mut Fixtures,
         stage_id: i32,
     ) -> (Vec<f64>, Vec<f64>, Vec<f64>, usize, usize, usize) {
@@ -2014,9 +2044,9 @@ mod filling_phase_gating_tests {
             col_upper: &mut col_upper,
             objective: &mut objective,
         };
-        super::fill_filling_floor_columns(&ctx, STAGE_IDX, &layout, &mut bufs);
-        let n_floors = layout.filling_floor_hydro_indices.len();
-        let col_start = layout.col_filling_floor_start();
+        super::fill_filled_min_storage_floor_columns(&ctx, STAGE_IDX, &layout, &mut bufs);
+        let n_floors = layout.filled_min_storage_floor_hydro_indices.len();
+        let col_start = layout.col_filled_min_storage_floor_start();
         (
             col_lower,
             col_upper,
@@ -2034,10 +2064,10 @@ mod filling_phase_gating_tests {
     /// the flow/power-rate slacks would be a $·h/hm³ units error on this
     /// storage-volume ($/hm³) penalty, identical to the `σ_fill` convention).
     #[test]
-    fn filling_floor_column_emitted_in_operating() {
+    fn filled_min_storage_floor_column_emitted_in_operating() {
         let mut fixtures = Fixtures::new(Some(filling_config()), Some(ENTRY_STAGE_ID), false);
         let (col_lower, col_upper, objective, col_start, n_floors, _num_cols) =
-            run_filling_floor_fill(&mut fixtures, OPERATING_ID);
+            run_filled_min_storage_floor_fill(&mut fixtures, OPERATING_ID);
         assert_eq!(n_floors, 1, "exactly one σ^{{v-}} column in Operating");
         let col = col_start;
         assert_eq!(col_lower[col], 0.0, "σ^{{v-}} col_lower = 0");
@@ -2052,13 +2082,13 @@ mod filling_phase_gating_tests {
 
     /// No `σ^{v-}` column is emitted at any non-operating stage of a filling hydro —
     /// `PreFilling` or `Filling`. `Operating`-only (the complement of `σ_fill`'s
-    /// terminal-only scope), so the `σ^{v-}` family never collides with `σ_fill`.
+    /// every-Filling-stage scope), so the `σ^{v-}` family never collides with `σ_fill`.
     #[test]
-    fn filling_floor_column_absent_in_prefilling_and_filling() {
+    fn filled_min_storage_floor_column_absent_in_prefilling_and_filling() {
         for stage_id in [PREFILLING_ID, FILLING_ID] {
             let mut fixtures = Fixtures::new(Some(filling_config()), Some(ENTRY_STAGE_ID), false);
             let (_, _, _, col_start, n_floors, num_cols) =
-                run_filling_floor_fill(&mut fixtures, stage_id);
+                run_filled_min_storage_floor_fill(&mut fixtures, stage_id);
             assert_eq!(n_floors, 0, "no σ^{{v-}} column at id {stage_id}");
             assert_eq!(
                 col_start, num_cols,
@@ -2072,11 +2102,11 @@ mod filling_phase_gating_tests {
     /// untouched by the fill. The forbidden GLOBAL soft floor — matching every
     /// Operating hydro regardless of `filling` — would softly floor every reservoir.
     #[test]
-    fn non_filling_hydro_no_filling_floor_column() {
+    fn non_filling_hydro_no_filled_min_storage_floor_column() {
         for stage_id in [PREFILLING_ID, FILLING_ID, OPERATING_ID] {
             let mut fixtures = Fixtures::new(None, None, false);
             let (col_lower, col_upper, objective, col_start, n_floors, num_cols) =
-                run_filling_floor_fill(&mut fixtures, stage_id);
+                run_filled_min_storage_floor_fill(&mut fixtures, stage_id);
             assert_eq!(
                 n_floors, 0,
                 "non-filling: no σ^{{v-}} column at id {stage_id}"
@@ -2091,20 +2121,21 @@ mod filling_phase_gating_tests {
         }
     }
 
-    /// The `σ^{v-}` (`Operating`) and `σ_fill` (terminal `Filling`) families are
-    /// MUTUALLY EXCLUSIVE per stage: at the terminal `Filling` stage (`entry − 1`) a
-    /// filling hydro has `σ_fill` but NOT `σ^{v-}`; at an `Operating` stage
-    /// (`entry`) it has `σ^{v-}` but NOT `σ_fill`. Two separate columns, two
-    /// separate stage scopes — never conflated.
+    /// The `σ^{v-}` (`Operating`) and `σ_fill` (`Filling`) families are MUTUALLY
+    /// EXCLUSIVE per stage: at the LAST Filling stage (`entry − 1`, the boundary
+    /// witness) a filling hydro has `σ_fill` but NOT `σ^{v-}`; at the first
+    /// `Operating` stage (`entry`) it has `σ^{v-}` but NOT `σ_fill`. Two separate
+    /// columns, two non-overlapping stage scopes (Filling vs Operating) — never
+    /// conflated.
     #[test]
-    fn filling_floor_and_filling_target_are_mutually_exclusive_by_stage() {
-        // Terminal Filling stage (entry − 1): σ_fill present, σ^{v-} absent.
+    fn filled_min_storage_floor_and_filling_target_are_mutually_exclusive_by_stage() {
+        // Last Filling stage (entry − 1): σ_fill present, σ^{v-} absent.
         let mut f_terminal = Fixtures::new(Some(filling_config()), Some(ENTRY_STAGE_ID), false);
         let (_, _, _, _, n_targets_terminal, _) =
             run_filling_target_fill(&mut f_terminal, ENTRY_STAGE_ID - 1);
         let mut f_terminal2 = Fixtures::new(Some(filling_config()), Some(ENTRY_STAGE_ID), false);
         let (_, _, _, _, n_floors_terminal, _) =
-            run_filling_floor_fill(&mut f_terminal2, ENTRY_STAGE_ID - 1);
+            run_filled_min_storage_floor_fill(&mut f_terminal2, ENTRY_STAGE_ID - 1);
         assert_eq!(n_targets_terminal, 1, "σ_fill present at terminal stage");
         assert_eq!(n_floors_terminal, 0, "σ^{{v-}} absent at terminal stage");
 
@@ -2112,7 +2143,8 @@ mod filling_phase_gating_tests {
         let mut f_op = Fixtures::new(Some(filling_config()), Some(ENTRY_STAGE_ID), false);
         let (_, _, _, _, n_targets_op, _) = run_filling_target_fill(&mut f_op, OPERATING_ID);
         let mut f_op2 = Fixtures::new(Some(filling_config()), Some(ENTRY_STAGE_ID), false);
-        let (_, _, _, _, n_floors_op, _) = run_filling_floor_fill(&mut f_op2, OPERATING_ID);
+        let (_, _, _, _, n_floors_op, _) =
+            run_filled_min_storage_floor_fill(&mut f_op2, OPERATING_ID);
         assert_eq!(n_targets_op, 0, "σ_fill absent in Operating");
         assert_eq!(n_floors_op, 1, "σ^{{v-}} present in Operating");
     }
@@ -2278,6 +2310,7 @@ mod anticipated_objective_tests {
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0, 0.9, 0.81, 0.729, 0.6561, 0.59049],
                 total_hours_per_stage: vec![744.0; N_STAGES],
+                filling_v_target: BTreeMap::new(),
             }
         }
     }
@@ -2747,6 +2780,7 @@ mod block_family_slack_tests {
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0],
                 total_hours_per_stage: vec![BLOCK_HOURS[0] + BLOCK_HOURS[1]],
+                filling_v_target: BTreeMap::new(),
             }
         }
     }

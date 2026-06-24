@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
-use cobre_core::{EntityId, Stage, System};
+use cobre_core::{EntityId, Hydro, ResolvedBounds, Stage, System};
 use cobre_solver::StageTemplate;
 use cobre_stochastic::normal::precompute::PrecomputedNormal;
 use cobre_stochastic::par::precompute::PrecomputedPar;
@@ -15,7 +15,9 @@ use crate::setup::template_postprocess::{
 };
 
 use super::layout::{ResolvedTables, StageLayout, TemplateBuildCtx};
-use super::{COST_SCALE_FACTOR, GenericConstraintRowEntry, columns, entries, rows, scaling};
+use super::{
+    COST_SCALE_FACTOR, GenericConstraintRowEntry, M3S_TO_HM3, columns, entries, rows, scaling,
+};
 
 /// Outcome of [`build_stage_templates`]: one [`StageTemplate`] per study stage
 /// plus the per-stage `base_rows` offsets needed by `PatchBuffer`.
@@ -330,33 +332,22 @@ pub struct StageGeometry {
     /// non-uniform schedule a single global stage-0 range would misread this
     /// stage's rows — this per-stage range carries the stage-correct extent.
     pub load_balance: Range<usize>,
-    /// Impound-retention row range (one row per Filling-phase hydro at this
-    /// stage). Empty (`start..start`, a zero-length range at the cursor, not `0..0`) for a non-filling stage. Carried per stage for the
-    /// same per-stage-membership reason as the FPHA/evap carriers: the count and
-    /// base both vary per stage, so a single global stage-0 range would misread
-    /// any stage with a differing filling set or block-major prefix.
-    // Rationale: the retention rows carry no extracted primal (no slack/decision
-    // columns), so no read site consumes this range yet; it is the per-stage
-    // carrier the sibling `σ_fill`/`σ^{v-}` filling-row families will extend, and
-    // it keeps `StageGeometry` a faithful mirror of the per-stage row shape. The
-    // `#[allow(dead_code)]` refires if the seam is removed before those callers
-    // land.
-    #[allow(dead_code)]
-    pub filling_retention: Range<usize>,
-    /// Terminal `σ_fill`-target row range (one row per filling hydro whose
-    /// `entry − 1` is this stage). Empty (`start..start`, a zero-length range at the cursor, not `0..0`) at every non-terminal stage.
-    /// Carried per stage for the same per-stage-membership reason as the
-    /// `filling_retention` sibling: the count and base both vary per stage.
+    /// Per-stage `σ_fill`-target row range (one row per filling hydro in the
+    /// Filling phase at this stage). Empty (`start..start`, a zero-length range at the cursor, not `0..0`) at every non-Filling stage.
+    /// Carried per stage for the same per-stage-membership reason as the FPHA/evap
+    /// carriers: the count and base both vary per stage, so a single global stage-0
+    /// range would misread any stage with a differing filling set or block-major
+    /// prefix.
     // Rationale: the `σ_fill` rows carry no extracted primal yet (the slack column
     // value is not read by simulation extraction at this point), so no read site
     // consumes this range; it is the per-stage carrier that keeps `StageGeometry` a
-    // faithful mirror of the per-stage row shape, mirroring the `filling_retention`
-    // seam. The `#[allow(dead_code)]` refires if the seam is removed before a
-    // reader lands.
+    // faithful mirror of the per-stage row shape, the seam the sibling `σ^{v-}`
+    // family extends. The `#[allow(dead_code)]` refires if the seam is removed
+    // before a reader lands.
     #[allow(dead_code)]
     pub filling_target: Range<usize>,
-    /// Terminal `σ_fill`-target slack column range (one column per filling hydro
-    /// whose `entry − 1` is this stage). Empty (`start..start`, a zero-length range at the cursor, not `0..0`) at every non-terminal
+    /// Per-stage `σ_fill`-target slack column range (one column per filling hydro
+    /// in the Filling phase at this stage). Empty (`start..start`, a zero-length range at the cursor, not `0..0`) at every non-Filling
     /// stage. Carried per stage alongside `filling_target` (the row range) so the
     /// per-stage geometry mirrors both the row and column shape of the family.
     /// Simulation extraction reads the `σ_fill` primal at `start + local_idx` for a
@@ -374,15 +365,15 @@ pub struct StageGeometry {
     // seam. The `#[allow(dead_code)]` refires if the seam is removed before a
     // reader lands.
     #[allow(dead_code)]
-    pub filling_floor: Range<usize>,
+    pub filled_min_storage_floor: Range<usize>,
     /// Soft `σ^{v-}` operating-floor slack column range (one column per filling
     /// hydro in the Operating phase at this stage). Empty (`start..start`, a zero-length range at the cursor, not `0..0`) at every
     /// non-operating stage of a filling hydro. Carried per stage alongside
-    /// `filling_floor` (the row range) so the per-stage geometry mirrors both the
+    /// `filled_min_storage_floor` (the row range) so the per-stage geometry mirrors both the
     /// row and column shape of the family.
     /// Simulation extraction reads the `σ^{v-}` primal at `start + local_idx` for a
-    /// filling hydro, resolving `local_idx` via `filling_floor_hydro_indices`.
-    pub filling_floor_col: Range<usize>,
+    /// filling hydro, resolving `local_idx` via `filled_min_storage_floor_hydro_indices`.
+    pub filled_min_storage_floor_col: Range<usize>,
     /// Row index of the first z-inflow definition constraint. Always `0`: state
     /// pinning uses column bounds, so no state-fixing rows precede the z-inflow
     /// block. Carried per stage to mirror `StageLayout::z_inflow_row_start`.
@@ -401,10 +392,10 @@ pub struct StageGeometry {
     /// order. Parallel to `evap_indices`; carried per stage for the same
     /// per-stage-membership reason as `fpha_hydro_indices`.
     pub evap_hydro_indices: Vec<usize>,
-    /// System hydro indices owning a terminal `σ_fill`-target slack column at this
-    /// stage (the filling hydros whose `entry − 1` is this stage), in slot order.
+    /// System hydro indices owning a per-stage `σ_fill`-target slack column at this
+    /// stage (the filling hydros in the Filling phase at this stage), in slot order.
     /// Parallel to `filling_target_col`: the `σ_fill` column for the system hydro at
-    /// slot `i` is `filling_target_col.start + i`. Empty at every non-terminal stage
+    /// slot `i` is `filling_target_col.start + i`. Empty at every non-Filling stage
     /// and for a non-filling system. The family is SPARSE — one column per filling
     /// hydro, not per hydro — so extraction resolves a system hydro's column via this
     /// system→slot list (the `fpha_hydro_indices` / `evap_hydro_indices` pattern),
@@ -412,11 +403,11 @@ pub struct StageGeometry {
     pub filling_target_hydro_indices: Vec<usize>,
     /// System hydro indices owning a soft `σ^{v-}` operating-floor slack column at
     /// this stage (the filling hydros in the Operating phase at this stage), in slot
-    /// order. Parallel to `filling_floor_col`: the `σ^{v-}` column for the system
-    /// hydro at slot `i` is `filling_floor_col.start + i`. Empty at every
+    /// order. Parallel to `filled_min_storage_floor_col`: the `σ^{v-}` column for the system
+    /// hydro at slot `i` is `filled_min_storage_floor_col.start + i`. Empty at every
     /// non-operating stage of a filling hydro and for a non-filling system. SPARSE
     /// like `filling_target_hydro_indices`; resolved the same way.
-    pub filling_floor_hydro_indices: Vec<usize>,
+    pub filled_min_storage_floor_hydro_indices: Vec<usize>,
 }
 
 impl StageGeometry {
@@ -470,22 +461,24 @@ impl StageGeometry {
             generation_below_slack: layout.generation_below_slack.clone(),
             water_balance: layout.water_balance.clone(),
             load_balance: layout.load_balance.clone(),
-            filling_retention: layout.row_filling_retention_start
-                ..layout.row_filling_retention_start + layout.filling_retention_hydro_indices.len(),
             filling_target: layout.row_filling_target_start
                 ..layout.row_filling_target_start + layout.filling_target_hydro_indices.len(),
             filling_target_col: layout.col_filling_target_start
                 ..layout.col_filling_target_start + layout.filling_target_hydro_indices.len(),
-            filling_floor: layout.row_filling_floor_start
-                ..layout.row_filling_floor_start + layout.filling_floor_hydro_indices.len(),
-            filling_floor_col: layout.col_filling_floor_start
-                ..layout.col_filling_floor_start + layout.filling_floor_hydro_indices.len(),
+            filled_min_storage_floor: layout.row_filled_min_storage_floor_start
+                ..layout.row_filled_min_storage_floor_start
+                    + layout.filled_min_storage_floor_hydro_indices.len(),
+            filled_min_storage_floor_col: layout.col_filled_min_storage_floor_start
+                ..layout.col_filled_min_storage_floor_start
+                    + layout.filled_min_storage_floor_hydro_indices.len(),
             z_inflow_row_start: layout.z_inflow_row_start,
             n_blks: layout.n_blks,
             fpha_hydro_indices: layout.fpha_hydro_indices.clone(),
             evap_hydro_indices: layout.evap_hydro_indices.clone(),
             filling_target_hydro_indices: layout.filling_target_hydro_indices.clone(),
-            filling_floor_hydro_indices: layout.filling_floor_hydro_indices.clone(),
+            filled_min_storage_floor_hydro_indices: layout
+                .filled_min_storage_floor_hydro_indices
+                .clone(),
         }
     }
 }
@@ -871,6 +864,91 @@ pub fn build_stage_templates(
     ))
 }
 
+/// Precompute the per-stage minimum target-storage trajectory `V_target[t]` for
+/// every filling hydro, keyed `(hydro_idx, stage_id) → V_target` \[hm³\].
+///
+/// Computed ONCE here, where the full per-stage ζ·rate schedule across all
+/// Filling stages of a hydro is available (a per-stage row-fill helper sees one
+/// stage and cannot reconstruct the backward fold). With `L = entry_stage_id − 1`
+/// the last Filling stage, the trajectory is anchored on the dead volume and
+/// folded backward:
+///
+/// ```text
+/// V_target[L] = min_storage_hm3                          (at L's stage_idx)
+/// V_target[t] = min( V_target[t+1] − ζ_{t+1}·rate[t+1], min_storage_hm3 )
+/// ```
+///
+/// with `ζ_t = total_hours_per_stage[stage_idx]·M3S_TO_HM3` and `rate[t]` /
+/// `min_storage_hm3` the RESOLVED per-stage `filling_min_rate_m3s` /
+/// `min_storage_hm3` (`bounds.hydro_bounds(h_idx, stage_idx)`). The clip at
+/// `min_storage` is the contract that no floor exceeds the dead volume: under the
+/// validated non-negative rate the unclipped value is already `≤ min_storage`, so
+/// the clip relaxes an over-provisioned earliest floor to slack rather than
+/// demanding over-fill — dropping it would let an over-provisioned schedule
+/// demand a floor ABOVE the dead volume (the design §3.1 forbidden alternative).
+/// The fold runs on the UNCLIPPED running value (`min_storage − Σ ζ·rate`),
+/// clipping each stored `V_target[t]` independently, exactly mirroring the closed
+/// form.
+///
+/// `stage_id_to_idx` maps a study `stage.id` to its study stage index so the
+/// per-stage ζ and resolved bounds are read at the correct row. Hydros are
+/// iterated in canonical slot order and the result is a `BTreeMap`, so the
+/// insertion / iteration order is declaration-order-invariant. A non-filling
+/// system yields an empty map (parity-neutrality).
+///
+/// `pub(super)` so the sibling `entries`/`rows` builder test modules can exercise
+/// it against single-stage fixtures; production callers reach it only through
+/// `build_template_build_ctx`.
+pub(super) fn build_filling_v_target(
+    hydros: &[Hydro],
+    bounds: &ResolvedBounds,
+    total_hours_per_stage: &[f64],
+    stage_id_to_idx: &BTreeMap<i32, usize>,
+) -> BTreeMap<(usize, i32), f64> {
+    let mut v_target: BTreeMap<(usize, i32), f64> = BTreeMap::new();
+    for (h_idx, hydro) in hydros.iter().enumerate() {
+        let (Some(filling), Some(entry)) = (hydro.filling.as_ref(), hydro.entry_stage_id) else {
+            continue;
+        };
+        let start = filling.start_stage_id;
+        let last = entry - 1; // L: the last Filling stage id.
+        // `start < entry` is validated upstream, so `start <= last`; guard anyway
+        // so a hypothetical inverted config produces an empty trajectory rather
+        // than a malformed loop.
+        if last < start {
+            continue;
+        }
+        let Some(&last_idx) = stage_id_to_idx.get(&last) else {
+            continue;
+        };
+        // Anchor: V_target[L] = min_storage (at L's own stage_idx). The clip is a
+        // no-op here (min(min_storage, min_storage)); recorded explicitly so the
+        // terminal row reads the dead volume exactly.
+        let min_storage_at_last = bounds.hydro_bounds(h_idx, last_idx).min_storage_hm3;
+        v_target.insert((h_idx, last), min_storage_at_last);
+        // Backward fold from L down to `start`. `running` is the UNCLIPPED
+        // accumulator `min_storage − Σ_{s=t+1}^{L} ζ_s·rate_s`; each stored
+        // V_target is clipped at that stage's own resolved dead volume.
+        let mut running = min_storage_at_last;
+        let mut t = last;
+        while t > start {
+            // Subtract stage t's contribution to obtain V_target[t − 1].
+            if let Some(&t_idx) = stage_id_to_idx.get(&t) {
+                let zeta_t = total_hours_per_stage[t_idx] * M3S_TO_HM3;
+                let rate_t = bounds.hydro_bounds(h_idx, t_idx).filling_min_rate_m3s;
+                running -= zeta_t * rate_t;
+            }
+            let prev = t - 1;
+            if let Some(&prev_idx) = stage_id_to_idx.get(&prev) {
+                let min_storage_prev = bounds.hydro_bounds(h_idx, prev_idx).min_storage_hm3;
+                v_target.insert((h_idx, prev), running.min(min_storage_prev));
+            }
+            t = prev;
+        }
+    }
+    v_target
+}
+
 /// Build the [`TemplateBuildCtx`] and ancillary data needed by the stage loop.
 ///
 /// Constructs position maps (hydro/thermal/line/bus), the diversion-upstream
@@ -1022,6 +1100,26 @@ fn build_template_build_ctx<'a>(
     // delivery stage index `t + K_i` to its commissioning id through this slice.
     let study_stage_ids: Vec<i32> = study_stages.iter().map(|s| s.id).collect();
 
+    // Inverse of `study_stage_ids`: study `stage.id` → study stage index. The
+    // filling-target backward fold reads per-stage ζ (`total_hours_per_stage`)
+    // and resolved bounds at the stage INDEX, but the Filling-phase window is
+    // expressed in stage IDs, so the fold maps each filling stage id through this.
+    let stage_id_to_idx: BTreeMap<i32, usize> = study_stage_ids
+        .iter()
+        .enumerate()
+        .map(|(idx, &id)| (id, idx))
+        .collect();
+
+    // Per-stage minimum target-storage trajectory for every filling hydro,
+    // computed once here where the full per-stage ζ·rate schedule is known.
+    // Empty for a non-filling system (parity-neutrality).
+    let filling_v_target = build_filling_v_target(
+        hydros,
+        system.bounds(),
+        &total_hours_per_stage,
+        &stage_id_to_idx,
+    );
+
     let ctx = TemplateBuildCtx {
         hydros,
         thermals: system.thermals(),
@@ -1066,6 +1164,7 @@ fn build_template_build_ctx<'a>(
         has_penalty: n_hydros > 0 && inflow_method.has_slack_columns(),
         cumulative_discount_factors,
         total_hours_per_stage,
+        filling_v_target,
     };
 
     (ctx, load_bus_indices, diversion_upstream_output)
@@ -2342,6 +2441,7 @@ mod tests {
             has_penalty: ctx_a.has_penalty,
             cumulative_discount_factors: ctx_a.cumulative_discount_factors.clone(),
             total_hours_per_stage: ctx_a.total_hours_per_stage.clone(),
+            filling_v_target: ctx_a.filling_v_target.clone(),
         };
 
         // Sanity: ctx_b really has the swapped ordering.
@@ -3290,6 +3390,230 @@ mod tests {
             (t.row_upper[max_outflow_row] - 800.0).abs() < 1e-10,
             "max_outflow row_upper = {}, expected 800.0 (rate units m3/s)",
             t.row_upper[max_outflow_row],
+        );
+    }
+
+    // ── build_filling_v_target backward fold ─────────────────────────────────
+
+    use cobre_core::FillingConfig;
+    use std::collections::BTreeMap as VTargetMap;
+
+    /// A single non-cascade hydro carrying a `FillingConfig`
+    /// (`start_stage_id`/`entry_stage_id`), used by the `build_filling_v_target`
+    /// fold tests. All other fields are inert.
+    fn vtarget_filling_hydro(id: i32, start: i32, entry: i32) -> Hydro {
+        Hydro {
+            id: EntityId(id),
+            name: format!("H{id}"),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            entry_stage_id: Some(entry),
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 50.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 45.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: Some(FillingConfig {
+                start_stage_id: start,
+                filling_min_rate_m3s: 0.0,
+            }),
+            penalties: hydro_penalties_zero(),
+        }
+    }
+
+    /// A `ResolvedBounds` table for one hydro across `n_stages` stages, with every
+    /// stage's `min_storage_hm3` and `filling_min_rate_m3s` set to the given values.
+    fn vtarget_bounds(n_stages: usize, min_storage: f64, rate: f64) -> ResolvedBounds {
+        let mut bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        for stage_idx in 0..n_stages {
+            let hb = bounds.hydro_bounds_mut(0, stage_idx);
+            hb.min_storage_hm3 = min_storage;
+            hb.filling_min_rate_m3s = rate;
+        }
+        bounds
+    }
+
+    /// Identity `stage_id → stage_idx` map for `n_stages` study stages.
+    fn vtarget_id_map(n_stages: usize) -> VTargetMap<i32, usize> {
+        (0..n_stages).map(|i| (i as i32, i)).collect()
+    }
+
+    /// The AC: `start = 2`, `entry = 4`, `min_storage = 60`, per-stage ζ = 2.592
+    /// (`total_hours = 720`, `M3S_TO_HM3 = 0.0036`), `rate = 5`. The backward fold
+    /// pins `V_target[3] = 60` (the dead-volume anchor at L = entry − 1) and
+    /// `V_target[2] = 60 − 2.592·5 = 47.04` (one stage of minimum accumulation
+    /// below the anchor). No `V_target` is emitted at PreFilling (ids 0, 1) or
+    /// Operating (id ≥ 4).
+    #[test]
+    fn build_filling_v_target_backward_fold_ac_values() {
+        let n_stages = 5;
+        let hydros = vec![vtarget_filling_hydro(1, 2, 4)];
+        let bounds = vtarget_bounds(n_stages, 60.0, 5.0);
+        // ζ_t = total_hours[t]·M3S_TO_HM3 = 720·0.0036 = 2.592 at every stage.
+        let total_hours = vec![720.0; n_stages];
+        let v_target = super::build_filling_v_target(
+            &hydros,
+            &bounds,
+            &total_hours,
+            &vtarget_id_map(n_stages),
+        );
+
+        // L = entry − 1 = 3: anchored at the dead volume.
+        assert!(
+            (v_target[&(0, 3)] - 60.0).abs() < 1e-9,
+            "V_target[3] == min_storage == 60.0, got {}",
+            v_target[&(0, 3)]
+        );
+        // Early Filling stage 2: 60 − 2.592·5 = 47.04.
+        assert!(
+            (v_target[&(0, 2)] - 47.04).abs() < 1e-9,
+            "V_target[2] == 60 − 2.592·5 == 47.04, got {}",
+            v_target[&(0, 2)]
+        );
+        // No entry outside the Filling window {2, 3}.
+        assert!(
+            !v_target.contains_key(&(0, 0)),
+            "no V_target at PreFilling id 0"
+        );
+        assert!(
+            !v_target.contains_key(&(0, 1)),
+            "no V_target at PreFilling id 1"
+        );
+        assert!(
+            !v_target.contains_key(&(0, 4)),
+            "no V_target at Operating id 4"
+        );
+        // Exactly the two Filling-stage entries.
+        assert_eq!(v_target.len(), 2, "exactly one V_target per Filling stage");
+    }
+
+    /// Over-provisioned schedule: a fill rate large enough that the backward fold's
+    /// unclipped value would exceed `min_storage` is impossible (non-negative rate
+    /// only lowers it); the contract is that EVERY `V_target[t] ≤ min_storage`. With
+    /// a wide Filling window (ids 1..=5, entry = 6) and a high rate, every earliest
+    /// floor sits strictly below the dead volume and the clip never raises one above
+    /// it. The clip is verified to hold at every Filling stage.
+    #[test]
+    fn build_filling_v_target_clips_at_min_storage_when_over_provisioned() {
+        let n_stages = 7;
+        let min_storage = 30.0;
+        let hydros = vec![vtarget_filling_hydro(1, 1, 6)]; // Filling ids {1,2,3,4,5}.
+        // A high rate (50 m³/s over ζ = 2.592 ⇒ 129.6 hm³/stage) far exceeds the
+        // 30 hm³ dead volume, so the unclipped earliest floors go deeply negative.
+        let bounds = vtarget_bounds(n_stages, min_storage, 50.0);
+        let total_hours = vec![720.0; n_stages];
+        let v_target = super::build_filling_v_target(
+            &hydros,
+            &bounds,
+            &total_hours,
+            &vtarget_id_map(n_stages),
+        );
+
+        for stage_id in 1..=5 {
+            let v = v_target[&(0, stage_id)];
+            assert!(
+                v <= min_storage + 1e-12,
+                "V_target[{stage_id}] = {v} must not exceed the dead volume {min_storage}"
+            );
+        }
+        // The anchor (last Filling stage, id 5) is exactly the dead volume.
+        assert!(
+            (v_target[&(0, 5)] - min_storage).abs() < 1e-9,
+            "V_target[L] == min_storage (the clip is a no-op at the anchor)"
+        );
+        // The earliest floor is strictly below (deep accumulation requirement).
+        assert!(
+            v_target[&(0, 1)] < v_target[&(0, 5)],
+            "earliest floor strictly below the anchor"
+        );
+    }
+
+    /// A zero fill rate makes the trajectory FLAT: every Filling stage's floor
+    /// equals `min_storage` (the design's `rate == 0 ⇒ V_target[t] == V_target[t+1]`
+    /// degenerate case). The clip is a no-op throughout.
+    #[test]
+    fn build_filling_v_target_flat_when_rate_is_zero() {
+        let n_stages = 5;
+        let hydros = vec![vtarget_filling_hydro(1, 1, 4)]; // Filling ids {1,2,3}.
+        let bounds = vtarget_bounds(n_stages, 45.0, 0.0);
+        let total_hours = vec![720.0; n_stages];
+        let v_target = super::build_filling_v_target(
+            &hydros,
+            &bounds,
+            &total_hours,
+            &vtarget_id_map(n_stages),
+        );
+        for stage_id in 1..=3 {
+            assert!(
+                (v_target[&(0, stage_id)] - 45.0).abs() < 1e-9,
+                "flat trajectory: V_target[{stage_id}] == min_storage == 45.0"
+            );
+        }
+    }
+
+    /// A non-filling hydro (no `FillingConfig`) yields an EMPTY map — the
+    /// parity-neutrality contract for the precompute itself.
+    #[test]
+    fn build_filling_v_target_empty_for_non_filling() {
+        let n_stages = 3;
+        let mut h = vtarget_filling_hydro(1, 1, 2);
+        h.filling = None;
+        h.entry_stage_id = None;
+        let hydros = vec![h];
+        let bounds = vtarget_bounds(n_stages, 50.0, 5.0);
+        let total_hours = vec![720.0; n_stages];
+        let v_target = super::build_filling_v_target(
+            &hydros,
+            &bounds,
+            &total_hours,
+            &vtarget_id_map(n_stages),
+        );
+        assert!(
+            v_target.is_empty(),
+            "non-filling hydro ⇒ empty V_target map"
         );
     }
 }

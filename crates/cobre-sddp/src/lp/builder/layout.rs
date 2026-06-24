@@ -168,6 +168,22 @@ pub(crate) struct TemplateBuildCtx<'a> {
     /// within `[0, n_stages)`.
     /// Populated by `build_template_build_ctx` before the per-stage template loop.
     pub(crate) total_hours_per_stage: Vec<f64>,
+    /// Per-stage minimum target-storage trajectory `V_target[t]` for each filling
+    /// hydro, keyed `(hydro_idx, stage_id) → V_target` \[hm³\].
+    ///
+    /// Computed ONCE here (in `build_template_build_ctx`) by a backward fold from
+    /// the dead volume, because the fold needs the full per-stage ζ·rate schedule
+    /// across every Filling stage of a hydro — data a per-stage row-fill helper
+    /// (which sees one stage) cannot reconstruct. `fill_filling_target_rows` reads
+    /// this map as the `≥` row RHS at each Filling stage; the forbidden alternative
+    /// is recomputing the trajectory inside that helper, which would either be
+    /// wrong (it cannot see other stages' ζ) or re-walk the schedule on the hot
+    /// path. `BTreeMap`, not `HashMap`, so iteration order is the canonical
+    /// `(hydro_idx, stage_id)` order — declaration-order bit-determinism is then
+    /// structural, matching `hydro_pos`. Empty for a build with no filling hydros,
+    /// so the non-filling world is byte-identical (parity-neutrality). See
+    /// [`build_filling_v_target`](super::template::build_filling_v_target).
+    pub(crate) filling_v_target: BTreeMap<(usize, i32), f64>,
 }
 
 /// Column/row offsets describing the anticipated-thermal layout for one stage.
@@ -442,81 +458,67 @@ pub(crate) struct StageLayout<'a> {
     /// (`fpha_rows_end + n_evap_hydros`). The four operational-violation row
     /// families collapse onto this single cursor when `n_h == 0`.
     pub(crate) post_equipment_row_start: usize,
-    /// First impound-retention row; the `filling_retention` block follows the
-    /// operational-violation rows and precedes the fishing/anticipated/generic
-    /// rows. One row per Filling-phase hydro at this stage (the count is
-    /// `filling_retention_hydro_indices.len()`). The block is empty when no hydro
-    /// is Filling, in which case this cursor equals `row_anticipated_fishing_start`
-    /// and `num_rows` is unchanged. Lives strictly below `num_rows`, ahead of the
-    /// append-only cut rows.
-    pub(crate) row_filling_retention_start: usize,
-    /// System hydro indices (into `ctx.hydros`) in the Filling phase at this
-    /// stage, in ascending order. Parallel to the `filling_retention` row block:
-    /// local retention-row index `i` maps to system hydro
-    /// `filling_retention_hydro_indices[i]`, at row
-    /// `row_filling_retention_start + i`. Empty for a non-filling system.
-    pub(crate) filling_retention_hydro_indices: Vec<usize>,
-    /// First terminal `σ_fill`-target row; the `filling_target` block follows the
-    /// `filling_retention` block as a SIBLING in the pre-cut region (after the
-    /// operational-violation rows, before fishing/anticipated/generic). One row per
-    /// filling hydro whose `entry_stage_id − 1 == stage.id` at this stage (the count
-    /// is `filling_target_hydro_indices.len()`). The block is empty (zero rows) at
-    /// every stage except the single terminal stage of a filling hydro, in which
-    /// case this cursor equals `row_anticipated_fishing_start` and `num_rows` is
-    /// unchanged. Lives strictly below `num_rows`, ahead of the append-only cut
-    /// rows: a `filling_target` row written at any index `>= num_rows` would alias
-    /// the appended cut rows (slot-identity warm-start reconstruction matches cut
-    /// rows from `num_rows`) and corrupt every cut, so the family MUST reserve its
-    /// index here in the cursor chain.
+    /// First per-stage `σ_fill`-target row; the `filling_target` block follows the
+    /// operational-violation rows directly, in the pre-cut region (before
+    /// fishing/anticipated/generic). One row per
+    /// filling hydro in the Filling phase at this stage (the count is
+    /// `filling_target_hydro_indices.len()`). The block is empty (zero rows) at
+    /// every non-Filling stage of a filling hydro, in which case this cursor equals
+    /// `row_anticipated_fishing_start` and `num_rows` is unchanged. Lives strictly
+    /// below `num_rows`, ahead of the append-only cut rows: a `filling_target` row
+    /// written at any index `>= num_rows` would alias the appended cut rows
+    /// (slot-identity warm-start reconstruction matches cut rows from `num_rows`)
+    /// and corrupt every cut, so the family MUST reserve its index here in the
+    /// cursor chain.
     pub(crate) row_filling_target_start: usize,
-    /// First `σ_fill` terminal-target slack column. The `filling_target` column
+    /// First `σ_fill` per-stage-target slack column. The `filling_target` column
     /// block sits after the generic-slack columns and before the `σ^{v-}`
-    /// `filling_floor` columns — the second-to-last per-stage column family. One
-    /// stage-level slack column per filling hydro whose `entry_stage_id − 1 ==
-    /// stage.id` at this stage. Empty (zero width) at every non-terminal stage and
-    /// for a non-filling system; both filling column blocks are empty for a
-    /// non-filling system, so every prior `col_*_start` and `num_cols` stay
-    /// byte-identical to a build without these families.
+    /// `filled_min_storage_floor` columns — the second-to-last per-stage column family. One
+    /// stage-level slack column per filling hydro in the Filling phase at this
+    /// stage. Empty (zero width) at every non-Filling stage and for a non-filling
+    /// system; both filling column blocks are empty for a non-filling system, so
+    /// every prior `col_*_start` and `num_cols` stay byte-identical to a build
+    /// without these families.
     pub(crate) col_filling_target_start: usize,
-    /// System hydro indices (into `ctx.hydros`) emitting a terminal `σ_fill` target
-    /// at this stage (`entry_stage_id − 1 == stage.id`), in ascending order.
+    /// System hydro indices (into `ctx.hydros`) emitting a per-stage `σ_fill` target
+    /// at this stage (the filling hydros in the Filling phase), in ascending order.
     /// Parallel to BOTH the `filling_target` row block and the `σ_fill` column
     /// block: local target index `i` maps to system hydro
     /// `filling_target_hydro_indices[i]`, at row `row_filling_target_start + i` and
-    /// column `col_filling_target_start + i`. Empty except at a filling hydro's
-    /// terminal stage.
+    /// column `col_filling_target_start + i`. Empty at every non-Filling stage of a
+    /// filling hydro.
     pub(crate) filling_target_hydro_indices: Vec<usize>,
-    /// First soft `σ^{v-}` operating-floor row; the `filling_floor` block follows
+    /// First soft `σ^{v-}` operating-floor row; the `filled_min_storage_floor` block follows
     /// the `filling_target` block as a SIBLING in the pre-cut region (after the
     /// operational-violation rows, before fishing/anticipated/generic). One row per
     /// filling hydro in the Operating phase at this stage (the count is
-    /// `filling_floor_hydro_indices.len()`). The block is empty (zero rows) at every
+    /// `filled_min_storage_floor_hydro_indices.len()`). The block is empty (zero rows) at every
     /// non-operating stage of a filling hydro and for a non-filling system, in which
     /// case this cursor equals `row_anticipated_fishing_start` and `num_rows` is
     /// unchanged. Lives strictly below `num_rows`, ahead of the append-only cut
-    /// rows: a `filling_floor` row written at any index `>= num_rows` would alias
+    /// rows: a `filled_min_storage_floor` row written at any index `>= num_rows` would alias
     /// the appended cut rows (slot-identity warm-start reconstruction matches cut
     /// rows from `num_rows`) and corrupt every cut, so the family MUST reserve its
     /// index here in the cursor chain.
-    pub(crate) row_filling_floor_start: usize,
-    /// First soft `σ^{v-}` operating-floor slack column. The `filling_floor` column
+    pub(crate) row_filled_min_storage_floor_start: usize,
+    /// First soft `σ^{v-}` operating-floor slack column. The `filled_min_storage_floor` column
     /// block is the LAST per-stage column family (after the `σ_fill`
     /// `filling_target` columns), so its presence/absence cannot shift any other
     /// family's column start. One stage-level slack column per filling hydro in the
-    /// Operating phase at this stage. Empty (`col_filling_floor_start == num_cols`
+    /// Operating phase at this stage. Empty (`col_filled_min_storage_floor_start == num_cols`
     /// minus the block width) at every non-operating stage of a filling hydro and
     /// for a non-filling system, leaving every other `col_*_start` and `num_cols`
     /// byte-identical.
-    pub(crate) col_filling_floor_start: usize,
+    pub(crate) col_filled_min_storage_floor_start: usize,
     /// System hydro indices (into `ctx.hydros`) emitting a soft `σ^{v-}`
     /// operating-floor row + column at this stage (filling hydros in the Operating
-    /// phase), in ascending order. Parallel to BOTH the `filling_floor` row block
+    /// phase), in ascending order. Parallel to BOTH the `filled_min_storage_floor` row block
     /// and the `σ^{v-}` column block: local floor index `i` maps to system hydro
-    /// `filling_floor_hydro_indices[i]`, at row `row_filling_floor_start + i` and
-    /// column `col_filling_floor_start + i`. DISTINCT from
-    /// `filling_target_hydro_indices` (`σ_fill`, terminal Filling stage only); the
+    /// `filled_min_storage_floor_hydro_indices[i]`, at row `row_filled_min_storage_floor_start + i` and
+    /// column `col_filled_min_storage_floor_start + i`. DISTINCT from
+    /// `filling_target_hydro_indices` (`σ_fill`, every Filling stage); the
     /// two never overlap. Empty except at an operating stage of a filling hydro.
-    pub(crate) filling_floor_hydro_indices: Vec<usize>,
+    pub(crate) filled_min_storage_floor_hydro_indices: Vec<usize>,
 
     // ── Role-(b) anticipated identity maps (own fields) ──────────────────────
     /// Reverse map: global thermal position → anticipated-local index. Built once
@@ -679,71 +681,44 @@ fn identify_evap_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<usize>
         .collect()
 }
 
-/// Collect the indices of hydros that emit an impound-retention row at this stage.
-///
-/// Membership is exactly the hydros whose [`filling_phase`] is `Phase::Filling`
-/// at `stage_id` — a per-stage, per-hydro derivation with no cached mask. The
-/// returned vector feeds this stage's [`StageLayout`], which owns the retention
-/// row offset (`row_filling_retention_start`); this helper only enumerates which
-/// hydros impound at this stage, never their offsets. The count drives the
-/// `filling_retention` row block sized in [`StageLayout::new`].
-///
-/// `PreFilling` and `Operating` are excluded: before `start_stage_id` the dam
-/// does not exist (no impounding), and at/after `entry` the plant operates
-/// normally (no impound cap). `stage_id` is the study `stage.id`, mirroring
-/// [`identify_fpha_hydros`]/[`identify_evap_hydros`]. A non-filling hydro is
-/// `Operating` at every stage, so the set is empty for a build with no filling
-/// hydros — and the `filling_retention` block collapses to zero rows, leaving
-/// `num_rows` bit-identical to a build without this family (the parity-neutrality
-/// contract: existing non-filling deterministic cases keep their row counts).
-fn identify_filling_retention_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<usize> {
-    (0..ctx.n_hydros)
-        .filter(|&h_idx| {
-            let hydro = &ctx.hydros[h_idx];
-            matches!(
-                filling_phase(hydro.filling.as_ref(), hydro.entry_stage_id, stage_id),
-                Phase::Filling
-            )
-        })
-        .collect()
-}
-
-/// Collect the indices of hydros that emit a terminal `σ_fill` target row +
+/// Collect the indices of hydros that emit a per-stage `σ_fill` target row +
 /// column at this stage.
 ///
 /// Membership is exactly the filling hydros (`filling.is_some()`) whose
-/// `entry_stage_id − 1 == stage_id` — the single TERMINAL Filling stage, derived
-/// inline with no cached mask. The returned vector feeds this stage's
+/// [`filling_phase`] is `Phase::Filling` at `stage_id` (i.e. `start_stage_id ≤
+/// stage_id < entry_stage_id`) — derived inline with no cached mask, mirroring
+/// [`identify_fpha_hydros`]/[`identify_evap_hydros`]. The returned vector feeds this stage's
 /// [`StageLayout`], which owns the `filling_target` row offset
 /// (`row_filling_target_start`) and the `σ_fill` slack column offset
-/// (`col_filling_target_start`); this helper only enumerates which hydros emit the
-/// terminal target here, never their offsets. The count drives both the
-/// `filling_target` row block and the `σ_fill` column block sized in
-/// [`StageLayout::new`].
+/// (`col_filling_target_start`); this helper only enumerates which hydros emit a
+/// target here, never their offsets. The count drives both the `filling_target`
+/// row block and the `σ_fill` column block sized in [`StageLayout::new`].
 ///
-/// The stage at id `entry − 1` IS in the Filling phase
-/// (`start ≤ entry − 1 < entry`), so [`filling_phase`] is unnecessary to consult —
-/// the `entry − 1` arithmetic already pins the single terminal Filling stage.
-/// Terminal-only at `entry − 1` is sufficient because the `filling_retention`
-/// per-stage impound cap rate-limits the fill (storage can rise by at most `ζ·F_h` per
-/// stage), so a single terminal target catches the cumulative shortfall; the
-/// wrong-but-compiling over-elaboration is one `σ_fill` per Filling stage (an
-/// intermediate per-stage trajectory target), which the design explicitly
-/// rejects. `entry_stage_id.is_none()` (a non-filling hydro, since entry requires
-/// filling by validation) never matches, so the set is empty for a build with no
-/// filling hydros — and both the `filling_target` row block and the `σ_fill`
-/// column block collapse to zero, leaving `num_rows`/`num_cols` bit-identical to a
-/// build without this family (the parity-neutrality contract: existing
-/// non-filling deterministic cases keep their row/column counts). `stage_id` is the study
-/// `stage.id`, mirroring [`identify_filling_retention_hydros`].
+/// EVERY filling stage carries a floor, NOT only the terminal stage at `entry −
+/// 1`: the model's per-stage minimum-target trajectory `V_target[t]` (computed
+/// backward from the dead volume in `build_stage_templates`) requires one soft
+/// floor `v_out[t] + σ_fill[t] ≥ V_target[t]` at each Filling stage. The
+/// wrong-but-compiling alternative — restricting membership to `entry − 1 ==
+/// stage_id` (the v1 terminal-only rule) — drops every intermediate floor and
+/// loses the minimum-accumulation guarantee at all but the last stage.
+/// `PreFilling` and `Operating` are excluded by [`filling_phase`]: before
+/// `start_stage_id` the dam does not exist, and at/after `entry` the soft
+/// operating floor (`filled_min_storage_floor`) takes over. A non-filling hydro is
+/// `Operating` at every stage, so the set is empty for a build with no filling
+/// hydros — and both the `filling_target` row block and the `σ_fill` column block
+/// collapse to zero, leaving `num_rows`/`num_cols` bit-identical to a build
+/// without this family (the parity-neutrality contract: existing non-filling
+/// deterministic cases keep their row/column counts). `stage_id` is the study
+/// `stage.id`, mirroring [`identify_fpha_hydros`]/[`identify_evap_hydros`].
 fn identify_filling_target_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<usize> {
     (0..ctx.n_hydros)
         .filter(|&h_idx| {
             let hydro = &ctx.hydros[h_idx];
             hydro.filling.is_some()
-                && hydro
-                    .entry_stage_id
-                    .is_some_and(|entry| entry - 1 == stage_id)
+                && matches!(
+                    filling_phase(hydro.filling.as_ref(), hydro.entry_stage_id, stage_id),
+                    Phase::Filling
+                )
         })
         .collect()
 }
@@ -754,17 +729,16 @@ fn identify_filling_target_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> 
 /// Membership is exactly the filling hydros (`filling.is_some()`) in the
 /// [`Phase::Operating`] phase at this stage (derived inline by [`filling_phase`],
 /// no cached mask). The returned vector feeds this stage's [`StageLayout`], which
-/// owns the `filling_floor` row offset (`row_filling_floor_start`) and the `σ^{v-}`
-/// slack column offset (`col_filling_floor_start`); this helper only enumerates
+/// owns the `filled_min_storage_floor` row offset (`row_filled_min_storage_floor_start`) and the `σ^{v-}`
+/// slack column offset (`col_filled_min_storage_floor_start`); this helper only enumerates
 /// which hydros emit the soft floor here, never their offsets. The count drives
-/// both the `filling_floor` row block and the `σ^{v-}` column block sized in
+/// both the `filled_min_storage_floor` row block and the `σ^{v-}` column block sized in
 /// [`StageLayout::new`].
 ///
 /// This is DISTINCT from [`identify_filling_target_hydros`] (`σ_fill`): `σ^{v-}`
-/// fires at EVERY Operating stage of a filling hydro, whereas `σ_fill` fires only
-/// at the single terminal Filling stage (`entry − 1`). The two families never
-/// overlap (Operating vs the last Filling stage), carry different costs, and must
-/// not be conflated.
+/// fires at EVERY Operating stage of a filling hydro, whereas `σ_fill` fires at
+/// EVERY Filling stage (`start ≤ id < entry`). The two families never overlap
+/// (Operating vs Filling), carry different costs, and must not be conflated.
 ///
 /// The soft floor is scoped to filling hydros DELIBERATELY. A non-filling hydro is
 /// [`Phase::Operating`] at every stage but `filling.is_none()`, so it never
@@ -774,12 +748,15 @@ fn identify_filling_target_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> 
 /// Operating hydro regardless of `filling` — would let the optimizer cheaply
 /// violate dead volume system-wide, the system-wide softening §3.4 of the design
 /// explicitly rejects. For a build with no filling hydros the set is empty, so
-/// both the `filling_floor` row block and the `σ^{v-}` column block collapse to
+/// both the `filled_min_storage_floor` row block and the `σ^{v-}` column block collapse to
 /// zero, leaving `num_rows`/`num_cols` bit-identical to a build without this
 /// family (the parity-neutrality contract: the existing deterministic cases keep
 /// their row/column counts). `stage_id` is the study `stage.id`, mirroring
 /// [`identify_filling_target_hydros`].
-fn identify_filling_floor_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<usize> {
+fn identify_filled_min_storage_floor_hydros(
+    ctx: &TemplateBuildCtx<'_>,
+    stage_id: i32,
+) -> Vec<usize> {
     (0..ctx.n_hydros)
         .filter(|&h_idx| {
             let hydro = &ctx.hydros[h_idx];
@@ -980,23 +957,19 @@ impl<'a> StageLayout<'a> {
         let (fpha_hydro_indices, fpha_planes_per_hydro) =
             identify_fpha_hydros(ctx, stage_idx, stage.id);
         let evap_hydro_indices = identify_evap_hydros(ctx, stage.id);
-        // Hydros in the Filling phase at this stage emit one impound-retention row
-        // each; the count sizes the `filling_retention` row block below. Keyed on
-        // `stage.id`, like FPHA/evap membership.
-        let filling_retention_hydro_indices = identify_filling_retention_hydros(ctx, stage.id);
-        // Filling hydros whose terminal Filling stage (`entry − 1`) is this stage
-        // emit one `σ_fill` target row + slack column each; the count sizes BOTH
-        // the `filling_target` row block (sibling to `filling_retention`, below)
-        // and the `σ_fill` column block (the last column family, below). Keyed on
-        // `stage.id`.
+        // Filling hydros in the Filling phase at this stage emit one `σ_fill`
+        // target row + slack column each; the count sizes BOTH the `filling_target`
+        // row block (after the operational-violation rows, below) and the `σ_fill`
+        // column block (the last column family, below). Keyed on `stage.id`.
         let filling_target_hydro_indices = identify_filling_target_hydros(ctx, stage.id);
         // Filling hydros in the Operating phase at this stage emit one soft
         // `σ^{v-}` operating-floor row + slack column each; the count sizes BOTH
-        // the `filling_floor` row block (sibling to `filling_target`, below) and
+        // the `filled_min_storage_floor` row block (sibling to `filling_target`, below) and
         // the `σ^{v-}` column block (the last column family, after `filling_target`,
-        // below). DISTINCT from the `σ_fill` set (terminal Filling stage only);
+        // below). DISTINCT from the `σ_fill` set (Operating vs Filling phase);
         // they never overlap. Keyed on `stage.id`.
-        let filling_floor_hydro_indices = identify_filling_floor_hydros(ctx, stage.id);
+        let filled_min_storage_floor_hydro_indices =
+            identify_filled_min_storage_floor_hydros(ctx, stage.id);
 
         // Inverse of `fpha_hydro_indices`: system hydro index → FPHA-local index.
         // Built once here so the matrix-fill helpers read the cached map instead of
@@ -1174,34 +1147,23 @@ impl<'a> StageLayout<'a> {
             post_equipment_row_start
         };
 
-        // Impound-retention rows: one per hydro in the Filling phase at this
-        // stage. Placed AFTER the operational-violation row block and BEFORE the
-        // fishing/anticipated-state-out-def/generic blocks — i.e. strictly inside
-        // the structural row region `[0, num_rows)` and ahead of the append-only
-        // cut rows that start at `num_rows`. A retention row written at any index
+        // Per-stage `σ_fill`-target rows: one per filling hydro in the Filling
+        // phase at this stage. Placed immediately AFTER the operational-violation
+        // row block (`row_min_generation_start + n_op_rows`, the prior block's end)
+        // and BEFORE the fishing/anticipated/generic blocks — strictly inside the
+        // structural row region `[0, num_rows)`, ahead of the append-only cut rows
+        // that start at `num_rows`. A `filling_target` row written at any index
         // >= num_rows would alias the appended cut rows and corrupt every cut
         // (slot-identity warm-start reconstruction matches cut rows from
         // `num_rows`), so the family MUST reserve its index here in the cursor
-        // chain, not be bolted on past `num_rows`. The block is empty (zero rows)
-        // when no hydro is Filling, so `row_anticipated_fishing_start` and every
-        // downstream cursor are unshifted for a non-filling system — `num_rows`
-        // stays bit-identical to a build without this family. This is the first of
-        // the pre-cut filling-row families; `σ_fill` and `σ^{v-}` add sibling
-        // blocks in the same region after it.
-        let n_filling_retention_rows = filling_retention_hydro_indices.len();
-        let row_filling_retention_start = row_min_generation_start + n_op_rows;
-
-        // Terminal `σ_fill`-target rows: one per filling hydro whose `entry − 1`
-        // is this stage. Placed as a SIBLING immediately AFTER the
-        // `filling_retention` block and BEFORE the fishing/anticipated/generic
-        // blocks — same pre-cut region, same "row >= num_rows aliases the
-        // append-only cut rows" invariant. The block is empty (zero rows) at every
-        // stage except a filling hydro's terminal stage, so
-        // `row_anticipated_fishing_start` and every downstream row cursor are
-        // unshifted for a non-filling system — `num_rows` stays bit-identical to a
-        // build without this family.
+        // chain. The block is empty (zero rows) at every non-Filling stage of a
+        // filling hydro, so `row_anticipated_fishing_start` and every downstream row
+        // cursor are unshifted for a non-filling system — `num_rows` stays
+        // bit-identical to a build without this family. This is the first of the
+        // pre-cut filling-row families; `σ^{v-}` adds a sibling block in the same
+        // region after it.
         let n_filling_target_rows = filling_target_hydro_indices.len();
-        let row_filling_target_start = row_filling_retention_start + n_filling_retention_rows;
+        let row_filling_target_start = row_min_generation_start + n_op_rows;
 
         // Soft `σ^{v-}` operating-floor rows: one per filling hydro in the Operating
         // phase at this stage. Placed as a SIBLING immediately AFTER the
@@ -1211,12 +1173,13 @@ impl<'a> StageLayout<'a> {
         // stage of a filling hydro and for a non-filling system, so
         // `row_anticipated_fishing_start` and every downstream row cursor are
         // unshifted — `num_rows` stays bit-identical to a build without this family.
-        let n_filling_floor_rows = filling_floor_hydro_indices.len();
-        let row_filling_floor_start = row_filling_target_start + n_filling_target_rows;
+        let n_filled_min_storage_floor_rows = filled_min_storage_floor_hydro_indices.len();
+        let row_filled_min_storage_floor_start = row_filling_target_start + n_filling_target_rows;
 
         // One fishing row per anticipated plant at every stage (always-active).
         let n_anticipated_fishing_rows = ctx.n_anticipated;
-        let row_anticipated_fishing_start = row_filling_floor_start + n_filling_floor_rows;
+        let row_anticipated_fishing_start =
+            row_filled_min_storage_floor_start + n_filled_min_storage_floor_rows;
 
         // Anticipated-state-out definition rows: one per ACTIVE plant. Active is
         // the single-owner gate `StateLayout::is_anticipated_decision_active`;
@@ -1256,12 +1219,12 @@ impl<'a> StageLayout<'a> {
         let generic =
             enumerate_generic_constraint_rows(ctx, stage, n_blks, col_generic_slack_start);
 
-        // Terminal `σ_fill` slack columns: the second-to-last per-stage column
+        // Per-stage `σ_fill` slack columns: the second-to-last per-stage column
         // family, placed after the generic-slack columns and before the `σ^{v-}`
-        // `filling_floor` columns. One stage-level slack per filling hydro whose
-        // `entry − 1` is this stage; addressed `col_filling_target_start + local_idx`
-        // over `filling_target_hydro_indices`. The block is empty at every
-        // non-terminal stage and for a non-filling system, so `num_cols` stays
+        // `filled_min_storage_floor` columns. One stage-level slack per filling hydro in the
+        // Filling phase at this stage; addressed `col_filling_target_start +
+        // local_idx` over `filling_target_hydro_indices`. The block is empty at
+        // every non-Filling stage and for a non-filling system, so `num_cols` stays
         // byte-identical to a build without this family.
         let col_filling_target_start = col_generic_slack_start + generic.n_generic_slack_cols;
 
@@ -1269,12 +1232,14 @@ impl<'a> StageLayout<'a> {
         // family, placed after the `σ_fill` `filling_target` columns so its
         // presence/absence cannot shift any other family's column start. One
         // stage-level slack per filling hydro in the Operating phase at this stage;
-        // addressed `col_filling_floor_start + local_idx` over
-        // `filling_floor_hydro_indices`. The block is empty at every non-operating
+        // addressed `col_filled_min_storage_floor_start + local_idx` over
+        // `filled_min_storage_floor_hydro_indices`. The block is empty at every non-operating
         // stage of a filling hydro and for a non-filling system, so `num_cols` stays
         // byte-identical to a build without this family.
-        let col_filling_floor_start = col_filling_target_start + filling_target_hydro_indices.len();
-        let num_cols = col_filling_floor_start + filling_floor_hydro_indices.len();
+        let col_filled_min_storage_floor_start =
+            col_filling_target_start + filling_target_hydro_indices.len();
+        let num_cols =
+            col_filled_min_storage_floor_start + filled_min_storage_floor_hydro_indices.len();
         let num_rows = row_generic_start + generic.n_generic_rows;
         let zeta = stage.blocks.iter().map(|b| b.duration_hours).sum::<f64>() * M3S_TO_HM3;
 
@@ -1365,14 +1330,12 @@ impl<'a> StageLayout<'a> {
             min_turbine_rows: oper.min_turbine_rows,
             min_generation_rows: oper.min_generation_rows,
             post_equipment_row_start,
-            row_filling_retention_start,
-            filling_retention_hydro_indices,
             row_filling_target_start,
             col_filling_target_start,
             filling_target_hydro_indices,
-            row_filling_floor_start,
-            col_filling_floor_start,
-            filling_floor_hydro_indices,
+            row_filled_min_storage_floor_start,
+            col_filled_min_storage_floor_start,
+            filled_min_storage_floor_hydro_indices,
             anticipated_local_by_sys_pos,
         }
     }
@@ -1896,26 +1859,12 @@ impl<'a> StageLayout<'a> {
         }
     }
 
-    /// Start of impound-retention rows (one per Filling-phase hydro at this
-    /// stage); reads `self.row_filling_retention_start`.
-    ///
-    /// Layout: `row_filling_retention_start() + local_filling_idx`, where the
-    /// local index runs over `filling_retention_hydro_indices` in order. The block
-    /// is empty when no hydro is Filling — this cursor then equals
-    /// `row_anticipated_fishing_start` and carries no rows, so reading it for an
-    /// empty block yields the (unused) shared cursor rather than a stale `0`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn row_filling_retention_start(&self) -> usize {
-        self.row_filling_retention_start
-    }
-
-    /// Start of terminal `σ_fill`-target rows (one per filling hydro whose
-    /// `entry − 1` is this stage); reads `self.row_filling_target_start`.
+    /// Start of per-stage `σ_fill`-target rows (one per filling hydro in the
+    /// Filling phase at this stage); reads `self.row_filling_target_start`.
     ///
     /// Layout: `row_filling_target_start() + local_target_idx`, where the local
     /// index runs over `filling_target_hydro_indices` in order. The block is empty
-    /// at every non-terminal stage — this cursor then equals
+    /// at every non-Filling stage — this cursor then equals
     /// `row_anticipated_fishing_start` and carries no rows.
     #[inline]
     #[must_use]
@@ -1923,12 +1872,12 @@ impl<'a> StageLayout<'a> {
         self.row_filling_target_start
     }
 
-    /// Start of terminal `σ_fill`-target slack columns (one per filling hydro whose
-    /// `entry − 1` is this stage); reads `self.col_filling_target_start`.
+    /// Start of per-stage `σ_fill`-target slack columns (one per filling hydro in
+    /// the Filling phase at this stage); reads `self.col_filling_target_start`.
     ///
     /// Layout: `col_filling_target_start() + local_target_idx`, parallel to
-    /// `row_filling_target_start()`. The block is empty at every non-terminal stage
-    /// — this cursor then equals `num_cols` and carries no columns.
+    /// `row_filling_target_start()`. The block is empty at every non-Filling stage
+    /// — this cursor then carries no columns.
     #[inline]
     #[must_use]
     pub(crate) fn col_filling_target_start(&self) -> usize {
@@ -1936,29 +1885,29 @@ impl<'a> StageLayout<'a> {
     }
 
     /// Start of soft `σ^{v-}` operating-floor rows (one per filling hydro in the
-    /// Operating phase at this stage); reads `self.row_filling_floor_start`.
+    /// Operating phase at this stage); reads `self.row_filled_min_storage_floor_start`.
     ///
-    /// Layout: `row_filling_floor_start() + local_floor_idx`, where the local index
-    /// runs over `filling_floor_hydro_indices` in order. The block is empty at every
+    /// Layout: `row_filled_min_storage_floor_start() + local_floor_idx`, where the local index
+    /// runs over `filled_min_storage_floor_hydro_indices` in order. The block is empty at every
     /// non-operating stage of a filling hydro — this cursor then equals
     /// `row_anticipated_fishing_start` and carries no rows.
     #[inline]
     #[must_use]
-    pub(crate) fn row_filling_floor_start(&self) -> usize {
-        self.row_filling_floor_start
+    pub(crate) fn row_filled_min_storage_floor_start(&self) -> usize {
+        self.row_filled_min_storage_floor_start
     }
 
     /// Start of soft `σ^{v-}` operating-floor slack columns (one per filling hydro
-    /// in the Operating phase at this stage); reads `self.col_filling_floor_start`.
+    /// in the Operating phase at this stage); reads `self.col_filled_min_storage_floor_start`.
     ///
-    /// Layout: `col_filling_floor_start() + local_floor_idx`, parallel to
-    /// `row_filling_floor_start()`. The block is empty at every non-operating stage
+    /// Layout: `col_filled_min_storage_floor_start() + local_floor_idx`, parallel to
+    /// `row_filled_min_storage_floor_start()`. The block is empty at every non-operating stage
     /// of a filling hydro — this cursor then equals `num_cols` and carries no
     /// columns.
     #[inline]
     #[must_use]
-    pub(crate) fn col_filling_floor_start(&self) -> usize {
-        self.col_filling_floor_start
+    pub(crate) fn col_filled_min_storage_floor_start(&self) -> usize {
+        self.col_filled_min_storage_floor_start
     }
 }
 
@@ -2100,6 +2049,7 @@ mod tests {
                 // factors; provide n_stages = 1 element vecs that won't panic.
                 cumulative_discount_factors: vec![1.0],
                 total_hours_per_stage: vec![744.0],
+                filling_v_target: BTreeMap::new(),
             }
         }
     }
@@ -2329,6 +2279,7 @@ mod tests {
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0],
                 total_hours_per_stage: vec![744.0],
+                filling_v_target: BTreeMap::new(),
             }
         }
     }
@@ -2496,6 +2447,7 @@ mod tests {
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0],
                 total_hours_per_stage: vec![744.0],
+                filling_v_target: BTreeMap::new(),
             }
         }
 
@@ -2524,12 +2476,12 @@ mod tests {
             StageLayout::new(&ctx, &state, &stage, 0).filling_target_hydro_indices
         }
 
-        /// `filling_floor_hydro_indices` for a stage built at `stage_id`.
-        fn filling_floor_indices_at(&self, stage_id: i32) -> Vec<usize> {
+        /// `filled_min_storage_floor_hydro_indices` for a stage built at `stage_id`.
+        fn filled_min_storage_floor_indices_at(&self, stage_id: i32) -> Vec<usize> {
             let ctx = self.make_ctx();
             let stage = stage_with_id(stage_id);
             let state = state_layout_for(&ctx);
-            StageLayout::new(&ctx, &state, &stage, 0).filling_floor_hydro_indices
+            StageLayout::new(&ctx, &state, &stage, 0).filled_min_storage_floor_hydro_indices
         }
 
         /// `num_rows` for a stage built at `stage_id` — the structural row count
@@ -2542,31 +2494,32 @@ mod tests {
         }
     }
 
-    /// The terminal `σ_fill` target is emitted only at the single stage with id
-    /// `entry − 1`. Both filling hydros share `entry = ENTRY_STAGE_ID = 3`, so
-    /// `entry − 1 == 2` is the only stage carrying the target — for BOTH of them.
-    /// The wrong-but-compiling over-elaboration is one target per Filling stage
-    /// (id 1 and id 2 here); this test pins terminal-only.
+    /// The per-stage `σ_fill` target is emitted at EVERY Filling stage, not only at
+    /// `entry − 1`. Both filling hydros share `start = 1`, `entry = 3`, so the
+    /// Filling stages are `{1, 2}`; both carry the target at BOTH. `PreFilling` (id 0)
+    /// and Operating (id ≥ 3) emit none. The wrong-but-compiling alternative is the
+    /// v1 terminal-only rule (`entry − 1 == stage_id`), which would drop the id-1
+    /// floor; this test pins per-stage Filling membership.
     #[test]
-    fn filling_target_emitted_only_at_entry_minus_one() {
+    fn filling_target_emitted_at_every_filling_stage() {
         let fixtures = FillingMembershipFixtures::new();
 
-        // entry − 1 = 2 (with entry = 3): both filling hydros (system indices 0, 1)
-        // carry the target.
-        assert_eq!(
-            fixtures.filling_target_indices_at(2),
-            vec![0, 1],
-            "both filling hydros carry the σ_fill target at id entry − 1"
-        );
+        // Filling stages 1 and 2 (start = 1, entry = 3): both filling hydros
+        // (system indices 0, 1) carry the target at every Filling stage.
+        for stage_id in [1, 2] {
+            assert_eq!(
+                fixtures.filling_target_indices_at(stage_id),
+                vec![0, 1],
+                "both filling hydros carry the σ_fill target at Filling id {stage_id}"
+            );
+        }
 
-        // Every other stage id — PreFilling (0, 1 is start), other Filling stages,
-        // and Operating — emits NO target. id 1 is a Filling stage (start) but not
-        // the terminal one, so it must be empty: terminal-only, not per-stage.
-        for stage_id in [0, 1, 3, 4] {
+        // PreFilling (id 0) and Operating (id ≥ entry = 3) emit NO target.
+        for stage_id in [0, 3, 4] {
             assert_eq!(
                 fixtures.filling_target_indices_at(stage_id),
                 Vec::<usize>::new(),
-                "no σ_fill target at id {stage_id} (only id entry − 1 = 2 carries it)"
+                "no σ_fill target at non-Filling id {stage_id}"
             );
         }
     }
@@ -2607,11 +2560,13 @@ mod tests {
         }
     }
 
-    /// The terminal `σ_fill` row block lands STRICTLY BELOW `num_rows` (the pre-cut
+    /// The `σ_fill` row block lands STRICTLY BELOW `num_rows` (the pre-cut
     /// region), ahead of the append-only cut rows that begin at `num_rows`. A row
     /// at index `>= num_rows` would alias a cut row and corrupt slot-identity
     /// warm-start reconstruction. The `σ_fill` column likewise lands strictly below
-    /// `num_cols`. This is the same invariant the `filling_retention` family upholds.
+    /// `num_cols`. The `filling_target` block is the FIRST pre-cut filling-row
+    /// family, so it follows the operational-violation rows directly (no retention
+    /// block precedes it).
     #[test]
     fn filling_target_row_and_col_below_structural_bounds() {
         let fixtures = FillingMembershipFixtures::new();
@@ -2633,12 +2588,12 @@ mod tests {
                 layout.num_rows
             );
         }
-        // The σ_fill rows sit immediately after the retention block (sibling
-        // placement) and before the fishing rows — i.e. inside the pre-cut region.
+        // The σ_fill rows sit immediately after the operational-violation rows (the
+        // last of which is `min_generation_rows`) and before the fishing rows — i.e.
+        // inside the pre-cut region, with no retention block in between.
         assert_eq!(
-            row_start,
-            layout.row_filling_retention_start() + layout.filling_retention_hydro_indices.len(),
-            "σ_fill rows follow the retention block as a sibling"
+            row_start, layout.min_generation_rows.end,
+            "σ_fill rows follow the operational-violation rows directly"
         );
 
         // Every σ_fill column index is strictly below num_cols.
@@ -2652,11 +2607,11 @@ mod tests {
             );
         }
         // At the terminal Filling stage (id 2) no hydro is Operating, so the
-        // sibling σ^{v-} `filling_floor` column block (the true last column family)
+        // sibling σ^{v-} `filled_min_storage_floor` column block (the true last column family)
         // is empty: its start coincides with num_cols and the σ_fill block is the
         // last occupied family, so num_cols = col_filling_target_start + n_targets.
         assert_eq!(
-            layout.col_filling_floor_start(),
+            layout.col_filled_min_storage_floor_start(),
             layout.num_cols,
             "σ^{{v-}} column block empty at the terminal Filling stage"
         );
@@ -2667,46 +2622,50 @@ mod tests {
         );
     }
 
-    /// A non-filling stage of a filling system keeps `num_rows` equal to the same
-    /// system with the filling configs stripped — the target family adds rows ONLY
-    /// at id `entry − 1`. This isolates the row-count delta to the single terminal
-    /// stage.
+    /// The `σ_fill` target family adds rows at EVERY Filling stage (ids 1, 2 here)
+    /// and NONE at `PreFilling` (id 0) or Operating (id ≥ 3). The non-Filling stages
+    /// keep an empty target block (the fishing-row start coincides with the
+    /// target-row start), isolating the per-stage target rows to the Filling window.
     #[test]
-    fn filling_target_adds_rows_only_at_terminal_stage() {
+    fn filling_target_adds_rows_at_every_filling_stage() {
         let fixtures = FillingMembershipFixtures::new();
-        // Non-terminal stages: retention may add rows (Filling stages), but the
-        // σ_fill TARGET adds none. Confirm the target block is empty there by
-        // checking the fishing-row start coincides with the target-row start.
-        for stage_id in [0, 1, 3, 4] {
+        // PreFilling (id 0) and Operating (id 3, 4): the σ_fill TARGET adds no rows.
+        for stage_id in [0, 3, 4] {
             let ctx = fixtures.make_ctx();
             let stage = stage_with_id(stage_id);
             let state = state_layout_for(&ctx);
             let layout = StageLayout::new(&ctx, &state, &stage, 0);
             assert!(
                 layout.filling_target_hydro_indices.is_empty(),
-                "no σ_fill target rows at non-terminal id {stage_id}"
+                "no σ_fill target rows at non-Filling id {stage_id}"
             );
             // Anchor unaffected: same fixture exercised in num_rows_at below.
             let _ = fixtures.num_rows_at(stage_id);
         }
-        // The terminal stage adds exactly 2 target rows (one per filling hydro).
-        assert_eq!(fixtures.filling_target_indices_at(2).len(), 2);
+        // Every Filling stage (ids 1, 2) adds exactly 2 target rows (one per hydro).
+        for stage_id in [1, 2] {
+            assert_eq!(
+                fixtures.filling_target_indices_at(stage_id).len(),
+                2,
+                "Filling id {stage_id} adds one σ_fill target row per filling hydro"
+            );
+        }
     }
 
     /// The soft `σ^{v-}` operating floor is emitted at EVERY `Operating` stage of a
     /// filling hydro (id ≥ entry = 3), for BOTH filling hydros — distinct from the
-    /// terminal-only `σ_fill` target. `PreFilling` (id 0) and `Filling` (id 1, 2)
+    /// every-Filling-stage `σ_fill` target. `PreFilling` (id 0) and `Filling` (id 1, 2)
     /// emit none. This pins the `Operating`-only scope and the `σ^{v-}`/`σ_fill`
     /// stage split.
     #[test]
-    fn filling_floor_emitted_at_every_operating_stage() {
+    fn filled_min_storage_floor_emitted_at_every_operating_stage() {
         let fixtures = FillingMembershipFixtures::new();
 
         // Operating (id >= entry = 3): both filling hydros carry the floor at every
         // stage, not just one terminal stage.
         for stage_id in [3, 4, 7] {
             assert_eq!(
-                fixtures.filling_floor_indices_at(stage_id),
+                fixtures.filled_min_storage_floor_indices_at(stage_id),
                 vec![0, 1],
                 "both filling hydros carry σ^{{v-}} at Operating id {stage_id}"
             );
@@ -2715,7 +2674,7 @@ mod tests {
         // PreFilling (id 0) and Filling (id 1, 2 = the σ_fill terminal): no floor.
         for stage_id in [0, 1, 2] {
             assert_eq!(
-                fixtures.filling_floor_indices_at(stage_id),
+                fixtures.filled_min_storage_floor_indices_at(stage_id),
                 Vec::<usize>::new(),
                 "no σ^{{v-}} at non-operating id {stage_id}"
             );
@@ -2724,9 +2683,9 @@ mod tests {
         // Mutual exclusivity at the boundary: id 2 (entry − 1) carries σ_fill but
         // NOT σ^{v-}; id 3 (entry) carries σ^{v-} but NOT σ_fill.
         assert_eq!(fixtures.filling_target_indices_at(2), vec![0, 1]);
-        assert!(fixtures.filling_floor_indices_at(2).is_empty());
+        assert!(fixtures.filled_min_storage_floor_indices_at(2).is_empty());
         assert!(fixtures.filling_target_indices_at(3).is_empty());
-        assert_eq!(fixtures.filling_floor_indices_at(3), vec![0, 1]);
+        assert_eq!(fixtures.filled_min_storage_floor_indices_at(3), vec![0, 1]);
     }
 
     /// Parity-neutrality: a non-filling system never emits a `σ^{v-}` floor, so
@@ -2735,14 +2694,17 @@ mod tests {
     /// `filling` — would shift `num_rows` and alias the append-only cut rows for the
     /// existing deterministic cases.
     #[test]
-    fn non_filling_system_no_filling_floor_num_rows_unchanged() {
+    fn non_filling_system_no_filled_min_storage_floor_num_rows_unchanged() {
         let fixtures = FphaMixFixtures::new();
         let layout_at = |stage_id: i32| {
             let ctx = fixtures.make_ctx();
             let stage = stage_with_id(stage_id);
             let state = state_layout_for(&ctx);
             let layout = StageLayout::new(&ctx, &state, &stage, 0);
-            (layout.filling_floor_hydro_indices.clone(), layout.num_rows)
+            (
+                layout.filled_min_storage_floor_hydro_indices.clone(),
+                layout.num_rows,
+            )
         };
         let (reference_floors, reference_num_rows) = layout_at(0);
         assert_eq!(
@@ -3377,6 +3339,7 @@ mod tests {
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0; n_stages],
                 total_hours_per_stage: vec![744.0; n_stages],
+                filling_v_target: BTreeMap::new(),
             }
         }
     }
@@ -3633,6 +3596,7 @@ mod tests {
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0; n_stages],
                 total_hours_per_stage: vec![744.0; n_stages],
+                filling_v_target: BTreeMap::new(),
             }
         }
 

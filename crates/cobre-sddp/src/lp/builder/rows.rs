@@ -25,9 +25,8 @@ pub(super) fn fill_stage_rows(
         &mut row_lower,
         &mut row_upper,
     );
-    fill_filling_retention_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
-    fill_filling_target_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
-    fill_filling_floor_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
+    fill_filling_target_rows(ctx, stage.id, layout, &mut row_lower, &mut row_upper);
+    fill_filled_min_storage_floor_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
     fill_load_balance_rows(
         ctx,
         stage,
@@ -129,93 +128,60 @@ fn fill_water_balance_rows(
     }
 }
 
-/// Fill impound-retention row bounds: `≥` with `row_lower = −ζ·F_h`,
+/// Fill per-stage `σ_fill`-target row bounds: `≥` with `row_lower = V_target[t]`,
 /// `row_upper = +∞`.
 ///
-/// One row per Filling-phase hydro at this stage (the `filling_retention` family;
-/// the LHS coefficients are emitted by
-/// [`super::entries::fill_filling_retention_entries`]). The row reads, in hm³:
-///
-/// ```text
-/// Σ_blk τ_h·(release_h) − Σ_blk τ_h·(upstream release) − ζ·z_h ≥ −ζ·F_h
-/// ```
-///
-/// `F_h` is the RESOLVED per-stage `filling_min_rate_m3s`
-/// (`hydro_bounds(h_idx, stage_idx).filling_min_rate_m3s`), NOT the raw
-/// `FillingConfig.filling_min_rate_m3s` scalar — the impound cap can vary per stage,
-/// so reading the entity field directly would silently drop any per-stage
-/// override. The realized incremental inflow rides the `z_h` column on the LHS
-/// (scenario-exact, see the entries doc), so the RHS carries ONLY the constant
-/// `−ζ·F_h`; this row receives NO solve-time noise patch (its scenario inflow is
-/// the patched `z_h` column, not a patched RHS).
-///
-/// With `F_h = 0` the bound is `0`, i.e. `total release ≥ ζ·z_h` (the reservoir
-/// must pass the entire realized natural inflow downstream — a zero impound cap).
-///
-/// No-op when no hydro is in the Filling phase (the index list is empty).
-fn fill_filling_retention_rows(
-    ctx: &TemplateBuildCtx<'_>,
-    stage_idx: usize,
-    layout: &StageLayout,
-    row_lower: &mut [f64],
-    row_upper: &mut [f64],
-) {
-    let zeta = layout.zeta;
-    let row_start = layout.row_filling_retention_start();
-    for (local_idx, &h_idx) in layout.filling_retention_hydro_indices.iter().enumerate() {
-        let f_h = ctx
-            .resolved
-            .bounds
-            .hydro_bounds(h_idx, stage_idx)
-            .filling_min_rate_m3s;
-        let row = row_start + local_idx;
-        row_lower[row] = -zeta * f_h;
-        row_upper[row] = f64::INFINITY;
-    }
-}
-
-/// Fill terminal `σ_fill`-target row bounds: `≥` with `row_lower = min_storage_hm3`,
-/// `row_upper = +∞`.
-///
-/// One row per filling hydro whose `entry_stage_id − 1 == stage.id` at this stage
-/// (the `filling_target` family; the LHS coefficients `v_h + σ_fill` are emitted by
+/// One row per filling hydro in the Filling phase at this stage (the
+/// `filling_target` family; the LHS coefficients `v_h + σ_fill` are emitted by
 /// [`super::entries::fill_filling_target_entries`]). The row reads, in hm³:
 ///
 /// ```text
-/// v_h + σ_fill ≥ min_storage_hm3
+/// v_h + σ_fill ≥ V_target[t]
 /// ```
 ///
-/// `min_storage_hm3` is the RESOLVED per-stage dead volume
-/// (`hydro_bounds(h_idx, stage_idx).min_storage_hm3`), the same field
-/// `fill_storage_columns` reads for the operating storage floor — reading the raw
-/// `Hydro.min_storage_hm3` entity field instead would silently drop any per-stage
-/// override. The terminal target is the dead volume itself (no separate target
-/// field): the reservoir must reach `min_storage_hm3` by the last Filling stage, or
-/// `σ_fill > 0` absorbs the shortfall at the highest penalty in the system.
+/// **Contract — the RHS is the per-stage `V_target[t]` (backward-anchored), NOT
+/// `min_storage` at every stage.** `V_target[t]` is the precomputed minimum
+/// target-storage trajectory read from `ctx.filling_v_target[(h_idx, stage_id)]`;
+/// it is folded backward from the dead volume in
+/// [`build_filling_v_target`](super::template::build_filling_v_target) so the LAST
+/// Filling stage's floor equals `min_storage_hm3` while every EARLIER stage's
+/// floor is strictly lower (the reservoir is only required to have accumulated the
+/// running minimum by stage `t`). The wrong-but-compiling alternative — writing
+/// the resolved `min_storage_hm3` at every Filling stage (the v1 terminal rule
+/// applied per-stage) — would demand the reservoir already hold the full dead
+/// volume from the FIRST Filling stage, an over-strict floor that the soft slack
+/// would absorb at cost every stage. The trajectory cannot be recomputed here (a
+/// per-stage helper cannot see other stages' ζ·rate), so it MUST come from the
+/// precompute.
 ///
 /// This is a SOFT `≥` (the `σ_fill` slack relaxes it), never a hard column bound on
-/// `v_h`: a hydro that filled short must keep a feasible LP, with the cost driving
+/// `v_h`: a hydro that fills short must keep a feasible LP, with the cost driving
 /// `σ_fill → 0` whenever water permits.
 ///
-/// No-op at every non-terminal stage and for a non-filling system (the index list
+/// No-op at every non-filling stage and for a non-filling system (the index list
 /// is empty), so `row_lower`/`row_upper` are byte-identical to a build without this
 /// family.
 fn fill_filling_target_rows(
     ctx: &TemplateBuildCtx<'_>,
-    stage_idx: usize,
+    stage_id: i32,
     layout: &StageLayout,
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
     let row_start = layout.row_filling_target_start();
     for (local_idx, &h_idx) in layout.filling_target_hydro_indices.iter().enumerate() {
-        let min_storage = ctx
-            .resolved
-            .bounds
-            .hydro_bounds(h_idx, stage_idx)
-            .min_storage_hm3;
+        // Membership (`identify_filling_target_hydros`) and the precompute
+        // (`build_filling_v_target`) share the Filling-phase predicate, so every
+        // enumerated `(h_idx, stage_id)` has a `V_target` entry; the
+        // `debug_assert` pins that coupling without a hot-path branch in release.
+        let v_target = ctx.filling_v_target.get(&(h_idx, stage_id)).copied();
+        debug_assert!(
+            v_target.is_some(),
+            "no V_target for filling hydro {h_idx} at stage id {stage_id}: \
+             filling_target membership and the V_target precompute disagree"
+        );
         let row = row_start + local_idx;
-        row_lower[row] = min_storage;
+        row_lower[row] = v_target.unwrap_or(0.0);
         row_upper[row] = f64::INFINITY;
     }
 }
@@ -224,8 +190,8 @@ fn fill_filling_target_rows(
 /// `row_lower = min_storage_hm3`, `row_upper = +∞`.
 ///
 /// One row per filling hydro in the Operating phase at this stage (the
-/// `filling_floor` family; the LHS coefficients `v_h + σ^{v-}` are emitted by
-/// [`super::entries::fill_filling_floor_entries`]). The row reads, in hm³:
+/// `filled_min_storage_floor` family; the LHS coefficients `v_h + σ^{v-}` are emitted by
+/// [`super::entries::fill_filled_min_storage_floor_entries`]). The row reads, in hm³:
 ///
 /// ```text
 /// v_h + σ^{v-} ≥ min_storage_hm3
@@ -243,22 +209,27 @@ fn fill_filling_target_rows(
 /// storage recovers above `min_storage`.
 ///
 /// DISTINCT from `fill_filling_target_rows` (`σ_fill`): `σ^{v-}` fires at EVERY
-/// Operating stage of a filling hydro, whereas `σ_fill` fires only at the single
-/// terminal Filling stage (`entry − 1`). Same `≥`/RHS shape, different stage scope,
-/// different slack column and cost.
+/// Operating stage of a filling hydro, whereas `σ_fill` fires at EVERY Filling
+/// stage (`start ≤ id < entry`). Same `≥` shape, different RHS
+/// (`min_storage` here vs the per-stage `V_target[t]` there), non-overlapping
+/// stage scope (Operating vs Filling), different slack column and cost.
 ///
 /// No-op at every non-operating stage of a filling hydro and for a non-filling
 /// system (the index list is empty), so `row_lower`/`row_upper` are byte-identical
 /// to a build without this family.
-fn fill_filling_floor_rows(
+fn fill_filled_min_storage_floor_rows(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
     layout: &StageLayout,
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    let row_start = layout.row_filling_floor_start();
-    for (local_idx, &h_idx) in layout.filling_floor_hydro_indices.iter().enumerate() {
+    let row_start = layout.row_filled_min_storage_floor_start();
+    for (local_idx, &h_idx) in layout
+        .filled_min_storage_floor_hydro_indices
+        .iter()
+        .enumerate()
+    {
         let min_storage = ctx
             .resolved
             .bounds

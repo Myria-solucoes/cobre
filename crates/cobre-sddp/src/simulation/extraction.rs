@@ -68,11 +68,11 @@ pub(crate) struct HydroReverseLookup {
     /// slack column at this stage (its terminal Filling stage), `None` otherwise.
     /// The `σ_fill` column is then `geometry.filling_target_col.start + local_idx`.
     pub(crate) filling_target: Vec<Option<usize>>,
-    /// `filling_floor[h]` is `Some(local_idx)` if hydro `h` owns a `σ^{v-}`
+    /// `filled_min_storage_floor[h]` is `Some(local_idx)` if hydro `h` owns a `σ^{v-}`
     /// operating-floor slack column at this stage (an Operating stage of a filling
     /// hydro), `None` otherwise. The `σ^{v-}` column is then
-    /// `geometry.filling_floor_col.start + local_idx`.
-    pub(crate) filling_floor: Vec<Option<usize>>,
+    /// `geometry.filled_min_storage_floor_col.start + local_idx`.
+    pub(crate) filled_min_storage_floor: Vec<Option<usize>>,
 }
 
 impl HydroReverseLookup {
@@ -80,7 +80,7 @@ impl HydroReverseLookup {
     ///
     /// Allocates four `Vec<Option<usize>>` of length `n_hydros`, populated from the
     /// per-stage `fpha_hydro_indices` / `evap_hydro_indices` /
-    /// `filling_target_hydro_indices` / `filling_floor_hydro_indices`. Reads the
+    /// `filling_target_hydro_indices` / `filled_min_storage_floor_hydro_indices`. Reads the
     /// stage-correct lists from `geometry`. Using a single global stage-0 list for a
     /// stage whose membership differs IS the defect this per-stage build exists to
     /// forbid.
@@ -97,15 +97,19 @@ impl HydroReverseLookup {
         for (local, &sys) in geometry.filling_target_hydro_indices.iter().enumerate() {
             filling_target[sys] = Some(local);
         }
-        let mut filling_floor = vec![None; n_hydros];
-        for (local, &sys) in geometry.filling_floor_hydro_indices.iter().enumerate() {
-            filling_floor[sys] = Some(local);
+        let mut filled_min_storage_floor = vec![None; n_hydros];
+        for (local, &sys) in geometry
+            .filled_min_storage_floor_hydro_indices
+            .iter()
+            .enumerate()
+        {
+            filled_min_storage_floor[sys] = Some(local);
         }
         Self {
             fpha,
             evap,
             filling_target,
-            filling_floor,
+            filled_min_storage_floor,
         }
     }
 
@@ -131,7 +135,7 @@ impl HydroReverseLookup {
 ///
 /// `local_idx` is the hydro's slot within the family (resolved by the
 /// [`HydroReverseLookup`] system→slot map); `col_range` is the family's per-stage
-/// column range (`geometry.filling_target_col` / `geometry.filling_floor_col`). When
+/// column range (`geometry.filling_target_col` / `geometry.filled_min_storage_floor_col`). When
 /// `local_idx` is `None` — the common non-filling / `PreFilling` / off-terminal case —
 /// the slack column does not exist for this `(stage, hydro)`, so the realized
 /// violation is `0.0`. Indexing is checked (`get().unwrap_or(0.0)`), so a malformed
@@ -715,8 +719,8 @@ fn extract_hydro_no_turbine(
     );
     let storage_violation_below = read_filling_slack_primal(
         view.primal,
-        &spec.geometry.filling_floor_col,
-        lookup.filling_floor[h],
+        &spec.geometry.filled_min_storage_floor_col,
+        lookup.filled_min_storage_floor[h],
     );
 
     SimulationHydroResult {
@@ -861,8 +865,8 @@ impl HydroStageContext {
         );
         let storage_violation_below = read_filling_slack_primal(
             view.primal,
-            &spec.geometry.filling_floor_col,
-            lookup.filling_floor[h],
+            &spec.geometry.filled_min_storage_floor_col,
+            lookup.filled_min_storage_floor[h],
         );
         let conv = spec.energy_conversion.conversion(h, spec.stage_index);
         let rho_acum = spec
@@ -2010,8 +2014,8 @@ mod tests {
         let geom = StageGeometry {
             filling_target_hydro_indices: vec![2],
             filling_target_col: 500..501,
-            filling_floor_hydro_indices: vec![0],
-            filling_floor_col: 600..601,
+            filled_min_storage_floor_hydro_indices: vec![0],
+            filled_min_storage_floor_col: 600..601,
             ..StageGeometry::default()
         };
 
@@ -2026,11 +2030,11 @@ mod tests {
 
         // σ^{v-}: only hydro 0, at slot 0 ⇒ column 600. Others absent. Independent of
         // the σ_fill family — hydro 0 has a floor column but no target column.
-        assert_eq!(lookup.filling_floor[0], Some(0));
-        assert_eq!(lookup.filling_floor[1], None);
-        assert_eq!(lookup.filling_floor[2], None);
-        let floor_local = lookup.filling_floor[0].expect("hydro 0 owns a σ^{v-} column");
-        assert_eq!(geom.filling_floor_col.start + floor_local, 600);
+        assert_eq!(lookup.filled_min_storage_floor[0], Some(0));
+        assert_eq!(lookup.filled_min_storage_floor[1], None);
+        assert_eq!(lookup.filled_min_storage_floor[2], None);
+        let floor_local = lookup.filled_min_storage_floor[0].expect("hydro 0 owns a σ^{v-} column");
+        assert_eq!(geom.filled_min_storage_floor_col.start + floor_local, 600);
     }
 
     /// `read_filling_slack_primal` returns the solved primal at `start + local_idx`
@@ -2134,7 +2138,7 @@ mod tests {
     /// stage-level), while a hydro absent from the family stays `0.0`. A non-empty
     /// `turbine` range routes `extract_hydros` through the per-block branch.
     #[test]
-    fn extract_reads_binding_filling_floor_slack_per_block_branch() {
+    fn extract_reads_binding_filled_min_storage_floor_slack_per_block_branch() {
         let study_dims = crate::indexer::test_fixtures::study_dims();
         let state = crate::indexer::test_fixtures::state_layout(2, 1);
         let ec = zero_energy_conversion(2, 1);
@@ -2160,8 +2164,8 @@ mod tests {
             turbine: 9..11,
             spillage: 11..13,
             n_blks: 1,
-            filling_floor_hydro_indices: vec![1],
-            filling_floor_col: 13..14,
+            filled_min_storage_floor_hydro_indices: vec![1],
+            filled_min_storage_floor_col: 13..14,
             ..crate::indexer::test_fixtures::geom(2, 1)
         };
 

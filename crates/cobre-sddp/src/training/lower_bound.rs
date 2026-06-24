@@ -2067,9 +2067,9 @@ mod tests {
     /// Two filling hydros, both white-noise (`max_par_order = 0`), independent (no
     /// cascade), on a single bus:
     /// - `H_A` (id 3): `start_stage_id = 0`, `entry_stage_id = 1`. At stage 0 it is
-    ///   in the terminal `Filling` stage (`entry − 1 == 0`), so stage 0 carries
-    ///   BOTH the `filling_retention` row family and the `filling_target`/`σ_fill`
-    ///   row+column family. Its noise is NOT zeroed (Filling keeps PAR noise).
+    ///   in the terminal `Filling` stage (`entry − 1 == 0`), so stage 0 carries the
+    ///   `filling_target`/`σ_fill` row+column family. Its noise is NOT zeroed
+    ///   (Filling keeps PAR noise).
     /// - `H_B` (id 4): `start_stage_id = 2`, `entry_stage_id = 4`. At stage 0
     ///   (`id 0 < start 2`) it is `PreFilling`, so `compute_noise_scale` zeros its
     ///   stage-0 `noise_scale` entry.
@@ -2436,7 +2436,10 @@ mod tests {
     }
 
     /// AC1: the lower-bound `StageTemplate` (= forward/backward `templates[0]`)
-    /// carries the filling row families present in the production template, and the
+    /// carries the filling row families present in the production template — the
+    /// per-stage `filling_target`/`σ_fill` family at EVERY Filling stage (the
+    /// per-stage widening, not only the terminal `entry − 1` stage) and the renamed
+    /// `filled_min_storage_floor`/`σ^{v-}` operating-floor family — and the
     /// `PreFilling` hydro's stage-0 `noise_scale` entry is `0.0`.
     ///
     /// The lower bound's `LbEvalSpec.template` is bound to `stage_ctx.templates[0]`
@@ -2451,14 +2454,9 @@ mod tests {
         assert_eq!(n_hydros, 2, "fixture has two filling hydros");
 
         // Stage 0 is H_A's terminal Filling stage: the per-stage geometry the
-        // template was baked with must carry the filling_retention AND
-        // filling_target (σ_fill) row families, plus the σ_fill slack column.
+        // template was baked with must carry the filling_target (σ_fill) row family
+        // plus the σ_fill slack column.
         let geom0 = &templates.geometry_per_stage[0];
-        assert!(
-            !geom0.filling_retention.is_empty(),
-            "stage 0 (H_A terminal Filling) must carry a filling_retention row, got {:?}",
-            geom0.filling_retention
-        );
         assert!(
             !geom0.filling_target.is_empty(),
             "stage 0 (H_A entry − 1) must carry a filling_target/σ_fill row, got {:?}",
@@ -2476,11 +2474,9 @@ mod tests {
         // `>= num_rows` would alias a cut row.)
         let tpl0 = &templates.templates[0];
         assert!(
-            geom0.filling_retention.end <= tpl0.num_rows
-                && geom0.filling_target.end <= tpl0.num_rows,
-            "filling rows must lie within templates[0].num_rows ({}): retention {:?}, target {:?}",
+            geom0.filling_target.end <= tpl0.num_rows,
+            "filling rows must lie within templates[0].num_rows ({}): target {:?}",
             tpl0.num_rows,
-            geom0.filling_retention,
             geom0.filling_target
         );
         assert!(
@@ -2490,14 +2486,61 @@ mod tests {
             geom0.filling_target_col
         );
 
+        // Per-stage widening: the `filling_target`/`σ_fill` family fires at EVERY
+        // Filling stage (`start ≤ id < entry`), not only the terminal `entry − 1`
+        // one. H_A (start 0, entry 1) is Filling at id 0 only; H_B (start 2, entry 4)
+        // is Filling at ids 2 AND 3. So the family must be present at all three
+        // {0, 2, 3} and absent at the non-filling stages {1, 4}. A pre-widening build
+        // that emitted the family only at the terminal stage would leave stages 2/3
+        // empty — the regression this assertion pins. The lower bound loads
+        // `templates[0]` (stage 0), so stage 0's membership is the directly-consumed
+        // one; the later filling stages are asserted on the same `geometry_per_stage`
+        // the forward/backward passes load, proving the widening is template-driven
+        // at every stage the lower bound or its sibling passes could evaluate.
+        let filling_stage_ids = [0_usize, 2, 3];
+        for &fs in &filling_stage_ids {
+            let geom = &templates.geometry_per_stage[fs];
+            assert!(
+                !geom.filling_target.is_empty(),
+                "stage {fs} is a Filling stage and must carry a filling_target/σ_fill \
+                 row family (per-stage widening), got {:?}",
+                geom.filling_target
+            );
+            assert!(
+                !geom.filling_target_col.is_empty(),
+                "stage {fs} is a Filling stage and must carry the σ_fill slack column \
+                 (per-stage widening), got {:?}",
+                geom.filling_target_col
+            );
+            assert_eq!(
+                geom.filling_target_hydro_indices.len(),
+                geom.filling_target_col.len(),
+                "stage {fs}: the sparse filling_target hydro-index list must be parallel \
+                 to the σ_fill column range"
+            );
+        }
+        // Contrast: the non-filling stages carry NO filling_target family, so the
+        // assertion above is a real per-stage signal, not a tautology that would also
+        // pass for an always-on family. Stage 1: H_A Operating (id 1 ≥ entry 1),
+        // H_B PreFilling (id 1 < start 2). Stage 4: H_B Operating (id 4 ≥ entry 4).
+        for &ns in &[1_usize, 4] {
+            let geom = &templates.geometry_per_stage[ns];
+            assert!(
+                geom.filling_target.is_empty(),
+                "stage {ns} is NOT a Filling stage for either hydro, so it must carry \
+                 no filling_target/σ_fill row, got {:?}",
+                geom.filling_target
+            );
+        }
+
         // A later Operating stage of H_B (id 4 == entry) must carry the
-        // filling_floor/σ^{v-} family — proving the third filling row family is
+        // filled_min_storage_floor/σ^{v-} family — proving the third filling row family is
         // template-driven too (it just does not fire at stage 0 for these hydros).
         let geom4 = &templates.geometry_per_stage[4];
         assert!(
-            !geom4.filling_floor.is_empty(),
-            "stage 4 (H_B Operating) must carry a filling_floor/σ^{{v-}} row, got {:?}",
-            geom4.filling_floor
+            !geom4.filled_min_storage_floor.is_empty(),
+            "stage 4 (H_B Operating) must carry a filled_min_storage_floor/σ^{{v-}} row, got {:?}",
+            geom4.filled_min_storage_floor
         );
 
         // PreFilling noise-scale zeroing: H_B is PreFilling at stage 0 (id 0 <
@@ -2534,12 +2577,18 @@ mod tests {
     fn lower_bound_never_references_filling_gating() {
         // Filling-gating symbols assembled from fragments so they are absent from
         // this file's own bytes (the source text scanned below is this very file).
-        let needles: [String; 5] = [
+        // The needle set tracks the live filling row families: the per-stage
+        // `σ_fill`/`filling_target` family and the renamed `filled_min_storage_floor`
+        // (`σ^{v-}`) operating-floor family. There is no `filling_retention` needle:
+        // the retention family was removed (the Filling phase keeps PAR noise via
+        // `noise_scale`, not a retention row), so referencing it would itself be a
+        // stale symbol — the rename/removal is mirrored here so the guard cannot rot
+        // back to the abandoned family name.
+        let needles: [String; 4] = [
             ["filling", "_phase"].concat(),
             ["Phase", "::"].concat(),
-            ["filling", "_retention"].concat(),
             ["sigma", "_fill"].concat(),
-            ["filling", "_floor"].concat(),
+            ["filled", "_min_storage_floor"].concat(),
         ];
 
         // The full lower-bound module source. Only the PRODUCTION region (above the
