@@ -1,7 +1,7 @@
 # Hydro dead-volume filling and commissioning
 
 > **Status**: Shipped (v1). Authoritative specification for commissioning windows
-> on hydro reservoirs and the dead-volume filling lifecycle. A proposed successor,
+> on hydro reservoirs and the dead-volume filling lifecycle. The shipped successor,
 > `hydro-filling-volume-target-reformulation.md`, supersedes the formulation
 > sections §3.1 (impound cap → minimum-rate floors) and §3.3 (terminal `σ_fill` →
 > per-stage targets); the input-model sections §5.3 (`filling_inflow_m3s` →
@@ -10,8 +10,9 @@
 > placement). It **keeps** §3.2 (PreFilling short-circuit, minus the cap-row port),
 > §3.4 (the soft operating floor — kept, family renamed `filled_min_storage_floor`,
 > penalty ordering flipped), §3.5, §3.6, §3.7 (continuous handoff), §5.1 (no new
-> field), §5.2, and the remaining §8 decisions. **Until the successor ships, this
-> document is the live system**; the successor is design-only.
+> field), §5.2, and the remaining §8 decisions. The successor has shipped;
+> those superseded sections are now governed by
+> `hydro-filling-volume-target-reformulation.md`.
 > Hydro is the last and hardest of the six commissionable entity
 > types: its storage is a Benders **state coordinate**, so it cannot use the
 > column-omission/zero-influence mechanism the other five use — it must keep its

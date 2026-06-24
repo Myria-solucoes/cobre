@@ -86,7 +86,7 @@ all fields — required and optional — for a single plant:
       },
       "filling": {
         "start_stage_id": 48,
-        "filling_inflow_m3s": 100.0
+        "filling_min_rate_m3s": 100.0
       },
       "penalties": {
         "spillage_cost": 0.01,
@@ -727,14 +727,14 @@ filling operation is active.
 ```json
 "filling": {
   "start_stage_id": 48,
-  "filling_inflow_m3s": 100.0
+  "filling_min_rate_m3s": 100.0
 }
 ```
 
 | Field                | Description                                                     |
 | -------------------- | --------------------------------------------------------------- |
 | `start_stage_id`     | Stage index at which filling begins (inclusive).                |
-| `filling_inflow_m3s` | Constant inflow applied to the reservoir during filling [m³/s]. |
+| `filling_min_rate_m3s` | Per-stage minimum accumulation rate during filling [m³/s]: anchors a per-stage minimum target-storage trajectory on `min_storage_hm3`. Not an applied inflow and not a cap. |
 
 ---
 

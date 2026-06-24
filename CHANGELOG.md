@@ -29,6 +29,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when `min_m3s > max_m3s`, matching the checks already enforced on the
   `system/pumping_stations.json` entity path.
 
+- **BREAKING — `filling_min_rate_m3s` replaces `filling_inflow_m3s` and flips
+  semantics.** The `filling` block in `system/hydros.json` and the override
+  column in `constraints/hydro_bounds.parquet` are renamed from
+  `filling_inflow_m3s` to `filling_min_rate_m3s`. The field is no longer a
+  retention cap on impounded inflow (a ceiling limiting how much of the natural
+  inflow is kept): it is now a **per-stage minimum accumulation rate** (a floor
+  the reservoir must clear). Each Filling stage derives a minimum target storage
+  anchored on `min_storage_hm3` and accumulating `filling_min_rate_m3s` over
+  the stage duration; the reservoir must reach at least that running level by the
+  end of the stage. Natural inflow (PAR / AR coupling) is no longer cap-limited
+  during Filling — inflow above the old cap flows freely. The impound / retention
+  cap mechanism is removed entirely. Per-stage `V_target` filling floors replace
+  the single terminal filling target that was enforced only at the entry stage.
+  Any existing case that sets `filling_inflow_m3s` must rename the field and
+  review the value: the two semantics are inverses, not aliases.
+
 ## [0.8.2] - 2026-06-17
 
 ### Added

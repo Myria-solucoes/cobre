@@ -1,6 +1,6 @@
 # Hydro filling: per-stage volume-target model (DECOMP-aligned)
 
-> **Status**: Proposed — not yet implemented. This document **replaces the earlier
+> **Status**: Shipped — this reformulation is the live system. This document **replaces the earlier
 > reset-based draft of the same file** (the entry-stage state-reset reformulation),
 > which is abandoned in favor of the DECOMP-aligned minimum-rate / continuous-handoff
 > model below. Companion to `hydro-dead-volume-filling.md` (the shipped v1).

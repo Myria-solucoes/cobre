@@ -604,7 +604,7 @@ Key fields:
 | `hydros[].efficiency`                             | No       | Turbine efficiency model: `"constant"`                                                                        |
 | `hydros[].evaporation`                            | No       | Evaporation config: `coefficients_mm` (12 values) and optional `reference_volumes_hm3`                        |
 | `hydros[].diversion`                              | No       | Diversion channel: `downstream_id` and `max_flow_m3s`                                                         |
-| `hydros[].filling`                                | No       | Filling config: `start_stage_id` and `filling_inflow_m3s`                                                     |
+| `hydros[].filling`                                | No       | Filling config: `start_stage_id` and `filling_min_rate_m3s`                                                     |
 | `hydros[].penalties`                              | No       | Entity-level hydro penalty overrides (all fields optional, fall back to global)                               |
 
 All fields within `hydros[].penalties` are optional. When a field is absent the
@@ -1264,7 +1264,7 @@ Stage-varying operational bound overrides for hydro plants.
 | `min_generation_mw`    | DOUBLE | No       | Minimum generation (MW)         |
 | `max_generation_mw`    | DOUBLE | No       | Maximum generation (MW)         |
 | `max_diversion_m3s`    | DOUBLE | No       | Maximum diversion flow (m³/s)   |
-| `filling_inflow_m3s`   | DOUBLE | No       | Filling inflow override (m³/s)  |
+| `filling_min_rate_m3s`   | DOUBLE | No       | Filling minimum-rate override (m³/s)  |
 | `water_withdrawal_m3s` | DOUBLE | No       | Water withdrawal (m³/s)         |
 
 ---
