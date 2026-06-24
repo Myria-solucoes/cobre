@@ -143,7 +143,6 @@ fn read_or_regen_baseline(case: &str, hash: &str) -> Result<(), String> {
     let path = baseline_path(case);
 
     if std::env::var("COBRE_PARITY_REGEN").as_deref() == Ok("1") {
-        // Regeneration mode: write the baseline.
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("cannot create baseline dir: {e}"))?;
@@ -154,7 +153,6 @@ fn read_or_regen_baseline(case: &str, hash: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    // Verification mode.
     if !path.exists() {
         return Err(format!(
             "baseline file for {case} is missing at {}; \
@@ -167,7 +165,6 @@ fn read_or_regen_baseline(case: &str, hash: &str) -> Result<(), String> {
         .map_err(|e| format!("cannot read baseline for {case}: {e}"))?;
     let expected = raw.trim();
 
-    // Validate the baseline is a well-formed 64-char hex string.
     if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(format!("baseline file {case} is malformed: {expected:?}"));
     }
@@ -306,12 +303,28 @@ fn case_dir(label: &str) -> std::path::PathBuf {
         // off-cascade control H4. U commissions LATER than D
         // (`start_U = 3 > start_D = 1`), so at stages 1–2 D is Filling while U is
         // still PreFilling. U's absent dam routes its (large) realized inflow onto
-        // D's water-balance row AND onto D's impound-retention cap, so D must
-        // release the excess rather than over-impound. D03/D38 cannot exercise a
+        // D's water-balance row only (the cap row is removed), so D treats it as
+        // ordinary cascade inflow. D03/D38 cannot exercise a
         // PreFilling-upstream-of-Filling adjacency; the parity hash covers
-        // storage/water/cuts/convergence, so it reflects the retention-cap routing
+        // storage/water/cuts/convergence, so it reflects the short-circuit routing
         // through the cascade coupling.
         "D39" => "d39-prefilling-upstream-of-filling",
+        // Filling cascade: a cascade `H_up (id 0, filling) → H_down (id 1,
+        // filling) → H_sink (id 2, real) ` plus an off-cascade control H_ctrl
+        // (id 3). H_up and H_down share `entry_stage_id = 4` with
+        // `filling { start_stage_id = 1 }`, so over the 6-stage horizon BOTH are
+        // PreFilling at stage 0, Filling at stages 1–3, and Operating at stages
+        // 4–5 — two reservoirs in Filling SIMULTANEOUSLY. They are coupled only
+        // through the cascade release (`H_up.downstream_id = 1`): H_up's outflow
+        // routes onto H_down's water-balance row while both are Filling. The
+        // volume-target model is water-balance-row-only — there is no impound /
+        // retention cap row — so a downstream filling dam absorbs an upstream
+        // filling dam's release as ordinary cascade inflow. Block counts change
+        // across the horizon (schedule 1/1/3/2/3/1). A single-filling-dam case
+        // (D38/D39) cannot exercise two adjacent dams in Filling at once; the
+        // parity hash covers hydro storage/water/cuts/convergence, so it reflects
+        // the dual-filling cascade coupling and the per-stage filling floors.
+        "D40" => "d40-filling-cascade",
         other => panic!("unknown case label: {other}"),
     };
     // Integration tests run from the crate root; fixtures live at
@@ -373,7 +386,6 @@ fn run_case(label: &str) {
     let comm = StubComm;
     let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
 
-    // Set up event channel to capture per-iteration convergence data.
     let (event_tx, event_rx) = mpsc::channel::<TrainingEvent>();
 
     let outcome = setup
@@ -392,7 +404,6 @@ fn run_case(label: &str) {
     );
     let result = outcome.result;
 
-    // Collect ConvergenceUpdate events and sort by iteration number.
     let mut convergence_updates: Vec<(u64, f64, f64, f64, f64)> = event_rx
         .into_iter()
         .filter_map(|ev| {
@@ -413,7 +424,6 @@ fn run_case(label: &str) {
         .collect();
     convergence_updates.sort_by_key(|&(iter, ..)| iter);
 
-    // Run simulation to collect per-scenario stage results.
     let mut pool = setup
         .create_workspace_pool(&comm, 1, HighsSolver::new)
         .expect("simulation workspace pool must build");
@@ -440,14 +450,13 @@ fn run_case(label: &str) {
     let _summary = aggregate_simulation(&local_costs.costs, sim_config, &comm)
         .expect("aggregate_simulation must succeed");
 
-    // Compute parity hash and compare/write baseline.
     let hash = compute_parity_hash(&convergence_updates, &setup, scenario_results);
 
     read_or_regen_baseline(label, &hash).unwrap_or_else(|msg| panic!("{msg}"));
 }
 
 // ---------------------------------------------------------------------------
-// Individual test functions — D01–D17, with D12 and D16 absent
+// Individual test functions — one per case label enumerated in `case_dir`
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -673,4 +682,13 @@ fn parity_hash_d38() {
 )]
 fn parity_hash_d39() {
     run_case("D39");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d40() {
+    run_case("D40");
 }

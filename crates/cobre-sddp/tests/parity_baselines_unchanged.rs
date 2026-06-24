@@ -5,16 +5,13 @@
 //! in [`EXPECTED_HASHES`]. Any change to a baseline file will cause this
 //! test to fail with a message pointing at the offending case.
 //!
-//! The original implementation hashed all baselines into a single
-//! meta-hash via `sha2::Sha256`. That was a double-hash (the baseline
-//! files are already SHA-256 digests) and gave weak diagnostics — a
-//! meta-hash mismatch tells you *something* changed but not which file.
-//! The per-file table here uses plain string equality and identifies the
-//! offending case directly. The `sha2` crate is still a dev-dependency
-//! because `parity_hash_d01_d15.rs` legitimately uses it to compute the
+//! The per-file table uses plain string equality (not a single meta-hash of
+//! all baselines) so a mismatch names the offending case directly instead of
+//! reporting that *something* changed. The `sha2` dev-dependency is unused
+//! here but kept because `parity_hash_d01_d15.rs` uses it to compute the
 //! baselines themselves from training output.
 //!
-//! This test is NOT slow-gated: the total I/O is 15 × 64 bytes and the
+//! This test is NOT slow-gated: each baseline is one 64-byte digest and the
 //! test runs in milliseconds.
 
 #![allow(
@@ -171,18 +168,33 @@ const EXPECTED_HASHES: &[(&str, &str)] = &[
     // `parity_hash_d38`.
     (
         "D38",
-        "585c33665773bdc1fef78a65a09aec57ec16e9079d11a5e7ce97dbdbc28f4511",
+        "7e02e0cfd3d7cbf27ec4d1939a9e6957e52eecaa3e20ccdb2ef2be03426de352",
     ),
     // PreFilling hydro directly upstream of a Filling hydro: cascade
     // `U (filling) → D (filling) → H3 (real sink)` plus an off-cascade control.
     // U commissions after D (`start_U = 3 > start_D = 1`), so at stages 1–2 D is
-    // Filling while U is PreFilling; U's routed PreFilling inflow must count toward
-    // D's impound-retention cap, so D releases the excess rather than over-impound.
-    // This guard pins only the HiGHS `D39.sha256`; the CLP `D39.sha256` is verified
-    // by the slow-gated CLP `parity_hash_d39`.
+    // Filling while U is PreFilling; U's PreFilling inflow short-circuits onto D's
+    // water-balance row only (the cap row is removed), and D treats it as ordinary
+    // cascade inflow. This guard pins only the HiGHS `D39.sha256`; the CLP
+    // `D39.sha256` is verified by the slow-gated CLP `parity_hash_d39`.
     (
         "D39",
-        "f250e89d7706f4b9ac8f256b640b60e3567894c280ee916a3264e81c7a576e38",
+        "7a29931dcd7e678c3e0ce83820508c97c9419e620669f98ae25b17292c8ad7e8",
+    ),
+    // Filling cascade: `H_up (filling) → H_down (filling) → H_sink (real)` plus
+    // an off-cascade control. H_up and H_down share the same commissioning and
+    // filling-start stages, so BOTH are Filling at the interior stages
+    // simultaneously, coupled ONLY through the cascade release — H_up's outflow
+    // routes onto H_down's water-balance row. The volume-target model is
+    // water-balance-row-only: there is no impound / retention cap row, so the
+    // downstream filling dam absorbs the upstream filling dam's release as
+    // ordinary cascade inflow. A single-filling-dam case (D38/D39) cannot
+    // exercise two adjacent dams in Filling at once. This guard pins only the
+    // HiGHS `D40.sha256`; the CLP `D40.sha256` is verified by the slow-gated CLP
+    // `parity_hash_d40`.
+    (
+        "D40",
+        "e9e2508363c3d2cd6524fc822849f8d35ca76a3909f51f48fd7325d53c6d1968",
     ),
 ];
 

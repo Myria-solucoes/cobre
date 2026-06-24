@@ -303,9 +303,19 @@ fn case_dir(label: &str) -> std::path::PathBuf {
         "D38" => "d38-dead-volume-filling",
         // PreFilling hydro directly upstream of a Filling hydro (U→D→H3): U
         // commissions after D, so at stages 1–2 D is Filling while U is PreFilling
-        // and U's routed inflow must count toward D's impound-retention cap. See the
-        // HiGHS harness for the full topology note.
+        // and U's PreFilling inflow short-circuits onto D's water-balance row only
+        // (the cap row is removed). See the HiGHS harness for the full topology note.
         "D39" => "d39-prefilling-upstream-of-filling",
+        // Filling cascade: `H_up (id 0, filling) → H_down (id 1, filling) →
+        // H_sink (id 2, real) ` plus an off-cascade control H_ctrl (id 3). H_up
+        // and H_down share `entry_stage_id = 4` with `filling { start_stage_id =
+        // 1 }`, so BOTH are Filling at stages 1–3 simultaneously, coupled only
+        // through the cascade release (H_up's outflow routes onto H_down's
+        // water-balance row). The volume-target model is water-balance-row-only
+        // (no impound/retention cap), so the downstream filling dam absorbs the
+        // upstream release as ordinary cascade inflow. See the HiGHS harness for
+        // the full topology note.
+        "D40" => "d40-filling-cascade",
         other => panic!("unknown case label: {other}"),
     };
     // Integration tests run from the crate root; fixtures live at
@@ -434,7 +444,7 @@ fn run_case(label: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Individual test functions — D01–D17, with D12 and D16 absent
+// Individual test functions — one per case enumerated in `case_dir`
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -660,4 +670,13 @@ fn parity_hash_d38() {
 )]
 fn parity_hash_d39() {
     run_case("D39");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d40() {
+    run_case("D40");
 }

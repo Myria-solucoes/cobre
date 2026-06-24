@@ -4,7 +4,7 @@
 //! ## What the parity hash cannot see
 //!
 //! The declaration-order parity baseline hashes hydro storage / water values and
-//! cuts; it does NOT hash the filling soft-penalty slacks. The terminal
+//! cuts; it does NOT hash the filling soft-penalty slacks. The per-stage
 //! `σ_fill` (`filling_target_violation_hm3`) and the operating soft-floor
 //! `σ^{v-}` (`storage_violation_below_hm3`) are invisible to the hash, as is the
 //! PreFilling cascade short-circuit that routes an absent dam's water onto its
@@ -17,7 +17,7 @@
 //!
 //! Cascade `H1 (id 0) → H2 (id 1, filling) → H3 (id 2, real fed downstream)` plus
 //! an off-cascade non-filling control `H4 (id 3)`. `H2` carries
-//! `entry_stage_id = 4` and `filling { start_stage_id = 2, filling_min_rate_m3s = 10 }`,
+//! `entry_stage_id = 4` and `filling { start_stage_id = 2, filling_min_rate_m3s = 12 }`,
 //! so over the 6-stage horizon it is PreFilling at ids 0–1, Filling at ids 2–3,
 //! and Operating at ids 4–5. Block counts change at BOTH phase boundaries
 //! (schedule 1/1/3/2/3/1: 1→3 at stage 1→2, 2→3 at stage 3→4), exercising the
@@ -26,11 +26,21 @@
 //! separately). A single filling hydro is the design baseline — the chained
 //! transitive short-circuit walk is covered by `filling_cut_validity`.
 //!
-//! The inflow schedule (`std_m3s = 0` everywhere ⇒ deterministic) drives the
-//! binding regime: `H2`'s natural inflow is SHORT during Filling (5 m³/s, below
-//! the impound cap) so the dead volume (`min_storage_hm3 = 60`) is MISSED at the
-//! terminal Filling stage (id 3) and `σ_fill > 0`; it RECOVERS in Operating
-//! (60 m³/s) so `H2` climbs above the dead volume and `σ^{v-} → 0` by id 5.
+//! The volume-target filling model gives each Filling stage a per-stage soft
+//! floor `v_out[t] + σ_fill[t] ≥ V_target[t]`, with the target anchored backward
+//! from the dead volume: `V_target[3] = min_storage_hm3 = 60` and
+//! `V_target[2] = 60 − ζ·rate = 28.896` hm³. Filling is continuous: the
+//! end-of-Filling storage at id 3 hands off to the incoming storage at id 4 with
+//! no reset. The inflow schedule (`std_m3s = 0` everywhere ⇒ deterministic) drives
+//! the binding regime: `H2`'s natural inflow is SHORT during Filling (5 m³/s) so
+//! the accumulation stays below the per-stage `V_target` floors and `σ_fill[t] > 0`
+//! at BOTH filling stages (ids 2 and 3); it RECOVERS in Operating (60 m³/s) so
+//! `H2` climbs above the dead volume and `σ^{v-} → 0` by id 5. Filling is uncapped,
+//! so a water-rich upstream feeder would overfill `H2` past the target; `H1` is
+//! therefore starved before Operating (seed 0, inflow 2/2/0/0 m³/s over ids 0–3)
+//! so its total drainable water (≤ `ζ·2·2 = 10.368` hm³) cannot lift `H2` to the
+//! target even if released in full at the first filling stage. `σ_fill` binding is
+//! thus structural, not an artifact of a particular LP routing choice.
 
 #![allow(
     clippy::unwrap_used,
@@ -70,9 +80,9 @@ const H4_ID: i32 = 3;
 /// `H2`'s dead volume (filling target / soft operating floor), hm³. Mirrors
 /// `system/hydros.json` `H2.reservoir.min_storage_hm3`.
 const H2_MIN_STORAGE_HM3: f64 = 60.0;
-/// `H2`'s per-stage impound cap `F_h` (m³/s). Mirrors `system/hydros.json`
-/// `H2.filling.filling_min_rate_m3s`.
-const H2_FILLING_INFLOW_M3S: f64 = 10.0;
+/// `H2`'s per-stage minimum accumulation rate (m³/s). Mirrors
+/// `system/hydros.json` `H2.filling.filling_min_rate_m3s`.
+const H2_FILLING_MIN_RATE_M3S: f64 = 12.0;
 /// `H4`'s reservoir bounds (hm³), mirroring `system/hydros.json`.
 const H4_MIN_STORAGE_HM3: f64 = 0.0;
 const H4_MAX_STORAGE_HM3: f64 = 200.0;
@@ -166,13 +176,12 @@ fn stage_hydro(
         "hydro {hydro_id} must have at least one row at stage {stage_index}"
     );
     let first = rows[0];
-    let turbined_total_m3s = rows.iter().map(|r| r.turbined_m3s).sum();
     StageHydro {
         storage_initial_hm3: first.storage_initial_hm3,
         storage_final_hm3: first.storage_final_hm3,
         incremental_inflow_m3s: first.incremental_inflow_m3s,
         generation_mw: rows.iter().map(|r| r.generation_mw).sum(),
-        turbined_total_m3s,
+        turbined_total_m3s: rows.iter().map(|r| r.turbined_m3s).sum(),
         filling_target_violation_hm3: first.filling_target_violation_hm3,
         storage_violation_below_hm3: first.storage_violation_below_hm3,
     }
@@ -187,7 +196,6 @@ fn stage_hydro(
 // the same trajectory" flow this regression exists to make legible.
 #[allow(clippy::too_many_lines)]
 #[test]
-#[ignore = "d38 filling rate predates the minimum-rate filling-sufficiency check and under-provisions the dead volume (capacity 51.84 < 60 hm3); the case is re-derived under the volume-target filling model with per-stage sigma_fill assertions before this regression is re-enabled"]
 fn dead_volume_filling_binds_and_routes_in_simulation() {
     let case_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -365,8 +373,9 @@ fn dead_volume_filling_binds_and_routes_in_simulation() {
     }
 
     // §7.3: H2 storage frozen at the seed (0.0, empty pit) across PreFilling
-    // (stages 0–1), then non-decreasing and per-stage-capped across Filling
-    // (stages 2–3). The seed is the stage-0 incoming storage.
+    // (stages 0–1), then non-decreasing across Filling (stages 2–3) as the
+    // inflow-only accumulation climbs toward the per-stage V_target floors. The
+    // seed is the stage-0 incoming storage.
     let h2_s0 = stage_hydro(scenario, H2_ID, 0);
     let h2_s1 = stage_hydro(scenario, H2_ID, 1);
     let seed = h2_s0.storage_initial_hm3;
@@ -407,30 +416,20 @@ fn dead_volume_filling_binds_and_routes_in_simulation() {
         h2_s1.storage_final_hm3,
         h2_s3.storage_final_hm3
     );
-    // Per-stage rise bounded by the impound cap ζ·F_h (the retention row rate-limit).
-    let cap_rise = zeta * H2_FILLING_INFLOW_M3S;
-    let rise_s2 = h2_s2.storage_final_hm3 - h2_s2.storage_initial_hm3;
-    let rise_s3 = h2_s3.storage_final_hm3 - h2_s3.storage_initial_hm3;
-    assert!(
-        rise_s2 <= cap_rise + 1e-6,
-        "H2 Filling rise at stage 2 must be capped by ζ·F_h = {cap_rise}; got {rise_s2}"
-    );
-    assert!(
-        rise_s3 <= cap_rise + 1e-6,
-        "H2 Filling rise at stage 3 must be capped by ζ·F_h = {cap_rise}; got {rise_s3}"
-    );
 
     // §7.1 (water balance on H3, re-anchored — does NOT use inflow_m3s): during
     // PreFilling the dam at H2 does not exist, so H2's water short-circuits onto
     // H3's real water-balance row. The closed water balance on H3 is
     //     Δstorage = ζ·incr_H3 − release_H3 + ROUTED,
-    // where ROUTED = ζ·incr_H2 + (H1's release re-routed H1→H3) + H2's withdrawal.
-    // Rearranged, the GAP between H3's actual Δstorage and its incremental-only
-    // balance IS the routed contribution: it must be strictly positive, proving
-    // the water lands on H3's row (H3 is a fed reservoir, not a sink). It must
-    // moreover be at least H2's own routed incremental ζ·incr_H2 — a known,
-    // deterministic quantity (std=0) — which is a quantitative floor on the
-    // routing, not just `> incremental_only`.
+    // where ROUTED = ζ·incr_H2 + (any H1 release re-routed H1→H3) + H2's withdrawal.
+    // H1 is starved before Operating, so its PreFilling release is small or zero;
+    // the asserted floor therefore rests on H2's OWN incremental alone. Rearranged,
+    // the GAP between H3's actual Δstorage and its incremental-only balance IS the
+    // routed contribution: it must be strictly positive, proving the water lands on
+    // H3's row (H3 is a fed reservoir, not a sink). It must moreover be at least
+    // H2's own routed incremental ζ·incr_H2 — a known, deterministic quantity
+    // (std=0) — which is a quantitative floor on the routing, not just
+    // `> incremental_only`.
     let h2_prefilling_incr_m3s = 15.0; // mirrors scenarios/inflow_seasonal_stats.parquet, H2 ids 0–1
     let routed_floor_hm3 = zeta * h2_prefilling_incr_m3s;
     for prefilling_stage in [0_usize, 1] {
@@ -464,15 +463,25 @@ fn dead_volume_filling_binds_and_routes_in_simulation() {
         );
     }
 
-    // §7.4: σ_fill binds at the terminal Filling stage (id 3) under the short
-    // inflow, and σ^{v-} → 0 by the last Operating stage (id 5) on recovery.
-    let sigma_fill_s3 = stage_hydro(scenario, H2_ID, 3).filling_target_violation_hm3;
-    assert!(
-        sigma_fill_s3 > 1e-6,
-        "§7.4: H2 σ_fill must be strictly positive at id {ENTRY_STAGE_ID} − 1 = 3 (the \
-         short inflow leaves the reservoir below the dead volume {H2_MIN_STORAGE_HM3}); got \
-         {sigma_fill_s3}"
-    );
+    // §7.4: σ_fill binds at BOTH Filling stages (ids 2 and 3) under the short
+    // inflow, and σ^{v-} → 0 by the last Operating stage (id 5) on recovery. The
+    // volume-target model imposes a per-stage soft floor v_out[t] + σ_fill[t] ≥
+    // V_target[t]; with the short inflow the inflow-only accumulation (12.96 hm³
+    // by id 2, 25.92 hm³ by id 3) stays below the backward-anchored targets
+    // (V_target[2] = min_storage − ζ·rate = 28.896, V_target[3] = min_storage =
+    // 60.0), so σ_fill is strictly positive at each filling stage. A terminal-only
+    // check would miss a per-stage floor regression that binds only at the last
+    // Filling stage.
+    let v_target_2 = H2_MIN_STORAGE_HM3 - zeta * H2_FILLING_MIN_RATE_M3S;
+    for (filling_stage, v_target) in [(2_usize, v_target_2), (3, H2_MIN_STORAGE_HM3)] {
+        let sigma_fill = stage_hydro(scenario, H2_ID, filling_stage).filling_target_violation_hm3;
+        assert!(
+            sigma_fill > 1e-6,
+            "§7.4: H2 σ_fill must be strictly positive at Filling stage {filling_stage} (the \
+             short inflow leaves storage below V_target[{filling_stage}] = {v_target}); got \
+             {sigma_fill}"
+        );
+    }
     let sigma_floor_s5 = stage_hydro(scenario, H2_ID, 5).storage_violation_below_hm3;
     assert!(
         sigma_floor_s5 < 1e-6,
