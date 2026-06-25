@@ -1,9 +1,5 @@
-//! Unified LP-solve entry point shared by the three hot-path drivers.
-//!
-//! [`run_stage_solve`] encapsulates basis reconstruction, invariant enforcement,
-//! and the solver call so that `forward.rs`, `backward.rs`, and
-//! `simulation/pipeline.rs` can delegate to a single implementation instead of
-//! each maintaining their own copy.
+//! Unified LP-solve entry point shared by the three hot-path drivers
+//! (`forward.rs`, `backward.rs`, `simulation/pipeline.rs`).
 
 use cobre_solver::{SolutionView, SolverError, SolverInterface};
 
@@ -17,13 +13,9 @@ use crate::{
 
 /// Read-only inputs for one LP solve at stage `t`, scenario `m`.
 ///
-/// All fields are borrows or `Copy` primitives — no owned allocation. The
-/// struct has no `Default` implementation; callers must supply every field.
-/// This prevents the "new config flag wired three places, missed the fourth"
-/// bug class: the compiler rejects any construction that omits a field.
-///
-/// Constructed per-call inside each driver's inner loop; never stored across
-/// solves.
+/// Intentionally has no `Default`: callers must supply every field, so the
+/// compiler rejects any construction that omits one — preventing the "new flag
+/// wired three places, missed the fourth" bug class.
 pub struct StageInputs<'a> {
     /// Per-stage LP layout and noise scaling parameters.
     pub stage_context: &'a StageContext<'a>,
@@ -35,29 +27,17 @@ pub struct StageInputs<'a> {
     pub stage_index: usize,
     /// Scenario index `m`.
     pub scenario_index: usize,
-    /// Training iteration number (1-based), if the caller is the forward pass.
-    ///
-    /// `None` on the backward and simulation phases, where iteration context
-    /// is either absent or available through other channels. Present on the
-    /// forward phase to populate `SddpError::Infeasible { iteration }` without
-    /// the caller having to re-wrap the error.
+    /// Training iteration (1-based) on the forward pass; `None` on backward and
+    /// simulation. Forward supplies it so `SddpError::Infeasible { iteration }`
+    /// is populated without the caller re-wrapping the error.
     pub iteration: Option<u64>,
 }
 
-/// Execute one LP solve at stage `t` for scenario `m`.
+/// Execute one LP solve at stage `t` for scenario `m`, owning basis
+/// reconstruction, invariant enforcement, and the solve call.
 ///
-/// Load-and-bounds setup is the caller's responsibility (via `StageInputs`);
-/// `run_stage_solve` owns basis reconstruction, invariant enforcement, and
-/// the solve call.
-///
-/// Returns on success the solver's current solution view. The returned borrow
-/// is alive until the next mutation of `ws.solver`. Basis reconstruction
-/// counters are recorded on the workspace via
-/// [`SolverInterface::record_reconstruction_stats`] and are not surfaced to the
-/// caller (no caller consumes them).
-///
-/// The load / set-bounds / `reconstruct_basis` / solve sequence is identical
-/// regardless of which driver (forward, backward, simulation) issues the call.
+/// Load-and-bounds setup is the caller's responsibility (via `StageInputs`).
+/// Returns the solver's solution view on success.
 ///
 /// # Errors
 ///
@@ -68,34 +48,22 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
     ws: &'ws mut SolverWorkspace<S>,
     inputs: &StageInputs<'_>,
 ) -> Result<SolutionView<'ws>, SddpError> {
-    // Grow slot-lookup scratch if the pool has allocated new slots since the last
-    // call. `pool.populated_count` is monotonically non-decreasing, so after the
-    // first few iterations this check is a no-op.
+    // `pool.populated_count` only grows, so this resize is a no-op after the
+    // first few iterations.
     if ws.scratch.recon_slot_lookup.len() < inputs.pool.populated_count {
         ws.scratch
             .recon_slot_lookup
             .resize(inputs.pool.populated_count, None);
     }
 
-    // Select the basis path and solve. When a stored basis exists, warm-start
-    // via slot-identity reconstruction; otherwise (e.g. iteration 1) take the
-    // cold path and let the solver start from scratch.
     let view = if let Some(captured) = inputs.stored_basis {
-        // All solves use the baked path: cuts are structural rows in the baked
-        // template. `base_row_count` is set to the non-baked template row
-        // count so the reconstruction helper handles cut rows via slot
-        // identity rather than positional copy from the stored basis.
-        //
-        // The baked template carries one row per active cut in
-        // `active_cuts()` iteration order. The reconstruction helper iterates
-        // the same active cuts and matches stored slot ids to LP rows.
+        // `base_row_count` is the non-baked template row count so cut rows are
+        // matched by slot identity, not positional copy from the stored basis.
         let target = ReconstructionTarget {
             base_row_count: inputs.stage_context.templates[inputs.stage_index].num_rows,
             num_cols: inputs.stage_context.templates[inputs.stage_index].num_cols,
         };
 
-        // Reconstruction counters are accumulated on the workspace solver via
-        // `record_reconstruction_stats()` below.
         let _ = reconstruct_basis(
             captured,
             target,
@@ -103,23 +71,16 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
             &mut ws.scratch_basis,
             &mut ws.scratch.recon_slot_lookup,
         );
-        // `enforce_basic_count_invariant` is an unconditional safety net: when
-        // cut selection drops a cut whose stored row status was BASIC, the
-        // freshly reconstructed basis carries more BASIC entries than
-        // `num_row`. The post-pass demotes trailing BASIC cut rows to LOWER
-        // until `col_basic + row_basic == num_row` holds.
+        // Safety net: when cut selection drops a cut whose stored row was BASIC,
+        // the reconstructed basis carries excess BASIC entries; the post-pass
+        // demotes them until `col_basic + row_basic == num_row`.
         //
-        // `num_row_for_invariant` uses the reconstructed basis length (not
-        // baked.num_rows) because the populated-cuts iterator may yield delta
-        // cuts (added during the current backward pass) that extend beyond
-        // the baked template row count. The two values agree when no delta
-        // cuts are present (forward path and first backward stage per
-        // iteration).
+        // `num_row_for_invariant` uses the reconstructed length, not
+        // baked.num_rows, because delta cuts (added during the current backward
+        // pass) extend past the baked template row count.
         //
-        // `base_row_for_invariant = 0` is safe because the demotion loop
-        // touches only rows whose current status is BASIC, and equality rows
-        // (z_inflow, water_balance, FPHA, evaporation) are never BASIC by LP
-        // duality.
+        // `base_row_for_invariant = 0` is safe: the loop demotes only currently-
+        // BASIC rows, and equality rows are never BASIC by LP duality.
         let num_row_for_invariant = ws.scratch_basis.row_status.len();
         let base_row_for_invariant = 0;
 
@@ -140,7 +101,6 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
             )
         })?
     } else {
-        // Cold path: no stored basis; solver starts from scratch.
         ws.solver.solve(None).map_err(|e| {
             map_solver_error(
                 e,
@@ -174,11 +134,6 @@ fn map_solver_error(
         other => SddpError::Solver(other),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Unscale helpers. `fill_unscaled` is shared by the forward and simulation
-// drivers; `fill_unscaled_dual` is used by the simulation driver only.
-// ---------------------------------------------------------------------------
 
 /// Unscale a primal vector into `out`: `x_original[i] = col_scale[i] *
 /// x_scaled[i]` (or the raw values when `col_scale` is empty). `out` retains its
