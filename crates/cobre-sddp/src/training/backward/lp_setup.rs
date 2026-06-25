@@ -1,11 +1,6 @@
-//! LP load and bound-patch seam for the backward pass.
-//!
-//! Invoked at the top of each trial-point iteration (and per opening) to reset
-//! the stage LP to its structural template, append delta cuts, and patch the
-//! noise-dependent row/column bounds for one opening. The functions are
-//! `pub(crate)` because the per-opening solve dispatch in
-//! [`super::StageOpeningSolver`] (`trial_point`) drives them across the
-//! submodule boundary.
+//! LP load and bound-patch seam for the backward pass: reset the stage LP to its
+//! structural template, append delta cuts, and patch the noise-dependent
+//! row/column bounds for one opening.
 
 use cobre_solver::SolverInterface;
 
@@ -20,11 +15,10 @@ use super::SuccessorSpec;
 
 /// Load the stage LP template and append delta cuts.
 ///
-/// Called at the top of every trial-point iteration in `process_stage_backward`
-/// to reset `HiGHS`'s retained simplex basis, factorization, and RNG position so
-/// that results do not depend on the scenario-to-worker partition. Within a
-/// trial point the LP structure is identical across openings — only the
-/// noise-dependent bounds change, so only bound patching happens per opening.
+/// Resets the solver's retained basis, factorization, and RNG position so results
+/// do not depend on the scenario-to-worker partition. The LP structure is
+/// identical across a trial point's openings, so only bound patching runs per
+/// opening.
 pub(crate) fn load_backward_lp<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
     succ: &SuccessorSpec<'_>,
@@ -37,10 +31,8 @@ pub(crate) fn load_backward_lp<S: SolverInterface + Send>(
 
 /// Transform opening noise and patch LP bounds for one backward opening.
 ///
-/// Called once per opening inside [`process_trial_point_backward`](super::process_trial_point_backward).  The LP
-/// structure is already loaded by [`load_backward_lp`]; this function only
-/// updates noise-dependent row and column bounds via `set_row_bounds` /
-/// `set_col_bounds`.
+/// The LP structure is already loaded by [`load_backward_lp`]; this only updates
+/// noise-dependent row and column bounds via `set_row_bounds` / `set_col_bounds`.
 pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
     ctx: &StageContext<'_>,
@@ -81,10 +73,9 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
             &mut ws.scratch.ncs_col_upper_buf,
         );
     }
-    // No shift_anticipated_state call here: the backward pass solves each
-    // opening at a fixed trial point produced by the forward sampler. The
-    // ring-buffer advance happens once in the forward pass; the backward
-    // and simulation paths reuse those slot values without re-shifting.
+    // No shift_anticipated_state here: the ring-buffer advance happens once in the
+    // forward pass; backward and simulation reuse those slot values without
+    // re-shifting (re-shifting would offset x_hat from the fixing rows).
     ws.patch_buf
         .fill_col_state_patches(training_ctx.state, x_hat, &ctx.templates[s].col_scale);
     ws.patch_buf.fill_forward_patches(
@@ -95,9 +86,7 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
         &ctx.templates[s].row_scale,
     );
     if ctx.n_load_buses > 0 {
-        // Per-stage grid: it must carry this stage's block count, not the global
-        // `indexer.n_blks`. `max_deficit_segments` is study-invariant, so it reads
-        // from the single `study_dims` owner, not the global stage-0 `indexer`.
+        // Per-stage grid: this stage's block count, not the global `indexer.n_blks`.
         let grid = BlockGrid::new(n_blks, training_ctx.study_dims.max_deficit_segments);
         ws.patch_buf.fill_load_patches(
             ctx.load_balance_row_starts[s],
@@ -107,12 +96,8 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
             &ctx.templates[s].row_scale,
         );
     }
-    // z-inflow rows start at the per-stage `geometry.z_inflow_row_start` (always 0:
-    // state pinning uses column bounds, so no rows precede the z-inflow block),
-    // read from the per-stage geometry table rather than the global stage-0
-    // `indexer`. Empty `geometry_per_stage` in a synthetic test falls back to the
-    // all-empty `StageGeometry::default` (also 0), matching the sibling per-stage
-    // slices.
+    // z_inflow_row_start is always 0: state pinning uses column bounds, so no rows
+    // precede the z-inflow block.
     let z_inflow_row_start = ctx
         .geometry_per_stage
         .get(s)
@@ -134,17 +119,11 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
         &ws.patch_buf.lower[..pc],
         &ws.patch_buf.upper[..pc],
     );
-    // Patch NCS availability bounds onto this stage's dense NCS columns, indexed
-    // by `ncs_stochastic_dense_col[slot]` (the slot's NCS system index — the dense
-    // column position, identical at every stage). `transform_ncs_noise` above wrote
-    // the bound buffers in full stochastic-slot order; the gather copies every
-    // slot's bounds, forcing `[0, 0]` for a slot whose
-    // `ncs_stochastic_windows[slot]` excludes this stage's id (dormancy computed
-    // inline by the gather). This is the same zeroing the forward and lower-bound
-    // patch sites apply — keeping the three identical is the
-    // `.claude/rules/sddp.md` "patch NCS identically" contract (a divergence
-    // understates the bound). Index buffer rebuilt lazily on a stage transition
-    // (when the per-stage NCS column start changes); bounds gathered every opening.
+    // Patch NCS availability bounds onto this stage's dense NCS columns. The gather
+    // forces `[0, 0]` for a slot whose `ncs_stochastic_windows[slot]` excludes this
+    // stage's id. Keep this zeroing identical to the forward and lower-bound patch
+    // sites — the "patch NCS identically" contract (sddp.md); a divergence
+    // understates the bound.
     if n_stochastic_ncs > 0 && training_ctx.study_dims.has_ncs {
         let n_blks_stage = ctx.block_counts_per_stage[s];
         let dense_col = ctx.ncs_stochastic_dense_col;

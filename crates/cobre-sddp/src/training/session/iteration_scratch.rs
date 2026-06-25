@@ -1,20 +1,8 @@
 //! Per-iteration scratch buffers for the SDDP training loop.
 //!
-//! [`IterationScratch`] holds reusable scratch fields allocated once and cleared
-//! each iteration, avoiding per-iteration heap allocation.
-//!
-//! ## Startup allocations
-//!
-//! [`IterationScratch::new`] performs `O(max_local_fwd * num_stages)`
-//! allocations at training-run startup:
-//! - N × `TrajectoryRecord` with `state: Vec<f64>` of length `n_state`.
-//! - `num_stages` × `RowBatch` for cut-batch scratch.
-//! - `num_stages` × `RowBatch` for bake scratch.
-//! - `num_stages` × `StageTemplate` for baked templates.
-//! - One `PatchBuffer`, one `lb_cut_batch`, one `CutRowMap`.
-//! - One `BakingScratch` for `bake_rows_into_template` count/emit-pass temporaries.
-//!
-//! These are amortized across all iterations of a training run.
+//! [`IterationScratch`] holds reusable scratch fields allocated once at
+//! training-run startup and reused every iteration, avoiding per-iteration heap
+//! allocation.
 
 use cobre_solver::{RowBatch, StageTemplate};
 
@@ -25,15 +13,9 @@ use crate::{
 
 /// Per-training-run iteration scratch owned by `TrainingSession`.
 ///
-/// All fields are allocated once in `IterationScratch::new` at the start
-/// of a training run and are cleared/reused across iterations. The
-/// iteration loop body (forward pass, backward pass, cut management,
-/// lower-bound evaluation) writes into these buffers in-place; no
-/// per-iteration heap allocation is permitted on this struct's fields.
-///
-/// This struct intentionally excludes the backward-pass-specific scratch
-/// (currently the `bwd_*_buf` fields on `TrainingSession`) because those
-/// are owned by `BackwardPassState`.
+/// Allocated once in `IterationScratch::new` and reused in place across
+/// iterations; no per-iteration heap allocation is permitted on these fields.
+/// Excludes backward-pass-specific scratch, which `BackwardPassState` owns.
 pub(crate) struct IterationScratch {
     /// Patch buffer for lower-bound LP patching (single solver path).
     pub patch_buf: PatchBuffer,
@@ -56,28 +38,11 @@ pub(crate) struct IterationScratch {
 }
 
 impl IterationScratch {
-    /// Allocate and initialise all iteration scratch buffers.
-    ///
-    /// Applies the pre-bake loop so that `baked_templates[t]` is a structural
-    /// copy of `stage_ctx.templates[t]` with an empty cut batch applied before
-    /// the first iteration begins.
-    ///
-    /// # Arguments
-    ///
-    /// * `max_local_fwd` — maximum number of forward passes assigned to this rank.
-    /// * `num_stages` — number of study stages.
-    /// * `n_state` — state-vector dimension (used to size `records[i].state`).
-    /// * `fcf_pool_0_capacity` — capacity of the stage-0 FCF pool (for `CutRowMap`).
-    /// * `template_0_num_rows` — number of rows in the stage-0 template (for `CutRowMap`).
-    /// * `hydro_count` — number of hydro plants (for `PatchBuffer`).
-    /// * `max_par_order` — maximum PAR model order (for `PatchBuffer`).
-    /// * `n_anticipated` — number of anticipated thermals (for `PatchBuffer` Category 6).
-    /// * `k_max` — maximum anticipated lead-stage horizon (for `PatchBuffer` Category 6).
-    /// * `stage_ctx` — stage context providing base templates for the pre-bake loop.
-    // Rationale: each argument sizes one of the seven independent pre-allocated scratch
-    // regions (trajectory records, patch buffer row/col capacity, cut row map, baked
-    // templates) — no two share the same sizing formula, so there is no sub-struct that
-    // naturally groups a subset without just renaming the arity.
+    /// Allocate and initialise all iteration scratch buffers, pre-baking each
+    /// `baked_templates[t]` as an empty-cut-batch structural copy of
+    /// `stage_ctx.templates[t]` so iteration 1 can use the baked load path.
+    // Rationale: each argument sizes a distinct pre-allocated scratch region with
+    // its own sizing formula, so no sub-struct would group a subset of the arity.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         max_local_fwd: usize,
@@ -91,9 +56,8 @@ impl IterationScratch {
         k_max: usize,
         stage_ctx: &StageContext<'_>,
     ) -> Self {
-        // ── Trajectory records ─────────────────────────────────────────────
-        // Each record is constructed fresh to avoid cloning empty Vecs;
-        // `Vec::new()` is strictly cheaper than cloning a capacity-0 Vec.
+        // Construct each record fresh: `Vec::new()` is cheaper than cloning a
+        // capacity-0 Vec.
         let records: Vec<TrajectoryRecord> = (0..max_local_fwd * num_stages)
             .map(|_| TrajectoryRecord {
                 primal: Vec::new(),
@@ -103,19 +67,15 @@ impl IterationScratch {
             })
             .collect();
 
-        // ── Patch buffer ───────────────────────────────────────────────────
-        // Standalone patch buffer for the lower-bound evaluation which uses
-        // the single `solver` argument directly. The lower-bound path calls
-        // `fill_forward_patches` (Categories 1, 2, 6) and `fill_z_inflow_patches`
-        // (Category 5); it does NOT call `fill_load_patches` (Category 4), so
-        // `n_load_buses` and `max_blocks` remain zero. Category 6
+        // The LB path never calls `fill_load_patches` (Category 4), so the
+        // `n_load_buses` and `max_blocks` args are 0. Category 6
         // (anticipated_state_fixing) capacity MUST be sized by the actual
-        // `n_anticipated * k_max`: when these are zero, the LB anticipated-state
-        // rows default to `0 == 0` and silently force every anticipated_state
-        // column to zero, ignoring past commitments in `initial_state`.
+        // `n_anticipated * k_max`: passing zero leaves the LB anticipated-state
+        // rows at their `0 == 0` default, silently forcing every
+        // anticipated_state column to zero and ignoring past `initial_state`
+        // commitments.
         let patch_buf = PatchBuffer::new(hydro_count, max_par_order, 0, 0, n_anticipated, k_max);
 
-        // ── Cut row batch buffers (reused across iterations) ───────────────
         let cut_batches: Vec<RowBatch> = (0..num_stages)
             .map(|_| RowBatch {
                 num_rows: 0,
@@ -135,7 +95,6 @@ impl IterationScratch {
             row_upper: Vec::new(),
         };
 
-        // ── Template baking buffers ────────────────────────────────────────
         let mut baked_templates: Vec<StageTemplate> =
             (0..num_stages).map(|_| StageTemplate::empty()).collect();
         let bake_row_batches: Vec<RowBatch> = (0..num_stages)
@@ -149,14 +108,10 @@ impl IterationScratch {
             })
             .collect();
 
-        // Reusable scratch for the baking count/emit passes (reused across the
-        // pre-bake loop here and every per-iteration rebake).
         let mut baking_scratch = cobre_solver::BakingScratch::new();
 
-        // Pre-bake every stage template with an empty cut batch so that
-        // iteration 1's forward and backward passes can use the baked
-        // load path. Empty-batch bake is a structural copy of the base
-        // template.
+        // Pre-bake with an empty cut batch (a structural copy of the base
+        // template) so iteration 1's passes can use the baked load path.
         for t in 0..num_stages {
             cobre_solver::bake_rows_into_template(
                 &stage_ctx.templates[t],
@@ -166,12 +121,8 @@ impl IterationScratch {
             );
         }
 
-        // ── Lower-bound cut row map ────────────────────────────────────────
         let lb_cut_row_map = CutRowMap::new(fcf_pool_0_capacity, template_0_num_rows);
 
-        // ── Lower-bound evaluation scratch ────────────────────────────────
-        // Allocated empty; populated on the first evaluate_lower_bound call
-        // and reused (without reallocation) on every subsequent iteration.
         let lb_scratch = LbEvalScratch::new();
 
         Self {

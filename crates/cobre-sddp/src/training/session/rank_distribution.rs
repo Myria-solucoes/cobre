@@ -2,24 +2,15 @@
 
 use cobre_comm::Communicator;
 
-/// Constants derived from the MPI communicator and training configuration.
-///
-/// All fields are set once in `RankDistribution::new` at the start of a
-/// training run and are read-only for its duration. This struct owns the
-/// base/remainder distribution arithmetic that divides `total_forward_passes`
-/// across MPI ranks.
-///
-/// Fields are derived from `(comm.size(), comm.rank(), total_forward_passes,
-/// n_state, num_stages)` and remain constant for the lifetime of the session.
-/// `num_total_forward_passes` caches the `total_forward_passes` parameter as
-/// `usize` so call sites do not need to re-derive it from `LoopConfig::forward_passes`.
+/// Base/remainder arithmetic that divides `total_forward_passes` across MPI
+/// ranks. All fields are set once in `RankDistribution::new` and read-only for
+/// the run.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct RankDistribution {
     pub num_stages: usize,
     pub num_ranks: usize,
-    // Rationale: `my_rank` (usize) is read only by rank-distribution unit tests via
-    // `per_rank[rd.my_rank]`; the MPI call sites in this module use `fwd_rank` (i32)
-    // as the actual rank, so the dead_code lint fires on this `usize` variant.
+    // Rationale: read only by unit tests via `per_rank[rd.my_rank]`; MPI call
+    // sites use the `i32` `fwd_rank` instead.
     #[allow(dead_code)]
     pub my_rank: usize,
     pub my_actual_fwd: usize,
@@ -31,16 +22,11 @@ pub(crate) struct RankDistribution {
 }
 
 impl RankDistribution {
-    /// Derive all rank-distribution constants from the communicator and training
-    /// configuration.
+    /// Derive all rank-distribution constants from the communicator and config.
     ///
-    /// Performs the base/remainder arithmetic that distributes
-    /// `total_forward_passes` across `comm.size()` ranks: the first
-    /// `remainder_fwd` ranks each receive `base_fwd + 1` forward passes; the
-    /// remaining ranks receive `base_fwd`.
-    ///
-    /// The single `expect` call is preserved verbatim from the pre-refactor
-    /// inline code; MPI rank integers must fit in `i32`.
+    /// The first `remainder_fwd` ranks each receive `base_fwd + 1` forward
+    /// passes; the rest receive `base_fwd`.
+    // Rationale: MPI rank integers fit in `i32`, so the `expect` cannot fire.
     #[allow(clippy::expect_used)]
     pub(crate) fn new<C: Communicator>(
         comm: &C,
@@ -71,11 +57,6 @@ impl RankDistribution {
 
     /// Return a vector of length `num_ranks` where index `r` holds the number
     /// of forward passes assigned to rank `r`.
-    ///
-    /// The per-rank value is `base_fwd + usize::from(r < remainder_fwd)`, which
-    /// is identical to the `my_actual_fwd` derivation in `new` applied for every
-    /// rank index. Calling `actual_per_rank(total)[self.my_rank]` equals
-    /// `self.my_actual_fwd`.
     pub(crate) fn actual_per_rank(&self, total_forward_passes: usize) -> Vec<usize> {
         let base_fwd = total_forward_passes / self.num_ranks;
         let remainder_fwd = total_forward_passes % self.num_ranks;

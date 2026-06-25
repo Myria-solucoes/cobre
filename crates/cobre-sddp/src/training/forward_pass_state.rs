@@ -67,22 +67,8 @@ pub(crate) struct ForwardPassInputs<'a, S: SolverInterface + Send> {
 }
 
 impl<'a, S: SolverInterface + Send> ForwardPassInputs<'a, S> {
-    /// Construct inputs from the fields of a `TrainingSession`, minus `fwd_state`.
-    ///
-    /// The caller is responsible for taking `&mut session.fwd_state` separately
-    /// (which the borrow checker treats as a disjoint field borrow), then passing
-    /// the remaining session fields here.  This collapses the multi-field struct
-    /// literal into a single compact call:
-    ///
-    /// ```text
-    /// let fwd = &mut self.fwd_state;
-    /// let mut inputs = ForwardPassInputs::from_session_fields(
-    ///     &mut self.fwd_pool, &mut self.basis_store, self.stage_ctx,
-    ///     &mut self.scratch, self.fcf, self.training_ctx, &self.ranks,
-    ///     &self.runtime, iteration,
-    /// );
-    /// let forward_result = fwd.run(&mut inputs)?;
-    /// ```
+    /// Construct inputs from the fields of a `TrainingSession`, minus `fwd_state`
+    /// (which the caller takes separately as a disjoint field borrow).
     // RATIONALE: 9 args are disjoint borrows of `TrainingSession` fields required because
     // Rust NLL cannot split a single `&mut TrainingSession` borrow when `fwd_state` is also
     // borrowed mutably. Each arg maps to a distinct session field; no grouping is possible
@@ -119,14 +105,8 @@ impl<'a, S: SolverInterface + Send> ForwardPassInputs<'a, S> {
 
 /// Read-only captures shared across all rayon workers in the forward pass.
 ///
-/// Built once by [`ForwardPassState::run`] before the parallel region and
-/// passed by shared reference (`&ForwardWorkerParams`) to every
-/// [`run_forward_worker`] invocation. All fields are either scalars or
-/// immutable borrows; no field is mutated inside the worker.
-///
-/// The struct is not generic over the solver type `S` because no field holds an
-/// `S`-typed value. The `SolverWorkspace<S>` is passed as a separate `ws`
-/// argument to [`run_forward_worker`].
+/// Built once before the parallel region and passed by shared reference to every
+/// [`run_forward_worker`] invocation; no field is mutated inside the worker.
 pub(crate) struct ForwardWorkerParams<'a> {
     /// Number of forward passes assigned to this rank (local partition size).
     pub forward_passes: usize,
@@ -150,10 +130,8 @@ pub(crate) struct ForwardWorkerParams<'a> {
     pub recent_accum_seed: &'a [f64],
     /// Lag-accumulator weight seed at trajectory start.
     pub recent_weight_seed: f64,
-    /// Stage-invariant role-(a) state layout (state-vector column ranges,
-    /// hydro/lag counts). The only field read from it is `inflow_lags.start`
-    /// (for the initial-state lag base), so the geometry descriptor is not needed
-    /// here.
+    /// Stage-invariant state layout; only `inflow_lags.start` is read (the
+    /// initial-state lag base).
     pub state: &'a StateLayout,
     /// Stage-level LP context (templates, row counts, noise scales).
     pub ctx: &'a StageContext<'a>,
@@ -196,61 +174,35 @@ struct PostProcessContext {
 
 /// Owned scratch buffers for the forward pass, allocated once and reused.
 ///
-/// `ForwardPassState` is constructed once by `TrainingSession::new` and stored
-/// as a field on `TrainingSession`. The buffers are pre-sized from the study
-/// dimensions and reused across every iteration via `clear()` / `resize()` /
-/// `extend()`. No allocation occurs on the hot path.
-///
-/// Per-iteration inputs (workspaces, basis store, stage context, records, etc.)
-/// are passed via [`ForwardPassInputs`] at each `run()` call.
+/// Pre-sized from the study dimensions and reused across every iteration; every
+/// field is cleared and repopulated each `run()`, so no allocation occurs on the
+/// hot path. Per-iteration inputs are passed via [`ForwardPassInputs`].
 // The `worker_` prefix is intentional: all fields are per-worker scratch buffers.
 #[allow(clippy::struct_field_names)]
 pub(crate) struct ForwardPassState {
-    /// Per-worker, per-stage solver-stats accumulators.
-    ///
-    /// Reused across iterations: cleared at the start of each `run()`.
-    /// Shape: `n_workers × num_stages`.
+    /// Per-worker, per-stage solver-stats accumulators (`n_workers × num_stages`).
     worker_stage_stats: Vec<Vec<SolverStatsDelta>>,
 
     /// Per-worker solver statistics snapshot taken **before** the parallel region.
-    ///
-    /// Cleared and repopulated at the start of each `run()`.
     worker_stats_before: Vec<SolverStatistics>,
 
     /// Per-worker solver statistics snapshot taken **after** the parallel region.
-    ///
-    /// Cleared and repopulated after the parallel region each `run()`.
     worker_stats_after: Vec<SolverStatistics>,
 
     /// Per-worker solver-statistics delta (after − before).
-    ///
-    /// Cleared and repopulated after the parallel region each `run()`.
     worker_deltas: Vec<SolverStatsDelta>,
 
     /// Per-worker wall-time total for load-imbalance decomposition.
-    ///
-    /// Cleared and repopulated after the parallel region each `run()`.
     worker_totals: Vec<f64>,
 
-    /// Per-iteration scenario cost accumulator.
-    ///
-    /// Pre-sized to `max_local_fwd` at construction. At the start of
-    /// `post_process_worker_results` the buffer is taken via
-    /// `std::mem::take`, cleared, populated by the worker-result merge loop,
-    /// then moved into [`ForwardResult`]. On the next iteration the field
-    /// starts empty; the merge loop extends into it, growing capacity only
-    /// when `forward_passes` exceeds the previous maximum.
+    /// Per-iteration scenario cost accumulator. Taken via `std::mem::take` into
+    /// the [`ForwardResult`] each run and left empty; capacity grows only when
+    /// `forward_passes` exceeds the previous maximum.
     scenario_costs: Vec<f64>,
 
-    /// Per-stage solver-stats accumulator for the merged forward result.
-    ///
-    /// Pre-sized to `num_stages` at construction with default-initialised
-    /// entries. At the start of `post_process_worker_results` the buffer is
-    /// taken via `std::mem::take` and each entry reset in place, then
-    /// populated by the worker-result merge loop, then moved into
-    /// [`ForwardResult`]. On the next iteration the field is restored via
-    /// `std::mem::replace` from the returned `ForwardResult` by the
-    /// `run()` method so no allocation occurs from iteration 2 onward.
+    /// Per-stage solver-stats accumulator for the merged forward result. Swapped
+    /// out via `std::mem::replace` into the [`ForwardResult`] each run, leaving a
+    /// pre-sized empty vec so the next iteration's resize does not allocate.
     stage_stats: Vec<SolverStatsDelta>,
 }
 
@@ -358,7 +310,6 @@ impl ForwardPassState {
         let n_workers = inputs.workspaces.len().max(1);
         let start = Instant::now();
 
-        // Partition record slice into per-worker sub-slices.
         let mut remaining: &mut [TrajectoryRecord] = inputs.records;
         let mut record_slices: Vec<&mut [TrajectoryRecord]> = Vec::with_capacity(n_workers);
         for w in 0..n_workers {
@@ -369,22 +320,14 @@ impl ForwardPassState {
         }
         let basis_slices = inputs.basis_store.split_workers_mut(n_workers);
 
-        // Noise dimension for worker-local sampling buffers (`OutOfSample` path).
         let noise_dim = stochastic.dim();
 
-        // True when the last study stage has warm-start (boundary) cuts.
         let terminal_has_boundary_cuts =
             num_stages > 0 && inputs.fcf.pools[num_stages - 1].warm_start_count > 0;
 
-        // Re-size per-worker per-stage stat accumulators to match the current
-        // worker count (may differ from the count at new() if the pool shrank).
-        // Each entry is reset to default.
-        //
-        // Fast path (common case): dimensions unchanged → reset scalars in place
-        // and clear each histogram without reallocating the outer Vec.
-        //
-        // Slow path: dimensions changed (e.g. pool resized) → rebuild from scratch
-        // so that the shape exactly matches (n_workers, num_stages).
+        // Re-size the per-worker per-stage accumulators: the worker count may
+        // differ from `new()` if the pool shrank. Fast path resets in place when
+        // the shape is unchanged; otherwise rebuild to `(n_workers, num_stages)`.
         let shape_matches = self.worker_stage_stats.len() == n_workers
             && self.worker_stage_stats.first().map_or(0, Vec::len) == num_stages;
         if shape_matches {
@@ -404,18 +347,13 @@ impl ForwardPassState {
             }
         }
 
-        // Collect per-worker snapshots before the parallel region.
         self.worker_stats_before.clear();
         self.worker_stats_before
             .extend(inputs.workspaces.iter().map(|ws| ws.solver.statistics()));
 
-        // Apply the forward-phase solver profile to every worker workspace before
-        // the parallel region begins.  The profile is applied via delta-tracked
-        // FFI: `set_profile` issues solver-option calls only for the fields that
-        // differ from each solver's current state (the tuned deep-cut-pool profile
-        // sets `simplex_price_strategy = 2` relative to the HiGHS default).
-        // Resolved once; it is the compile-time `FORWARD` const. The assert
-        // verifies `set_profile` stored exactly the profile we passed.
+        // Apply the forward-phase solver profile to every workspace. `set_profile`
+        // is delta-tracked: it issues solver-option FFI calls only for fields that
+        // differ from each solver's current state.
         let forward_profile = Phase::Forward.profile();
         for ws in inputs.workspaces.iter_mut() {
             ws.solver.set_profile(&forward_profile);
@@ -425,16 +363,13 @@ impl ForwardPassState {
             );
         }
 
-        // Reset per-worker timing accumulators at the iteration boundary.
         for ws in inputs.workspaces.iter_mut() {
             ws.worker_timing_buf = cobre_core::WorkerPhaseTimings::default();
         }
 
-        // Parallel region: each worker processes its scenario partition.
         let parallel_start = Instant::now();
-        // Temporarily drain `worker_stage_stats` into a Vec consumed by the
-        // parallel closure. After the closure completes we receive the updated
-        // stats back via the ForwardWorkerResult.
+        // Drain `worker_stage_stats` into the parallel closure; the updated stats
+        // come back via each `ForwardWorkerResult` so the allocation is recycled.
         let worker_stage_stats_for_par: Vec<Vec<SolverStatsDelta>> =
             std::mem::take(&mut self.worker_stage_stats);
 
@@ -457,10 +392,6 @@ impl ForwardPassState {
             training_ctx,
             sampler: &sampler,
         };
-        // `params` is shared across all rayon workers via `&ForwardWorkerParams`.
-        // All fields are either `Copy` scalars or `&'a T` shared references, so
-        // `ForwardWorkerParams` is `Sync` by Rust's automatic derivation rules.
-
         let worker_results: Vec<Result<ForwardWorkerResult, SddpError>> = inputs
             .workspaces
             .par_iter_mut()
@@ -482,7 +413,6 @@ impl ForwardPassState {
             )
             .collect();
 
-        // Capture parallel region wall-clock before sequential post-processing.
         #[allow(clippy::cast_possible_truncation)]
         let parallel_wall_ms = parallel_start.elapsed().as_millis() as u64;
 
@@ -561,7 +491,6 @@ impl ForwardPassState {
         )]
         let fwd_scheduling_ms = (parallel_wall_ms as f64 - max_worker_ms).max(0.0);
 
-        // Accumulate per-worker forward-setup time into the named field.
         for (ws, delta) in inputs.workspaces.iter_mut().zip(&self.worker_deltas) {
             ws.worker_timing_buf.fwd_setup_ms +=
                 delta.load_model_time_ms + delta.set_bounds_time_ms + delta.basis_set_time_ms;
@@ -578,24 +507,12 @@ impl ForwardPassState {
             }
         }
 
-        // Merge per-worker cost vectors in global scenario index order (canonical).
-        // Simultaneously merge per-stage stats by summing element-wise across workers,
-        // and move each worker's per_stage_stats Vec back into self.worker_stage_stats
-        // so the next iteration's fast-path reset can reuse the allocation.
-        //
-        // scenario_costs: taken from self (pre-allocated in new), cleared, extended, then
-        // moved into ForwardResult. self.scenario_costs becomes Vec::new() after each call;
-        // capacity grows only when forward_passes increases beyond the previous maximum.
-        //
-        // stage_stats: reset in-place (len unchanged across iterations). After accumulation
-        // we swap self.stage_stats with a Vec::with_capacity(num_stages), giving ForwardResult
-        // the populated vec and leaving self a pre-sized empty vec for next iteration.
-        // resize_with at the start of the next run() fills it without allocating.
+        // Merge per-worker cost vectors in canonical global scenario index order,
+        // and per-stage stats by element-wise summation across workers. The
+        // canonical order keeps the merged result rank-count-invariant.
         let mut scenario_costs = std::mem::take(&mut self.scenario_costs);
         scenario_costs.clear();
 
-        // Ensure stage_stats has the correct length (on iteration 1 it was pre-sized
-        // by new(); on subsequent iterations it is empty but has capacity num_stages).
         if self.stage_stats.len() != num_stages {
             self.stage_stats
                 .resize_with(num_stages, SolverStatsDelta::default);
@@ -621,9 +538,6 @@ impl ForwardPassState {
             self.worker_stage_stats.push(worker_stage_stats);
         }
 
-        // Swap self.stage_stats (populated) with a pre-sized empty vec. ForwardResult
-        // receives the populated data; self retains a capacity-sized empty vec so that
-        // the resize_with above does not allocate on the next iteration.
         let stage_stats = std::mem::replace(&mut self.stage_stats, Vec::with_capacity(num_stages));
 
         #[allow(clippy::cast_possible_truncation)]
@@ -642,26 +556,12 @@ impl ForwardPassState {
     }
 }
 
-/// Execute the forward pass for one rayon worker's scenario partition.
+/// Execute the forward pass for one rayon worker's scenario partition, through
+/// every stage, accumulating trajectory costs and per-stage solver statistics.
 ///
-/// Processes `n_local` scenarios (the worker's slice of the global forward-pass
-/// batch) through every stage, accumulating trajectory costs and per-stage
-/// solver statistics.
-///
-/// # Parameters
-///
-/// - `w`: rayon worker index (0-based), used to derive the local scenario range
-///   via [`fn@partition`].
-/// - `ws`: mutable reference to this worker's [`SolverWorkspace`].
-/// - `worker_records`: mutable slice of [`TrajectoryRecord`] for this worker's
-///   scenarios. Length is `n_local * num_stages`.
-/// - `basis_slice`: mutable view into the basis warm-start store for this worker.
-/// - `per_stage_stats`: mutable per-stage [`SolverStatsDelta`] accumulator
-///   vector. Length is `num_stages` on entry; values are accumulated in-place.
-///   At return the vector is taken via `mem::take` into the result so the
-///   allocation is recycled across iterations (no per-worker per-iteration
-///   reallocation).
-/// - `params`: shared read-only bundle of all captures for this parallel region.
+/// `per_stage_stats` (length `num_stages`) is accumulated in place and taken via
+/// `mem::take` into the result at return, recycling the allocation across
+/// iterations.
 ///
 /// # Errors
 ///
@@ -676,23 +576,19 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     params: &ForwardWorkerParams<'_>,
 ) -> Result<ForwardWorkerResult, SddpError> {
     let worker_wall_start = Instant::now();
-    // Snapshot the cumulative lazy-scoring accumulator at the forward-region
-    // start; the delta at region end attributes scoring done during this
-    // forward pass to the forward phase (the accumulator is never reset, so a
-    // snapshot-delta is the only correct attribution). Stays zero on the baked
-    // path, which never enters the lazy solve.
+    // Snapshot the cumulative lazy-scoring accumulator; the region-end delta
+    // attributes this pass's scoring to the forward phase. The accumulator is
+    // never reset, so a snapshot-delta is the only correct attribution; it stays
+    // zero on the baked path.
     let scoring_seconds_before = ws.backward_accum.dcs_solve.scoring_time_seconds;
     let (start_m, end_m) = partition(params.forward_passes, params.n_workers, w);
     let n_local = end_m - start_m;
 
-    // ── Pre-allocated scratch from ws ─────────────────────────────────────
-    // trajectory_costs_buf: reused across iterations; clear + resize avoids
-    // re-allocation when n_local is stable.
     ws.scratch.trajectory_costs_buf.clear();
     ws.scratch.trajectory_costs_buf.resize(n_local, 0.0_f64);
 
-    // Sampling scratch: taken out of ws to avoid borrow conflicts when
-    // run_forward_stage borrows ws while raw_noise is still live.
+    // Sampling scratch taken out of ws so it can stay live while
+    // run_forward_stage borrows ws (and so the allocation is reused).
     let mut raw_noise_buf = std::mem::take(&mut ws.scratch.raw_noise_buf);
     raw_noise_buf.resize(params.noise_dim, 0.0_f64);
     let mut perm_scratch = std::mem::take(&mut ws.scratch.perm_scratch);
@@ -702,9 +598,8 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     #[allow(clippy::cast_possible_truncation)]
     let total_scenarios_u32 = params.total_forward_passes as u32;
 
-    // Dynamic Cut Selection decision for this forward pass: `Some` only when the
-    // dynamic method is configured AND active at this iteration. Constant across
-    // stages and scenarios, mirroring the backward pass's per-call gate.
+    // DCS decision for this pass: `Some` only when configured AND active at this
+    // iteration; constant across all stages and scenarios.
     let dcs_params = params
         .training_ctx
         .dcs
@@ -754,7 +649,6 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                         .copy_from_slice(params.recent_accum_seed);
                     ws.scratch.lag_weight_accum = params.recent_weight_seed;
                 }
-                // Reset downstream accumulator at trajectory start.
                 ws.scratch
                     .downstream_accumulator
                     .iter_mut()
@@ -809,8 +703,6 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 pool: &params.fcf.pools[t],
                 dcs: dcs_params,
             };
-            // Snapshot solver statistics before the stage solve so the
-            // per-stage delta can be accumulated without hot-path allocation.
             let stats_before_stage = ws.solver.statistics();
             let stage_cost = run_forward_stage(
                 ws,
@@ -838,15 +730,10 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     ws.worker_timing_buf.scoring_ms +=
         (ws.backward_accum.dcs_solve.scoring_time_seconds - scoring_seconds_before) * 1_000.0;
     Ok(ForwardWorkerResult {
-        // Take the pre-allocated buffer out of ws; ForwardResult reassembles
-        // the pieces, and post_process_worker_results later returns it via
-        // mem::take so the allocation survives across training iterations.
+        // `mem::take` both buffers out of ws; post_process_worker_results returns
+        // them so the allocations persist across training iterations.
         trajectory_costs: std::mem::take(&mut ws.scratch.trajectory_costs_buf),
         local_solves,
-        // mem::take recycles the per-worker, per-stage accumulator Vec back
-        // into ForwardWorkerResult; post_process_worker_results pushes it
-        // onto self.worker_stage_stats so the allocation persists across
-        // training iterations.
         per_stage_stats: std::mem::take(per_stage_stats),
     })
 }

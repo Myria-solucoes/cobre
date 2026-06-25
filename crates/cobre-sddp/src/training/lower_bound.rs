@@ -2,29 +2,11 @@
 //!
 //! [`evaluate_lower_bound`] computes the risk-adjusted lower bound by solving
 //! the stage-0 LP for every opening in the scenario tree and aggregating the
-//! per-opening objectives through the stage-0 risk measure. The result is
-//! broadcast from rank 0 to all other ranks so that every rank holds the same
-//! global lower bound value.
+//! per-opening objectives through the stage-0 risk measure, then broadcasts the
+//! scalar from rank 0.
 //!
-//! ## Algorithm
-//!
-//! 1. Rank 0 iterates over all `n_openings` openings at stage 0.
-//! 2. For each opening the LP is rebuilt: `load_model` → `add_rows(cut_batch)`
-//!    → `fill_forward_patches` → `set_row_bounds` → `solve`.
-//! 3. The per-opening objectives are aggregated by the risk measure using
-//!    uniform probabilities `1 / n_openings`.
-//! 4. The scalar lower bound is broadcast from rank 0 to all ranks.
-//!
-//! ## Correctness notes
-//!
-//! - The cut batch is built **once** before the opening loop because it does
-//!   not change per opening.
-//! - `fill_forward_patches` is used (not `fill_state_patches`) because each
-//!   opening carries different noise values that must be patched into the LP.
-//! - The function must be called **after** the backward pass and cut sync so
-//!   that the FCF holds the latest cuts when the LPs are solved.
-//! - Stage 0 should never be infeasible (the penalty system guarantees recourse),
-//!   so `SddpError::Infeasible` from this function indicates a modelling error.
+//! Must be called **after** the backward pass and cut sync so the FCF holds the
+//! latest cuts when the LPs are solved.
 
 use std::ops::Range;
 
@@ -208,8 +190,8 @@ fn lb_init_rank0<S: SolverInterface>(
     scratch.ncs_col_indices_buf.clear();
     scratch.ncs_col_lower_buf.clear();
 
-    // Indices are constant across openings (same dense columns) — build once here;
-    // the per-opening bound buffers are gathered inside the loop.
+    // Indices are constant across openings — build once here; the per-opening
+    // bound buffers are gathered inside the loop.
     if let Some(stoch) = spec.stochastic {
         let n_stochastic_ncs = stoch.n_stochastic_ncs();
         if n_stochastic_ncs > 0 && !spec.ncs_generation.is_empty() {
@@ -224,9 +206,8 @@ fn lb_init_rank0<S: SolverInterface>(
 
     scratch.par_inflow_buf.resize(spec.n_hydros, 0.0);
 
-    // Append-only LP management: cuts are never removed, keeping the lower bound
-    // monotone across iterations. With a CutRowMap the solver persists (load once,
-    // then append only new cuts); without one (tests), rebuild each call.
+    // Append-only: cuts are never removed, keeping the lower bound monotone across
+    // iterations. The CutRowMap-less branch (tests) rebuilds the model each call.
     if let Some(row_map) = lb_cut_row_map {
         if row_map.total_cut_rows() == 0 {
             solver.load_model(spec.template);
@@ -268,13 +249,11 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
     let n_hydros = spec.n_hydros;
     let base_row = spec.base_row;
 
-    // Truncation precompute: constant across openings, so done once before the loop.
     let needs_truncation = matches!(
         spec.inflow_method,
         InflowNonNegativityMethod::Truncation | InflowNonNegativityMethod::TruncationWithPenalty
     );
 
-    // Resolve the PAR LP once; used for both truncation and z-inflow RHS.
     let par_lp_opt = spec.stochastic.map(StochasticContext::par);
     let truncation_par = if needs_truncation {
         par_lp_opt.filter(|p| p.n_stages() > 0 && p.n_hydros() == n_hydros)
@@ -553,15 +532,6 @@ mod tests {
     }
 
     /// Return the owned locals needed to build an [`LbEvalScratchBundle`] for tests.
-    ///
-    /// Call pattern:
-    /// ```text
-    /// let (mut row_batch, mut lb_scratch) = make_lb_locals();
-    /// let mut bundle = LbEvalScratchBundle::from_scratch_fields(
-    ///     &mut patch_buf, &mut row_batch, None, &mut lb_scratch,
-    /// );
-    /// evaluate_lower_bound(..., &mut bundle, ...);
-    /// ```
     fn make_lb_locals() -> (RowBatch, LbEvalScratch) {
         (empty_row_batch(), LbEvalScratch::new())
     }
@@ -833,8 +803,7 @@ mod tests {
                 return Err(SolverError::Infeasible);
             }
             let obj = self.objectives[call % self.objectives.len()];
-            // Return a minimal view; evaluate_lower_bound only reads `view.objective`.
-            // Use static empty slices for primal/dual/reduced_costs.
+            // evaluate_lower_bound reads only `view.objective`, so the slices stay empty.
             Ok(cobre_solver::SolutionView {
                 objective: obj,
                 primal: &[],
@@ -1553,20 +1522,9 @@ mod tests {
 
     // ── NCS column-bound patching regression test ────────────────────────────
 
-    /// Regression: `lb_evaluate_stage_0` calls `set_col_bounds` once per
-    /// opening when stochastic NCS entities are present.
-    ///
-    /// This is the correctness guard for the D15 NCS column-bound patch
-    /// contract: NCS column
-    /// bounds must be patched *per opening*, not once before the loop or not
-    /// at all. With `n_openings` openings and stochastic NCS present, the
-    /// solver must receive exactly `n_openings` `set_col_bounds` calls.
-    ///
-    /// A real `StochasticContext` is built via `build_stochastic_context` with
-    /// a minimal `System` containing one `NonControllableSource` and one
-    /// `NcsModel`. The `LbEvalScratch` is pre-populated to mirror the output of
-    /// `lb_init_rank0`. `lb_evaluate_stage_0` is called directly so that we can
-    /// inspect the `MockSolver`'s `set_col_bounds_calls` counter afterwards.
+    /// Correctness guard for the D15 NCS column-bound patch contract: NCS column
+    /// bounds must be patched *per opening*, not once before the loop or not at
+    /// all, so the solver receives one `set_col_bounds` call per opening.
     // `clippy::too_many_lines`: the inline `System`/`StochasticContext` fixture and
     // its per-opening assertions are one coherent scenario; splitting them into
     // helpers would scatter the setup the assertions depend on and obscure the test.
@@ -2014,8 +1972,6 @@ mod tests {
             excess_cost: 0.0,
         };
 
-        // H_A is terminal-Filling at stage 0 (entry − 1 == 0); H_B is PreFilling at
-        // stage 0 (id 0 < start 2).
         let hydros = vec![filling_hydro(3, 0, 1), filling_hydro(4, 2, 4)];
 
         let stages: Vec<Stage> = (0..n_stages)
@@ -2333,14 +2289,8 @@ mod tests {
         // Per-stage widening: the `filling_target`/`σ_fill` family fires at EVERY
         // Filling stage (`start ≤ id < entry`), not only the terminal `entry − 1`
         // one. H_A (start 0, entry 1) is Filling at id 0 only; H_B (start 2, entry 4)
-        // is Filling at ids 2 AND 3. So the family must be present at all three
-        // {0, 2, 3} and absent at the non-filling stages {1, 4}. A pre-widening build
-        // that emitted the family only at the terminal stage would leave stages 2/3
-        // empty — the regression this assertion pins. The lower bound loads
-        // `templates[0]` (stage 0), so stage 0's membership is the directly-consumed
-        // one; the later filling stages are asserted on the same `geometry_per_stage`
-        // the forward/backward passes load, proving the widening is template-driven
-        // at every stage the lower bound or its sibling passes could evaluate.
+        // is Filling at ids 2 AND 3. A pre-widening build that emitted the family only
+        // at the terminal stage would leave stages 2/3 empty — the regression pinned.
         let filling_stage_ids = [0_usize, 2, 3];
         for &fs in &filling_stage_ids {
             let geom = &templates.geometry_per_stage[fs];
@@ -2486,12 +2436,9 @@ mod tests {
             "σ_fill slack column must be a real column of templates[0]"
         );
 
-        // Real solver + communicator. The lower bound loads the production
-        // `templates[0]`, so the solve genuinely sees the filling-structured LP.
-        // n_hydros = 2 matches the system; the per-opening water-balance noise patch
-        // reads `spec.noise_scale` — including H_B's PreFilling-zeroed stage-0 entry
-        // — exactly as the forward/backward passes do, so the bound is computed
-        // against the same constraints those passes see at stage 0.
+        // The per-opening water-balance noise patch reads `spec.noise_scale` —
+        // including H_B's PreFilling-zeroed stage-0 entry — exactly as the
+        // forward/backward passes do, so the bound sees the same stage-0 constraints.
         let mut solver = cobre_solver::ActiveSolver::new().expect("ActiveSolver::new");
         let comm = LocalComm;
 

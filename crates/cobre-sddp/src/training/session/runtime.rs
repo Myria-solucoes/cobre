@@ -6,34 +6,19 @@ use std::sync::mpsc::Sender;
 
 use cobre_core::TrainingEvent;
 
-/// Per-invocation runtime handles for a training run.
-///
-/// These are the per-call hooks that allow an external caller to observe
-/// the training's progress (`event_sender`), abort it gracefully
-/// (`shutdown_flag`), and opt into state export (`export_states`). They
-/// are not configuration values that govern the training algorithm; they
-/// are runtime integration points. This mirrors the `EventParams`
-/// projection on `StudySetup` (see `crates/cobre-sddp/src/config.rs`),
-/// which deliberately excludes runtime handles from the long-lived
-/// study configuration.
-///
-/// All three fields are moved into the struct exactly once at construction
-/// time (inside `TrainingSession::new`) and are never mutated thereafter.
+/// Per-invocation runtime integration hooks, kept separate from the long-lived
+/// study configuration — mirrors the `EventParams` projection on `StudySetup`.
 pub(crate) struct RuntimeHandles {
     pub event_sender: Option<Sender<TrainingEvent>>,
     pub shutdown_flag: Option<Arc<AtomicBool>>,
-    // Rationale: production code reads `config.events.export_states` directly rather than
-    // going through `RuntimeHandles`; this field is set in `RuntimeHandles::new` for
-    // structural symmetry with `event_sender` and `shutdown_flag`, and is asserted in
-    // the unit test that validates constructor round-trip behaviour.
+    // Rationale: production reads `config.events.export_states` directly; this
+    // field exists for symmetry and is asserted by the constructor unit test.
     #[allow(dead_code)]
     pub export_states: bool,
 }
 
 impl RuntimeHandles {
     /// Construct the handles from the three per-invocation values.
-    ///
-    /// Trivially stores the inputs; no derivation or heap activity.
     pub(crate) fn new(
         event_sender: Option<Sender<TrainingEvent>>,
         shutdown_flag: Option<Arc<AtomicBool>>,
@@ -47,10 +32,6 @@ impl RuntimeHandles {
     }
 
     /// Return a borrowed reference to the event sender, if present.
-    ///
-    /// Called at every event emission site (6+ times per iteration path).
-    /// Centralising `Option::as_ref()` here removes repetition without
-    /// adding accessor bloat.
     pub(crate) fn event_sender(&self) -> Option<&Sender<TrainingEvent>> {
         self.event_sender.as_ref()
     }

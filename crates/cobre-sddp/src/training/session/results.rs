@@ -6,10 +6,6 @@ use crate::solver_stats::SolverStatsLogEntry;
 use crate::stopping_rule::RULE_ITERATION_LIMIT;
 
 /// Accumulates per-iteration results for one training run.
-///
-/// Fields are initialised once in `new`, written on each call to
-/// `TrainingSession::run_iteration` (and its phase helpers), and consumed
-/// by `TrainingSession::finalize` / `finalize_with_error`.
 pub(crate) struct TrainingResults {
     pub final_lb: f64,
     pub final_ub: f64,
@@ -24,10 +20,6 @@ pub(crate) struct TrainingResults {
 impl TrainingResults {
     /// Initialise all result accumulators for a training run starting at
     /// `start_iteration`.
-    ///
-    /// `start_time` is captured here so that `total_time_ms` in the emitted
-    /// `TrainingFinished` event reflects elapsed time from the same instant as
-    /// the pre-refactor code.
     pub(crate) fn new(start_iteration: u64) -> Self {
         Self {
             start_time: Instant::now(),

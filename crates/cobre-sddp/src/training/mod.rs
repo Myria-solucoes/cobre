@@ -20,13 +20,9 @@
 //! - `training_output` — converts the training summary plus event log into the
 //!   structured output the `cobre-io` writers consume.
 
-// Rationale: the training-loop file keeps its established `training` basename
-// inside this `training/` cluster, so the submodule shares its parent's name.
-// Renaming it (e.g. to `loop`) would break the `crate::training::train` /
-// `crate::training::TrainingResult` re-export paths the call sites and intra-doc
-// links rely on, the `cobre_sddp::training::{train, TrainingResult,
-// TrainingOutcome}` curated surface, and the `training/training.rs` hot-path
-// pointer in `CLAUDE.md` for no behavioural gain.
+// Rationale: renaming this submodule out of its parent's `training` name would
+// break the `crate::training::{train, TrainingResult, TrainingOutcome}`
+// re-export paths call sites and intra-doc links rely on, for no behavioural gain.
 #[allow(clippy::module_inception)]
 pub mod training;
 
@@ -48,8 +44,6 @@ pub use training::{TrainingOutcome, TrainingResult, train};
 pub use training_output::build_training_output;
 pub use trajectory::TrajectoryRecord;
 
-// Crate-internal re-export: keeps the `crate::training::broadcast_basis_cache`
-// path resolving verbatim for its sole consumer, `session/mod.rs`, after the
-// loop file became the `training` submodule. `pub(crate)` keeps this MPI
-// basis-cache helper off the curated public surface.
+// `pub(crate)` keeps this MPI basis-cache helper (sole consumer `session/mod.rs`)
+// off the curated public surface.
 pub(crate) use training::broadcast_basis_cache;

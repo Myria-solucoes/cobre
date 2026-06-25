@@ -1,10 +1,8 @@
 //! Benders subgradient extraction from a solved backward LP.
 //!
-//! Owns the cut-sign / `col_scale`-division contract ([`extract_duals_from_view`]):
-//! the subgradient is `rc_scaled / col_scale[col]` — **divided, not multiplied** —
-//! because the incoming-state column pin sets `v_scaled = v_orig / col_scale`.
-//! Both functions are `pub(crate)` for the cross-submodule call from
-//! [`super::StageOpeningSolver`].
+//! The subgradient is `rc_scaled / col_scale[col]` — **divided, not multiplied** —
+//! because the incoming-state column pin sets `v_scaled = v_orig / col_scale`
+//! (sddp.md "Benders cut sign & subgradient extraction").
 
 use cobre_solver::SolutionView;
 
@@ -13,12 +11,10 @@ use crate::indexer::StateLayout;
 use super::SuccessorSpec;
 
 /// Extract state and cut duals from the live solver view into pre-warmed scratch
-/// buffers (`state_duals`, `cut_duals` — taken from `ws.backward_accum` before the
-/// solve so no `ws` borrow is held here). Returns the LP objective.
-///
-/// `state_duals` holds the unscaled incoming-state reduced costs (the module-level
-/// `col_scale`-division contract); `cut_duals` holds the cut-row slice
-/// `[template_num_rows, template_num_rows + num_cuts)` (implicit `row_scale = 1`).
+/// buffers, returning the LP objective. `state_duals` holds the unscaled
+/// incoming-state reduced costs (the module-level `col_scale`-division contract);
+/// `cut_duals` holds the cut-row slice
+/// `[template_num_rows, template_num_rows + num_cuts)`.
 pub(crate) fn extract_duals_from_view(
     view: &SolutionView<'_>,
     n_state: usize,
@@ -30,9 +26,9 @@ pub(crate) fn extract_duals_from_view(
 ) -> f64 {
     let objective = view.objective;
 
-    // Unscale to original units: the pin sets v_scaled = v_orig / col_scale[col]
-    // (see fill_col_state_patches), so the subgradient dQ/dv_orig is
-    // rc_scaled / col_scale[col] — divided, not multiplied. (col_scale empty ⇒ raw rc.)
+    // Unscale: the subgradient is rc_scaled / col_scale[col] — divided, not
+    // multiplied (the pin sets v_scaled = v_orig / col_scale; see
+    // fill_col_state_patches). Empty col_scale ⇒ raw rc.
     state_duals.clear();
     for j in 0..n_state {
         let col = state.state_to_lp_incoming_column(j);
@@ -61,11 +57,8 @@ pub(crate) fn extract_duals_from_view(
 }
 
 /// State-dual half of [`extract_duals_from_view`] for the lazy-solve path: fills
-/// `state_duals` with the unscaled incoming-state reduced costs (the negation into
-/// the `−∇·x + θ ≥ intercept` row happens later, in cut-row construction).
+/// `state_duals` with the unscaled incoming-state reduced costs.
 ///
-/// The Benders gradient comes solely from the structural state columns, which are
-/// identical in the all-cuts and lazy-solve LPs, so the cut matches by exactness.
 /// Unlike [`extract_duals_from_view`] it does NOT read cut-row duals — under
 /// lazy-solve the resident cut rows are an insertion-order subset, so the
 /// cut-row→slot mapping does not apply.

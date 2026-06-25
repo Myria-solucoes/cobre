@@ -12,28 +12,15 @@
 //! The backward pass reads the `state` and `dual` fields from each record to
 //! generate Benders cuts.
 //!
-//! ## Ownership
-//!
-//! `TrajectoryRecord`s are owned by the forward pass workspace. They are
-//! **not** stored inside the [`FutureCostFunction`]. Serialization support
-//! will be added when checkpoint/restart is implemented.
+//! `TrajectoryRecord`s are owned by the forward pass workspace, **not** stored
+//! inside the [`FutureCostFunction`].
 //!
 //! [`FutureCostFunction`]: crate::cut::fcf::FutureCostFunction
 
 /// LP solution for one scenario at one stage, produced by the forward pass.
 ///
-/// All four fields are taken directly from the LP solver output:
-///
-/// - `primal` is the full primal solution vector (all LP variables in column
-///   order).
-/// - `dual` is the full dual solution vector (one value per LP constraint).
-/// - `stage_cost` is the LP objective value at this stage, excluding the
-///   future-cost theta variable contribution.
-/// - `state` is the end-of-stage state vector (length `n_state`), extracted
-///   from the primal solution by the stage indexer.
-///
-/// The backward pass uses `state` and `dual` to compute cut coefficients.
-/// The training loop monitors `stage_cost` for convergence statistics.
+/// The backward pass reads `state` and `dual` to compute cut coefficients; the
+/// training loop monitors `stage_cost` for convergence statistics.
 #[derive(Debug, Clone)]
 pub struct TrajectoryRecord {
     /// Full primal solution vector (all LP variables in column order).
@@ -42,12 +29,10 @@ pub struct TrajectoryRecord {
     /// Full dual solution vector (one value per LP constraint).
     pub dual: Vec<f64>,
 
-    /// LP objective value at this stage (excluding the future-cost
-    /// theta variable contribution).
+    /// LP objective value at this stage, excluding the future-cost theta variable.
     pub stage_cost: f64,
 
-    /// End-of-stage state vector (length `n_state`), extracted from the
-    /// primal solution by the stage indexer.
+    /// End-of-stage state vector (length `n_state`), extracted from `primal` by the stage indexer.
     pub state: Vec<f64>,
 }
 
@@ -72,8 +57,6 @@ mod tests {
 
     #[test]
     fn stage_cost_value_is_accessible() {
-        // Acceptance criterion: given stage_cost: 42.0, accessing stage_cost
-        // returns 42.0.
         let record = TrajectoryRecord {
             primal: vec![],
             dual: vec![],
@@ -94,13 +77,11 @@ mod tests {
 
         let mut cloned = original.clone();
 
-        // Field equality.
         assert_eq!(cloned.primal, original.primal);
         assert_eq!(cloned.dual, original.dual);
         assert_eq!(cloned.stage_cost, original.stage_cost);
         assert_eq!(cloned.state, original.state);
 
-        // Independence: mutating the clone does not affect the original.
         cloned.stage_cost = 0.0;
         cloned.primal.push(99.0);
         assert_eq!(original.stage_cost, 7.5);
@@ -121,12 +102,9 @@ mod tests {
 
     #[test]
     fn flat_vec_indexing_pattern_works_correctly() {
-        // Demonstrates the canonical storage layout used by the forward pass:
-        // records[scenario * n_stages + stage]
         let n_stages: usize = 5;
         let scenario: usize = 1;
 
-        // n_scenarios * n_stages = 15, well within u8 range.
         let mut records: Vec<TrajectoryRecord> = (0_u8..15_u8)
             .map(|i| TrajectoryRecord {
                 primal: vec![],
@@ -136,13 +114,11 @@ mod tests {
             })
             .collect();
 
-        // Write to scenario=1, stage=3
         records[scenario * n_stages + 3].stage_cost = 999.0;
 
         assert_eq!(records[scenario * n_stages + 3].stage_cost, 999.0);
-        // Adjacent entries are unaffected. Initial stage_cost for each record
-        // was set to its flat index (scenario * n_stages + stage).
-        // scenario=1, stage=2 → index=7, scenario=1, stage=4 → index=9.
+        // Each record's initial stage_cost is its flat index, so the untouched
+        // neighbours read scenario=1,stage=2 → 7.0 and scenario=1,stage=4 → 9.0.
         assert_eq!(records[scenario * n_stages + 2].stage_cost, 7.0);
         assert_eq!(records[scenario * n_stages + 4].stage_cost, 9.0);
     }

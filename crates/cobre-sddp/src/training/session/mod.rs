@@ -77,14 +77,9 @@ pub(crate) enum IterationOutcome {
 // TrainingSession
 // ---------------------------------------------------------------------------
 
-/// Owns all per-training-run scratch state for one call to `train`.
-///
-/// ## Lifetime `'a`
-///
-/// The session borrows `solver`, `fcf`, `stage_ctx`, `training_ctx`, and `comm`
-/// for the duration of the training run. All methods that call into the
-/// forward / backward passes require only `&mut self` because the session IS
-/// the holder of all required references.
+/// Owns all per-training-run scratch state for one call to `train`, borrowing
+/// `solver`, `fcf`, `stage_ctx`, `training_ctx`, and `comm` for the lifetime
+/// `'a` of the run.
 pub(crate) struct TrainingSession<'a, S: SolverInterface + Send, C: Communicator> {
     // ── Borrowed inputs (live for 'a) ─────────────────────────────────────
     solver: &'a mut S,
@@ -130,10 +125,9 @@ where
     /// # Errors
     ///
     /// Returns `SddpError::Solver(e)` if the workspace pool cannot be constructed.
-    // RATIONALE: `i32::try_from(my_rank).expect(...)` is safe because MPI
-    // rank counts are bounded by `i32::MAX` by the MPI specification. A
-    // `?`-propagating variant would return `Result` for an invariant the
-    // caller cannot recover from and the runtime guarantees.
+    // Rationale: the `i32::try_from(my_rank).expect(...)` cannot fire — the MPI
+    // spec bounds rank counts by `i32::MAX`; `?` would surface an unrecoverable
+    // invariant as a `Result`.
     #[allow(clippy::expect_used)]
     pub(crate) fn new(
         solver: &'a mut S,
@@ -144,20 +138,16 @@ where
         comm: &'a C,
         solver_factory: impl Fn() -> Result<S, cobre_solver::SolverError>,
     ) -> Result<Self, SddpError> {
-        // ── Rank math ─────────────────────────────────────────────────────
         let horizon = training_ctx.horizon;
         let state = training_ctx.state;
         let num_stages = horizon.num_stages();
         let total_forward_passes = config.loop_config.forward_passes as usize;
         let ranks = RankDistribution::new(comm, num_stages, total_forward_passes, state.n_state);
 
-        // ── Dense cut packing ─────────────────────────────────────────────
-        // Map the first training iteration (start_iteration + 1) to slot
-        // `warm_start_count` so training cuts pack densely with no reserved
-        // leading block. Runs before the first backward pass adds any cut.
+        // Map the first training iteration to slot `warm_start_count` so
+        // training cuts pack densely with no reserved leading block.
         fcf.set_iteration_base(config.loop_config.start_iteration + 1);
 
-        // ── Workspace pool ────────────────────────────────────────────────
         let n_threads = config.loop_config.n_fwd_threads.max(1);
         let mut fwd_pool = WorkspacePool::try_new(
             ranks.fwd_rank,
@@ -184,10 +174,9 @@ where
             solver_factory,
         )
         .map_err(SddpError::Solver)?;
-        // Pre-size ws.scratch_basis to the largest template the reconstruction
-        // path might ever populate. reconstruct_basis runs unconditionally on any
-        // forward/backward apply with a stored basis; pre-sizing here is what
-        // keeps the hot path allocation-free.
+        // Pre-size scratch_basis to the largest template: `reconstruct_basis`
+        // runs on every stored-basis apply, so this keeps the hot path
+        // allocation-free.
         let max_cols = stage_ctx
             .templates
             .iter()
@@ -202,12 +191,10 @@ where
             .unwrap_or(0);
         fwd_pool.resize_scratch_bases(max_cols, max_rows);
 
-        // ── Basis store ───────────────────────────────────────────────────
-        // Per-scenario, per-stage basis store. Sized for the maximum local
-        // forward passes so that scenario indices are stable across iterations.
+        // Sized for max local forward passes so scenario indices stay stable
+        // across iterations.
         let basis_store = BasisStore::new(ranks.max_local_fwd, ranks.num_stages);
 
-        // ── Exchange + cut-sync buffers ────────────────────────────────────
         let actual_per_rank = ranks.actual_per_rank(total_forward_passes);
         let exchange_bufs = ExchangeBuffers::with_actual_counts(
             ranks.n_state,
@@ -222,11 +209,8 @@ where
             total_forward_passes,
         );
 
-        // ── Visited-states archive ────────────────────────────────────────
-        // All cut-selection strategies require the visited-states archive: the
-        // unified value-evaluation kernel evaluates every populated cut at the
-        // trial points stored here. Event export also needs the archive when
-        // `export_states` is enabled.
+        // Needed by every cut-selection strategy (the value-evaluation kernel
+        // scores cuts at these trial points) and by `export_states`.
         let needs_archive =
             config.cut_management.cut_selection.is_some() || config.events.export_states;
         let visited_archive = if needs_archive {
@@ -240,21 +224,17 @@ where
             None
         };
 
-        // ── Extract runtime handles; leave the rest on `config` ──────────
-        // event_sender and shutdown_flag are moved out via .take() so that
-        // `config.events` remains in a valid state and `config` can be stored
-        // by value. export_states is Copy — it is read directly.
+        // `.take()` the non-Copy handles so `config` stays valid and can be
+        // stored by value; `export_states` is Copy and read directly.
         let event_sender = config.events.event_sender.take();
         let shutdown_flag = config.events.shutdown_flag.take();
         let export_states = config.events.export_states;
 
-        // ── Convergence monitor ────────────────────────────────────────────
         let convergence_monitor =
             ConvergenceMonitor::new(config.loop_config.stopping_rules.clone());
 
-        // ── TrainingStarted event ─────────────────────────────────────────
-        // Emit before moving the three locals into RuntimeHandles so that
-        // the local `event_sender` binding is still available here.
+        // Emit before the locals move into RuntimeHandles, while `event_sender`
+        // is still bound here.
         #[allow(clippy::cast_possible_truncation)]
         emit(
             event_sender.as_ref(),
@@ -269,13 +249,10 @@ where
             },
         );
 
-        // ── Runtime handles ────────────────────────────────────────────────
         let runtime = RuntimeHandles::new(event_sender, shutdown_flag, export_states);
 
-        // ── Result accumulators ────────────────────────────────────────────
         let results = TrainingResults::new(config.loop_config.start_iteration);
 
-        // ── Iteration scratch (reused buffers for forward/backward/cut/lb) ──
         let scratch = IterationScratch::new(
             ranks.max_local_fwd,
             ranks.num_stages,
@@ -289,14 +266,10 @@ where
             stage_ctx,
         );
 
-        // ── Forward-pass scratch buffers ──────────────────────────────────
-        // All allocated once in ForwardPassState::new; reused across iterations.
         let n_workers_local = fwd_pool.workspaces.len();
         let fwd_state =
             ForwardPassState::new(n_workers_local, ranks.num_stages, ranks.max_local_fwd);
 
-        // ── Backward-pass scratch buffers ─────────────────────────────────
-        // All allocated once in BackwardPassState::new; reused across iterations.
         let bwd_max_openings = (0..ranks.num_stages)
             .map(|t| training_ctx.stochastic.opening_tree().n_openings(t))
             .max()
@@ -333,18 +306,13 @@ where
     }
 
     /// Returns the range of iteration indices this session should run.
-    ///
-    /// The outer orchestrator in `train()` iterates over this range and passes
-    /// each index to [`run_iteration`](Self::run_iteration).
     pub(crate) fn iteration_range(&self) -> std::ops::RangeInclusive<u64> {
         (self.config.loop_config.start_iteration + 1)..=self.config.loop_config.max_iterations
     }
 
-    /// Sum the cumulative resident-set-size accumulators (`(sum, count)`) across
-    /// this rank's forward-pass workspaces. A per-iteration delta of this gives
-    /// the iteration's rows-in-LP contribution; the final value gives the run
-    /// total. Zero for non-lazy methods (the accumulators are only touched by the
-    /// lazy solve path).
+    /// Sum the cumulative rows-in-LP accumulators (`(sum, count)`) across this
+    /// rank's forward-pass workspaces. Zero for non-lazy methods — only the lazy
+    /// solve path touches these accumulators.
     fn rows_in_lp_local_totals(&self) -> (u64, u64) {
         self.fwd_pool.workspaces.iter().fold((0, 0), |(s, c), w| {
             let d = &w.backward_accum.dcs_solve;
@@ -365,22 +333,13 @@ where
 
     /// Execute one training iteration.
     ///
-    /// Performs: forward pass, forward sync, backward pass, cut selection,
-    /// template baking, lower bound evaluation, convergence update, event
-    /// emission, and iteration record construction.
-    ///
-    /// Returns:
-    /// - `Ok(Continue)` — iteration completed normally; outer loop continues.
-    /// - `Ok(Converged)` — a stopping rule triggered; outer loop should break.
-    /// - `Ok(Shutdown)` — external shutdown flag was observed; outer loop should break.
-    /// - `Err(e)` — mid-iteration failure; caller must call `finalize_with_error(e)`.
+    /// On `Err(e)` the caller must call `finalize_with_error(e)`.
     ///
     /// # Errors
     ///
     /// Propagates `SddpError` from forward pass, sync, backward pass, or lower
     /// bound evaluation failures.
     pub(crate) fn run_iteration(&mut self, iteration: u64) -> Result<IterationOutcome, SddpError> {
-        // Check external shutdown flag before starting.
         if let Some(flag) = self.runtime.shutdown_flag.as_ref()
             && flag.load(Ordering::Relaxed)
         {
@@ -389,24 +348,16 @@ where
 
         let iter_start = Instant::now();
 
-        // Snapshot the cumulative rows-in-LP accumulators before this iteration's
-        // solves so the post-backward delta isolates this iteration's contribution.
+        // Snapshot before this iteration's solves so the post-backward delta
+        // isolates this iteration's contribution.
         let (rows_in_lp_sum_before, rows_in_lp_count_before) = self.rows_in_lp_local_totals();
 
-        // ── Forward pass + sync ────────────────────────────────────────────
         let (forward_result, sync_result, fwd_solve_time_ms) = self.run_forward_phase(iteration)?;
-
-        // ── Backward pass ──────────────────────────────────────────────────
         let (backward_result, bwd_solve_time_ms) = self.run_backward_phase(iteration)?;
 
-        // Resident-set-size (rows-in-LP) metric, reduced across ranks so every
-        // reported figure is work-distribution invariant. The sum/count are this
-        // iteration's per-rank delta (Sum-reduced) and feed the per-iteration
-        // mean; the running peak is the cumulative max so far (Max-reduced) and
-        // feeds the run-level peak via a max-fold in `build_training_output` — so
-        // all three rows-in-LP aggregates travel the one event path, with no
-        // separate finalize reduce. Forward + backward are the only lazy solves;
-        // LB evaluation is all-cuts.
+        // Reduced across ranks so the reported figures are work-distribution
+        // invariant (Sum for the per-iteration delta, Max for the running peak).
+        // Forward + backward are the only lazy solves; LB is all-cuts.
         let (rows_in_lp_sum, rows_in_lp_count, rows_in_lp_max) = {
             let (sum_after, count_after) = self.rows_in_lp_local_totals();
             let sum_delta = sum_after - rows_in_lp_sum_before;
@@ -431,13 +382,10 @@ where
             )
         };
 
-        // ── Cut selection + baking ─────────────────────────────────────────
         self.run_cut_management(iteration);
 
-        // ── Lower bound evaluation ─────────────────────────────────────────
         let (lb, lb_lp_solves, lb_wall_ms, lb_solve_time_ms) = self.run_lower_bound(iteration)?;
 
-        // ── Convergence update ─────────────────────────────────────────────
         let (should_stop, rule_results) = self.convergence_monitor.update(lb, &sync_result);
 
         self.results.final_lb = self.convergence_monitor.lower_bound();
@@ -493,7 +441,6 @@ where
                 .find(|r| r.triggered)
                 .map_or_else(|| "unknown".to_string(), |r| r.rule_name.to_string());
 
-            // Distinguish shutdown from convergence using the triggered rule name.
             if self.results.termination_reason == RULE_GRACEFUL_SHUTDOWN {
                 return Ok(IterationOutcome::Shutdown);
             }
@@ -504,9 +451,6 @@ where
     }
 
     /// Assemble and return the successful `TrainingOutcome`.
-    ///
-    /// Emits the `TrainingFinished` event with `termination_reason`, broadcasts
-    /// the basis cache, and returns a fully-assembled `TrainingOutcome`.
     ///
     /// # Errors
     ///
@@ -565,9 +509,6 @@ where
     /// Emit `TrainingFinished` with `reason = "error"` and return a partial
     /// `TrainingOutcome` carrying the original error.
     ///
-    /// Consumes `self` so the accumulated state (solver stats, visited archive,
-    /// baked templates) is moved — not cloned — into the outcome.
-    ///
     /// # Errors
     ///
     /// Returns `Err(comm_err)` if `broadcast_basis_cache` itself fails.
@@ -625,8 +566,6 @@ where
     // ── Private phase helpers ──────────────────────────────────────────────
 
     /// Run the forward pass and forward synchronisation for one iteration.
-    ///
-    /// Returns `(forward_result, sync_result, fwd_solve_time_ms)`.
     fn run_forward_phase(
         &mut self,
         iteration: u64,
@@ -645,8 +584,8 @@ where
                 .map(|w| w.solver.statistics()),
         );
 
-        // Borrow fwd_state independently so the remaining fields can be
-        // passed to the factory without a whole-struct borrow conflict.
+        // Borrow fwd_state alone so the remaining fields can be passed without a
+        // whole-struct borrow conflict.
         let fwd = &mut self.fwd_state;
         let mut inputs = ForwardPassInputs::from_session_fields(
             &mut self.fwd_pool,
@@ -671,17 +610,11 @@ where
             SolverStatsDelta::from_snapshots(&fwd_stats_before, &fwd_stats_after).solve_time_ms
         };
 
-        // Aggregate per-stage forward solver stats across MPI ranks before
-        // logging. Without this, only rank 0's slice (its share of the
-        // forward-pass workers) would be written to `iterations.parquet`,
-        // because `write_training_outputs` is rank-0-gated. Backward writes
-        // per-`(rank, worker_id)` rows via its own allgatherv path; forward
-        // emits one row per stage with global totals so the parquet's
-        // `lp_solves` column matches the true global LP count.
-        //
-        // `retry_level_histogram` is not packed by `pack_delta_scalars`; it is
-        // absent from the aggregated forward rows. Backward retains the histogram
-        // via its per-worker rows.
+        // Aggregate per-stage forward stats across ranks: `write_training_outputs`
+        // is rank-0-gated, so without this only rank 0's workers would reach
+        // `iterations.parquet` and `lp_solves` would understate the global count.
+        // `retry_level_histogram` is not packed here, so it is absent from the
+        // aggregated forward rows (backward keeps it via per-worker rows).
         let num_stages = forward_result.stage_stats.len();
         let global_forward_stage_stats = if num_stages == 0 {
             Vec::new()
@@ -764,22 +697,15 @@ where
     }
 
     /// Run the backward pass for one iteration.
-    ///
-    /// Returns `(backward_result, bwd_solve_time_ms)`.
-    // RATIONALE: `i32::try_from(*omega).expect(...)` is safe because opening
-    // indices derive from `branching_factor: u16` and never approach
-    // `i32::MAX`. The expect documents an invariant of the study tree, not
-    // a recoverable runtime error.
+    // Rationale: the `i32::try_from(*omega).expect(...)` cannot fire — opening
+    // indices derive from `branching_factor: u16` and stay well below `i32::MAX`.
     #[allow(clippy::expect_used)]
     fn run_backward_phase(
         &mut self,
         iteration: u64,
     ) -> Result<(crate::backward::BackwardResult, f64), SddpError> {
-        // Borrow bwd_state independently so the remaining fields can be
-        // passed to the factory without a whole-struct borrow conflict.
-        // `IterationScratch` is split into named sub-field borrows so the
-        // disjoint scratch slots can be co-borrowed mutably (each is a
-        // distinct field of `self.scratch`).
+        // Borrow bwd_state and each disjoint `self.scratch` sub-field separately
+        // so they can be co-borrowed mutably without a whole-struct conflict.
         let bwd = &mut self.bwd_state;
         let mut inputs = BackwardPassInputs::from_session_fields(
             &mut self.fwd_pool,
@@ -865,15 +791,11 @@ where
     ///
     /// All operations are O(active cuts) and perform no heap allocation when the
     /// cut pools have not grown since the previous iteration.
-    // RATIONALE: run_cut_management sequences 5 interleaved mutation phases on
-    // &mut self (selection, bitmap shift, budget cap, template bake, statistics).
-    // Each phase reads state written by the prior phase; splitting into helpers
-    // would require passing all 5 fields individually as &mut refs under NLL.
+    // Rationale: the phases mutate `&mut self` and each reads state the prior
+    // phase wrote, so splitting into helpers would pass every field individually.
     #[allow(clippy::too_many_lines)]
     fn run_cut_management(&mut self, iteration: u64) {
-        // Step 4a: Strategy-based cut selection.
-        // sel_state holds (per_stage, rows_deactivated, selection_time_ms,
-        // stages_processed) when step 4a ran; None otherwise.
+        // `sel_state` is `Some` only when strategy-based selection ran.
         let mut sel_state: Option<(Vec<StageRowSelectionRecord>, u32, u64, u32)> = None;
 
         if let Some(strategy) = self.config.cut_management.cut_selection.as_ref()
@@ -884,15 +806,10 @@ where
             let mut rows_deactivated = 0u32;
             let mut per_stage = Vec::with_capacity(num_sel_stages);
 
-            // Stage 0 is exempt: its cuts are never the "successor" in the
-            // backward pass, so their binding activity is never updated.
-            // Stage T-1 (the terminal stage) is also exempt: the backward
-            // pass sweeps T-2 down to 0 (see `backward.rs` module docs),
-            // so the terminal-stage pool receives no cuts to select among.
-            // `num_sel_stages = num_stages - 1` (via the saturating_sub
-            // above) and the parallel loop ranges over `1..num_sel_stages`,
-            // which expands to stages 1..=T-2 — naturally excluding
-            // stage T-1 from selection.
+            // Selection covers interior stages 1..=T-2 only. Stage 0's cuts are
+            // never a backward-pass successor (their activity is never updated);
+            // the terminal stage T-1 receives no cuts. Stage 0 is recorded here;
+            // the loop below ranges 1..num_sel_stages.
             #[allow(clippy::cast_possible_truncation)]
             {
                 let pool0 = &self.fcf.pools[0];
@@ -912,15 +829,8 @@ where
             }
 
             let archive_ref = self.visited_archive.as_ref();
-            // Sequential selection over interior stages 1..=T-2. Stage 0 was
-            // recorded above; stage T-1 (terminal) is skipped because the
-            // backward pass produces no cuts at stage T-1, so the pool is
-            // empty and selection would be a no-op.
-            //
-            // The outer loop is sequential (not `into_par_iter`) because the
-            // m-block kernel saturates the available cores via its inner
-            // parallelism; Design §4.2 confirms the 24-48 m-block tasks per
-            // stage saturate a 96-core machine on their own.
+            // Sequential (not `into_par_iter`): the m-block kernel already
+            // saturates the cores via its inner parallelism.
             let pools = &self.fcf.pools;
             #[allow(clippy::cast_possible_truncation)]
             let deactivations: Vec<(usize, CutActivityUpdates, f64)> = (1..num_sel_stages)
@@ -943,8 +853,6 @@ where
                 let n_reactivated = deact.reactivations.len() as u32;
                 rows_deactivated += n_deact;
 
-                // Apply both deactivations and reactivations from the
-                // unified kernel output.
                 self.fcf.pools[stage].apply_updates(&deact);
 
                 let active_after = self.fcf.pools[stage].active_count() as u32;
@@ -963,21 +871,10 @@ where
                 });
             }
 
-            // Trim the visited-states archive to the active strategy's
-            // sliding window now that selection has consumed the current
-            // contents. Done AFTER the per-stage application loop so the
-            // immutable borrow held by `deactivations` is fully released.
-            //
-            // Trim runs AFTER selection so the kernel evaluates against
-            // the full accumulated archive (up to `2 * check_frequency`
-            // iterations of states); we then shrink back to a
-            // steady-state bound of `check_frequency` iterations.
-            // Selection benefits from seeing more visited states than the
-            // post-trim window — better selection quality — at the cost
-            // of a temporary ~2x memory peak just before this trim runs.
-            // The bound documented on
-            // [`VisitedStatesArchive::trim_to_window`] is the
-            // post-trim (steady-state) size.
+            // Trim AFTER the application loop so the immutable borrow held by
+            // `deactivations` is released, and AFTER selection so the kernel sees
+            // the full ~2x-peak archive before shrinking to the steady-state
+            // bound documented on [`VisitedStatesArchive::trim_to_window`].
             if let Some(ref mut archive) = self.visited_archive {
                 let check_freq = match strategy {
                     crate::cut_selection::CutSelectionStrategy::Level1 {
@@ -1012,11 +909,8 @@ where
             ));
         }
 
-        // Step 4b: Budget enforcement (every iteration when budget is set).
-        //
-        // Runs unconditionally when `budget` is Some — not gated by
-        // `check_frequency`. The budget is a hard cap that must be maintained
-        // at all times.
+        // Budget is a hard cap: enforced every iteration when set, never gated
+        // by `check_frequency` like selection.
         if let Some(b) = self.config.cut_management.budget {
             let budget_start = Instant::now();
             let mut total_evicted = 0u32;
@@ -1028,7 +922,6 @@ where
                     self.config.loop_config.forward_passes,
                 );
                 total_evicted += result.evicted_count;
-                // Annotate per-stage records with post-budget counts.
                 if let Some((ref mut per_stage, _, _, _)) = sel_state
                     && let Some(rec) = per_stage.get_mut(stage)
                 {
@@ -1050,7 +943,7 @@ where
             );
         }
 
-        // Emit PolicySelectionComplete now that all per-stage annotation is done.
+        // Emit after the budget loop has annotated every per-stage record.
         if let Some((per_stage, rows_deactivated, selection_time_ms, stages_processed)) = sel_state
         {
             emit(
@@ -1066,8 +959,6 @@ where
             );
         }
 
-        // Step 4c: Template baking.
-        // Rebuild per-stage baked templates from the current active cut set.
         let bake_start = Instant::now();
         let total_rows_baked = self.bake_active_cuts_into_templates();
         #[allow(clippy::cast_possible_truncation)]
@@ -1093,14 +984,10 @@ where
     /// structural copy of the base template — identical to the pre-bake done in
     /// `IterationScratch::new`.
     ///
-    /// The full per-iteration rebake is deliberately left unoptimized. Its cost
-    /// is quadratic in the active-cut count, but that count only grows
-    /// unboundedly in the no-cut-selection default configuration; production
-    /// runs at scale always enable cut selection, which caps the active set and
-    /// keeps each rebake cheap. An append-only fast path (baking only the cuts
-    /// added since the previous bake) would fire exclusively in that same
-    /// no-selection configuration, so it would add branching and state to this
-    /// hot path for no production benefit. The simpler full rebake is preferred.
+    /// Deliberately left unoptimized: the rebake is quadratic in the active-cut
+    /// count only in the no-cut-selection default, which production never runs at
+    /// scale. An append-only fast path would fire only there, so the full rebake
+    /// is kept.
     fn bake_active_cuts_into_templates(&mut self) -> u64 {
         let mut total_rows_baked: u64 = 0;
         let state = self.training_ctx.state;
@@ -1130,21 +1017,14 @@ where
     /// before the first training iteration runs.
     ///
     /// `cache` carries one [`CapturedBasis`](crate::workspace::CapturedBasis)
-    /// per stage (as built by
+    /// per stage (built by
     /// [`build_basis_cache_from_checkpoint`](crate::build_basis_cache_from_checkpoint)).
-    /// The checkpoint stores a single basis per stage, but the forward pass
-    /// keeps one basis per `(forward-pass worker, stage)` cell. This method
-    /// therefore replicates each stage's basis across every forward-pass worker
-    /// (`0..max_local_fwd`) so that on iteration 1 every worker warm-starts its
-    /// cut-loaded LP from the checkpoint basis instead of cold-starting.
-    /// `reconstruct_basis` reconciles the stored cut rows against the current
-    /// LP's active cut set via slot identity, so the seeded basis stays correct
-    /// even if cut selection diverges from the checkpoint.
-    ///
-    /// Stages whose `cache[t]` is `None` are left untouched (no basis). Entries
-    /// beyond the store's stage count are ignored. No-op for a fresh start
-    /// (the caller passes no cache), so fresh-mode behavior and the
-    /// deterministic regression baselines are unchanged.
+    /// The checkpoint holds a single basis per stage; the forward pass keeps one
+    /// per `(worker, stage)`, so each stage's basis is replicated across every
+    /// worker for iteration 1's warm-start. `reconstruct_basis` reconciles the
+    /// stored cut rows against the current active set by slot identity, so a
+    /// seeded basis stays correct even if cut selection diverges. No-op for a
+    /// fresh start (no cache).
     pub(crate) fn seed_basis_store(&mut self, cache: &[Option<crate::workspace::CapturedBasis>]) {
         let max_local_fwd = self.ranks.max_local_fwd;
         let num_stages = self.ranks.num_stages;
@@ -1159,17 +1039,10 @@ where
     /// Bake the warm-start / resume pre-loaded cuts into the stage templates
     /// before the first training iteration runs.
     ///
-    /// `IterationScratch::new` pre-bakes every template with an *empty* cut
-    /// batch — correct for a fresh start, but it leaves a warm-start/resume
-    /// FCF's loaded cuts out of the templates that iteration 1's forward and
-    /// backward passes solve (those passes use `scratch.baked_templates`
-    /// exclusively; the per-iteration rebake in `run_cut_management` only runs
-    /// *after* them). Without this, the first post-resume iteration would solve
-    /// a cut-less, myopic policy — yielding a spuriously high upper-bound
-    /// estimate and a wasted iteration — until the end-of-iteration rebake.
-    ///
-    /// No-op for a fresh start (no active cuts), so fresh-mode behavior and the
-    /// deterministic regression baselines are unchanged.
+    /// `IterationScratch::new` pre-bakes with an empty cut batch, and iteration
+    /// 1's passes read `scratch.baked_templates` before `run_cut_management`
+    /// rebakes; without this, the first post-resume iteration would solve a
+    /// cut-less, myopic policy. No-op for a fresh start (no active cuts).
     pub(crate) fn prime_baked_templates(&mut self) {
         if self.fcf.total_active_cuts() > 0 {
             let _ = self.bake_active_cuts_into_templates();
@@ -1177,23 +1050,15 @@ where
     }
 
     /// Evaluate the lower bound and push the solver stats entry.
-    ///
-    /// Returns `(lb_value, lb_lp_solves, lb_wall_ms, lb_solve_time_ms)`.
     fn run_lower_bound(&mut self, iteration: u64) -> Result<(f64, u64, u64, f64), SddpError> {
         let lb_wall_start = Instant::now();
         let lb_stats_before = self.solver.statistics();
 
-        // The lower bound evaluates stage 0 only, so its NCS column base is the
-        // per-stage `StageContext::ncs_col_starts[0]` — never a single global
-        // stage-0 NCS base (`StudyDimensions` carries only `has_ncs`, no column
-        // base). Under the dense layout every NCS keeps a column at every stage, so
-        // the range spans the full NCS block (the scalar `n_ncs * block_count[0]`);
-        // a dormant NCS keeps its column and is zeroed inline via the windows. The
-        // range is empty when the study has no stage-0 NCS columns, which guards
-        // the patch off via `LbEvalSpec::ncs_generation` emptiness in
-        // `lb_init_rank0`. The stage-invariant `ncs_stochastic_dense_col` map drives
-        // the column strides; only `.start` and emptiness of this range are
-        // consumed.
+        // The NCS column base is the per-stage `StageContext::ncs_col_starts[0]`,
+        // never a global base (`StudyDimensions` has only `has_ncs`). The dense
+        // range spans the full stage-0 NCS block (`n_ncs * block_count[0]`); a
+        // dormant NCS is zeroed inline via the windows. An empty range guards the
+        // patch off via `LbEvalSpec::ncs_generation` emptiness.
         let block_count_stage0 = self.stage_ctx.block_counts_per_stage[0];
         let n_ncs = self.stage_ctx.n_ncs;
         // Stage id of the first study stage — the commissioning key for dormancy.
@@ -1224,9 +1089,8 @@ where
             stage_id: stage0_id,
             block_count: block_count_stage0,
             ncs_generation,
-            // z-inflow rows start at row 0 (state pinning uses column bounds);
-            // sourced from the stage-0 geometry, falling back to 0 when the table
-            // is absent, matching the sibling stage-0 `StageContext` reads above.
+            // From the stage-0 geometry; falls back to 0 because state pinning
+            // uses column bounds, leaving no rows before the z-inflow block.
             z_inflow_row_start: self
                 .stage_ctx
                 .geometry_per_stage

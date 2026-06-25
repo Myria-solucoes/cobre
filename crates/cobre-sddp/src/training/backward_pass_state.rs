@@ -52,9 +52,6 @@ pub struct BackwardPassInputs<'a, S: SolverInterface + Send, C: Communicator> {
     /// Stage-level LP context (templates, row counts, noise scales).
     pub ctx: &'a StageContext<'a>,
     /// Baked LP templates including pre-appended prior-iteration cuts.
-    ///
-    /// Borrowed immutably: the backward pass reads baked templates to solve
-    /// successor LPs but never mutates them.
     pub baked: &'a [StageTemplate],
     /// Future-cost function — receives new cuts after each stage.
     pub fcf: &'a mut FutureCostFunction,
@@ -106,12 +103,9 @@ pub struct BackwardPassInputs<'a, S: SolverInterface + Send, C: Communicator> {
 impl<'a, S: SolverInterface + Send, C: Communicator> BackwardPassInputs<'a, S, C> {
     /// Construct inputs from the fields of a `TrainingSession`, minus `bwd_state`.
     ///
-    /// The caller takes `&mut session.bwd_state` separately and passes the
-    /// remaining session fields here. The `IterationScratch` is split into
-    /// named sub-field parameters so the caller can keep the four disjoint
-    /// borrows alive simultaneously across the call — Rust NLL cannot split
-    /// a single `&mut TrainingSession` borrow when `bwd_state` is also
-    /// borrowed mutably.
+    /// Fields are passed individually so the caller can keep the disjoint borrows
+    /// alive across the call — Rust NLL cannot split a single `&mut TrainingSession`
+    /// borrow when `bwd_state` is also borrowed mutably.
     // Rationale: the arguments are disjoint mutable borrows into `TrainingSession` fields that
     // Rust NLL cannot split from a single `&mut self`; bundling them into a context struct would
     // just move the arity to the struct literal without resolving the borrow-splitting requirement.
@@ -328,13 +322,9 @@ impl BackwardPassState {
             .map(|ws| ws.solver.statistics().solve_count)
             .sum();
 
-        // Apply the backward-phase solver profile to every worker workspace before
-        // the per-stage loop begins.  The profile is applied via delta-tracked
-        // FFI: `set_profile` issues solver-option calls only for the fields that
-        // differ from each solver's current state (the tuned deep-cut-pool profile
-        // sets `simplex_price_strategy = 2` relative to the HiGHS default).
-        // Resolved once; it is the compile-time `BACKWARD` const. The assert
-        // verifies `set_profile` stored exactly the profile we passed.
+        // Apply the backward-phase solver profile to every worker before the
+        // per-stage loop. `set_profile` is delta-tracked: it issues solver-option
+        // calls only for fields that differ from the solver's current state.
         let backward_profile = Phase::Backward.profile();
         for ws in inputs.workspaces.iter_mut() {
             ws.solver.set_profile(&backward_profile);
@@ -344,7 +334,6 @@ impl BackwardPassState {
             );
         }
 
-        // Reset per-worker timing buffers.
         for ws in inputs.workspaces.iter_mut() {
             ws.worker_timing_buf = WorkerPhaseTimings::default();
         }
@@ -386,9 +375,7 @@ impl BackwardPassState {
         }
 
         let mut cuts_generated: usize = 0;
-        // Pre-size to (num_stages - 1) so the push loop below does not grow the
-        // outer Vec mid-iteration. The bound is exact: one entry per stage in
-        // the backward sweep `(0..num_stages-1).rev()`.
+        // Pre-size to (num_stages - 1): one entry per stage in the backward sweep.
         let mut stage_stats: Vec<(usize, Vec<StageWorkerOpeningDelta>)> =
             Vec::with_capacity(num_stages.saturating_sub(1));
         let mut state_exchange_ms: u64 = 0;
@@ -444,18 +431,13 @@ impl BackwardPassState {
         })
     }
 
-    /// Synchronise per-slot cut binding metadata across MPI ranks for one stage.
+    /// Synchronise per-slot cut binding metadata across MPI ranks for one stage via
+    /// one `allreduce(Sum)` over `metadata_sync_contribution`.
     ///
-    /// Performs one `allreduce(Sum)` over `metadata_sync_contribution` to
-    /// accumulate `active_count` and `last_active_iter` across all ranks.
-    /// Called once per backward stage after cut insertion.
-    ///
-    /// The reduction is bounded to `populated_count` (the high-water mark of
-    /// cut-bearing slots), not the full pool capacity (`metadata.len()`). Slots
-    /// in `[populated_count, capacity)` are never written by any accumulation
-    /// path, so they are structurally zero on every rank; summing them is a
-    /// no-op. `populated_count` is rank-invariant (cuts are added identically on
-    /// every rank), so all ranks reduce over the same length.
+    /// The reduction is bounded to `populated_count`, not the full pool capacity:
+    /// slots in `[populated_count, capacity)` are structurally zero on every rank.
+    /// `populated_count` is rank-invariant (cuts are added identically on every
+    /// rank), so all ranks reduce over the same length.
     fn sync_stage_metadata<C: Communicator>(
         &mut self,
         successor: usize,
@@ -468,7 +450,6 @@ impl BackwardPassState {
         if populated_count == 0 {
             return Ok(());
         }
-        // Sum per-worker binding increment contributions into the send buffer.
         self.metadata_sync_buf.clear();
         self.metadata_sync_buf.resize(populated_count, 0u64);
         for ws in workspaces {
@@ -574,7 +555,6 @@ impl BackwardPassState {
         workspaces: &[SolverWorkspace<impl SolverInterface>],
         comm: &C,
     ) -> Result<Vec<StageWorkerOpeningDelta>, SddpError> {
-        // Copy per-worker per-opening stats into the local StageWorkerStatsBuffer.
         self.stage_worker_stats_buf.reset();
         for ws in workspaces {
             debug_assert_eq!(
@@ -616,9 +596,7 @@ impl BackwardPassState {
             n_ranks * n_workers_local,
             bwd_max_openings,
         );
-        // Upper bound on push count: every (rank, worker, opening) tuple may
-        // contribute one entry. Pre-sizing eliminates the log(n) growth
-        // reallocations during the triple-nested fill loop below.
+        // Upper bound on push count: one entry per (rank, worker, opening) tuple.
         let mut entries: Vec<StageWorkerOpeningDelta> =
             Vec::with_capacity(n_ranks * n_workers_local * n_openings);
         for r in 0..n_ranks {
@@ -711,7 +689,8 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
     let num_stages = training_ctx.horizon.num_stages();
     let successor = t + 1;
 
-    // State exchange: gather trial-point states for stage `t` via allgatherv.
+    // State exchange runs here, once per stage inside the backward sweep — not in a
+    // separate pre-pass before the loop (sddp.md "Per-stage exchange").
     let mut state_exchange_ms: u64 = 0;
     if !inputs.records.is_empty() {
         let exch_start = Instant::now();
@@ -724,7 +703,6 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
         }
     }
 
-    // Archive visited states for dominated cut selection (if active).
     if let Some(ref mut archive) = inputs.visited_archive {
         let total_fwd = inputs.exchange.real_total_scenarios();
         inputs
@@ -733,7 +711,6 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
         archive.archive_gathered_states(t, &state.real_states_buf, total_fwd);
     }
 
-    // Build uniform opening probabilities and delta cut batch for the successor.
     state.worker_stats_before.clear();
     state
         .worker_stats_before
@@ -782,7 +759,6 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
         successor_pool: &inputs.fcf.pools[successor],
     };
 
-    // Parallel trial-point solves.
     let basis_slices = inputs
         .basis_store
         .split_workers_mut(params.n_workers_local.max(1));
@@ -802,12 +778,8 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
     #[allow(clippy::cast_possible_truncation)]
     let parallel_wall_ms = process_start.elapsed().as_millis() as u64;
 
-    // Collect cuts and insert into FCF in deterministic order. Each cut is
-    // paired with the index `w` of the worker that produced it so the merge can
-    // resolve its `coefficients_range` against that worker's arena. The
-    // `&mut inputs.workspaces` borrow taken by `process_stage_backward` is
-    // released once it returns, so the per-cut immutable re-borrow below is
-    // legal (disjoint from the `inputs.fcf` mutable borrow in `add_cut`).
+    // Each cut is paired with the index `w` of its producing worker so the merge
+    // resolves its `coefficients_range` against that worker's arena.
     state.staged_cuts_buf.clear();
     for worker_result in worker_staged {
         let (w, cuts) = worker_result?;
@@ -815,9 +787,9 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
             .staged_cuts_buf
             .extend(cuts.into_iter().map(|cut| (w, cut)));
     }
-    // `trial_point_idx` is the SOLE sort key, unchanged from HEAD: it is
-    // globally unique across workers (disjoint contiguous partitions), so this
-    // reproduces the identical global merge order regardless of worker index.
+    // `trial_point_idx` is the SOLE sort key: globally unique across workers
+    // (disjoint contiguous partitions), so the merge order is identical regardless
+    // of worker index.
     state
         .staged_cuts_buf
         .sort_by_key(|(_, cut)| cut.trial_point_idx);
@@ -839,7 +811,6 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
         );
     }
 
-    // Per-stage cut sync across MPI ranks.
     let sync_start = Instant::now();
     let n_local = inputs
         .cut_sync_bufs
@@ -910,13 +881,8 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
     let pop = succ.successor_populated_count;
     let n_workers = workspaces.len().max(1);
 
-    // Per-trial-point opening-solve strategy, chosen once for this stage from the
-    // `is_active`-filtered DCS params. The decision depends only on `iteration`,
-    // so it is constant across workers and trial points. `Lazy` selects the
-    // resident-set (DCS) path, `Baked` the all-cuts path; each variant owns its
-    // own per-trial-point LP load via `StageOpeningSolver::prepare`, so the driver
-    // no longer asks "is DCS active, so should I skip my normal load?" — it issues
-    // one uniform prepare call per trial point regardless of strategy.
+    // Opening-solve strategy, chosen once per stage. The decision depends only on
+    // `iteration`, so it is constant across workers and trial points.
     let opening_solver = StageOpeningSolver::from_dcs_params(
         training_ctx
             .dcs
@@ -928,11 +894,9 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
         .zip(basis_slices.into_par_iter())
         .enumerate()
         .map(|(w, (ws, mut basis_slice))| {
-            // Pre-allocate per-stage buffers. The per-trial-point LP load is now
-            // issued per `m` via `opening_solver.prepare` (after the per-opening
-            // solver-state reset); the
-            // buffer setup below touches only `ws.backward_accum`, never
-            // `ws.solver`, so no stage-level load is needed here.
+            // Pre-allocate per-stage buffers. This touches only `ws.backward_accum`,
+            // never `ws.solver`: the LP load is issued per trial point via
+            // `opening_solver.prepare`, not here.
             while ws.backward_accum.outcomes.len() < n_openings {
                 ws.backward_accum
                     .outcomes
@@ -961,63 +925,36 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
                 *slot = SolverStatsDelta::default();
             }
 
-            // Static partition: assign scenarios to worker, matching basis_slice view.
+            // Static partition, matching the basis_slice view.
             let (start_m, end_m) = partition(local_work, n_workers, w);
-            // Size the per-worker coefficient arena to hold one `n_state` slot
-            // per owned trial point. Grow-only: capacity is retained across
-            // stages/iterations (like `staged_cuts_buf`), so no heap activity
-            // occurs after the first stage that needs this many slots. Content
-            // is overwritten per trial point before read, so no zero-fill.
+            // Grow-only arena (one `n_state` slot per owned trial point); content is
+            // overwritten per trial point before read, so no zero-fill.
             let arena_len = (end_m - start_m) * n_state;
             if ws.backward_accum.agg_arena.len() < arena_len {
                 ws.backward_accum.agg_arena.resize(arena_len, 0.0_f64);
             }
-            // Reuse the per-worker staged-cuts buffer; `clear()` preserves the
-            // allocation from prior stages so no heap activity occurs after the
-            // first stage of the first iteration.
             ws.backward_accum.staged_cuts_buf.clear();
             let worker_stage_wall_start = Instant::now();
-            // Snapshot the cumulative lazy-scoring accumulator at this stage's
-            // backward-region start; the delta below attributes scoring done in
-            // this stage to the backward phase (the accumulator is never reset,
-            // so a snapshot-delta is the only correct attribution). Stays zero
-            // on the baked path, which never enters the lazy solve.
+            // Snapshot the cumulative lazy-scoring accumulator; the delta below
+            // attributes this stage's scoring to the backward phase (the accumulator
+            // is never reset, so a snapshot-delta is the only correct attribution).
             let scoring_seconds_before = ws.backward_accum.dcs_solve.scoring_time_seconds;
 
             for m in start_m..end_m {
-                // Reset the solver's simplex state at the per-trial-point boundary
-                // so this trial point's cold-head solve (the first-solved opening)
-                // cannot depend on which trial points the worker solved before it
-                // (determinism across thread/rank counts). No-op for HiGHS; for CLP
-                // recreates the model (`Clp_loadProblem` leaves rim/pricing/
-                // steepest-edge state stale).
-                //
-                // MUST precede the per-trial-point LP load: the uniform
-                // `opening_solver.prepare` call on the next line (which loads the
-                // baked all-cuts LP on the `Baked` path, or the cut-free core +
-                // metadata seed on the `Lazy` path).
-                //
-                // Fires ONCE PER TRIAL POINT, not per opening: the within-trial-
-                // point warm-start chain across openings (ω > the first-solved one)
-                // is preserved inside `process_trial_point_backward`, which never
-                // resets between openings.
+                // Reset solver state at the per-trial-point boundary so the cold-head
+                // solve cannot depend on which trial points the worker solved before
+                // it (determinism across thread/rank counts). No-op for HiGHS; for
+                // CLP recreates the model (`Clp_loadProblem` leaves rim/pricing/
+                // steepest-edge state stale). MUST precede `prepare` below, and fires
+                // ONCE PER TRIAL POINT, not per opening — the within-trial-point
+                // warm-start chain across openings is preserved inside
+                // `process_trial_point_backward`, which never resets between openings.
                 ws.solver.reset_solver_state();
 
-                // Per-trial-point LP load, uniform across strategies. The `Baked`
-                // variant loads the baked all-cuts template (resetting HiGHS's
-                // internal simplex basis, factorization, and RNG position); the
-                // `Lazy` variant loads the cut-free core + builds the metadata
-                // seed, which supplies the same reset and is the LP the lazy loop
-                // owns. Replaces the former DCS-gated load skips.
                 opening_solver.prepare(ws, ctx, succ, iteration);
                 ws.backward_accum.slot_increments[..pop].fill(0);
-                // Call process_trial_point_backward before the push to avoid a
-                // simultaneous mutable borrow of `ws.backward_accum.staged_cuts_buf`
-                // (for the push receiver) and `ws` (for the function argument).
-                // Local arena offset (element units) for this trial point's
-                // `n_state` slot: `local_idx * n_state` with `local_idx = m -
-                // start_m`. Threaded in so the helper need not know the
-                // partition scheme.
+                // Call before the push to avoid a simultaneous mutable borrow of
+                // `staged_cuts_buf` (push receiver) and `ws` (function argument).
                 let arena_offset = (m - start_m) * n_state;
                 let cut = process_trial_point_backward(
                     ws,
@@ -1036,25 +973,18 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
                 ws.backward_accum.staged_cuts_buf.push(cut);
             }
 
-            // Accumulate per-worker elapsed into the iteration-level timing buffer.
             ws.worker_timing_buf.backward_wall_ms +=
                 worker_stage_wall_start.elapsed().as_secs_f64() * 1_000.0;
-            // Fold the backward-region lazy-scoring delta into the timing buffer
-            // (ms), mirroring the `backward_wall_ms` fold above. Zero on the
-            // baked path. The forward and backward folds write the same physical
-            // `scoring_ms` field on disjoint phase emissions, so the per-iteration
-            // total is recovered by summing across both phases' events.
+            // The forward and backward folds write the same physical `scoring_ms`
+            // field on disjoint phase emissions, so the per-iteration total is
+            // recovered by summing across both phases' events.
             ws.worker_timing_buf.scoring_ms += (ws.backward_accum.dcs_solve.scoring_time_seconds
                 - scoring_seconds_before)
                 * 1_000.0;
 
-            // Drain the buffer into an owned Vec to cross the rayon closure
-            // boundary.  `drain(..)` leaves `staged_cuts_buf` empty with its
-            // capacity intact so the next stage reuses the same allocation. The
-            // worker index `w` rides alongside so the merge can resolve each
-            // cut's `coefficients_range` against `workspaces[w].backward_accum.agg_arena`
-            // after the parallel region returns (the `&mut workspaces` borrow is
-            // released then, allowing an immutable re-borrow per worker).
+            // `drain(..)` crosses the rayon closure boundary while leaving capacity
+            // intact for the next stage; `w` rides alongside so the merge resolves
+            // each cut's `coefficients_range` against that worker's arena.
             Ok((w, ws.backward_accum.staged_cuts_buf.drain(..).collect()))
         })
         .collect()

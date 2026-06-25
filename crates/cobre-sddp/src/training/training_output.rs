@@ -1,18 +1,9 @@
 //! Bridge from `TrainingResult` and `TrainingEvent` log to `TrainingOutput`.
 //!
-//! [`build_training_output`] converts the summary produced by the training loop
-//! ([`TrainingResult`]) plus the collected event log into the structured
-//! [`TrainingOutput`] type required by the output writers in `cobre-io`.
-//!
-//! ## Design
-//!
-//! The training loop already emits [`TrainingEvent`] variants at each lifecycle
-//! step boundary. Rather than modifying the hot-path `train()` function, this
-//! module reads those events after training completes and reconstructs the
-//! per-iteration records required by [`cobre_io::TrainingOutput`].
-//!
-//! The conversion is a pure function — it cannot fail. Missing events for a
-//! given iteration produce zero values for the affected fields.
+//! [`build_training_output`] reads the post-training [`TrainingEvent`] log and
+//! reconstructs the per-iteration records [`cobre_io::TrainingOutput`] needs,
+//! rather than modifying the hot-path `train()` function. Missing events for an
+//! iteration produce zero values for the affected fields.
 
 use std::collections::BTreeMap;
 
@@ -21,85 +12,73 @@ use cobre_io::{IterationRecord, RowPoolStatistics, RowSelectionRecord, TrainingO
 
 use crate::{FutureCostFunction, TrainingResult};
 
-/// Partial iteration record accumulated from multiple [`TrainingEvent`] variants
-/// before the final [`IterationRecord`] is assembled.
+/// Per-iteration accumulator filled by [`accumulate_partial_records`] from
+/// multiple [`TrainingEvent`] variants, then converted to one [`IterationRecord`].
+/// Time fields are milliseconds.
 #[derive(Default)]
 struct PartialRecord {
-    /// Lower bound from [`TrainingEvent::IterationSummary`].
+    /// Lower bound.
     lower_bound: f64,
-    /// Upper bound mean from [`TrainingEvent::ForwardSyncComplete`].
+    /// Upper bound mean.
     upper_bound_mean: f64,
-    /// Upper bound std from [`TrainingEvent::ForwardSyncComplete`].
+    /// Upper bound std.
     upper_bound_std: f64,
-    /// Gap from [`TrainingEvent::IterationSummary`].
+    /// Convergence gap.
     gap: f64,
-    /// Forward pass wall-clock from [`TrainingEvent::IterationSummary`] (ms).
+    /// Forward pass wall-clock.
     forward_ms: u64,
-    /// Backward pass wall-clock from [`TrainingEvent::IterationSummary`] (ms).
+    /// Backward pass wall-clock.
     backward_ms: u64,
-    /// Iteration total wall-clock from [`TrainingEvent::IterationSummary`] (ms).
+    /// Iteration total wall-clock.
     iteration_time_ms: u64,
-    /// LP solve count from [`TrainingEvent::IterationSummary`].
+    /// LP solve count.
     lp_solves: u64,
-    /// Forward passes from [`TrainingEvent::ForwardPassComplete`].
+    /// Forward passes.
     forward_passes: u32,
-    /// Cuts generated from [`TrainingEvent::BackwardPassComplete`].
+    /// Cuts generated.
     cuts_added: u32,
-    /// Rows removed from [`TrainingEvent::PolicySyncComplete`].
+    /// Rows removed.
     cuts_removed: u32,
-    /// Active rows from [`TrainingEvent::PolicySyncComplete`].
+    /// Active rows.
     cuts_active: u32,
-    /// Wall-clock time for the `allreduce` bound-statistic reduction
-    /// from [`TrainingEvent::ForwardSyncComplete`] (ms).
-    ///
-    /// Note: the forward-pass scenario exchange uses `allgatherv`, not
-    /// `allreduce`. This field tracks only the scalar bound reduction.
+    /// Scalar bound-statistic `allreduce` time — not the `allgatherv` scenario exchange.
     forward_sync_ms: u64,
-    /// Policy sync allgatherv time from [`TrainingEvent::PolicySyncComplete`] (ms).
+    /// Policy sync allgatherv time.
     cut_sync_ms: u64,
-    /// Local row selection time from [`TrainingEvent::PolicySelectionComplete`] (ms).
+    /// Local row selection time.
     cut_selection_ms: u64,
-    /// Allgatherv time from [`TrainingEvent::PolicySelectionComplete`] (ms).
+    /// Row-selection allgatherv time.
     cut_selection_allgatherv_ms: u64,
-    /// Cumulative LP solve wall-clock time for this iteration (ms).
+    /// Cumulative LP solve wall-clock time for this iteration.
     solve_time_ms: f64,
-    /// State exchange time from [`TrainingEvent::BackwardPassComplete`] (ms).
+    /// State exchange time.
     state_exchange_ms: u64,
-    /// Cut batch build time from [`TrainingEvent::BackwardPassComplete`] (ms).
+    /// Cut batch build time.
     cut_batch_build_ms: u64,
-    /// Thread-pool setup time from [`TrainingEvent::BackwardPassComplete`] (ms).
+    /// Backward thread-pool setup time.
     bwd_setup_ms: u64,
-    /// Load imbalance from [`TrainingEvent::BackwardPassComplete`] (ms).
+    /// Backward load imbalance.
     bwd_load_imbalance_ms: u64,
-    /// Scheduling overhead from [`TrainingEvent::BackwardPassComplete`] (ms).
+    /// Backward scheduling overhead.
     bwd_scheduling_overhead_ms: u64,
-    /// Lower bound evaluation wall-clock from [`TrainingEvent::IterationSummary`] (ms).
+    /// Lower bound evaluation wall-clock.
     lower_bound_eval_ms: u64,
-    /// Forward pass setup time from [`TrainingEvent::IterationSummary`] (ms).
+    /// Forward pass setup time.
     fwd_setup_ms: u64,
-    /// Forward pass load imbalance from [`TrainingEvent::IterationSummary`] (ms).
+    /// Forward pass load imbalance.
     fwd_load_imbalance_ms: u64,
-    /// Forward pass scheduling overhead from [`TrainingEvent::IterationSummary`] (ms).
+    /// Forward pass scheduling overhead.
     fwd_scheduling_overhead_ms: u64,
-    /// Sum of resident rows-in-LP over this iteration's lazy solves (all ranks),
-    /// from [`TrainingEvent::IterationSummary`]. Zero for non-lazy methods.
+    /// Sum of resident rows-in-LP over this iteration's lazy solves (all ranks). Zero for non-lazy methods.
     rows_in_lp_sum: u64,
-    /// Count of this iteration's lazy solves (all ranks), from
-    /// [`TrainingEvent::IterationSummary`]. The per-iteration mean denominator.
+    /// Count of this iteration's lazy solves (all ranks) — the per-iteration mean denominator.
     rows_in_lp_count: u64,
-    /// Running peak resident rows-in-LP up to and including this iteration (all
-    /// ranks), from [`TrainingEvent::IterationSummary`]. A `max`-fold over
-    /// iterations yields the run-level peak. Zero for non-lazy methods.
+    /// Running peak resident rows-in-LP through this iteration (all ranks); `max`-folds to the run-level peak. Zero for non-lazy methods.
     rows_in_lp_max: u64,
 }
 
-/// Accumulate per-iteration partial records from the event log.
-///
-/// Processes each [`TrainingEvent`] variant that carries per-iteration timing
-/// or convergence data, building a [`BTreeMap`] keyed by iteration number.
-/// Also tracks the peak active cut count observed in the log.
-///
-/// Returns `(partials, peak_active)`.
+/// Accumulate per-iteration partial records from the event log, returning
+/// `(partials keyed by iteration, peak active cut count)`.
 fn accumulate_partial_records(events: &[TrainingEvent]) -> (BTreeMap<u64, PartialRecord>, u64) {
     let mut partials: BTreeMap<u64, PartialRecord> = BTreeMap::new();
     let mut peak_active: u64 = 0;
@@ -206,7 +185,6 @@ fn accumulate_partial_records(events: &[TrainingEvent]) -> (BTreeMap<u64, Partia
                 let record = partials.entry(*iteration).or_default();
                 record.cut_selection_ms = *selection_time_ms;
                 record.cut_selection_allgatherv_ms = *allgatherv_time_ms;
-                // Adjust cuts_active to reflect the post-selection count.
                 record.cuts_active = record.cuts_active.saturating_sub(*rows_deactivated);
             }
 
@@ -218,9 +196,6 @@ fn accumulate_partial_records(events: &[TrainingEvent]) -> (BTreeMap<u64, Partia
 }
 
 /// Convert a single [`PartialRecord`] into an [`IterationRecord`].
-///
-/// Computes derived fields (gap percent, overhead) from the accumulated timing
-/// data and casts u64 iteration/solve counts to u32.
 fn partial_to_iteration_record(iter: u64, partial: &PartialRecord) -> IterationRecord {
     let gap_percent = if partial.lower_bound > 0.0 {
         Some(partial.gap * 100.0)
@@ -233,9 +208,8 @@ fn partial_to_iteration_record(iter: u64, partial: &PartialRecord) -> IterationR
     #[allow(clippy::cast_possible_truncation)]
     let lp_solves_u32 = partial.lp_solves as u32;
 
-    // Compute overhead as total minus the sum of all TOP-LEVEL non-overlapping
-    // phases. Note: cut_sync_ms is a sub-component of backward_ms and must NOT
-    // be included here (that was a double-counting bug in the previous version).
+    // Sum only TOP-LEVEL non-overlapping phases: cut_sync_ms is a sub-component
+    // of backward_ms and must NOT be added here (would double-count).
     let attributed_ms = partial
         .forward_ms
         .saturating_add(partial.backward_ms)
@@ -245,8 +219,6 @@ fn partial_to_iteration_record(iter: u64, partial: &PartialRecord) -> IterationR
         .saturating_add(partial.lower_bound_eval_ms);
     let overhead_ms = partial.iteration_time_ms.saturating_sub(attributed_ms);
 
-    // Mean resident rows-in-LP per lazy solve this iteration (0.0 when no lazy
-    // solve ran). The sum/count are already reduced across ranks on the event.
     #[allow(clippy::cast_precision_loss)]
     let mean_rows_in_lp = if partial.rows_in_lp_count > 0 {
         partial.rows_in_lp_sum as f64 / partial.rows_in_lp_count as f64
@@ -288,12 +260,8 @@ fn partial_to_iteration_record(iter: u64, partial: &PartialRecord) -> IterationR
     }
 }
 
-/// Convert a [`TrainingResult`] and collected event log into a [`TrainingOutput`].
-///
-/// The caller passes the full event log received from the training loop's
-/// `mpsc::Receiver<TrainingEvent>`. Events from multiple lifecycle steps are
-/// correlated by their `iteration` field to produce one [`IterationRecord`] per
-/// completed iteration.
+/// Convert a [`TrainingResult`] and collected event log into a [`TrainingOutput`],
+/// one [`IterationRecord`] per completed iteration.
 ///
 /// # Examples
 ///
@@ -349,7 +317,8 @@ pub fn build_training_output(
 ) -> TrainingOutput {
     let (partials, peak_active) = accumulate_partial_records(events);
 
-    // Only include iterations that have an IterationSummary event.
+    // Drop partial-only iterations: a record is emitted only when an
+    // IterationSummary event exists for that iteration.
     let summary_iterations: std::collections::BTreeSet<u64> = events
         .iter()
         .filter_map(|e| {
@@ -361,12 +330,6 @@ pub fn build_training_output(
         })
         .collect();
 
-    // Run-level rows-in-LP aggregate, all from the per-iteration IterationSummary
-    // events (already reduced across ranks): sum/count fold to the run total and
-    // solve count (→ mean per solve), and the running peak max-folds to the
-    // run-level peak. Keeping all three on the one event path avoids a separate
-    // finalize reduce or a TrainingResult conduit. All zero for non-lazy methods,
-    // so the consumer can detect "no lazy selection ran".
     let (rows_in_lp_total, rows_in_lp_solve_count, rows_in_lp_max) =
         partials.values().fold((0u64, 0u64, 0u64), |(s, c, m), p| {
             (
@@ -395,11 +358,8 @@ pub fn build_training_output(
     let converged = result.reason == crate::stopping_rule::RULE_BOUND_STALLING
         || result.reason == crate::stopping_rule::RULE_SIMULATION_BASED;
 
-    // `final_gap_percent` is reported only when `final_lb > 0.0`.
-    // For a non-positive lower bound the gap percentage is either
-    // undefined (`final_lb == 0.0`) or sign-inverted
-    // (`final_lb < 0.0`), so the writer reports `None` rather than
-    // a value that would mislead downstream consumers.
+    // None for non-positive lower bound: the gap percentage is undefined
+    // (final_lb == 0) or sign-inverted (final_lb < 0).
     let final_gap_percent = if result.final_lb > 0.0 {
         Some(result.final_gap * 100.0)
     } else {
@@ -458,19 +418,11 @@ pub fn build_training_output(
     }
 }
 
-/// Build the per-`(iteration, rank, worker_id)` timing rows for
-/// `training/timing/iterations.parquet`.
-///
-/// For each completed iteration:
-/// - One rank-aggregated row per rank (`worker_id=None`) carries the rank-only
-///   columns (`cut_selection`, `mpi_allreduce`, `cut_sync`, `lower_bound`,
-///   `state_exchange`, `cut_batch_build`, the synthetic
-///   `load_imbalance`/`scheduling_overhead` pair, and `overhead`).
-/// - One per-worker row per `(rank, worker_id)` carries the parallel-region
-///   contributions (`forward_wall`, `backward_wall`, `fwd_setup`, `bwd_setup`)
-///   merged from the `WorkerTiming{Forward}` and `WorkerTiming{Backward}` events.
-///
-/// `SUM(col) GROUP BY iteration` recovers the single-row totals.
+/// Build the `(iteration, rank, worker_id)` timing rows for
+/// `training/timing/iterations.parquet`. Each iteration emits one rank-aggregated
+/// row (`worker_id=None`, rank-only columns) plus one per-worker row per
+/// `(rank, worker_id)` (parallel-region contributions); the two row kinds use
+/// disjoint columns so `SUM(col) GROUP BY iteration` recovers the totals.
 fn build_worker_timing_records(
     events: &[TrainingEvent],
     convergence_records: &[IterationRecord],
@@ -480,9 +432,6 @@ fn build_worker_timing_records(
         WORKER_TIMING_SLOT_FWD_SETUP, WORKER_TIMING_SLOT_FWD_WALL, WORKER_TIMING_SLOT_SCORING,
     };
 
-    // Per-(iteration, rank, worker_id) merged timings for the per-worker rows.
-    // The BTreeMap value is the 16-wide writer record that bridges the named
-    // WorkerPhaseTimings fields and the Parquet schema.
     let mut per_worker: BTreeMap<(u32, i32, i32), [u64; WORKER_TIMING_SLOT_COUNT]> =
         BTreeMap::new();
     for event in events {
@@ -499,14 +448,6 @@ fn build_worker_timing_records(
             let entry = per_worker
                 .entry((iter_u32, *rank, *worker_id))
                 .or_insert([0_u64; WORKER_TIMING_SLOT_COUNT]);
-            // Map the named fields into the corresponding writer-record slots.
-            // Forward fills FWD_WALL/FWD_SETUP (both 0 on Backward events).
-            // Backward fills BWD_WALL/BWD_SETUP (both 0 on Forward events).
-            // SCORING (slot 15) is filled by whichever phase scored; summing
-            // across both phases' events recovers the per-iteration total.
-            // All other slots remain 0 on per-worker rows; rank-aggregated rows
-            // carry the rank-only columns. The f64-ms → u64 conversion matches
-            // the wall/setup fields (clamp negatives to 0, round, saturating-add).
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             {
                 entry[WORKER_TIMING_SLOT_FWD_WALL] = entry[WORKER_TIMING_SLOT_FWD_WALL]
@@ -526,9 +467,6 @@ fn build_worker_timing_records(
     let mut out: Vec<cobre_io::WorkerTimingRecord> =
         Vec::with_capacity(convergence_records.len() + per_worker.len());
 
-    // Rank-aggregated rows: one per iteration. Single-rank in current builds —
-    // multi-rank emits one rank-aggregated row per rank when ranks > 0
-    // produce IterationSummary events (rank-0-only by design today).
     for record in convergence_records {
         let mut timings = [0_u64; WORKER_TIMING_SLOT_COUNT];
         timings[2] = record.time_cut_selection_ms;
@@ -550,7 +488,6 @@ fn build_worker_timing_records(
         });
     }
 
-    // Per-worker rows.
     for ((iteration, rank, worker_id), timings) in per_worker {
         out.push(cobre_io::WorkerTimingRecord {
             iteration,
@@ -668,7 +605,6 @@ mod tests {
 
         let mut fcf = FutureCostFunction::new(2, 1, 4, 10, &[0; 2]);
 
-        // Add 3 cuts to pool[0] and 2 cuts to pool[1].
         fcf.add_cut(0, 0, 0, 1.0, &[1.0]);
         fcf.add_cut(0, 0, 1, 2.0, &[0.5]);
         fcf.add_cut(0, 0, 2, 3.0, &[0.25]);
@@ -995,11 +931,8 @@ mod tests {
         // Top-level non-overlapping phases:
         //   forward=40, backward=50, allreduce=7, selection=8,
         //   allgatherv=2, lower_bound=3 → attributed=110
-        // total=120 → overhead=10
-        //
-        // Note: cut_sync(5) is a sub-component of backward(50) and is NOT
-        // included in the attributed sum. This was a double-counting bug
-        // in the previous version.
+        // total=120 → overhead=10; cut_sync(5) is a sub-component of
+        // backward(50) and is NOT in the attributed sum.
         let events = vec![
             TrainingEvent::IterationSummary {
                 iteration: 1,
@@ -1047,9 +980,6 @@ mod tests {
         let output = build_training_output(&result, &events, &fcf);
         let rec = &output.convergence_records[0];
 
-        // attributed = forward(40) + backward(50) + selection(8) + allgatherv(2)
-        //            + allreduce(7) + lower_bound(3) = 110
-        // overhead = total(120) - attributed(110) = 10
         assert_eq!(
             rec.time_overhead_ms, 10,
             "overhead_ms must equal total(120) - attributed(110) = 10"
@@ -1058,9 +988,7 @@ mod tests {
 
     #[test]
     fn overhead_ms_saturates_at_zero_when_attributed_exceeds_total() {
-        // If timing measurements are slightly inconsistent, overhead must not underflow.
         let result = make_result("iteration_limit", 100.0, 110.0, 0.1, 1);
-        // Construct events where attributed > total (e.g., total=10, forward=50+backward=50)
         let events = vec![TrainingEvent::IterationSummary {
             iteration: 1,
             lower_bound: 100.0,
