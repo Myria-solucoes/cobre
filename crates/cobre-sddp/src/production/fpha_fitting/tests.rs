@@ -385,8 +385,7 @@ fn interpolation_second_segment_correct() {
 
 // ── ProductionFunction helpers ────────────────────────────────────────────
 
-/// Build a simple 2-point ForebayTable that returns a constant 400 m for all v.
-/// Derivative is 0, but for these tests we usually fix v at 10000 hm3.
+/// A 2-point ForebayTable returning a constant 400 m for all v.
 fn flat_forebay_400m() -> ForebayTable {
     ForebayTable::new(
         &[
@@ -431,12 +430,7 @@ fn sloped_forebay() -> ForebayTable {
     .unwrap()
 }
 
-/// Build a quadratic-style polynomial tailrace giving h_tail = 5.5 m at q_out = 3000.
-/// Coefficients: h = 5.0 + 0.001*q + (-1e-7)*q^2
-/// At q=3000: h = 5.0 + 3.0 - 0.9 = 7.1   (NOT 5.5, see below)
-///
-/// For AC tests: use a linear model h = 5.5 / 3000 * q = 1.8333e-3 * q.
-/// At q=3000: h = 5.5. Derivative = 5.5 / 3000.
+/// A linear tailrace `h = (5.5 / 3000)·q`, giving `h_tail = 5.5 m` at q = 3000.
 fn linear_tailrace_5_5_at_3000() -> TailraceModel {
     let slope = 5.5 / 3000.0;
     TailraceModel::Polynomial {
@@ -1343,12 +1337,9 @@ fn make_sobradinho_hydro() -> Hydro {
 /// AC: fit_fpha_planes with Sobradinho-style geometry and default FphaColumnLayout
 /// returns Ok with at least one plane, all with valid coefficient signs.
 ///
-/// The fitter derives planes from the convex hull of the production cloud rather
-/// than from tangent sampling, so the count is the number of distinct
-/// upper-envelope hull faces — fewer than the dense tangent candidate set. The
-/// migrated contract is the hull-based invariant (>= 1 plane and valid γ signs),
-/// not a fixed tangent-derived count; the pointwise outer-approximation guarantee
-/// is owned by the `hull_fit` unit tests on the raw (un-κ-scaled) planes.
+/// The fitter derives planes from the convex hull, so the contract is the
+/// hull-based invariant (>= 1 plane and valid γ signs), not a fixed count; the
+/// pointwise outer-approximation guarantee is owned by the `hull_fit` unit tests.
 #[test]
 fn fit_fpha_planes_sobradinho_style_end_to_end() {
     let rows = sobradinho_rows();

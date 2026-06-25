@@ -1,6 +1,4 @@
-//! Energy-conversion builder: derives the [`EnergyConversionSet`] for the case,
-//! including the FPHA `ρ_eq` resolution and the topological cascade walk that
-//! fills `ρ_acum`.
+//! Energy-conversion builder: derives the [`EnergyConversionSet`] for the case.
 
 use std::collections::HashMap;
 
@@ -13,22 +11,15 @@ use crate::fpha_fitting::{ForebayTable, evaluate_losses, evaluate_tailrace};
 
 /// Build the [`EnergyConversionSet`] for the case.
 ///
-/// Populates `equivalent_productivity_mw_per_m3s`, `reference_volume_hm3`, and
-/// `reference_outflow_m3s` for every hydro and stage. For FPHA hydros, `ρ_eq`
-/// is resolved from three sources in priority order:
+/// For FPHA hydros, `ρ_eq` is resolved from three sources in priority order:
 ///
 /// 1. `override_table` — a per-`(hydro, stage)` user-supplied value from the
 ///    optional `system/hydro_energy_productivity.parquet` rows.
 /// 2. VHA geometry + `ρ_esp` — derived via `ρ_esp · h_eq(V_ref, Q_ref)`.
 /// 3. Neither — returns [`EnergyConversionError::FphaMissingEquivalentProductivity`].
 ///
-/// For non-FPHA hydros, `ρ_eq` is read from `production_models` (the per-stage
-/// resolved production model, populated from `hydro_production_models.json`).
-/// Pass `None` to use `0.0` as a placeholder (only appropriate in tests that do
-/// not require accurate `equivalent_productivity_mw_per_m3s` values).
-///
-/// `accumulated` (`ρ_acum`) is zero-initialized and then filled by the cascade
-/// walk before returning.
+/// For non-FPHA hydros, `ρ_eq` is read from `production_models`; passing `None`
+/// yields `0.0` (only appropriate in tests that do not require accurate `ρ_eq`).
 ///
 /// # Errors
 ///
@@ -73,12 +64,6 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
             });
         }
 
-        // For FPHA hydros, try to derive ρ_eq from VHA + ρ_esp once per hydro
-        // (independent of stage) so the per-stage loop only does lookups.
-        //
-        // rho_eq_opt is Some(value) only when both VHA rows and ρ_esp are
-        // present and the forebay table validates. For non-FPHA hydros this
-        // path is skipped entirely.
         let fpha_derivation = if matches!(hydro.generation_model, HydroGenerationModel::Fpha) {
             match (
                 vha_rows_by_hydro.get(&hydro.id),
@@ -101,18 +86,8 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
 
         let mut row: Vec<EnergyConversion> = Vec::with_capacity(n_stages);
         for stage in 0..n_stages {
-            // Absolute hm³ from the resolver: the JSON-declared (or default)
-            // reference volume already resolved against this plant's band. The
-            // `v_min + fraction·(..)` span is applied once, at resolver
-            // construction — never again here.
             let reference_volume_hm3 = reference_volume_fractions.get(hydro.id, stage);
 
-            // Non-FPHA hydros: read the resolved ρ_eq directly from
-            // `ProductionModelSet`, which is the single source of truth after
-            // `prepare_hydro_models` has folded in the parquet override.
-            // FPHA hydros: seed with 0.0 as a placeholder; the FPHA branch
-            // below derives ρ_eq from the override or the VHA + ρ_esp pipeline
-            // and overwrites it.
             let productivity = if matches!(hydro.generation_model, HydroGenerationModel::Fpha) {
                 0.0
             } else {
@@ -127,9 +102,7 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
                 derive_conversion_for_hydro(hydro, reference_volume_hm3, productivity);
 
             if matches!(hydro.generation_model, HydroGenerationModel::Fpha) {
-                // FPHA ρ_eq: override (parquet) wins over the VHA + ρ_esp
-                // derivation. This is the only remaining consumer of
-                // `override_table` inside this function.
+                // FPHA ρ_eq: parquet override wins over the VHA + ρ_esp derivation.
                 let parquet_rho_eq =
                     override_table.and_then(|o| o.equivalent_productivity(hydro.id, stage));
                 let rho_eq = if let Some(value) = parquet_rho_eq {
@@ -157,10 +130,6 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
         per_hydro_stage.push(row);
     }
 
-    // Validate that the cascade topology was built from the same hydro set.
-    // topological_order() contains every hydro reachable from the graph; if a
-    // hydro was declared with a downstream_id that points outside the slice the
-    // topology length will differ from n_hydros.
     let topo_len = cascade.topological_order().len();
     if topo_len != n_hydros {
         return Err(EnergyConversionError::CascadeIndexMismatch {
@@ -169,16 +138,13 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
         });
     }
 
-    // Build a lookup from EntityId to slice index once, outside the stage loop,
-    // so the inner loop is O(1) per entry.
     let mut id_to_index: HashMap<EntityId, usize> = HashMap::with_capacity(n_hydros);
     for (idx, h) in hydros.iter().enumerate() {
         id_to_index.insert(h.id, idx);
     }
 
-    // Walk the topological order in reverse (downstream before upstream) so
-    // that when we process hydro i, the accumulated value for its downstream
-    // plant is already fully computed.
+    // Reverse topological order (downstream before upstream): each plant's
+    // downstream ρ_acum is fully computed before it is summed in.
     let mut accumulated = vec![vec![0.0_f64; n_stages]; n_hydros];
     for t in 0..n_stages {
         for id in cascade.topological_order().iter().rev() {
@@ -216,21 +182,10 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
 
 /// Derive the per-`(hydro, stage)` [`EnergyConversion`] cell.
 ///
-/// `reference_volume_hm3` is the resolved reference operating volume (absolute
-/// hm³) for the `(hydro, stage)` of interest, already obtained from the resolver
-/// — the JSON-declared (or default) value resolved against the plant's band at
-/// resolver construction. It is stored verbatim; the `v_min + fraction·(..)` span
-/// is applied once upstream, never re-applied here, so an undeclared plant's
-/// `reference_volume_hm3` is bit-identical to the prior inline resolution.
-///
-/// This cell's `reference_volume_hm3` is the single JSON-sourced reference
-/// operating volume that the policy `ReferenceVolume` parameter and the
-/// downstream LP/simulation consumers read — there is no parquet `v_ref` tier.
-///
-/// For FPHA hydros, `productivity` should be `0.0` — it is filled in by the
-/// FPHA-specific derivation in `build_energy_conversion_set`. For non-FPHA
-/// hydros, `productivity` is the per-stage value from the resolved production
-/// model (i.e., from `hydro_production_models.json`).
+/// `reference_volume_hm3` (absolute hm³) is stored verbatim — the
+/// `v_min + fraction·(..)` span is applied once at resolver construction, never
+/// re-applied here. For FPHA hydros pass `productivity = 0.0`;
+/// `build_energy_conversion_set` overwrites it via the FPHA derivation.
 fn derive_conversion_for_hydro(
     hydro: &Hydro,
     reference_volume_hm3: f64,
@@ -244,11 +199,10 @@ fn derive_conversion_for_hydro(
     }
 }
 
-/// Compute `h_eq = h_fore(V_ref) − h_tail(Q_ref) − h_loss` for a hydro plant.
+/// Equivalent head `h_eq = h_fore(V_ref) − h_tail(Q_ref) − h_loss`.
 ///
-/// Returns `None` when `h_eq <= 0.0` so callers that treat non-positive head as
-/// a silent skip do not need separate guard logic. Callers that must surface
-/// the non-positive case as an error use [`fpha_equivalent_head`] instead.
+/// Returns `None` when `h_eq <= 0.0`; [`fpha_equivalent_head`] surfaces that case
+/// as an error instead.
 fn equivalent_head(hydro: &Hydro, table: &ForebayTable, v_ref: f64, q_ref: f64) -> Option<f64> {
     let h_fore = table.height(v_ref);
     let h_tail = hydro
@@ -263,10 +217,10 @@ fn equivalent_head(hydro: &Hydro, table: &ForebayTable, v_ref: f64, q_ref: f64) 
     (h_eq > 0.0).then_some(h_eq)
 }
 
-/// Compute the FPHA equivalent head `h_eq = h_fore(V_ref) − h_tail(Q_ref) − h_loss`.
+/// FPHA equivalent head ([`equivalent_head`]), erroring on non-positive results.
 ///
-/// Returns [`EnergyConversionError::NonPositiveEquivalentHead`] when the result
-/// is `<= 0.0` (which would yield a non-physical `ρ_eq`).
+/// Returns [`EnergyConversionError::NonPositiveEquivalentHead`] when `h_eq <= 0.0`
+/// (which would yield a non-physical `ρ_eq`).
 fn fpha_equivalent_head(
     hydro: &Hydro,
     v_ref: f64,
@@ -931,8 +885,6 @@ mod tests {
     /// Expected ρ_acum: C=5.0, B=3+5=8.0, A=2+8=10.0.
     #[test]
     fn linear_cascade_accumulates_three_levels() {
-        // A(id=0)->B(id=1)->C(id=2, terminal). Each hydro has ConstantProductivity.
-        // The ρ_eq values are supplied via ProductionModelSet (declaration order: A=0, B=1, C=2).
         let mut a = make_hydro(0, Some(1));
         a.generation_model = HydroGenerationModel::ConstantProductivity;
         let mut b = make_hydro(1, Some(2));
@@ -1000,7 +952,6 @@ mod tests {
     #[test]
     fn declaration_order_invariance() {
         let make_linear = |order: &[i32]| {
-            // Map entity ID to downstream: 0->1->2 (terminal).
             let downstream = |id: i32| match id {
                 0 => Some(1),
                 1 => Some(2),
@@ -1047,7 +998,6 @@ mod tests {
         )
         .expect("cab order");
 
-        // Build id->index maps for each ordering.
         let idx_abc: HashMap<i32, usize> = hydros_abc
             .iter()
             .enumerate()
@@ -1074,19 +1024,9 @@ mod tests {
     /// must return DanglingDownstream.
     #[test]
     fn dangling_downstream_is_rejected() {
-        // Hydro 0 has downstream_id=99, but hydro 99 is not in the slice.
-        // We must build the cascade manually to inject the dangling edge,
-        // because CascadeTopology::build silently stores the dangling entry and
-        // topological_order() ends up shorter than hydros.len(), triggering
-        // CascadeIndexMismatch instead.  We therefore build a topology where
-        // the downstream entry 99 IS in the map but not in id_to_index.
-
-        // Use two hydros: id=0 (downstream=99) and id=1 (terminal).
-        // The cascade built from these two will have topological_order length 2
-        // (only hydros present in in_degree are included in the topo sort).
-        // Because hydro 99 is absent from in_degree, length == 2 == hydros.len().
-        // The DanglingDownstream error fires when the inner loop tries to look
-        // up ds_id=99 in id_to_index.
+        // Two hydros (id=0 downstream=99, id=1 terminal) so topo length stays 2
+        // == hydros.len(); otherwise the shorter topo would fire
+        // CascadeIndexMismatch before DanglingDownstream can.
         let mut h0 = make_hydro(0, Some(99));
         h0.generation_model = HydroGenerationModel::ConstantProductivity;
         let mut h1 = make_hydro(1, None);
@@ -1121,14 +1061,10 @@ mod tests {
     /// CascadeIndexMismatch.
     #[test]
     fn cascade_index_mismatch_is_rejected() {
-        // Three hydros but a cascade for only two of them (built from a
-        // different slice).  We create a cascade from a 2-hydro slice and then
-        // call the builder with a 3-hydro slice.
         let h0 = make_hydro(0, Some(1));
         let h1 = make_hydro(1, None);
         let h2 = make_hydro(2, None);
 
-        // Build the cascade from only two hydros so topo order has length 2.
         let short_cascade = CascadeTopology::build(&[h0.clone(), h1.clone()]);
 
         let hydros_three = vec![h0, h1, h2];

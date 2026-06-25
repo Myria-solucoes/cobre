@@ -1,21 +1,13 @@
 //! Deterministic seeded PRNG and identity hash for the sampled plane reduction.
 //!
-//! The sampled mean-squared-distance reduction draws random `(V, Q)` points to
-//! estimate how close two planes are. A wall-clock or thread-local RNG would make
-//! the fitted policy depend on entropy that varies between runs and between MPI
-//! rank counts, violating the declaration-order bit-determinism hard rule. This
-//! module supplies the two pieces that make the sampling a pure function of a
-//! STABLE identity instead: [`SplitMix64`], a hand-rolled seedable PRNG, and
-//! [`fnv1a64`], a stable hash used to derive each pair's seed from the plant /
-//! entry / slot identity.
-//!
 //! # Determinism (Voice 1 / D5)
 //!
-//! Neither symbol reads any clock, thread id, or MPI rank: the same seed yields
-//! the same `u64` stream on every machine and every run. The forbidden
-//! alternative is a `rand`/`thread_rng`-backed sampler, which would break
-//! bit-determinism across rank counts. Both are hand-rolled (no external crate)
-//! so the dependency surface carries no entropy source at all.
+//! The sampled-distance reduction draws random `(V, Q)` points; seeding from a
+//! STABLE (plant / entry / slot) identity via [`fnv1a64`] + [`SplitMix64`] — and
+//! NOT a `rand`/`thread_rng` sampler — is what keeps the fitted policy bit-
+//! identical across runs and MPI rank counts (the declaration-order hard rule).
+//! Neither symbol reads any clock, thread id, or rank, and both are hand-rolled so
+//! the dependency surface carries no entropy source at all.
 
 /// A tiny, fully deterministic, seedable PRNG: the `SplitMix64` seed-expander.
 ///
@@ -56,8 +48,6 @@ impl SplitMix64 {
     /// the largest inputs, breaking the half-open `[0, 1)` range the sampler
     /// relies on to stay inside the fitting box.
     pub(crate) fn next_unit_f64(&mut self) -> f64 {
-        // `>> 11` keeps 53 bits, exactly representable in an f64 mantissa, so the
-        // widening `as f64` is lossless; the product lands in [0, 1).
         #[allow(clippy::cast_precision_loss)]
         let mantissa = (self.next_u64() >> 11) as f64;
         mantissa * 2.0_f64.powi(-53)

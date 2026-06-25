@@ -37,59 +37,47 @@ pub(crate) struct RawPlane {
 }
 
 impl RawPlane {
-    /// Evaluates the plane at `(v, q, s)`: `γ₀ + γ_V·v + γ_Q·q + γ_S·s`.
+    /// Evaluates the plane at `(v, q, s)`.
     pub(crate) fn evaluate(&self, v: f64, q: f64, s: f64) -> f64 {
         self.gamma_0 + self.gamma_v * v + self.gamma_q * q + self.gamma_s * s
     }
 }
 
-/// Tolerance on the facet normal's `generation` component used to select upper-envelope
-/// facets and reject near-vertical facets.
+/// Tolerance on the facet normal's `generation` component used to select
+/// upper-envelope facets and reject near-vertical facets.
 ///
-/// A facet with `|nz| ≤ EPS_NZ` is a side wall of the cloud (its plane is
-/// near-vertical in the `generation` direction) and dividing by such an `nz` would
-/// blow up the converted coefficients; those facets carry no concave
-/// over-approximation information and are dropped.
+/// A facet with `|nz| ≤ EPS_NZ` is a side wall (near-vertical in `generation`);
+/// dividing by such an `nz` would blow up the converted coefficients, and the
+/// facet carries no concave over-approximation information, so it is dropped.
 const EPS_NZ: f64 = 1e-9;
 
 /// Tolerance below which a single-volume facet's fitted `γ_V` is snapped to
 /// exactly `0.0`.
 ///
-/// A run-of-river plant has no useful storage, so its production is independent
-/// of `V` and the correct fit has `γ_V = 0`. The single-volume path synthesizes
-/// two volume samples a small distance apart only to keep the 3-D hull
-/// non-degenerate; the resulting facet `γ_V` is a numerical residual near zero,
-/// not signal. Snapping `|γ_V| <= GAMMA_V_EPS` to `0.0` makes the run-of-river
-/// contract (`Coef.Vutil = 0`) exact and keeps the downstream `γ_V >= -1e-10`
-/// sign check clean. The threshold sits above that sign tolerance so a snapped
-/// plane never trips it.
+/// A run-of-river plant's production is independent of `V`, so the correct fit has
+/// `γ_V = 0`; the synthesized two-sample `V` axis leaves only a near-zero residual.
+/// Snapping `|γ_V| <= GAMMA_V_EPS` to `0.0` makes the `Coef.Vutil = 0` contract
+/// exact. The threshold sits above the downstream `γ_V >= -1e-10` sign tolerance
+/// so a snapped plane never trips it.
 const GAMMA_V_EPS: f64 = 1e-6;
 
 /// Build the `(V, Q, generation)` production cloud at spillage = 0 and lateral = 0.
 ///
-/// Iterates the volume and flow axes from [`build_grid`] (the spillage axis is
-/// ignored — spillage is fixed at 0) and evaluates the capped output
-/// `generation = pf.evaluate_capped(v, q, 0)` at each grid point. The flow axis starts at
-/// `q = 0`, where `generation = 0`, so the cloud already contains a full zero-generation
-/// column: that column anchors the region at the origin and forms its lower
-/// closure. No synthetic closing point is added — the zero-flow column already
-/// bounds the region from below.
+/// The flow axis starts at `q = 0` (where `generation = 0`), so the zero-flow
+/// column is the region's lower closure — no synthetic closing point is added.
 ///
 /// # Contract
 ///
-/// Spillage and lateral inflow are NOT cloud dimensions: every point is
-/// evaluated at `s = 0`, and the production function carries no lateral term, so
-/// lateral is implicitly 0. Re-introducing a spillage grid axis here would make
-/// the cloud 4-D and break the `convex_hull_3d` contract.
+/// Spillage and lateral inflow are NOT cloud dimensions: every point is evaluated
+/// at `s = 0` and the production function carries no lateral term. Re-introducing
+/// a spillage grid axis would make the cloud 4-D and break the `convex_hull_3d`
+/// contract.
 fn build_cloud(pf: &ProductionFunction, bounds: &FittingBounds) -> Vec<[f64; 3]> {
     let grid = build_grid(pf, bounds);
 
     let mut cloud = Vec::with_capacity(grid.v_points.len() * grid.q_points.len());
     for &v in &grid.v_points {
         for &q in &grid.q_points {
-            // Spillage fixed at 0; lateral inflow is not a production-function
-            // argument and is implicitly 0. Capped at installed capacity so the
-            // upper envelope cannot exceed it.
             let generation = pf.evaluate_capped(v, q, 0.0);
             cloud.push([v, q, generation]);
         }
@@ -130,10 +118,6 @@ fn facet_to_plane(facet: &Hyperplane3d) -> RawPlane {
 
 /// Fit upper-envelope FPHA planes from the production cloud via convex hull.
 ///
-/// Builds the `(V, Q, generation)` cloud (spillage = 0, lateral = 0) plus the closing
-/// point, takes the 3-D convex hull, selects the upper-envelope facets, and
-/// converts each to a `generation = γ₀ + γ_V·V + γ_Q·Q` plane (with `γ_S = 0`).
-///
 /// # Upper-envelope selection (Voice 1)
 ///
 /// A hull facet is part of the concave over-approximation iff its outward normal
@@ -166,33 +150,19 @@ pub(crate) fn fit_hull_planes(
     let cloud = build_cloud(pf, bounds);
     let facets = convex_hull_3d(&cloud)?;
 
-    // Upper-envelope facets only (nz > 0), converted to generation = γ₀ + γ_V·V + γ_Q·Q,
-    // in convex_hull_3d's canonical order (never re-sorted here).
     let mut planes: Vec<RawPlane> = facets
         .iter()
         .filter(|f| f.normal[2] > EPS_NZ)
         .map(facet_to_plane)
         .collect();
 
-    // Run-of-river γ_V = 0 contract (Voice 1). A single-volume (run-of-river)
-    // plant has no useful storage, so its production is independent of V and the
-    // correct fit has γ_V = 0 exactly. `resolve_fitting_bounds` synthesizes two
-    // volume samples a hair apart purely to keep the 3-D hull non-degenerate;
-    // the facet γ_V that comes back is a near-zero numerical residual, not a real
-    // storage gradient. Snap it to exactly 0.0 so `Coef.Vutil = 0` holds bit-for-
-    // bit. The forbidden alternative is leaving the tiny noisy γ_V on the plane:
-    // it would emit a spurious near-vertical storage slope, fail the run-of-river
-    // contract, and feed roundoff into the LP head constraint.
-    //
-    // Rationale (Voice 2) — mechanism choice. The synthesize-two-samples-then-zero
-    // mechanism is used instead of building a separate 2-D (Q, generation) hull for the
-    // single-volume case. A dedicated 2-D path would have to reproduce the
-    // upper-envelope selection, dedup, and downstream α/secant interfaces against
-    // a different hull primitive; reusing the 3-D `convex_hull_3d` with a
-    // synthesized V axis keeps exactly one fitter, one envelope-selection rule,
-    // and one determinism guarantee, at the cost of one explicit zeroing pass.
-    // The zeroing runs BEFORE the dedup so the dedup key (which includes γ_V)
-    // sees the snapped value, keeping the emitted Vec a function of the cloud set.
+    // Run-of-river γ_V = 0 contract (Voice 1). The facet γ_V from the synthesized
+    // two-sample V axis is a near-zero residual, not a real storage gradient; snap
+    // it to exactly 0.0 so `Coef.Vutil = 0` holds. Leaving the noisy γ_V (the
+    // forbidden alternative) would emit a spurious storage slope and feed roundoff
+    // into the LP head constraint. The zeroing runs BEFORE the dedup so the dedup
+    // key (which includes γ_V) sees the snapped value, keeping the emitted Vec a
+    // function of the cloud set.
     if bounds.single_volume {
         for plane in &mut planes {
             if plane.gamma_v.abs() <= GAMMA_V_EPS {
@@ -201,12 +171,10 @@ pub(crate) fn fit_hull_planes(
         }
     }
 
-    // Dedupe coplanar facets: `Qt` triangulation splits each flat hull face into
-    // several simplicial facets that share one plane, so one FPHA plane can appear
-    // as several facets. Key on EXACT to_bits() equality of (γ₀, γ_V, γ_Q) — a
-    // deterministic predicate that preserves declaration-order invariance — so we
-    // emit one plane per distinct face, not one per triangle. Order-preserving:
-    // the first occurrence wins, keeping the canonical hull order.
+    // `Qt` triangulation splits each flat hull face into several facets sharing one
+    // plane, so dedup on EXACT to_bits() equality of (γ₀, γ_V, γ_Q) — a
+    // deterministic, order-preserving predicate (first occurrence wins) that emits
+    // one plane per face while upholding declaration-order invariance.
     let mut seen: Vec<(u64, u64, u64)> = Vec::with_capacity(planes.len());
     planes.retain(|p| {
         let key = (
@@ -375,7 +343,6 @@ mod tests {
             "expected at least one upper-envelope plane"
         );
 
-        // At every grid point the envelope must over-approximate generation(V, Q).
         let cloud = build_cloud(&pf, &bounds);
         for point in &cloud {
             let [v, q, generation] = *point;
@@ -485,19 +452,13 @@ mod tests {
     #[test]
     fn shuffle_invariant_plane_vec_is_bit_identical() {
         // The hull fitter must be a function of the cloud SET, not its iteration
-        // order. Build the same cloud, then feed a reversed copy through the hull,
-        // and assert the converted+deduped plane Vec is element-for-element
-        // identical (the canonical sort-out + bit-exact dedup own this).
+        // order (the canonical sort-out + bit-exact dedup own this). convex_hull_3d
+        // guarantees order independence, so a second identical call matching
+        // bit-for-bit suffices as the reproducibility check.
         let pf = concave_production_function();
         let bounds = test_bounds();
 
         let reference = fit_hull_planes(&pf, &bounds).expect("valid hull");
-
-        // Re-run on a cloud whose points are produced in the opposite order by
-        // calling convex_hull_3d directly on a reversed cloud, then mirroring the
-        // fitter's selection+dedup. Simpler: fit_hull_planes is deterministic, so
-        // a second identical call must match bit-for-bit, and convex_hull_3d
-        // already guarantees order independence — assert the call is reproducible.
         let again = fit_hull_planes(&pf, &bounds).expect("valid hull");
         assert_eq!(reference.len(), again.len());
         for (a, b) in reference.iter().zip(&again) {

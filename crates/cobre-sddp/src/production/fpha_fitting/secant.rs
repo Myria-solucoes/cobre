@@ -1,72 +1,46 @@
 //! Per-plane lateral-flow secant `γ_S` on the `lateral_flow` axis.
 //!
-//! Owns [`resolve_s_max`], [`representative_operating_point`], and
-//! [`fit_gamma_s`]. The fitter adds one extra FPHA axis — the **lateral
-//! flow `lateral_flow`**, aggregating everything that raises the tailrace without
-//! driving generation — and fits a single secant `γ_S` per plane by
-//! least-squares over `lateral_flow ∈ [0, S_max]`.
+//! Fits one secant `γ_S` per plane by 1-D ordinary-least-squares of `generation`
+//! against `lateral_flow ∈ [0, S_max]` at the plane's representative operating
+//! point — NOT a hull/grid axis. The sample is a closed-form evenly-spaced grid,
+//! so the fit is deterministic and order-independent.
 //!
 //! # The smart default (`lateral_flow = S`, `reference lateral flow = 0`)
 //!
-//! With smart defaults the lateral axis collapses to own spill: `lateral_flow = S` and
-//! the reference offset `reference lateral flow = 0`. The richer `lateral_flow` composition (upstream
-//! outflows, post inflows) and its LP wiring are a later refinement; here only
-//! the secant axis and its default land. The tailrace already sees total outflow
-//! `q + s` (`super::geometry::evaluate_tailrace` is called at `q_out = q + s` by
-//! `ProductionFunction::net_head`), so evaluating `pf.evaluate(v, q, s = lateral_flow)`
-//! makes the tailrace see `outflow = q + lateral_flow` — exactly the spill-only default.
-//!
-//! # Secant slope (1-D least-squares, not a hull axis)
-//!
-//! The slope is a per-plane 1-D ordinary-least-squares regression of `generation` against
-//! `lateral_flow` over a FIXED evenly-spaced sample of `lateral_flow ∈ [0, S_max]`:
-//!
-//! ```text
-//! γ_S = Σ_i (x_i − x̄)(y_i − ȳ) / Σ_i (x_i − x̄)²
-//! ```
-//!
-//! where `x_i` are the `lateral_flow` samples and `y_i = generation(V_k, q_k, lateral_flow_i)` at the
-//! plane's representative operating point. This is NOT a spillage hull/grid axis —
-//! it is a 1-D fit per plane, deterministic and order-independent (the sample is a
-//! closed-form evenly-spaced grid, so the result does not depend on entity or
-//! iteration order).
+//! The lateral axis collapses to own spill: feeding the lateral flow as the
+//! spillage argument makes the tailrace see `outflow = q + lateral_flow` (it
+//! already evaluates at `q_out = q + s`), exactly the spill-only default. Richer
+//! `lateral_flow` composition and its LP wiring are a later refinement.
 
 use super::geometry::FittingBounds;
 use super::hull_fit::RawPlane;
 use super::production::ProductionFunction;
 
-/// Number of evenly-spaced `lateral_flow` samples used for the per-plane secant fit.
+/// Number of evenly-spaced `lateral_flow` samples for the per-plane secant fit.
 ///
-/// Fixed (not config-driven) so the secant is deterministic and order-independent:
-/// the sample is a closed-form grid over `[0, S_max]`, identical for every plane
-/// and every run regardless of input ordering.
+/// Fixed (not config-driven) so the secant is deterministic and order-independent
+/// (D5).
 const N_LATERAL_FLOW_SAMPLES: usize = 9;
 
-/// Magnitude below which a fitted `γ_S` secant slope is snapped to exactly 0.
+/// Magnitude below which a fitted `γ_S` slope is snapped to exactly 0.
 ///
-/// A flat tailrace produces a physically-zero secant, but the OLS fit leaves
-/// floating-point residuals of either sign. Slopes with `|γ_S| < GAMMA_S_SNAP_EPS`
-/// are numerical zero and MUST be emitted as exactly `0.0`: a surviving near-zero
-/// structural coefficient in the spillage column otherwise wrecks LP column
-/// scaling. The bound sits well below the smallest physically-meaningful spillage
-/// sensitivity (~`1e-6` MW/(m³/s)), so no real coefficient is snapped, and at/above
-/// the `validate_fitted_planes` sign tolerance so every snapped value is sign-valid.
+/// The OLS fit of a flat tailrace leaves floating-point residuals of EITHER sign;
+/// a surviving near-zero structural coefficient in the spillage column wrecks LP
+/// column scaling, so both signs MUST snap to `0.0`. The bound sits well below the
+/// smallest physical spillage sensitivity (~`1e-6` MW/(m³/s)), so no real
+/// coefficient is snapped, and at/above the `validate_fitted_planes` sign
+/// tolerance so every snapped value is sign-valid.
 const GAMMA_S_SNAP_EPS: f64 = 1e-10;
 
-/// Resolve the lateral-flow sample upper bound `S_max` for the secant fit.
-///
-/// `S_max = 2 × long-term mean inflow` when the long-term mean inflow is
-/// positive, else `2 × max_turbined_m3s`.
+/// Resolve the lateral-flow sample upper bound `S_max` for the secant fit:
+/// `2 × long-term mean inflow` when positive, else `2 × max_turbined_m3s`.
 ///
 /// # Contract — `long-term mean inflow > 0` strictly, else fall back (Voice 1)
 ///
-/// The `long-term mean inflow > 0` test is strict: a hydro with no inflow history yields `long_term_mean_inflow_m3s = 0.0`
-/// (the canonical-order mean of an empty series) and MUST take the
-/// `2 × max_turbined_m3s` fallback. Using `long_term_mean_inflow_m3s >= 0.0` instead would collapse the
-/// fallback to `S_max = 0` for a history-less hydro and zero out every `γ_S`
-/// (the degenerate guard in [`fit_gamma_s`]), silently dropping the lateral
-/// correction. The caller (`super::fit_fpha_planes`) supplies the per-hydro
-/// long-term mean natural inflow as `long_term_mean_inflow_m3s`.
+/// The test is strict: a history-less hydro yields `long_term_mean_inflow_m3s =
+/// 0.0` and MUST take the fallback. `>= 0.0` would collapse `S_max = 0` and zero
+/// out every `γ_S` (the degenerate guard in [`fit_gamma_s`]), silently dropping
+/// the lateral correction.
 pub(crate) fn resolve_s_max(long_term_mean_inflow_m3s: f64, max_turbined_m3s: f64) -> f64 {
     if long_term_mean_inflow_m3s > 0.0 {
         2.0 * long_term_mean_inflow_m3s
@@ -79,25 +53,19 @@ pub(crate) fn resolve_s_max(long_term_mean_inflow_m3s: f64, max_turbined_m3s: f6
 ///
 /// # Contract — anchor where the plane binds (argmin), not where it is loosest (Voice 1)
 ///
-/// The secant slope `dGH/dlateral_flow = ρ·q·d(h_net)/dlateral_flow` depends on `(V, q)`, so each
-/// plane needs one representative operating point: the spill = 0 fit-grid point where
-/// this plane is the *active* (binding) upper bound and attains the largest
-/// `generation` among the points it governs. The LP applies every plane as
-/// `g ≤ plane_k`, so the binding plane at a point is the pointwise **minimum** over
-/// planes (the tightest cap) — matching the min-envelope contract in
-/// `compute_alpha_fpha`. Anchoring at the pointwise **maximum** (the loosest bound)
-/// is the wrong-but-compiling alternative: it anchors each plane where it does not
-/// govern, over-steepening `γ_S` on high-head planes and zeroing it on the planes
-/// that never attain the max. A fixed `(V_ref, q_max)` corner would be defensible
-/// but mismatched for planes that govern a low-flow or low-volume region; the
-/// active-point choice tracks each plane's own region.
+/// Each plane anchors at the spill = 0 grid point where it is the *active* binding
+/// bound — the pointwise **minimum** over planes (the LP applies `g ≤ plane_k`),
+/// matching the min-envelope contract in `compute_alpha_fpha` — and attains the
+/// largest `generation` among the points it governs. Anchoring at the pointwise
+/// **maximum** (the loosest bound) is the wrong-but-compiling alternative: it
+/// anchors each plane where it does not govern, over-steepening `γ_S` on high-head
+/// planes and zeroing it on planes that never attain the max.
 ///
-/// Determinism: the grid is the closed-form `super::grid::build_grid` grid and the
-/// scan is in fixed `(v, q)` order with a strict `>` improvement test, so ties
-/// resolve to the first point in iteration order — order-independent across runs.
+/// Determinism (D5): the closed-form `build_grid` grid scanned in fixed `(v, q)`
+/// order with a strict `>` test resolves ties to the first point.
 ///
-/// Returns `None` when the plane is never the active bound on the grid (e.g. a
-/// fully dominated plane); the caller then leaves `γ_S = 0` for that plane.
+/// Returns `None` for a plane never active on the grid; the caller leaves
+/// `γ_S = 0`.
 fn representative_operating_point(
     plane: &RawPlane,
     planes: &[RawPlane],
@@ -109,17 +77,14 @@ fn representative_operating_point(
     let mut best: Option<(f64, f64, f64)> = None; // (v, q, generation) at the binding point
     for &v in &grid.v_points {
         for &q in &grid.q_points {
-            // Spill = 0: the representative point is on the no-lateral surface; the
-            // secant then sweeps lateral_flow away from this anchor.
             let this_val = plane.evaluate(v, q, 0.0);
             let min_val = planes
                 .iter()
                 .map(|p| p.evaluate(v, q, 0.0))
                 .fold(f64::INFINITY, f64::min);
 
-            // Active iff this plane is the binding (tightest) upper bound here, within
-            // the same tolerance redundancy elimination uses. The LP binds on the
-            // pointwise min, so the governing plane is the argmin — not the argmax.
+            // Active iff this plane is the binding bound: the argmin (the LP min),
+            // not the argmax.
             if this_val - min_val <= 1e-8 {
                 let generation = pf.evaluate(v, q, 0.0);
                 if best.is_none_or(|(_, _, best_gh)| generation > best_gh) {
@@ -132,34 +97,27 @@ fn representative_operating_point(
     best.map(|(v, q, _)| (v, q))
 }
 
-/// Fit the lateral-flow secant `γ_S` for a single plane at `(v_rep, q_rep)`.
-///
-/// Sweeps a FIXED evenly-spaced sample of `lateral_flow ∈ [0, S_max]` (`N_LATERAL_FLOW_SAMPLES`
-/// points, inclusive endpoints), evaluates `generation = pf.evaluate(v_rep, q_rep, lateral_flow)`
-/// at each, and returns the ordinary-least-squares slope of `generation` vs `lateral_flow`.
+/// Fit the lateral-flow secant `γ_S` for a single plane at `(v_rep, q_rep)` — the
+/// OLS slope of `generation` vs `lateral_flow` over a fixed sample of `[0, S_max]`.
 ///
 /// # Contract — `γ_S ≤ 0` (Voice 1)
 ///
-/// More lateral flow raises the tailrace, lowers net head, and lowers `generation`, so the
-/// fitted slope is non-positive. A tiny positive slope from floating-point noise is
-/// clamped to `0.0` so every emitted plane satisfies the
-/// `validate_fitted_planes` rule `gamma_s ≤ 1e-10`. The wrong-but-compiling
-/// alternative — returning the raw slope — would let a `+1e-15` round-off bypass
-/// the sign contract and surface as an invalid coefficient downstream.
+/// More lateral flow raises the tailrace and lowers `generation`, so the slope is
+/// non-positive; floating-point noise is clamped to `0.0` to satisfy the
+/// `validate_fitted_planes` rule `gamma_s ≤ 1e-10`. Returning the raw slope is the
+/// wrong-but-compiling alternative — a `+1e-15` round-off would surface as an
+/// invalid coefficient downstream.
 ///
 /// # Contract — degenerate `S_max ≤ 0` returns the neutral `γ_S = 0` (Voice 1)
 ///
-/// When `S_max ≤ 0` (long-term mean inflow = 0 AND `max_turbined` = 0) the sample collapses to a single
-/// point and `Σ(x_i − x̄)² = 0` — the regression slope is undefined. This returns
-/// `0.0` (no lateral sensitivity) rather than dividing by zero. The same neutral
-/// path covers a flat `generation` (`Σ(x_i − x̄)(y_i − ȳ) = 0`).
+/// `S_max ≤ 0` collapses the sample to one point (`Σ(x_i − x̄)² = 0`, slope
+/// undefined); return `0.0` rather than dividing by zero. The same neutral path
+/// covers a flat `generation`.
 fn fit_gamma_s(pf: &ProductionFunction, v_rep: f64, q_rep: f64, s_max: f64) -> f64 {
     if s_max <= 0.0 {
         return 0.0;
     }
 
-    // Evenly-spaced lateral_flow sample over [0, S_max], inclusive endpoints. The first
-    // sample (lateral_flow = 0) is the no-lateral anchor; reference lateral flow = 0 is the reference.
     #[allow(clippy::cast_possible_truncation)]
     let denom = f64::from((N_LATERAL_FLOW_SAMPLES - 1) as u32);
 
@@ -193,16 +151,8 @@ fn fit_gamma_s(pf: &ProductionFunction, v_rep: f64, q_rep: f64, s_max: f64) -> f
     }
 
     let slope = cov / var_x;
-    // Snap near-zero round-off to exactly 0. A flat tailrace region yields a
-    // physically-zero secant, but OLS leaves sub-`GAMMA_S_SNAP_EPS` noise of
-    // EITHER sign; `slope.min(0.0)` alone kills only positive noise, letting a
-    // tiny NEGATIVE residual (e.g. -3e-17) survive into the spillage column.
-    // That near-zero structural coefficient, paired with the O(1) water-balance
-    // coefficient on the same column, drives cobre's geometric-mean column scaler
-    // to an extreme factor and the scaled LP is rejected by the solver. Snapping
-    // both signs keeps every emitted `γ_S` either a real (≤ -GAMMA_S_SNAP_EPS)
-    // slope or exactly 0. The threshold sits far below the smallest physical
-    // spillage sensitivity (~1e-6 MW/(m³/s)), so no real coefficient is snapped.
+    // Snap BOTH signs to 0 (see GAMMA_S_SNAP_EPS): `slope.min(0.0)` would let a
+    // tiny NEGATIVE residual survive into the spillage column.
     if slope > -GAMMA_S_SNAP_EPS {
         0.0
     } else {
@@ -210,24 +160,13 @@ fn fit_gamma_s(pf: &ProductionFunction, v_rep: f64, q_rep: f64, s_max: f64) -> f
     }
 }
 
-/// Fit `γ_S` for every plane in place, using the smart default `lateral_flow = S`.
+/// Fit `γ_S` in place for every plane, using the smart default `lateral_flow = S`.
 ///
-/// For each α-scaled plane, resolves a representative operating point and fits the
-/// lateral secant over `lateral_flow ∈ [0, S_max]`, writing the resulting non-positive
-/// slope onto `plane.gamma_s`. The α-scaled gradients (`gamma_v`, `gamma_q`) and
-/// intercept are untouched — `γ_S` is the only coefficient this step sets.
-///
-/// The secant is fit for every plant: spillage raises the tailrace and lowers net
-/// head universally, so there is no per-plant opt-out. The degenerate `S_max ≤ 0`
-/// guard in [`fit_gamma_s`] is the only path that yields `γ_S = 0`.
-///
-/// # Parameters
-///
-/// - `planes` — the α-scaled selected planes; mutated in place to carry `γ_S`.
-/// - `pf` — production function supplying `generation(V, q, lateral_flow)` via the tailrace.
-/// - `bounds` — resolved fitting bounds supplying the representative-point grid.
-/// - `long_term_mean_inflow_m3s` — long-term mean inflow \[m³/s\] for `S_max`; `0.0` (no inflow history)
-///   selects the `2 × max_turbined` fallback (see [`resolve_s_max`]).
+/// `γ_S` is the only coefficient this step sets; the α-scaled gradients and
+/// intercept are untouched. The secant is fit for every plant (spillage lowers net
+/// head universally); only the degenerate `S_max ≤ 0` guard in [`fit_gamma_s`]
+/// yields `γ_S = 0`. `long_term_mean_inflow_m3s = 0.0` selects the
+/// `2 × max_turbined` fallback (see [`resolve_s_max`]).
 pub(crate) fn fit_gamma_s_for_planes(
     planes: &mut [RawPlane],
     pf: &ProductionFunction,
@@ -236,10 +175,8 @@ pub(crate) fn fit_gamma_s_for_planes(
 ) {
     let s_max = resolve_s_max(long_term_mean_inflow_m3s, pf.max_turbined_m3s);
 
-    // Snapshot the envelope before mutation: the representative-point scan reads
-    // the spill = 0 plane values, which γ_S does not affect, so reading the live
-    // slice would be equivalent — the snapshot makes the read-vs-write separation
-    // explicit and keeps the active-point selection independent of fit order.
+    // Snapshot before mutation so the active-point selection is independent of fit
+    // order.
     let snapshot: Vec<RawPlane> = planes.to_vec();
     for plane in planes.iter_mut() {
         plane.gamma_s = match representative_operating_point(plane, &snapshot, pf, bounds) {
@@ -292,9 +229,9 @@ mod tests {
         }
     }
 
-    /// A production function whose tailrace rises with total outflow, so spillage /
-    /// lateral flow lowers net head and `generation`. Constant losses keep `d(h_net)/dlateral_flow`
-    /// equal to `−dh_tail/dQ_out`.
+    /// A production function whose tailrace rises with total outflow, so lateral
+    /// flow lowers net head. The linear tailrace gives a hand-computable secant
+    /// slope (`dh_tail/dq_out = 0.001`).
     fn spill_sensitive_pf() -> ProductionFunction {
         let rows = vec![
             row(0.0, 380.0),
@@ -303,8 +240,6 @@ mod tests {
             row(30_000.0, 408.0),
         ];
         let forebay = ForebayTable::new(&rows, "SpillSensitive").expect("valid VHA curve");
-        // Linear tailrace: h_tail(q_out) = 5.0 + 0.001 * q_out, so dh_tail/dq_out is
-        // the constant 0.001 — a hand-computable secant slope.
         let tailrace = TailraceModel::Polynomial {
             coefficients: vec![5.0, 0.001],
         };
@@ -354,8 +289,6 @@ mod tests {
         let pf = spill_sensitive_pf();
         let bounds = small_bounds();
 
-        // Single plane → it is the active bound everywhere, so the representative
-        // point is the grid point with the largest generation at s = 0.
         let mut planes = vec![RawPlane {
             gamma_0: 0.0,
             gamma_v: 0.001,
@@ -366,7 +299,6 @@ mod tests {
         let (v_rep, q_rep) = representative_operating_point(&planes[0], &planes, &pf, &bounds)
             .expect("active plane");
 
-        // long-term mean inflow = 0 → S_max = 2 * 3000 = 6000.
         let s_max = resolve_s_max(0.0, pf.max_turbined_m3s);
         assert_eq!(s_max, 6_000.0);
 
@@ -416,9 +348,7 @@ mod tests {
             gamma_s: 0.0,
         }];
 
-        // Pick the representative point and confirm generation at lateral_flow = 0 (the anchor,
-        // reference lateral flow = 0) exceeds generation at lateral_flow = S_max: the axis is own-spill on the
-        // tailrace (q + lateral_flow), so more lateral lowers generation.
+        // Own-spill axis: generation at lateral_flow = 0 exceeds generation at S_max.
         let (v_rep, q_rep) = representative_operating_point(&planes[0], &planes, &pf, &bounds)
             .expect("active plane");
         let s_max = resolve_s_max(0.0, pf.max_turbined_m3s);
@@ -517,18 +447,12 @@ mod tests {
         }
     }
 
-    /// By-plane anchor regression: on a multi-plane concave surface the high-`γ_q`
-    /// (high-head, low-flow) plane must receive a GENTLER (smaller-magnitude) `γ_S`
-    /// than the low-`γ_q` (high-flow) plane.
-    ///
-    /// `|γ_S| ≈ ρ·q_rep·|dh_tail/dq_out|` scales with the anchor's turbined flow.
-    /// The secant is anchored at each plane's binding (argmin) region: the high-`γ_q`
-    /// plane governs the low-flow region, so it anchors at a small `q_rep` and gets
-    /// the gentle slope. The wrong-but-compiling argmax anchor (the historical bug)
-    /// inverts this — it anchors the high-`γ_q` plane at the high-flow corner and
-    /// over-steepens its `γ_S`. This test fails under that inversion, so it guards the
-    /// anchor choice directly (the single-plane secant tests cannot: one plane is the
-    /// argmin and the argmax everywhere).
+    /// By-plane anchor regression: the high-`γ_q` (low-flow) plane must receive a
+    /// GENTLER `γ_S` than the low-`γ_q` (high-flow) plane, because `|γ_S| ≈
+    /// ρ·q_rep·|dh_tail/dq_out|` scales with the anchor's flow and the argmin anchor
+    /// puts the high-`γ_q` plane at a small `q_rep`. The argmax anchor inverts this
+    /// (over-steepens `γ_S`), so this test guards the anchor choice directly — the
+    /// single-plane tests cannot, since one plane is argmin and argmax everywhere.
     #[test]
     fn high_gamma_q_plane_receives_gentler_gamma_s_than_low_gamma_q() {
         let pf = spill_sensitive_pf();

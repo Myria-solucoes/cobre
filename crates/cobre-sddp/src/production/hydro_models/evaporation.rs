@@ -21,13 +21,9 @@ use crate::SddpError;
 
 /// Resolve per-hydro linearized evaporation models from reservoir geometry.
 ///
-/// Scans `system.hydros()` for plants with `evaporation_coefficients_mm` set.
-/// When none are found, returns `EvaporationModel::None` for every hydro
-/// without touching the filesystem. When any hydros have evaporation
-/// coefficients, loads `system/hydro_geometry.parquet` and computes a
-/// first-order Taylor linearization around the operating midpoint.
-///
-/// The linearized evaporation model for stage `t` is:
+/// Plants without `evaporation_coefficients_mm` get `EvaporationModel::None`; if
+/// no plant has them, the filesystem is never touched. Otherwise the model is a
+/// first-order Taylor linearization around the reference volume:
 ///
 /// ```text
 /// evaporation_outflow = intercept_m3s + volume_slope_m3s_per_hm3 * v
@@ -55,10 +51,8 @@ use crate::SddpError;
 /// | Computed slope or intercept is NaN or infinite                   | [`SddpError::Validation`] |
 /// | Stage has no `season_id` (cannot map to a month)                 | [`SddpError::Validation`] |
 /// | I/O failure loading geometry Parquet                             | [`SddpError::Io`]         |
-// Rationale: the return tuple carries three independently typed outputs of the
-// evaporation resolution step — the model set, the per-hydro source provenance,
-// and the per-hydro reference-source provenance; a type alias would obscure the
-// concrete types that callers destructure immediately at every call site.
+// Rationale: a type alias for this three-output tuple would hide the concrete
+// types callers destructure at every call site.
 #[allow(clippy::type_complexity)]
 pub fn resolve_evaporation_models(
     system: &System,
@@ -81,11 +75,8 @@ pub fn resolve_evaporation_models(
 /// # Errors
 ///
 /// Same conditions as [`resolve_evaporation_models`].
-// Rationale: the return tuple names the three independently typed outputs of the
-// evaporation resolution step — the model set, the per-hydro source provenance, and
-// the per-hydro reference-source provenance; a type alias would hide the concrete types
-// that callers destructure immediately, making the three-way split less readable at
-// the call sites.
+// Rationale: a type alias for this three-output tuple would hide the concrete
+// types callers destructure at every call site.
 #[allow(clippy::type_complexity)]
 pub fn resolve_evaporation_models_from_artifacts(
     system: &System,
@@ -133,8 +124,7 @@ pub fn resolve_evaporation_models_from_artifacts(
     for row in geometry_rows {
         geometry_map.entry(row.hydro_id).or_default().push(row);
     }
-    // Sort each hydro's rows by volume_hm3 ascending (should already be sorted,
-    // but guarantee it here since we rely on sorted order for interpolation).
+    // Interpolation below assumes ascending volume order.
     for rows in geometry_map.values_mut() {
         rows.sort_by(|a, b| a.volume_hm3.total_cmp(&b.volume_hm3));
     }
@@ -145,22 +135,15 @@ pub fn resolve_evaporation_models_from_artifacts(
     resolve_evaporation_core(system.hydros(), &geometry_map, &study_stages)
 }
 
-/// Core evaporation linearization logic, operating on pre-loaded data.
-///
-/// Separated from [`resolve_evaporation_models`] so that unit tests can exercise
-/// the resolution logic without loading files from disk. Takes pre-loaded, grouped
-/// geometry rows and the ordered set of study stages.
+/// Core evaporation linearization over pre-loaded data, split from
+/// [`resolve_evaporation_models`] so unit tests can run without disk I/O.
 ///
 /// # Errors
 ///
 /// Same error conditions as [`resolve_evaporation_models`].
-// Rationale: the function produces three independently typed outputs (same
-// three-tuple as [`resolve_evaporation_models`]); a type alias would obscure the
-// concrete types that callers destructure immediately.  The length is necessary
-// because the per-stage linearization loop must handle two interleaved
-// reference-volume paths (user-supplied vs. computed midpoint) together with
-// geometry interpolation, unit-conversion, and finite-value validation; splitting
-// would require threading several computed intermediates across helper boundaries.
+// Rationale: a type alias would hide the three concrete output types; splitting
+// the per-stage loop would thread several computed intermediates across helper
+// boundaries.
 #[allow(clippy::type_complexity, clippy::too_many_lines)]
 fn resolve_evaporation_core(
     hydros: &[cobre_core::entities::hydro::Hydro],
@@ -210,18 +193,13 @@ fn resolve_evaporation_core(
             )));
         }
 
-        // When the hydro supplies per-season reference volumes, use them per
-        // stage (compute A and dA/dv inside the loop). Otherwise fall back to
-        // the midpoint once outside the loop.
         let ref_source = if hydro.evaporation_reference_volumes_hm3.is_some() {
             EvaporationReferenceSource::UserSupplied
         } else {
             EvaporationReferenceSource::DefaultMidpoint
         };
 
-        // For the midpoint path, pre-compute reference_volume / A(reference_volume) / dA/dv once.
-        // These are only accessed when evaporation_reference_volumes_hm3 is None,
-        // so the values are always initialised before use.
+        // Midpoint-path values, read only when there are no per-season volumes.
         let midpoint_v = f64::midpoint(hydro.min_storage_hm3, hydro.max_storage_hm3);
         let midpoint_area = if hydro.evaporation_reference_volumes_hm3.is_none() {
             interpolate_area(geo_rows, midpoint_v)
@@ -258,10 +236,8 @@ fn resolve_evaporation_core(
 
             let monthly_evaporation_mm = coefficients_mm[month_index];
 
-            // Resolve reference_volume, a_ref, da_dv for this stage.
             let (reference_volume, a_ref, da_dv) =
                 if let Some(ref_vols) = hydro.evaporation_reference_volumes_hm3 {
-                    // Per-season path: look up the reference volume for this month.
                     let v = ref_vols[month_index];
                     (
                         v,
@@ -269,21 +245,18 @@ fn resolve_evaporation_core(
                         area_derivative(geo_rows, v),
                     )
                 } else {
-                    // Midpoint path: use the values pre-computed outside the loop.
                     (midpoint_v, midpoint_area, midpoint_slope)
                 };
 
-            // Total stage duration in hours (sum of all block durations).
             let stage_hours: f64 = stage.blocks.iter().map(|b| b.duration_hours).sum();
 
-            // mm·km²/month → m³/s unit-conversion factor: 1 / (3.6 · stage_hours).
+            // mm·km²/month → m³/s.
             let mm_km2_to_m3s = 1.0 / (3.6 * stage_hours);
 
             let volume_slope_m3s_per_hm3 = mm_km2_to_m3s * monthly_evaporation_mm * da_dv;
             let intercept_m3s = mm_km2_to_m3s * monthly_evaporation_mm * a_ref
                 - volume_slope_m3s_per_hm3 * reference_volume;
 
-            // Validate finiteness (catches degenerate geometry or zero-duration stages).
             if !volume_slope_m3s_per_hm3.is_finite() {
                 return Err(SddpError::Validation(format!(
                     "hydro {} (id={}) stage {}: computed volume_slope_m3s_per_hm3 = \
@@ -325,15 +298,9 @@ fn resolve_evaporation_core(
 // ── Evaporation geometry helpers ──────────────────────────────────────────────
 
 /// Linearly interpolate reservoir surface area at volume `v` from the sorted
-/// geometry table.
-///
-/// When `v` is below the first point or above the last point, returns the
-/// area at the first or last point respectively (clamping, not extrapolation).
-/// When `v` falls exactly on a geometry point, returns that point's area.
-/// Between two points, performs linear interpolation.
-///
-/// Assumes `geometry` is sorted by `volume_hm3` ascending and non-empty.
-/// Returns `0.0` for an empty geometry slice.
+/// geometry table. Out-of-range `v` clamps to the first/last point's area (no
+/// extrapolation). Assumes `geometry` is ascending by `volume_hm3`; returns `0.0`
+/// for an empty slice.
 fn interpolate_area(geometry: &[&cobre_io::extensions::HydroGeometryRow], v: f64) -> f64 {
     if geometry.is_empty() {
         return 0.0;
@@ -341,18 +308,14 @@ fn interpolate_area(geometry: &[&cobre_io::extensions::HydroGeometryRow], v: f64
 
     let n = geometry.len();
 
-    // Clamp below the first point.
     if v <= geometry[0].volume_hm3 {
         return geometry[0].area_km2;
     }
 
-    // Clamp above the last point.
     if v >= geometry[n - 1].volume_hm3 {
         return geometry[n - 1].area_km2;
     }
 
-    // Binary search for the interval [i, i+1] that straddles v.
-    // We know v is strictly between geometry[0] and geometry[n-1].
     let mut lo = 0usize;
     let mut hi = n - 1;
     while hi - lo > 1 {
@@ -369,8 +332,7 @@ fn interpolate_area(geometry: &[&cobre_io::extensions::HydroGeometryRow], v: f64
     let a0 = geometry[lo].area_km2;
     let a1 = geometry[hi].area_km2;
 
-    // Linear interpolation: A(v) = A0 + (A1 - A0) * (v - v0) / (v1 - v0).
-    // Guard against identical volume points (degenerate geometry).
+    // Guard against degenerate (identical-volume) points.
     let dv = v1 - v0;
     if dv == 0.0 {
         return a0;
@@ -379,32 +341,22 @@ fn interpolate_area(geometry: &[&cobre_io::extensions::HydroGeometryRow], v: f64
     a0 + (a1 - a0) * (v - v0) / dv
 }
 
-/// Compute the finite-difference derivative `dA/dv` at volume `v` from the
-/// sorted geometry table.
-///
-/// Uses the slope of the enclosing interval `[i, i+1]`. When `v` is at or
-/// below the first point, uses the slope between the first and second points.
-/// When `v` is at or above the last point, uses the slope between the last two
-/// points. For a single-point geometry, returns `0.0` (no gradient information).
-///
-/// Assumes `geometry` is sorted by `volume_hm3` ascending.
+/// Finite-difference derivative `dA/dv` at volume `v` from the sorted geometry
+/// table, using the enclosing interval's slope (the edge interval when `v` is
+/// out of range). Returns `0.0` for a single-point geometry. Assumes `geometry`
+/// is ascending by `volume_hm3`.
 fn area_derivative(geometry: &[&cobre_io::extensions::HydroGeometryRow], v: f64) -> f64 {
     let n = geometry.len();
 
     if n < 2 {
-        // Single-point or empty geometry: no gradient information.
         return 0.0;
     }
 
-    // Determine the interval to use for the finite difference.
     let (lo, hi) = if v <= geometry[0].volume_hm3 {
-        // At or below the first point: use the first interval.
         (0, 1)
     } else if v >= geometry[n - 1].volume_hm3 {
-        // At or above the last point: use the last interval.
         (n - 2, n - 1)
     } else {
-        // Binary search for the enclosing interval.
         let mut l = 0usize;
         let mut r = n - 1;
         while r - l > 1 {
@@ -421,7 +373,7 @@ fn area_derivative(geometry: &[&cobre_io::extensions::HydroGeometryRow], v: f64)
     let dv = geometry[hi].volume_hm3 - geometry[lo].volume_hm3;
     let da = geometry[hi].area_km2 - geometry[lo].area_km2;
 
-    // Guard against identical volume points (degenerate geometry).
+    // Guard against degenerate (identical-volume) points.
     if dv == 0.0 {
         return 0.0;
     }

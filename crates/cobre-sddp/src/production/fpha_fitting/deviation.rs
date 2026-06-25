@@ -1,15 +1,10 @@
 //! FPHA fit-quality deviation diagnostic.
 //!
-//! After the hull → `α` → secant → reduction pipeline produces the final plane
-//! set, [`compute_fit_deviation`] measures how far the emitted concave
+//! [`compute_fit_deviation`] measures how far the emitted concave
 //! over-approximation sits from the exact production function on the spill = 0
-//! grid. This is the fit-quality signal that replaces the retired `kappa` shrink:
-//! `α` balances the bias but a badly non-concave surface still leaves a large
-//! residual, and this metric is the only thing that surfaces it to the operator.
-//!
-//! All grid iteration reaches the single grid-formula owner via
-//! `super::grid::build_grid`, so the diagnostic grid never drifts from the cloud
-//! and α-regression grids.
+//! grid — the fit-quality signal an operator sees when a badly non-concave surface
+//! leaves a large residual that `α` alone cannot balance. Grid iteration reaches
+//! the single owner via `super::grid::build_grid`.
 
 use super::geometry::FittingBounds;
 use super::grid::build_grid;
@@ -20,20 +15,12 @@ use super::production::ProductionFunction;
 ///
 /// # Rationale (Voice 2)
 ///
-/// A heuristic alarm, not a hard error: `0.05` (5 %) echoes the retired
-/// `low_kappa_warning` threshold (`kappa < 0.95`). It is deliberately NOT a
-/// re-derivation of `kappa` — `kappa` shrank the intercept while this measures
-/// the mean absolute FPHA-vs-exact gap relative to peak generation. Because the
-/// `α` correction already balances the envelope, this fires only when the
-/// production surface is genuinely non-concave enough that no single scalar
-/// correction can track it. Raising it hides real misfits; lowering it floods
-/// well-fit reservoirs with noise.
+/// A heuristic alarm, not a hard error. Raising it hides real misfits; lowering it
+/// floods well-fit reservoirs with noise.
 const WARN_RELATIVE_THRESHOLD: f64 = 0.05;
 
 /// Aggregate FPHA-vs-exact deviation over the spill = 0 fit grid.
 ///
-/// Produced by [`compute_fit_deviation`] on the FINAL emitted plane set and
-/// carried up the fitting result so the resolver can warn on poorly-fit plants.
 /// All magnitudes are in MW; [`Self::relative`] is the dimensionless figure the
 /// warning threshold tests.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -42,43 +29,32 @@ pub(crate) struct FphaFitDeviation {
     pub mean_abs_mw: f64,
     /// Maximum of `|fitted − exact|` over the grid \[MW\].
     pub max_abs_mw: f64,
-    /// Mean of the signed residual `fitted − exact` over the grid \[MW\].
-    ///
-    /// The sign reports the net bias of the emitted cap: positive = the LP cap
-    /// sits, on average, above the exact surface (optimistic); negative =
-    /// pessimistic. Near zero after a good `α` balance.
+    /// Mean signed residual `fitted − exact` \[MW\]: positive = optimistic cap,
+    /// negative = pessimistic.
     pub mean_signed_mw: f64,
     /// [`Self::mean_abs_mw`] relative to the grid's peak exact generation
-    /// (dimensionless, `≥ 0`).
-    ///
-    /// `0.0` when the plant produces nothing on the grid (peak ≤ 0), so a
-    /// zero-production hydro never trips [`Self::exceeds_warn_threshold`].
+    /// (dimensionless, `≥ 0`). `0.0` when peak ≤ 0, so a zero-production hydro
+    /// never trips [`Self::exceeds_warn_threshold`].
     pub relative: f64,
 }
 
-/// One `(V, Q)` grid point's raw FPHA-vs-exact residual at spillage = 0.
-///
-/// The per-sampled-point detail the [`FphaFitDeviation`] aggregate is reduced
-/// from: emitted (opt-in) so a modeler can plot exactly where on the grid a fit
-/// diverges. Each field carries the SAME min-envelope `fpha_fitted` and exact
-/// `fph_exact` the aggregate uses at this point; `deviation` is the signed
-/// residual `fpha_fitted − fph_exact` and `relative_to_peak` is `|deviation|`
-/// against the grid's peak exact generation (the same peak the aggregate's
-/// `relative` divides by, `0.0` when peak ≤ 0).
+/// One `(V, Q)` grid point's FPHA-vs-exact residual at spillage = 0 — the
+/// per-point detail the [`FphaFitDeviation`] aggregate is reduced from, computed
+/// identically: same min-envelope `fpha_fitted`, same exact `fph_exact`, and a
+/// `relative_to_peak` against the same grid peak (`0.0` when peak ≤ 0).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct FphaDeviationPoint {
     /// Volume grid coordinate (hm³).
     pub v: f64,
     /// Turbined-flow grid coordinate (m³/s).
     pub q: f64,
-    /// Exact production-function value at `(v, q, 0.0)` (MW).
+    /// Exact production at `(v, q, 0.0)` (MW).
     pub fph_exact: f64,
     /// Fitted min-envelope value at `(v, q, 0.0)` (MW).
     pub fpha_fitted: f64,
     /// Signed residual `fpha_fitted − fph_exact` (MW).
     pub deviation: f64,
-    /// `|deviation|` relative to the grid's peak exact generation (dimensionless,
-    /// `≥ 0`). `0.0` when peak ≤ 0, matching [`FphaFitDeviation::relative`].
+    /// `|deviation|` relative to the grid peak (dimensionless, `≥ 0`).
     pub relative_to_peak: f64,
 }
 
@@ -105,28 +81,17 @@ impl FphaFitDeviation {
 ///
 /// # Contract — compare the MIN envelope, the one the LP consumes (Voice 1)
 ///
-/// The fitted value at `(V, Q)` is the pointwise **min** over `planes`, NOT the
-/// max: the LP applies the planes as `g ≤ plane_k` for every plane, so the
-/// binding cap is the minimum. Measuring the max envelope is the
-/// wrong-but-compiling alternative — it reports the deviation of a surface the LP
-/// never sees (≈1.5–1.8× the true cap for a concave φ), turning a faithful fit
-/// into a spurious alarm. This mirrors `super::alpha::compute_alpha_fpha`, which
-/// regresses the same min envelope.
+/// The fitted value is the pointwise **min** over `planes`, not the max (the LP
+/// binds on the minimum). Measuring the max envelope is the wrong-but-compiling
+/// alternative — it reports the deviation of a surface the LP never sees,
+/// spuriously alarming a faithful fit. Mirrors `super::alpha::compute_alpha_fpha`.
 ///
 /// # Contract — spillage = 0, lateral = 0 only (Voice 1)
 ///
-/// Both the fitted min envelope (`plane.evaluate(v, q, 0.0)`) and the exact
-/// `FPH` (`pf.evaluate_capped(v, q, 0.0)`) are evaluated at spillage = 0; the
-/// `s_points` axis is intentionally not iterated, exactly as the cloud build and
-/// the α regression ignore it. At `s = 0` the secant term `γ_S·0` vanishes, so
-/// the emitted plane value equals `α·FPHA_0` — the diagnostic measures the fit
-/// the operating region actually uses.
-///
-/// # Parameters
-///
-/// - `planes` — the FINAL emitted plane set (α-scaled, γ_S-fitted, reduced).
-/// - `pf` — production function supplying `FPH` and the grid axes.
-/// - `bounds` — resolved fitting bounds supplying the volume range and grid counts.
+/// Both envelope and exact `FPH` are evaluated at `s = 0`; the `s_points` axis is
+/// not iterated, as the cloud build and α regression also ignore it. At `s = 0`
+/// the secant term vanishes, so the diagnostic measures the fit the operating
+/// region actually uses.
 pub(crate) fn compute_fit_deviation(
     planes: &[RawPlane],
     pf: &ProductionFunction,
@@ -161,10 +126,8 @@ pub(crate) fn compute_fit_deviation(
         }
     }
 
-    // `count` is at least 1: `build_grid` always emits ≥ 1 point per axis, and
-    // the empty-plane short-circuit above already returned. Guarding the divisor
-    // anyway keeps the metric finite for a hypothetical empty grid rather than
-    // emitting NaN into a warning.
+    // `count.max(1)` guards the divisor against a hypothetical empty grid (NaN
+    // into a warning), though build_grid always emits ≥ 1 point per axis.
     #[allow(clippy::cast_precision_loss)]
     let n = count.max(1) as f64;
     let mean_abs_mw = sum_abs / n;
@@ -182,20 +145,9 @@ pub(crate) fn compute_fit_deviation(
     }
 }
 
-/// Collect the per-sampled-point FPHA-vs-exact residuals over the spill = 0 fit
-/// grid — the raw points the [`compute_fit_deviation`] aggregate is reduced from.
-///
-/// Returns one [`FphaDeviationPoint`] per `build_grid` `(V, Q)` point, in the
-/// SAME canonical `V`-outer/`Q`-inner walk order, computed identically to the
-/// aggregate: `fpha_fitted` is the pointwise min envelope `min_k plane_k(v, q,
-/// 0.0)` (the cap the LP consumes), `fph_exact` is `pf.evaluate_capped(v, q,
-/// 0.0)`, and `relative_to_peak` divides `|deviation|` by the grid's peak exact
-/// generation (`0.0` when peak ≤ 0). Reaches the grid through `build_grid` only —
-/// inlining a second axis formula would let this point grid drift from the
-/// aggregate grid; the spillage axis is intentionally not iterated (`s = 0`).
-///
-/// An empty plane set yields no points (nothing to measure), matching the
-/// aggregate's empty-plane short-circuit.
+/// Collect the per-point FPHA-vs-exact residuals — the points
+/// [`compute_fit_deviation`] aggregates — one [`FphaDeviationPoint`] per
+/// `build_grid` `(V, Q)` node, computed identically to the aggregate.
 pub(crate) fn collect_fit_deviation_points(
     planes: &[RawPlane],
     pf: &ProductionFunction,
@@ -207,10 +159,8 @@ pub(crate) fn collect_fit_deviation_points(
 
     let grid = build_grid(pf, bounds);
 
-    // First walk: compute each point's residual AND the grid peak, in canonical
-    // order. `relative_to_peak` needs the whole-grid peak, so the division is
-    // deferred to the second walk below — keeping the peak identical to the
-    // aggregate's, which also maxes the exact value across the full grid.
+    // `relative_to_peak` needs the whole-grid peak, so the division is deferred to
+    // the second walk — keeping the peak identical to the aggregate's.
     let mut points: Vec<FphaDeviationPoint> =
         Vec::with_capacity(grid.v_points.len() * grid.q_points.len());
     let mut peak_fph = 0.0_f64;
@@ -235,10 +185,7 @@ pub(crate) fn collect_fit_deviation_points(
         }
     }
 
-    // Second walk: divide each point's `|deviation|` by the grid peak, pinning
-    // `relative_to_peak` to 0 when peak ≤ 0 — the same guard
-    // `FphaFitDeviation::relative` applies, so a zero-production hydro reports a
-    // zero relative at every point rather than NaN/∞.
+    // peak ≤ 0 ⇒ relative pinned to 0 (same guard as `FphaFitDeviation::relative`).
     if peak_fph > 0.0 {
         for point in &mut points {
             point.relative_to_peak = point.deviation.abs() / peak_fph;
@@ -314,9 +261,8 @@ mod tests {
         )
     }
 
-    /// A production function whose net head is 0 everywhere (forebay below a
-    /// constant tailrace), so `evaluate_capped` clamps to 0 at every grid point —
-    /// exercising the `peak ≤ 0` relative-deviation guard.
+    /// Net head 0 everywhere (forebay below a constant tailrace), exercising the
+    /// `peak ≤ 0` relative-deviation guard.
     fn zero_production_function() -> ProductionFunction {
         let rows = vec![row(0.0, 100.0), row(30_000.0, 100.0)];
         let forebay = ForebayTable::new(&rows, "Zero").expect("valid VHA curve");
@@ -401,8 +347,6 @@ mod tests {
             gamma_s: 0.0,
         }];
 
-        // Hand-rebuild the exact grid the single-owner `build_grid` produces for a
-        // 2-point V axis over [0, 30_000] and a 2-point Q axis over [0, max_turbined].
         let v_pts = [0.0_f64, 30_000.0];
         let q_pts = [0.0_f64, pf.max_turbined_m3s];
 

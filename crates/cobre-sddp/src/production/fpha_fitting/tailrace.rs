@@ -26,25 +26,22 @@ use super::error::FphaFittingError;
 
 /// Absolute tolerance for the inter-segment contiguity check (m³/s).
 ///
-/// Contract (Voice 1): consecutive segments meet when `|outflow_min − outflow_max| <=
-/// CONTIG_EPS`, never when `outflow_min == outflow_max`. The source bounds are calibrated
-/// floats, so two segments that are contiguous by construction still differ in
-/// their last ULPs; an exact-equality test would reject essentially every real
-/// family. The owning check is [`TailraceSegments::from_rows`].
+/// Contract (Voice 1): consecutive segments meet when `|outflow_min −
+/// outflow_max| <= CONTIG_EPS`, never when `outflow_min == outflow_max`. The
+/// source bounds are calibrated floats differing in their last ULPs, so an
+/// exact-equality test would reject essentially every real family. Owning check:
+/// [`TailraceSegments::from_rows`].
 const CONTIG_EPS: f64 = 1e-6;
 
 /// Absolute tolerance for the inter-segment C0-continuity check (m).
 ///
 /// Contract (Voice 1): adjacent quartics are continuous when their boundary
-/// elevations agree to within `C0_EPS`, never bit-for-bit (`==`). The two
-/// quartics are fit independently and meet only to calibration precision, so
-/// asserting bit-equality would reject every real family. The owning check is
-/// [`TailraceSegments::from_rows`]. The bound is `1e-3` m (1 mm): per-segment
-/// polynomial coefficients carry finite precision, so endpoints meet only to
-/// ~1e-4 m in practice, while a genuine data error (a wrong segment) breaks by
-/// metres — `1e-3` accepts the former and still rejects the latter. A tighter
-/// `1e-6` m rejects faithfully-converted real curves; physical tailrace levels
-/// span ~100 m, so a sub-mm break is hydraulically meaningless.
+/// elevations agree within `C0_EPS`, never bit-for-bit (`==`) — the two are fit
+/// independently and meet only to calibration precision (~1e-4 m), so `==` would
+/// reject every real family. The `1e-3` m (1 mm) bound accepts that residual
+/// while a genuine data error breaks by metres; a tighter `1e-6` m rejects
+/// faithfully-converted real curves, and a sub-mm break in a ~100 m level range
+/// is hydraulically meaningless. Owning check: [`TailraceSegments::from_rows`].
 const C0_EPS: f64 = 1e-3;
 
 /// One degree-4 piece of a family's tailrace curve.
@@ -62,8 +59,7 @@ pub(crate) struct QuarticSegment {
 }
 
 impl QuarticSegment {
-    /// Evaluate the quartic at `q` via Horner's method (highest degree down):
-    /// `(((a4·q + a3)·q + a2)·q + a1)·q + a0`.
+    /// Evaluate the quartic at `q` via Horner's method.
     #[inline]
     pub(crate) fn eval(&self, q: f64) -> f64 {
         let [a0, a1, a2, a3, a4] = self.coeffs;
@@ -89,20 +85,9 @@ impl TailraceSegments {
     ///
     /// `rows` is the slice for a single `(hydro_id, family_id)` group, already
     /// sorted by ascending `segment_id` (as returned by the tailrace-curve
-    /// parser). The `downstream_reference_level_m` / `family_id` fields are not read here — the
-    /// caller groups by them before calling this. `hydro_name` labels errors.
-    ///
-    /// Validation runs in order:
-    ///
-    /// 1. at least one segment (`rows` non-empty);
-    /// 2. **contiguity** — for `k >= 1`, `segments[k].outflow_min` meets
-    ///    `segments[k-1].outflow_max` within [`CONTIG_EPS`] (the first segment's
-    ///    `outflow_min` is taken as given — not forced to 0);
-    /// 3. **C0 continuity** — at each interior boundary `b = segments[k-1].outflow_max`,
-    ///    the two adjacent quartics agree within [`C0_EPS`].
-    ///
-    /// C1 continuity is preferred but NOT checked — a derivative break does not
-    /// reject the family.
+    /// parser). The first segment's `outflow_min` is taken as given — not forced
+    /// to 0. C1 continuity is preferred but NOT checked — a derivative break does
+    /// not reject the family.
     ///
     /// # Errors
     ///
@@ -137,15 +122,11 @@ impl TailraceSegments {
             })
             .collect();
 
-        // Single forward pass: contiguity then C0 continuity at each interior
-        // boundary. The first segment's outflow_min is accepted as supplied.
         for k in 1..segments.len() {
             let prev = &segments[k - 1];
             let curr = &segments[k];
 
-            // Contiguity: prev.outflow_max and curr.outflow_min must coincide. A gap
-            // (curr.outflow_min > prev.outflow_max) and an overlap (curr.outflow_min <
-            // prev.outflow_max) both fail the same `<= CONTIG_EPS` test.
+            // Both a gap and an overlap fail the same `<= CONTIG_EPS` test.
             if (curr.outflow_min - prev.outflow_max).abs() > CONTIG_EPS {
                 return Err(FphaFittingError::TailraceGap {
                     hydro_name: hydro_name.to_owned(),
@@ -154,8 +135,6 @@ impl TailraceSegments {
                 });
             }
 
-            // C0 continuity: both quartics evaluated at the shared boundary must
-            // agree within tolerance.
             let boundary = prev.outflow_max;
             let h_left = prev.eval(boundary);
             let h_right = curr.eval(boundary);
@@ -186,10 +165,8 @@ impl TailraceSegments {
         let q_hi = self.segments[n - 1].outflow_max;
         let q = outflow_m3s.clamp(q_lo, q_hi);
 
-        // `partition_point` returns the first index whose `outflow_max` exceeds `q`.
-        // Saturate at `n - 1` so a `q` at the domain's upper edge resolves to
-        // the last segment instead of running past the end (mirrors the clamped
-        // locator shape used by the forebay table).
+        // Saturate at `n - 1` so a `q` at the upper edge resolves to the last
+        // segment instead of running past the end.
         let idx = self.segments.partition_point(|s| s.outflow_max <= q);
         let i = idx.min(n - 1);
         self.segments[i].eval(q)
@@ -199,10 +176,6 @@ impl TailraceSegments {
 // ── Backwater (downstream-level-coupled) family collection ──────────────────────
 
 /// One downstream-level-keyed family of a plant's tailrace curve.
-///
-/// `downstream_reference_level_m` is the downstream reference level (m) that keys this family;
-/// `None` marks a plant's single keyless family. `segments` is the within-family
-/// piecewise quartic evaluated by [`TailraceSegments::evaluate`].
 #[derive(Debug, Clone)]
 pub(crate) struct TailraceFamily {
     /// Downstream reference level keying the family (m); `None` for a
@@ -232,14 +205,10 @@ impl TailraceFamilies {
     /// Build a [`TailraceFamilies`] from one plant's tailrace rows.
     ///
     /// `rows` is the slice for a single `hydro_id`, already globally sorted by
-    /// `(hydro_id, family_id, segment_id)` (as the tailrace-curve parser
-    /// returns it). Rows are grouped into families by **consecutive equal**
-    /// `family_id` (valid because the slice is pre-sorted), each group built
-    /// into a [`TailraceSegments`] via [`TailraceSegments::from_rows`].
-    ///
-    /// Families are then ordered ascending by `downstream_reference_level_m`, with the integer
-    /// `family_id` as the **primary** key and `f64::total_cmp(downstream_reference_level_m)` as a
-    /// **secondary** tie-break.
+    /// `(hydro_id, family_id, segment_id)` (as the tailrace-curve parser returns
+    /// it). Rows are grouped into families by consecutive equal `family_id`, then
+    /// ordered ascending by `downstream_reference_level_m` (`total_cmp`) with
+    /// `family_id` as the secondary tie-break.
     ///
     /// # Family-key contract (Voice 1)
     ///
@@ -272,10 +241,8 @@ impl TailraceFamilies {
             });
         }
 
-        // Group by consecutive equal `family_id`. The slice is pre-sorted by
-        // `(hydro_id, family_id, segment_id)`, so equal `family_id` rows are
-        // contiguous and each group is already in `segment_id` order — exactly
-        // the shape `TailraceSegments::from_rows` expects.
+        // Pre-sorted by `(hydro_id, family_id, segment_id)`, so equal `family_id`
+        // rows are contiguous and already in `segment_id` order.
         let mut families: Vec<(i32, TailraceFamily)> = Vec::new();
         let mut group_start = 0_usize;
         for k in 1..=rows.len() {
@@ -308,15 +275,12 @@ impl TailraceFamilies {
             });
         }
 
-        // Order ascending by `downstream_reference_level_m` as the PRIMARY key, with `family_id` as
-        // the secondary tie-break. The level must be primary because `evaluate`
-        // clamps `L` to `[family_level(0), family_level(last)]` and brackets by level — keying on
-        // `family_id` first would leave the families out of level order whenever
-        // `family_id` order does not match level order, making the clamp bounds
-        // `min > max` (a panic) and the bracket indices wrong. The level key MUST
-        // use `total_cmp` (not `partial_cmp`) so the order is total even on equal
-        // levels, and `family_id` breaks a shared-level tie so two families at the
-        // same level keep a deterministic, declaration-order-invariant order.
+        // Level must be the PRIMARY key: `evaluate` clamps `L` to
+        // `[family_level(0), family_level(last)]` and brackets by level, so a
+        // `family_id`-primary sort would leave families out of level order, making
+        // the clamp bounds `min > max` (a panic) and the bracket wrong. `total_cmp`
+        // keeps the order total on equal levels; `family_id` breaks a shared-level
+        // tie deterministically (declaration-order invariance).
         families.sort_by(|(fa, a), (fb, b)| {
             let la = a.downstream_reference_level_m.unwrap_or(f64::NEG_INFINITY);
             let lb = b.downstream_reference_level_m.unwrap_or(f64::NEG_INFINITY);
@@ -331,27 +295,19 @@ impl TailraceFamilies {
     /// Effective tailrace elevation `tailrace_level` (m) at `outflow_m3s` (m³/s) for a resolved
     /// downstream level.
     ///
-    /// - **single family** ⇒ evaluate it directly; `downstream_level_m` is
-    ///   ignored (a single-family plant has no backwater coupling);
-    /// - **multiple families + `Some(L)`** ⇒ locate the two families bracketing
-    ///   `L` by `downstream_reference_level_m`, evaluate each at `outflow_m3s`, and linearly interpolate
-    ///   the two heights by `L`;
-    /// - **multiple families + `None`** ⇒ evaluate the lowest-`downstream_reference_level_m`
-    ///   family (a documented deterministic fallback for a plant whose
-    ///   downstream level could not be resolved).
+    /// - **single family** ⇒ evaluate it directly; `downstream_level_m` is ignored;
+    /// - **multiple families + `Some(L)`** ⇒ bracket `L` and linearly interpolate;
+    /// - **multiple families + `None`** ⇒ the lowest-level family (a deterministic
+    ///   fallback for an unresolved downstream level).
     ///
     /// # Clamp-not-extrapolate contract (Voice 1)
     ///
-    /// `L` is clamped to `[downstream_reference_level_m[0], downstream_reference_level_m[last]]` before bracketing,
-    /// so a level below the lowest family resolves to that family and a level
-    /// above the highest resolves to the highest — the result is **never**
-    /// extrapolated past the calibrated level range. The obvious-but-wrong
-    /// alternative — extending the linear blend beyond the bracket — would
-    /// produce a non-physical tailrace elevation from a quartic-derived height
-    /// outside its fitted band. Mirrors the clamp in
+    /// `L` is clamped to the calibrated level range before bracketing, so the
+    /// result is NEVER extrapolated past it. Extending the linear blend beyond the
+    /// bracket (the obvious-but-wrong alternative) would produce a non-physical
+    /// tailrace elevation from a quartic-derived height outside its fitted band.
+    /// Mirrors the clamp in
     /// [`ForebayTable::height`](super::geometry::ForebayTable::height).
-    ///
-    /// The method is infallible, pure, and allocation-free.
     pub(crate) fn evaluate(&self, outflow_m3s: f64, downstream_level_m: Option<f64>) -> f64 {
         // INVARIANT: `families` is non-empty (enforced by `from_rows`).
         let n = self.families.len();
@@ -359,16 +315,15 @@ impl TailraceFamilies {
             return self.families[0].segments.evaluate(outflow_m3s);
         }
 
-        // Multi-family: a resolved level brackets and interpolates; an
-        // unresolved level falls back to the lowest-keyed family (index 0,
-        // which carries the minimum `downstream_reference_level_m` after the ascending sort).
+        // Unresolved level falls back to the lowest-keyed family (index 0 after the
+        // ascending sort).
         let Some(level) = downstream_level_m else {
             return self.families[0].segments.evaluate(outflow_m3s);
         };
 
         // Every multi-family family carries a level (enforced by `from_rows`);
-        // `NEG_INFINITY` is an unreachable sentinel kept only to make the read
-        // total without an `unwrap`.
+        // `NEG_INFINITY` is an unreachable sentinel making the read total without
+        // an `unwrap`.
         let family_level = |i: usize| {
             self.families[i]
                 .downstream_reference_level_m
@@ -378,10 +333,8 @@ impl TailraceFamilies {
         let l_hi = family_level(n - 1);
         let l = level.clamp(l_lo, l_hi);
 
-        // `partition_point` returns the first family whose level exceeds `l`.
-        // Saturate the upper bracket at `n - 1` so a level at the top edge
-        // resolves the last pair instead of running past the end (mirrors the
-        // clamped locator shape used by the forebay table).
+        // Saturate the upper bracket at `n - 1` so a level at the top edge resolves
+        // the last pair instead of running past the end.
         let upper = self
             .families
             .partition_point(|f| level_le(f.downstream_reference_level_m, l));
@@ -393,9 +346,8 @@ impl TailraceFamilies {
         let level_lo = family_level(lo);
         let level_hi = family_level(hi);
 
-        // Linear interpolation in the level axis. A zero-width bracket (two
-        // same-level families) collapses to the lower height, avoiding a
-        // divide-by-zero.
+        // A zero-width bracket (two same-level families) collapses to the lower
+        // height, avoiding a divide-by-zero.
         let span = level_hi - level_lo;
         if span <= 0.0 {
             h_lo
@@ -432,9 +384,8 @@ fn level_le(downstream_reference_level_m: Option<f64>, l: f64) -> bool {
 pub(crate) fn build_tailrace_families_map(
     rows: &[TailraceCurveRow],
 ) -> Result<HashMap<EntityId, TailraceFamilies>, FphaFittingError> {
-    // Partition into per-plant contiguous slices. The table is pre-sorted by
-    // `(hydro_id, ...)`, so equal `hydro_id` rows are contiguous; a single pass
-    // isolates each plant's slice without cloning rows.
+    // Pre-sorted by `(hydro_id, ...)`, so equal `hydro_id` rows are contiguous and
+    // a single pass isolates each plant's slice without cloning rows.
     let mut map: HashMap<EntityId, TailraceFamilies> = HashMap::new();
     let mut group_start = 0_usize;
     for k in 1..=rows.len() {

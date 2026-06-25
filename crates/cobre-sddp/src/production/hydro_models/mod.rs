@@ -8,28 +8,14 @@
 //! algorithm-specific (FPHA hyperplane approximation is an SDDP concept). They
 //! must not be placed in `cobre-core`.
 //!
-//! # Submodule layout
-//!
-//! - `types` — the runtime output types (`ResolvedProductionModel`,
-//!   `ProductionModelSet`, `EvaporationModel`, `EvaporationModelSet`,
-//!   `HydroModelProvenance`, `HydroModelSummary`, `PrepareHydroModelsResult`,
-//!   and the source/provenance enums).
-//! - `production` — per-`(hydro, stage)` production-model resolution: constant
-//!   productivity, precomputed FPHA hyperplanes, and computed FPHA fitting via
-//!   `crate::fpha_fitting`.
-//! - `evaporation` — per-hydro linearized evaporation resolution from reservoir
-//!   geometry, plus the area interpolation and derivative helpers.
-//! - `summary` — the `build_hydro_model_summary` display-summary builder.
-//! - `export` — the `build_evaporation_model_rows` export-row builder that maps
-//!   the resolved evaporation models into `cobre_io::EvaporationModelRow`s.
-//!
 //! The orchestration entry points (`prepare_hydro_models`,
 //! `prepare_hydro_models_from_artifacts`) and the private
-//! `load_artifacts_for_hydro_models` reader live here in `mod`.
+//! `load_artifacts_for_hydro_models` reader live here; the `types`, `production`,
+//! `evaporation`, `summary`, and `export` submodules own the rest.
 //!
 //! Every public symbol is re-exported here so both the curated flat surface in
-//! `lib.rs` and the `cobre_sddp::hydro_models::Symbol` module path resolve to
-//! the same item regardless of which submodule owns it.
+//! `lib.rs` and the `cobre_sddp::hydro_models::Symbol` module path resolve to the
+//! same item regardless of which submodule owns it.
 
 use std::path::Path;
 
@@ -51,13 +37,8 @@ pub use production::{resolve_production_models, resolve_production_models_from_a
 pub use summary::build_hydro_model_summary;
 
 /// Wall-clock split of the two hydro-model fitting steps run by
-/// [`prepare_hydro_models_from_artifacts`].
-///
-/// Production fitting (constant-productivity/FPHA resolution) and evaporation
-/// fitting are timed independently because an operator wants each surfaced on
-/// its own. Populated only when a caller passes a `&mut` borrow to
-/// [`prepare_hydro_models_from_artifacts`]; callers that pass `None` pay no
-/// measurement and the resolver logic is identical in both cases.
+/// [`prepare_hydro_models_from_artifacts`]. Populated only when a caller passes a
+/// `&mut` borrow; the resolver logic is identical whether or not it is measured.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HydroFitTimings {
     /// Wall-clock seconds spent in [`resolve_production_models_from_artifacts`].
@@ -75,24 +56,16 @@ pub use types::{
 
 /// Run the full hydro model preprocessing pipeline for a case directory.
 ///
-/// Composes [`resolve_production_models`] and [`resolve_evaporation_models`]
-/// and returns a [`PrepareHydroModelsResult`] bundling all pipeline outputs.
-///
-/// Called once per entry point (CLI, Python) before constructing `StudySetup`.
-/// On MPI setups, this function runs on all ranks independently (each rank has
-/// the system via broadcast and can load the optional files from a shared
-/// filesystem).
-///
-/// `collect_deviation_points` is the run-level opt-in sourced from
-/// `config.exports.fpha_deviation_points`: `true` populates
-/// [`PrepareHydroModelsResult::fpha_deviation_point_rows`]; `false` leaves it
-/// empty and the fit bit-identical.
+/// Runs on all MPI ranks independently (each rank loads the optional files from a
+/// shared filesystem). `collect_deviation_points` is the
+/// `config.exports.fpha_deviation_points` opt-in: `false` leaves
+/// [`PrepareHydroModelsResult::fpha_deviation_point_rows`] empty and the fit
+/// bit-identical.
 ///
 /// # Errors
 ///
 /// Propagates errors from [`resolve_production_models`] and
-/// [`resolve_evaporation_models`]. See their individual documentation for the
-/// full error table.
+/// [`resolve_evaporation_models`].
 pub fn prepare_hydro_models(
     system: &System,
     case_dir: &Path,
@@ -102,21 +75,12 @@ pub fn prepare_hydro_models(
     prepare_hydro_models_from_artifacts(system, &artifacts, collect_deviation_points, None)
 }
 
-/// Variant of [`prepare_hydro_models`] that consumes a pre-parsed
-/// [`cobre_io::CaseArtifacts`] bundle instead of re-reading the case
-/// directory from disk.
+/// Variant of [`prepare_hydro_models`] consuming a pre-parsed
+/// [`cobre_io::CaseArtifacts`] bundle.
 ///
 /// Use this from any pipeline that has already called
-/// [`cobre_io::load_case_with_artifacts`]; it avoids the duplicate parsing
-/// and parallel validation paths.
-///
-/// When `timings` is `Some`, the wall time of each of the two fitting steps is
-/// recorded into the supplied [`HydroFitTimings`]. Passing `None` skips the
-/// measurement; the resolver calls and their results are identical either way.
-///
-/// `collect_deviation_points` is the run-level opt-in sourced from
-/// `config.exports.fpha_deviation_points`, forwarded to
-/// [`resolve_production_models_from_artifacts`].
+/// [`cobre_io::load_case_with_artifacts`]; it avoids re-parsing and re-validating.
+/// `timings`, when `Some`, records each fitting step's wall time.
 ///
 /// # Errors
 ///
@@ -149,10 +113,7 @@ pub fn prepare_hydro_models_from_artifacts(
         timings.evaporation_fit_seconds = evaporation_fit_seconds;
     }
 
-    // Group the VHA geometry by plant (sorted by ascending volume, as
-    // `ForebayTable::new` expects) so the energy-conversion build can derive ρ_eq
-    // from VHA + ρ_esp for any FPHA plant lacking a parquet override. Cloned out
-    // of `artifacts`, which the caller drops once preprocessing returns.
+    // Sorted by ascending volume, as `ForebayTable::new` expects.
     let mut vha_geometry_by_hydro: std::collections::HashMap<
         cobre_core::EntityId,
         Vec<cobre_io::HydroGeometryRow>,
@@ -184,19 +145,15 @@ pub fn prepare_hydro_models_from_artifacts(
     })
 }
 
-/// Build a [`cobre_io::CaseArtifacts`] containing the rows
-/// [`prepare_hydro_models_from_artifacts`] needs, by reading the case
-/// directory directly.
-///
-/// Used to back the legacy [`prepare_hydro_models`] signature; production
-/// pipelines should call [`cobre_io::load_case_with_artifacts`] instead so
-/// the full validation runs once.
+/// Build a [`cobre_io::CaseArtifacts`] by reading the case directory directly,
+/// backing the legacy [`prepare_hydro_models`] signature; production pipelines
+/// should call [`cobre_io::load_case_with_artifacts`] so the full validation runs
+/// once.
 fn load_artifacts_for_hydro_models(case_dir: &Path) -> Result<cobre_io::CaseArtifacts, SddpError> {
     let mut ctx = cobre_io::ValidationContext::new();
     let manifest = cobre_io::validate_structure(case_dir, &mut ctx);
-    // Propagate structural validation errors before attempting any file loads;
-    // a malformed layout must fail here rather than surface as a confusing
-    // parse error (or silent default) downstream.
+    // Fail on a malformed layout here, before any file load, so it does not
+    // surface as a confusing downstream parse error or silent default.
     ctx.into_result().map_err(SddpError::from)?;
 
     let prod_path = if manifest.system_hydro_production_models_json {

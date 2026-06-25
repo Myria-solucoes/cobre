@@ -7,28 +7,22 @@ use thiserror::Error;
 
 /// Per-`(hydro, stage)` scalars used for inflow-energy / stored-energy accounting.
 ///
-/// All three values are scalar reductions of the underlying production model
-/// at a representative operating point (`V_ref`, `Q_ref`). The triple is
-/// `Copy` so it can be sliced cheaply on hot paths.
+/// All three values are scalar reductions of the underlying production model at a
+/// representative operating point (`V_ref`, `Q_ref`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EnergyConversion {
-    /// Equivalent productivity `ρ_eq` \[MW / (m³/s)\]. Aggregates head and
-    /// efficiency into a single scalar at the reference operating point.
+    /// Equivalent productivity `ρ_eq` \[MW / (m³/s)\] at the reference point.
     pub equivalent_productivity_mw_per_m3s: f64,
-    /// Reference reservoir storage `V_ref` \[hm³\] used to evaluate
-    /// `h_eq(V_ref, Q_ref)`. Typically `V_min + fraction · (V_max − V_min)`
-    /// with `fraction` resolved per-`(hydro, season)`.
+    /// Reference reservoir storage `V_ref` \[hm³\] used to evaluate `h_eq`.
     pub reference_volume_hm3: f64,
     /// Reference turbined flow `Q_ref` \[m³/s\] used to evaluate `h_eq`.
-    /// Typically the installed turbine capacity.
     pub reference_outflow_m3s: f64,
 }
 
 /// Indexed grid of `(EnergyConversion, ρ_acum)` per `(hydro, stage)`.
 ///
 /// Indexing convention mirrors [`ProductionModelSet`](crate::hydro_models::ProductionModelSet):
-/// the outer dimension is the hydro plant, the inner dimension is the stage.
-/// All accesses are `O(1)`.
+/// outer dimension is the hydro plant, inner dimension is the stage.
 #[derive(Debug, Clone)]
 pub struct EnergyConversionSet {
     per_hydro_stage: Vec<Vec<EnergyConversion>>,
@@ -191,9 +185,6 @@ pub enum EnergyConversionError {
     },
     /// A downstream reference in the cascade points to an `EntityId` that is
     /// not present in the `hydros` slice.
-    ///
-    /// This indicates a malformed cascade built from a hydro set that does not
-    /// match the one passed to `build_energy_conversion_set`.
     #[error(
         "cascade has dangling downstream reference: hydro {hydro_id:?} points to {downstream_id:?} which is not in the hydros slice"
     )]
@@ -205,10 +196,6 @@ pub enum EnergyConversionError {
     },
     /// An FPHA hydro has no way to derive `ρ_eq`: no VHA geometry, no
     /// `ρ_esp`, and no entry in the override table.
-    ///
-    /// To fix: supply VHA geometry rows and `ρ_esp` for the hydro,
-    /// or add an entry in `system/hydro_energy_productivity.parquet`,
-    /// or change the hydro's `generation_model` away from FPHA.
     #[error(
         "FPHA hydro '{hydro_name}' ({hydro_id:?}) cannot derive ρ_eq for stage {stage}: \
         no VHA geometry + ρ_esp pair is present and no override entry exists. \
