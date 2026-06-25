@@ -164,7 +164,6 @@ pub fn geometry(
     } = *dims;
     let n_ant_state = n_anticipated * k_max;
 
-    // theta = N*(3+L) + A*k_max + A; control region starts at theta + 1.
     let theta = hydro_count * (3 + max_par_order) + n_ant_state + n_anticipated;
     let decision_start = theta + 1;
 
@@ -208,7 +207,6 @@ pub fn geometry(
     let n_evap_hydros = evap_hydro_indices.len();
     let evap_col_start = generation_end;
 
-    // Rows: z-inflow → water balance → load balance → FPHA → evaporation.
     let water_balance_start = z_inflow_row_start + hydro_count;
     let load_balance_start = water_balance_start + hydro_count;
     let load_balance_end = load_balance_start + n_buses * n_blks;
@@ -270,9 +268,8 @@ pub fn geometry(
         generation_below_slack,
         water_balance: water_balance_start..water_balance_start + hydro_count,
         load_balance: load_balance_start..load_balance_end,
-        // This synthetic fixture models no filling hydros, so the
-        // terminal-target and operating-floor blocks are empty — including the
-        // sparse `σ_fill` / `σ^{v-}` system→slot index vectors.
+        // This fixture models no filling hydros, so the terminal-target and
+        // operating-floor blocks are empty.
         filling_target: 0..0,
         filling_target_col: 0..0,
         filled_min_storage_floor: 0..0,

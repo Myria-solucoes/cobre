@@ -8,11 +8,8 @@
 
 /// Study-invariant, non-state LP shape for an SDDP study.
 ///
-/// Single owner of the layout facts that are invariant across both stages and
-/// blocks and are not state-defining: the non-state entity counts, the
-/// optional-column presence flags, and the anticipated-thermal identity list.
-/// Every reader of one of these facts resolves it here; no other long-lived
-/// type carries a copy.
+/// Holds the non-state entity counts, optional-column presence flags, and the
+/// anticipated-thermal identity list.
 ///
 /// The exclusions are deliberate, and each excluded dim lives elsewhere because
 /// it is owned by a different concern — duplicating it here would reintroduce
@@ -51,9 +48,8 @@ pub struct StudyDimensions {
     pub max_deficit_segments: usize,
     /// Whether the study has NCS generation columns.
     ///
-    /// `true` when NCS entities are active. The per-(ncs, block) column base is
-    /// addressed per stage, never from a study-global base, so only presence is
-    /// recorded here.
+    /// The per-(ncs, block) column base is addressed per stage, never from a
+    /// study-global base, so only presence is recorded here.
     pub has_ncs: bool,
     /// Whether inflow non-negativity penalty slack columns are present.
     pub has_inflow_penalty: bool,
@@ -61,11 +57,8 @@ pub struct StudyDimensions {
     pub has_withdrawal: bool,
     /// Whether operational violation slack columns are present.
     pub has_operational_violations: bool,
-    /// Mapping from anticipated-local position to global thermal index.
-    ///
-    /// `anticipated_thermal_indices[i]` is the position within
-    /// `system.thermals[]` of the i-th anticipated plant. Empty when there are
-    /// no anticipated thermals.
+    /// Maps anticipated-local position `i` to the i-th anticipated plant's
+    /// position within `system.thermals[]`.
     pub anticipated_thermal_indices: Vec<usize>,
     /// Number of pumping stations.
     pub n_pumping: usize,

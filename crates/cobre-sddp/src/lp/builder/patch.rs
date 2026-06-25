@@ -2,77 +2,32 @@ use crate::indexer::{BlockGrid, StateLayout};
 
 /// Pre-allocated row-bound and column-bound patch arrays for one SDDP stage LP solve.
 ///
-/// The buffer is reused across all iterations.  It carries two regions:
-///
-/// - **Row-bound region** (`indices` / `lower` / `upper`): sized for
-///   `N + M*B + N` patches, where `N` is the number of hydro plants,
-///   `M` is the number of stochastic load buses, and `B` is the maximum
-///   block count across stages.  The row buffer holds only Categories 3,
-///   4, and 5 — noise, load, and z-inflow patches.
-///
-/// - **Column-bound region** (`col_indices` / `col_lower` / `col_upper`):
-///   sized for `N*(1+L) + A*K` entries, where `L` is the maximum PAR order
-///   and `A*K` is the anticipated-thermal state count.  This region carries
-///   the state-fixing slots for Categories 1 (storage), 2 (lag), and
-///   6 (anticipated-state).  It is populated by `fill_col_state_patches`.
-///
-/// # Memory layout — row-bound region
-///
-/// | Entry range          | Category                          | LP row indices                |
-/// | -------------------- | --------------------------------- | ----------------------------- |
-/// | `[0, N)`             | AR dynamics / noise (Category 3)  | `base_rows[s]`                |
-/// | `[N, N + M*B_act)`   | Load balance patches (Category 4) | per-stage                     |
-/// | `[N + M*B, 2*N + M*B)` | Z-inflow definition (Category 5)| `z_inflow_row_start + h`     |
-///
-/// State fixing (Categories 1, 2, 6) is applied exclusively via column bounds
-/// and lives in the column-bound region.
-///
-/// [`fill_load_patches`](PatchBuffer::fill_load_patches) writes Category 4
-/// and records `active_load_patches` for the current stage's block count.
-/// When `n_load_buses == 0`, Category 4 is empty and `forward_patch_count`
-/// returns `N` unchanged.
-///
-/// Generic-constraint rows are not in this list; their coefficients,
-/// including those resolved from [`ResolvedParameters`](crate::resolved_parameters::ResolvedParameters),
-/// are immutable after stage-template construction.
+/// Reused across all iterations. The row-bound region (`indices`/`lower`/`upper`,
+/// length `N + M*B + N`) holds only the noise (Category 3), load (Category 4), and
+/// z-inflow (Category 5) patches; state fixing (Categories 1/2/6) is applied
+/// exclusively via column bounds and lives in the column-bound region
+/// (`col_indices`/`col_lower`/`col_upper`, length `N*(1+L) + A*K`). `N` is the
+/// hydro count, `M` the stochastic-load-bus count, `B` the max block count, `L` the
+/// max PAR order, and `A*K` the anticipated-thermal state count. For equality
+/// constraints each entry's lower == upper.
 #[derive(Debug, Clone)]
 pub struct PatchBuffer {
     /// Row indices to patch.
-    ///
-    /// Length `N + M*max_blocks + N`.  Entries are `usize` to match
-    /// the `set_row_bounds(&[usize], ...)` interface directly.
     pub indices: Vec<usize>,
 
     /// New lower bounds for each patched row.
-    ///
-    /// Length `N + M*max_blocks + N`.  For equality constraints,
-    /// `lower[i] == upper[i]`.
     pub lower: Vec<f64>,
 
     /// New upper bounds for each patched row.
-    ///
-    /// Length `N + M*max_blocks + N`.  For equality constraints,
-    /// `upper[i] == lower[i]`.
     pub upper: Vec<f64>,
 
     /// Column indices to patch in the column-bound region.
-    ///
-    /// Length `N*(1+L) + A*K` — one entry for each state-fixing slot covering
-    /// Categories 1 (storage, N entries), 2 (lag, N*L entries), and
-    /// 6 (anticipated-state, A*K entries).  Populated by `fill_col_state_patches`;
-    /// zero-initialised at construction.
     pub col_indices: Vec<usize>,
 
     /// New lower bounds for each patched column in the column-bound region.
-    ///
-    /// Length `N*(1+L) + A*K`.  Populated together with `col_indices` and
-    /// `col_upper` by `fill_col_state_patches`.
     pub col_lower: Vec<f64>,
 
     /// New upper bounds for each patched column in the column-bound region.
-    ///
-    /// Length `N*(1+L) + A*K`.  For tight bound constraints,
-    /// `col_upper[i] == col_lower[i]`.
     pub col_upper: Vec<f64>,
 
     /// Number of operating hydro plants (N).
@@ -84,9 +39,7 @@ pub struct PatchBuffer {
     /// Number of buses with stochastic load noise (M).
     load_bus_count: usize,
 
-    /// Maximum block count across all stages.
-    ///
-    /// Determines the Category 4 capacity: `load_bus_count * max_blocks`.
+    /// Maximum block count across all stages (B).
     max_blocks: usize,
 
     /// Number of anticipated thermals (A).
@@ -95,45 +48,28 @@ pub struct PatchBuffer {
     /// Maximum lead-time horizon across anticipated thermals (K).
     k_max: usize,
 
-    /// Number of load patches written by the most recent [`fill_load_patches`] call.
-    ///
-    /// Equals `load_bus_count * n_blocks` for the stage solved most recently.
-    /// Zero when `fill_load_patches` has not yet been called or when
+    /// Number of load patches from the most recent [`fill_load_patches`] call
+    /// (`load_bus_count * n_blocks`); zero before any call or when
     /// `load_bus_count == 0`.
     ///
     /// [`fill_load_patches`]: PatchBuffer::fill_load_patches
     active_load_patches: usize,
 
-    /// Number of z-inflow patches written by the most recent [`fill_z_inflow_patches`] call.
-    ///
-    /// Equals `hydro_count` when z-inflow patches are active, zero otherwise.
+    /// Number of z-inflow patches from the most recent [`fill_z_inflow_patches`]
+    /// call (`hydro_count` when active, zero otherwise).
     ///
     /// [`fill_z_inflow_patches`]: PatchBuffer::fill_z_inflow_patches
     active_z_inflow_patches: usize,
 }
 
 impl PatchBuffer {
-    /// Construct a [`PatchBuffer`] pre-allocated for `N + M*B + N` row patches.
+    /// Construct a [`PatchBuffer`] sized to `N + M*B + N` row patches and
+    /// `N*(1+L) + A*K` column patches, zero-initialised.
     ///
-    /// - `hydro_count` — number of operating hydro plants (N).
-    /// - `max_par_order` — maximum PAR order across all operating hydros (L).
-    ///   Not used in the row-buffer capacity; still used in the col-buffer
-    ///   capacity (`N*(1+L) + A*K`).
-    /// - `n_load_buses` — number of buses with stochastic load noise (M).
-    ///   Pass `0` when there is no stochastic load.
-    /// - `max_blocks` — maximum block count across all stages (B).
-    ///   Pass `0` when there is no stochastic load.
-    /// - `n_anticipated` — number of anticipated thermals (A).
-    ///   Pass `0` when there are no anticipated thermals.
-    /// - `k_max` — maximum lead-time horizon across anticipated thermals (K).
-    ///   Pass `0` when there are no anticipated thermals.
-    ///
-    /// The row-bound region (`indices`, `lower`, `upper`) is sized to
-    /// `N + M*B + N` and zero-initialised.  The column-bound region
-    /// (`col_indices`, `col_lower`, `col_upper`) is sized to `N*(1+L) + A*K`
-    /// and zero-initialised; it is populated by `fill_col_state_patches`.
-    /// Call [`fill_forward_patches`] and [`fill_load_patches`] to populate the
-    /// row-bound region before each LP solve.
+    /// Both regions are populated before each LP solve via [`fill_forward_patches`]
+    /// / [`fill_load_patches`] (row) and `fill_col_state_patches` (column). Pass `0`
+    /// for `n_load_buses`/`max_blocks` when there is no stochastic load, and for
+    /// `n_anticipated`/`k_max` when there are no anticipated thermals.
     ///
     /// # Examples
     ///
@@ -184,11 +120,7 @@ impl PatchBuffer {
         n_anticipated: usize,
         k_max: usize,
     ) -> Self {
-        // Row buffer carries only noise (N) + load (M*B) + z_inflow (N) patches.
-        // State fixing is applied via column bounds and lives in the col buffer.
         let capacity = hydro_count + n_load_buses * max_blocks + hydro_count;
-        // Column-bound region covers state-fixing slots for Categories 1, 2, and 6:
-        // N*(1+L) + A*K entries.
         let col_capacity = hydro_count * (1 + max_par_order) + n_anticipated * k_max;
         Self {
             indices: vec![0; capacity],
@@ -208,36 +140,13 @@ impl PatchBuffer {
         }
     }
 
-    /// Fill `N` noise patches (Category 3) for a forward-pass solve.
+    /// Fill `N` noise patches (Category 3) for a forward-pass solve: row
+    /// `base_row + h` ← `noise[h]` (equality) for `h ∈ [0, N)`.
     ///
-    /// Writes `N` noise-fixing patches at the start of the row buffer:
-    /// row `base_row + h` ← `noise[h]` for `h ∈ [0, N)`.
-    ///
-    /// Category 3 is NOT prescaled by `row_scale` because `noise[h]` is computed
-    /// from `template.row_lower` (already row-scaled) plus an unscaled noise term.
-    /// Prescaling would double-scale the base component.
-    ///
-    /// All patches are equality constraints: `lower[i] == upper[i] == noise[h]`.
-    ///
-    /// State-fixing (Categories 1, 2, 6) is applied separately via
-    /// `fill_col_state_patches` and `set_col_bounds`.
-    ///
-    /// After this call, pass `&buf.indices[..pc]`, `&buf.lower[..pc]`,
-    /// `&buf.upper[..pc]` where `pc = forward_patch_count()` to
-    /// `SolverInterface::set_row_bounds`.
-    ///
-    /// # Arguments
-    ///
-    /// - `layout` — stage-invariant role-(a) state layout (provides `n_state`
-    ///   and `hydro_count` for the length checks).
-    /// - `state` — incoming state vector of length `n_state = N*(1+L) + A*K`.
-    ///   Only used for the `debug_assert` length check; not read during noise write.
-    /// - `noise` — stochastic noise innovations of length `N`, one per hydro.
-    /// - `base_row` — first row index of the AR dynamics constraints in the
-    ///   static non-dual region of the LP ([Solver Abstraction SS2.2]).
-    ///   Computed during stage template construction.
-    /// - `row_scale` — per-row scaling factors from the stage template.
-    ///   Accepted for API compatibility; not applied to Category 3 values.
+    /// `noise[h]` is NOT prescaled by `row_scale` — it already combines the
+    /// row-scaled `template.row_lower` with a pre-scaled noise term, so applying
+    /// `row_scale` again would double-scale the base component (`_row_scale` is
+    /// accepted for API symmetry, never applied).
     ///
     /// # Panics
     ///
@@ -265,60 +174,25 @@ impl PatchBuffer {
             expected = layout.hydro_count,
         );
 
-        // Category 3: AR dynamics rows in the static non-dual region.
-        // The noise value is computed by the caller as:
-        //   noise[h] = template.row_lower[base_row + h] + noise_scale[h] * eta
-        // where `template.row_lower` is already scaled (by `apply_row_scale`).
-        // The `noise_scale` factor IS pre-scaled by the row scaling factor
-        // during LP setup (see `setup.rs`: noise_scale[h] *= row_scale[base_row + h]),
-        // so `noise[h]` is already in the correct scaled units and must be
-        // written as-is without additional prescaling here.
         for (h, &nv) in noise.iter().enumerate() {
-            // AR dynamics row = base_row + h (hydro-major). This is in the static
-            // non-dual region, NOT the inflow-lag column `N + ℓ·N + h` of Category 2,
-            // despite the shared `+ h` shape.
+            // AR dynamics row `base_row + h`, NOT the inflow-lag column
+            // `N + ℓ·N + h` of Category 2, despite the shared `+ h` shape.
             self.indices[h] = base_row + h;
             self.lower[h] = nv;
             self.upper[h] = nv;
         }
     }
 
-    /// Fill `N*(1+L) + A*K` column-bound patches for a state-fixing solve.
+    /// Fill `N*(1+L) + A*K` equality column-bound patches pinning incoming state:
+    /// Category 1 storage (`storage_in.start + h`), Category 2 AR lags
+    /// (`inflow_lags.start + lag*N + h`), and Category 6 anticipated state.
     ///
-    /// Populates the column-bound region (`col_indices`, `col_lower`, `col_upper`)
-    /// with the column-bound counterparts of Categories 1, 2, and 6:
-    ///
-    /// | Entry range              | Category                              | Column targets                            |
-    /// | ------------------------ | ------------------------------------- | ----------------------------------------- |
-    /// | `[0, N)`                 | Storage-fixing (Category 1)           | `storage_in.start + h` for `h ∈ [0, N)`  |
-    /// | `[N, N*(1+L))`           | AR lag-fixing (Category 2)            | `inflow_lags.start + lag*N + h`           |
-    /// | `[N*(1+L), N*(1+L)+A*K)` | Anticipated-state-fixing (Category 6) | `anticipated_state.start + slot*A + plant`|
-    ///
-    /// Column-bound state fixing enforces `x == v` by setting `lb = ub = v / col_scale[col]`
-    /// in the scaled LP (contrast with the row-equality path, which multiplies by `row_scale[row]`).
-    ///
-    /// All patches write equality bounds: `col_lower[i] == col_upper[i]` for every entry.
-    ///
-    /// After this call, pass
-    /// `&buf.col_indices[..state_col_patch_count()]`,
-    /// `&buf.col_lower[..state_col_patch_count()]`,
-    /// `&buf.col_upper[..state_col_patch_count()]`
-    /// to `SolverInterface::set_col_bounds`.
-    ///
-    /// # Arguments
-    ///
-    /// - `state_layout` — stage-invariant state-vector layout (role (a)),
-    ///   the source of the `storage_in`, `inflow_lags`, and `anticipated_state`
-    ///   column starts. A single global stage-0 layout resolves the correct
-    ///   column at every stage because these three starts are pure functions of
-    ///   `N`, `L`, `A`, `k_max` (independent of `n_blks`).
-    /// - `state` — incoming state vector of length `n_state = N*(1+L) + A*K`.
-    ///   Prefix `[0, N)` is incoming storage, `[N, N*(1+L))` is AR lags,
-    ///   `[N*(1+L), N*(1+L)+A*K)` is the anticipated-state ring-buffer.
-    /// - `col_scale` — per-column scaling factors from the stage template.
-    ///   Pass `&[]` when no column scaling is active. When non-empty, must
-    ///   be at least `state_layout.anticipated_state.end` entries long so every
-    ///   Category 1, 2, and 6 column can be indexed.
+    /// Enforces `x == v` by setting `lb = ub = v / col_scale[col]` in the scaled LP
+    /// — **divided**, contrast with the row-equality path that **multiplies** by
+    /// `row_scale[row]`. `col_scale` may be `&[]` (no scaling); when non-empty it
+    /// must be at least `state_layout.anticipated_state.end` long. A single global
+    /// stage-0 `state_layout` resolves the correct column at every stage: the three
+    /// starts are pure functions of `N`, `L`, `A`, `k_max` (independent of `n_blks`).
     ///
     /// # Panics
     ///
@@ -340,10 +214,9 @@ impl PatchBuffer {
         let n = self.hydro_count;
         let l = self.max_par_order;
 
-        // Category 1: storage-fixing (col = storage_in.start + h)
-        // The incoming storage column is distinct from the outgoing storage column
-        // at [0, N). Using the wrong column would pin the water-balance output
-        // variable rather than the state-carrying variable.
+        // Category 1: pin the incoming storage column (`storage_in`), distinct from
+        // the outgoing storage column at [0, N); the outgoing column would pin the
+        // water-balance output rather than the state-carrying variable.
         let storage_in_start = state_layout.storage_in.start;
         for (h, &sv) in state[..n].iter().enumerate() {
             let col = storage_in_start + h;
@@ -357,7 +230,6 @@ impl PatchBuffer {
             self.col_upper[h] = scaled;
         }
 
-        // Category 2: AR lag-fixing (col = inflow_lags.start + lag*N + h)
         let inflow_lags_start = state_layout.inflow_lags.start;
         for lag in 0..l {
             for h in 0..n {
@@ -375,21 +247,14 @@ impl PatchBuffer {
             }
         }
 
-        // Category 6: anticipated-state-fixing (col = anticipated_state.start + slot*A + plant)
         let cat6_start = n * (1 + l);
         self.fill_anticipated_state_col_patches(state_layout, state, col_scale, cat6_start);
     }
 
-    /// Write the `A*K` Category 6 anticipated-state-fixing column-bound patches
-    /// into the column-bound buffer starting at `cat6_start`.
-    ///
-    /// Each patch targets the column `anticipated_state.start + slot * A + plant`
-    /// and sets `lb = ub = state[col] / col_scale[col]` (or `state[col]` when
-    /// `col_scale` is empty). Iteration order is slot-major, plant-minor —
-    /// matching the LP ring-buffer layout and the row-equality counterpart
-    /// `fill_anticipated_state_patches`.
-    ///
-    /// When `n_anticipated == 0` or `k_max == 0` this is a no-op.
+    /// Write the `A*K` Category 6 anticipated-state column-bound patches at
+    /// `cat6_start`, slot-major / plant-minor — matching the LP ring-buffer layout
+    /// and the row-equality counterpart `fill_anticipated_state_patches`. No-op when
+    /// `n_anticipated == 0` or `k_max == 0`.
     fn fill_anticipated_state_col_patches(
         &mut self,
         state_layout: &StateLayout,
@@ -418,45 +283,15 @@ impl PatchBuffer {
         }
     }
 
-    /// Fill Category 4 load balance row patches for a forward-pass solve.
+    /// Fill `n_load_buses * n_blocks` Category 4 load-balance equality patches into
+    /// the row buffer at offset `N`, addressed via [`BlockGrid::flat`] (the single
+    /// owner of block-major strides). `load_rhs` is bus-major, block-minor matching
+    /// `bus_positions` order; values are prescaled by `row_scale[row]` when
+    /// `row_scale` is non-empty (pass `&[]` for no scaling).
     ///
-    /// Writes `n_load_buses * n_blocks` equality patches into the Category 4
-    /// region starting at offset `N` (immediately after Category 3 noise patches).
-    /// Each patch targets the exact load balance row for bus `bus_positions[i]`
-    /// and block `blk`:
-    ///
-    /// ```text
-    /// row = load_row_start + bus_positions[i] * n_blocks + blk
-    /// ```
-    ///
-    /// where `n_blocks` is the per-stage block count carried by `grid`. The row
-    /// address is computed through [`BlockGrid::flat`] (bus-outer / block-inner),
-    /// the single owner of block-major address strides.
-    ///
-    /// The `load_rhs` slice is laid out as `[bus0_blk0, bus0_blk1, …, bus1_blk0, …]`
-    /// (bus-major, block-minor), matching `bus_positions` order.
-    ///
-    /// When `row_scale` is non-empty, each patch value is prescaled by
-    /// `row_scale[row]` before being stored.  Pass `&[]` when no row scaling
-    /// has been applied.
-    ///
-    /// After this call, [`forward_patch_count`] returns
-    /// `N + n_load_buses * n_blocks` so that the correct slice is
-    /// passed to `set_row_bounds`.
-    ///
-    /// # Arguments
-    ///
-    /// - `load_row_start` — first row index of the load-balance block in the LP.
-    /// - `grid` — the per-stage [`BlockGrid`]; it must carry this stage's block
-    ///   count (the value the LP template was built with), NOT a global grid.
-    ///   A global grid would stride by the wrong block count at any stage whose
-    ///   count differs.
-    /// - `load_rhs` — patched RHS values; length must equal
-    ///   `self.load_bus_count * grid.n_blks()`.
-    /// - `bus_positions` — LP bus position for each stochastic load bus;
-    ///   length must equal `self.load_bus_count`.
-    /// - `row_scale` — per-row scaling factors from the stage template.
-    ///   Pass `&[]` when no scaling is active.
+    /// `grid` must carry this stage's block count (the value the LP template was
+    /// built with), NOT a global grid: a global grid would stride by the wrong block
+    /// count at any stage whose count differs.
     ///
     /// # Panics
     ///
@@ -464,8 +299,6 @@ impl PatchBuffer {
     /// - `load_rhs.len() != self.load_bus_count * grid.n_blks()`
     /// - `bus_positions.len() != self.load_bus_count`
     /// - `grid.n_blks() > self.max_blocks`
-    ///
-    /// [`forward_patch_count`]: PatchBuffer::forward_patch_count
     pub fn fill_load_patches(
         &mut self,
         load_row_start: usize,
@@ -474,9 +307,6 @@ impl PatchBuffer {
         bus_positions: &[usize],
         row_scale: &[f64],
     ) {
-        // `n_blocks` here is a buffer-size count (no `+ blk` address term), so it
-        // reads the scalar via `grid.n_blks()` rather than routing through `flat`;
-        // the LP row address below routes through `grid.flat` instead.
         let n_blocks = grid.n_blks();
         debug_assert_eq!(
             load_rhs.len(),
@@ -498,16 +328,14 @@ impl PatchBuffer {
             mb = self.max_blocks,
         );
 
-        // Category 4 follows Category 3 (noise, N entries).
         let cat4_start = self.hydro_count;
         let mut slot = cat4_start;
 
         for (i, &bus_pos) in bus_positions.iter().enumerate() {
             for blk in 0..n_blocks {
                 let row = grid.flat(load_row_start, bus_pos, blk);
-                // The host-array index shares the flat layout `i * n_blks + blk`,
-                // so it routes through `grid.flat(0, i, blk)` (start = 0) — the
-                // same primitive, keeping a single owner for the strided arithmetic.
+                // Host-array index `i * n_blks + blk` routed through the same
+                // `grid.flat` (start = 0) to keep one owner of the stride.
                 let rhs = load_rhs[grid.flat(0, i, blk)];
                 let scaled = if row_scale.is_empty() {
                     rhs
@@ -524,24 +352,12 @@ impl PatchBuffer {
         self.active_load_patches = self.load_bus_count * n_blocks;
     }
 
-    /// Fill Category 5 patches: z-inflow definition row RHS.
+    /// Fill the `N` Category 5 z-inflow-definition equality patches at
+    /// `z_inflow_row_start` from `z_inflow_rhs`, prescaled by `row_scale[row]` when
+    /// `row_scale` is non-empty (pass `&[]` for no scaling).
     ///
-    /// Updates N rows starting at `z_inflow_row_start` with the realized-inflow
-    /// RHS values from `z_inflow_rhs`. Each row is an equality constraint:
-    /// `lower[i] = upper[i] = z_inflow_rhs[h]`.
-    ///
-    /// This method must be called after `fill_forward_patches` (which fills
-    /// categories 1-3) and [`fill_load_patches`] (category 4), before
-    /// `solver.set_row_bounds`.
-    ///
-    /// When `row_scale` is non-empty, each patch value is prescaled by
-    /// `row_scale[row]`.  Pass `&[]` when no row scaling is active.
-    ///
-    /// # Arguments
-    ///
-    /// - `z_inflow_row_start` - first row index of the z-inflow definition rows.
-    /// - `z_inflow_rhs` - per-hydro RHS values (length >= `hydro_count`).
-    /// - `row_scale` - per-row scaling factors. Pass `&[]` when no scaling.
+    /// Must be called after [`fill_load_patches`] (whose `active_load_patches` sets
+    /// this region's offset) and before `set_row_bounds`.
     ///
     /// [`fill_load_patches`]: PatchBuffer::fill_load_patches
     pub fn fill_z_inflow_patches(
@@ -556,7 +372,6 @@ impl PatchBuffer {
             return;
         }
 
-        // Category 5 follows Categories 3 (N) and 4 (active load patches).
         let cat5_start = self.hydro_count + self.active_load_patches;
 
         for (h, &rhs) in z_inflow_rhs.iter().enumerate().take(n) {
@@ -575,27 +390,15 @@ impl PatchBuffer {
         self.active_z_inflow_patches = n;
     }
 
-    /// Number of active patches after [`fill_forward_patches`], (optionally)
-    /// [`fill_load_patches`], and (optionally) [`fill_z_inflow_patches`]:
-    /// `N + active_load_patches + active_z_inflow_patches`.
-    ///
-    /// Use this to pass the full forward-pass buffer to `set_row_bounds`.
-    ///
-    /// [`fill_forward_patches`]: PatchBuffer::fill_forward_patches
-    /// [`fill_load_patches`]: PatchBuffer::fill_load_patches
-    /// [`fill_z_inflow_patches`]: PatchBuffer::fill_z_inflow_patches
+    /// Active row-patch count (noise + load + z-inflow) for the full forward-pass
+    /// slice passed to `set_row_bounds`.
     #[must_use]
     #[inline]
     pub fn forward_patch_count(&self) -> usize {
         self.hydro_count + self.active_load_patches + self.active_z_inflow_patches
     }
 
-    /// Capacity of the column-bound region: `N*(1+L) + A*K`.
-    ///
-    /// Returns the number of entries allocated in `col_indices`, `col_lower`,
-    /// and `col_upper` — one for each state-fixing slot covering Categories 1
-    /// (storage, N entries), 2 (lag, N*L entries), and 6 (anticipated-state,
-    /// A*K entries).
+    /// Column-bound region capacity (`N*(1+L) + A*K` state-fixing slots).
     #[must_use]
     #[inline]
     pub fn state_col_patch_count(&self) -> usize {

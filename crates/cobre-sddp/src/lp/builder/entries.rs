@@ -7,18 +7,9 @@ use super::M3S_TO_HM3;
 use super::fpha_cursor::for_each_fpha_plane;
 use super::layout::{StageLayout, TemplateBuildCtx};
 
-/// Fill CSC matrix entries for anticipated-fishing equality constraints.
-///
-/// For each anticipated plant `i` (always-active predicate), writes:
-/// - `(row, +block_hours[blk])` on each per-block thermal column
-///   `col_thermal_start + thermal_idx * n_blks + blk` (`LHS`, `MWh`).
-/// - `(row, -block_hours_total)` on the anticipated-state slot-0 column
-///   `col_anticipated_state_start + local_idx` (`RHS` coupling: `MW` × h = `MWh`).
-///
-/// The constraint enforces that the total generated energy (sum over blocks) equals
-/// the committed power level (slot 0 content) scaled to `MWh`.
-///
-/// When `n_anticipated == 0`, this function is a no-op.
+/// Enforce, per anticipated plant, that summed per-block thermal energy (`MWh`)
+/// equals the committed power level in the anticipated-state slot-0 column scaled
+/// to `MWh` (`MW` × `block_hours_total`). Always-active: one row per plant.
 pub(super) fn fill_anticipated_fishing_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -46,23 +37,12 @@ pub(super) fn fill_anticipated_fishing_entries(
     );
 }
 
-/// Fill CSC entries for the `anticipated_state_out` definition equality rows.
+/// Encode `anticipated_state_out[i] − decision_col[i] = 0` for each active plant
+/// `i` (`stage_idx + K_i < n_stages`); inactive plants emit no entries.
 ///
-/// For each active anticipated plant `i` (`stage_idx + K_i < n_stages`),
-/// emits TWO CSC entries at the definition row:
-/// - `(row, +1.0)` on `col_anticipated_state_out_start + i`
-/// - `(row, -1.0)` on `col_anticipated_decision_start + i`
-///
-/// Encodes the equality `anticipated_state_out[i] − decision_col[i] = 0`.
-/// Row bounds are filled by `super::rows::fill_anticipated_state_out_def_rows`. The
-/// final CSC ordering is enforced by the per-column
-/// `sort_unstable_by_key(|&(row, _)| row)` pass in
-/// `build_single_stage_template`, so the relative order of the two pushes here
-/// does not matter for correctness.
-///
-/// Inactive plants emit no entries.
-///
-/// No-op when `n_anticipated == 0` or when no plant is active.
+/// The per-column `sort_unstable_by_key` pass in `build_single_stage_template`
+/// re-sorts the CSC, so the relative push order of the two entries here does not
+/// matter for correctness.
 pub(super) fn fill_anticipated_state_out_def_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -96,11 +76,8 @@ pub(super) fn fill_anticipated_state_out_def_entries(
 
 /// Returns `true` when hydro `h_idx` is in the `PreFilling` phase at this stage.
 ///
-/// Derived inline per `(stage, hydro)` from [`crate::lp_builder::filling_phase`]
-/// — no cached per-stage mask (the dense-layout convention every gating site
-/// follows). A hydro with no `FillingConfig` is `Operating` at every stage, so
-/// this is `false`, and the water-balance fill keeps its standard form
-/// (parity-neutral).
+/// A hydro with no `FillingConfig` is `Operating` at every stage, so this is
+/// `false` and the water-balance fill keeps its standard form (parity-neutral).
 #[inline]
 pub(super) fn is_prefilling(ctx: &TemplateBuildCtx<'_>, stage: &Stage, h_idx: usize) -> bool {
     let hydro = &ctx.hydros[h_idx];
@@ -111,38 +88,29 @@ pub(super) fn is_prefilling(ctx: &TemplateBuildCtx<'_>, stage: &Stage, h_idx: us
 }
 
 /// Resolve the cascade target that an absent `PreFilling` hydro `h_idx` routes its
-/// water onto: the FIRST downstream hydro that is NOT `PreFilling` at this stage.
+/// water onto: the FIRST downstream hydro that is NOT `PreFilling` at this stage,
+/// skipping every consecutive `PreFilling` hydro along the chain. `None` (the SINK
+/// case) when the chain reaches a terminal, an unresolved id, or stays
+/// `PreFilling` all the way down — then `h`'s water exits the system, as a
+/// terminal hydro's outflow does.
 ///
-/// Walks `h → downstream(h) → downstream(downstream(h)) → …`, skipping every
-/// consecutive `PreFilling` hydro, and returns the system index of the first
-/// hydro that is `Filling`, `Operating`, or non-filling — the first hydro whose
-/// water-balance row is a NORMAL balance that can absorb the routed inflow,
-/// upstream releases, diversion, and withdrawal. Returns `None` when the chain
-/// reaches a terminal (`downstream == None`) or an unresolved id, or stays
-/// `PreFilling` all the way down: in that SINK case `h`'s water exits the system,
-/// exactly as a terminal hydro's outflow does.
+/// The target MUST be non-`PreFilling`: a `PreFilling` downstream's row is the
+/// frozen identity `v_d − v_d_in = 0` and routing any inflow/upstream/withdrawal
+/// term onto it corrupts that constraint. The forbidden alternative — routing to
+/// the immediate `downstream(h)` unconditionally — corrupts that frozen row when
+/// the immediate downstream is itself `PreFilling`, a wrong cut that still
+/// compiles (see [`fill_prefilling_shortcircuit`]).
 ///
-/// The short-circuit target MUST be a non-`PreFilling` downstream: a `PreFilling`
-/// downstream's row is the frozen identity `v_d − v_d_in = 0`, and routing inflow
-/// / upstream / withdrawal terms onto it CORRUPTS that frozen constraint (it must
-/// stay free of every such term — see [`fill_prefilling_shortcircuit`] and the
-/// `super::entries::is_prefilling` frozen-row fill). The forbidden alternative is
-/// routing to the immediate `downstream(h)` unconditionally (the prior behaviour):
-/// when that immediate downstream is itself `PreFilling`, its frozen row is
-/// corrupted and the cut is wrong yet still compiles.
-///
-/// Acyclicity: the cascade is validated acyclic by `check_cascade_acyclic`, so the
-/// walk terminates; the `n_h`-bounded loop is defense-in-depth against a
-/// pathological cycle reaching here via direct test construction — it returns
-/// `None` (sink) rather than spinning, with no panic/unwrap.
+/// The cascade is validated acyclic by `check_cascade_acyclic`, so the walk
+/// terminates; the `n_h`-bounded loop is defense-in-depth against a pathological
+/// cycle reaching here via direct test construction — it returns `None` rather
+/// than spinning.
 pub(super) fn resolve_shortcircuit_target(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
     h_idx: usize,
 ) -> Option<usize> {
     let mut current_id = ctx.hydros[h_idx].id;
-    // Bound the walk by the hydro count: an acyclic cascade visits each node at
-    // most once, so more than `n_h` hops can only mean a (validated-out) cycle.
     for _ in 0..ctx.hydros.len() {
         let down_id = ctx.cascade.downstream(current_id)?;
         let d_idx = *ctx.hydro_pos.get(&down_id)?;
@@ -154,21 +122,15 @@ pub(super) fn resolve_shortcircuit_target(
     None
 }
 
-/// Fill water-balance row entries into `col_entries`.
+/// Fill water-balance row entries (outgoing/incoming storage, turbine, spillage,
+/// upstream cascade, AR lag dynamics). Incoming state is pinned via column bounds,
+/// so no row-equality state-fixing diagonals are written here.
 ///
-/// Writes entries for the water-balance rows (outgoing/incoming
-/// storage, turbine, spillage, upstream cascade, and AR lag
-/// dynamics). Incoming state is pinned via column bounds, so no
-/// row-equality state-fixing diagonals are written here.
-///
-/// A hydro in the `PreFilling` phase is short-circuited: its own row collapses to
-/// the frozen-storage identity `v_h − v_h_in = 0` and its water interactions
-/// (incremental inflow, upstream releases, withdrawal) transfer to the first
-/// non-`PreFilling` downstream hydro `d` (resolved by
-/// [`resolve_shortcircuit_target`], cascading THROUGH any `PreFilling` downstream
-/// whose row is itself a frozen identity). See [`fill_prefilling_shortcircuit`]
-/// for the contract; the standard `Operating`/`Filling` fill below runs for every
-/// non-`PreFilling` hydro unchanged.
+/// A `PreFilling` hydro's row collapses to the frozen-storage identity
+/// `v_h − v_h_in = 0`, with its water interactions routed to the first
+/// non-`PreFilling` downstream by [`fill_prefilling_shortcircuit`] (the contract
+/// home); the standard `Operating`/`Filling` fill runs unchanged for every other
+/// hydro.
 pub(super) fn fill_state_and_water_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -184,28 +146,20 @@ pub(super) fn fill_state_and_water_entries(
     let col_storage_in_start = layout.col_storage_in_start();
     let col_inflow_lags_start = layout.col_inflow_lags_start();
 
-    // Water balance: outgoing storage (+1), incoming storage (-1),
-    // turbine/spillage (+tau), upstream turbine/spillage (-tau),
-    // and AR lag dynamics (-ζ*ψ).
     for h_idx in 0..n_h {
         let hydro = &ctx.hydros[h_idx];
         let row = row_water + h_idx;
 
         if is_prefilling(ctx, stage, h_idx) {
-            // Frozen-storage identity `v_h − v_h_in = 0` for the absent reservoir.
-            // The storage column keeps its dense system index `h_idx` (§4 trap 2:
-            // NEVER omit or relocate the storage column — only the physics ON the
-            // row changes); the incoming-storage column keeps its `−1.0`, pinned
-            // per pass to `v̂_h` by `fill_col_state_patches`. Emitting ONLY these
-            // two entries (no inflow/upstream/AR-lag/withdrawal/evaporation terms)
-            // is the §4 trap-4 contract: with `h`'s row free of upstream/inflow
-            // coupling, `v_h` is a dead variable, so perturbing `v̂_h` changes
-            // nothing ⇒ `∂Q/∂v̂_h = 0` (a valid flat cut). Leaving ANY of `h`'s
-            // upstream/inflow coupling on this row would make `β_h` stale-nonzero
-            // — a wrong cut that still compiles. The frozen-identity RHS is `0`,
-            // set by `super::rows::fill_water_balance_rows`, and the solve-time
-            // noise patch is neutralized by zeroing this hydro's `noise_scale`
-            // (see `super::scaling::compute_noise_scale`).
+            // Frozen-storage identity `v_h − v_h_in = 0`: emit ONLY these two
+            // entries (no inflow/upstream/AR-lag/withdrawal/evaporation terms). The
+            // storage column keeps its dense system index `h_idx` (never omit or
+            // relocate it — only the physics ON the row changes). With `h`'s row
+            // free of upstream/inflow coupling, `v_h` is dead, so `∂Q/∂v̂_h = 0` (a
+            // valid flat cut); leaving ANY coupling here makes `β_h` stale-nonzero,
+            // a wrong cut that still compiles. RHS `0` is set by
+            // `super::rows::fill_water_balance_rows`; the noise patch is neutralized
+            // by zeroing this hydro's `noise_scale`.
             col_entries[h_idx].push((row, 1.0));
             col_entries[col_storage_in_start + h_idx].push((row, -1.0));
             fill_prefilling_shortcircuit(ctx, stage, h_idx, layout, col_entries);
@@ -220,19 +174,14 @@ pub(super) fn fill_state_and_water_entries(
             col_entries[col_turbine].push((row, tau_h));
             let col_spillage = layout.spillage_col(h_idx, blk);
             col_entries[col_spillage].push((row, tau_h));
-            // Diversion outflow: this hydro's diversion column enters its own
-            // water balance with +tau (outflow), same sign as turbine/spillage.
             let col_diversion = layout.diversion_col(h_idx, blk);
             col_entries[col_diversion].push((row, tau_h));
-            // Cascade inflow: upstream turbine/spillage enter with -tau.
             for &up_id in ctx.cascade.upstream(hydro.id) {
                 if let Some(&u_idx) = ctx.hydro_pos.get(&up_id) {
                     col_entries[layout.turbine_col(u_idx, blk)].push((row, -tau_h));
                     col_entries[layout.spillage_col(u_idx, blk)].push((row, -tau_h));
                 }
             }
-            // Diversion inflow: for each hydro that diverts TO this hydro, its
-            // diversion column enters this hydro's water balance with -tau.
             if let Some(sources) = ctx.diversion_upstream.get(&hydro.id) {
                 for &d_idx in sources {
                     let col_div = layout.diversion_col(d_idx, blk);
@@ -251,8 +200,10 @@ pub(super) fn fill_state_and_water_entries(
         }
     }
 
-    // Inflow non-negativity slack: sigma_inf_h enters water balance with -ζ.
-    // Skipped for a PreFilling hydro — its row is the frozen identity.
+    // The `continue` on each PreFilling hydro below is load-bearing: its row is the
+    // frozen identity and must stay free of every slack/flow term (the contract in
+    // the PreFilling branch above). A PreFilling hydro is excluded from
+    // `evap_hydro_indices` upstream, so the evaporation loop needs no such guard.
     if ctx.has_penalty {
         for h_idx in 0..n_h {
             if is_prefilling(ctx, stage, h_idx) {
@@ -264,24 +215,12 @@ pub(super) fn fill_state_and_water_entries(
         }
     }
 
-    // Evaporation: the per-hydro evaporation-outflow column enters water balance with +ζ.
-    // Evaporation is an outflow (water leaving the reservoir), so its
-    // coefficient matches the turbine/spillage sign convention (positive). A
-    // PreFilling hydro is excluded from `evap_hydro_indices` upstream (no reservoir
-    // surface, evaporation is zero and is NOT transferred to `d`), so this loop
-    // never touches a frozen-identity row.
     for (local_idx, &h_idx) in layout.evap_hydro_indices.iter().enumerate() {
         let col_evaporation_flow = layout.evap_flow_col(local_idx);
         let row = row_water + h_idx;
         col_entries[col_evaporation_flow].push((row, zeta));
     }
 
-    // Under-withdrawal slack (neg): adds water back to the balance.
-    // When the reservoir cannot sustain the full scheduled withdrawal, the neg slack
-    // absorbs the difference, reducing the effective withdrawal in that stage.
-    // Skipped for a PreFilling hydro — `h`'s withdrawal demand is served by `d`'s
-    // own withdrawal slacks (the demand transfers via `d`'s RHS in
-    // `super::rows::fill_water_balance_rows`, not a slack on `h`'s frozen row).
     for h_idx in 0..n_h {
         if is_prefilling(ctx, stage, h_idx) {
             continue;
@@ -291,10 +230,6 @@ pub(super) fn fill_state_and_water_entries(
         col_entries[col].push((row, -zeta));
     }
 
-    // Over-withdrawal slack (pos): removes additional water from the balance.
-    // When the solver withdraws more than the target, the pos slack accounts for
-    // the excess withdrawal at a penalty cost. Skipped for a PreFilling hydro (see
-    // the neg-slack note above).
     for h_idx in 0..n_h {
         if is_prefilling(ctx, stage, h_idx) {
             continue;
@@ -306,65 +241,35 @@ pub(super) fn fill_state_and_water_entries(
 }
 
 /// Re-route an absent `PreFilling` hydro `h`'s water interactions onto the FIRST
-/// non-`PreFilling` downstream hydro `d`'s water-balance row.
+/// non-`PreFilling` downstream hydro `d` (resolved by [`resolve_shortcircuit_target`]),
+/// whose water-balance row is `row_water + d_idx`.
 ///
-/// Before `start_stage_id` the dam at `h`'s site does not exist; the river flows
-/// past it. `d` is NOT necessarily the immediate `downstream(h)`: when the
-/// immediate downstream is itself `PreFilling`, its row is the frozen identity
-/// `v_d − v_d_in = 0` and MUST NOT receive routed terms, so the water cascades
-/// THROUGH it to the first existing reservoir downstream. The target is resolved by
-/// [`resolve_shortcircuit_target`], which walks the chain skipping consecutive
-/// `PreFilling` hydros; the forbidden alternative is routing to the immediate
-/// `downstream(h)` unconditionally (which corrupts a `PreFilling` downstream's
-/// frozen row — a wrong cut that still compiles).
-///
-/// Every water interaction of the absent `h` transfers to `d`, in the REAL
-/// `ζ`/`τ_k` coefficients of the standard balance (NOT an approximation): by LP
-/// duality the reduced cost of `d`'s pinned incoming-storage column is then the
-/// TRUE sensitivity of the routed problem, so the harvested cut coefficient
-/// `rc / col_scale` is a valid subgradient (§4, `PreFilling`-downstream). Synthesizing
-/// a coefficient instead of routing the real columns would break that duality and
+/// Route the REAL `ζ`/`τ_k` columns, never a synthesized coefficient: with the
+/// real columns on `d`'s row, the reduced cost of `d`'s pinned incoming-storage
+/// column is the true sensitivity of the routed problem, so `rc / col_scale` is a
+/// valid subgradient; synthesizing a coefficient would break that duality and
 /// produce an invalid cut.
 ///
-/// Conservation across a `PreFilling` chain (`h₁ → h₂ → … → d`, all of `h₁ … hₙ`
-/// `PreFilling`, `d` the first non-`PreFilling`): each `PreFilling` hydro routes
-/// its OWN incremental inflow + withdrawal to the SAME resolved `d` independently,
-/// with no double-count. A skipped intermediate `PreFilling` hydro contributes ZERO
-/// releases — its turbine/diversion are pinned `[0, 0]` and its spillage appears on
-/// no row (a positive cost drives it to 0) — so referencing an intermediate's
-/// release columns in a downstream's routing multiplies zero columns and adds
-/// nothing. Each link's incremental inflow therefore reaches `d` exactly once.
+/// Conservation across a `PreFilling` chain: each `PreFilling` hydro routes its OWN
+/// inflow + withdrawal to the same `d` independently with no double-count — a
+/// skipped intermediate contributes ZERO releases (turbine/diversion pinned
+/// `[0, 0]`, spillage driven to 0), so referencing its release columns adds
+/// nothing. Each link's incremental inflow reaches `d` exactly once.
 ///
-/// Three pieces land on `d`'s row (`row_water + d_idx`):
+/// Pieces landing on `d`'s row:
 ///
-/// - `h`'s incremental inflow, as the realized-inflow column `z_h` with `−ζ` (the
-///   `z_h`→water coupling relocated from `h`'s row to `d`'s). `z_h` is pinned by
-///   its own definition row to the realized scenario inflow `base_h + σ_h·η_h +
-///   Σ_l ψ_l·lag_h`, and that machinery (the z-inflow definition row + its Category-5
-///   patch) is left UNTOUCHED for `h`, so routing the column makes the inflow
-///   scenario-exact with no new noise patch. The deterministic base is part of `z_h`,
-///   so it must NOT also be added to `d`'s RHS (double-count).
-/// - `h`'s upstream releases: for each `u ∈ upstream(h)`, per block, `u`'s
-///   turbine/spillage with `−τ_h` — the cascade edge `upstream(h)→h→d` re-routed to
-///   `upstream(h)→d` (upstream(h)'s releases feed `d` directly while `h` is absent).
-///   Diversion-into-`h` columns are routed the same way (the "all water interactions
-///   transfer to `d`" principle, §3.2), conserving water that would otherwise vanish.
+/// - `h`'s incremental inflow, as the `z_h` column with `−ζ`. `z_h`'s own
+///   definition row + noise patch are left UNTOUCHED for `h`, so the routed column
+///   is scenario-exact; the deterministic base is part of `z_h` and must NOT also
+///   be added to `d`'s RHS (double-count).
+/// - `h`'s upstream releases (`u ∈ upstream(h)`, per block, `−τ_h`) and the
+///   diversion-into-`h` columns, re-routed `upstream(h)→d` while `h` is absent.
 ///
-/// Every routed piece lands on `d`'s water-balance row and on NO other row. Filling
-/// is uncapped in the volume-target model (§3.1, §3.4): there is no impound-cap row,
-/// so even when `d` is itself in the Filling phase the routed inflow has only the
-/// balance row to receive it. The per-stage `V_target` floors bound `d`'s storage
-/// rise, not a release-side cap on the routed inflow.
-///
-/// `h`'s withdrawal DEMAND transfers to `d` via `d`'s RHS (served by `d`'s existing
-/// withdrawal slacks); that is an RHS adjustment owned by
-/// `super::rows::fill_water_balance_rows`, which MUST resolve the SAME `d` via
-/// [`resolve_shortcircuit_target`] so the matrix routing and the RHS routing agree.
-/// `h`'s evaporation is ZERO in `PreFilling` and is NOT transferred.
-///
-/// Sink case (no non-`PreFilling` downstream — terminal, unresolved id, or
-/// `PreFilling` all the way down): `h`'s water exits the system, exactly as a
-/// terminal hydro's outflow does today — nothing is routed, no panic.
+/// `h`'s withdrawal DEMAND transfers to `d` via `d`'s RHS (owned by
+/// `super::rows::fill_water_balance_rows`), which MUST resolve the SAME `d` so the
+/// matrix and RHS routing agree. `h`'s evaporation is ZERO in `PreFilling` and is
+/// not transferred. Sink case (no non-`PreFilling` downstream): nothing routed, no
+/// panic — `h`'s water exits the system as a terminal hydro's outflow does.
 fn fill_prefilling_shortcircuit(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -374,39 +279,26 @@ fn fill_prefilling_shortcircuit(
 ) {
     let hydro = &ctx.hydros[h_idx];
     let Some(d_idx) = resolve_shortcircuit_target(ctx, stage, h_idx) else {
-        // Sink: no non-PreFilling downstream row receives `h`'s water; it exits the
-        // system (terminal, unresolved downstream id, or PreFilling all the way
-        // down). Nothing routed rather than a panic.
         return;
     };
     let n_blks = layout.n_blks;
     let zeta = layout.zeta;
     let row_d = layout.row_water_balance_start() + d_idx;
 
-    // Single push onto `d`'s water-balance row. Filling is uncapped (§3.1, §3.4):
-    // there is no impound-cap row to also receive the routed water, so every routed
-    // coefficient lands on the balance row and nowhere else, whether or not `d` is
-    // itself in the Filling phase. A second push onto a per-stage cap row would
-    // strand nothing (no such row exists) but would alias an unrelated row index.
     let mut route = |col: usize, coeff: f64| {
         col_entries[col].push((row_d, coeff));
     };
 
-    // `h`'s realized incremental inflow arrives at `d`: the `z_h` column with `−ζ`
-    // (inflow sign). `z_h` is a stage-level column (not per-block).
     route(layout.col_z_inflow_start() + h_idx, -zeta);
 
     for blk in 0..n_blks {
         let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
-        // Upstream releases re-routed `upstream(h)→d` with `−τ_h` (inflow to `d`).
         for &up_id in ctx.cascade.upstream(hydro.id) {
             if let Some(&u_idx) = ctx.hydro_pos.get(&up_id) {
                 route(layout.turbine_col(u_idx, blk), -tau_h);
                 route(layout.spillage_col(u_idx, blk), -tau_h);
             }
         }
-        // Diversion-into-`h` re-routed to `d` with `−τ_h`, same sign as upstream
-        // releases — the absent `h`'s diversion inflow now reaches `d` directly.
         if let Some(sources) = ctx.diversion_upstream.get(&hydro.id) {
             for &src_idx in sources {
                 route(layout.diversion_col(src_idx, blk), -tau_h);
@@ -415,95 +307,46 @@ fn fill_prefilling_shortcircuit(
     }
 }
 
-/// Fill per-stage `σ_fill`-target row entries into `col_entries`.
+/// Fill the LHS of the per-stage soft filling-target row `v_h + σ_fill ≥ V_target[t]`
+/// for each Filling-phase hydro (the `filling_target` family): `+1.0` on the
+/// outgoing storage column `v_h` (dense system index `h_idx`) and `+1.0` on the
+/// `σ_fill` slack column. The `≥` sense and `V_target[t]` RHS are set by
+/// [`super::rows::fill_filling_target_rows`].
 ///
-/// For each filling hydro in the Filling phase at this stage (the `filling_target`
-/// family enumerated by `layout.filling_target_hydro_indices`), writes the LHS of
-/// one `≥` target row at `row_filling_target_start() + local_idx`:
+/// The storage column is never omitted or relocated at any phase, so addressing it
+/// by `h_idx` is correct in every phase.
 ///
-/// ```text
-/// v_h + σ_fill ≥ V_target[t]
-/// ```
-///
-/// - `+1.0` on the OUTGOING storage column `v_h`, which is the dense system index
-///   `h_idx` — the same column `fill_state_and_water_entries` writes the
-///   water-balance `+1.0` onto (`col_entries[h_idx]`). The storage column is never
-///   omitted or relocated at any phase (§4 trap 2), so addressing it by `h_idx`
-///   here is correct in every phase.
-/// - `+1.0` on the `σ_fill` slack column at `col_filling_target_start() +
-///   local_idx`, parallel to the row index.
-///
-/// The `≥` sense and the per-stage `V_target[t]` RHS live in the row bounds
-/// (`row_lower = V_target[t]`, `row_upper = +∞`, set by
-/// [`super::rows::fill_filling_target_rows`]); this fill writes only the two unit
-/// coefficients, so it is RHS-agnostic and unchanged from the v1 terminal rule —
-/// only membership (per-stage Filling, not `entry − 1`) and the RHS source widened.
-///
-/// Cut validity (§4 trap 3): this row couples to the storage state through the
-/// constraint matrix, so LP duality folds the `σ_fill` soft-row dual into the
-/// SINGLE reduced cost of the incoming-storage column that the cut already reads as
-/// `rc / col_scale`. NEVER separately extract this row's dual and add it to the cut
-/// coefficient by hand — that double-counts the soft floor. The dual-extraction
-/// entry point (in `training/backward/duals_extraction.rs`) is correct as-is and is
-/// not touched by this family — a guard test in this module asserts no `lp/builder`
-/// file references it.
-///
-/// No-op at every non-filling stage and for a non-filling system (the index list
-/// is empty).
+/// Cut validity: this row couples to the storage state through the matrix, so LP
+/// duality folds the `σ_fill` soft-row dual into the SINGLE reduced cost of the
+/// incoming-storage column the cut reads as `rc / col_scale`. NEVER separately
+/// extract this row's dual and add it by hand — that double-counts the soft floor
+/// (a guard test in this module asserts no `lp/builder` file references the
+/// dual-extraction entry point).
 fn fill_filling_target_entries(layout: &StageLayout, col_entries: &mut [Vec<(usize, f64)>]) {
     let row_start = layout.row_filling_target_start();
     let col_start = layout.col_filling_target_start();
     for (local_idx, &h_idx) in layout.filling_target_hydro_indices.iter().enumerate() {
         let row = row_start + local_idx;
-        // +1 on the outgoing storage column v_h (dense system index h_idx).
         col_entries[h_idx].push((row, 1.0));
-        // +1 on the σ_fill slack column.
         col_entries[col_start + local_idx].push((row, 1.0));
     }
 }
 
-/// Fill soft `σ^{v-}` operating-floor row entries into `col_entries`.
+/// Fill the LHS of the soft operating-floor row `v_h + σ^{v-} ≥ min_storage_hm3`
+/// for each Operating-phase filling hydro (the `filled_min_storage_floor` family):
+/// `+1.0` on the outgoing storage column `v_h` (dense system index `h_idx`) and
+/// `+1.0` on the `σ^{v-}` slack column. The `≥` sense and RHS are set by
+/// [`super::rows::fill_filled_min_storage_floor_rows`].
 ///
-/// For each filling hydro in the Operating phase at this stage (the
-/// `filled_min_storage_floor` family enumerated by `layout.filled_min_storage_floor_hydro_indices`),
-/// writes the LHS of one `≥` operating-floor row at
-/// `row_filled_min_storage_floor_start() + local_idx`:
+/// Cut validity (like the sibling `σ_fill` row): NEVER separately extract this
+/// row's dual and add it to the cut coefficient by hand — LP duality already folds
+/// it into the incoming-storage column's `rc / col_scale`, so a hand extraction
+/// double-counts the soft floor.
 ///
-/// ```text
-/// v_h + σ^{v-} ≥ min_storage_hm3
-/// ```
-///
-/// - `+1.0` on the OUTGOING storage column `v_h`, which is the dense system index
-///   `h_idx` — the same column `fill_state_and_water_entries` writes the
-///   water-balance `+1.0` onto (`col_entries[h_idx]`). The storage column is never
-///   omitted or relocated at any phase (§4 trap 2), so addressing it by `h_idx`
-///   here is correct in every phase.
-/// - `+1.0` on the `σ^{v-}` slack column at `col_filled_min_storage_floor_start() +
-///   local_idx`, parallel to the row index.
-///
-/// The `≥` sense and the `min_storage_hm3` RHS live in the row bounds
-/// (`row_lower = min_storage_hm3`, `row_upper = +∞`, set by
-/// [`super::rows::fill_filled_min_storage_floor_rows`]); this fill writes only the two unit
-/// coefficients.
-///
-/// Cut validity (§4 trap 3): like the sibling `σ_fill` row, this row couples to the
-/// storage state through the constraint matrix, so LP duality folds the `σ^{v-}`
-/// soft-row dual into the SINGLE reduced cost of the incoming-storage column that
-/// the cut already reads as `rc / col_scale`. NEVER separately extract this row's
-/// dual and add it to the cut coefficient by hand — that double-counts the soft
-/// floor. The dual-extraction entry point (in
-/// `training/backward/duals_extraction.rs`) is correct as-is and is not touched by
-/// this family — the `lp_builder_never_references_dual_extraction` guard test in
-/// this module asserts no `lp/builder` file references it.
-///
-/// DISTINCT from `fill_filling_target_entries` (`σ_fill`, every Filling stage):
-/// same `v_h + slack ≥ floor` shape, but a different slack column, a
-/// non-overlapping stage scope (every Operating stage vs every Filling stage), a
-/// different RHS (`min_storage` here vs `V_target[t]` there), and a different cost
-/// — never conflate them.
-///
-/// No-op at every non-operating stage of a filling hydro and for a non-filling
-/// system (the index list is empty).
+/// DISTINCT from `fill_filling_target_entries` (`σ_fill`): same `v_h + slack ≥ floor`
+/// shape, but a different slack column, a non-overlapping stage scope (Operating vs
+/// Filling), a different RHS (`min_storage` here vs `V_target[t]` there), and a
+/// different cost — never conflate them.
 fn fill_filled_min_storage_floor_entries(
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
@@ -516,40 +359,24 @@ fn fill_filled_min_storage_floor_entries(
         .enumerate()
     {
         let row = row_start + local_idx;
-        // +1 on the outgoing storage column v_h (dense system index h_idx).
         col_entries[h_idx].push((row, 1.0));
-        // +1 on the σ^{v-} slack column.
         col_entries[col_start + local_idx].push((row, 1.0));
     }
 }
 
-/// Fill pumping-flow water-balance row entries into `col_entries`.
-///
-/// A pumping station moves water from its SOURCE reservoir to its DESTINATION
-/// reservoir. The pumped flow column therefore enters two water rows per block:
-///
-/// - the SOURCE hydro's water row with `+tau_h` (water LEAVES the source — the
-///   same sign a turbine/spillage outflow carries in a plant's own row, see
-///   [`fill_state_and_water_entries`]);
-/// - the DESTINATION hydro's water row with `−tau_h` (water ARRIVES at the
-///   destination — the same sign cascade-upstream inflow carries in the
-///   downstream row, see [`fill_state_and_water_entries`]).
+/// Fill pumping-flow water-balance row entries: per block, the pumped-flow column
+/// enters the SOURCE hydro's water row with `+tau_h` (outflow sign, as
+/// turbine/spillage carry) and the DESTINATION hydro's row with `−tau_h` (inflow
+/// sign, as cascade-upstream inflow carries) — see [`fill_state_and_water_entries`].
 ///
 /// `tau_h` is the identical `stage.blocks[blk].duration_hours * M3S_TO_HM3`
-/// expression used by turbine/spillage in [`fill_state_and_water_entries`] —
-/// the same arithmetic on the same operands, so the coefficient is bit-identical
-/// across the two sites; computing a differently-rounded τ would desynchronise
-/// pumping from the cascade water terms.
+/// expression turbine/spillage use, so the coefficient is bit-identical across the
+/// two sites; a differently-rounded τ would desynchronise pumping from the cascade
+/// water terms.
 ///
-/// Stations are iterated dense by SYSTEM index `p_sys` (the dense column
-/// position), mirroring how the NCS column fill iterates NCS. The structural ±τ
-/// entries are written for every station regardless of its commissioning window:
-/// a dormant station's pumping column is forced to `[0, 0]` in
-/// [`super::columns::fill_pumping_columns`], so its ±τ terms multiply a zero
-/// column and contribute nothing (and presolve away). A source or destination
-/// hydro id absent from `ctx.hydro_pos` skips only that side's entry — the
-/// present side is still written, and no panic occurs (semantic validation of the
-/// references is a separate concern).
+/// A dormant station's pumping column is forced to `[0, 0]`, so its ±τ entries
+/// multiply a zero column and contribute nothing — hence the structural entries
+/// are written for every station regardless of its commissioning window.
 pub(super) fn fill_pumping_water_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -560,13 +387,11 @@ pub(super) fn fill_pumping_water_entries(
     let grid = layout.block_grid();
     let row_water = layout.row_water_balance_start();
     for (p_sys, station) in ctx.pumping_stations.iter().enumerate() {
-        // `validate_pumping_station_refs` (run from `SystemBuilder::build()`)
-        // guarantees both refs resolve on a validated `System`, so on the
-        // production path both `Option`s are `Some`. The per-side `if let
-        // Some(...)` guards below are defense-in-depth for direct-construction
-        // test paths that bypass validation — never a production branch. A
-        // one-sided resolve writes a feasible-but-wrong half water coupling, so
-        // the guards must not be promoted to an unconditional index/expect.
+        // `validate_pumping_station_refs` guarantees both refs resolve on a
+        // production `System`; the per-side guards are defense-in-depth for
+        // direct-construction tests. Do NOT promote them to an unconditional
+        // index/expect — a one-sided resolve writes a feasible-but-wrong half
+        // coupling.
         let source = ctx.hydro_pos.get(&station.source_hydro_id).copied();
         let destination = ctx.hydro_pos.get(&station.destination_hydro_id).copied();
         for blk in 0..n_blks {
@@ -582,22 +407,16 @@ pub(super) fn fill_pumping_water_entries(
     }
 }
 
-/// Fill load-balance entries into `col_entries`.
+/// Fill load-balance entries for hydro/thermal generation, line flows, pumping
+/// power, and deficit/excess slacks.
 ///
-/// Writes entries for hydro turbine generation, thermal generation,
-/// line forward/reverse flows, pumping power consumption, and deficit/excess slacks.
+/// FPHA hydros enter with the generation variable `g_{h,k}` at `+1.0`;
+/// constant-productivity hydros enter with `rho * turbine_col`.
 ///
-/// For FPHA hydros the generation variable `g_{h,k}` (in `col_generation_start`)
-/// enters the load balance with coefficient +1.0 instead of `rho * turbine_col`.
-/// For constant-productivity hydros the original `rho * turbine_col` behavior is unchanged.
-///
-/// Pumping power `Eb = consumption_mw_per_m3s · Qb` is a negative injection on the
-/// station's bus: the `pumping_flow` column enters the load-balance row with
-/// `−consumption_mw_per_m3s` — the same negative sign a line carries into its
-/// source bus (`col_fwd` → `−1.0` below), not the `+1.0` of generation. There is
-/// no separate power column; the coefficient scales the SAME flow column, so a
-/// positive coefficient (treating pumping as generation) would credit the bus for
-/// power the station consumes.
+/// Pumping power is a negative injection: the `pumping_flow` column enters with
+/// `−consumption_mw_per_m3s` (no separate power column — the coefficient scales the
+/// SAME flow column). A positive coefficient would credit the bus for power the
+/// station consumes.
 pub(super) fn fill_load_balance_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -672,13 +491,9 @@ pub(super) fn fill_load_balance_entries(
         }
     }
 
-    // Pumping power: negative injection on the station's bus. Iterate ALL
-    // stations dense by SYSTEM index `p_sys` (the dense column position), the
-    // same split the NCS fill uses. The structural entry is written for every
-    // station regardless of its commissioning window: a dormant station's pumping
-    // column is `[0, 0]`, so this `-consumption` term multiplies a zero column and
-    // contributes no bus injection. A bus id absent from `bus_pos` skips that
-    // station with no entry (semantic validation is a separate concern).
+    // Written for every station regardless of commissioning window: a dormant
+    // station's pumping column is `[0, 0]`, so this `-consumption` term multiplies
+    // a zero column and injects nothing.
     for (p_sys, station) in ctx.pumping_stations.iter().enumerate() {
         if let Some(&b_idx) = ctx.bus_pos.get(&station.bus_id) {
             for blk in 0..n_blks {
@@ -702,10 +517,9 @@ pub(super) fn fill_load_balance_entries(
     }
 }
 
-/// Fill FPHA hyperplane constraint entries into `col_entries`.
-///
-/// For each FPHA hydro `h` at this stage, for each block `k`, for each
-/// hyperplane `m`, adds matrix entries to FPHA row `r(h,k,m)`:
+/// Fill FPHA hyperplane constraint entries, one row per `(FPHA hydro, block, plane)`,
+/// implementing `g − gamma_v/2·v − gamma_v/2·v_in − gamma_q·q − gamma_s·s ≤ gamma_0`
+/// (`gamma_0` encoded in the row upper bound by `super::rows::fill_stage_rows`):
 ///
 /// ```text
 /// g_{h,k}  column:  +1.0              (generation variable)
@@ -714,9 +528,6 @@ pub(super) fn fill_load_balance_entries(
 /// q_{h,k}  column:  -gamma_q           (turbined flow)
 /// s_{h,k}  column:  -gamma_s           (spillage)
 /// ```
-///
-/// These entries implement `g - gamma_v/2*v - gamma_v/2*v_in - gamma_q*q - gamma_s*s <= gamma_0`,
-/// where `gamma_0` is already encoded in the row upper bound set by `super::rows::fill_stage_rows`.
 ///
 /// FPHA uses **average** storage `(V_in + V_out)/2`, so `-gamma_v/2` lands on
 /// BOTH the outgoing-storage column (`v = h_idx`) and the incoming-storage column
@@ -745,24 +556,21 @@ pub(super) fn fill_fpha_entries(
             let col_s = layout.spillage_col(h_idx, blk);
             let col_g = layout.generation_col(local_idx, blk);
 
-            // g_{h,k} column: +1.0
             col_entries[col_g].push((row, 1.0));
-            // v (outgoing storage): -gamma_v/2 — average-storage term, also on v_in below.
+            // Average storage: -gamma_v/2 on BOTH the outgoing and incoming storage
+            // columns, not on V_out alone (D06).
             col_entries[col_v].push((row, -plane.gamma_v / 2.0));
-            // v_in (incoming storage, fixed by storage-fixing row): -gamma_v/2.
             col_entries[col_v_in].push((row, -plane.gamma_v / 2.0));
-            // q_{h,k} (turbine): -gamma_q
             col_entries[col_q].push((row, -plane.gamma_q));
-            // s_{h,k} (spillage): -gamma_s
             col_entries[col_s].push((row, -plane.gamma_s));
         },
     );
 }
 
-/// Fill CSC matrix entries for the evaporation constraint rows.
-///
-/// For each evaporation hydro `h` at local position `local_idx`, the equality row
-/// `row_evap_start + local_idx` encodes:
+/// Fill the evaporation equality row per evaporation hydro, encoding
+/// `evaporation_flow − slope/2·v − slope/2·v_in + f_plus − f_minus = intercept_m3s`
+/// (`slope` = `volume_slope_m3s_per_hm3`; `intercept_m3s` set by
+/// `super::rows::fill_stage_rows`):
 ///
 /// ```text
 /// evaporation_flow column:  +1.0
@@ -772,12 +580,9 @@ pub(super) fn fill_fpha_entries(
 /// f_minus column:  -1.0
 /// ```
 ///
-/// These entries implement
-/// `evaporation_flow - volume_slope_m3s_per_hm3/2*v - volume_slope_m3s_per_hm3/2*v_in + f_plus - f_minus = intercept_m3s`,
-/// where `intercept_m3s` is already encoded in the row bounds set by
-/// `super::rows::fill_stage_rows`. When `v_in` is fixed to value `V`, the effective RHS
-/// becomes `intercept_m3s + volume_slope_m3s_per_hm3/2 * V`, which matches the
-/// linearized evaporation at the average volume `(v + V) / 2`.
+/// Like FPHA, the `slope/2` lands on BOTH storage columns: with `v_in` fixed to
+/// `V`, the effective RHS is `intercept_m3s + slope/2·V`, matching the linearized
+/// evaporation at the average volume `(v + V) / 2`.
 pub(super) fn fill_evaporation_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -802,7 +607,6 @@ pub(super) fn fill_evaporation_entries(
                 }
             }
             EvaporationModel::None => {
-                // Should never happen: evap_hydro_indices only contains linearized hydros.
                 debug_assert!(
                     false,
                     "evap_hydro_indices contains hydro {h_idx} but model is None"
@@ -833,42 +637,19 @@ pub(super) fn fill_evaporation_entries(
 pub(super) struct LpMatrixBuffers<'a> {
     /// CSC column entries (column index -> list of (row, coefficient)).
     pub(super) col_entries: &'a mut [Vec<(usize, f64)>],
-    /// Column upper bounds.
     pub(super) col_upper: &'a mut [f64],
-    /// Objective function coefficients.
     pub(super) objective: &'a mut [f64],
-    /// Row lower bounds.
     pub(super) row_lower: &'a mut [f64],
-    /// Row upper bounds.
     pub(super) row_upper: &'a mut [f64],
 }
 
-/// Fill CSC matrix entries, row bounds, and slack column data for all active
-/// generic constraint rows at this stage.
+/// Fill matrix entries, row bounds, and slack column data for every active generic
+/// constraint row at this stage, resolving each expression term via
+/// `resolve_variable_ref` and pricing any enabled slack at `penalty * block_hours`.
 ///
-/// For each active `(constraint, block)` pair recorded in
-/// `layout.generic_constraint_rows`:
-///
-/// 1. Sets `row_lower` / `row_upper` for the generic constraint row according
-///    to the constraint sense:
-///    - `<=`: `row_lower = -INF`, `row_upper = bound`
-///    - `>=`: `row_lower = bound`, `row_upper = +INF`
-///    - `==`: `row_lower = bound`, `row_upper = bound`
-///
-/// 2. Iterates over the constraint expression terms, calls
-///    `resolve_variable_ref` for each `LinearTerm`, and pushes
-///    `(row_index, coefficient * multiplier)` entries into `col_entries`.
-///
-/// 3. When `slack.enabled = true`, sets slack column bounds to `[0, +INF)` and
-///    objective to `penalty * block_hours`:
-///    - `<=`: one slack column `s_g` with CSC entry `(row, -1.0)`.
-///    - `>=`: one slack column `s_g` with CSC entry `(row, +1.0)`.
-///    - `==`: two slack columns `s_g_plus` and `s_g_minus` with CSC entries
-///      `(row, +1.0)` and `(row, -1.0)` respectively.
-///
-/// Unknown entity IDs in variable refs produce zero contributions (the empty
-/// vec returned by `resolve_variable_ref` is skipped), which is the
-/// defense-in-depth fallback for referential validation gaps.
+/// Unknown entity IDs in variable refs produce zero contributions (the empty vec
+/// from `resolve_variable_ref` is skipped) — the defense-in-depth fallback for
+/// referential validation gaps.
 pub(super) fn fill_generic_constraint_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -993,7 +774,6 @@ pub(super) fn fill_generic_constraint_entries(
             col_upper[plus_col] = f64::INFINITY;
             objective[plus_col] = obj_coeff;
 
-            // CSC entry for plus slack depends on sense.
             match entry.sense {
                 ConstraintSense::LessEqual => {
                     // LHS - s_g <= bound  →  slack enters with -1.0
@@ -1009,9 +789,7 @@ pub(super) fn fill_generic_constraint_entries(
                 }
             }
 
-            // minus slack: only for equality constraints.
             if let Some(minus_col) = entry.slack_minus_col {
-                // col_lower is already 0.0 from vec initialisation.
                 col_upper[minus_col] = f64::INFINITY;
                 objective[minus_col] = obj_coeff;
                 // LHS + s_g_plus - s_g_minus == bound  →  minus slack with -1.0
@@ -1021,12 +799,9 @@ pub(super) fn fill_generic_constraint_entries(
     }
 }
 
-/// Fill NCS generation entries into the load balance constraint rows.
+/// Inject `+1.0` for each NCS at its connected bus's load-balance row, per block.
 ///
-/// For each NCS `r` at block `k`, injects `+1.0` at the load balance row of the
-/// connected bus, identical to thermal generation injection. Iterates ALL NCS
-/// dense by SYSTEM index (the dense column position). The structural `+1.0` is
-/// written for every NCS regardless of its commissioning window: a dormant NCS's
+/// Written for every NCS regardless of its commissioning window: a dormant NCS's
 /// generation column is forced to `[0, 0]`, so the injection multiplies a zero
 /// column and contributes nothing.
 pub(super) fn fill_ncs_load_balance_entries(
@@ -1048,18 +823,12 @@ pub(super) fn fill_ncs_load_balance_entries(
     }
 }
 
-/// Fill z-inflow definition constraint entries into `col_entries`.
+/// Fill the z-inflow definition row per hydro:
+/// `z_h − Σ_l ψ_l·lag_in[h,l] = base_h + σ_h·η_h` — `+1.0` on `z_h`, `−ψ_l` on each
+/// nonzero lag column.
 ///
-/// For each hydro h, the z-inflow constraint is:
-///   `z_h - sum_l[psi_l * lag_in[h,l]] = base_h + sigma_h * eta_h`
-///
-/// Matrix entries:
-/// - Column `z_h`: coefficient `+1.0` in row `row_z_inflow_start + h`
-/// - For each lag l with nonzero `psi_l`: column `inflow_lags.start + lag * n_h + h`
-///   gets coefficient `-psi_l` in row `row_z_inflow_start + h`
-///
-/// Note: the lag column layout matches the LP builder convention (lag-major):
-/// the column at `inflow_lags.start + lag * n_h + h` stores lag `l` of hydro `h`.
+/// The lag column layout is lag-major (`inflow_lags.start + lag * n_h + h`),
+/// matching the water-balance AR-dynamics entries in `fill_state_and_water_entries`.
 pub(super) fn fill_z_inflow_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -1073,13 +842,9 @@ pub(super) fn fill_z_inflow_entries(
     for h_idx in 0..n_h {
         let row = layout.row_z_inflow_start() + h_idx;
 
-        // z_h column: coefficient +1.0
         let col_z = layout.col_z_inflow_start() + h_idx;
         col_entries[col_z].push((row, 1.0));
 
-        // Lag columns: coefficient -psi_l for each nonzero psi.
-        // Uses lag-major layout (lag * n_h + h) matching the water-balance
-        // AR dynamics entries in fill_state_and_water_entries.
         if ctx.par_lp.n_stages() > 0 && ctx.par_lp.n_hydros() == n_h {
             let psi = ctx.par_lp.psi_slice(stage_idx, h_idx);
             for (lag, &psi_val) in psi.iter().enumerate() {
@@ -1092,17 +857,14 @@ pub(super) fn fill_z_inflow_entries(
     }
 }
 
-/// Fill CSC matrix entries for the 4 operational violation constraint families.
+/// Fill entries for the 4 operational-violation families, linking decision
+/// variables to their slack columns:
 ///
-/// Each constraint links decision variables (turbine, spillage, diversion, generation)
-/// to their respective slack columns via the constraint rows allocated in
-/// [`StageLayout`].
-///
-/// - **Min outflow** (`>=`): `sum_blk[tau * (q + s + d)] + sigma_below >= RHS`
-/// - **Max outflow** (`<=`): `sum_blk[tau * (q + s + d)] - sigma_above <= RHS`
-/// - **Min turbine** (`>=`): `sum_blk[tau * q] + sigma_below >= RHS`
-/// - **Min generation** (`>=`): `sum_blk[coeff * var * hours] + sigma_below >= RHS`
-///   where `coeff * var` is `rho * q` for constant-productivity hydros or `g` for FPHA.
+/// - **Min outflow** (`>=`): `q + s + d + sigma_below`
+/// - **Max outflow** (`<=`): `q + s + d - sigma_above`
+/// - **Min turbine** (`>=`): `q + sigma_below`
+/// - **Min generation** (`>=`): `var + sigma_below`, where `var` is `rho * q` for
+///   constant-productivity hydros or the generation column `g` for FPHA.
 pub(super) fn fill_operational_violation_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -1113,7 +875,6 @@ pub(super) fn fill_operational_violation_entries(
     let grid = layout.block_grid();
 
     for (h_idx, fpha_local_entry) in layout.fpha_local_index.iter().enumerate() {
-        // Min outflow (per block): q + s + d + sigma >= min_outflow_m3s
         for blk in 0..n_blks {
             let row = grid.flat(layout.row_min_outflow_start(), h_idx, blk);
             let col_q = layout.turbine_col(h_idx, blk);
@@ -1126,7 +887,6 @@ pub(super) fn fill_operational_violation_entries(
             col_entries[col_slack].push((row, 1.0));
         }
 
-        // Max outflow (per block): q + s + d - sigma <= max_outflow_m3s
         for blk in 0..n_blks {
             let row = grid.flat(layout.row_max_outflow_start(), h_idx, blk);
             let col_q = layout.turbine_col(h_idx, blk);
@@ -1139,7 +899,6 @@ pub(super) fn fill_operational_violation_entries(
             col_entries[col_slack].push((row, -1.0));
         }
 
-        // Min turbine flow (per block): q + sigma >= min_turbined_m3s
         for blk in 0..n_blks {
             let row = grid.flat(layout.row_min_turbine_start(), h_idx, blk);
             let col_q = layout.turbine_col(h_idx, blk);
@@ -1148,9 +907,7 @@ pub(super) fn fill_operational_violation_entries(
             col_entries[col_slack].push((row, 1.0));
         }
 
-        // Min generation (per block): g + sigma >= min_generation_mw
         if let Some(&local_fpha_idx) = fpha_local_entry.as_ref() {
-            // FPHA: generation variable g_{h,blk} (already in MW).
             for blk in 0..n_blks {
                 let row = grid.flat(layout.row_min_generation_start(), h_idx, blk);
                 let col_g = layout.generation_col(local_fpha_idx, blk);
@@ -1159,8 +916,7 @@ pub(super) fn fill_operational_violation_entries(
                 col_entries[col_slack].push((row, 1.0));
             }
         } else {
-            // Constant productivity: gen_k = rho * q_k (MW).
-            // Always read rho from the resolved per-stage production model.
+            // Read rho from the resolved per-stage production model, not a static field.
             let rho = match ctx.production_models.model(h_idx, stage_idx) {
                 ResolvedProductionModel::ConstantProductivity { productivity } => *productivity,
                 ResolvedProductionModel::Fpha { .. } => {
@@ -1215,14 +971,10 @@ pub(super) fn build_stage_matrix_entries(
 /// Returns `(col_starts, row_indices, values)` in the format required by
 /// `SolverInterface::load_model`.
 pub(super) fn assemble_csc(col_entries: &[Vec<(usize, f64)>]) -> (Vec<i32>, Vec<i32>, Vec<f64>) {
-    // Contract: within each column the (row, _) entries are sorted by row index
-    // (non-decreasing). The caller (`build_single_stage_template` CSC assembly)
-    // owns the `sort_unstable_by_key(|&(row, _)| row)`; `assemble_csc` emits each
-    // column's rows in iteration order and does NOT sort. Passing unsorted entries
-    // produces CSC `row_indices` out of order within a column, which HiGHS/CLP may
-    // silently misfactorize — the assert surfaces a missing caller-side sort rather
-    // than masking it with an internal re-sort. debug-only: the release/hot path
-    // pays no scan.
+    // Each column's entries must arrive row-sorted: the caller owns the sort and
+    // `assemble_csc` does NOT sort. Unsorted `row_indices` within a column may make
+    // HiGHS/CLP silently misfactorize, so this surfaces a missing caller-side sort
+    // rather than masking it with an internal re-sort (debug-only).
     debug_assert!(
         col_entries
             .iter()
@@ -1239,17 +991,14 @@ pub(super) fn assemble_csc(col_entries: &[Vec<(usize, f64)>]) -> (Vec<i32>, Vec<
     for entries in col_entries {
         col_starts.push(offset);
         for &(row, val) in entries {
-            // Rationale: the HiGHS/CLP C API requires i32 row indices and column
-            // offsets. The stage LP row count is bounded by O(entities^2 * blocks);
-            // for any realistic SDDP problem this is far below i32::MAX, so the
-            // usize -> i32 cast cannot truncate or wrap.
+            // Rationale: the stage LP row count is far below i32::MAX, so the
+            // i32 cast the HiGHS/CLP C API demands cannot truncate or wrap.
             #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
             row_indices.push(row as i32);
             values.push(val);
         }
-        // Rationale: the running CSC offset (total nonzeros so far) is bounded by
-        // the stage LP nonzero count, far below i32::MAX for any realistic SDDP
-        // problem; the i32 offset the solver C API demands cannot overflow.
+        // Rationale: the running nonzero offset is far below i32::MAX, so the i32
+        // offset the solver C API demands cannot overflow.
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         {
             offset += entries.len() as i32;

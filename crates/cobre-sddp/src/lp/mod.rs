@@ -22,6 +22,4 @@ pub mod builder;
 pub(crate) mod generic_constraints;
 pub mod indexer;
 
-// Re-exported here so the crate-root curated surface in `lib.rs` can re-point
-// through this cluster.
 pub use builder::{StageGeometry, StageTemplates, build_stage_templates};

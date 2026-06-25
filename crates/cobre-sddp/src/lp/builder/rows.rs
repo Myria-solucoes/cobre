@@ -45,24 +45,16 @@ pub(super) fn fill_stage_rows(
     (row_lower, row_upper)
 }
 
-/// Fill water-balance row bounds: static RHS = ζ · (`deterministic_base_h` − `water_withdrawal_m3s_h`).
+/// Fill water-balance row bounds: static RHS = ζ · (`deterministic_base_h` −
+/// `water_withdrawal_m3s_h`); the PAR(p) noise innovation is added at solve time.
 ///
-/// The withdrawal is a fixed schedule that reduces the effective inflow available
-/// to the reservoir. Subtracting it from the base keeps the row bound correct for
-/// the stage template; the PAR(p) noise innovation is added at solve time via patches.
-///
-/// A hydro in the `PreFilling` phase has the frozen-storage-identity row
-/// `v_h − v_h_in = 0` (matrix entries by
-/// [`super::entries::fill_state_and_water_entries`]), so its RHS is `0` — NOT
-/// `ζ·(base − withdrawal)`. Its base inflow is carried instead by the `z_h` column
-/// routed onto the short-circuit target row (the first non-`PreFilling`
-/// downstream, resolved by [`super::entries::resolve_shortcircuit_target`]), and
-/// its withdrawal DEMAND transfers to that target row's RHS here (served by the
-/// target's own withdrawal slacks).
-/// The solve-time noise patch on a `PreFilling` row is neutralized by zeroing the
-/// hydro's `noise_scale` (see `super::scaling::compute_noise_scale`), so the
-/// `0` RHS survives to the solve. Leaving a nonzero RHS here would break the
-/// frozen identity even with the noise patch zeroed.
+/// A `PreFilling` hydro's row is the frozen identity `v_h − v_h_in = 0` (matrix
+/// entries by [`super::entries::fill_state_and_water_entries`]), so its RHS is `0`,
+/// NOT `ζ·(base − withdrawal)`: its base inflow rides the routed `z_h` column on
+/// the short-circuit target row, and its withdrawal DEMAND transfers to that
+/// target's RHS below. The solve-time noise patch is neutralized by zeroing the
+/// hydro's `noise_scale`, so the `0` RHS survives; a nonzero RHS here would break
+/// the frozen identity even with the noise patch zeroed.
 fn fill_water_balance_rows(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -75,8 +67,7 @@ fn fill_water_balance_rows(
     for h_idx in 0..layout.n_h {
         let row = layout.row_water_balance_start() + h_idx;
         if super::entries::is_prefilling(ctx, stage, h_idx) {
-            // Frozen-storage identity RHS: 0. The base inflow rides the routed
-            // `z_h` column on the downstream row, never this RHS.
+            // Frozen identity: RHS 0 (the base inflow rides the routed `z_h` column).
             row_lower[row] = 0.0;
             row_upper[row] = 0.0;
             continue;
@@ -96,19 +87,13 @@ fn fill_water_balance_rows(
         row_upper[row] = rhs;
     }
 
-    // Transfer each PreFilling hydro `h`'s withdrawal DEMAND to its short-circuit
-    // target `d`'s RHS: `d` must additionally release `ζ·withdrawal_h` to serve the
-    // absent reservoir's downstream withdrawal, absorbed by `d`'s existing
-    // withdrawal slacks. `d` is the FIRST non-PreFilling downstream resolved by
-    // `super::entries::resolve_shortcircuit_target` — the SAME target the matrix
-    // routing in `fill_prefilling_shortcircuit` uses, so the RHS transfer and the
-    // matrix coupling agree. Routing onto the immediate `downstream(h)` instead
-    // would land `ζ·withdrawal_h` on a PreFilling downstream's frozen-identity RHS
-    // (which must stay `0`), the same corruption the matrix-side resolution guards
-    // against. A second pass (not folded into the loop above) because `d` may be
-    // filled before or after `h` in index order. Sink case (no non-PreFilling
-    // downstream — terminal, unresolved id, or PreFilling all the way down)
-    // transfers nothing.
+    // Transfer each PreFilling hydro's withdrawal DEMAND (`ζ·withdrawal_h`) to its
+    // short-circuit target `d`'s RHS, absorbed by `d`'s withdrawal slacks. `d` MUST
+    // be the SAME target `fill_prefilling_shortcircuit` routed the matrix terms to,
+    // so the RHS transfer and the matrix coupling agree; routing onto the immediate
+    // `downstream(h)` would land it on a PreFilling downstream's frozen-identity RHS
+    // (which must stay `0`). A second pass, since `d` may be filled before or after
+    // `h` in index order; sink case transfers nothing.
     for h_idx in 0..layout.n_h {
         if !super::entries::is_prefilling(ctx, stage, h_idx) {
             continue;
@@ -128,39 +113,22 @@ fn fill_water_balance_rows(
     }
 }
 
-/// Fill per-stage `σ_fill`-target row bounds: `≥` with `row_lower = V_target[t]`,
-/// `row_upper = +∞`.
-///
-/// One row per filling hydro in the Filling phase at this stage (the
-/// `filling_target` family; the LHS coefficients `v_h + σ_fill` are emitted by
-/// [`super::entries::fill_filling_target_entries`]). The row reads, in hm³:
-///
-/// ```text
-/// v_h + σ_fill ≥ V_target[t]
-/// ```
+/// Fill the soft filling-target row bounds (`v_h + σ_fill ≥ V_target[t]`, in hm³):
+/// `row_lower = V_target[t]`, `row_upper = +∞`. LHS coefficients are emitted by
+/// [`super::entries::fill_filling_target_entries`].
 ///
 /// **Contract — the RHS is the per-stage `V_target[t]` (backward-anchored), NOT
-/// `min_storage` at every stage.** `V_target[t]` is the precomputed minimum
-/// target-storage trajectory read from `ctx.filling_v_target[(h_idx, stage_id)]`;
-/// it is folded backward from the dead volume in
-/// [`build_filling_v_target`](super::template::build_filling_v_target) so the LAST
-/// Filling stage's floor equals `min_storage_hm3` while every EARLIER stage's
-/// floor is strictly lower (the reservoir is only required to have accumulated the
-/// running minimum by stage `t`). The wrong-but-compiling alternative — writing
-/// the resolved `min_storage_hm3` at every Filling stage (the v1 terminal rule
-/// applied per-stage) — would demand the reservoir already hold the full dead
-/// volume from the FIRST Filling stage, an over-strict floor that the soft slack
-/// would absorb at cost every stage. The trajectory cannot be recomputed here (a
-/// per-stage helper cannot see other stages' ζ·rate), so it MUST come from the
-/// precompute.
+/// `min_storage` at every stage.** `V_target[t]` is the precomputed trajectory
+/// folded backward from the dead volume in
+/// [`build_filling_v_target`](super::template::build_filling_v_target), so only the
+/// LAST Filling stage's floor equals `min_storage_hm3` and earlier floors are
+/// strictly lower. Writing `min_storage_hm3` at every Filling stage would demand
+/// the full dead volume from the FIRST Filling stage — an over-strict floor the
+/// soft slack absorbs at cost every stage. A per-stage helper cannot see other
+/// stages' ζ·rate, so the trajectory MUST come from the precompute.
 ///
-/// This is a SOFT `≥` (the `σ_fill` slack relaxes it), never a hard column bound on
-/// `v_h`: a hydro that fills short must keep a feasible LP, with the cost driving
-/// `σ_fill → 0` whenever water permits.
-///
-/// No-op at every non-filling stage and for a non-filling system (the index list
-/// is empty), so `row_lower`/`row_upper` are byte-identical to a build without this
-/// family.
+/// SOFT `≥` (the `σ_fill` slack relaxes it), never a hard column bound on `v_h`, so
+/// a hydro that fills short keeps a feasible LP.
 fn fill_filling_target_rows(
     ctx: &TemplateBuildCtx<'_>,
     stage_id: i32,
@@ -170,12 +138,10 @@ fn fill_filling_target_rows(
 ) {
     let row_start = layout.row_filling_target_start();
     for (local_idx, &h_idx) in layout.filling_target_hydro_indices.iter().enumerate() {
-        // Membership (`identify_filling_target_hydros`) and the precompute
-        // (`build_filling_v_target`) share the Filling-phase predicate, so every
-        // enumerated `(h_idx, stage_id)` has a `V_target` entry. A lookup miss is
-        // a construction bug between those two sources; this fails loud rather
-        // than writing a `0.0` floor, which would make `v + σ_fill ≥ 0` trivially
-        // true and silently neutralize the filling constraint.
+        // Fail loud on a lookup miss rather than writing a `0.0` floor, which would
+        // make `v + σ_fill ≥ 0` trivially true and silently neutralize the
+        // constraint. Membership and the `build_filling_v_target` precompute share
+        // the Filling-phase predicate, so a miss is a construction bug between them.
         let Some(v_target) = ctx.filling_v_target.get(&(h_idx, stage_id)).copied() else {
             unreachable!(
                 "no V_target for filling hydro {h_idx} at stage id {stage_id}: \
@@ -188,37 +154,22 @@ fn fill_filling_target_rows(
     }
 }
 
-/// Fill soft `σ^{v-}` operating-floor row bounds: `≥` with
-/// `row_lower = min_storage_hm3`, `row_upper = +∞`.
-///
-/// One row per filling hydro in the Operating phase at this stage (the
-/// `filled_min_storage_floor` family; the LHS coefficients `v_h + σ^{v-}` are emitted by
-/// [`super::entries::fill_filled_min_storage_floor_entries`]). The row reads, in hm³:
-///
-/// ```text
-/// v_h + σ^{v-} ≥ min_storage_hm3
-/// ```
+/// Fill the soft operating-floor row bounds (`v_h + σ^{v-} ≥ min_storage_hm3`, in
+/// hm³): `row_lower = min_storage_hm3`, `row_upper = +∞`. LHS coefficients are
+/// emitted by [`super::entries::fill_filled_min_storage_floor_entries`].
 ///
 /// `min_storage_hm3` is the RESOLVED per-stage dead volume
-/// (`hydro_bounds(h_idx, stage_idx).min_storage_hm3`), the same field
-/// `fill_storage_columns` reads — reading the raw `Hydro.min_storage_hm3` entity
-/// field instead would silently drop any per-stage override.
+/// (`hydro_bounds(h_idx, stage_idx).min_storage_hm3`); reading the raw
+/// `Hydro.min_storage_hm3` entity field instead would drop any per-stage override.
 ///
-/// This is a SOFT `≥` (the `σ^{v-}` slack relaxes it), never a hard column bound on
-/// `v_h`: `fill_storage_columns` deliberately relaxes the hard floor of a filling
-/// hydro to `0` so a reservoir that finished filling short keeps a feasible LP,
-/// with the high `storage_violation_below_cost` driving `σ^{v-} → 0` whenever
-/// storage recovers above `min_storage`.
+/// SOFT `≥`, never a hard column bound: `fill_storage_columns` relaxes a filling
+/// hydro's hard floor to `0` so a reservoir that finished filling short keeps a
+/// feasible LP, with `storage_violation_below_cost` driving `σ^{v-} → 0`.
 ///
-/// DISTINCT from `fill_filling_target_rows` (`σ_fill`): `σ^{v-}` fires at EVERY
-/// Operating stage of a filling hydro, whereas `σ_fill` fires at EVERY Filling
-/// stage (`start ≤ id < entry`). Same `≥` shape, different RHS
-/// (`min_storage` here vs the per-stage `V_target[t]` there), non-overlapping
-/// stage scope (Operating vs Filling), different slack column and cost.
-///
-/// No-op at every non-operating stage of a filling hydro and for a non-filling
-/// system (the index list is empty), so `row_lower`/`row_upper` are byte-identical
-/// to a build without this family.
+/// DISTINCT from `fill_filling_target_rows` (`σ_fill`): same `≥` shape but a
+/// non-overlapping stage scope (Operating vs Filling), a different RHS
+/// (`min_storage` here vs the per-stage `V_target[t]` there), and a different slack
+/// column and cost.
 fn fill_filled_min_storage_floor_rows(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -275,14 +226,11 @@ fn fill_load_balance_rows(
     }
 }
 
-/// Fill FPHA hyperplane row bounds: `row_lower = -INF`, `row_upper = gamma_0`
-/// (the pre-scaled `intercept`).
-///
-/// The constraint is `g_{h,k} - gamma_v/2·v - gamma_v/2·v_in - gamma_q·q - gamma_s·s <= gamma_0`.
-/// The `v`, `v_in`, `q`, `s` contributions live in the CSC matrix entries
-/// ([`super::entries::fill_fpha_entries`]), so the static upper bound carries only the `intercept`.
-/// Driven by [`for_each_fpha_plane`] so these bounds and the matrix coefficients
-/// share one row cursor.
+/// Fill FPHA hyperplane row bounds: `row_lower = -INF`, `row_upper = gamma_0` (the
+/// pre-scaled `intercept`). The `v`/`v_in`/`q`/`s` contributions live in the matrix
+/// entries ([`super::entries::fill_fpha_entries`]), so the upper bound carries only
+/// the intercept. Driven by [`for_each_fpha_plane`] so these bounds and the matrix
+/// coefficients share one row cursor.
 fn fill_fpha_rows(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -302,12 +250,9 @@ fn fill_fpha_rows(
 }
 
 /// Fill evaporation row bounds: equality `row_lower == row_upper == intercept_m3s`.
-///
-/// The linearised outflow is
-/// `intercept_m3s + volume_slope_m3s_per_hm3/2·(v + v_in - 2·reference_volume)`.
-/// The volume-dependent term `volume_slope_m3s_per_hm3/2 · v` is added via the
-/// CSC matrix entry on the outgoing-storage column, so the static row bounds
-/// encode only the constant `intercept_m3s`.
+/// The volume-dependent term lives in the matrix entries
+/// ([`super::entries::fill_evaporation_entries`]), so the row bounds encode only
+/// the constant intercept.
 fn fill_evaporation_rows(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -329,8 +274,6 @@ fn fill_evaporation_rows(
                 row_upper[row] = intercept_m3s;
             }
             EvaporationModel::None => {
-                // Should never happen: evap_hydro_indices only contains linearized hydros.
-                // No row is written; release builds skip this hydro.
                 debug_assert!(
                     false,
                     "evap_hydro_indices contains hydro {h_idx} but model is None"
@@ -381,17 +324,10 @@ fn fill_operational_violation_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    // All four operational-violation row families share the same per-hydro bound
-    // lookup, so the bound is read once per hydro and a `(row_start, lower, upper)`
-    // descriptor is built from it. Each family targets `row_lower`/`row_upper` by its
-    // own computed row index, so the visit order is irrelevant to the result. The
-    // descriptor order is nonetheless pinned to the canonical row-region order
-    // (min-outflow, max-outflow, min-turbine, min-generation) so the source-level
-    // write order stays auditable against the layout. Per-family sense:
-    //   min-outflow   (>=): LHS + sigma >= min_outflow_m3s
-    //   max-outflow   (<=): LHS - sigma <= max_outflow_m3s
-    //   min-turbine   (>=): LHS + sigma >= min_turbined_m3s
-    //   min-generation(>=): LHS + sigma >= min_generation_mw
+    // Each family writes its own computed row index, so the visit order does not
+    // affect the result; the descriptor order is nonetheless pinned to the canonical
+    // row-region order (min-outflow, max-outflow, min-turbine, min-generation) so the
+    // write order stays auditable against the layout.
     let grid = layout.block_grid();
     for h_idx in 0..layout.n_h {
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
@@ -427,25 +363,16 @@ fn fill_operational_violation_rows(
     }
 }
 
-/// Fill row bounds for anticipated-fishing equality constraints.
-///
-/// For each anticipated plant `i`, sets one row to equality `0 == 0`. The
-/// fishing constraint balances per-block thermal generation (`MWh`) against the
-/// committed power level in the `anticipated_state` slot
-/// (`MW` × `block_hours_total` = `MWh`).
-///
-/// The predicate is always-active: one row per anticipated plant at every stage.
-/// When `n_anticipated == 0`, this function is a no-op.
+/// Fill anticipated-fishing equality row bounds: `0 == 0` per anticipated plant.
+/// Always-active: one row per plant at every stage.
 pub(super) fn fill_anticipated_fishing_rows(
     ctx: &TemplateBuildCtx<'_>,
     layout: &StageLayout,
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    // Every anticipated plant emits a fishing row at the dense offset
-    // `row_anticipated_fishing_start + local_idx`. The offset is dense — not a
-    // sparse `active_pos` offset — precisely because the fishing constraint is
-    // always active for every anticipated plant.
+    // Dense offset (`+ local_idx`), not a sparse `active_pos` offset, because the
+    // fishing constraint is always active for every anticipated plant.
     for local_idx in 0..ctx.n_anticipated {
         let row = layout.anticipated.row_anticipated_fishing_start + local_idx;
         row_lower[row] = 0.0;
@@ -457,16 +384,10 @@ pub(super) fn fill_anticipated_fishing_rows(
     );
 }
 
-/// Fill row bounds for the `anticipated_state_out` definition equality rows.
-///
-/// For each active anticipated plant (`stage_idx + K_i < n_stages`),
-/// sets one row to equality `0 == 0`. Inactive plants emit no row, so rows are
-/// packed at the sparse `active_pos` offset. This gates on
-/// `stage_idx + K_i < n_stages`, unlike [`fill_anticipated_fishing_rows`], which
-/// is always active and emits one row per plant at a dense offset.
-///
-/// No-op when `n_anticipated == 0` or when no plant is active at
-/// `stage_idx`.
+/// Fill the `anticipated_state_out` definition equality row bounds (`0 == 0`) for
+/// each active plant (`stage_idx + K_i < n_stages`). Inactive plants emit no row,
+/// so rows pack at the SPARSE `active_pos` offset — unlike
+/// [`fill_anticipated_fishing_rows`], which is always active and uses a dense offset.
 pub(super) fn fill_anticipated_state_out_def_rows(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,

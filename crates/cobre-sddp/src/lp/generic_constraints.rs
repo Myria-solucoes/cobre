@@ -1,49 +1,22 @@
 //! Variable reference to LP column index mapping for generic constraints.
 //!
-//! This module provides `resolve_variable_ref`, which maps a [`VariableRef`]
-//! and block index to a list of `(column_index, coefficient_multiplier)` pairs.
-//! The LP builder calls this function for each [`cobre_core::LinearTerm`] in a
-//! generic constraint expression to produce the CSC matrix entries.
+//! `resolve_variable_ref` maps a [`VariableRef`] and block index to a list of
+//! `(column_index, coefficient_multiplier)` pairs; the LP builder calls it for each
+//! [`cobre_core::LinearTerm`] of a generic-constraint expression to produce CSC
+//! entries. Column offsets come from the [`GenericResolverGeom`] view (role-(a)
+//! state region through its [`StateLayout`] handle, role-(b) equipment ranges
+//! directly), with all block-stride arithmetic routed through the single-owner
+//! [`BlockGrid`] primitive.
 //!
-//! ## Column index arithmetic
+//! For a block-level variable with `block_id = None`, the resolver returns the
+//! column for the *current* `block_idx`; the caller loops over blocks and calls once
+//! per block, so per-block expansion happens in the caller, not here.
 //!
-//! Column offsets come from the [`GenericResolverGeom`] view: the stage-invariant
-//! role-(a) state region (storage and z-inflow columns) through its [`StateLayout`]
-//! handle, and the per-stage role-(b) equipment ranges directly. The block-stride
-//! arithmetic routes through the [`BlockGrid`] primitive built from the view's own
-//! `n_blks`/`max_deficit_segments` so the stride expression is single-owned:
-//!
-//! - Block-level variables (turbine, spillage, thermal, line, excess) use the
-//!   flat block-major address [`BlockGrid::flat`] (`start + entity * n_blks + blk`).
-//! - Deficit uses the 3-term [`BlockGrid::deficit`] (bus-outer, segment-middle,
-//!   block-inner).
-//! - Stage-level variables: storage (role (a)) uses `state.storage.start + pos`;
-//!   evaporation (role (b)) reads the evap-flow column.
-//! - FPHA generation uses [`BlockGrid::flat`] on the role-(b) `generation.start`.
-//!
-//! ## Block expansion
-//!
-//! When `block_id = None` for a block-level variable, the function returns the
-//! column for the *current* `block_idx` rather than expanding to all blocks.
-//! The caller iterates over blocks and calls this function once per block, so
-//! the per-block expansion happens in the caller loop, not here.
-//!
-//! ## Pumping columns
-//!
-//! `PumpingFlow` resolves to the block-major pumping-flow column
-//! `grid.flat(col_pumping_start, p_idx, blk)` (via [`BlockGrid::flat`]).
-//! `PumpingPower` aliases the SAME
-//! flow column scaled by the station's `consumption_mw_per_m3s` rate — power is
-//! affine in flow, so it has no column of its own (a separate column would be an
-//! unconstrained free variable). The scale matches the bus-balance coupling
-//! coefficient.
-//!
-//! ## Stub entities
-//!
-//! Variables that reference entity types with no LP columns (contracts,
-//! non-controllable sources, withdrawal) return an empty vec. This is consistent
-//! with the convention that the constraint term has no LP effect for those
-//! entity types.
+//! `PumpingPower` aliases the SAME flow column as `PumpingFlow`, scaled by the
+//! station's `consumption_mw_per_m3s` — power is affine in flow, so a column of its
+//! own would be an unconstrained free variable. Variables referencing entity types
+//! with no LP columns (contracts, non-controllable sources, withdrawal) return an
+//! empty vec.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
@@ -53,63 +26,53 @@ use cobre_core::{CascadeTopology, ConstraintExpression, EntityId, PumpingStation
 use crate::hydro_models::{ProductionModelSet, ResolvedProductionModel};
 use crate::indexer::{BlockGrid, EvaporationIndices, StateLayout};
 
-/// Borrowed LP-column geometry the generic-constraint resolver reads, split by
-/// concern between the stage-invariant role-(a) state region and the per-stage
-/// role-(b) equipment geometry.
-///
-/// Built in `entries.rs::fill_generic_constraint_entries` from the `StageLayout`
-/// being filled (which is private to the `builder` module), so this view is the
-/// resolver's window onto the geometry without exposing `StageLayout` outside
-/// `builder`. Every field is a borrow or a `Copy` scalar — constructing the view
-/// is allocation-free and does not clone the layout.
+/// Borrowed LP-column geometry the generic-constraint resolver reads — the
+/// resolver's window onto a `StageLayout` (private to `builder`) without exposing it.
 ///
 /// ## Role split (the load-bearing distinction for the cut path)
 ///
-/// - **Role (a)** — `state`: the stage-invariant state region (storage and
-///   z-inflow columns). These offsets are pure functions of `N`, `L`, `A`,
-///   `k_max` and are owned by [`StateLayout`]; resolving a `HydroStorage` or
-///   `HydroInflow` term through the handle is what keeps a generic constraint's
-///   storage/inflow column landing on the same column the cut path reads.
-/// - **Role (b)** — every other field: per-stage equipment/slack column ranges
-///   (turbine, spillage, …, deficit, generation), the block-stride constants
-///   (`n_blks`, `max_deficit_segments`), the FPHA/evaporation local maps, and the
-///   anticipated-decision column base + reverse map. These ride this stage's own
-///   block count and are owned by `StageLayout`.
+/// - **Role (a)** — `state`: storage and z-inflow columns, owned by [`StateLayout`].
+///   Resolving a `HydroStorage`/`HydroInflow` term through the handle is what keeps a
+///   generic constraint's storage/inflow column landing on the same column the cut
+///   path reads.
+/// - **Role (b)** — every other field: per-stage equipment/slack column ranges, the
+///   block-stride constants, the FPHA/evaporation local maps, and the
+///   anticipated-decision base + reverse map, riding this stage's own block count.
 pub(crate) struct GenericResolverGeom<'a> {
     /// Role-(a) state-region handle (storage + z-inflow column owner).
     pub state: &'a StateLayout,
-    /// Role-(b) turbine column range (one per hydro per block).
+    /// Turbine column range (one per hydro per block).
     pub turbine: &'a Range<usize>,
-    /// Role-(b) spillage column range.
+    /// Spillage column range.
     pub spillage: &'a Range<usize>,
-    /// Role-(b) diversion column range.
+    /// Diversion column range.
     pub diversion: &'a Range<usize>,
-    /// Role-(b) thermal column range.
+    /// Thermal column range.
     pub thermal: &'a Range<usize>,
-    /// Role-(b) forward line-flow column range.
+    /// Forward line-flow column range.
     pub line_fwd: &'a Range<usize>,
-    /// Role-(b) reverse line-flow column range.
+    /// Reverse line-flow column range.
     pub line_rev: &'a Range<usize>,
-    /// Role-(b) bus-excess column range.
+    /// Bus-excess column range.
     pub excess: &'a Range<usize>,
-    /// Role-(b) FPHA generation column range.
+    /// FPHA generation column range.
     pub generation: &'a Range<usize>,
-    /// Role-(b) bus-deficit column range.
+    /// Bus-deficit column range.
     pub deficit: &'a Range<usize>,
-    /// Role-(b) deficit-stride constant (`S`).
+    /// Deficit-stride constant (`S`).
     pub max_deficit_segments: usize,
-    /// Role-(b) per-stage block count (`K`); the `BlockGrid` flat/​deficit stride.
+    /// Per-stage block count (`K`); the `BlockGrid` flat/​deficit stride.
     pub n_blks: usize,
-    /// Role-(b) per-evaporation-hydro column indices, parallel to
+    /// Per-evaporation-hydro column indices, parallel to
     /// [`Self::evap_hydro_indices`].
     pub evap_indices: &'a [EvaporationIndices],
-    /// Role-(b) system hydro indices of the evaporation hydros at this stage.
+    /// System hydro indices of the evaporation hydros at this stage.
     pub evap_hydro_indices: &'a [usize],
-    /// Role-(b) system hydro indices of the FPHA hydros at this stage.
+    /// System hydro indices of the FPHA hydros at this stage.
     pub fpha_hydro_indices: &'a [usize],
-    /// Role-(b) first anticipated-decision column (`anticipated_decision.start`).
+    /// First anticipated-decision column (`anticipated_decision.start`).
     pub anticipated_decision_start: usize,
-    /// Role-(b) reverse map: global thermal position → anticipated-local index.
+    /// Reverse map: global thermal position → anticipated-local index.
     pub anticipated_local_by_sys_pos: &'a HashMap<usize, usize>,
 }
 
@@ -137,12 +100,9 @@ pub(crate) struct EntityPositionMaps<'a> {
     pub line: &'a BTreeMap<EntityId, usize>,
 }
 
-/// Borrowed cascade context for resolving the total-inflow expression.
-///
-/// Grouped (rather than passed as two more positional arguments) so
-/// [`resolve_variable_ref`] does not trip `clippy::too_many_arguments`,
-/// mirroring the [`EntityPositionMaps`] grouping idiom. The `HydroInflow` arm is
-/// the only consumer; every other arm ignores it.
+/// Borrowed cascade context for resolving the total-inflow expression. Consulted
+/// only by the `HydroInflow` arm; grouped to keep [`resolve_variable_ref`] under the
+/// `too_many_arguments` threshold.
 pub(crate) struct CascadeRefs<'a> {
     /// Immediately-upstream cascade adjacency. `upstream(h)` returns
     /// `&[EntityId]` sorted by `EntityId.0` at build time, so the resolver
@@ -155,64 +115,35 @@ pub(crate) struct CascadeRefs<'a> {
     pub diversion_upstream: &'a HashMap<EntityId, Vec<usize>>,
 }
 
-/// Borrowed pumping context for resolving `PumpingFlow`/`PumpingPower`.
-///
-/// Grouped (rather than passed as more positional arguments) so
-/// [`resolve_variable_ref`] does not trip `clippy::too_many_arguments`,
-/// mirroring the [`CascadeRefs`] grouping idiom. The `PumpingFlow`/`PumpingPower`
-/// arms are the only consumers; every other arm ignores it.
+/// Borrowed pumping context for resolving `PumpingFlow`/`PumpingPower`. Consulted
+/// only by those two arms; grouped to keep [`resolve_variable_ref`] under the
+/// `too_many_arguments` threshold.
 pub(crate) struct PumpingRefs<'a> {
-    /// First pumping-flow column. The column for station local index `p_idx`,
-    /// block `blk` is `grid.flat(col_pumping_start, p_idx, blk)`, where `grid` is
-    /// the [`BlockGrid`](crate::indexer::BlockGrid) built from the
-    /// [`GenericResolverGeom`] inside [`resolve_variable_ref`] (the single stride
-    /// owner every block-major resolver helper addresses through), not a field here.
-    ///
-    /// Sourced from `StageLayout::col_pumping_start` (the real reserved range).
-    /// When `pumping_stations` is empty this value is meaningless, so the resolver
-    /// guards on the `pumping_pos` lookup before using it.
+    /// First pumping-flow column (from `StageLayout::col_pumping_start`); meaningless
+    /// when `pumping_stations` is empty, so the resolver guards on the `pumping_pos`
+    /// lookup first.
     pub col_pumping_start: usize,
-    /// Pumping stations in canonical ID-sorted slot order. Indexed by the local
-    /// index `p_idx` obtained from [`PumpingRefs::pumping_pos`]; the entry's
-    /// `consumption_mw_per_m3s` is the `PumpingPower` coefficient.
+    /// Pumping stations in canonical ID-sorted slot order, indexed by the `p_idx`
+    /// from [`PumpingRefs::pumping_pos`]; each entry's `consumption_mw_per_m3s` is the
+    /// `PumpingPower` coefficient.
     pub pumping_stations: &'a [PumpingStation],
     /// Station id → local index (`p_idx`) into [`PumpingRefs::pumping_stations`].
-    /// A lookup miss (unknown station, or no stations at all) yields `vec![]`.
     pub pumping_pos: &'a BTreeMap<EntityId, usize>,
 }
 
 /// Map a [`VariableRef`] and block index to LP column indices with multipliers.
 ///
-/// Returns a `Vec<(column_index, coefficient_multiplier)>`. The caller scales
-/// each entry by the `LinearTerm::coefficient` to get the final CSC value.
-///
-/// # Arguments
-///
-/// - `var_ref` — the LP variable being referenced.
-/// - `block_idx` — the block being built (0-indexed). For stage-level variables
-///   this is ignored; for block-level variables with `block_id = Some(b)` the
-///   function returns the column for block `b` regardless of `block_idx`.
-/// - `stage_idx` — stage index used to look up per-stage production models.
-/// - `geom` — the role-(a) state handle + role-(b) column geometry the resolver
-///   reads, grouped into [`GenericResolverGeom`]. Role-(a) terms (`HydroStorage`,
-///   `HydroInflow`) resolve through `geom.state`; every other term reads
-///   `geom`'s role-(b) ranges.
-/// - `production_models` — resolved production model set, used to distinguish
-///   FPHA hydros from constant-productivity hydros for `HydroGeneration`.
-/// - `positions` — entity position maps grouped into [`EntityPositionMaps`].
-/// - `cascade_refs` — cascade topology + diversion-into map grouped into
-///   [`CascadeRefs`]; consulted only by the `HydroInflow` arm.
-/// - `pumping_refs` — pumping column start, station slice, and position map
-///   grouped into [`PumpingRefs`]; consulted only by the `PumpingFlow` /
-///   `PumpingPower` arms.
+/// Returns a `Vec<(column_index, coefficient_multiplier)>`; the caller scales each
+/// entry by the `LinearTerm::coefficient` for the final CSC value. `block_idx` is
+/// ignored for stage-level variables and overridden by `block_id = Some(b)` for
+/// block-level ones.
 ///
 /// # Returns
 ///
-/// An empty vec when:
-/// - The entity ID is not found in the relevant position map (should have been
-///   caught by referential validation, but this is defense-in-depth).
-/// - The variable type references a stub entity with no LP columns (contracts,
-///   non-controllable sources, withdrawal).
+/// An empty vec when the entity ID is absent from the relevant position map
+/// (defense-in-depth past referential validation), or when the variable references
+/// a stub entity with no LP columns (contracts, non-controllable sources,
+/// withdrawal).
 #[must_use]
 // Rationale: one exhaustive arm per `VariableRef` variant — the match is the
 // dispatch, and its exhaustiveness is the contract that a new variant forces a
@@ -235,14 +166,12 @@ pub(crate) fn resolve_variable_ref(
     let line_pos = positions.line;
     let grid = geom.block_grid();
     match var_ref {
-        // ── Stage-level hydro variables ────────────────────────────────────
         VariableRef::HydroStorage { hydro_id } => resolve_hydro_storage(*hydro_id, geom, hydro_pos),
 
         VariableRef::HydroEvaporation { hydro_id } => {
             resolve_hydro_evaporation(*hydro_id, geom, hydro_pos)
         }
 
-        // ── Block-level hydro variables ────────────────────────────────────
         VariableRef::HydroInflow { hydro_id, block_id } => resolve_hydro_inflow(
             *hydro_id,
             *block_id,
@@ -288,7 +217,6 @@ pub(crate) fn resolve_variable_ref(
             hydro_pos,
         ),
 
-        // ── Thermal ────────────────────────────────────────────────────────
         VariableRef::ThermalGeneration {
             thermal_id,
             block_id,
@@ -302,7 +230,6 @@ pub(crate) fn resolve_variable_ref(
             1.0,
         ),
 
-        // ── Transmission lines ─────────────────────────────────────────────
         VariableRef::LineDirect { line_id, block_id } => resolve_block_variable(
             *line_id,
             *block_id,
@@ -327,7 +254,6 @@ pub(crate) fn resolve_variable_ref(
             resolve_line_exchange(*line_id, *block_id, block_idx, grid, geom, line_pos)
         }
 
-        // ── Bus deficit / excess ───────────────────────────────────────────
         VariableRef::BusDeficit { bus_id, block_id } => {
             resolve_bus_deficit(*bus_id, *block_id, block_idx, grid, geom, bus_pos)
         }
@@ -352,15 +278,10 @@ pub(crate) fn resolve_variable_ref(
             1.0,
         ),
 
-        // ── Anticipated thermal decision column ────────────────────────────
         VariableRef::AnticipatedDecision { thermal_id } => {
             resolve_anticipated_decision(*thermal_id, geom, thermal_pos)
         }
 
-        // ── Pumping columns ────────────────────────────────────────────────
-        // PumpingFlow carries +1.0; PumpingPower aliases the SAME flow column
-        // scaled by the station's consumption rate (power is affine in flow),
-        // so the coefficient is computed from `pumping_stations[p_idx]`.
         VariableRef::PumpingFlow {
             station_id,
             block_id,
@@ -385,16 +306,11 @@ pub(crate) fn resolve_variable_ref(
             |station| station.consumption_mw_per_m3s,
         ),
 
-        // ── Contracts ──────────────────────────────────────────────────────
-        // Contracts carry no LP decision column in this implementation: the
-        // `ElementKind::ContractImport`/`ContractExport` families resolve through
-        // `block_col_range` (their single owner) to the empty `0..0` range, so a
-        // generic-constraint term referencing a contract emits no
-        // `(column, coefficient)` pair. The `debug_assert!` is the seam a future
-        // contract-column implementation extends: it both keeps the `ElementKind`
-        // variants and `block_col_range`'s contract arm live and fires loudly if a
-        // non-empty range is ever wired without also emitting the resolved
-        // column(s) here — preventing a silent fall-through to the empty return.
+        // Contracts carry no LP column: `block_col_range` resolves both contract
+        // families to the empty `0..0` range. The `debug_assert!` is the seam a
+        // future contract-column implementation extends — it fires if a non-empty
+        // range is wired without also emitting the resolved column(s) here, so the
+        // empty return cannot silently swallow real contract columns.
         VariableRef::ContractImport { .. } => {
             debug_assert!(
                 block_col_range(geom, ElementKind::ContractImport).is_empty(),
@@ -412,53 +328,30 @@ pub(crate) fn resolve_variable_ref(
             vec![]
         }
 
-        // ── Stub entities with no LP columns ──────────────────────────────
-        // These entity types are registered in the data model but contribute no LP
-        // decision variable, and have no `ElementKind` block-major column family:
-        // - HydroWithdrawal: withdrawal is a schedule fixed by bounds, not a
-        //   decision variable.
-        // - NonControllableGeneration, NonControllableCurtailment: non-controllable
-        //   sources carry no decision column.
+        // Registered in the data model but no LP decision column: withdrawal is a
+        // schedule fixed by bounds; non-controllable sources carry no decision column.
         VariableRef::HydroWithdrawal { .. }
         | VariableRef::NonControllableGeneration { .. }
         | VariableRef::NonControllableCurtailment { .. } => vec![],
     }
 }
 
-/// Whether a single [`VariableRef`] resolves to the *same* LP column(s)
-/// regardless of the block index passed to [`resolve_variable_ref`].
+/// Whether a single [`VariableRef`] resolves to the *same* LP column(s) regardless
+/// of `block_idx` — **block-independent** ("stock"). Only three kinds qualify:
+/// [`VariableRef::HydroStorage`], [`VariableRef::HydroEvaporation`], and
+/// [`VariableRef::AnticipatedDecision`].
 ///
-/// A variable is **block-independent** ("stock") when its resolver ignores the
-/// `block_idx` argument and returns a per-stage column. Only three kinds qualify,
-/// each verified against its resolver:
-///
-/// - [`VariableRef::HydroStorage`] → `storage.start + pos` (outgoing reservoir level)
-/// - [`VariableRef::HydroEvaporation`] → the stage-level evaporation-outflow column
-/// - [`VariableRef::AnticipatedDecision`] → `anticipated_decision.start + local`
-///   (a per-plant per-stage scalar, uniform across blocks)
-///
-/// [`VariableRef::HydroInflow`] is **block-dependent** (in the `false` arm): its
-/// upstream-release terms (`turbine`/`spillage`/`diversion` of upstream plants)
-/// are per-block LP columns, and a single block-dependent term makes the whole
-/// expression block-dependent. Classifying it "stock" would collapse a multi-block
-/// expression to one mis-priced stage-level row that reads upstream columns at a
-/// single arbitrary block, silently dropping the other blocks' contributions.
-///
-/// Every other kind is block-level: it resolves through the block-stride
-/// [`BlockGrid`] primitive (via `resolve_block_variable` / `resolve_hydro_inflow`
-/// / FPHA generation / line / deficit / excess / pumping), so distinct block
-/// indices yield distinct columns. [`VariableRef::PumpingFlow`] and
-/// [`VariableRef::PumpingPower`] are block-level (their `resolve_pumping_column`
-/// column is a [`BlockGrid::flat`] address on `col_pumping_start`), so they stay
-/// in the `false` arm — classifying them "stock" would collapse a per-block
-/// pumping term to a single mis-priced row. The remaining stub kinds (withdrawal, contracts,
-/// non-controllable) resolve to no columns at all; they are conservatively treated
-/// as block-level here so that only *provably* stock variables enable the
+/// [`VariableRef::HydroInflow`] is block-DEPENDENT: its upstream-release terms are
+/// per-block columns. Classifying it "stock" would collapse a multi-block expression
+/// to one mis-priced stage-level row reading upstream columns at a single arbitrary
+/// block, silently dropping the other blocks. [`VariableRef::PumpingFlow`] /
+/// [`VariableRef::PumpingPower`] are block-level for the same reason. The stub kinds
+/// (withdrawal, contracts, non-controllable) resolve to no columns and are
+/// conservatively block-level, so only *provably* stock variables enable the
 /// single-row collapse.
 ///
-/// The match is deliberately exhaustive (no wildcard arm): a future
-/// [`VariableRef`] variant forces a compile error here, defaulting nothing to
-/// "stock" by omission.
+/// The match is exhaustive (no wildcard): a future variant forces a compile error
+/// here, defaulting nothing to "stock" by omission.
 #[must_use]
 fn variable_ref_is_block_independent(var_ref: &VariableRef) -> bool {
     match var_ref {
@@ -487,19 +380,10 @@ fn variable_ref_is_block_independent(var_ref: &VariableRef) -> bool {
     }
 }
 
-/// Whether an entire generic-constraint expression is block-independent.
-///
-/// True only when **every** term is block-independent (see
-/// [`variable_ref_is_block_independent`]). A `block_id = None` bound on such an
-/// expression produces the *same* row for every block, so the LP builder may
-/// collapse the per-block replication into a single stage-level row priced by
-/// the stage's total hours — the row's coefficients do not depend on the block.
-///
-/// An **empty** expression (no terms) is vacuously block-independent: it carries
-/// no block-dependent coefficients, so collapsing its replicated rows changes
-/// nothing but the row/slack count.
-///
-/// Any block-level term anywhere forces `false` (keep the per-block path).
+/// Whether **every** term of a generic-constraint expression is block-independent
+/// (see [`variable_ref_is_block_independent`]), letting a `block_id = None` bound
+/// collapse its per-block replication into one stage-level row. Any block-level term
+/// forces `false`. An empty expression is vacuously true.
 #[must_use]
 pub(crate) fn expression_is_block_independent(expression: &ConstraintExpression) -> bool {
     expression
@@ -524,33 +408,24 @@ fn resolve_hydro_storage(
     }
 }
 
-/// Resolve `HydroInflow` to the cascade total-inflow expression at `eff_blk`.
+/// Resolve `HydroInflow` to the cascade total-inflow expression at `eff_blk`: the
+/// incremental (local) `z_inflow` column plus immediately-upstream releases (turbine
+/// + spillage) plus plants diverting into `h`, all coefficient `+1.0`.
 ///
-/// This is the inflow side of the hydro water balance expressed as an
-/// instantaneous **rate** (m³/s): the incremental (local) `z_inflow` column plus
-/// the immediately-upstream cascade releases (turbine + spillage) plus the
-/// plants diverting into `h`. All coefficients are unit `+1.0` — a rate identity,
-/// **not** the `−τ`-weighted (hm³) storage-balance row. The `−τ` sign and `τ`
-/// weighting are specific to the storage-balance row and must not be copied here.
-/// `h`'s own outflows (turbine/spillage/diversion), evaporation, withdrawal
-/// slacks, AR-lag-`ψ`, and pumped transfer are **excluded**: they are
-/// storage-balance (`±τ`-weighted hm³) / loss / outflow terms or have no LP
-/// column, not instantaneous-rate inflow terms.
+/// This is an instantaneous **rate** identity (m³/s), **not** the `−τ`-weighted (hm³)
+/// storage-balance row — the `−τ` sign and `τ` weighting belong to storage balance
+/// and must not be copied here. `h`'s own outflows, evaporation, withdrawal slacks,
+/// AR-lag-`ψ`, and pumped transfer are excluded (storage-balance / loss / outflow
+/// terms, or no LP column).
 ///
-/// Column arithmetic mirrors [`resolve_block_variable`]: the flat block-major
-/// address `grid.flat(col_start, pos, eff_blk)` with
-/// `eff_blk = block_id.unwrap_or(block_idx)`.
-/// The column set mirrors the cascade/diversion loops of
-/// `fill_state_and_water_entries`: upstream releases iterate
-/// `cascade.upstream(h)` resolved via `hydro_pos`; diverted inflow iterates
-/// `diversion_upstream[h]`, whose values are already **system indices**. Both are
-/// in canonical (ID-sorted / canonical-hydro) order at build time, so the emitted
-/// pairs are input-ordering-independent with no extra sort here.
+/// Upstream releases iterate `cascade.upstream(h)`; diverted inflow iterates
+/// `diversion_upstream[h]` (values already system indices). Both are canonically
+/// ordered at build time, so emitted pairs are input-ordering-independent with no
+/// extra sort.
 ///
 /// The `z_inflow.is_empty()` guard is load-bearing: `z_inflow` is empty when
-/// `hydro_count == 0` (unlike `storage`, which is non-empty whenever hydros
-/// exist), so `z_inflow.start` would be a meaningless offset there. Returns an
-/// empty vec when `hydro_count == 0` or `hydro_id` is unknown.
+/// `hydro_count == 0` (unlike `storage`), so `z_inflow.start` would be meaningless.
+/// Returns an empty vec when `hydro_count == 0` or `hydro_id` is unknown.
 fn resolve_hydro_inflow(
     hydro_id: EntityId,
     block_id: Option<usize>,
@@ -560,9 +435,6 @@ fn resolve_hydro_inflow(
     hydro_pos: &BTreeMap<EntityId, usize>,
     cascade_refs: &CascadeRefs<'_>,
 ) -> Vec<(usize, f64)> {
-    // Role (a): the z_inflow column owner is the state handle. Empty when
-    // `hydro_count == 0` (unlike `storage`, non-empty whenever hydros exist), so
-    // `z_inflow.start` would be meaningless there.
     if geom.state.z_inflow.is_empty() {
         return vec![];
     }
@@ -577,15 +449,12 @@ fn resolve_hydro_inflow(
         .get(&hydro_id)
         .map_or(&[][..], Vec::as_slice);
 
-    // Incremental term, then two per upstream plant, then one per diverting plant.
     let mut result = Vec::with_capacity(1 + 2 * upstream.len() + diversion_into.len());
 
-    // Incremental (local) inflow: the free z_inflow column (role (a)).
     result.push((geom.state.z_inflow.start + pos_h, 1.0));
 
-    // Upstream cascade releases: turbine + spillage of each immediately-upstream
-    // plant at the effective block. Same column set as the storage-balance inflow
-    // side, but with +1.0 (rate) instead of −τ (volume).
+    // Upstream releases (turbine + spillage): same column set as the storage-balance
+    // inflow side but coefficient +1.0 (rate), not −τ (volume).
     let turbine = block_col_range(geom, ElementKind::Turbine);
     let spillage = block_col_range(geom, ElementKind::Spillage);
     if !turbine.is_empty() && !spillage.is_empty() {
@@ -597,9 +466,8 @@ fn resolve_hydro_inflow(
         }
     }
 
-    // Diverted inflow: the diversion column of each plant diverting into `h`.
-    // `diversion_upstream[h]` already holds system indices, so no `hydro_pos`
-    // lookup is needed (mirrors the `fill_state_and_water_entries` diversion-inflow loop).
+    // `diversion_upstream[h]` already holds system indices, so no `hydro_pos` lookup
+    // (mirrors the `fill_state_and_water_entries` diversion-inflow loop).
     let diversion = block_col_range(geom, ElementKind::Diversion);
     if !diversion.is_empty() {
         for &d_idx in diversion_into {
@@ -610,11 +478,8 @@ fn resolve_hydro_inflow(
     result
 }
 
-/// Resolve `HydroEvaporation` to the evaporation-outflow column for the matching hydro.
-///
-/// The evaporation list uses a local index; we find it by matching the
-/// system-level hydro position. Returns empty vec when the hydro has no
-/// linearized evaporation at this stage.
+/// Resolve `HydroEvaporation` to the evaporation-outflow column for the matching
+/// hydro; empty vec when the hydro has no linearized evaporation at this stage.
 fn resolve_hydro_evaporation(
     hydro_id: EntityId,
     geom: &GenericResolverGeom<'_>,
@@ -623,12 +488,8 @@ fn resolve_hydro_evaporation(
     let Some(&sys_pos) = hydro_pos.get(&hydro_id) else {
         return vec![];
     };
-    // Role (b): linear scan over the small per-stage evaporation-hydro list. This
-    // runs on the cold per-constraint-term resolver path (template build, not a
-    // solve loop), so the O(n) cost over a handful of evaporation hydros is not
-    // measurable and a pre-built O(1) reverse map is not warranted here — unlike
-    // `resolve_anticipated_decision`, whose larger/hotter set earns
-    // `anticipated_local_by_sys_pos`.
+    // Linear scan: cold template-build path over a handful of evap hydros, so an
+    // O(1) reverse map is not warranted (unlike `resolve_anticipated_decision`).
     let Some(local_idx) = geom.evap_hydro_indices.iter().position(|&p| p == sys_pos) else {
         return vec![];
     };
@@ -636,12 +497,9 @@ fn resolve_hydro_evaporation(
     vec![(evaporation_flow_col, 1.0)]
 }
 
-/// Resolve `HydroOutflow` (turbine + spillage) to two block-level columns.
-///
-/// One `hydro_pos` lookup resolves both columns (mirroring
-/// [`resolve_line_exchange`]); turbine is emitted before spillage. Returns an
-/// empty vec on a `hydro_pos` miss, so the no-result-on-miss contract holds for
-/// the whole pair, never a partial single column.
+/// Resolve `HydroOutflow` to two block-level columns (turbine before spillage). A
+/// single `hydro_pos` miss returns an empty vec for the whole pair, never a partial
+/// single column.
 fn resolve_hydro_outflow(
     hydro_id: EntityId,
     block_id: Option<usize>,
@@ -687,24 +545,19 @@ fn resolve_hydro_generation(
     };
     match production_models.model(sys_pos, stage_idx) {
         ResolvedProductionModel::Fpha { .. } => {
-            // Role (b): linear scan over the small per-stage FPHA-hydro list. This
-            // runs on the cold per-constraint-term resolver path (template build,
-            // not a solve loop), so the O(n) cost over a handful of FPHA hydros is
-            // not measurable and a pre-built O(1) reverse map is not warranted here
-            // — unlike `resolve_anticipated_decision`, whose larger/hotter set
-            // earns `anticipated_local_by_sys_pos`.
+            // Linear scan: cold template-build path over a handful of FPHA hydros, so
+            // an O(1) reverse map is not warranted (see `resolve_hydro_evaporation`).
             if let Some(fpha_local_idx) = geom.fpha_hydro_indices.iter().position(|&p| p == sys_pos)
             {
                 let effective_blk = block_id.unwrap_or(block_idx);
                 let col = grid.flat(geom.generation.start, fpha_local_idx, effective_blk);
                 vec![(col, 1.0)]
             } else {
-                // Should not happen if geom and production_models are consistent.
                 vec![]
             }
         }
         ResolvedProductionModel::ConstantProductivity { productivity } => {
-            // generation = productivity * turbined → map to turbine column.
+            // generation = productivity * turbined → turbine column scaled by productivity.
             resolve_block_variable(
                 hydro_id,
                 block_id,
@@ -745,12 +598,9 @@ fn resolve_line_exchange(
     }
 }
 
-/// Resolve `BusDeficit` to one column per deficit segment.
-///
-/// Each segment's column is the deficit 3-term address
-/// `grid.deficit(deficit.start, b_pos, seg, blk)` (bus-outer, segment-middle,
-/// block-inner); see [`BlockGrid::deficit`]. The segment count `S` comes from
-/// `geom.max_deficit_segments` because the grid exposes no accessor for it.
+/// Resolve `BusDeficit` to one column per deficit segment via the 3-term
+/// [`BlockGrid::deficit`] address. The segment count `S` comes from
+/// `geom.max_deficit_segments` (the grid exposes no accessor for it).
 fn resolve_bus_deficit(
     bus_id: EntityId,
     block_id: Option<usize>,
@@ -775,18 +625,13 @@ fn resolve_bus_deficit(
     }
 }
 
-/// Resolve `AnticipatedDecision` to the per-plant stage-level decision column.
+/// Resolve `AnticipatedDecision` to `anticipated_decision_start + local_idx`, the
+/// per-plant stage-level decision column.
 ///
-/// Column layout: `anticipated_decision_start + local_idx` where `local_idx`
-/// is the anticipated-local index of the thermal's system position, looked up via
-/// `geom.anticipated_local_by_sys_pos`.
-///
-/// Returns an empty vec when:
-/// - `thermal_id` is not in `thermal_pos` (defense-in-depth; referential
-///   validation should have caught this).
-/// - The thermal's system position is not in `anticipated_local_by_sys_pos`
-///   (the thermal is not anticipated; semantic validation should have caught
-///   this via rule 17 in `check_anticipated_decision_target_is_anticipated`).
+/// Returns an empty vec when `thermal_id` is not in `thermal_pos`, or the thermal's
+/// position is not in `anticipated_local_by_sys_pos` (the thermal is not anticipated)
+/// — both defense-in-depth past semantic validation
+/// (`check_anticipated_decision_target_is_anticipated`).
 fn resolve_anticipated_decision(
     thermal_id: EntityId,
     geom: &GenericResolverGeom<'_>,
@@ -795,8 +640,6 @@ fn resolve_anticipated_decision(
     let Some(&sys_pos) = thermal_pos.get(&thermal_id) else {
         return vec![];
     };
-    // Role (b): O(1) reverse lookup via the pre-built map rather than a linear
-    // scan over anticipated_thermal_indices.
     if let Some(&local_idx) = geom.anticipated_local_by_sys_pos.get(&sys_pos) {
         vec![(geom.anticipated_decision_start + local_idx, 1.0)]
     } else {
@@ -804,33 +647,20 @@ fn resolve_anticipated_decision(
     }
 }
 
-/// Resolve `PumpingFlow`/`PumpingPower` to the block-major pumping-flow column(s).
+/// Resolve `PumpingFlow`/`PumpingPower` to the block-major pumping-flow column.
 ///
-/// Both variants resolve to the SAME flow column — `PumpingPower` has no column
-/// of its own; it aliases the flow column scaled by the station's
-/// `consumption_mw_per_m3s` (power is affine in flow). Resolving `PumpingPower`
-/// to a separate column would create an unconstrained free variable. The
-/// coefficient is therefore selected by `coeff_fn`: `PumpingFlow` passes `|_| 1.0`,
-/// `PumpingPower` passes `|s| s.consumption_mw_per_m3s` — the same alias as the
-/// bus-balance coupling coefficient.
+/// Both variants resolve to the SAME flow column — `PumpingPower` has no column of
+/// its own; resolving it to a separate column would create an unconstrained free
+/// variable. The coefficient comes from `coeff_fn`: `|_| 1.0` for flow,
+/// `|s| s.consumption_mw_per_m3s` for power (power is affine in flow).
 ///
-/// Column arithmetic: the flat block-major address
-/// `grid.flat(col_pumping_start, p_idx, eff_blk)` where `p_idx` is the station's
-/// SYSTEM index (`pumping_pos.get(station_id)`) and `eff_blk =
-/// block_id.unwrap_or(block_idx)`. Under the dense layout the pumping column block
-/// is system-indexed, so this system index IS the correct column-block position at
-/// every stage — a commissioning-dormant station keeps its (zeroed) column, so the
-/// address is well-defined regardless of the station's window. (Under the prior
-/// active-subset layout the column block was strided by active-local index while
-/// this resolver used the system index, mismatching at any gated stage; the dense
-/// layout removes that latent bug by construction.) For `block_id = None` the
-/// caller loop supplies the effective block via `block_idx` (one resolver call per
-/// block), mirroring [`resolve_block_variable`]; this function returns a single
-/// pair per call regardless of `block_id`.
+/// The address `grid.flat(col_pumping_start, p_idx, eff_blk)` uses the station's
+/// SYSTEM index `p_idx`: under the dense layout the column block is system-indexed, so
+/// the system index IS the correct column-block position at every stage (a dormant
+/// station keeps its zeroed column).
 ///
-/// Returns an empty vec when the station id is unknown (a `pumping_pos` miss) or
-/// when there are no pumping stations (`pumping_pos` is empty), so `n_pumping == 0`
-/// is handled by the same lookup guard. No panic.
+/// Returns an empty vec on an unknown station or no stations (`pumping_pos` miss);
+/// `n_pumping == 0` is handled by the same guard. No panic.
 fn resolve_pumping_column(
     station_id: EntityId,
     block_id: Option<usize>,
@@ -842,9 +672,8 @@ fn resolve_pumping_column(
     let Some(&p_idx) = pumping_refs.pumping_pos.get(&station_id) else {
         return vec![];
     };
-    // Defense-in-depth: `pumping_pos` and `pumping_stations` are built from the
-    // same ID-sorted slice, so a present index is always in range; guard rather
-    // than index to uphold the no-panic contract if they ever diverge.
+    // Guard rather than index to uphold no-panic if `pumping_pos` and
+    // `pumping_stations` ever diverge (both built from the same ID-sorted slice).
     let Some(station) = pumping_refs.pumping_stations.get(p_idx) else {
         return vec![];
     };
@@ -853,16 +682,9 @@ fn resolve_pumping_column(
     vec![(col, coeff_fn(station))]
 }
 
-/// Resolve a block-level LP variable to a `(column_index, multiplier)` pair.
-///
-/// Computes the flat block-major address `grid.flat(col_start, entity_pos,
-/// effective_block_idx)` where `effective_block_idx` is `block_idx` when
-/// `ref_block_id` is `None`, or `b` when `ref_block_id` is `Some(b)`. Routing
-/// through [`BlockGrid::flat`] keeps the flat stride expression single-owned —
-/// this resolver and `StageLayout::block_col` no longer open-code it
-/// independently.
-///
-/// Returns an empty vec if the entity ID is not found in `pos_map`.
+/// Resolve a block-level LP variable to a `(column_index, multiplier)` pair via the
+/// single-owner [`BlockGrid::flat`] address (`eff_blk = ref_block_id.unwrap_or(...)`);
+/// empty vec on a `pos_map` miss.
 fn resolve_block_variable(
     entity_id: EntityId,
     ref_block_id: Option<usize>,
@@ -880,14 +702,12 @@ fn resolve_block_variable(
     }
 }
 
-/// A block-major equipment/line/contract column family the resolver addresses by
-/// reading the family's role-(b) column range on the geometry. Each variant maps
-/// to exactly one range in [`block_col_range`].
+/// A block-major equipment/line/contract column family, each mapping to exactly one
+/// range in [`block_col_range`].
 ///
-/// Closed set, exhaustively matched (no `_` arm) in [`block_col_range`]: a new
-/// block-major family is a compile error there until its range source is named,
-/// rather than silently resolving to whichever field a hand-written `.start` read
-/// happened to pick.
+/// Exhaustively matched there (no `_` arm): a new family is a compile error until its
+/// range source is named, rather than silently resolving to whichever field a
+/// hand-written `.start` read happened to pick.
 #[derive(Clone, Copy)]
 enum ElementKind {
     Turbine,
@@ -901,22 +721,17 @@ enum ElementKind {
     ContractExport,
 }
 
-/// Map an [`ElementKind`] to its role-(b) block-major column range on `geom`.
+/// Map an [`ElementKind`] to its block-major column range on `geom` — the single
+/// point pairing a family with its `StageLayout` range, so a wrong arm mapping (e.g.
+/// `geom.spillage` for `Turbine`) is caught here once instead of open-coded and
+/// silently wrong at each `col_start` read.
 ///
-/// This is the single point that pairs an element family with its `StageLayout`
-/// role-(b) column range (carried on [`GenericResolverGeom`]), so a wrong arm
-/// mapping (e.g. returning `geom.spillage` for `Turbine`) is caught here, once,
-/// instead of being open-coded — and silently wrong — at each `col_start` read
-/// across the resolver and its helpers.
+/// `ContractImport`/`ContractExport` return the empty `0..0` sentinel (no LP columns)
+/// — the single owner of the contract column range, so wiring real contract columns
+/// later is one edit here.
 ///
-/// `ContractImport`/`ContractExport` return the empty `0..0` range: contracts have
-/// no LP columns in this implementation (the geometry exposes no contract range),
-/// so they resolve to no `(column, coefficient)` pair. This is the single owner of
-/// the contract column range, so wiring real contract columns later is one edit here.
-///
-/// Returns an **owned** `Range<usize>` (a two-`usize` clone, stack-only) so the
-/// `0..0` contract sentinel is returnable without tying the result's lifetime to
-/// `geom`; do NOT change this to `&Range<usize>`.
+/// Returns an **owned** `Range<usize>` so the `0..0` sentinel is returnable without
+/// tying the result's lifetime to `geom`; do NOT change this to `&Range<usize>`.
 #[must_use]
 fn block_col_range(geom: &GenericResolverGeom<'_>, kind: ElementKind) -> Range<usize> {
     match kind {

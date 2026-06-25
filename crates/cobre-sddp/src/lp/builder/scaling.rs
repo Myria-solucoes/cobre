@@ -8,14 +8,9 @@ use cobre_stochastic::par::precompute::PrecomputedPar;
 
 use super::M3S_TO_HM3;
 
-/// Compute per-column geometric-mean scaling factors from a CSC constraint matrix.
-///
-/// For each column `j`, the scale factor is `1 / sqrt(max|A_ij| * min|A_ij|)` over
-/// nonzero entries. Columns with no nonzero entries receive a scale factor of 1.0.
-///
-/// The returned vector has length `num_cols`. Applying column scaling transforms the
-/// LP: multiply each column's matrix entries, objective coefficient, and column bounds
-/// by the corresponding scale factor.
+/// Per-column geometric-mean scaling factors from a CSC matrix:
+/// `1 / sqrt(max|A_ij| * min|A_ij|)` over nonzeros, `1.0` for an empty column.
+/// Length `num_cols`.
 #[must_use]
 #[allow(clippy::cast_sign_loss)] // col_starts are non-negative by CSC construction
 pub(crate) fn compute_col_scale(num_cols: usize, col_starts: &[i32], values: &[f64]) -> Vec<f64> {
@@ -24,7 +19,6 @@ pub(crate) fn compute_col_scale(num_cols: usize, col_starts: &[i32], values: &[f
         let start = col_starts[j] as usize;
         let end = col_starts[j + 1] as usize;
         if start == end {
-            // No nonzero entries in this column.
             continue;
         }
         let mut max_abs = 0.0_f64;
@@ -40,26 +34,17 @@ pub(crate) fn compute_col_scale(num_cols: usize, col_starts: &[i32], values: &[f
             let d = 1.0 / (max_abs * min_abs).sqrt();
             scale[j] = d;
         }
-        // Otherwise keep 1.0 (all structural zeros or defensive fallback).
     }
     scale
 }
 
-/// Apply column scaling to a stage template's matrix, objective, and bounds.
-///
-/// Modifies the template in-place. After this call:
-/// - `values[k]` has been multiplied by `col_scale[col_of(k)]`
-/// - `objective[j]` has been multiplied by `col_scale[j]`
-/// - `col_lower[j]` has been divided by `col_scale[j]`
-/// - `col_upper[j]` has been divided by `col_scale[j]`
-///
-/// Infinite bounds remain infinite (dividing infinity by a finite positive
-/// scale factor yields infinity).
+/// Apply column scaling in-place. After this call, per column `j`: `values` and
+/// `objective` are MULTIPLIED by `col_scale[j]`, while `col_lower`/`col_upper` are
+/// DIVIDED by it (the scaled variable is `x̃ = x / d_j`).
 pub(crate) fn apply_col_scale(template: &mut StageTemplate, col_scale: &[f64]) {
     let num_cols = template.num_cols;
     debug_assert_eq!(col_scale.len(), num_cols);
 
-    // Scale matrix values (CSC: iterate columns).
     #[allow(clippy::needless_range_loop, clippy::cast_sign_loss)]
     // j+1 access; col_starts non-negative by construction
     for j in 0..num_cols {
@@ -71,14 +56,11 @@ pub(crate) fn apply_col_scale(template: &mut StageTemplate, col_scale: &[f64]) {
         }
     }
 
-    // Scale objective coefficients.
     for (obj, &d) in template.objective.iter_mut().zip(col_scale) {
         *obj *= d;
     }
 
-    // Inverse-scale column bounds.
-    // The scaled variable is x_tilde = x / d_j, so bounds become [lo/d, hi/d].
-    // For d > 0 this preserves bound ordering.
+    // Inverse-scale column bounds: `x̃ = x / d_j`, so bounds become `[lo/d, hi/d]`.
     for ((lo, hi), &d) in template
         .col_lower
         .iter_mut()
@@ -90,19 +72,12 @@ pub(crate) fn apply_col_scale(template: &mut StageTemplate, col_scale: &[f64]) {
     }
 }
 
-/// Compute per-row geometric-mean scaling factors from a CSC constraint matrix.
+/// Per-row geometric-mean scaling factors from a CSC matrix:
+/// `1 / sqrt(max|A_ij| * min|A_ij|)` over a row's nonzeros, `1.0` for an empty row.
+/// Length `num_rows`.
 ///
-/// For each row `i`, the scale factor is `1 / sqrt(max|A_ij| * min|A_ij|)` over
-/// all nonzero entries in that row. Rows with no nonzero entries receive a scale
-/// factor of 1.0.
-///
-/// The matrix is given in CSC (column-major) form; row statistics are accumulated
-/// by iterating all nonzeros once in O(nnz). This function should be called on
-/// the already column-scaled matrix to obtain the standard `D_r * A * D_c` form.
-///
-/// The returned vector has length `num_rows`. Applying row scaling transforms the
-/// LP: multiply each row's matrix entries, row lower bound, and row upper bound
-/// by the corresponding scale factor.
+/// MUST be called on the ALREADY column-scaled matrix to obtain the standard
+/// `D_r * A * D_c` form (column scaling before row scaling).
 #[must_use]
 #[allow(clippy::cast_sign_loss)] // col_starts and row_indices are non-negative by CSC construction
 pub(crate) fn compute_row_scale(
@@ -134,28 +109,17 @@ pub(crate) fn compute_row_scale(
         if rmax > 0.0 && rmin < f64::INFINITY {
             *s = 1.0 / (rmax * rmin).sqrt();
         }
-        // Otherwise keep 1.0 (empty row or all structural zeros).
     }
     scale
 }
 
-/// Apply row scaling to a stage template's matrix and row bounds.
-///
-/// Modifies the template in-place. After this call:
-/// - `values[k]` has been multiplied by `row_scale[row_of(k)]`
-/// - `row_lower[i]` has been multiplied by `row_scale[i]`
-/// - `row_upper[i]` has been multiplied by `row_scale[i]`
-///
-/// Infinite bounds remain infinite (multiplying infinity by a finite positive
-/// scale factor yields infinity).
-///
-/// The objective and column bounds are not modified — those are column-domain
-/// quantities already handled by column scaling.
+/// Apply row scaling in-place: per row `i`, `values` and `row_lower`/`row_upper`
+/// are MULTIPLIED by `row_scale[i]`. Objective and column bounds are NOT touched —
+/// those are column-domain quantities handled by [`apply_col_scale`].
 pub(crate) fn apply_row_scale(template: &mut StageTemplate, row_scale: &[f64]) {
     let num_rows = template.num_rows;
     debug_assert_eq!(row_scale.len(), num_rows);
 
-    // Scale matrix values (CSC: iterate columns, apply per-row factor).
     let num_cols = template.num_cols;
     #[allow(clippy::needless_range_loop, clippy::cast_sign_loss)]
     // j+1 access; values non-negative by construction
@@ -168,7 +132,6 @@ pub(crate) fn apply_row_scale(template: &mut StageTemplate, row_scale: &[f64]) {
         }
     }
 
-    // Scale row bounds.
     for ((lo, hi), &d) in template
         .row_lower
         .iter_mut()
@@ -180,27 +143,16 @@ pub(crate) fn apply_row_scale(template: &mut StageTemplate, row_scale: &[f64]) {
     }
 }
 
-/// Pre-compute `ζ * σ` per `(stage, hydro)` for noise transformation.
+/// Pre-compute `ζ * σ` per `(stage, hydro)` for noise transformation, returning
+/// `(noise_scale, zeta_per_stage, block_hours_per_stage)`. `noise_scale` is flat,
+/// `[s_idx * n_hydros + h_idx]`, so the forward pass indexes it without branching.
 ///
-/// Returns `(noise_scale, zeta_per_stage, block_hours_per_stage)`.  The
-/// `noise_scale` flat vector has layout `[s_idx * n_hydros + h_idx]` so that
-/// the forward pass can index it without branching.
-///
-/// A hydro in the `PreFilling` phase at a stage gets `noise_scale = 0` for that
-/// `(stage, hydro)`. The solve-time water-balance noise patch is
-/// `noise_buf[h] = template.row_lower[base_row + h] + noise_scale[s·N + h]·eta`;
-/// a `PreFilling` hydro's water-balance row is the frozen-storage identity
-/// `v_h − v_h_in = 0` with `row_lower = 0` (see
-/// [`super::entries::fill_state_and_water_entries`]), so leaving `noise_scale`
-/// nonzero would patch `noise_scale·eta ≠ 0` onto that RHS and unfreeze the
-/// storage column — `v_h` would drift off the pinned `v̂_h` by the accumulated
-/// noise. Zeroing it here (template build) neutralizes the patch in all three
-/// solve paths (forward/backward/lower-bound) with no per-solve branch. This is
-/// the ONLY noise channel touched: the `z_inflow` RHS (`z_inflow_rhs_buf`, a
-/// separate Category-5 patch) is NOT zeroed, so the realized incremental inflow
-/// `z_h` still flows onto the downstream row in the `PreFilling` cascade
-/// short-circuit. A non-filling hydro is `Operating` at every stage, so its
-/// `noise_scale` is untouched (parity-neutral).
+/// A `PreFilling` hydro gets `noise_scale = 0`: its water-balance row is the
+/// frozen-storage identity `v_h − v_h_in = 0`, so leaving `noise_scale` nonzero
+/// would patch `noise_scale·eta` onto that RHS and unfreeze the storage column. This
+/// is the ONLY noise channel touched — the `z_inflow` RHS is NOT zeroed, so realized
+/// inflow `z_h` still flows downstream in the `PreFilling` cascade short-circuit. A
+/// non-filling hydro is `Operating` at every stage (parity-neutral).
 pub(super) fn compute_noise_scale(
     study_stages: &[&Stage],
     hydros: &[Hydro],
@@ -218,10 +170,8 @@ pub(super) fn compute_noise_scale(
         zeta_per_stage.push(zeta_s);
         block_hours_per_stage.push(stage.blocks.iter().map(|b| b.duration_hours).collect());
         for h_idx in 0..n_hydros {
-            // Phase derived inline per (stage, hydro) — no cached mask, mirroring
-            // the column/row gating sites. `hydros` shorter than `n_hydros` (a
-            // direct-construction test path) defaults missing entries to
-            // `Operating` (no zeroing), never a panic.
+            // `hydros` shorter than `n_hydros` (a direct-construction test path)
+            // defaults missing entries to `Operating` via `.get()`, never a panic.
             let is_prefilling = hydros.get(h_idx).is_some_and(|hydro| {
                 matches!(
                     crate::lp_builder::filling_phase(

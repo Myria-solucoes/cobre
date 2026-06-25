@@ -6,13 +6,12 @@ use super::EVAPORATION_FLOW_SAFETY_MARGIN;
 use super::layout::{StageLayout, TemplateBuildCtx};
 
 /// Mutable column-bound and objective buffers shared by all fill helpers.
-///
-/// Passed by mutable reference to each `fill_*_columns` helper so that the
-/// orchestrator `fill_stage_columns` call sites stay on a single line each.
-/// This is an analogue of `LpMatrixBuffers` for the column-fill path.
 pub(super) struct ColumnBufs<'a> {
+    /// Column lower bounds.
     pub(super) col_lower: &'a mut [f64],
+    /// Column upper bounds.
     pub(super) col_upper: &'a mut [f64],
+    /// Objective coefficients.
     pub(super) objective: &'a mut [f64],
 }
 
@@ -62,33 +61,10 @@ pub(super) fn fill_stage_columns(
 
 /// Outgoing and incoming storage columns.
 ///
-/// Outgoing storage `v_h` gets stage-specific bounds `[min_storage, max_storage]`.
-/// Incoming storage `v_in_h` is unconstrained (fixed at solve-time by the
-/// storage-fixing equality row).
-///
-/// A filling hydro (`hydro.filling.is_some()`) relaxes the outgoing-storage FLOOR
-/// to `0` (`[0, max_storage]`) in EVERY phase — `PreFilling`, `Filling`, AND
-/// `Operating` — instead of the hard `min_storage_hm3`. In `PreFilling`/`Filling`
-/// the reservoir sits below its dead volume while it fills; in `Operating` the
-/// floor stays soft so a hydro that finished filling short can recover from a
-/// deficient start without making the LP infeasible. The economic floor is
-/// supplied by the soft `σ^{v-}` operating-floor row emitted in
-/// [`fill_filled_min_storage_floor_columns`] (and the per-stage `σ_fill` target at every
-/// Filling stage), not by the hard column bound. The upper bound stays
-/// `max_storage_hm3` in every phase.
-///
-/// The relax is gated on `hydro.filling.is_some()`, evaluated per-hydro. The
-/// wrong-but-compiling alternative — relaxing the floor system-wide for EVERY
-/// hydro — would silently make dead volume soft for every reservoir, letting the
-/// optimizer cheaply violate it system-wide. A non-filling hydro
-/// (`filling.is_none()`) keeps the hard `min_storage` floor at every stage
-/// (parity-neutral). `is_some()` is exactly equivalent to "filling hydro in any
-/// of its three [`filling_phase`] phases" because all three phases now relax the
-/// floor; gating on `is_some()` avoids the redundant phase derivation. This sets
-/// the floor only; the `PreFilling` `[seed, seed]` freeze is applied elsewhere —
-/// this site never freezes the column.
-///
-/// [`filling_phase`]: crate::lp_builder::filling_phase
+/// Outgoing storage `v_h` gets `[min_storage, max_storage]`; incoming storage
+/// `v_in_h` is unconstrained (pinned at solve time by column bounds). This site
+/// sets the floor only — the `PreFilling` `[seed, seed]` freeze is applied
+/// elsewhere.
 fn fill_storage_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -97,23 +73,13 @@ fn fill_storage_columns(
 ) {
     for h_idx in 0..layout.n_h {
         let hydro = &ctx.hydros[h_idx];
-        // INVARIANT: `min_storage` is a HARD outgoing-storage column lower bound for
-        // every hydro EXCEPT one that went through filling during the study
-        // (`hydro.filling.is_some()`), for which it relaxes to `0` here and is
-        // re-imposed as a SOFT floor by the `filled_min_storage_floor` family. The
-        // high resolved `storage_violation_below_cost` drives that family's `σ^{v-}`
-        // slack to `0` in every feasible scenario, so a filled hydro is
-        // indistinguishable from a never-filled one in operation.
-        //
-        // FORBIDDEN A — globalizing the soft floor to all hydros: it makes dead
-        // volume soft for every reservoir, letting the optimizer cheaply violate it
-        // system-wide.
-        // FORBIDDEN B — keeping `min_storage` hard for a filled hydro: it
-        // re-introduces first-operating-stage infeasibility when filling finished
-        // short, on a deficient start.
-        //
-        // Gated by `hydro.filling.is_some()`, mirroring
-        // `identify_filled_min_storage_floor_hydros`.
+        // CONTRACT: `min_storage` is a HARD lower bound for every hydro EXCEPT a
+        // filling one (`hydro.filling.is_some()`), whose floor relaxes to `0` here
+        // and is re-imposed as a SOFT floor by `fill_filled_min_storage_floor_columns`.
+        // FORBIDDEN — globalizing the relax to all hydros (makes dead volume soft
+        // system-wide); keeping it hard for a filled hydro (re-introduces
+        // first-operating-stage infeasibility on a deficient start). Gated on
+        // `is_some()`, mirroring `identify_filled_min_storage_floor_hydros`.
         let floor_off = hydro.filling.is_some();
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         bufs.col_lower[h_idx] = if floor_off { 0.0 } else { hb.min_storage_hm3 };
@@ -132,16 +98,9 @@ fn fill_ar_lag_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
     }
 }
 
-/// Anticipated-state columns: intentionally unconstrained bounds `(-INF, +INF)`.
-///
-/// Writes `(-INF, +INF)` on every `n_ant_state` anticipated-state columns.
-/// The columns are stored in slot-major, plant-minor order:
-/// `col = col_anticipated_state_start + slot * n_anticipated + plant`.
-/// Bounds are left open because the binding constraint comes from the
-/// `n_ant_state` state-fixing equality rows whose RHS values are patched
-/// at solve time by `fill_state_patches`. Mirror of `fill_ar_lag_columns`.
-///
-/// No-op when `n_anticipated == 0` (`n_ant_state == 0`).
+/// Anticipated-state columns: open bounds `(-INF, +INF)` in slot-major,
+/// plant-minor order. Left open because the binding comes from the state-fixing
+/// equality rows, RHS-patched at solve time by `fill_state_patches`.
 fn fill_anticipated_state_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
     for slot in 0..layout.k_max {
         for plant in 0..layout.n_anticipated {
@@ -162,20 +121,13 @@ fn fill_theta_column(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
 
 /// Turbine columns per hydro per block.
 ///
-/// For constant-productivity hydros, caps turbine flow so that
-/// `productivity * turbined <= max_generation_mw` (derated capacity).
-/// Carries `turbined_cost * block_hours` in the objective on every hydro's
-/// turbine column regardless of production model — the turbined cost
-/// applies to every plant, not only FPHA hydros.
+/// Constant-productivity hydros cap turbine flow at `max_generation_mw /
+/// productivity` (derated). Every hydro's turbine column carries `turbined_cost *
+/// block_hours`, regardless of production model.
 ///
-/// A filling hydro (`PreFilling` or `Filling`) has no installed turbines, so its
-/// turbine column has BOTH bounds forced to `[0, 0]` (the zero-influence
-/// convention, mirroring `fill_thermal_columns`). Both must drop: a positive
-/// `min_turbined_m3s` is a hard floor that would otherwise live in `col_lower`,
-/// so zeroing only `col_upper` would leave `[min > 0, 0]` — an infeasible pair
-/// that makes the whole LP infeasible during filling rather than idling the
-/// turbines. The phase is derived inline per hydro per stage (no cached mask);
-/// `filling.is_none()` ⇒ `Operating` at every stage ⇒ no-op (parity-neutral).
+/// A filling hydro (`PreFilling`/`Filling`) has BOTH bounds forced to `[0, 0]`:
+/// both must drop, or a positive `min_turbined_m3s` would leave `[min > 0, 0]`, an
+/// infeasible pair. `filling.is_none()` ⇒ `Operating` ⇒ no-op (parity-neutral).
 fn fill_turbine_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -238,19 +190,12 @@ fn fill_spillage_columns(
     }
 }
 
-/// Diversion columns per hydro per block.
+/// Diversion columns per hydro per block (dense; non-diverting hydros get `[0, 0]`
+/// and are presolve-eliminated).
 ///
-/// Dense allocation: all hydros get columns; those without diversion have
-/// bounds `[0, 0]` and are eliminated by presolve.
-///
-/// A filling hydro (`hydro.filling.is_some()`) has its diversion column forced to
-/// `[0, 0]` in **all** phases — `PreFilling`, `Filling`, AND `Operating` — not
-/// just before entry. Gating on `filling.is_some()` rather than the `Phase` value is
-/// deliberate: a filling hydro never diverts. Gating on the phase would wrongly
-/// re-enable diversion the moment it enters `Operating`, contradicting the spec
-/// (diversion is `0` for filling hydros always). The phase-keyed gate belongs on
-/// generation/turbine (suspended only before entry); diversion is the wider,
-/// all-phases gate.
+/// A filling hydro (`hydro.filling.is_some()`) is forced to `[0, 0]` in ALL phases
+/// — gated on `is_some()`, NOT the `Phase`, deliberately: phase-gating would wrongly
+/// re-enable diversion at `Operating`, but a filling hydro never diverts.
 fn fill_diversion_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -260,12 +205,9 @@ fn fill_diversion_columns(
 ) {
     for (h_idx, hydro) in ctx.hydros.iter().enumerate() {
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
-        // Contract: the diversion upper bound is the per-stage RESOLVED value
-        // (`hydro_bounds.parquet` override into `HydroStageBounds.max_diversion_m3s`),
-        // NOT the declaration-time `hydro.diversion.max_flow_m3s` — reading the entity
-        // directly silently drops any wired per-stage override. Mirror every sibling
-        // column family (e.g. `fill_thermal_columns`). A filling hydro overrides this
-        // to `0` regardless of the resolved value (all phases).
+        // CONTRACT: read the per-stage RESOLVED `max_diversion_m3s`, NOT the
+        // declaration-time `hydro.diversion.max_flow_m3s` — the entity read silently
+        // drops any wired per-stage override (mirrors every sibling column family).
         let max_div = if hydro.filling.is_some() {
             0.0
         } else {
@@ -289,29 +231,18 @@ fn fill_diversion_columns(
 
 /// Thermal columns per thermal per block.
 ///
-/// Anticipated thermals get their per-block **bounds** here like any other
-/// thermal, but their per-block **objective** is left at the `0.0`
-/// initialisation default: the generation is priced once at the decision stage
-/// via `fill_anticipated_columns`, and the delivery-stage column must consume it
-/// at zero marginal cost — pricing it here too would double-count.
-/// Anticipated plants are detected via `layout.anticipated_local_by_sys_pos`,
-/// the reverse map global-thermal-position → anticipated-local index; a
-/// non-anticipated thermal is simply not in the map and is priced normally.
+/// Anticipated thermals get per-block **bounds** here but their **objective** stays
+/// `0.0`: generation is priced once at the decision stage via
+/// `fill_anticipated_columns`, so pricing the delivery-stage column too would
+/// double-count. Anticipated plants are detected via
+/// `layout.anticipated_local_by_sys_pos`.
 ///
-/// A commissioning-dormant thermal (`commissioning_active == false`) keeps its
-/// dense, system-indexed column but has BOTH bounds forced to `[0, 0]` (the
-/// zero-influence convention). Both must drop: `min_generation_mw` is a hard
-/// must-run floor written to `col_lower`, so zeroing only `col_upper` would
-/// leave `[min > 0, 0]` — an infeasible pair that makes the whole LP infeasible
-/// rather than retiring the plant. The objective coefficient then multiplies a
-/// forced-0 column, which is inert. Commissioning keys on `stage.id` (the
-/// stage's commissioning identifier), not the stage index. This GENERATION
-/// column carries the operation-window gate for every thermal, anticipated or
-/// not: an anticipated thermal's delivery-stage generation is zeroed here when
-/// the stage is outside its `[entry, exit)` window, exactly like a plain thermal.
-/// The SHIFTED gate (decision priced `K` stages early, keyed on the delivery
-/// stage's window) lives on the anticipated DECISION / `anticipated_state_out`
-/// columns in `fill_anticipated_columns`, not here.
+/// A commissioning-dormant thermal (`commissioning_active == false`) has BOTH
+/// bounds forced to `[0, 0]`: both must drop, or a `min_generation_mw` must-run
+/// floor would leave the infeasible `[min > 0, 0]`. Commissioning keys on
+/// `stage.id`. This GENERATION column carries the operation-window gate for every
+/// thermal; the SHIFTED gate (decision priced `K` stages early) lives on the
+/// DECISION column in `fill_anticipated_columns`, not here.
 pub(super) fn fill_thermal_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -348,48 +279,19 @@ pub(super) fn fill_thermal_columns(
 }
 
 /// Anticipated-plant columns: state-out bound, decision bound, and decision
-/// objective, resolved in one pass so the active-set predicate
-/// [`StageLayout::is_anticipated_decision_active`] is evaluated once per plant.
+/// objective per plant.
 ///
-/// Each plant `i` writes three values, each at a distinct column index, so the
-/// fold is byte-identical to filling the three column families in separate
-/// passes (column order is fixed by `layout`, not by write order):
+/// Active is `is_anticipated_decision_active`; the boundary `t + K_i == n_stages`
+/// is INACTIVE (strict gate) — pricing it would create a cost-only column with no
+/// delivery LP. Active plants get open `state_out` bounds (pinned by the
+/// `anticipated_state_out_def` row) and delivery-stage decision bounds; inactive
+/// plants get `[0, 0]` on both. The `anticipated_state_out_def` row is emitted iff
+/// the plant is active (lockstep invariant: zero-bound iff no def row), discharged
+/// here against `n_anticipated_state_out_def_rows`.
 ///
-/// - **State-out bound** at `col_anticipated_state_out_start + i`:
-///   - Active (`stage_idx + K_i < n_stages`): `[-INF, +INF]`. The `state_out`
-///     value is pinned to `decision_col[i]` by the `anticipated_state_out_def`
-///     equality row (filled by `fill_anticipated_state_out_def_entries`).
-///   - Inactive: `[0, 0]`. The presolver eliminates the column. The definition
-///     row is NOT emitted for inactive plants (lockstep invariant: zero-bound
-///     iff no def row). The `state_out` objective stays `0.0` (vec default) —
-///     the column carries no direct cost; the cost flows through the cut machinery.
-///
-/// - **Decision bound** at `col_anticipated_decision_start + i`:
-///   - Active: the delivery-stage bounds `thermal_bounds(thermal_idx, t + K_i)`.
-///   - Inactive: `[0, 0]`; the presolver eliminates. The boundary case
-///     `t + K_i == n_stages` is inactive (strict gate): the delivery stage would
-///     fall outside `[0, n_stages)`, so no delivery LP exists and pricing it
-///     would create a cost-only column with no physical delivery.
-///
-/// - **Decision objective** at `col_anticipated_decision_start + i`:
-///   - Active: the present-value cost of committing one MW at stage `t` for
-///     delivery at stage `t + K_i`,
-///
-///     ```text
-///     cost_per_mwh(thermal_idx, t + K_i)
-///         * total_hours_per_stage[t + K_i]
-///         * cumulative_discount_factors[t + K_i]
-///     ```
-///
-///     The coefficient is UNSCALED: the caller (`build_single_stage_template`)
-///     divides every non-theta objective entry by `COST_SCALE_FACTOR` afterwards.
-///   - Inactive: stays `0.0` (vec default); the `[0, 0]` decision bounds make the
-///     LP effect identical to not having the column regardless of objective value.
-///
-/// The active-plant count from this single pass discharges the lockstep
-/// invariant against `n_anticipated_state_out_def_rows`.
-///
-/// No-op when `n_anticipated == 0` (loop iterates zero times).
+/// The decision objective is the present-value commit cost (`cost_per_mwh *
+/// total_hours * discount` at the delivery stage), UNSCALED — the caller divides
+/// every non-theta entry by `COST_SCALE_FACTOR` afterwards.
 pub(super) fn fill_anticipated_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -426,8 +328,6 @@ pub(super) fn fill_anticipated_columns(
             let d_factor = ctx.cumulative_discount_factors[delivery_stage];
             bufs.objective[decision_col] = tb.cost_per_mwh * delivery_hours * d_factor;
         } else {
-            // Inactive: both columns pinned to [0, 0] for presolve elimination;
-            // the decision objective stays at the 0.0 vec default.
             bufs.col_lower[state_out_col] = 0.0;
             bufs.col_upper[state_out_col] = 0.0;
             bufs.col_lower[decision_col] = 0.0;
@@ -442,16 +342,10 @@ pub(super) fn fill_anticipated_columns(
 
 /// Line columns per line per block (forward and reverse).
 ///
-/// Exchange factors from `exchange_factors.json` scale the stage-level
-/// capacity bounds per block. Default factor is `(1.0, 1.0)` (no scaling).
-///
-/// A commissioning-dormant line (`commissioning_active == false`) keeps its
-/// dense, system-indexed forward and reverse columns but has `col_upper` forced
-/// to `0` on both directions (the zero-influence convention). `col_lower` is
-/// already `0` for lines (no transmission floor), so only the cap drops; the
-/// exchange-factor multiply `direct_mw * df` becomes `0 * df = 0`, clean.
-/// Commissioning keys on `stage.id` (the stage's commissioning identifier), not
-/// the stage index.
+/// Exchange factors scale the stage-level capacity bounds per block (default
+/// `(1.0, 1.0)`). A commissioning-dormant line (`commissioning_active == false`)
+/// has `col_upper` forced to `0` on both directions; `col_lower` is already `0`
+/// (no transmission floor), so only the cap drops. Commissioning keys on `stage.id`.
 fn fill_line_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -490,13 +384,9 @@ fn fill_line_columns(
 
 /// Deficit and excess columns per bus per block.
 ///
-/// The deficit region uses a uniform stride of `max_deficit_segments` segments
-/// per bus.  For bus `b_idx`, segment `seg_idx`, block `blk`:
-/// `col = col_deficit_start + b_idx * max_deficit_segments * n_blks + seg_idx * n_blks + blk`
-///
-/// Buses with fewer than `max_deficit_segments` segments leave the trailing
-/// slots at `[lower=0, upper=0, objective=0]` (from vec initialisation), which
-/// the `HiGHS` presolver eliminates before the simplex phase.
+/// The deficit region uses a uniform per-bus stride of `max_deficit_segments`
+/// (column address owned by `deficit_col`). Buses with fewer segments leave the
+/// trailing slots at the `[0, 0]` vec default, presolve-eliminated.
 fn fill_deficit_and_excess_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -545,20 +435,14 @@ fn fill_inflow_slack_columns(
     }
 }
 
-/// FPHA generation columns (`g_{h,k}`): one per FPHA hydro per block.
+/// FPHA generation columns (`g_{h,k}`): one per FPHA hydro per block, bounds
+/// `[0, max_generation_mw]`, objective `0.0` (turbined cost is on the turbine
+/// column).
 ///
-/// Bounds: `[0, max_generation_mw]`.  Objective: `0.0` (the global
-/// `turbined_cost` is applied on the turbine column for every hydro).
-///
-/// A filling hydro generates nothing during `PreFilling`/`Filling`, but it is
-/// excluded from `fpha_hydro_indices` by `identify_fpha_hydros` at those stages,
-/// so it is never iterated here and its FPHA generation column block is not
-/// allocated at all — strictly safer than a `[0, 0]` pin, since a non-existent
-/// column cannot generate. The row exclusion is the single owner of the
-/// "no generation while filling" contract; this loop must NOT re-gate by phase
-/// (a `[0, 0]` branch here would be dead, the exclusion already guarantees every
-/// iterated hydro is `Operating`). A non-filling hydro stays at its normal
-/// `[0, max_generation_mw]` bounds (parity-neutral).
+/// A filling hydro is excluded from `fpha_hydro_indices` by `identify_fpha_hydros`
+/// during `PreFilling`/`Filling`, so it is never iterated here — that exclusion is
+/// the single owner of "no generation while filling"; this loop must NOT re-gate by
+/// phase (the branch would be dead). Non-filling is parity-neutral.
 fn fill_fpha_generation_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -575,17 +459,13 @@ fn fill_fpha_generation_columns(
     }
 }
 
-/// Evaporation columns: 3 per evaporation hydro (evaporation outflow,
+/// Evaporation columns: 3 stage-level per evaporation hydro (evaporation outflow,
 /// `f_evap_plus`, `f_evap_minus`).
 ///
-/// All three columns are stage-level (not per-block).  The evaporation-outflow
-/// column is bounded symmetrically `[-q_max, +q_max]` so a negative value can
-/// absorb net rainfall input on the lake surface; `f_evap_plus` and
-/// `f_evap_minus` are bounded `[0, +inf)`.  The evaporation-outflow column
-/// carries zero objective cost (evaporation flow itself is not penalised).
-/// `f_evap_plus` and `f_evap_minus` carry
-/// `evaporation_violation_cost * total_stage_hours` so that the solver is
-/// penalised for violating the linearised evaporation constraint.
+/// The evaporation-outflow column is bounded symmetrically `[-q_max, +q_max]` so a
+/// negative value can absorb net rainfall input on the lake surface, and carries
+/// zero objective. `f_evap_plus`/`f_evap_minus` are `[0, +inf)` and carry the
+/// directional violation costs scaled by `total_stage_hours`.
 fn fill_evaporation_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -597,9 +477,7 @@ fn fill_evaporation_columns(
         let col_evaporation_flow = layout.evap_flow_col(local_idx);
         let col_f_plus = layout.evap_f_plus_col(local_idx);
         let col_f_minus = layout.evap_f_minus_col(local_idx);
-        // Signed flow: a negative evaporation outflow reads as net rainfall input (inflow).
-        // Bound: [-q_max, +q_max] where
-        // q_max = |intercept_m3s + volume_slope_m3s_per_hm3 * v_max| * margin.
+        // Signed: a negative outflow reads as net rainfall input (inflow).
         match ctx.evaporation_models.model(h_idx) {
             EvaporationModel::Linearized { coefficients, .. } => {
                 let coeff = &coefficients[stage_idx];
@@ -624,40 +502,23 @@ fn fill_evaporation_columns(
         bufs.col_upper[col_f_plus] = f64::INFINITY;
         bufs.col_lower[col_f_minus] = 0.0;
         bufs.col_upper[col_f_minus] = f64::INFINITY;
-        // Violation cost: read directional costs from resolved penalties.
-        // Evaporation outflow (offset 0) keeps objective = 0.0 (already the vec initialisation default).
-        // f_evap_plus = under-evaporation (evaporated less than target).
-        // f_evap_minus = over-evaporation (evaporated more than target).
+        // f_evap_plus = under-evaporation, f_evap_minus = over-evaporation.
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         bufs.objective[col_f_plus] = hp.evaporation_violation_neg_cost * total_stage_hours;
         bufs.objective[col_f_minus] = hp.evaporation_violation_pos_cost * total_stage_hours;
     }
 }
 
-/// Withdrawal violation slack columns — neg (under-withdrawal) and pos (over-withdrawal).
+/// Withdrawal violation slack columns — neg (under-withdrawal) and pos
+/// (over-withdrawal), one stage-level column per hydro per direction.
 ///
-/// One stage-level column per hydro for each direction. In the water-balance row
-/// the neg slack enters with coefficient `-zeta` and the pos slack with `+zeta`,
-/// so the *realized* withdrawal removed from the reservoir is
-/// `R = T - neg + pos`, where `T = water_withdrawal_m3s` (a signed schedule:
-/// `T > 0` is a removal, `T < 0` an inter-basin return/addition).
-///
-/// ## Sign-aware under-delivery cap
-///
-/// Realized withdrawal must stay on its signed segment and must **not flip sign**
-/// (a scheduled removal cannot become an injection, nor a scheduled addition a
-/// removal): `R ∈ [0, T]` for `T > 0`, `R ∈ [T, 0]` for `T < 0`. The *under-delivery*
-/// direction is the one that drags `R` toward — and potentially across — zero, so it
-/// is capped at the target magnitude `|T|`; the *over-delivery* direction is left
-/// unbounded (it pushes `R` further along its own sign, never across zero, and is the
-/// solver's latitude to shed excess water through the withdrawal point):
-///
-/// - `T > 0`: under-delivery is `neg` (`R = T - neg`), capped `neg ≤ |T|` (floors `R ≥ 0`);
-///   over-delivery is `pos`, left `+∞`.
-/// - `T < 0`: under-delivery is `pos` (`R = T + pos`), capped `pos ≤ |T|` (floors `R ≤ 0`);
-///   over-delivery is `neg`, left `+∞`.
-/// - `T = 0`: both pinned to `0` so the columns are presolve-eliminated, preserving
-///   identical behaviour to the pre-withdrawal implementation when withdrawal is absent.
+/// Realized withdrawal is `R = T - neg + pos`, `T = water_withdrawal_m3s` (signed:
+/// `T > 0` removal, `T < 0` inter-basin return). `R` must NOT flip sign, so the
+/// *under-delivery* direction (the one dragging `R` toward zero) is capped at `|T|`
+/// while *over-delivery* is left `+∞`:
+/// - `T > 0`: cap `neg ≤ |T|` (floors `R ≥ 0`); `pos` is `+∞`.
+/// - `T < 0`: cap `pos ≤ |T|` (floors `R ≤ 0`); `neg` is `+∞`.
+/// - `T = 0`: both `0` (presolve-eliminated).
 fn fill_withdrawal_slack_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -665,32 +526,30 @@ fn fill_withdrawal_slack_columns(
     total_stage_hours: f64,
     bufs: &mut ColumnBufs<'_>,
 ) {
-    // Neg slacks: under-delivery for T>0 (cap at |T|), over-application for T<0 (unbounded).
     for h_idx in 0..layout.n_h {
         let col = layout.col_withdrawal_neg_start() + h_idx;
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         let t = hb.water_withdrawal_m3s;
         bufs.col_upper[col] = if t > 0.0 {
-            t // under-delivery: floor R ≥ 0 by capping neg ≤ |T|
+            t
         } else if t < 0.0 {
-            f64::INFINITY // over-application latitude (R further negative)
+            f64::INFINITY
         } else {
-            0.0 // no scheduled withdrawal: presolve-eliminate
+            0.0
         };
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         bufs.objective[col] = hp.water_withdrawal_violation_neg_cost * total_stage_hours;
     }
-    // Pos slacks: over-delivery for T>0 (unbounded), under-delivery for T<0 (cap at |T|).
     for h_idx in 0..layout.n_h {
         let col = layout.col_withdrawal_pos_start() + h_idx;
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         let t = hb.water_withdrawal_m3s;
         bufs.col_upper[col] = if t > 0.0 {
-            f64::INFINITY // over-withdrawal latitude (R further positive)
+            f64::INFINITY
         } else if t < 0.0 {
-            -t // under-delivery: floor R ≤ 0 by capping pos ≤ |T|
+            -t
         } else {
-            0.0 // no scheduled withdrawal: presolve-eliminate
+            0.0
         };
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         bufs.objective[col] = hp.water_withdrawal_violation_pos_cost * total_stage_hours;
@@ -698,33 +557,24 @@ fn fill_withdrawal_slack_columns(
 }
 
 /// One operational-violation slack family, addressing a disjoint `n_h * n_blks`
-/// column range. The variant selects, via `match`, all three axes that distinguish
-/// the families: the resolved-bound activation predicate, the `StageLayout` column
-/// accessor, and the `HydroStagePenalties` cost field. Every predicate reads the
-/// **resolved per-stage** bound (`ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx)`), never
-/// the entity declaration on `ctx.hydros[h_idx]` — the declaration ignores per-stage
-/// overrides and would silently mis-activate columns while still compiling.
+/// column range. Every activation predicate reads the **resolved per-stage** bound,
+/// never the entity declaration — the declaration ignores per-stage overrides and
+/// would silently mis-activate columns while still compiling.
 #[derive(Clone, Copy)]
 enum BlockSlackFamily {
-    /// `sigma_outflow_below_{h,k}`: active (unbounded above) iff the resolved
-    /// `min_outflow_m3s > 0.0`; pinned to `[0, 0]` otherwise.
+    /// Active iff resolved `min_outflow_m3s > 0.0`.
     OutflowBelow,
-    /// `sigma_outflow_above_{h,k}`: active (unbounded above) iff the resolved
-    /// `max_outflow_m3s` is `Some` (an `Option::is_some()` check, NOT `> 0.0` — a
-    /// `Some(0.0)` cap still activates the column); pinned to `[0, 0]` otherwise.
+    /// Active iff resolved `max_outflow_m3s.is_some()` — NOT `> 0.0`: a `Some(0.0)`
+    /// cap still activates the column.
     OutflowAbove,
-    /// `sigma_turbine_below_{h,k}`: active (unbounded above) iff the resolved
-    /// `min_turbined_m3s > 0.0`; pinned to `[0, 0]` otherwise.
+    /// Active iff resolved `min_turbined_m3s > 0.0`.
     TurbineBelow,
-    /// `sigma_generation_below_{h,k}`: active (unbounded above) iff the resolved
-    /// `min_generation_mw > 0.0`; pinned to `[0, 0]` otherwise.
+    /// Active iff resolved `min_generation_mw > 0.0`.
     GenerationBelow,
 }
 
-/// Operational violation slack columns: 4 families of `n_h * n_blks` columns.
-///
-/// Drives [`fill_block_family`] once per family; each family writes to a disjoint
-/// column range, so the call order does not affect the result.
+/// Operational violation slack columns: 4 families of `n_h * n_blks` columns, each
+/// a disjoint range, so call order does not affect the result.
 fn fill_operational_slack_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -766,12 +616,9 @@ fn fill_operational_slack_columns(
     );
 }
 
-/// Fill one operational-violation slack family's `n_h * n_blks` columns.
-///
-/// For each hydro the activation is decided once from the resolved per-stage bound;
-/// for each block the column index comes from the family's `StageLayout` accessor and
-/// the objective coefficient from the family's `HydroStagePenalties` cost field scaled
-/// by the block duration. `col_lower[col]` is left at the vec default `0.0`.
+/// Fill one operational-violation slack family's `n_h * n_blks` columns. Activation
+/// is decided once per hydro from the resolved per-stage bound; `col_lower` stays at
+/// the `0.0` vec default.
 fn fill_block_family(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -809,29 +656,16 @@ fn fill_block_family(
 }
 
 /// NCS generation columns: one per NCS per block, dense and system-indexed.
+/// `col_upper = available_gen * ncs_factor`; `col_lower = 0` when curtailable, else
+/// `col_upper` (must-run); objective `-curtailment_cost * block_hours`.
 ///
-/// `col_lower[col] = if ncs.allow_curtailment { 0 } else { col_upper[col] }`.
-/// `col_upper[col] = available_gen * ncs_factor`.
-/// `objective[col] = -curtailment_cost * block_hours` (negative incentivises generation).
+/// A commissioning-dormant NCS (`commissioning_active == false`) has BOTH bounds
+/// forced to `[0, 0]`: the forbidden alternative — leaving the must-run lower bound
+/// at `upper > 0` — would force generation from a not-yet-commissioned source.
 ///
-/// Iterates ALL NCS by system index (the dense column position). A
-/// commissioning-dormant NCS (`commissioning_active == false`) keeps its column
-/// but has BOTH bounds forced to `[0, 0]` (the zero-influence convention), so it
-/// contributes nothing to the dispatch and produces a zero output row, uniform
-/// with thermal/line. The forbidden alternative — leaving the dormant must-run
-/// lower bound at `upper > 0` — would force generation from a not-yet-commissioned
-/// source.
-///
-/// For an active NCS these template values govern only when NCS noise is
-/// **non-stochastic** (`n_stochastic_ncs == 0`). When stochastic NCS is active,
-/// both bounds are rebuilt per scenario by `transform_ncs_noise` to scale with
-/// the realized availability ratio `α = clamp(mean + std·η, 0, 1)`; the template
-/// values are overwritten via `set_col_bounds` before each stage solve (the patch
-/// path zeroes dormant stochastic NCS the same way). With
-/// `allow_curtailment == true` (the default) an active column is fully
-/// curtailable; with `allow_curtailment == false` it is pinned to the available
-/// level on every stage (must-run: non-simulated aggregate generation pre-netted
-/// from load).
+/// These template values govern only when NCS noise is non-stochastic; with
+/// stochastic NCS, `transform_ncs_noise` overwrites both bounds per scenario via
+/// `set_col_bounds` (zeroing dormant stochastic NCS the same way).
 fn fill_ncs_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -872,19 +706,12 @@ fn fill_ncs_columns(
 }
 
 /// Pumping-flow columns: one per station per block, dense and system-indexed.
+/// Bounds are the resolved `[min_flow_m3s, max_flow_m3s]`; objective is zero —
+/// pumping's electrical cost enters through the bus load balance, not here.
 ///
-/// Block-major (`col_pumping_start + p_sys * n_blks + blk`). Bounds are the
-/// resolved `[min_flow_m3s, max_flow_m3s]` for the `(station, stage)` pair;
-/// objective cost is zero (pumping carries no direct cost — its electrical cost
-/// enters through the bus load balance in the power-coupling pass, not here).
-///
-/// Iterates ALL stations by system index, exactly as `fill_ncs_columns` iterates
-/// NCS. A commissioning-dormant station (`commissioning_active == false`) keeps
-/// its column but has BOTH bounds forced to `[0, 0]`: the forced minimum
-/// (`min_flow_m3s`) must be zeroed too, or a `[min > 0, max = 0]` pair is
-/// infeasible — exactly like a thermal must-run floor under decommissioning. The
-/// per-station bounds slot is the SYSTEM station index `p_sys` (the dense column
-/// position), so `pumping_bounds(p_sys, …)` reads the matching station.
+/// A commissioning-dormant station (`commissioning_active == false`) has BOTH
+/// bounds forced to `[0, 0]`: zeroing only `max` would leave the infeasible
+/// `[min > 0, 0]`. The bounds slot is the SYSTEM index `p_sys`.
 pub(super) fn fill_pumping_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -910,37 +737,20 @@ pub(super) fn fill_pumping_columns(
                 bufs.col_lower[col] = 0.0;
                 bufs.col_upper[col] = 0.0;
             }
-            // objective[col] = 0.0 — already zero from vec initialisation.
         }
     }
 }
 
-/// Per-stage `σ_fill`-target slack columns: one stage-level slack per filling hydro
-/// in the Filling phase at this stage.
-///
-/// `col_lower = 0`, `col_upper = +∞`, and the objective coefficient is the
-/// RESOLVED per-stage `filling_target_violation_cost`
-/// (`hydro_penalties(h_idx, stage_idx).filling_target_violation_cost`). The cost is
-/// written UNSCALED here, exactly like every other column cost; the caller
-/// (`build_single_stage_template`) divides every non-theta objective entry by
-/// `COST_SCALE_FACTOR` afterward, so the LP coefficient becomes
-/// `filling_target_violation_cost / COST_SCALE_FACTOR`.
+/// Per-stage `σ_fill`-target slack columns: one stage-level slack per Filling-phase
+/// filling hydro. `[0, +∞)`, objective is the RESOLVED `filling_target_violation_cost`,
+/// written UNSCALED (the caller divides non-theta entries by `COST_SCALE_FACTOR`).
 ///
 /// CRITICAL — the cost is NOT multiplied by stage hours. `σ_fill` is a
-/// STORAGE-VOLUME slack (hm³) and `filling_target_violation_cost` is in $/hm³
-/// (penalty-system spec, the same unit as `storage_violation_below_cost`), so the
-/// product `σ_fill · cost` is already in $. The sibling flow/power-rate slacks
-/// (withdrawal $/m³·s, operational-violation $/m³·s and $/MW) DO multiply by
-/// `total_stage_hours`/`block_hours` because they integrate a RATE over time — the
-/// wrong-but-compiling alternative here is to copy that `* total_stage_hours`
-/// factor, which would scale a volume penalty by hours (a units error of
-/// $·h/hm³) and silently let the optimizer violate the dead-volume target ~744×
-/// too cheaply. The `σ^{v-}` operating-floor slack (a sibling storage-volume
-/// $/hm³ penalty) follows this same no-hours convention.
-///
-/// No-op at every non-Filling stage and for a non-filling system (the index list
-/// is empty), so `objective`/`col_lower`/`col_upper` are byte-identical to a build
-/// without this family (parity-neutral).
+/// STORAGE-VOLUME slack (hm³) and the cost is $/hm³, so `σ_fill · cost` is already
+/// $. The wrong-but-compiling alternative — copying the `* total_stage_hours`
+/// factor the flow/power-RATE slacks carry — is a $·h/hm³ units error that lets the
+/// optimizer violate the target ~744× too cheaply. (`σ^{v-}` shares this convention.)
+/// No-op for a non-filling system (parity-neutral).
 fn fill_filling_target_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -957,37 +767,14 @@ fn fill_filling_target_columns(
     }
 }
 
-/// Soft `σ^{v-}` operating-floor slack columns: one stage-level slack per filling
-/// hydro in the OPERATING phase at this stage.
+/// Soft `σ^{v-}` operating-floor slack columns: one stage-level slack per
+/// Operating-phase filling hydro. `[0, +∞)`, objective is the RESOLVED
+/// `storage_violation_below_cost`, written UNSCALED with the SAME no-hours,
+/// $/hm³ units contract as `fill_filling_target_columns` (`σ_fill`).
 ///
-/// `col_lower = 0`, `col_upper = +∞`, and the objective coefficient is the
-/// RESOLVED per-stage `storage_violation_below_cost`
-/// (`hydro_penalties(h_idx, stage_idx).storage_violation_below_cost`). The cost is
-/// written UNSCALED here, exactly like the sibling `σ_fill` slack and every other
-/// column cost; the caller (`build_single_stage_template`) divides every non-theta
-/// objective entry by `COST_SCALE_FACTOR` afterward, so the LP coefficient becomes
-/// `storage_violation_below_cost / COST_SCALE_FACTOR`.
-///
-/// CRITICAL — the cost is NOT multiplied by stage hours. `σ^{v-}` is a
-/// STORAGE-VOLUME slack (hm³) and `storage_violation_below_cost` is in $/hm³
-/// (penalty-system spec, the same unit as `filling_target_violation_cost`), so the
-/// product `σ^{v-} · cost` is already in $. Copying the `* total_stage_hours` /
-/// `* block_hours` factor the flow/power-rate slacks carry (they integrate a RATE
-/// over time) would scale a volume penalty by hours — a $·h/hm³ units error that
-/// silently lets the optimizer violate the operating floor ~744× too cheaply. This
-/// follows the `fill_filling_target_columns` (`σ_fill`) no-hours convention
-/// exactly; `σ^{v-}` and `σ_fill` are SIBLING storage-volume $/hm³ penalties.
-///
-/// `σ^{v-}` is DISTINCT from `σ_fill` (`fill_filling_target_columns`): `σ^{v-}`
-/// fires at EVERY Operating stage of a filling hydro with cost
-/// `storage_violation_below_cost`, whereas `σ_fill` fires at every FILLING stage
-/// (`start ≤ id < entry`) with cost `filling_target_violation_cost`. They are
-/// separate columns, separate costs, separate stage scopes (Operating vs Filling,
-/// never overlapping) — never conflate them.
-///
-/// No-op at every non-operating stage of a filling hydro and for a non-filling
-/// system (the index list is empty), so `objective`/`col_lower`/`col_upper` are
-/// byte-identical to a build without this family (parity-neutral).
+/// DISTINCT from `σ_fill`: `σ^{v-}` fires at EVERY Operating stage, `σ_fill` at
+/// every Filling stage; separate columns, costs, and stage scopes (never overlap).
+/// No-op for a non-filling system (parity-neutral).
 fn fill_filled_min_storage_floor_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -1016,7 +803,6 @@ fn fill_z_inflow_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
         let col = layout.col_z_inflow_start() + h_idx;
         bufs.col_lower[col] = f64::NEG_INFINITY;
         bufs.col_upper[col] = f64::INFINITY;
-        // objective[col] = 0.0 — already zero from vec initialisation.
     }
 }
 

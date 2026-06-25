@@ -5,27 +5,19 @@ use super::layout::{StageLayout, TemplateBuildCtx};
 /// Walk every FPHA hyperplane row of the stage, invoking `visit` once per
 /// `(FPHA hydro, block, plane)` triple with the resolved plane and its LP row.
 ///
-/// This is the single owner of the FPHA row-cursor arithmetic. Both the bounds
-/// fill ([`super::rows::fill_fpha_rows`]) and the coefficient fill
-/// ([`super::entries::fill_fpha_entries`]) drive off this walker, so the cursor
-/// advance and the row formula live in one place: a one-sided edit to either
-/// fill is no longer possible, which would otherwise land the row bounds and the
-/// matrix coefficients on different rows.
+/// The single owner of the FPHA row-cursor arithmetic: both the bounds fill
+/// ([`super::rows::fill_fpha_rows`]) and the coefficient fill
+/// ([`super::entries::fill_fpha_entries`]) drive off this walker, so a one-sided
+/// edit that lands the bounds and the coefficients on different rows is impossible.
 ///
-/// The per-hydro block start advances by the cumulative `n_blks * n_planes`
-/// prefix sum over preceding FPHA hydros — REQUIRED because plane counts vary
-/// per hydro, so using this hydro's plane count as a uniform stride
-/// (`local_idx * n_blks * n_planes`) overlaps a later, fewer-plane hydro onto an
-/// earlier hydro's rows. Within a hydro the row is
-/// `block_start + blk * n_planes + p_idx`. Matches the indexer's
-/// `FphaRowRange::start` ordering exactly.
+/// The per-hydro block start advances by the cumulative `n_blks * n_planes` prefix
+/// sum over preceding FPHA hydros — REQUIRED because plane counts vary per hydro: a
+/// uniform `local_idx * n_blks * n_planes` stride would overlap a later,
+/// fewer-plane hydro onto an earlier hydro's rows. Matches `FphaRowRange::start`.
 ///
-/// The closure receives `&FphaPlane` (not a re-indexable `p_idx` alone) so each
-/// fill reads exactly the coefficients it needs (`intercept` for the bounds,
-/// `gamma_*` for the matrix) without a second `planes[p_idx]` lookup. The
-/// closure is a monomorphised `FnMut` that borrows its target buffer — no
-/// `Box<dyn>`, no intermediate `Vec` — so the build path allocates nothing and
-/// the byte-identical `(row, value)` push order is preserved.
+/// The closure is a monomorphised `FnMut` borrowing its target buffer (no
+/// `Box<dyn>`, no intermediate `Vec`), so the build allocates nothing and the
+/// byte-identical `(row, value)` push order is preserved.
 pub(super) fn for_each_fpha_plane<F>(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -41,7 +33,6 @@ pub(super) fn for_each_fpha_plane<F>(
         let planes = match ctx.production_models.model(h_idx, stage_idx) {
             ResolvedProductionModel::Fpha { planes, .. } => planes,
             ResolvedProductionModel::ConstantProductivity { .. } => {
-                // Invariant: fpha_hydro_indices only ever holds FPHA hydros.
                 debug_assert!(
                     false,
                     "fpha_hydro_indices contains hydro {h_idx} but model is ConstantProductivity"
@@ -56,10 +47,9 @@ pub(super) fn for_each_fpha_plane<F>(
         );
         for blk in 0..n_blks {
             for (p_idx, plane) in planes.iter().enumerate() {
-                // FPHA-plane shape: block OUTER (stride n_planes), plane INNER —
-                // the opposite nesting of the flat shape. Routed through the
-                // distinct `fpha_plane` method so the flat `(start, entity, blk)`
-                // order cannot silently transpose the two.
+                // Block OUTER (stride n_planes), plane INNER — the opposite nesting
+                // of the flat shape; the distinct `fpha_plane` method prevents a
+                // silent transpose of the two.
                 let row = grid.fpha_plane(fpha_block_start, blk, p_idx, n_planes);
                 visit(local_idx, h_idx, blk, p_idx, plane, row);
             }

@@ -20,13 +20,8 @@ use super::{
 };
 
 /// Outcome of [`build_stage_templates`]: one [`StageTemplate`] per study stage
-/// plus the per-stage `base_rows` offsets needed by `PatchBuffer`.
-///
-/// `base_rows[s]` is the row index of the first water-balance (AR dynamics)
-/// constraint in stage `s`.  It equals `template.n_dual_relevant` for every
-/// stage (constant when all stages share the same entity set, which is the
-/// case for the minimal viable solver).  It is stored per-stage for forward
-/// compatibility with stages that have different active entity sets.
+/// plus the per-stage offsets and counts the forward/backward/simulation passes
+/// need. The per-stage `Vec`s are parallel — index `s` of each refers to stage `s`.
 #[derive(Debug, Clone)]
 pub struct StageTemplates {
     /// One structural LP template per study stage, in stage order.
@@ -137,49 +132,31 @@ pub struct StageTemplates {
     /// `hydro_productivities_per_stage[stage][h]` is the productivity of hydro `h`
     /// at stage `stage`, accounting for per-stage overrides.  FPHA hydros have 0.0.
     pub hydro_productivities_per_stage: Vec<Vec<f64>>,
-    /// Per-stage one-step discount factor for the transition departing stage `t`.
+    /// Per-stage one-step discount factor for the transition departing stage `t`:
+    /// `discount_factors[t] = 1 / (1 + r_t)^(Dt / 365.25)` (`r_t` the annual rate,
+    /// `Dt` the stage duration in days); all `1.0` when the rate is `0.0` with no
+    /// overrides. Applied to the theta objective coefficient.
     ///
-    /// `discount_factors[t] = 1 / (1 + r_t)^(Dt / 365.25)` where `r_t` is the
-    /// annual discount rate (global or per-transition override) and `Dt` is the
-    /// stage duration in days. When `annual_discount_rate == 0.0` and no
-    /// per-transition overrides exist, all entries are `1.0`.
-    ///
-    /// Length equals `templates.len()`. Computed at setup time and applied to
-    /// the theta objective coefficient in the LP template.
-    ///
-    /// Private with a getter/setter pair: [`build_stage_templates`] leaves this
-    /// a `1.0`-placeholder; the real factors are written by
-    /// [`StageTemplates::set_discount_factors`] in the postprocess step. A `pub`
-    /// field would let an external caller read the placeholder as if it were the
-    /// discounted value — silently yielding undiscounted NPV. Read via
+    /// Private with a getter/setter: [`build_stage_templates`] leaves a
+    /// `1.0`-placeholder until [`StageTemplates::set_discount_factors`]. A `pub`
+    /// field would let a caller read the placeholder as the discounted value —
+    /// silently yielding undiscounted NPV. Read via
     /// [`StageTemplates::discount_factors`].
     discount_factors: Vec<f64>,
-    /// Cumulative discount factor at each stage for reporting.
+    /// Cumulative discount factor for reporting: `cumulative[0] = 1.0`,
+    /// `cumulative[t] = cumulative[t-1] * discount_factors[t-1]`. The present value
+    /// of stage `t`'s immediate cost is `cumulative[t] * immediate_cost_t`.
     ///
-    /// `cumulative_discount_factors[0] = 1.0` (present value).
-    /// `cumulative_discount_factors[t] = cumulative_discount_factors[t-1] * discount_factors[t-1]`
-    /// for `t >= 1`.
-    ///
-    /// Length equals `templates.len()` (one entry per study stage). The
-    /// anticipated-decision predicate is strict (`stage_idx + K_i < n_stages`),
-    /// so every active delivery stage satisfies `delivery_stage in [0, n_stages)`.
-    /// The present value of stage `t`'s immediate cost is
-    /// `cumulative_discount_factors[t] * immediate_cost_t`.
-    ///
-    /// Private for the same reason as [`StageTemplates::discount_factors`]:
-    /// derived from it by [`StageTemplates::set_discount_factors`], so it shares
-    /// the placeholder window. Read via
+    /// Private for the same reason as [`StageTemplates::discount_factors`] (shares
+    /// the placeholder window). Read via
     /// [`StageTemplates::cumulative_discount_factors`].
     cumulative_discount_factors: Vec<f64>,
 }
 
 impl StageTemplates {
-    /// All-empty [`StageTemplates`] for a study with zero stages.
-    ///
-    /// Every per-stage collection is empty; only `n_hydros` (the stride into
-    /// `noise_scale`) carries through, since it is a system-level count that is
-    /// well-defined even when no stage templates are built. Used by the
-    /// empty-study early return in [`build_stage_templates`].
+    /// All-empty [`StageTemplates`] for a study with zero stages. Only `n_hydros`
+    /// (the stride into `noise_scale`) carries through; it is a system-level count
+    /// well-defined even with no stages.
     #[must_use]
     pub(crate) fn empty(n_hydros: usize) -> Self {
         Self {
@@ -205,71 +182,43 @@ impl StageTemplates {
         }
     }
 
-    /// Per-stage one-step discount factors (read access).
-    ///
-    /// See the [`discount_factors`](StageTemplates#structfield.discount_factors)
-    /// field: the slice is a `1.0`-placeholder until
-    /// [`StageTemplates::set_discount_factors`] runs in the postprocess step.
+    /// Per-stage one-step discount factors (read access). A `1.0`-placeholder until
+    /// [`StageTemplates::set_discount_factors`] runs.
     #[must_use]
     pub(crate) fn discount_factors(&self) -> &[f64] {
         &self.discount_factors
     }
 
-    /// Cumulative discount factors for reporting (read access).
-    ///
-    /// See the
-    /// [`cumulative_discount_factors`](StageTemplates#structfield.cumulative_discount_factors)
-    /// field: the slice is a `1.0`-placeholder until
-    /// [`StageTemplates::set_discount_factors`] runs in the postprocess step.
+    /// Cumulative discount factors for reporting (read access). A `1.0`-placeholder
+    /// until [`StageTemplates::set_discount_factors`] runs.
     #[must_use]
     pub(crate) fn cumulative_discount_factors(&self) -> &[f64] {
         &self.cumulative_discount_factors
     }
 
-    /// Install the real per-stage discount factors and derive the cumulative
-    /// factors from them in one call.
-    ///
-    /// The cumulative vector is always recomputed here from `per_stage`
-    /// (`D_0 = 1.0`, `D_t = D_{t-1} * d_{t-1}`), so the two slices cannot drift
-    /// out of step: a caller cannot set per-stage factors while leaving a stale
-    /// cumulative vector behind. Called once by the postprocess step
-    /// (`setup::template_postprocess`).
+    /// Install the per-stage discount factors and recompute the cumulative factors
+    /// from them in one call, so the two slices cannot drift out of step (a caller
+    /// cannot set per-stage factors while leaving a stale cumulative vector behind).
     pub(crate) fn set_discount_factors(&mut self, per_stage: Vec<f64>) {
         self.cumulative_discount_factors = compute_cumulative_discount_factors(&per_stage);
         self.discount_factors = per_stage;
     }
 }
 
-/// Per-stage equipment geometry for simulation extraction.
+/// Per-stage equipment geometry for simulation extraction: the stage-correct
+/// column/row `Range`s, identity lists, and block count for every block-major
+/// family, each computed from **this** stage's `StageLayout`.
 ///
-/// Holds the stage-correct column and row `Range`s, the per-stage identity
-/// lists, and the per-stage block count for every block-major equipment family
-/// that simulation extraction reads — both the per-block `grid.flat` base reads
-/// and the cost-breakdown `range_sum` reads. Each datum is computed from
-/// **this** stage's `StageLayout` (anchored at `state.control_region_start()`
-/// with the per-stage `n_blks`), so it is the stage-correct geometry.
+/// A single global stage-0 geometry is the bug this struct forbids: every family
+/// after `turbine` has a base `turbine.start + Σ(prior)·n_blks` and length
+/// `count·n_blks`, both striped by stage 0's block count, so at any stage with a
+/// differing block count the stage-0 base/length addresses the WRONG primal
+/// columns. The per-stage `n_blks` stride was already correct; this closes the
+/// matching base/length gap. Uniform-block studies coincide with stage 0.
 ///
-/// A single global stage-0 geometry would be the bug this struct exists to
-/// forbid: every family after the first block-major one (`turbine`) has a base
-/// `turbine.start + Σ(prior families)·n_blks` and a length `count·n_blks`, both
-/// striped by stage 0's block count. At any stage whose block count differs from
-/// stage 0's (a non-uniform schedule such as `[1, 3, 2]`), the stage-0
-/// base/length addresses the **wrong** primal columns, silently misreporting
-/// per-block equipment and the cost breakdown. The per-stage `n_blks` *stride*
-/// (carried by `StageExtractionSpec::n_blks`) was already correct; this struct
-/// closes the matching *base/length* gap. For uniform-block studies every
-/// stage's geometry equals stage 0's, so the reads coincide.
-///
-/// Mirrors the established `ncs_col_starts` / `pumping_col_starts` per-stage
-/// persistence: built per stage in `build_single_stage_template`, transposed
-/// into [`StageTemplates::geometry_per_stage`], and threaded into
-/// `StageExtractionSpec` resolved at the stage being extracted.
-///
-/// The [`Default`] is the all-`0..0` geometry: every family empty, so every
-/// extraction read it gates returns zero. It is the safe fallback a caller
-/// borrows when no per-stage geometry is available (e.g. a synthetic test that
-/// drives a sub-path without a real stage table), matching the empty-slice
-/// fallbacks used for the sibling `ncs_col_starts` / `pumping_col_starts` tables.
+/// [`Default`] is the all-`0..0` geometry — every extraction read it gates returns
+/// zero — the safe fallback when no per-stage geometry is available, matching the
+/// sibling `ncs_col_starts` / `pumping_col_starts` empty-slice fallbacks.
 #[derive(Debug, Clone, Default)]
 pub struct StageGeometry {
     /// Turbined-flow column range (one per hydro per block). `turbine.start` is
@@ -318,95 +267,59 @@ pub struct StageGeometry {
     pub generation_below_slack: Range<usize>,
 
     // ── Per-stage row ranges, identity lists, and block count ────────────────
-    // These widen the geometry from columns-only to the full per-stage role-(b)
-    // shape extraction reads. Each is the stage-correct datum from **this**
-    // stage's `StageLayout`, so a non-uniform block schedule cannot shift it.
-    /// Water-balance row range (one row per hydro, stage-level). Stage-invariant
-    /// in count (`n_hydros`) but its *base* rides the per-stage block-major rows
-    /// before it; carried here so extraction reads the stage-correct base. A
-    /// single global stage-0 base would misread any stage with a differing block
-    /// count.
+    /// Water-balance row range (one row per hydro). Count is stage-invariant
+    /// (`n_hydros`) but the base rides the per-stage block-major rows before it.
     pub water_balance: Range<usize>,
-    /// Load-balance row range (one row per bus per block). `load_balance.end`
-    /// rides `n_blks` (the row count is `n_buses · n_blks`), so under a
-    /// non-uniform schedule a single global stage-0 range would misread this
-    /// stage's rows — this per-stage range carries the stage-correct extent.
+    /// Load-balance row range (one row per bus per block; `n_buses · n_blks`).
     pub load_balance: Range<usize>,
-    /// Per-stage `σ_fill`-target row range (one row per filling hydro in the
-    /// Filling phase at this stage). Empty (`start..start`, a zero-length range at the cursor, not `0..0`) at every non-Filling stage.
-    /// Carried per stage for the same per-stage-membership reason as the FPHA/evap
-    /// carriers: the count and base both vary per stage, so a single global stage-0
-    /// range would misread any stage with a differing filling set or block-major
-    /// prefix.
-    // Rationale: the `σ_fill` rows carry no extracted primal yet (the slack column
-    // value is not read by simulation extraction at this point), so no read site
-    // consumes this range; it is the per-stage carrier that keeps `StageGeometry` a
-    // faithful mirror of the per-stage row shape, the seam the sibling `σ^{v-}`
-    // family extends. The `#[allow(dead_code)]` refires if the seam is removed
-    // before a reader lands.
+    /// Per-stage `σ_fill`-target row range (one row per Filling-phase hydro); empty
+    /// `start..start` (not `0..0`) at every non-Filling stage.
+    // Voice 4: no read site consumes this yet — it is the per-stage carrier that
+    // keeps `StageGeometry` a faithful mirror of the row shape, the seam the sibling
+    // `σ^{v-}` family extends. The `#[allow(dead_code)]` refires if the seam is
+    // removed before a reader lands.
     #[allow(dead_code)]
     pub filling_target: Range<usize>,
-    /// Per-stage `σ_fill`-target slack column range (one column per filling hydro
-    /// in the Filling phase at this stage). Empty (`start..start`, a zero-length range at the cursor, not `0..0`) at every non-Filling
-    /// stage. Carried per stage alongside `filling_target` (the row range) so the
-    /// per-stage geometry mirrors both the row and column shape of the family.
-    /// Simulation extraction reads the `σ_fill` primal at `start + local_idx` for a
-    /// filling hydro, resolving `local_idx` via `filling_target_hydro_indices`.
+    /// Per-stage `σ_fill`-target slack column range (one column per Filling-phase
+    /// hydro); empty `start..start` at every non-Filling stage. Simulation
+    /// extraction reads the `σ_fill` primal at `start + local_idx`, resolving
+    /// `local_idx` via `filling_target_hydro_indices`.
     pub filling_target_col: Range<usize>,
-    /// Soft `σ^{v-}` operating-floor row range (one row per filling hydro in the
-    /// Operating phase at this stage). Empty (`start..start`, a zero-length range at the cursor, not `0..0`) at every non-operating stage
-    /// of a filling hydro. Carried per stage for the same per-stage-membership
-    /// reason as the `filling_target` sibling: the count and base both vary per
-    /// stage.
-    // Rationale: the `σ^{v-}` rows carry no extracted primal yet (the slack column
-    // value is not read by simulation extraction at this point), so no read site
-    // consumes this range; it is the per-stage carrier that keeps `StageGeometry` a
-    // faithful mirror of the per-stage row shape, mirroring the `filling_target`
-    // seam. The `#[allow(dead_code)]` refires if the seam is removed before a
-    // reader lands.
+    /// Soft `σ^{v-}` operating-floor row range (one row per Operating-phase filling
+    /// hydro); empty `start..start` (not `0..0`) at every non-operating stage.
+    // Voice 4: no read site consumes this yet — the per-stage row-shape carrier
+    // mirroring the `filling_target` seam. The `#[allow(dead_code)]` refires if the
+    // seam is removed before a reader lands.
     #[allow(dead_code)]
     pub filled_min_storage_floor: Range<usize>,
-    /// Soft `σ^{v-}` operating-floor slack column range (one column per filling
-    /// hydro in the Operating phase at this stage). Empty (`start..start`, a zero-length range at the cursor, not `0..0`) at every
-    /// non-operating stage of a filling hydro. Carried per stage alongside
-    /// `filled_min_storage_floor` (the row range) so the per-stage geometry mirrors both the
-    /// row and column shape of the family.
-    /// Simulation extraction reads the `σ^{v-}` primal at `start + local_idx` for a
-    /// filling hydro, resolving `local_idx` via `filled_min_storage_floor_hydro_indices`.
+    /// Soft `σ^{v-}` operating-floor slack column range (one column per
+    /// Operating-phase filling hydro); empty `start..start` at every non-operating
+    /// stage. Simulation extraction reads the `σ^{v-}` primal at `start + local_idx`,
+    /// resolving `local_idx` via `filled_min_storage_floor_hydro_indices`.
     pub filled_min_storage_floor_col: Range<usize>,
     /// Row index of the first z-inflow definition constraint. Always `0`: state
     /// pinning uses column bounds, so no state-fixing rows precede the z-inflow
     /// block. Carried per stage to mirror `StageLayout::z_inflow_row_start`.
     pub z_inflow_row_start: usize,
-    /// Number of operating blocks (K) at this stage. The block-major stride for
-    /// every equipment column/row family. Per-stage by definition (the LP
-    /// template is built from `stage.blocks.len()`); a single global stage-0
-    /// `n_blks` would mis-stride any stage whose block count differs.
+    /// Number of operating blocks (K) at this stage — the block-major stride for
+    /// every equipment family.
     pub n_blks: usize,
     /// System hydro indices using FPHA at this stage, in slot order. FPHA
-    /// membership varies per stage (the resolved production model is per
-    /// `(hydro, stage)`), so this is the stage-correct list. A single global
-    /// stage-0 list would misclassify any stage whose membership differs.
+    /// membership is per `(hydro, stage)`, so this is the stage-correct list.
     pub fpha_hydro_indices: Vec<usize>,
     /// System hydro indices with linearized evaporation at this stage, in slot
-    /// order. Parallel to `evap_indices`; carried per stage for the same
-    /// per-stage-membership reason as `fpha_hydro_indices`.
+    /// order. Parallel to `evap_indices`.
     pub evap_hydro_indices: Vec<usize>,
-    /// System hydro indices owning a per-stage `σ_fill`-target slack column at this
-    /// stage (the filling hydros in the Filling phase at this stage), in slot order.
-    /// Parallel to `filling_target_col`: the `σ_fill` column for the system hydro at
-    /// slot `i` is `filling_target_col.start + i`. Empty at every non-Filling stage
-    /// and for a non-filling system. The family is SPARSE — one column per filling
-    /// hydro, not per hydro — so extraction resolves a system hydro's column via this
-    /// system→slot list (the `fpha_hydro_indices` / `evap_hydro_indices` pattern),
-    /// never by the dense system index `h`.
+    /// System hydro indices owning a `σ_fill`-target slack column at this stage (the
+    /// Filling-phase hydros), in slot order. Parallel to `filling_target_col` (slot
+    /// `i` → `filling_target_col.start + i`). The family is SPARSE — one column per
+    /// filling hydro — so extraction resolves a system hydro's column via this
+    /// system→slot list, never by the dense system index `h`.
     pub filling_target_hydro_indices: Vec<usize>,
-    /// System hydro indices owning a soft `σ^{v-}` operating-floor slack column at
-    /// this stage (the filling hydros in the Operating phase at this stage), in slot
-    /// order. Parallel to `filled_min_storage_floor_col`: the `σ^{v-}` column for the system
-    /// hydro at slot `i` is `filled_min_storage_floor_col.start + i`. Empty at every
-    /// non-operating stage of a filling hydro and for a non-filling system. SPARSE
-    /// like `filling_target_hydro_indices`; resolved the same way.
+    /// System hydro indices owning a `σ^{v-}` operating-floor slack column at this
+    /// stage (the Operating-phase filling hydros), in slot order. Parallel to
+    /// `filled_min_storage_floor_col`; SPARSE like `filling_target_hydro_indices`,
+    /// resolved the same way.
     pub filled_min_storage_floor_hydro_indices: Vec<usize>,
 }
 
@@ -420,20 +333,11 @@ impl StageGeometry {
     /// resolve the dedicated empty-block cursor rather than a bare `0` when the
     /// family collapses to `0..0`, matching the indexer convention.
     fn from_layout(layout: &StageLayout<'_>) -> Self {
-        // Most ranges below are `StageLayout` own fields, already normalised to
-        // `0..0` for an empty family (so a collapsed family yields an empty range
-        // rather than a stale offset). The four operational-violation slack
-        // ranges and the two withdrawal-slack ranges are likewise own fields, so
-        // there is no need to reconstruct them from the empty-block-cursor
-        // accessors here. The `filling_*` families are the exception: they are
-        // built inline as `start..start + indices.len()`, so an empty family is
-        // `start..start` (a zero-length range at the cursor position, not `0..0`).
-        // Both forms are empty (`is_empty()` true); only the recorded offset
-        // differs, which the simulation read-path never dereferences for an empty
-        // range.
-        // Anticipated-decision: A=`n_anticipated` stage-level columns starting at
-        // the per-stage `thermal.end` cursor; `0..0` when no anticipated thermals,
-        // matching the empty-block convention the indexer uses.
+        // Most ranges are cloned from `StageLayout` own fields (already `0..0` when
+        // empty). The `filling_*` families are built inline as
+        // `start..start + indices.len()`, so an empty family is `start..start` (not
+        // `0..0`) — both are `is_empty()`, and the read-path never dereferences an
+        // empty range.
         let anticipated_decision = if layout.n_anticipated > 0 {
             let s = layout.anticipated.col_anticipated_decision_start;
             s..s + layout.n_anticipated
@@ -483,15 +387,10 @@ impl StageGeometry {
     }
 }
 
-/// Per-stage outputs of [`build_single_stage_template`].
-///
-/// One field per datum the per-stage build emits; produced by
-/// [`build_single_stage_template`] and consumed by
-/// [`assemble_stage_templates_output`], which transposes a
-/// `Vec<StageBuildOutput>` into the parallel per-stage `Vec`s of
+/// Per-stage outputs of [`build_single_stage_template`], transposed by
+/// [`assemble_stage_templates_output`] into the parallel per-stage `Vec`s of
 /// [`StageTemplates`]. Adding a per-stage datum is one field here plus one
-/// transpose line in the assembler — not a new tuple element threaded through
-/// the loop and a parallel argument.
+/// transpose line in the assembler.
 pub(super) struct StageBuildOutput {
     /// Structural LP template for the stage.
     pub template: StageTemplate,
@@ -517,13 +416,7 @@ pub(super) struct StageBuildOutput {
     pub equipment_geometry: StageGeometry,
 }
 
-/// Construct a [`StageTemplate`] for a single study stage.
-///
-/// Returns a [`StageBuildOutput`] bundling the template, the two base-row
-/// offsets (water-balance for `PatchBuffer` noise injection, load-balance for
-/// load-noise patches), the generic constraint row entries, NCS metadata
-/// (column start, count, and active system indices), and pumping metadata
-/// (column start and station count).
+/// Construct the [`StageBuildOutput`] for a single study stage.
 // Rationale: `clippy::similar_names` flags the `state` handle next to `stage`/`stage_idx`;
 // both names are established (the `StageLayout`/`StageData` field is `state`, the per-stage
 // inputs are `stage`/`stage_idx`), so renaming either to satisfy the heuristic would obscure
@@ -544,7 +437,6 @@ pub(super) fn build_single_stage_template(
     let (mut row_lower, mut row_upper) = rows::fill_stage_rows(ctx, stage, stage_idx, &layout);
     let mut col_entries = entries::build_stage_matrix_entries(ctx, stage, stage_idx, &layout);
 
-    // Fill generic constraint rows, slack columns, and CSC entries.
     {
         let mut buffers = entries::LpMatrixBuffers {
             col_entries: &mut col_entries,
@@ -556,24 +448,14 @@ pub(super) fn build_single_stage_template(
         entries::fill_generic_constraint_entries(ctx, stage, stage_idx, &layout, &mut buffers);
     }
 
-    // Scale all monetary objective coefficients for numerical conditioning.
-    // The entire SDDP algorithm operates in scaled cost space; outputs
-    // are unscaled at the reporting boundary (forward.rs, lower_bound.rs,
-    // simulation/pipeline.rs, simulation/extraction.rs).
+    // Scale every monetary objective coefficient by 1/K for numerical
+    // conditioning; outputs are unscaled at the reporting boundary.
     //
-    // Theta (the future cost approximation variable) must NOT be divided by
-    // COST_SCALE_FACTOR.  The Benders cuts enforce `theta >= intercept_scaled`
-    // where `intercept_scaled = Q_successor / K`, so theta holds the SCALED
-    // future cost.  The LP objective is `sum(c_i/K * x_i) + 1.0 * theta`, and
-    // the total scaled objective = (stage_cost + future_cost) / K.  Multiplying
-    // by K at the reporting boundary recovers the original monetary cost.
-    //
-    // If theta were also divided by K its objective coefficient would become
-    // 1/K, making the LP objective `stage_cost/K + (1/K)*theta` which, after
-    // multiplication by K, gives `stage_cost + future_cost/K` -- wrong.
-    // Use `layout.col_theta()` so the correct index is read from the augmented
-    // indexer even when `n_anticipated > 0` shifts theta past the anticipated
-    // state block.
+    // Theta must NOT be divided: the Benders cuts already enforce
+    // `theta >= Q_successor / K`, so theta holds the SCALED future cost. Dividing
+    // it too would make the LP `stage_cost/K + (1/K)*theta`, which recovers
+    // `stage_cost + future_cost/K` at the boundary — wrong. `layout.col_theta()`
+    // reads the correct index even when `n_anticipated > 0` shifts theta.
     let theta_col = layout.col_theta();
     for (i, coeff) in objective.iter_mut().enumerate() {
         if i != theta_col {
@@ -635,8 +517,6 @@ pub(super) fn build_single_stage_template(
 /// `std_mw > 0` in any load model, sorted by `EntityId` for declaration-order
 /// invariance.  Buses with duplicate IDs across stages are deduplicated.
 fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>) -> Vec<usize> {
-    // `n_load_buses` must equal `normal_lp.n_entities()` in a consistent
-    // system; both are derived from buses with std_mw > 0 in the load models.
     let mut ids: Vec<EntityId> = system
         .load_models()
         .iter()
@@ -776,7 +656,6 @@ pub fn build_stage_templates(
     evaporation_models: &EvaporationModelSet,
     resolved_parameters: &ResolvedParameters,
 ) -> Result<StageTemplates, SddpError> {
-    // Only build templates for study stages (id >= 0), in canonical order.
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
     let n_hydros = system.hydros().len();
 
@@ -784,8 +663,6 @@ pub fn build_stage_templates(
         return Ok(StageTemplates::empty(n_hydros));
     }
 
-    // Consistency gate: a non-empty PrecomputedNormal must have the same
-    // entity count as the stochastic load buses derived from the system.
     let (ctx, load_bus_indices, diversion_upstream_output) = build_template_build_ctx(
         system,
         inflow_method,
@@ -802,22 +679,16 @@ pub fn build_stage_templates(
         n_load_buses
     );
 
-    // Build the single canonical role-(a) `StateLayout` once, before the
-    // per-stage loop, so every `StageLayout` borrows the same handle for its
-    // state-region reads (`theta`, `storage_in`, `inflow_lags`, `z_inflow`,
-    // `anticipated_state`/`anticipated_state_out`, `n_state`). The column ranges
-    // and the `state_to_lp_column_map` — the only role-(a) data the per-stage
-    // template build reads through the handle — are pure functions of the state
-    // dimensions, so they match the `StateLayout` setup stores on
-    // `StageData.state` (via `build_wired_indexer`) regardless of the mask.
+    // One canonical role-(a) `StateLayout` shared by every `StageLayout`: the
+    // column ranges and `state_to_lp_column_map` it reads are pure functions of the
+    // state dimensions, so they match the `StateLayout` setup stores on
+    // `StageData.state` regardless of the mask.
     //
-    // `effective_lag_counts` feeds only the `nonzero_state_indices` mask, which
-    // the cut path reads (off `StageData.state`), never the template build. It is
-    // sized to `ctx.n_hydros` (the `StateLayout::new` contract), reading the PAR
-    // effective lag count where the model carries that hydro and falling back to
-    // the dense `max_par_order` stride otherwise — so a test driving
-    // `build_stage_templates` with a hydro-free `PrecomputedPar` still satisfies
-    // the length contract without affecting the produced templates.
+    // `effective_lag_counts` feeds only the `nonzero_state_indices` mask (read off
+    // `StageData.state` by the cut path), never the template build. Sized to
+    // `ctx.n_hydros` per the `StateLayout::new` contract, falling back to the dense
+    // `max_par_order` stride for hydros the PAR model omits — so a hydro-free
+    // `PrecomputedPar` test still satisfies the length contract.
     let effective_lag_counts: Vec<usize> = if ctx.max_par_order > 0 {
         (0..ctx.n_hydros)
             .map(|h| {
@@ -867,10 +738,9 @@ pub fn build_stage_templates(
 /// Precompute the per-stage minimum target-storage trajectory `V_target[t]` for
 /// every filling hydro, keyed `(hydro_idx, stage_id) → V_target` \[hm³\].
 ///
-/// Computed ONCE here, where the full per-stage ζ·rate schedule across all
-/// Filling stages of a hydro is available (a per-stage row-fill helper sees one
-/// stage and cannot reconstruct the backward fold). With `L = entry_stage_id − 1`
-/// the last Filling stage, the trajectory is anchored on the dead volume and
+/// Computed ONCE here, where the full per-stage ζ·rate schedule is available (a
+/// per-stage row-fill helper sees one stage and cannot reconstruct the fold). With
+/// `L = entry_stage_id − 1` the last Filling stage, anchored on the dead volume and
 /// folded backward:
 ///
 /// ```text
@@ -878,27 +748,18 @@ pub fn build_stage_templates(
 /// V_target[t] = min( V_target[t+1] − ζ_{t+1}·rate[t+1], min_storage_hm3 )
 /// ```
 ///
-/// with `ζ_t = total_hours_per_stage[stage_idx]·M3S_TO_HM3` and `rate[t]` /
-/// `min_storage_hm3` the RESOLVED per-stage `filling_min_rate_m3s` /
-/// `min_storage_hm3` (`bounds.hydro_bounds(h_idx, stage_idx)`). The clip at
-/// `min_storage` is the contract that no floor exceeds the dead volume: under the
-/// validated non-negative rate the unclipped value is already `≤ min_storage`, so
-/// the clip relaxes an over-provisioned earliest floor to slack rather than
-/// demanding over-fill — dropping it would let an over-provisioned schedule
+/// `ζ_t = total_hours_per_stage[stage_idx]·M3S_TO_HM3`; `rate`/`min_storage` are
+/// the RESOLVED per-stage bounds. The clip at `min_storage` enforces that no floor
+/// exceeds the dead volume — dropping it would let an over-provisioned schedule
 /// demand a floor ABOVE the dead volume (the design §3.1 forbidden alternative).
-/// The fold runs on the UNCLIPPED running value (`min_storage − Σ ζ·rate`),
-/// clipping each stored `V_target[t]` independently, exactly mirroring the closed
-/// form.
+/// The fold runs on the UNCLIPPED running value, clipping each stored `V_target[t]`
+/// independently to mirror the closed form.
 ///
-/// `stage_id_to_idx` maps a study `stage.id` to its study stage index so the
-/// per-stage ζ and resolved bounds are read at the correct row. Hydros are
-/// iterated in canonical slot order and the result is a `BTreeMap`, so the
-/// insertion / iteration order is declaration-order-invariant. A non-filling
-/// system yields an empty map (parity-neutrality).
+/// Hydros are iterated in canonical slot order into a `BTreeMap`, so the result is
+/// declaration-order-invariant; a non-filling system yields an empty map.
 ///
-/// `pub(super)` so the sibling `entries`/`rows` builder test modules can exercise
-/// it against single-stage fixtures; production callers reach it only through
-/// `build_template_build_ctx`.
+/// `pub(super)` so the sibling builder test modules can exercise it against
+/// single-stage fixtures; production reaches it via `build_template_build_ctx`.
 pub(super) fn build_filling_v_target(
     hydros: &[Hydro],
     bounds: &ResolvedBounds,
@@ -912,27 +773,19 @@ pub(super) fn build_filling_v_target(
         };
         let start = filling.start_stage_id;
         let last = entry - 1; // L: the last Filling stage id.
-        // `start < entry` is validated upstream, so `start <= last`; guard anyway
-        // so a hypothetical inverted config produces an empty trajectory rather
-        // than a malformed loop.
+        // Guard a hypothetical inverted config (`start < entry` is validated
+        // upstream) into an empty trajectory rather than a malformed loop.
         if last < start {
             continue;
         }
         let Some(&last_idx) = stage_id_to_idx.get(&last) else {
             continue;
         };
-        // Anchor: V_target[L] = min_storage (at L's own stage_idx). The clip is a
-        // no-op here (min(min_storage, min_storage)); recorded explicitly so the
-        // terminal row reads the dead volume exactly.
         let min_storage_at_last = bounds.hydro_bounds(h_idx, last_idx).min_storage_hm3;
         v_target.insert((h_idx, last), min_storage_at_last);
-        // Backward fold from L down to `start`. `running` is the UNCLIPPED
-        // accumulator `min_storage − Σ_{s=t+1}^{L} ζ_s·rate_s`; each stored
-        // V_target is clipped at that stage's own resolved dead volume.
         let mut running = min_storage_at_last;
         let mut t = last;
         while t > start {
-            // Subtract stage t's contribution to obtain V_target[t − 1].
             if let Some(&t_idx) = stage_id_to_idx.get(&t) {
                 let zeta_t = total_hours_per_stage[t_idx] * M3S_TO_HM3;
                 let rate_t = bounds.hydro_bounds(h_idx, t_idx).filling_min_rate_m3s;
@@ -992,12 +845,8 @@ fn build_template_build_ctx<'a>(
     let bus_pos: BTreeMap<EntityId, usize> =
         buses.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
 
-    // Pumping stations are ID-sorted at `System` build time
-    // (`SystemBuilder::build` sorts every entity Vec by `id.0`), so
-    // `System::pumping_stations` returns them in canonical order. Iterate that
-    // slice in slot order — NOT declaration order — to build `pumping_pos`,
-    // mirroring `hydro_pos`/`bus_pos`; this upholds the declaration-order
-    // bit-determinism rule.
+    // Iterate the (ID-sorted) station slice in slot order, NOT declaration order,
+    // to uphold the declaration-order bit-determinism rule.
     let pumping_stations = system.pumping_stations();
     let pumping_pos: BTreeMap<EntityId, usize> = pumping_stations
         .iter()
@@ -1005,11 +854,8 @@ fn build_template_build_ctx<'a>(
         .map(|(i, p)| (p.id, i))
         .collect();
     let n_pumping = pumping_stations.len();
-    // The resolved-bounds table sizes the `pumping` Vec from the same station
-    // count; a divergence means the bounds resolution and the entity slice
-    // disagree on how many stations exist (a resolution bug), not a benign
-    // empty-system case. Fail fast rather than silently reserving the wrong
-    // number of pumping-flow columns.
+    // Fail fast on a station-count divergence rather than silently reserving the
+    // wrong number of pumping-flow columns.
     debug_assert_eq!(
         n_pumping,
         system.bounds().n_pumping(),
@@ -1030,12 +876,9 @@ fn build_template_build_ctx<'a>(
         .unwrap_or(0)
         .max(par_lp.max_order());
 
-    // Compute anticipated-thermal metadata in declaration order.
-    // For each thermal with `anticipated_config.is_some()`, record its global
-    // index, per-plant lead_stages (K_i), and commissioning window. The window
-    // is carried so the decision gate keys its operation-window clause on the
-    // delivery stage; an anticipated thermal without a declared window has
-    // `(None, None)` and is active at every delivery stage inside the horizon.
+    // Per anticipated thermal: global index, lead_stages (K_i), and commissioning
+    // window. The window keys the decision gate's operation-window clause on the
+    // delivery stage; `(None, None)` means active every delivery stage in horizon.
     let mut anticipated_thermal_indices: Vec<usize> = Vec::new();
     let mut anticipated_lead_stages: Vec<usize> = Vec::new();
     let mut anticipated_windows: Vec<(Option<i32>, Option<i32>)> = Vec::new();
@@ -1050,10 +893,8 @@ fn build_template_build_ctx<'a>(
     let n_anticipated = anticipated_thermal_indices.len();
     let k_max = anticipated_lead_stages.iter().copied().max().unwrap_or(0);
 
-    // Precompute diversion upstream map: maps target hydro ID -> list of source
-    // hydro indices that divert water to it. O(1) lookup in water balance loop.
-    // Cloned so the map is available both for LP construction (ctx) and for the
-    // simulation extraction pipeline (StageTemplates output).
+    // Target hydro ID -> source hydro indices that divert to it. Cloned so the map
+    // serves both LP construction (ctx) and the simulation extraction output.
     let mut diversion_upstream: HashMap<EntityId, Vec<usize>> = HashMap::new();
     for (h_idx, hydro) in hydros.iter().enumerate() {
         if let Some(ref div) = hydro.diversion {
@@ -1065,15 +906,9 @@ fn build_template_build_ctx<'a>(
     }
     let diversion_upstream_output = diversion_upstream.clone();
 
-    // Pre-compute discount factors and total stage hours before the per-stage
-    // template loop so that the anticipated-decision objective in
-    // `fill_anticipated_columns` can read them from the ctx at LP build time
-    // (before postprocess_templates runs).
-    //
-    // Both arrays have length `n_study_stages` exactly. The anticipated-decision
-    // predicate is strict (`stage_idx + K_i < n_stages`), so every active
-    // delivery stage satisfies `delivery_stage in [0, n_stages)` — no phantom
-    // boundary entry is needed.
+    // Computed before the per-stage loop so `fill_anticipated_columns` can read the
+    // discount factors and stage hours from the ctx at LP build time (before
+    // postprocess runs). Both arrays have length `n_study_stages`.
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
     let per_stage_discount =
         compute_per_stage_discount_factors(&study_stages, system.policy_graph());
@@ -1094,25 +929,19 @@ fn build_template_build_ctx<'a>(
         "total_hours_per_stage length must equal n_study_stages"
     );
 
-    // Study-stage commissioning ids, indexed by study stage index. The
-    // anticipated decision gate keys its operation-window clause on the
-    // DELIVERY stage's `stage.id` (not the stage index), so it maps the
-    // delivery stage index `t + K_i` to its commissioning id through this slice.
+    // Study-stage ids by study stage index: the decision gate keys its
+    // operation-window clause on the DELIVERY stage's `stage.id`, mapping the
+    // delivery index `t + K_i` to its id through this slice.
     let study_stage_ids: Vec<i32> = study_stages.iter().map(|s| s.id).collect();
 
-    // Inverse of `study_stage_ids`: study `stage.id` → study stage index. The
-    // filling-target backward fold reads per-stage ζ (`total_hours_per_stage`)
-    // and resolved bounds at the stage INDEX, but the Filling-phase window is
-    // expressed in stage IDs, so the fold maps each filling stage id through this.
+    // Inverse: study `stage.id` → study stage index. The filling-target fold reads
+    // per-stage ζ and bounds at the INDEX but expresses the window in stage IDs.
     let stage_id_to_idx: BTreeMap<i32, usize> = study_stage_ids
         .iter()
         .enumerate()
         .map(|(idx, &id)| (id, idx))
         .collect();
 
-    // Per-stage minimum target-storage trajectory for every filling hydro,
-    // computed once here where the full per-stage ζ·rate schedule is known.
-    // Empty for a non-filling system (parity-neutrality).
     let filling_v_target = build_filling_v_target(
         hydros,
         system.bounds(),
@@ -1170,21 +999,12 @@ fn build_template_build_ctx<'a>(
     (ctx, load_bus_indices, diversion_upstream_output)
 }
 
-/// Assemble the final [`StageTemplates`] from the per-stage build outputs.
-///
-/// Transposes the `Vec<StageBuildOutput>` (one entry per study stage) into the
-/// parallel per-stage `Vec`s of [`StageTemplates`] in a single pass, then
-/// computes the noise-scale, zeta, block-hour, hydro-productivity, and discount
-/// arrays and packages everything into the `StageTemplates` returned by
-/// [`build_stage_templates`].
-///
-/// Called once, immediately after the per-stage loop completes.
-// Rationale: the remaining args are genuinely separate inputs — the per-stage
-// `Vec<StageBuildOutput>` plus the build context (`study_stages`, `ctx`, `par_lp`),
-// the cross-stage scalar dims, and the two whole-run outputs (`load_bus_indices`,
-// `diversion_upstream_output`). They have distinct lifetimes and ownership (some
-// borrowed, some owned), so bundling them into one struct would buy nothing on this
-// single-call cold path while obscuring the transpose inputs.
+/// Transpose the per-stage `Vec<StageBuildOutput>` into the parallel per-stage
+/// `Vec`s of [`StageTemplates`], computing the noise-scale, zeta, block-hour,
+/// hydro-productivity, and discount arrays.
+// Rationale: the args have distinct lifetimes and ownership (some borrowed, some
+// owned), so bundling them into one struct would buy nothing on this single-call
+// cold path while obscuring the transpose inputs.
 #[allow(clippy::too_many_arguments)]
 fn assemble_stage_templates_output(
     stage_outputs: Vec<StageBuildOutput>,
@@ -1197,9 +1017,8 @@ fn assemble_stage_templates_output(
     n_load_buses: usize,
     n_study: usize,
 ) -> StageTemplates {
-    // Transpose the per-stage outputs into the parallel Vecs in one pass,
-    // preserving the per-stage push order: index `s` of every parallel Vec
-    // refers to the same stage, which the assembled StageTemplates relies on.
+    // Index `s` of every parallel Vec must refer to the same stage, so preserve the
+    // per-stage push order.
     let mut templates = Vec::with_capacity(n_study);
     let mut base_rows = Vec::with_capacity(n_study);
     let mut load_balance_row_starts = Vec::with_capacity(n_study);
@@ -1207,10 +1026,9 @@ fn assemble_stage_templates_output(
     let mut ncs_col_starts = Vec::with_capacity(n_study);
     let mut pumping_col_starts = Vec::with_capacity(n_study);
     let mut geometry_per_stage = Vec::with_capacity(n_study);
-    // The dense NCS/pumping counts are constant across stages (every entity keeps
-    // a column at every stage), so they collapse to scalars; the column STARTS
-    // remain per-stage because they ride this stage's `n_blks`. The first output
-    // seeds the scalars; later outputs must agree (the dense invariant).
+    // The dense NCS/pumping counts are constant across stages, so they collapse to
+    // scalars (column STARTS stay per-stage, riding `n_blks`): the first output
+    // seeds the scalars, later outputs must agree.
     let mut n_ncs: usize = 0;
     let mut n_pumping: usize = 0;
     for (s, out) in stage_outputs.into_iter().enumerate() {
@@ -1239,7 +1057,6 @@ fn assemble_stage_templates_output(
     let (noise_scale, zeta_per_stage, block_hours_per_stage) =
         scaling::compute_noise_scale(study_stages, ctx.hydros, n_hydros, par_lp);
 
-    // Build per-stage productivity arrays for simulation extraction.
     let hydro_productivities_per_stage: Vec<Vec<f64>> = (0..n_study)
         .map(|s| {
             (0..n_hydros)
@@ -1269,12 +1086,7 @@ fn assemble_stage_templates_output(
         geometry_per_stage,
         diversion_upstream: diversion_upstream_output,
         hydro_productivities_per_stage,
-        // Discount factors are 1.0-placeholders here; the real per-stage and
-        // cumulative factors are installed by StageTemplates::set_discount_factors
-        // in the postprocess step (setup::template_postprocess). Lengths match
-        // n_study: the strict anticipated-decision predicate
-        // (`stage_idx + K_i < n_stages`) guarantees every delivery lookup falls
-        // within `[0, n_stages)`.
+        // 1.0-placeholders until `StageTemplates::set_discount_factors`.
         discount_factors: vec![1.0; n_study],
         cumulative_discount_factors: vec![1.0; n_study],
     }

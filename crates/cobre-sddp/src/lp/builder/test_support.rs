@@ -1,8 +1,4 @@
 //! Shared `#[cfg(test)]` fixtures for the split builder representation modules.
-//!
-//! `zero_hydro_penalties` and `two_block_stage` live here once; every user
-//! imports them by explicit name via `use super::super::test_support::…` (the
-//! test modules nest one level below this module) — never `use super::*`.
 
 use chrono::NaiveDate;
 use cobre_core::{
@@ -17,11 +13,9 @@ use super::layout::TemplateBuildCtx;
 /// Build the canonical role-(a) [`StateLayout`] a `StageLayout` borrows, from a
 /// test [`TemplateBuildCtx`].
 ///
-/// Mirrors the production build in `template.rs::build_stage_templates`: the same
-/// state dimensions and the same PAR-derived per-hydro effective lag counts, so
-/// the handle a test passes to `StageLayout::new` is byte-identical to the one
-/// production threads. Tests hold the returned value in a local and pass `&state`
-/// (the borrow outlives the per-stage `StageLayout`, so no clone is forced).
+/// Mirrors `template.rs::build_stage_templates` — same state dimensions and
+/// PAR-derived effective lag counts — so the handle a test passes to
+/// `StageLayout::new` is byte-identical to production's.
 pub(super) fn state_layout_for(ctx: &TemplateBuildCtx<'_>) -> StateLayout {
     let effective_lag_counts: Vec<usize> = if ctx.max_par_order > 0 {
         (0..ctx.n_hydros)
@@ -46,9 +40,8 @@ pub(super) fn state_layout_for(ctx: &TemplateBuildCtx<'_>) -> StateLayout {
     )
 }
 
-/// All-zero hydro penalties: every one of the 16 `HydroPenalties` cost fields is
-/// `0.0`, so no fixture-side penalty cost contaminates the column/objective
-/// assertions in the builder tests.
+/// All-zero `HydroPenalties` so no fixture-side penalty cost contaminates the
+/// column/objective assertions in the builder tests.
 pub(super) fn zero_hydro_penalties() -> HydroPenalties {
     HydroPenalties {
         spillage_cost: 0.0,
