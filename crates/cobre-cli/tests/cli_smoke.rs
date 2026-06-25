@@ -1,16 +1,12 @@
 //! Smoke tests for the `cobre` binary using `assert_cmd`.
-//!
-//! These tests verify that the argument-parsing skeleton and subcommand stubs
-//! behave correctly without performing any real computation.
 
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
 use std::process::Command;
 
 fn cobre() -> Command {
-    // `cargo_bin!` resolves via the CARGO_BIN_EXE_cobre environment variable,
-    // which is set by cargo for integration tests and is compatible with custom
-    // build directories (unlike the deprecated `Command::cargo_bin`).
+    // `cargo_bin!` honors custom build directories via CARGO_BIN_EXE_cobre, unlike
+    // the deprecated `Command::cargo_bin`.
     Command::new(assert_cmd::cargo::cargo_bin!("cobre"))
 }
 
@@ -38,11 +34,8 @@ fn run_help_exits_0_and_lists_flags() {
         .stdout(predicate::str::contains("CASE_DIR"));
 }
 
-/// `--threads 0` is rejected by clap before execution begins.
-///
-/// The `value_parser = clap::value_parser!(u32).range(1..)` constraint
-/// on `RunArgs::threads` means `0` triggers a clap validation error,
-/// producing exit code 2 and a message on stderr, without any I/O.
+/// Exit 2 here is a clap validation error (the `.range(1..)` parser), not I/O —
+/// the case path is never touched.
 #[test]
 fn run_threads_zero_exits_with_clap_error() {
     cobre()
@@ -52,12 +45,8 @@ fn run_threads_zero_exits_with_clap_error() {
         .code(2);
 }
 
-/// `--threads` with a positive value is accepted by clap (argument is valid).
-///
-/// Even though the case directory does not exist, the argument parsing itself
-/// succeeds: the error is an I/O error (exit code 2), not a clap parse error.
-/// This test verifies that `--threads 2` passes validation and execution
-/// proceeds past argument parsing.
+/// A positive `--threads` passes clap; the failure is the missing path (I/O),
+/// proving execution proceeded past argument parsing.
 #[test]
 fn run_threads_positive_is_accepted_by_clap() {
     cobre()

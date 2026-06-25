@@ -1,10 +1,5 @@
-//! Integration test: end-to-end run with anticipated thermals.
-//!
-//! Verifies that `simulation/thermals/` carries non-null, semantically
-//! correct values in the three columns `is_anticipated`,
-//! `anticipated_decision_mw`, and `anticipated_committed_mw` after a
-//! full training + simulation run on a fixture with one regular and one
-//! anticipated thermal plant.
+//! Integration test: end-to-end run with anticipated thermals on a 2-stage
+//! fixture (one regular, one anticipated thermal with `lead_stages=1`).
 
 #![allow(
     clippy::unwrap_used,
@@ -26,7 +21,6 @@ fn cobre() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("cobre"))
 }
 
-/// Config with simulation enabled (1 scenario, 2 training iterations).
 const CONFIG_JSON: &str = r#"{
     "training": {
         "forward_passes": 1,
@@ -132,11 +126,6 @@ fn write_file(root: &Path, relative: &str, content: &str) {
     fs::write(&full, content).unwrap();
 }
 
-/// Reads all record batches from a Parquet file and concatenates them into
-/// a single collection of column arrays, indexed by column name.
-///
-/// Returns `(stage_ids, thermal_ids, is_anticipated, anticipated_committed_mw,
-/// anticipated_decision_mw)` extracted from every row.
 struct ThermalRows {
     stage_ids: Vec<i32>,
     thermal_ids: Vec<i32>,
@@ -231,14 +220,6 @@ fn read_thermals_parquet(path: &Path) -> ThermalRows {
     }
 }
 
-/// End-to-end run with two thermals (id=1 regular, id=2 anticipated with `lead_stages=1`).
-///
-/// Asserts on the three columns populated by the anticipated thermal extraction:
-/// - Regular thermal at every stage: `is_anticipated=false`, both optional columns null.
-/// - Anticipated thermal at stage 0: `is_anticipated=true`, `anticipated_decision_mw` non-null
-///   and `>= 0.0`, `anticipated_committed_mw` null (decision placed, not yet matured).
-/// - Anticipated thermal at stage 1: `is_anticipated=true`, `anticipated_committed_mw`
-///   non-null and `>= 0.0`.
 #[test]
 fn cli_run_populates_anticipated_thermal_columns() {
     // Sanity: IDs are ascending (declaration-order invariance).
@@ -275,8 +256,7 @@ fn cli_run_populates_anticipated_thermal_columns() {
         .assert()
         .success();
 
-    // Simulation writes one parquet per scenario. With num_scenarios=1, the file
-    // is at simulation/thermals/scenario_id=0000/data.parquet.
+    // One parquet per scenario; num_scenarios=1 gives the single scenario_id=0000 file.
     let parquet_path = output.join("simulation/thermals/scenario_id=0000/data.parquet");
     assert!(
         parquet_path.exists(),
@@ -291,7 +271,6 @@ fn cli_run_populates_anticipated_thermal_columns() {
         "thermals.parquet must contain at least one row"
     );
 
-    // AC-3 and AC-7: Regular thermal — is_anticipated=false, both optional columns null.
     for (row_idx, &tid) in rows.thermal_ids.iter().enumerate() {
         if tid != regular_id {
             continue;
@@ -314,7 +293,6 @@ fn cli_run_populates_anticipated_thermal_columns() {
         );
     }
 
-    // Verify we actually saw rows for the regular thermal.
     let regular_row_count = rows
         .thermal_ids
         .iter()
@@ -325,7 +303,6 @@ fn cli_run_populates_anticipated_thermal_columns() {
         "no rows found for regular thermal id={regular_id} in thermals.parquet"
     );
 
-    // AC-6: Anticipated thermal — is_anticipated=true for all rows.
     for (row_idx, &tid) in rows.thermal_ids.iter().enumerate() {
         if tid != anticipated_id {
             continue;
@@ -338,7 +315,6 @@ fn cli_run_populates_anticipated_thermal_columns() {
         );
     }
 
-    // Verify we actually saw rows for the anticipated thermal.
     let anticipated_row_count = rows
         .thermal_ids
         .iter()
@@ -349,9 +325,6 @@ fn cli_run_populates_anticipated_thermal_columns() {
         "no rows found for anticipated thermal id={anticipated_id} in thermals.parquet"
     );
 
-    // AC-4: Anticipated thermal at stage 0 — anticipated_decision_mw non-null and >= 0.0;
-    //        anticipated_committed_mw non-null under always-active fishing (reads slot 0
-    //        of the seeded ring buffer regardless of K vs stage_idx).
     let stage_0_ant_rows: Vec<usize> = rows
         .thermal_ids
         .iter()
@@ -391,8 +364,6 @@ fn cli_run_populates_anticipated_thermal_columns() {
         );
     }
 
-    // AC-5: Anticipated thermal at stage 1 — anticipated_committed_mw non-null and >= 0.0
-    //        (matured delivery: stage 1 >= K=1).
     let stage_1_ant_rows: Vec<usize> = rows
         .thermal_ids
         .iter()
@@ -414,8 +385,6 @@ fn cli_run_populates_anticipated_thermal_columns() {
              anticipated_committed_mw (matured delivery for K=1)"
         );
         let v = committed.unwrap();
-        // Bounded magnitude — must lie in the thermal's [min, max]
-        // generation envelope. ANTICIPATED has max_mw=100.0 in the fixture.
         assert!(
             v.is_finite() && (0.0..=100.0).contains(&v),
             "row {row_idx}: anticipated_committed_mw at stage 1 must be finite and in \
@@ -423,11 +392,9 @@ fn cli_run_populates_anticipated_thermal_columns() {
         );
     }
 
-    // Ring-buffer transport invariant. The decision placed at stage 0
-    // must equal the committed value matured at stage 1, bit-for-bit (single
-    // anticipated plant, single scenario, single block — no aggregation).
-    // Catches future regressions of the simulation-shift class (simulation pipeline
-    // failing to shift the anticipated ring buffer).
+    // Ring-buffer transport invariant: the stage-0 decision must equal the
+    // stage-1 committed value (single plant/scenario/block — no aggregation).
+    // Guards the simulation-shift contract (pipeline must shift the ring buffer).
     assert_eq!(
         stage_0_ant_rows.len(),
         stage_1_ant_rows.len(),
@@ -439,11 +406,9 @@ fn cli_run_populates_anticipated_thermal_columns() {
             .expect("stage-0 decision must be Some (asserted above)");
         let committed = rows.anticipated_committed_mw[stage_1_idx]
             .expect("stage-1 committed must be Some (asserted above)");
-        // Ring-buffer transport invariant: decision must equal committed.
-        // Bit equality is preferred but IEEE 754 +0.0 / -0.0 are numerically
-        // equivalent at zero and either may surface depending on solver vertex
-        // selection at an inactive anticipated slot. Treat them as equal at
-        // zero, otherwise require bit equality.
+        // IEEE 754 +0.0/-0.0 are equivalent and either may surface from solver
+        // vertex selection at an inactive slot; treat equal at zero, else require
+        // bit equality.
         let zero_equiv =
             decision == 0.0 && committed == 0.0 && decision.is_finite() && committed.is_finite();
         assert!(

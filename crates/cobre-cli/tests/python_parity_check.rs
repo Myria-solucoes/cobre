@@ -1,24 +1,9 @@
 //! Integration test: Python parity check.
 //!
-//! `python_parity_script_passes` invokes `python3
-//! scripts/check_python_parity.py --max 0` against the repo root. The
-//! script parses both `crates/cobre-cli/src/commands/run.rs` and
-//! `crates/cobre-python/src/run.rs` for `cobre_io::write_*` calls and
-//! other output helpers and asserts the set is identical — the
-//! canonical source-level parity contract.
-//!
-//! Earlier revisions of this file carried two `contents.contains(...)`
-//! grep tests targeted at the anticipated-thermals output calls. Those
-//! tests were subset checks of what the script already covers, and any
-//! call site that happened to mention the substring in a comment or
-//! string literal would satisfy the assertion. Per assessment finding,
-//! the redundant grep tests are removed; the script is the
-//! canonical check.
-//!
-//! A future behavioural parity test — running cobre CLI and cobre-python
-//! against the same fixture and asserting byte-for-byte parquet
-//! equality — is tracked separately. Until then, the script-based
-//! parity check is the hard rule's enforcement point.
+//! `scripts/check_python_parity.py` parses both `cobre-cli/src/commands/run.rs`
+//! and `cobre-python/src/run.rs` for `cobre_io::write_*` calls and other output
+//! helpers and asserts the two sets are identical — the canonical source-level
+//! enforcement of the CLI↔Python output-parity hard rule.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::manual_assert)]
 

@@ -1,9 +1,4 @@
 //! Integration tests for the `cobre init` subcommand.
-//!
-//! Tests the full path: binary invocation → template resolution → file
-//! creation → exit code. The init-then-validate round-trip test is the
-//! highest-value test: it proves that the embedded template files constitute
-//! a valid case directory.
 
 #![allow(clippy::unwrap_used)]
 

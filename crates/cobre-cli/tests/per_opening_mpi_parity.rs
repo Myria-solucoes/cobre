@@ -1,9 +1,6 @@
 //! Integration test wrapper for the per-opening MPI parity shell script.
 //!
-//! This test shells out to `scripts/test_per_opening_mpi_parity.sh` and asserts
-//! exit code 0.  It is marked `#[ignore]` so that default `cargo test` and
-//! `cargo nextest run` invocations do not trigger MPI execution.
-//!
+//! `#[ignore]`d so default `cargo test` / `cargo nextest run` do not trigger MPI.
 //! To run explicitly:
 //!
 //! ```text
@@ -20,25 +17,16 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Returns the repository root, resolved relative to this test file's location.
-///
-/// Cargo sets `CARGO_MANIFEST_DIR` to the crate root; the repo root is two
-/// levels up (crates/cobre-cli → repo root).
 fn repo_root() -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     PathBuf::from(manifest_dir)
-        .parent() // crates/
+        .parent()
         .expect("crates/ parent must exist")
-        .parent() // repo root
+        .parent()
         .expect("repo root must exist")
         .to_path_buf()
 }
 
-/// Runs `scripts/test_per_opening_mpi_parity.sh` with the D01 case and
-/// asserts that exit code 0 is returned (parity confirmed).
-///
-/// This test requires MPI (`mpirun`) and a release binary with `--features mpi`.
-/// It is `#[ignore]`d by default; run with `-- --ignored` to activate.
 #[test]
 #[ignore = "requires mpirun and a release build with --features mpi"]
 fn per_opening_mpi_parity_d01() {

@@ -1,7 +1,4 @@
 //! Integration tests for the `cobre validate` subcommand.
-//!
-//! Tests the full path: binary invocation → `load_case` → formatted output →
-//! exit code.  Fixtures are built programmatically in temporary directories.
 
 #![allow(clippy::unwrap_used)]
 
@@ -86,8 +83,6 @@ const HYDROS_JSON: &str = r#"{ "hydros": [] }"#;
 const THERMALS_JSON: &str = r#"{ "thermals": [] }"#;
 
 /// Build a minimal valid case directory in `dir`.
-///
-/// Contains 1 bus, 0 hydros, 0 thermals, 0 lines, 1 stage.
 fn make_valid_case(dir: &TempDir) {
     let root = dir.path();
     write_file(root, "config.json", CONFIG_JSON);
@@ -99,8 +94,6 @@ fn make_valid_case(dir: &TempDir) {
     write_file(root, "system/hydros.json", HYDROS_JSON);
     write_file(root, "system/thermals.json", THERMALS_JSON);
 }
-
-// ── acceptance criterion 1: valid case → exit 0, entity counts in stdout ─────
 
 #[test]
 fn valid_case_exits_0() {
@@ -123,13 +116,10 @@ fn valid_case_stdout_contains_buses_count() {
         .stdout(predicate::str::contains("buses,"));
 }
 
-// ── acceptance criterion 2: missing required file → exit 1, error in stdout ──
-
 #[test]
 fn missing_buses_json_exits_1() {
     let dir = TempDir::new().unwrap();
     make_valid_case(&dir);
-    // Remove the required buses.json to trigger a validation error.
     fs::remove_file(dir.path().join("system/buses.json")).unwrap();
     cobre()
         .args(["validate", dir.path().to_str().unwrap()])
@@ -164,12 +154,8 @@ fn missing_buses_json_stdout_mentions_file() {
         .stdout(predicate::str::contains("buses.json"));
 }
 
-// ── failure presentation: report goes to stdout only, no circular hint ───────
-
-/// A validation failure prints the report to stdout (the `validate` command's
-/// deliverable). It must NOT be re-printed to stderr, and stderr must NOT carry
-/// the "run `cobre validate`" hint — that would point the user back at the very
-/// command they just ran.
+/// stderr must NOT carry the "run `cobre validate`" hint — that would point the
+/// user back at the very command they just ran.
 #[test]
 fn validate_failure_report_in_stdout_not_stderr() {
     let dir = TempDir::new().unwrap();
@@ -185,15 +171,12 @@ fn validate_failure_report_in_stdout_not_stderr() {
         .stderr(predicate::str::contains("run `cobre validate`").not());
 }
 
-/// A schema-violation failure (duplicate bus IDs — the file parses but breaks
-/// schema) must surface the offending path exactly once. Before the dedup, the
-/// combined message carried the relative path as a prefix AND the absolute path
-/// inside the embedded `SchemaError` display.
+/// The offending path must surface exactly once: the relative prefix and the
+/// embedded `SchemaError` display both carry it, so the two must be deduped.
 #[test]
 fn validate_schema_failure_path_appears_once() {
     let dir = TempDir::new().unwrap();
     make_valid_case(&dir);
-    // Two buses sharing id 1 — parses, but trips the duplicate-id schema check.
     write_file(
         dir.path(),
         "system/buses.json",
@@ -212,8 +195,6 @@ fn validate_schema_failure_path_appears_once() {
         "offending path must appear exactly once, found {occurrences} in: {stdout:?}"
     );
 }
-
-// ── acceptance criterion 3: nonexistent path → exit 2, I/O error in stderr ───
 
 #[test]
 fn nonexistent_path_exits_2() {
@@ -234,35 +215,28 @@ fn nonexistent_path_stderr_mentions_path() {
         .stderr(predicate::str::contains("nonexistent"));
 }
 
-// ── acceptance criterion 4: piped output has no ANSI escape sequences ─────────
-
 #[test]
 fn valid_case_piped_stdout_has_no_ansi_escapes() {
     let dir = TempDir::new().unwrap();
     make_valid_case(&dir);
-    // When stdout is not a terminal (as in this test), `console` strips ANSI codes.
+    // `console` strips ANSI codes when stdout is not a terminal, as it is here.
     let output = cobre()
         .args(["validate", dir.path().to_str().unwrap()])
         .output()
         .unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
-    // ANSI escape sequences start with ESC (\x1b) followed by '['.
     assert!(
         !stdout.contains('\x1b'),
         "stdout should contain no ANSI escape sequences when piped, got: {stdout:?}"
     );
 }
 
-// ── acceptance criterion 5: pre-solver preparation phases are exercised ────────
-//
 // These tests cover failures that pass the six-layer IO pipeline but are caught
 // only by the three additional phases (StudyParams::from_config, prepare_stochastic,
-// prepare_hydro_models_from_artifacts) that `validate` now exercises.
+// prepare_hydro_models_from_artifacts) that `validate` exercises.
 
-/// An unknown `cut_selection` key (such as the removed `basis_activity_window`)
-/// is a hard schema error under `deny_unknown_fields` — the clean-break
-/// restructure dropped the soft-deprecation path entirely, so an unmigrated
-/// flat config fails to load rather than being silently ignored.
+/// An unknown `cut_selection` key is a hard schema error under
+/// `deny_unknown_fields`, not silently ignored.
 #[test]
 fn removed_cut_selection_field_fails_validate() {
     let dir = TempDir::new().unwrap();
@@ -286,25 +260,14 @@ fn removed_cut_selection_field_fails_validate() {
         .failure();
 }
 
-/// A hydro plant configured with `"model": "fpha"` in `hydros.json` but with
-/// no entry in `system/hydro_production_models.json` (the file is absent entirely)
-/// must cause `validate` to exit 1.
-///
-/// Failure mode: `prepare_hydro_models_from_artifacts` (Phase 10) calls
-/// `determine_source`, which rejects an FPHA hydro that has no config entry.
-/// The dimensional-consistency check (Layer 4 of the IO pipeline) skips FPHA
-/// hydros when `fpha_hyperplanes.parquet` is absent — so the case passes Phases
-/// 1-9 and is only caught at Phase 10.
+/// An FPHA hydro with no `hydro_production_models.json` entry slips past the
+/// IO pipeline (the Layer-4 dimensional check skips FPHA hydros when
+/// `fpha_hyperplanes.parquet` is absent) and is rejected only at Phase 10 by
+/// `prepare_hydro_models_from_artifacts` → `determine_source`.
 #[test]
 fn fpha_hydro_without_production_models_json_fails_validate() {
     let dir = TempDir::new().unwrap();
 
-    // Build a case identical to `make_valid_case` except:
-    // 1. `hydros.json` declares one hydro with `model: "fpha"`.
-    // 2. `system/hydro_production_models.json` is absent.
-    // 3. `system/fpha_hyperplanes.parquet` is absent.
-    // The IO pipeline passes because the dimensional check is guarded by
-    // `if !data.fpha_hyperplanes.is_empty()`. Phase 10 catches it.
     write_file(dir.path(), "config.json", CONFIG_JSON);
     write_file(dir.path(), "penalties.json", PENALTIES_JSON);
     write_file(dir.path(), "stages.json", STAGES_JSON);
@@ -317,7 +280,6 @@ fn fpha_hydro_without_production_models_json_fails_validate() {
     write_file(dir.path(), "system/lines.json", LINES_JSON);
     write_file(dir.path(), "system/thermals.json", THERMALS_JSON);
 
-    // Hydro with FPHA generation model and no hydro_production_models.json entry.
     let fpha_hydros_json = r#"{
         "hydros": [
             {
@@ -344,9 +306,6 @@ fn fpha_hydro_without_production_models_json_fails_validate() {
         ]
     }"#;
     write_file(dir.path(), "system/hydros.json", fpha_hydros_json);
-    // Deliberately omit system/hydro_production_models.json and
-    // system/fpha_hyperplanes.parquet — the IO pipeline should pass,
-    // and Phase 10 should reject.
 
     cobre()
         .args(["validate", dir.path().to_str().unwrap()])
@@ -355,8 +314,6 @@ fn fpha_hydro_without_production_models_json_fails_validate() {
         .code(1);
 }
 
-/// Same case — stdout must mention `hydro_production_models.json` so the user
-/// knows which file to create.
 #[test]
 fn fpha_hydro_without_production_models_json_stdout_mentions_file() {
     let dir = TempDir::new().unwrap();
