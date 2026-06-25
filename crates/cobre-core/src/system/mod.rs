@@ -1,31 +1,8 @@
 //! Top-level system struct and builder.
 //!
-//! The `System` struct is the top-level in-memory representation of a fully loaded,
-//! validated, and resolved case. It is produced by `cobre-io::load_case()` and consumed
-//! by solvers and analysis tools (e.g., optimization, simulation, power flow).
-//!
 //! All entity collections in `System` are stored in canonical ID-sorted order to ensure
 //! declaration-order invariance: results are bit-for-bit identical regardless of input
-//! entity ordering. See the design principles spec for details.
-//!
-//! # Submodule layout
-//!
-//! - `mod` (this file) — the `System` struct, its `Send`/`Sync` compile-time
-//!   assertion, and the read-only accessor methods.
-//! - `builder` — `SystemBuilder`, whose `build()` sorts entities into canonical
-//!   order, runs the construction-time validation pass, and assembles the
-//!   immutable `System`. As a child of `system`, it constructs `System` via a
-//!   direct struct literal over the ancestor-private fields without any field
-//!   promotion.
-//! - `validate` — the construction-time cross-reference, duplicate-id, and
-//!   filling-config validation helpers that `build()` drives, plus the `HasId`
-//!   keying trait and the `build_index` / `build_stage_index` lookup-index
-//!   builders.
-//!
-//! `SystemBuilder` is re-exported here so the curated `cobre_core::SystemBuilder`
-//! flat surface and the `cobre_core::system::SystemBuilder` module path both
-//! resolve to the same item; `System` is defined here and is already in the
-//! `system` namespace.
+//! entity ordering.
 
 use std::collections::HashMap;
 
@@ -45,14 +22,9 @@ pub use builder::SystemBuilder;
 
 use validate::{build_index, build_stage_index};
 
-/// Top-level system representation.
-///
-/// Produced by `cobre-io::load_case()` or [`SystemBuilder`] in tests.
-/// Consumed by solvers and analysis tools via shared reference.
-/// Immutable and thread-safe after construction.
+/// Top-level system representation: immutable and thread-safe after construction.
 ///
 /// Entity collections are in canonical order (sorted by [`EntityId`]'s inner `i32`).
-/// Lookup indices provide O(1) access by [`EntityId`].
 ///
 /// # Examples
 ///
@@ -77,7 +49,6 @@ use validate::{build_index, build_stage_index};
 #[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct System {
-    // Entity collections (canonical ordering by ID)
     buses: Vec<Bus>,
     lines: Vec<Line>,
     hydros: Vec<Hydro>,
@@ -86,9 +57,8 @@ pub struct System {
     contracts: Vec<EnergyContract>,
     non_controllable_sources: Vec<NonControllableSource>,
 
-    // O(1) lookup indices (entity ID -> position in collection) -- private.
-    // Per spec SS6.2: HashMap lookup indices are NOT serialized. After deserialization
-    // the caller must invoke `rebuild_indices()` to restore O(1) lookup capability.
+    // Lookup indices are not serialized; the caller must invoke `rebuild_indices()`
+    // after deserialization to restore them (spec SS6.2).
     #[cfg_attr(feature = "serde", serde(skip))]
     bus_index: HashMap<EntityId, usize>,
     #[cfg_attr(feature = "serde", serde(skip))]
@@ -104,25 +74,19 @@ pub struct System {
     #[cfg_attr(feature = "serde", serde(skip))]
     non_controllable_source_index: HashMap<EntityId, usize>,
 
-    // Topology
     /// Resolved hydro cascade graph.
     cascade: CascadeTopology,
     /// Resolved transmission network topology.
     network: NetworkTopology,
 
-    // Temporal domain
     /// Ordered list of stages (study + pre-study), sorted by `id` (canonical order).
     stages: Vec<Stage>,
     /// Policy graph defining stage transitions, horizon type, and discount rate.
     policy_graph: PolicyGraph,
 
-    // Stage O(1) lookup index (stage ID -> position in stages vec).
-    // Stage IDs are `i32` (pre-study stages have negative IDs).
-    // Not serialized; rebuilt via `rebuild_indices()`.
     #[cfg_attr(feature = "serde", serde(skip))]
     stage_index: HashMap<i32, usize>,
 
-    // Resolved tables (populated by cobre-io after penalty/bound cascade)
     /// Pre-resolved penalty values for all entities across all stages.
     penalties: ResolvedPenalties,
     /// Pre-resolved bound values for all entities across all stages.
@@ -138,7 +102,6 @@ pub struct System {
     /// Pre-resolved per-block NCS generation scaling factors.
     resolved_ncs_factors: ResolvedNcsFactors,
 
-    // Scenario pipeline data (raw parameters loaded by cobre-io)
     /// PAR(p) inflow model parameters, one entry per (hydro, stage) pair.
     inflow_models: Vec<InflowModel>,
     /// Seasonal load statistics, one entry per (bus, stage) pair.
@@ -148,32 +111,21 @@ pub struct System {
     /// Correlation model for stochastic inflow/load generation.
     correlation: CorrelationModel,
 
-    // Study state
     /// Initial reservoir storage levels at the start of the study.
     initial_conditions: InitialConditions,
     /// User-defined generic linear constraints, sorted by `id`.
     generic_constraints: Vec<GenericConstraint>,
 
-    // Raw scenario library data (H6 — historical and external sampling)
-    /// Raw historical inflow observations per (hydro, date) pair.
-    /// Sorted by `(hydro_id, date)` ascending. Empty when
-    /// `scenarios/inflow_history.parquet` is absent.
+    /// Raw historical inflow observations, sorted by `(hydro_id, date)` ascending.
     inflow_history: Vec<InflowHistoryRow>,
-    /// Raw external scenario rows per (stage, scenario, hydro) triple.
-    /// Sorted by `(stage_id, scenario_id, hydro_id)` ascending.
-    /// Empty when no external inflow scenario file is present.
+    /// Raw external inflow scenario rows, sorted by `(stage_id, scenario_id, hydro_id)` ascending.
     external_scenarios: Vec<ExternalScenarioRow>,
-    /// Raw external load scenario rows per (stage, scenario, bus) triple.
-    /// Sorted by `(stage_id, scenario_id, bus_id)` ascending.
-    /// Empty when no external load scenario file is present.
+    /// Raw external load scenario rows, sorted by `(stage_id, scenario_id, bus_id)` ascending.
     external_load_scenarios: Vec<ExternalLoadRow>,
-    /// Raw external NCS scenario rows per (stage, scenario, ncs) triple.
-    /// Sorted by `(stage_id, scenario_id, ncs_id)` ascending.
-    /// Empty when no external NCS scenario file is present.
+    /// Raw external NCS scenario rows, sorted by `(stage_id, scenario_id, ncs_id)` ascending.
     external_ncs_scenarios: Vec<ExternalNcsRow>,
 }
 
-// Compile-time check that System is Send + Sync.
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
     const fn check() {
@@ -463,13 +415,9 @@ impl System {
         &self.external_ncs_scenarios
     }
 
-    /// Replace the scenario models and correlation on this `System`, returning a new
-    /// `System` with updated fields and all other fields preserved.
-    ///
-    /// This is the only supported way to update `inflow_models` and `correlation`
-    /// after a `System` has been constructed — the fields are not public outside
-    /// this crate. All entity collections, topology, stages, penalties, bounds, and
-    /// study state are preserved unchanged.
+    /// Replace `inflow_models` and `correlation`, returning the `System` with all
+    /// other fields preserved. The only supported post-construction update path for
+    /// these fields, which are not public outside this crate.
     ///
     /// # Examples
     ///
@@ -501,12 +449,11 @@ impl System {
         self
     }
 
-    /// Rebuild all O(1) lookup indices from the entity collections.
+    /// Rebuild all lookup indices from the entity collections.
     ///
-    /// Required after deserialization: the `HashMap` lookup indices are not serialized
-    /// (per spec SS6.2 — they are derived from the entity collections). After
-    /// deserializing a `System` from JSON or any other format, call this method once
-    /// to restore O(1) access via [`bus`](Self::bus), [`hydro`](Self::hydro), etc.
+    /// Required after deserialization: the indices are `serde(skip)`, so call this
+    /// once to restore lookup via [`bus`](Self::bus), [`hydro`](Self::hydro), etc.
+    /// (spec SS6.2).
     ///
     /// # Examples
     ///
@@ -721,7 +668,6 @@ mod tests {
 
     #[test]
     fn test_canonical_ordering() {
-        // Provide buses in reverse order: id=2, id=1, id=0
         let system = SystemBuilder::new()
             .buses(vec![make_bus(2), make_bus(1), make_bus(0)])
             .build()
@@ -796,7 +742,6 @@ mod tests {
 
     #[test]
     fn test_duplicate_id_error() {
-        // Two buses with the same id=0 must yield an Err.
         let result = SystemBuilder::new()
             .buses(vec![make_bus(0), make_bus(0)])
             .build();
@@ -815,8 +760,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_stage_id_error() {
-        // Two stages with the same id must yield an Err — build_stage_index
-        // would otherwise silently overwrite the colliding stage.
+        // Without this check build_stage_index silently overwrites the colliding stage.
         let result = SystemBuilder::new()
             .stages(vec![make_stage(0), make_stage(0)])
             .build();
@@ -834,7 +778,7 @@ mod tests {
 
     #[test]
     fn test_multiple_duplicate_errors() {
-        // Duplicates in both buses (id=0) and thermals (id=5) must both be reported.
+        // Both duplicates must be reported (no short-circuiting on the first).
         let result = SystemBuilder::new()
             .buses(vec![make_bus(0), make_bus(0)])
             .thermals(vec![make_thermal(5), make_thermal(5)])
@@ -915,10 +859,8 @@ mod tests {
 
     #[test]
     fn test_all_entity_lookups() {
-        // Provide all buses and hydros that the other entities reference.
-        // - Buses 0 and 1 are needed by all entities (lines, hydros, thermals, etc.)
-        // - Hydros 0 and 1 are needed by the pumping station (source/destination)
-        // - Hydro 3 is the entity under test (lookup by id=3), on bus 0
+        // Hydros 0 and 1 exist for the pumping station's source/destination refs;
+        // hydro 3 is the lookup target.
         let system = SystemBuilder::new()
             .buses(vec![make_bus(0), make_bus(1)])
             .lines(vec![make_line(2, 0, 1)])
@@ -963,7 +905,6 @@ mod tests {
 
     #[test]
     fn test_invalid_bus_reference_hydro() {
-        // Hydro references bus id=99 which does not exist.
         let hydro = make_hydro_on_bus(1, 99);
         let result = SystemBuilder::new().hydros(vec![hydro]).build();
 
@@ -986,7 +927,6 @@ mod tests {
 
     #[test]
     fn test_invalid_downstream_reference() {
-        // Hydro references downstream hydro id=50 which does not exist.
         let bus = make_bus(0);
         let mut hydro = make_hydro(1);
         hydro.downstream_id = Some(EntityId(50));
@@ -1018,7 +958,6 @@ mod tests {
 
     #[test]
     fn test_invalid_pumping_station_hydro_refs() {
-        // Pumping station references source hydro id=77 which does not exist.
         let bus = make_bus(0);
         let dest_hydro = make_hydro(1);
         let ps = make_pumping_station_full(10, 0, 77, 1);
@@ -1051,8 +990,7 @@ mod tests {
 
     #[test]
     fn test_multiple_invalid_references_collected() {
-        // A line with bad source_bus_id AND a thermal with bad bus_id.
-        // Both errors must be reported (no short-circuiting).
+        // Both errors must be reported (no short-circuiting on the first).
         let line = make_line(1, 99, 0);
         let thermal = make_thermal_on_bus(2, 88);
 
@@ -1108,7 +1046,6 @@ mod tests {
 
     #[test]
     fn test_valid_cross_references_pass() {
-        // All cross-references point to entities that exist — build must succeed.
         let bus_0 = make_bus(0);
         let bus_1 = make_bus(1);
         let h0 = make_hydro_on_bus(0, 0);
@@ -1150,8 +1087,6 @@ mod tests {
 
     #[test]
     fn test_cascade_cycle_detected() {
-        // Three-node cycle: A(0)->B(1)->C(2)->A(0).
-        // All three reference a common bus (bus 0).
         let bus = make_bus(0);
         let mut h0 = make_hydro(0);
         h0.downstream_id = Some(EntityId(1));
@@ -1186,7 +1121,6 @@ mod tests {
 
     #[test]
     fn test_cascade_self_loop_detected() {
-        // Single hydro pointing to itself: A(0)->A(0).
         let bus = make_bus(0);
         let mut h0 = make_hydro(0);
         h0.downstream_id = Some(EntityId(0));
@@ -1209,8 +1143,6 @@ mod tests {
 
     #[test]
     fn test_valid_acyclic_cascade_passes() {
-        // Linear acyclic cascade A(0)->B(1)->C(2).
-        // Verifies that a valid cascade produces Ok with correct topological_order length.
         let bus = make_bus(0);
         let mut h0 = make_hydro(0);
         h0.downstream_id = Some(EntityId(1));
@@ -1240,7 +1172,6 @@ mod tests {
 
     #[test]
     fn test_filling_without_entry_stage() {
-        // Filling config present but entry_stage_id is None.
         use crate::entities::FillingConfig;
         let bus = make_bus(0);
         let mut hydro = make_hydro(1);
@@ -1274,8 +1205,7 @@ mod tests {
 
     #[test]
     fn test_filling_negative_rate() {
-        // Filling config with filling_min_rate_m3s < 0.0 (a negative rate is
-        // rejected; zero is valid and tested separately).
+        // Only a negative rate is rejected; zero is valid (test_filling_zero_rate_accepted).
         use crate::entities::FillingConfig;
         let bus = make_bus(0);
         let mut hydro = make_hydro(1);
@@ -1311,7 +1241,6 @@ mod tests {
     #[test]
     fn test_filling_zero_rate_accepted() {
         // A zero rate is valid: no minimum accumulation is required this stage.
-        // It must NOT produce a rate error.
         use crate::entities::FillingConfig;
         let bus = make_bus(0);
         let mut hydro = make_hydro(1);
@@ -1335,7 +1264,6 @@ mod tests {
 
     #[test]
     fn test_valid_filling_config_passes() {
-        // Valid filling config: entry_stage_id set and filling_min_rate_m3s positive.
         use crate::entities::FillingConfig;
         let bus = make_bus(0);
         let mut hydro = make_hydro(1);
@@ -1359,10 +1287,8 @@ mod tests {
 
     #[test]
     fn test_filling_start_not_before_entry_rejected() {
-        // start_stage_id must be strictly less than entry_stage_id. An inverted
-        // (or equal) ordering is rejected at the SystemBuilder boundary, so a
-        // System built directly (bypassing cobre-io) cannot reach the solver with
-        // a config that would silently mis-phase the reservoir.
+        // SystemBuilder rejects start_stage_id >= entry_stage_id even when cobre-io
+        // is bypassed; an inverted ordering otherwise mis-phases the reservoir.
         use crate::entities::FillingConfig;
         let bus = make_bus(0);
         let mut hydro = make_hydro(1);
@@ -1396,18 +1322,14 @@ mod tests {
 
     #[test]
     fn test_cascade_cycle_and_invalid_filling_both_reported() {
-        // Both a cascade cycle (A->A self-loop) AND an invalid filling config
-        // must produce both error variants.
         use crate::entities::FillingConfig;
         let bus = make_bus(0);
 
-        // Hydro 0: self-loop (cycle)
         let mut h0 = make_hydro(0);
         h0.downstream_id = Some(EntityId(0));
 
-        // Hydro 1: valid cycle participant? No -- use a separate hydro with invalid filling.
         let mut h1 = make_hydro(1);
-        h1.entry_stage_id = None; // no entry_stage_id
+        h1.entry_stage_id = None;
         h1.filling = Some(FillingConfig {
             start_stage_id: 5,
             filling_min_rate_m3s: 50.0,
@@ -1436,7 +1358,6 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn test_system_serde_roundtrip() {
-        // Build a system with a bus, a hydro, a line, and a thermal.
         let bus_a = make_bus(1);
         let bus_b = make_bus(2);
         let hydro = make_hydro_on_bus(10, 1);
@@ -1453,17 +1374,14 @@ mod tests {
 
         let json = serde_json::to_string(&system).unwrap();
 
-        // Deserialize and rebuild indices.
         let mut deserialized: System = serde_json::from_str(&json).unwrap();
         deserialized.rebuild_indices();
 
-        // Entity collections must match.
         assert_eq!(system.buses(), deserialized.buses());
         assert_eq!(system.hydros(), deserialized.hydros());
         assert_eq!(system.thermals(), deserialized.thermals());
         assert_eq!(system.lines(), deserialized.lines());
 
-        // O(1) lookup must work after index rebuild.
         assert_eq!(
             deserialized.bus(EntityId(1)).map(|b| b.id),
             Some(EntityId(1))
@@ -1513,15 +1431,11 @@ mod tests {
         }
     }
 
-    /// Verify that `SystemBuilder::new().build()` still works correctly.
-    /// New fields must default to empty/default values.
     #[test]
     fn test_system_backward_compat() {
         let system = SystemBuilder::new().build().expect("empty system is valid");
-        // Entity counts unchanged
         assert_eq!(system.n_buses(), 0);
         assert_eq!(system.n_hydros(), 0);
-        // New fields default to empty
         assert_eq!(system.n_stages(), 0);
         assert!(system.stages().is_empty());
         assert!(system.initial_conditions().storage.is_empty());
@@ -1530,7 +1444,6 @@ mod tests {
         assert!(system.load_models().is_empty());
         assert_eq!(system.penalties().n_stages(), 0);
         assert_eq!(system.bounds().n_stages(), 0);
-        // Generic constraint bounds default to empty.
         assert!(!system.resolved_generic_bounds().is_active(0, 0));
         assert!(
             system
@@ -1540,7 +1453,6 @@ mod tests {
         );
     }
 
-    /// Verify `System::resolved_generic_bounds()` accessor with a non-empty table.
     #[test]
     fn test_system_resolved_generic_bounds_accessor() {
         use crate::resolved::ResolvedGenericConstraintBounds;
@@ -1562,34 +1474,29 @@ mod tests {
         assert_eq!(slice[0], (None, 100.0));
     }
 
-    /// Build a System with 2 stages and verify `n_stages()` and `stage(id)` lookup.
     #[test]
     fn test_system_with_stages() {
         let s0 = make_stage(0);
         let s1 = make_stage(1);
 
         let system = SystemBuilder::new()
-            .stages(vec![s1.clone(), s0.clone()]) // supply in reverse order
+            .stages(vec![s1.clone(), s0.clone()])
             .build()
             .expect("valid system");
 
-        // Canonical ordering: id=0 comes before id=1
         assert_eq!(system.n_stages(), 2);
         assert_eq!(system.stages()[0].id, 0);
         assert_eq!(system.stages()[1].id, 1);
 
-        // O(1) lookup by stage id
         let found = system.stage(0).expect("stage 0 must be found");
         assert_eq!(found.id, s0.id);
 
         let found1 = system.stage(1).expect("stage 1 must be found");
         assert_eq!(found1.id, s1.id);
 
-        // Missing stage returns None
         assert!(system.stage(99).is_none());
     }
 
-    /// Build a System with 3 stages having IDs 0, 1, 2 and verify `stage()` lookups.
     #[test]
     fn test_system_stage_lookup_by_id() {
         let stages: Vec<Stage> = [0i32, 1, 2].iter().map(|&id| make_stage(id)).collect();
@@ -1603,7 +1510,6 @@ mod tests {
         assert!(system.stage(99).is_none());
     }
 
-    /// Build a System with `InitialConditions` containing 1 storage entry and verify accessor.
     #[test]
     fn test_system_with_initial_conditions() {
         let ic = InitialConditions {
@@ -1627,8 +1533,6 @@ mod tests {
         assert!((system.initial_conditions().storage[0].value_hm3 - 15_000.0).abs() < f64::EPSILON);
     }
 
-    /// Verify serde round-trip of a System with stages and `policy_graph`,
-    /// including that `stage_index` is correctly rebuilt after deserialization.
     #[cfg(feature = "serde")]
     #[test]
     fn test_system_serde_roundtrip_with_stages() {
@@ -1650,21 +1554,16 @@ mod tests {
 
         let json = serde_json::to_string(&system).unwrap();
         let mut deserialized: System = serde_json::from_str(&json).unwrap();
-
-        // stage_index is skipped during serde; rebuild before querying
         deserialized.rebuild_indices();
 
-        // Collections must match after round-trip
         assert_eq!(system.n_stages(), deserialized.n_stages());
         assert_eq!(system.stages()[0].id, deserialized.stages()[0].id);
         assert_eq!(system.stages()[1].id, deserialized.stages()[1].id);
 
-        // O(1) lookup must work after index rebuild
         assert_eq!(deserialized.stage(0).map(|s| s.id), Some(0));
         assert_eq!(deserialized.stage(1).map(|s| s.id), Some(1));
         assert!(deserialized.stage(99).is_none());
 
-        // policy_graph fields must round-trip
         assert_eq!(
             deserialized.policy_graph().graph_type,
             system.policy_graph().graph_type
@@ -1673,8 +1572,6 @@ mod tests {
 
     // ---- inflow_history and external_scenarios field tests ------------------
 
-    /// Given a `SystemBuilder` with no `.inflow_history()` call, `inflow_history()`
-    /// must return an empty slice.
     #[test]
     fn test_system_inflow_history_defaults_empty() {
         let system = SystemBuilder::new().build().expect("valid system");
@@ -1684,8 +1581,6 @@ mod tests {
         );
     }
 
-    /// Given a `SystemBuilder` with `.inflow_history(rows)`, the system must store
-    /// and return the same rows via `inflow_history()`.
     #[test]
     fn test_system_inflow_history_stores_rows() {
         use crate::scenario::InflowHistoryRow;
@@ -1712,8 +1607,6 @@ mod tests {
         assert_eq!(system.inflow_history()[1], row2);
     }
 
-    /// Given a `SystemBuilder` with no `.external_scenarios()` call,
-    /// `external_scenarios()` must return an empty slice.
     #[test]
     fn test_system_external_scenarios_defaults_empty() {
         let system = SystemBuilder::new().build().expect("valid system");
@@ -1723,8 +1616,6 @@ mod tests {
         );
     }
 
-    /// Given a `SystemBuilder` with `.external_scenarios(rows)`, the system must
-    /// store and return the same rows via `external_scenarios()`.
     #[test]
     fn test_system_external_scenarios_stores_rows() {
         use crate::scenario::ExternalScenarioRow;

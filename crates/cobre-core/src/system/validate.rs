@@ -1,14 +1,4 @@
 //! Construction-time validation helpers for [`SystemBuilder::build()`].
-//!
-//! Provides the duplicate-id check, the cross-reference validation pass (every
-//! entity field that names another entity by [`EntityId`] is checked against the
-//! appropriate lookup index, accumulating all violations), and the hydro
-//! filling-config check — plus the `HasId` keying trait and the `build_index` /
-//! `build_stage_index` lookup-index builders shared with [`System::rebuild_indices`].
-//!
-//! The items the sibling `builder` module drives are `pub(crate)`; the per-entity
-//! `validate_*_refs` helpers are reached only from `validate_cross_references` and
-//! stay private.
 
 use std::collections::HashMap;
 
@@ -65,9 +55,7 @@ pub(crate) fn build_index<T: HasId>(entities: &[T]) -> HashMap<EntityId, usize> 
     index
 }
 
-/// Build a stage lookup index from the canonical-ordered stages vec.
-///
-/// Keys are `i32` stage IDs (which can be negative for pre-study stages).
+/// Keys are `i32` stage IDs, negative for pre-study stages.
 pub(crate) fn build_stage_index(stages: &[Stage]) -> HashMap<i32, usize> {
     let mut index = HashMap::with_capacity(stages.len());
     for (i, stage) in stages.iter().enumerate() {
@@ -97,19 +85,12 @@ pub(crate) fn check_duplicates<T: HasId>(
     }
 }
 
-/// Detect duplicate stage IDs in a slice already sorted ascending by `Stage::id`.
+/// Parallel i32-keyed duplicate scan for stages, which key on a domain `i32` id
+/// (negative for pre-study) and so cannot reuse the [`HasId`]-generic [`check_duplicates`].
 ///
-/// Stages key on a domain-level `i32` id (negative for pre-study stages) rather
-/// than [`EntityId`], so they cannot reuse the [`HasId`]-generic
-/// [`check_duplicates`]; this is the parallel i32-keyed scan. The duplicate id
-/// is reported via [`ValidationError::DuplicateId`] with `entity_type: "Stage"`,
-/// wrapping the stage id in [`EntityId`] purely as the error's id carrier.
-///
-/// Contract: `stages` must be sorted ascending by `id` (the caller sorts in
-/// [`SystemBuilder::build`](super::SystemBuilder::build) before calling). The
-/// adjacent-pair scan misses non-adjacent duplicates on unsorted input, which
-/// would let `build_stage_index` silently overwrite a colliding stage and
-/// produce a broken index with no validation error.
+/// Contract: `stages` must be sorted ascending by `id` before calling. The
+/// adjacent-pair scan misses non-adjacent duplicates on unsorted input, letting
+/// `build_stage_index` silently overwrite a colliding stage with no validation error.
 pub(crate) fn check_duplicate_stages(stages: &[Stage], errors: &mut Vec<ValidationError>) {
     for window in stages.windows(2) {
         if window[0].id == window[1].id {
@@ -131,14 +112,8 @@ pub(crate) struct CrossRefEntities<'a> {
     pub(crate) non_controllable_sources: &'a [NonControllableSource],
 }
 
-/// Validate all cross-reference fields across entity collections.
-///
-/// Checks every entity field that references another entity by [`EntityId`]
-/// against the appropriate index. All invalid references are appended to
-/// `errors` — no short-circuiting on first error.
-///
-/// This function runs after duplicate checking passes and after indices are
-/// built, but before topology construction.
+/// Validate every [`EntityId`] cross-reference field against the appropriate index,
+/// appending all violations to `errors` — no short-circuiting on the first error.
 pub(crate) fn validate_cross_references(
     entities: &CrossRefEntities<'_>,
     bus_index: &HashMap<EntityId, usize>,
@@ -312,24 +287,18 @@ fn validate_ncs_refs(
     }
 }
 
-/// Validate filling configurations for all hydros that have one.
+/// Validate the filling config of every hydro that has one, appending all
+/// violations to `errors` (no short-circuiting on the first).
 ///
-/// For each hydro with `filling: Some(config)`:
-/// - `filling_min_rate_m3s` must be non-negative (>= 0.0). Zero is a valid rate
-///   meaning "no minimum accumulation is required this stage"; only a negative
-///   (or NaN) rate is rejected.
-/// - `entry_stage_id` must be set (`Some`), since filling requires a known start stage.
-/// - `start_stage_id` must be strictly less than `entry_stage_id`: the filling
-///   phase must precede operation. This is a mirror of the cobre-io ordering guard,
-///   enforced here so a `System` built directly via `SystemBuilder` (bypassing
-///   cobre-io's semantic layer, which `SystemBuilder` being a public export allows)
-///   still rejects an inverted config — an inverted `start >= entry` otherwise
-///   mis-phases the reservoir in the solver with no error. Validating
-///   `start_stage_id` against the study stage SET stays in cobre-io, which alone
-///   holds the horizon; only the intra-entity `start < entry` relation is checkable
-///   without it and belongs here as the last line of defense.
-///
-/// All violations are appended to `errors` — no short-circuiting on first error.
+/// For each `filling: Some(config)`:
+/// - `filling_min_rate_m3s` must be non-negative: zero is valid (no minimum
+///   accumulation required); only a negative or NaN rate is rejected.
+/// - `entry_stage_id` must be `Some`.
+/// - `start_stage_id < entry_stage_id`. Mirrors the cobre-io ordering guard here so
+///   a `System` built directly via the public [`SystemBuilder`](super::SystemBuilder)
+///   still rejects an inverted config, which otherwise mis-phases the reservoir in
+///   the solver with no error. Validating `start_stage_id` against the study stage
+///   set stays in cobre-io, which alone holds the horizon.
 pub(crate) fn validate_filling_configs(hydros: &[Hydro], errors: &mut Vec<ValidationError>) {
     for hydro in hydros {
         if let Some(filling) = &hydro.filling {
