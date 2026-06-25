@@ -1,7 +1,4 @@
-//! Reserved crate name for the Cobre ecosystem.
-//!
-//! This binary is not yet implemented. For command-line interaction
-//! with Cobre, use `cobre-cli`.
+//! Reserved binary for a future Cobre MCP server; not yet implemented.
 
 fn main() {
     eprintln!("cobre-mcp: not yet implemented");

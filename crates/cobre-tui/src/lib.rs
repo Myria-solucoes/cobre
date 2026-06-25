@@ -1,4 +1,1 @@
-//! Reserved crate name for the Cobre ecosystem.
-//!
-//! This crate is not yet implemented. For command-line interaction
-//! with Cobre, depend on `cobre-cli`.
+//! Reserved crate for a future Cobre terminal UI; not yet implemented.
