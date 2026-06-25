@@ -1,21 +1,10 @@
-//! Scenario sampling schemes.
+//! Scenario sampling schemes — strategies that select which scenarios are
+//! simulated each iteration.
 //!
-//! Provides sampling strategies that select which scenarios are simulated
-//! during each iteration of a stochastic optimization algorithm.
-//!
-//! ## Submodules
-//!
-//! - [`insample`] — `InSample` scheme: draws scenarios uniformly from the
-//!   opening tree and fixes them for the full iteration
-//!
-//! ## Forward Sampler
-//!
-//! [`ForwardSampler`] is a composite struct that unifies all supported sampling
-//! strategies under a single `sample()` dispatch method. It holds three
+//! [`ForwardSampler`] is the composite entry point: it holds three
 //! [`ClassSampler`] instances (one per entity class) and applies per-class
-//! spectral correlation only for `OutOfSample` class samplers. Use
-//! [`build_forward_sampler`] to construct the appropriate sampler from a
-//! [`SamplingScheme`] and a [`StochasticContext`].
+//! spectral correlation only for `OutOfSample`. Build one with
+//! [`build_forward_sampler`].
 //!
 //! ```
 //! use cobre_core::scenario::SamplingScheme;
@@ -51,8 +40,6 @@ use crate::{
 // ---------------------------------------------------------------------------
 
 /// Noise payload returned by [`ForwardSampler::sample`].
-///
-/// A newtype wrapping a borrowed slice; lifetime tied to the caller-supplied buffer.
 #[derive(Debug)]
 pub struct ForwardNoise<'b>(&'b [f64]);
 
@@ -92,13 +79,10 @@ pub struct CorrelationRef<'a> {
 
 /// Composite forward-pass sampler holding one [`ClassSampler`] per entity class.
 ///
-/// Constructed once per run via [`build_forward_sampler`] and reused
-/// across all `(iteration, scenario, stage)` calls without per-call allocation.
-///
-/// The `sample()` method splits the caller-supplied `noise_buf` into three
-/// segments `[hydros | load_buses | ncs]`, delegates to each class sampler's
-/// `fill()`, then applies per-class spectral correlation where `Some(corr_ref)`
-/// is present.
+/// Built once per run via [`build_forward_sampler`] and reused across all
+/// `(iteration, scenario, stage)` calls without per-call allocation. The
+/// `*_correlation` fields are `Some` only for `OutOfSample`; pre-correlated
+/// sources leave them `None`.
 pub struct ForwardSampler<'a> {
     /// Class sampler for inflow (hydro) entities.
     inflow: ClassSampler<'a>,
@@ -108,19 +92,16 @@ pub struct ForwardSampler<'a> {
     ncs: ClassSampler<'a>,
     /// Per-class entity counts that define the buffer split.
     dims: ClassDimensions,
-    /// Correlation ref for the inflow class; `None` for pre-correlated sources.
+    /// Correlation ref for the inflow class.
     inflow_correlation: Option<CorrelationRef<'a>>,
-    /// Correlation ref for the load class; `None` for pre-correlated sources.
+    /// Correlation ref for the load class.
     load_correlation: Option<CorrelationRef<'a>>,
-    /// Correlation ref for the NCS class; `None` for pre-correlated sources.
+    /// Correlation ref for the NCS class.
     ncs_correlation: Option<CorrelationRef<'a>>,
 }
 
 impl<'a> ForwardSampler<'a> {
     /// Construct a [`ForwardSampler`] from its constituent parts.
-    ///
-    /// Called by [`build_forward_sampler`] and by tests that need fine-grained
-    /// control over per-class sampler selection.
     pub(crate) fn new(
         inflow: ClassSampler<'a>,
         load: ClassSampler<'a>,
@@ -155,8 +136,6 @@ impl std::fmt::Debug for ForwardSampler<'_> {
 // ---------------------------------------------------------------------------
 
 /// Per-call arguments for [`ForwardSampler::sample`].
-///
-/// Bundles arguments to keep the `sample()` method signature within budget.
 pub struct SampleRequest<'b> {
     /// Training iteration counter (0-based).
     pub iteration: u32,
@@ -172,30 +151,18 @@ pub struct SampleRequest<'b> {
     pub perm_scratch: &'b mut [usize],
     /// Total scenario count across all ranks (for LHS stratification).
     pub total_scenarios: u32,
-    /// Noise group identifier for seed derivation (noise-group sharing).
-    ///
-    /// Stages within the same `(season_id, year)` bucket share the same
-    /// `noise_group_id` so that their noise draws are identical (noise-group sharing
-    /// sharing). Callers supply
-    /// `stage.id as u32` to preserve current per-stage seed behaviour.
+    /// Seed-derivation identifier: stages sharing a `(season_id, year)` bucket
+    /// share a `noise_group_id` so their noise draws are identical.
     pub noise_group_id: u32,
 }
 
 impl ForwardSampler<'_> {
-    /// Per-class initial-state injection hook called once before the stage-0
-    /// solve.
+    /// Per-class initial-state hook before the stage-0 solve; currently a no-op
+    /// for every class (see [`ClassSampler::apply_initial_state`]) so that
+    /// forward, backward, and lower-bound paths consume the same `x_0`.
     ///
-    /// Delegates to each class sampler's `apply_initial_state`. All current
-    /// variants — including `Historical` — are no-ops: the initial inflow
-    /// lags are owned by the caller (sourced from
-    /// `initial_conditions.past_inflows`)
-    /// and must remain identical across all scenarios so that forward,
-    /// backward, and lower-bound paths consume the same `x_0`.
-    ///
-    /// The hook is retained for future per-class state-vector preparation
-    /// (e.g. injecting class-specific RAM caches); the `lag_offset` is an
-    /// absolute index into `state` computed by the caller from the
-    /// `StageIndexer`.
+    /// `lag_offset` is an absolute index into `state` computed by the caller from
+    /// the `StageIndexer`.
     pub fn apply_initial_state(
         &self,
         req: &ClassSampleRequest,
@@ -203,16 +170,12 @@ impl ForwardSampler<'_> {
         lag_offset: usize,
     ) {
         self.inflow.apply_initial_state(req, state, lag_offset);
-        // Load and NCS have no lag state; calls are no-ops.
         self.load.apply_initial_state(req, state, 0);
         self.ncs.apply_initial_state(req, state, 0);
     }
 
-    /// Draw noise for a single `(iteration, scenario, stage)` triple.
-    ///
-    /// Splits `req.noise_buf` into per-class segments `[hydros | load_buses | ncs]`,
-    /// calls `fill()` on each class sampler, then applies per-class spectral
-    /// correlation where `Some(corr_ref)` is present.
+    /// Draw noise for a single `(iteration, scenario, stage)` triple into the
+    /// per-class segments `[hydros | load_buses | ncs]` of `req.noise_buf`.
     ///
     /// # Errors
     ///
@@ -227,7 +190,6 @@ impl ForwardSampler<'_> {
     pub fn sample<'b>(&self, req: SampleRequest<'b>) -> Result<ForwardNoise<'b>, StochasticError> {
         let total_dim = self.dims.n_hydros + self.dims.n_load_buses + self.dims.n_ncs;
 
-        // Split the noise buffer into three class segments.
         let (inflow_buf, rest) = req.noise_buf.split_at_mut(self.dims.n_hydros);
         let (load_buf, ncs_buf) = rest.split_at_mut(self.dims.n_load_buses);
 
@@ -244,7 +206,8 @@ impl ForwardSampler<'_> {
         self.load.fill(&class_req, load_buf, req.perm_scratch)?;
         self.ncs.fill(&class_req, ncs_buf, req.perm_scratch)?;
 
-        // Apply per-class correlation only where configured (OutOfSample path).
+        // Correlation is applied only where a ref is set (OutOfSample); applying
+        // it to a pre-correlated source would double-correlate.
         #[allow(clippy::cast_possible_wrap)]
         if let Some(ref corr) = self.inflow_correlation {
             corr.decomposed.apply_correlation_for_class(
@@ -282,10 +245,6 @@ impl ForwardSampler<'_> {
 // ---------------------------------------------------------------------------
 
 /// All parameters needed by [`build_forward_sampler`].
-///
-/// Bundles the per-class scheme selections, stochastic context, stage list,
-/// class dimensions, and optional library references into a single struct to
-/// keep the factory function signature within the argument budget.
 #[derive(Debug, Clone, Copy)]
 pub struct ForwardSamplerConfig<'a> {
     /// Per-class sampling scheme selections.
@@ -319,19 +278,7 @@ pub struct ForwardSamplerConfig<'a> {
 // Factory
 // ---------------------------------------------------------------------------
 
-/// Build a [`ClassSampler`] for a single entity class from a scheme and its
-/// associated parameters.
-///
-/// `class_name` is used only for error messages (e.g. `"inflow"`, `"load"`,
-/// `"ncs"`).
-///
-/// # Errors
-///
-/// Returns [`StochasticError::MissingScenarioSource`] when:
-/// - `OutOfSample` is requested but `forward_seed` is `None`.
-/// - `Historical` is requested but `library` is `None`, or the class is not
-///   `"inflow"` (historical is only supported for inflow).
-/// - `External` is requested but `library` is `None`.
+/// Inputs to [`build_class_sampler`] for one entity class.
 struct ClassSamplerParams<'a, 'b> {
     class_name: &'b str,
     scheme: SamplingScheme,
@@ -345,6 +292,14 @@ struct ClassSamplerParams<'a, 'b> {
     external_library: Option<&'a ExternalScenarioLibrary>,
 }
 
+/// Build a [`ClassSampler`] for one entity class. `class_name` is used only in
+/// error messages.
+///
+/// # Errors
+///
+/// Returns [`StochasticError::MissingScenarioSource`] when `OutOfSample` lacks a
+/// `forward_seed`, when `Historical`/`External` lacks its library, or when
+/// `Historical` is requested for a class other than `"inflow"`.
 fn build_class_sampler<'a>(
     p: ClassSamplerParams<'a, '_>,
 ) -> Result<ClassSampler<'a>, StochasticError> {
@@ -422,12 +377,7 @@ fn build_class_sampler<'a>(
 
 /// Build a composite [`ForwardSampler`] from a [`ForwardSamplerConfig`].
 ///
-/// Constructs three [`ClassSampler`] instances (one per entity class: inflow,
-/// load, NCS) and assembles them into a [`ForwardSampler`] with per-class
-/// spectral correlation refs where applicable.
-///
-/// A `None` scheme in `config.class_schemes` is treated as `InSample` (the
-/// default).
+/// A `None` scheme in `config.class_schemes` defaults to `InSample`.
 ///
 /// # Errors
 ///
@@ -454,18 +404,15 @@ pub fn build_forward_sampler(
     let load_scheme = class_schemes.load.unwrap_or(SamplingScheme::InSample);
     let ncs_scheme = class_schemes.ncs.unwrap_or(SamplingScheme::InSample);
 
-    // Pre-compute shared resources only when needed.
     let forward_seed = ctx.forward_seed();
     let base_seed = ctx.base_seed();
 
-    // Build per-stage noise methods once (shared across all OutOfSample classes).
     let noise_methods: Box<[NoiseMethod]> = stages
         .iter()
         .map(|s| s.scenario_config.noise_method)
         .collect::<Vec<_>>()
         .into_boxed_slice();
 
-    // Entity order sliced per-class for per-class correlation refs.
     let entity_order = ctx.entity_order();
     let inflow_order = &entity_order[..dims.n_hydros];
     let load_order = &entity_order[dims.n_hydros..dims.n_hydros + dims.n_load_buses];
@@ -512,8 +459,8 @@ pub fn build_forward_sampler(
         external_library: external_ncs_library,
     })?;
 
-    // Apply per-class correlation only for OutOfSample; pre-correlated sources
-    // (InSample, Historical, External) must not have correlation applied again.
+    // Correlation refs are set only for OutOfSample; pre-correlated sources must
+    // not be correlated again.
     let inflow_correlation = if matches!(inflow_scheme, SamplingScheme::OutOfSample) {
         Some(CorrelationRef {
             decomposed: correlation,
@@ -579,13 +526,12 @@ pub(crate) fn build_observation_sequence(
         return Vec::new();
     }
 
-    // Build lag seasons by stepping backwards from study_seasons[0].
-    // Lag seasons are in chronological order (oldest lag first).
+    // Lag seasons, oldest first: step backwards from study_seasons[0].
     let first_study_season = study_seasons[0];
     let lag_seasons: Vec<usize> = (1..=max_order)
         .rev()
         .map(|k| {
-            // Step k seasons before first_study_season, wrapping modularly.
+            // k seasons before first_study_season, wrapping modularly.
             #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
             let n = n_seasons as i32;
             #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
@@ -598,24 +544,19 @@ pub(crate) fn build_observation_sequence(
         })
         .collect();
 
-    // Concatenate: lag seasons (oldest first) then study seasons.
     let full_seasons: Vec<usize> = lag_seasons.into_iter().chain(study_seasons).collect();
 
-    // Assign year offsets.
-    //
-    // When n_seasons == 1 (annual data), every step advances exactly one year.
-    // Season-wrap detection (`season < prev_season`) would never fire because
-    // `0 < 0` is always false, producing wrong self-referential year offsets.
-    // Use explicit year arithmetic for the single-season case instead.
+    // For n_seasons == 1 (annual) the wrap test `season < prev_season` is always
+    // false (`0 < 0`), so each entry must advance a year by explicit arithmetic
+    // instead of wrap detection.
     let mut result = Vec::with_capacity(full_seasons.len());
     if n_seasons == 1 {
-        // Annual: each entry in full_seasons is a separate year offset.
         #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
         for (i, &season) in full_seasons.iter().enumerate() {
             result.push((i as i32, season));
         }
     } else {
-        // Build raw year offsets by detecting season wraps (Dec→Jan).
+        // Detect season wraps (Dec→Jan) to advance the year offset.
         let mut year_offset: i32 = 0;
         let mut prev_season = full_seasons[0];
         for (i, &season) in full_seasons.iter().enumerate() {
@@ -625,9 +566,8 @@ pub(crate) fn build_observation_sequence(
             result.push((year_offset, season));
             prev_season = season;
         }
-        // Normalize: the first STUDY stage (at index max_order) must have
-        // year_offset=0 so that `window_year` corresponds to the year of
-        // the first study observation. Lag entries get negative offsets.
+        // Normalize so the first study stage (index max_order) has year_offset 0
+        // — `window_year` is the first study observation's year; lags go negative.
         let study_base = result[max_order].0;
         if study_base != 0 {
             for entry in &mut result {
@@ -875,7 +815,6 @@ mod tests {
     // Factory tests
     // -----------------------------------------------------------------------
 
-    /// AC: all `InSample` class schemes returns Ok.
     #[test]
     fn test_build_all_in_sample() {
         let (ctx, stages) = build_test_ctx(None);
@@ -887,7 +826,6 @@ mod tests {
         );
     }
 
-    /// AC: `OutOfSample` with no `forward_seed` returns `MissingScenarioSource`.
     #[test]
     fn test_build_out_of_sample_missing_seed() {
         let (ctx, stages) = build_test_ctx(None);
@@ -904,7 +842,6 @@ mod tests {
         }
     }
 
-    /// AC: `OutOfSample` with `forward_seed` returns Ok with correlation refs set.
     #[test]
     fn test_build_out_of_sample_with_seed() {
         let (ctx, stages) = build_test_ctx(Some(99));
@@ -916,7 +853,6 @@ mod tests {
         );
     }
 
-    /// AC: Historical inflow with a library returns Ok.
     #[test]
     fn test_build_historical_with_library() {
         use super::HistoricalScenarioLibrary;
@@ -951,7 +887,6 @@ mod tests {
         );
     }
 
-    /// AC: Historical inflow with no library returns `MissingScenarioSource`.
     #[test]
     fn test_build_historical_missing_library() {
         let (ctx, stages) = build_test_ctx(None);
@@ -987,7 +922,6 @@ mod tests {
         }
     }
 
-    /// AC: External inflow with a library returns Ok.
     #[test]
     fn test_build_external_with_library() {
         use super::ExternalScenarioLibrary;
@@ -1026,7 +960,6 @@ mod tests {
         );
     }
 
-    /// AC: Historical load returns `MissingScenarioSource` with scheme `"historical_load"`.
     #[test]
     fn test_build_historical_load_unsupported() {
         let (ctx, stages) = build_test_ctx(None);
@@ -1155,12 +1088,9 @@ mod tests {
         assert_eq!(a.as_slice(), b.as_slice());
     }
 
-    /// AC: composite with three `InSample` class samplers fills each segment
-    /// from the correct tree region.
     #[test]
     fn test_composite_in_sample_fills_correct_segments() {
-        // Tree: 1 stage, 3 openings, dim=5 (2 hydros + 2 load + 1 ncs).
-        // Data layout: values 0..14 (sequential).
+        // dim=5 split as 2 hydros + 2 load + 1 ncs.
         let tree = uniform_tree(1, 3, 5);
         let view = tree.view();
         let dims = ClassDimensions {
@@ -1215,7 +1145,6 @@ mod tests {
             "total noise length must equal total_dim"
         );
 
-        // Verify against direct tree access.
         let (_, full_slice) =
             crate::sampling::insample::sample_forward(&tree.view(), 42, 0, 0, 0, 0);
         assert_eq!(
@@ -1225,11 +1154,8 @@ mod tests {
         );
     }
 
-    /// AC: composite with `OutOfSample` inflow and identity correlation
-    /// applies correlation to the inflow segment only.
     #[test]
     fn test_composite_out_of_sample_applies_per_class_correlation() {
-        // Build a 1-hydro system so we can get a real DecomposedCorrelation.
         let (ctx, stages) = build_test_ctx(Some(99));
         let sampler = build_forward_sampler(all_classes_config(
             SamplingScheme::OutOfSample,
@@ -1254,16 +1180,14 @@ mod tests {
         });
 
         let noise = result.expect("expected Ok from OutOfSample sample()");
-        // All values must be finite.
         for (i, &v) in noise.as_slice().iter().enumerate() {
             assert!(v.is_finite(), "element[{i}] is not finite: {v}");
         }
         assert_eq!(noise.as_slice().len(), dim);
-        let _ = ctx; // suppress unused warning
+        let _ = ctx;
         let _ = stages;
     }
 
-    /// AC: same inputs produce identical output (determinism).
     #[test]
     fn test_composite_sample_deterministic() {
         let (ctx, stages) = build_test_ctx(Some(77));
@@ -1312,10 +1236,6 @@ mod tests {
         );
     }
 
-    /// `noise_group_id` propagates through `ForwardSampler::sample`
-    /// to the underlying `ClassSampler`. Two calls with the same `noise_group_id`
-    /// but different `stage` produce identical `OutOfSample` noise; different
-    /// `noise_group_id` values produce different noise.
     #[test]
     fn test_sample_request_propagates_noise_group_id() {
         let (ctx, stages) = build_test_ctx(Some(42));
@@ -1327,7 +1247,6 @@ mod tests {
         .unwrap();
         let dim = ctx.dim();
 
-        // Two calls: same noise_group_id=7, different stage → identical noise.
         let mut buf_a = vec![0.0f64; dim];
         let mut buf_b = vec![0.0f64; dim];
         let mut perm_a = vec![0usize; 5];
@@ -1363,7 +1282,6 @@ mod tests {
             "same noise_group_id with different stage must produce identical OutOfSample noise"
         );
 
-        // Different noise_group_id=8 → different noise.
         let mut buf_c = vec![0.0f64; dim];
         let mut perm_c = vec![0usize; 5];
         let c = sampler

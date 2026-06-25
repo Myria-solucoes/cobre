@@ -1,24 +1,17 @@
-//! Per-class sampler building block for the composite forward sampler.
-//!
-//! [`ClassSampler`] is a per-entity-class noise source that writes uncorrelated
-//! (or pre-correlated, for tree/library variants) noise into a caller-provided
-//! buffer. Three instances of this type -- one for inflow, one for load, one
-//! for NCS -- are combined by the composite `ForwardSampler`.
+//! Per-class noise source ([`ClassSampler`]) combined three-up (inflow, load,
+//! NCS) by the composite `ForwardSampler`.
 //!
 //! ## Correlation contract
 //!
-//! - `InSample`, `Historical`, `External`: noise is already correlated (the
-//!   tree and libraries store pre-standardized eta values). No further
-//!   correlation step is needed at the composite level for these variants.
-//! - `OutOfSample`: noise is independent N(0,1). Spatial correlation is
-//!   applied at the composite `ForwardSampler` level, not here.
+//! `InSample`/`Historical`/`External` write pre-correlated noise (tree and
+//! libraries store pre-standardized eta). Only `OutOfSample` writes independent
+//! N(0,1); the composite `ForwardSampler` correlates it, not this module.
 //!
 //! ## Window / scenario selection
 //!
-//! For `Historical` and `External`, the selection is deterministic given
-//! `(iteration, scenario)` and does NOT depend on `stage`. This ensures
-//! that the same window or external scenario is used for all stages within
-//! a single forward trajectory.
+//! `Historical` and `External` selection is deterministic in `(iteration,
+//! scenario)` and excludes `stage`, so one window/scenario serves all stages of
+//! a forward trajectory.
 
 use cobre_core::temporal::NoiseMethod;
 
@@ -34,14 +27,7 @@ use crate::{
 
 use super::insample;
 
-// ---------------------------------------------------------------------------
-// ClassSampleRequest
-// ---------------------------------------------------------------------------
-
 /// Per-call arguments for [`ClassSampler::fill`].
-///
-/// Bundles arguments to keep the `fill()` signature within budget.
-/// All fields are small integers and the struct is `Copy`.
 #[derive(Debug, Clone, Copy)]
 pub struct ClassSampleRequest {
     /// Training iteration counter (0-based).
@@ -54,26 +40,12 @@ pub struct ClassSampleRequest {
     pub stage_idx: usize,
     /// Total scenario count across all ranks (for LHS stratification).
     pub total_scenarios: u32,
-    /// Noise group identifier for seed derivation (noise-group sharing).
-    ///
-    /// Stages within the same `(season_id, year)` bucket share the same
-    /// `noise_group_id` so that their `OutOfSample` noise draws are identical.
-    /// Until wires actual group IDs, callers supply `stage.id as u32`
-    /// to preserve current per-stage seed behaviour.
+    /// Seed-derivation identifier: stages sharing a `(season_id, year)` bucket
+    /// share a `noise_group_id` so their `OutOfSample` draws are identical.
     pub noise_group_id: u32,
 }
 
-// ---------------------------------------------------------------------------
-// ClassSampler
-// ---------------------------------------------------------------------------
-
 /// Per-class noise source for one entity class (inflow, load, or NCS).
-///
-/// Each variant draws noise from a different source. The `fill()` method
-/// writes exactly `output.len()` f64 values into the caller-provided buffer.
-///
-/// Constructed by the composite `ForwardSampler` factory. Reused
-/// across all `(iteration, scenario, stage)` calls without per-call allocation.
 pub enum ClassSampler<'a> {
     /// In-sample scheme: copies a segment from the pre-generated opening tree.
     InSample {
@@ -86,10 +58,9 @@ pub enum ClassSampler<'a> {
         /// Number of entities in this class (segment length).
         len: usize,
     },
-    /// Out-of-sample scheme: generates fresh independent N(0,1) noise on-the-fly.
-    ///
-    /// Correlation is NOT applied here; it is applied at the composite
-    /// `ForwardSampler` level after all classes have filled their segments.
+    /// Out-of-sample scheme: fresh independent N(0,1) noise. Correlation is NOT
+    /// applied here — the composite `ForwardSampler` applies it after all classes
+    /// have filled their segments.
     OutOfSample {
         /// Seed for the forward-pass noise generator.
         forward_seed: u64,
@@ -140,24 +111,16 @@ impl std::fmt::Debug for ClassSampler<'_> {
     }
 }
 
-/// A constant seed offset for historical window selection.
-///
-/// Using a non-zero constant distinguishes the historical selection hash domain
-/// from the forward-pass noise domain (which uses the caller-provided
-/// `forward_seed`).
+/// Window-selection seed base, distinct from the forward-pass noise domain so the
+/// two hash domains never collide.
 const HISTORICAL_SELECTION_BASE_SEED: u64 = 0x6869_7374_6f72_6963; // b"historic" as u64 LE
 
-/// A constant seed offset for external scenario selection.
-///
-/// Using a distinct constant distinguishes the external selection hash domain
-/// from both the forward-pass noise and historical selection domains.
+/// Scenario-selection seed base, distinct from both the forward-pass noise and
+/// historical-selection domains.
 const EXTERNAL_SELECTION_BASE_SEED: u64 = 0x6578_7465_726e_616c; // b"external" as u64 LE
 
 impl ClassSampler<'_> {
-    /// Compute the deterministic historical window index for the given request.
-    ///
-    /// The result is `derive_forward_seed(HISTORICAL_SELECTION_BASE_SEED,
-    /// req.iteration, req.scenario, 0) % n_windows`.
+    /// Deterministic historical window index from `(iteration, scenario)`.
     #[allow(clippy::cast_possible_truncation)]
     fn select_historical_window(req: &ClassSampleRequest, n_windows: usize) -> usize {
         let hash = derive_forward_seed(
@@ -169,22 +132,15 @@ impl ClassSampler<'_> {
         (hash as usize) % n_windows
     }
 
-    /// No-op hook reserved for future per-class initial-state injection.
+    /// No-op for every variant — reserved for future per-class initial-state
+    /// injection.
     ///
-    /// All current variants — `InSample`, `OutOfSample`, `Historical`, and
-    /// `External` — leave the caller-supplied state vector untouched. The
-    /// historical-replay scheme deliberately does NOT inject window-preceding
-    /// lag values: following the hydrological-tendency convention, the
-    /// initial inflow lags come from `initial_conditions.past_inflows`
-    /// for every scenario regardless of which
-    /// historical window is being replayed. The historical window contributes
-    /// only the standardized noise residuals via [`ClassSampler::fill`]; never
-    /// the initial-state lags.
-    ///
-    /// This convention guarantees that forward simulations and the
-    /// lower-bound / backward-pass evaluators all consume the same `x_0`,
-    /// keeping the reported convergence gap meaningful on historical-replay
-    /// cases.
+    /// `Historical` deliberately does NOT inject window-preceding lags: initial
+    /// inflow lags come from `initial_conditions.past_inflows` for every scenario
+    /// regardless of the replayed window, so forward, backward, and lower-bound
+    /// evaluators all consume the same `x_0` (a window-dependent lag would make the
+    /// reported convergence gap meaningless). The window contributes only
+    /// standardized noise residuals via [`ClassSampler::fill`].
     pub fn apply_initial_state(
         &self,
         _req: &ClassSampleRequest,
@@ -195,13 +151,9 @@ impl ClassSampler<'_> {
 
     /// Fill `output` with noise for the given `(iteration, scenario, stage)` triple.
     ///
-    /// Writes exactly `output.len()` f64 values into the provided buffer.
-    ///
-    /// For `InSample`, `Historical`, and `External` variants the noise is
-    /// pre-correlated (sourced from the tree or library); no further correlation
-    /// is needed. For `OutOfSample`, the noise is independent N(0,1); the
-    /// composite `ForwardSampler` applies spatial correlation after all classes
-    /// have been filled.
+    /// `InSample`/`Historical`/`External` produce pre-correlated noise; only
+    /// `OutOfSample` leaves it uncorrelated for the composite `ForwardSampler` to
+    /// correlate downstream.
     ///
     /// # Errors
     ///
@@ -270,16 +222,13 @@ impl ClassSampler<'_> {
                     dim: *dim,
                     total_scenarios: req.total_scenarios,
                 };
-                // TODO: replace with fill_uncorrelated call once
-                // extracts this into a dedicated function.
                 fill_uncorrelated(spec, None, output, perm_scratch)?;
                 Ok(())
             }
 
             ClassSampler::Historical { library } => {
-                // Deterministic window selection: hash of (iteration, scenario)
-                // using a domain-specific base seed. Stage is NOT included so
-                // the same window is used for all stages within a trajectory.
+                // Stage is excluded from the selection hash so one window serves
+                // every stage of a trajectory.
                 let window_idx = Self::select_historical_window(req, library.n_windows());
                 output.copy_from_slice(library.eta_slice(window_idx, req.stage_idx));
                 Ok(())
@@ -287,8 +236,8 @@ impl ClassSampler<'_> {
 
             ClassSampler::External { library } => {
                 let n_scenarios = library.n_scenarios();
-                // Deterministic scenario selection: hash of (iteration, scenario)
-                // using a domain-specific base seed. Stage is NOT included.
+                // Stage is excluded from the selection hash so one scenario serves
+                // every stage of a trajectory.
                 let hash = derive_forward_seed(
                     EXTERNAL_SELECTION_BASE_SEED,
                     req.iteration,
@@ -354,7 +303,6 @@ mod tests {
 
     #[test]
     fn test_in_sample_fill_copies_correct_segment() {
-        // Tree: 1 stage, 3 openings, dim=5. Noise values are 0..14.
         let tree = uniform_tree(1, 3, 5);
         let view = tree.view();
 
@@ -371,14 +319,11 @@ mod tests {
 
         sampler.fill(&req, &mut output, &mut perm).unwrap();
 
-        // The fill must give exactly 3 elements from the chosen opening at
-        // indices [2, 3, 4] of the full dim=5 noise vector.
         assert_eq!(output.len(), 3);
         for v in &output {
             assert!(v.is_finite(), "output value {v} is not finite");
         }
 
-        // Verify the extracted segment matches the tree's opening_data at offset..offset+len.
         let (opening_idx, full_slice) = crate::sampling::insample::sample_forward(
             &tree.view(),
             42,
@@ -387,7 +332,7 @@ mod tests {
             req.stage,
             req.stage_idx,
         );
-        let _ = opening_idx; // used only to compute full_slice
+        let _ = opening_idx;
         assert_eq!(&output, &full_slice[2..5]);
     }
 
@@ -489,9 +434,8 @@ mod tests {
 
     #[allow(clippy::cast_precision_loss)]
     fn make_historical_library() -> HistoricalScenarioLibrary {
-        // 3 windows, 4 stages, 2 hydros.
+        // new(n_windows, n_stages, n_hydros, max_order, years)
         let mut lib = HistoricalScenarioLibrary::new(3, 4, 2, 1, vec![1990, 1995, 2000]);
-        // Fill each (window, stage) with recognizable values.
         for w in 0..3 {
             for s in 0..4 {
                 let base = (w * 100 + s * 10) as f64;
@@ -550,7 +494,6 @@ mod tests {
             })
             .collect();
 
-        // At least some outputs should differ (different windows selected).
         outputs.sort_by(|a, b| a.partial_cmp(b).unwrap());
         outputs.dedup();
         assert!(
@@ -561,9 +504,6 @@ mod tests {
 
     #[test]
     fn test_historical_window_stable_across_stages() {
-        // The same (iteration, scenario) must always produce the same window
-        // regardless of stage_idx. We verify this by checking that the selected
-        // window gives consistent eta values across stage_idx changes.
         let lib = make_historical_library();
         let sampler = ClassSampler::Historical { library: &lib };
 
@@ -587,10 +527,7 @@ mod tests {
         sampler.fill(&req_stage0, &mut out0, &mut perm).unwrap();
         sampler.fill(&req_stage1, &mut out1, &mut perm).unwrap();
 
-        // Both must come from the same window — verify using the known library layout.
-        // With our layout: eta[w, s] = [w*100 + s*10, w*100 + s*10 + 1].
-        // If stage 0 gives base_s0 and stage 1 gives base_s1, then
-        // base_s1 - base_s0 == 10 (i.e. same window, adjacent stage).
+        // Layout eta[w, s] = [w*100 + s*10, …]; same window, adjacent stage ⇒ +10.
         assert_eq!(
             out1[0] - out0[0],
             10.0,
@@ -605,7 +542,7 @@ mod tests {
 
     #[allow(clippy::cast_precision_loss)]
     fn make_external_library() -> ExternalScenarioLibrary {
-        // 4 stages, 50 scenarios, 3 entities.
+        // new(n_stages, n_scenarios, n_entities, kind, per_stage_scenarios)
         let mut lib = ExternalScenarioLibrary::new(4, 50, 3, "inflow", vec![50usize; 4]);
         for s in 0..4_usize {
             for sc in 0..50_usize {
@@ -636,7 +573,6 @@ mod tests {
 
         sampler.fill(&req, &mut output, &mut perm).unwrap();
 
-        // Compute the expected scenario_idx using the same hash.
         let hash = crate::noise::seed::derive_forward_seed(
             super::EXTERNAL_SELECTION_BASE_SEED,
             req.iteration,
@@ -682,8 +618,6 @@ mod tests {
 
     #[test]
     fn test_external_scenario_stable_across_stages() {
-        // Same (iteration, scenario) must select the same external scenario index
-        // regardless of stage_idx. We verify via the known eta layout.
         let lib = make_external_library();
         let sampler = ClassSampler::External { library: &lib };
 
@@ -707,8 +641,7 @@ mod tests {
         sampler.fill(&req_stage0, &mut out0, &mut perm).unwrap();
         sampler.fill(&req_stage1, &mut out1, &mut perm).unwrap();
 
-        // With our layout: eta[s, sc] = [s*1000 + sc*10, ...].
-        // If same sc is selected, out1[0] - out0[0] = 1000.0.
+        // Layout eta[s, sc] = [s*1000 + sc*10, …]; same scenario, adjacent stage ⇒ +1000.
         assert_eq!(
             out1[0] - out0[0],
             1000.0,
@@ -731,7 +664,6 @@ mod tests {
     )]
     fn make_historical_library_with_lags() -> HistoricalScenarioLibrary {
         let mut lib = HistoricalScenarioLibrary::new(3, 4, 2, 2, vec![1990, 1995, 2000]);
-        // Populate eta values so fill() is usable too.
         for w in 0..3 {
             for s in 0..4 {
                 let base = (w * 100 + s * 10) as f64;
@@ -743,11 +675,6 @@ mod tests {
 
     #[test]
     fn test_historical_apply_initial_state_noop() {
-        // Historical::apply_initial_state must not touch the caller-supplied
-        // state vector. Following the hydrological-tendency convention,
-        // the initial inflow lags come from `initial_conditions.past_inflows`
-        // and are owned by the caller; the historical window contributes only
-        // standardized noise residuals via `fill`.
         let lib = make_historical_library_with_lags();
         let sampler = ClassSampler::Historical { library: &lib };
 
@@ -778,8 +705,7 @@ mod tests {
 
     #[test]
     fn test_historical_fill_window_selection_still_deterministic() {
-        // Sanity check: removing the lag-injection arm from apply_initial_state
-        // must not affect the window-selection hash used by fill().
+        // fill()'s window selection is independent of apply_initial_state.
         let lib = make_historical_library_with_lags();
         let sampler = ClassSampler::Historical { library: &lib };
         let mut perm = vec![0usize; 20];
@@ -902,7 +828,6 @@ mod tests {
             assert!(!s.is_empty(), "Debug output must not be empty");
         }
 
-        // Historical and External debug format (library refs are large).
         let hist_lib = make_historical_library();
         let ext_lib = make_external_library();
         let hist_debug = format!("{:?}", ClassSampler::Historical { library: &hist_lib });
@@ -914,8 +839,6 @@ mod tests {
     // noise_group_id propagation tests
     // -----------------------------------------------------------------------
 
-    /// Two `OutOfSample::fill()` calls with the same `noise_group_id` but
-    /// different `stage` must produce identical noise.
     #[test]
     fn test_out_of_sample_same_group_produces_identical_noise() {
         let noise_methods: Box<[NoiseMethod]> =
@@ -926,7 +849,6 @@ mod tests {
             noise_methods,
         };
 
-        // Same noise_group_id=5, different stage (0 vs 1).
         let req_stage0 = ClassSampleRequest {
             iteration: 1,
             scenario: 2,
@@ -954,8 +876,6 @@ mod tests {
         );
     }
 
-    /// AC: Two `OutOfSample::fill()` calls with different `noise_group_id`
-    /// values must produce different noise.
     #[test]
     fn test_out_of_sample_different_group_produces_different_noise() {
         let noise_methods: Box<[NoiseMethod]> =

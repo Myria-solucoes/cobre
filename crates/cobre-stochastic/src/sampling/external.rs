@@ -1,28 +1,14 @@
 //! `External` scenario sampling scheme — library type and eta standardization.
 //!
 //! [`ExternalScenarioLibrary`] stores pre-standardized eta values loaded from
-//! externally provided scenario files. During the forward pass, the
-//! `ClassSampler::External` variant indexes into this library to retrieve
-//! noise vectors for a given (stage, scenario) pair.
+//! externally provided scenario files; the `ClassSampler::External` variant
+//! indexes into it per (stage, scenario) during the forward pass. One library
+//! instance per entity class.
 //!
-//! The library is per entity class — each class that uses the `External`
-//! sampling scheme gets its own library instance.
-//!
-//! ## Eta storage layout
-//!
-//! The `eta` buffer uses **stage-major** layout:
-//! `eta[stage * n_scenarios * n_entities + scenario * n_entities + entity]`.
-//!
-//! This is optimal for accessing all entities of a given (stage, scenario) pair,
-//! matching the forward-pass access pattern.
-//!
-//! ## Standardization functions
-//!
-//! Three public functions populate the library from raw external scenario rows:
-//!
-//! - [`standardize_external_inflow`] — full PAR(p) standardization via [`solve_par_noise`]
-//! - [`standardize_external_load`] — simple `(value - mean) / std` per (bus, stage)
-//! - [`standardize_external_ncs`] — simple `(value - mean) / std` per (ncs, stage)
+//! The `eta` buffer uses **stage-major** layout
+//! (`eta[stage * n_scenarios * n_entities + scenario * n_entities + entity]`),
+//! matching the forward-pass access pattern of all entities for one (stage,
+//! scenario) pair.
 //!
 //! [`solve_par_noise`]: crate::par::evaluate::solve_par_noise
 
@@ -44,14 +30,8 @@ use crate::par::{evaluate::solve_par_noise, precompute::PrecomputedPar};
 
 /// Pre-standardized eta store for external scenario files.
 ///
-/// A pure data container — no sampling or selection logic is included.
-/// Population is performed by the external-file parsing pass after
-/// construction; selection is performed by the `ClassSampler::External`
-/// variant during the forward pass.
-///
-/// # Construction
-///
-/// Use [`ExternalScenarioLibrary::new`], which allocates zero-filled buffers.
+/// A pure data container: the external-file parsing pass populates it, the
+/// `ClassSampler::External` variant reads it during the forward pass.
 ///
 /// # Examples
 ///
@@ -71,42 +51,25 @@ use crate::par::{evaluate::solve_par_noise, precompute::PrecomputedPar};
 /// ```
 #[derive(Debug, Clone)]
 pub struct ExternalScenarioLibrary {
-    /// Flat eta buffer in stage-major layout.
     eta: Box<[f64]>,
-    /// Number of study stages.
     n_stages: usize,
-    /// Number of scenarios per stage (the padded, uniform count used for the eta buffer).
+    /// Padded, uniform per-stage count used to size the eta buffer.
     n_scenarios: usize,
-    /// Number of entities in the eta vector width.
     n_entities: usize,
-    /// Entity class label for diagnostic messages (e.g., `"inflow"`, `"load"`, `"ncs"`).
     entity_class: &'static str,
-    /// Pre-padding scenario count per stage.
-    ///
-    /// When no padding is needed, all entries equal `n_scenarios`. When
-    /// padding was applied (non-uniform input counts), stages with fewer raw
-    /// scenarios retain their original count here so that downstream code
-    /// (e.g., opening-tree clamping) can distinguish padded from unpadded
-    /// stages.
+    /// Pre-padding scenario count per stage; a stage with fewer raw scenarios
+    /// than `n_scenarios` keeps its original count so downstream code can tell
+    /// padded from unpadded stages.
     raw_scenarios_per_stage: Vec<usize>,
 }
 
 impl ExternalScenarioLibrary {
     /// Construct a new library with zero-filled buffers.
     ///
-    /// `raw_scenarios_per_stage` records the pre-padding scenario count for
-    /// each stage. When all stages share the same count (no padding), every
-    /// entry equals `n_scenarios`. When padding is applied by
-    /// [`pad_library_to_uniform`], the padded stages retain their original
-    /// smaller count in this vector.
-    ///
     /// # Parameters
     ///
-    /// - `n_stages` — number of study stages
-    /// - `n_scenarios` — number of scenarios per stage in the eta buffer (max across all stages)
-    /// - `n_entities` — number of entities in the eta vector (e.g., hydros, buses, NCS units)
-    /// - `entity_class` — label for diagnostic messages (e.g., `"inflow"`, `"load"`, `"ncs"`)
-    /// - `raw_scenarios_per_stage` — pre-padding scenario count per stage (length must equal `n_stages`)
+    /// - `n_scenarios` — eta-buffer per-stage count (max across all stages)
+    /// - `raw_scenarios_per_stage` — pre-padding count per stage (length must equal `n_stages`)
     #[must_use]
     pub fn new(
         n_stages: usize,
@@ -165,10 +128,6 @@ impl ExternalScenarioLibrary {
     }
 
     /// Returns the pre-padding scenario count per stage.
-    ///
-    /// When no padding was applied, every entry equals `n_scenarios()`. When
-    /// padding was applied, stages with fewer raw scenarios carry their
-    /// original (pre-padding) count here.
     #[must_use]
     #[inline]
     pub fn raw_scenarios_per_stage(&self) -> &[usize] {
@@ -205,8 +164,6 @@ impl ExternalScenarioLibrary {
 
     /// Returns a mutable `n_entities`-length slice of eta values for `(stage, scenario)`.
     ///
-    /// Used by the external-file parsing pass to populate the library.
-    ///
     /// # Panics
     ///
     /// Panics if `stage >= n_stages` or `scenario >= n_scenarios`.
@@ -234,50 +191,30 @@ impl ExternalScenarioLibrary {
 
 /// Populate `library` with standardized eta values from external inflow rows.
 ///
-/// For each (stage, scenario, hydro), inverts the PAR(p) model equation via
-/// [`solve_par_noise`] to produce the standardized noise `η` that, when fed
-/// through the forward PAR pass, would reproduce the raw external value.
+/// For each (stage, scenario, hydro), inverts the PAR(p) model via
+/// [`solve_par_noise`] to produce the noise `η` that the forward PAR pass would
+/// turn back into the raw external value, using a lag chain seeded from
+/// `past_inflows` and advanced by the `stage_lag_transitions`
+/// accumulate/finalize pattern (lags frozen within a period; shifted with the
+/// period's weighted-average raw value at each `finalize_period` boundary).
 ///
-/// ## Lag initialization and advancement
-///
-/// Lag state is initialized from `past_inflows` and advanced using the
-/// frozen-lag + accumulation pattern encoded in `stage_lag_transitions`.
-/// Within a lag period (`finalize_period == false`), the lag buffer is frozen
-/// at the previous period's values. At a period boundary (`finalize_period == true`),
-/// the lag buffer is shifted with the weighted average of the raw external values
-/// accumulated during the finalized period.
-///
-/// For uniform monthly studies (each stage is one lag period), this produces
-/// bit-for-bit identical eta values to the simple per-stage advancement used
-/// previously, because each stage has `accumulate_weight=1.0`, `spillover_weight=0.0`,
-/// and `finalize_period=true`.
-///
-/// ## `NEG_INFINITY` values
-///
-/// If `solve_par_noise` returns `f64::NEG_INFINITY` (sigma=0, non-matching target),
-/// the value is stored as-is and will be caught by Tier 3 validation (V3.7).
+/// A `f64::NEG_INFINITY` from `solve_par_noise` (sigma=0, non-matching target)
+/// is stored as-is; V3.7 in [`validate_external_library`] rejects it.
 ///
 /// # Parameters
 ///
-/// - `library` — destination library, must have `n_entities() == hydro_ids.len()`
-/// - `external_rows` — sorted raw rows (sorted by `(stage_id, scenario_id, hydro_id)`)
+/// - `library` — destination, must have `n_entities() == hydro_ids.len()`
+/// - `external_rows` — raw rows sorted by `(stage_id, scenario_id, hydro_id)`
 /// - `hydro_ids` — canonical-order hydro entity IDs
-/// - `stages` — study stages (must match `library.n_stages()`)
-/// - `par` — precomputed PAR model parameters
-/// - `past_inflows` — pre-study inflow history sorted by `hydro_id`; used for
-///   lag initialization at stage 0
-/// - `stage_lag_transitions` — pre-computed lag transition config, one per stage,
-///   same length as `stages`
+/// - `past_inflows` — pre-study history sorted by `hydro_id`; seeds the stage-0 lag chain
+/// - `stage_lag_transitions` — one per stage, same length as `stages`
 ///
 /// # Panics
 ///
 /// Panics in debug builds if dimension mismatches are detected.
-// Rationale: the function maintains shared mutable lag-state and accumulator
-// buffers that advance through the (scenario × stage × entity) triple loop; the
-// lag-accumulation step and the finalize-and-shift step for each stage share
-// these buffers and must execute in strict sequence within the same loop body,
-// making extraction into helpers impractical without passing the buffers by
-// mutable reference through multiple call boundaries.
+// Rationale: the lag-state and accumulator buffers thread through the
+// (scenario × stage × entity) loop in strict sequence; extracting helpers would
+// pass them by mutable ref across several call boundaries.
 #[allow(clippy::too_many_lines)]
 pub fn standardize_external_inflow(
     library: &mut ExternalScenarioLibrary,
@@ -319,22 +256,13 @@ pub fn standardize_external_inflow(
         return;
     }
 
-    // -----------------------------------------------------------------------
-    // Build hydro ID → canonical index map.
-    // -----------------------------------------------------------------------
     let hydro_index: std::collections::HashMap<EntityId, usize> = hydro_ids
         .iter()
         .enumerate()
         .map(|(i, &id)| (id, i))
         .collect();
 
-    // -----------------------------------------------------------------------
-    // Build raw value lookup: flat array indexed as
-    //   raw[stage * n_scenarios * n_hydros + scenario * n_hydros + h_idx]
-    //
-    // External rows are sorted by (stage_id, scenario_id, hydro_id) per
-    // contract, but we use a HashMap for robustness.
-    // -----------------------------------------------------------------------
+    // raw[stage * n_scenarios * n_hydros + scenario * n_hydros + h_idx]
     let mut raw_values = vec![0.0_f64; n_stages * n_scenarios * n_hydros].into_boxed_slice();
 
     #[allow(clippy::cast_sign_loss)]
@@ -363,49 +291,26 @@ pub fn standardize_external_inflow(
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Build past-inflows lookup: past_lag[h_idx][lag] = values_m3s[lag].
-    // Indexed as past_lag_buf[h_idx * max_order + lag].
-    // Hydros absent from past_inflows default to 0.0 for all lags.
-    // -----------------------------------------------------------------------
+    // past_lag_buf[h_idx * safe_max_order + lag]
     let safe_max_order = max_order.max(1);
     let mut past_lag_buf = vec![0.0_f64; n_hydros * safe_max_order];
     for pi in past_inflows {
         if let Some(&h_idx) = hydro_index.get(&pi.hydro_id) {
-            // Fill up to `max_order` lag slots so PAR(p)-A annual contributions
-            // (spread across the widened `psi` slice) see real lag values, not
-            // zeros. Limited by what the past_inflows entry actually provides.
+            // Fill up to `max_order` slots so PAR(p)-A annual contributions
+            // (widened across the `psi` slice) see real lag values, not zeros.
             for (lag, &value) in pi.values_m3s.iter().enumerate().take(max_order) {
                 past_lag_buf[h_idx * safe_max_order + lag] = value;
             }
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Pre-allocate reusable buffers. All reused across iterations.
-    //
     // lag_state[h * safe_max_order + l] = lag-l value for hydro h.
-    // Initialized from past_lag_buf at the start of each scenario.
-    //
-    // lag_buf: scratch buffer of length safe_max_order passed to solve_par_noise.
-    //
-    // lag_accum[h]: accumulator of weighted raw values for hydro h, used to
-    // compute the weighted-average monthly inflow when finalizing a lag period.
-    //
-    // lag_weight_accum: sum of accumulate_weight values accumulated so far in
-    // the current lag period.
-    // -----------------------------------------------------------------------
     let mut lag_state = vec![0.0_f64; n_hydros * safe_max_order];
     let mut lag_buf = vec![0.0_f64; safe_max_order];
     let mut lag_accum = vec![0.0_f64; n_hydros];
 
-    // -----------------------------------------------------------------------
-    // March forward through (scenario, stage, hydro) and compute eta.
-    // Each scenario is independent: reset lag state and accumulators at the
-    // start of each scenario.
-    // -----------------------------------------------------------------------
     for scenario in 0..n_scenarios {
-        // Reset lag state from past_lag_buf (same initial conditions for all scenarios).
+        // Each scenario starts from the same past_inflows-seeded lag state.
         lag_state.copy_from_slice(&past_lag_buf);
         lag_accum.fill(0.0);
         let mut lag_weight_accum = 0.0_f64;
@@ -413,14 +318,11 @@ pub fn standardize_external_inflow(
         for t in 0..n_stages {
             let stage_lag = &stage_lag_transitions[t];
 
-            // ── Compute eta for each hydro using the current (frozen) lag state ──
             for h in 0..n_hydros {
                 let target = raw_values[t * n_scenarios * n_hydros + scenario * n_hydros + h];
 
-                // Build the full-length lag_buf so PAR(p)-A annual contributions
-                // (spread across the widened `psi` slice) participate in the η
-                // inversion. lag_state uses lag-major layout:
-                // lag_state[h * safe_max_order + l].
+                // Full-length lag_buf so PAR(p)-A annual contributions (widened
+                // across the `psi` slice) participate in the η inversion.
                 for (l, slot) in lag_buf.iter_mut().enumerate() {
                     *slot = lag_state[h * safe_max_order + l];
                 }
@@ -434,9 +336,8 @@ pub fn standardize_external_inflow(
                 library.eta_slice_mut(t, scenario)[h] = eta;
             }
 
-            // ── Step 1: Accumulate this stage's raw values × accumulate_weight ──
-            // Must happen unconditionally before the finalize check so that this
-            // stage's contribution is always included in the period average.
+            // Accumulate before the finalize check so this stage's contribution
+            // is always in the period average.
             let w = stage_lag.accumulate_weight;
             for h in 0..n_hydros {
                 let val = raw_values[t * n_scenarios * n_hydros + scenario * n_hydros + h];
@@ -444,25 +345,19 @@ pub fn standardize_external_inflow(
             }
             lag_weight_accum += w;
 
-            // ── Step 2: Finalize — shift lag state at period boundary ────────────
             if stage_lag.finalize_period && lag_weight_accum > 0.0 {
-                // Compute per-hydro weighted average and shift the lag state:
-                //   lag_state[h, l] <- lag_state[h, l-1]  for l in (1..max_order).rev()
-                //   lag_state[h, 0] <- weighted_avg[h]
                 let inv = 1.0 / lag_weight_accum;
                 for h in 0..n_hydros {
                     let avg = lag_accum[h] * inv;
-                    // Shift older lags down (from highest lag to lag-1 to avoid overwrite).
+                    // Shift highest-lag-first so each slot reads its predecessor
+                    // before being overwritten.
                     for l in (1..safe_max_order).rev() {
                         lag_state[h * safe_max_order + l] = lag_state[h * safe_max_order + l - 1];
                     }
-                    // Newest lag slot gets the weighted average for this period.
                     lag_state[h * safe_max_order] = avg;
                 }
 
-                // ── Reset accumulator; seed spillover if required ────────────────
-                // Spillover uses the RAW inflow value (not the averaged value),
-                // consistent with lag-state accumulation patterns.
+                // Spillover seeds from the RAW value, not the period average.
                 let sw = stage_lag.spillover_weight;
                 if sw > 0.0 {
                     for h in 0..n_hydros {
@@ -476,7 +371,7 @@ pub fn standardize_external_inflow(
                     lag_weight_accum = 0.0;
                 }
             }
-            // Non-finalizing stages: lag_state is left untouched (lags frozen).
+            // Non-finalizing stages keep lag_state frozen.
         }
     }
 }
@@ -485,34 +380,24 @@ pub fn standardize_external_inflow(
 // standardize_external_simple
 // ---------------------------------------------------------------------------
 
-/// Sole owner of the simple `η = (value - mean) / std` standardization arithmetic
-/// shared by every non-PAR(p) external entity class.
+/// Sole owner of the simple `η = (value - mean) / std` standardization shared by
+/// every non-PAR(p) external entity class.
 ///
-/// Contract: for each `(stage, scenario, entity)` triple the stored eta is
-/// `(value - mean) / std`, with the `std == 0.0` case yielding `η = 0.0` (a
-/// deterministic entity, consistent with the sigma=0 convention) — the obvious
-/// alternative of dividing unconditionally would emit NaN/inf for those entities.
-/// The `mean_std` lookup is laid out as `mean_std[stage * n_entities + idx]`;
-/// callers and this body must agree on that index expression — it is the storage
-/// contract, not an implementation detail.
+/// The `std == 0.0` case yields `η = 0.0` (deterministic entity, per the sigma=0
+/// convention); dividing unconditionally would emit NaN/inf instead. The
+/// `mean_std` lookup is `mean_std[stage * n_entities + idx]` — callers and this
+/// body must agree on that index expression.
 ///
-/// Determinism: `models` and `external_rows` are traversed in the order given,
-/// and entity indices come from `entity_ids` order. Nothing is collected, sorted,
-/// or reordered, so the output is invariant to anything but input declaration
-/// order — upholding the bit-determinism rule.
+/// Determinism: `models`, `external_rows`, and `entity_ids` are traversed in the
+/// order given with no collect/sort/reorder, so output depends only on input
+/// declaration order.
 ///
-/// Entity-class–agnostic by construction: the per-class field access is supplied
-/// by the two monomorphized accessor closures, so this body carries no entity
-/// vocabulary. The wrappers ([`standardize_external_load`],
-/// [`standardize_external_ncs`]) own that vocabulary.
+/// Carries no entity vocabulary — the two accessor closures supply per-class
+/// field access; [`standardize_external_load`] / [`standardize_external_ncs`] own it.
 ///
 /// # Parameters
 ///
-/// - `library` — destination library, must have `n_entities() == entity_ids.len()`
-/// - `external_rows` — raw rows; iterated in the given order
-/// - `entity_ids` — canonical-order entity IDs
-/// - `models` — per-(entity, stage) models; iterated in the given order
-/// - `n_stages` — number of study stages
+/// - `library` — destination, must have `n_entities() == entity_ids.len()`
 /// - `model_fields` — yields `(entity_id, stage_id, mean, std)` for one model
 /// - `row_fields` — yields `(entity_id, stage_id, scenario_id, value)` for one row
 ///
@@ -553,19 +438,13 @@ fn standardize_external_simple<R, M, FM, FR>(
         return;
     }
 
-    // -----------------------------------------------------------------------
-    // Build entity ID → canonical index map.
-    // -----------------------------------------------------------------------
     let entity_index: std::collections::HashMap<EntityId, usize> = entity_ids
         .iter()
         .enumerate()
         .map(|(i, &id)| (id, i))
         .collect();
 
-    // -----------------------------------------------------------------------
-    // Build (entity_idx, stage_idx) → (mean, std) lookup.
-    // Indexed as mean_std[stage * n_entities + entity_idx] = (mean, std).
-    // -----------------------------------------------------------------------
+    // mean_std[stage * n_entities + entity_idx]
     let mut mean_std = vec![(0.0_f64, 0.0_f64); n_stages * n_entities];
     #[allow(clippy::cast_sign_loss)]
     for model in models {
@@ -578,9 +457,6 @@ fn standardize_external_simple<R, M, FM, FR>(
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Apply (value - mean) / std for each row.
-    // -----------------------------------------------------------------------
     #[allow(clippy::cast_sign_loss)]
     for row in external_rows {
         let (entity_id, stage_id, scenario_id, value) = row_fields(row);
@@ -610,19 +486,10 @@ fn standardize_external_simple<R, M, FM, FR>(
 // standardize_external_load
 // ---------------------------------------------------------------------------
 
-/// Populate `library` with standardized eta values from external load rows.
+/// Populate `library` with standardized eta from external load rows, via
+/// `standardize_external_simple` with the [`LoadModel`] field accessors.
 ///
-/// For each (stage, scenario, bus), computes `η = (value_mw - mean_mw) / std_mw`
-/// using the [`LoadModel`] for that (bus, stage). When `std_mw == 0.0`, stores
-/// `η = 0.0` (deterministic entity, consistent with the sigma=0 convention).
-///
-/// # Parameters
-///
-/// - `library` — destination library, must have `n_entities() == bus_ids.len()`
-/// - `external_rows` — sorted raw rows (sorted by `(stage_id, scenario_id, bus_id)`)
-/// - `bus_ids` — canonical-order bus entity IDs
-/// - `load_models` — per-(bus, stage) load models sorted by `(bus_id, stage_id)`
-/// - `n_stages` — number of study stages
+/// `library` must have `n_entities() == bus_ids.len()`.
 ///
 /// # Panics
 ///
@@ -649,19 +516,10 @@ pub fn standardize_external_load(
 // standardize_external_ncs
 // ---------------------------------------------------------------------------
 
-/// Populate `library` with standardized eta values from external NCS rows.
+/// Populate `library` with standardized eta from external NCS rows, via
+/// `standardize_external_simple` with the [`NcsModel`] field accessors.
 ///
-/// For each (stage, scenario, ncs), computes `η = (value - mean) / std`
-/// using the [`NcsModel`] for that (ncs, stage). When `std == 0.0`, stores
-/// `η = 0.0` (deterministic entity, consistent with the sigma=0 convention).
-///
-/// # Parameters
-///
-/// - `library` — destination library, must have `n_entities() == ncs_ids.len()`
-/// - `external_rows` — sorted raw rows (sorted by `(stage_id, scenario_id, ncs_id)`)
-/// - `ncs_ids` — canonical-order NCS entity IDs
-/// - `ncs_models` — per-(ncs, stage) NCS models sorted by `(ncs_id, stage_id)`
-/// - `n_stages` — number of study stages
+/// `library` must have `n_entities() == ncs_ids.len()`.
 ///
 /// # Panics
 ///
@@ -704,21 +562,15 @@ pub fn standardize_external_ncs(
 /// |------|---------|--------------------------------------------------------------------------|
 /// | V3.2 | Error   | Every entity in `entity_ids` must have data in `row_entity_ids`.         |
 /// | V3.3 | Error   | Every study stage must have at least one row in `rows_per_stage`.        |
-/// | V3.4 | Error   | The number of scenarios per stage must be uniform across all stages.     |
+/// | V3.4 | Error   | Each stage's row count must be divisible by `n_entities` (non-uniform counts allowed). |
 /// | V3.5 | Error   | Every entity ID in `row_entity_ids` must exist in `entity_ids`.          |
 /// | V3.6 | Assert  | All values in raw rows are finite (parser invariant — `debug_assert`).   |
 /// | V3.7 | Error   | No eta value in the library may be `f64::NEG_INFINITY` or `NaN`.        |
 /// | V3.8 | Warning | `library.n_scenarios() < forward_passes` — log a warning.               |
 ///
-/// ## Pre-extracted metadata
-///
-/// The caller is responsible for extracting `row_entity_ids` and
-/// `rows_per_stage` from the raw parsed rows before calling this function.
-///
-/// - `row_entity_ids` — the set of entity IDs that appear in the raw rows
-/// - `rows_per_stage` — number of raw rows for each study stage (length must
-///   equal `n_stages`); `rows_per_stage[s]` is the total row count for stage `s`
-///   across all entities and scenarios
+/// The caller pre-extracts `row_entity_ids` (entity IDs present in the raw rows)
+/// and `rows_per_stage` (raw-row count per stage across all entities and
+/// scenarios; length must equal `n_stages`).
 ///
 /// # Errors
 ///
@@ -753,10 +605,7 @@ pub fn validate_external_library<S: std::hash::BuildHasher>(
     let n_entities = entity_ids.len();
     let class = library.entity_class();
 
-    // -----------------------------------------------------------------------
-    // V3.2 — Entity coverage: every entity in `entity_ids` must appear in
-    // `row_entity_ids`.
-    // -----------------------------------------------------------------------
+    // V3.2 — every entity in `entity_ids` must appear in `row_entity_ids`.
     for &id in entity_ids {
         if !row_entity_ids.contains(&id) {
             return Err(StochasticError::InsufficientData {
@@ -769,9 +618,7 @@ pub fn validate_external_library<S: std::hash::BuildHasher>(
         }
     }
 
-    // -----------------------------------------------------------------------
-    // V3.3 — Stage coverage: every study stage must have at least one row.
-    // -----------------------------------------------------------------------
+    // V3.3 — every study stage must have at least one row.
     for (stage_idx, &count) in rows_per_stage.iter().enumerate().take(n_stages) {
         if count == 0 {
             return Err(StochasticError::InsufficientData {
@@ -783,15 +630,9 @@ pub fn validate_external_library<S: std::hash::BuildHasher>(
         }
     }
 
-    // -----------------------------------------------------------------------
-    // V3.4 — Exact divisibility: rows_per_stage[s] must be exactly divisible
-    // by n_entities (no partial rows). Non-uniform counts across stages are
-    // now accepted — padding is applied after standardization in the setup
-    // blocks. See `pad_library_to_uniform`.
-    //
-    // Guard against zero entities to avoid division by zero; this situation
-    // is benign (empty library) so we skip the check.
-    // -----------------------------------------------------------------------
+    // V3.4 — each stage's row count must be divisible by n_entities. Non-uniform
+    // counts are accepted; `pad_library_to_uniform` fills them afterward. The
+    // zero-entity guard skips an empty (benign) library to avoid a div-by-zero.
     if n_entities > 0 && n_stages > 0 {
         for (stage_idx, &count) in rows_per_stage.iter().enumerate().take(n_stages) {
             if count % n_entities != 0 {
@@ -806,10 +647,7 @@ pub fn validate_external_library<S: std::hash::BuildHasher>(
         }
     }
 
-    // -----------------------------------------------------------------------
-    // V3.5 — Entity ID existence: every ID in `row_entity_ids` must be a
-    // known entity in `entity_ids`.
-    // -----------------------------------------------------------------------
+    // V3.5 — every ID in `row_entity_ids` must exist in `entity_ids`.
     let entity_id_set: HashSet<EntityId> = entity_ids.iter().copied().collect();
     for &id in row_entity_ids {
         if !entity_id_set.contains(&id) {
@@ -823,22 +661,14 @@ pub fn validate_external_library<S: std::hash::BuildHasher>(
         }
     }
 
-    // -----------------------------------------------------------------------
-    // V3.6 — Finite values (parser invariant — debug_assert only).
-    // The parser enforces this; we do not repeat the full scan here.
-    // -----------------------------------------------------------------------
+    // V3.6 — finite values are a parser invariant; debug_assert only, no full rescan.
     debug_assert!(
         row_entity_ids.iter().all(|id| entity_id_set.contains(id)),
         "V3.6: row_entity_ids contains IDs not in entity_id_set (parser invariant violated)",
     );
 
-    // -----------------------------------------------------------------------
-    // V3.7 — PAR compatibility: no eta value may be NEG_INFINITY or NaN.
-    //
-    // NEG_INFINITY is the sentinel written by standardize_external_inflow when
-    // sigma=0 but the external value does not match the deterministic base
-    // (data quality issue). NaN indicates a numerical failure.
-    // -----------------------------------------------------------------------
+    // V3.7 — no eta may be NEG_INFINITY (the sigma=0 non-matching-target sentinel
+    // from standardize_external_inflow) or NaN (numerical failure).
     for stage in 0..library.n_stages() {
         for scenario in 0..library.n_scenarios() {
             let eta = library.eta_slice(stage, scenario);
@@ -857,9 +687,7 @@ pub fn validate_external_library<S: std::hash::BuildHasher>(
         }
     }
 
-    // -----------------------------------------------------------------------
-    // V3.8 — Scenario count warning: fewer scenarios than forward passes.
-    // -----------------------------------------------------------------------
+    // V3.8 — warn (do not fail) when scenarios < forward passes.
     if library.n_scenarios() < forward_passes as usize {
         tracing::warn!(
             n_scenarios = library.n_scenarios(),
@@ -879,19 +707,9 @@ pub fn validate_external_library<S: std::hash::BuildHasher>(
 // pad_library_to_uniform
 // ---------------------------------------------------------------------------
 
-/// Replicate eta values in stages that have fewer raw scenarios than
-/// `library.n_scenarios()`, filling the library to a uniform count.
-///
-/// For each stage `s` where `raw_scenarios_per_stage[s] < n_scenarios`,
-/// the raw scenario slots `0..raw_count` are already populated by the
-/// preceding standardization call. This function copies those values into
-/// the remaining slots `raw_count..n_scenarios` using wrap-around indexing
-/// (`k % raw_count`), so that every scenario index in `0..n_scenarios` holds
-/// a valid (possibly replicated) eta vector.
-///
-/// The function is a no-op when all stages already have `n_scenarios` raw
-/// scenarios (uniform input). A single `tracing::info!` is emitted only when
-/// at least one stage is actually padded.
+/// Fill each under-populated stage to `library.n_scenarios()` by replicating its
+/// raw scenario slots with wrap-around indexing (`k % raw_count`), so every
+/// scenario index holds a valid eta vector. No-op for already-uniform input.
 ///
 /// # Panics
 ///
@@ -900,11 +718,9 @@ pub fn pad_library_to_uniform(library: &mut ExternalScenarioLibrary) {
     let n_scenarios = library.n_scenarios();
     let n_stages = library.n_stages();
     let n_entities = library.n_entities();
-    // Copy the class name before the mutable borrow loop so the
-    // tracing macro can reference it after eta mutation.
+    // Owned so the tracing macro can use it after the mutable-borrow loop.
     let class = library.entity_class().to_owned();
 
-    // Collect which stages need padding so we can emit a single info log.
     let mut padded_stages: Vec<(usize, usize)> = Vec::new();
 
     for s in 0..n_stages {
@@ -915,9 +731,8 @@ pub fn pad_library_to_uniform(library: &mut ExternalScenarioLibrary) {
 
         padded_stages.push((s, raw_count));
 
-        // For each slot that needs to be filled, copy from the wrap-around
-        // raw slot. We work directly on the flat eta buffer to avoid borrow
-        // issues with `eta_slice` / `eta_slice_mut`.
+        // Operate on the flat eta buffer directly; eta_slice/eta_slice_mut would
+        // borrow-conflict here.
         for k in raw_count..n_scenarios {
             let src_k = k % raw_count;
             let src_offset = (s * n_scenarios + src_k) * n_entities;
@@ -973,9 +788,7 @@ mod tests {
     use crate::par::{evaluate::evaluate_par, precompute::PrecomputedPar};
 
     /// Build `n_stages` uniform-monthly transitions: each stage finalizes its own
-    /// period with full weight and no spillover. Passing these to
-    /// `standardize_external_inflow` produces bit-for-bit identical results to the
-    /// old per-stage advancement logic for uniform monthly studies.
+    /// period with full weight and no spillover (the simple per-stage path).
     fn uniform_monthly_transitions(n_stages: usize) -> Vec<StageLagTransition> {
         vec![
             StageLagTransition {
@@ -1753,14 +1566,11 @@ mod tests {
     #[test]
     fn test_eta_roundtrip_multiple_cells() {
         let mut lib = ExternalScenarioLibrary::new(3, 2, 4, "inflow", vec![2, 2, 2]);
-        // Write to (0, 0)
         lib.eta_slice_mut(0, 0)
             .copy_from_slice(&[0.1, 0.2, 0.3, 0.4]);
-        // Write to (2, 1)
         lib.eta_slice_mut(2, 1)
             .copy_from_slice(&[9.0, 8.0, 7.0, 6.0]);
 
-        // Verify (0, 0) and (2, 1) are independent.
         assert_eq!(lib.eta_slice(0, 0), &[0.1, 0.2, 0.3, 0.4]);
         assert_eq!(lib.eta_slice(2, 1), &[9.0, 8.0, 7.0, 6.0]);
         // (1, 0) was not written and must still be zero.
@@ -2068,7 +1878,7 @@ mod tests {
         )
     }
 
-    /// Round-trip consistency: [`standardize_external_inflow`] followed by
+    /// Round-trip consistency: `standardize_external_inflow` followed by
     /// [`evaluate_par`] must reconstruct the original external targets for a
     /// mixed 4-weekly + 1-monthly layout with AR(1) lags.
     ///
@@ -2086,7 +1896,6 @@ mod tests {
         let n_stages = stages.len();
         let n_scenarios = targets.len();
 
-        // Build ExternalScenarioRow entries from the targets array.
         let mut rows = Vec::with_capacity(n_stages * n_scenarios);
         for (scenario, scenario_targets) in targets.iter().enumerate() {
             for (stage, &value) in scenario_targets.iter().enumerate() {
@@ -2105,7 +1914,6 @@ mod tests {
             season_ids: None,
         }];
 
-        // Standardize: compute eta values for all (stage, scenario) pairs.
         let raw = vec![n_scenarios; n_stages];
         let mut lib = ExternalScenarioLibrary::new(n_stages, n_scenarios, 1, "inflow", raw);
         standardize_external_inflow(

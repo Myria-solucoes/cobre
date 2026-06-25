@@ -1,21 +1,15 @@
 //! `InSample` scenario sampling scheme.
 //!
-//! The `InSample` scheme draws a fixed set of scenarios from the opening
-//! tree at the start of each iteration and uses the same scenarios for
-//! all stages. This scheme is the minimal viable sampling strategy for
-//! iterative stochastic optimization algorithms and serves as the
-//! baseline from which other sampling strategies can be derived.
+//! Draws a fixed set of scenarios from the opening tree per iteration and reuses
+//! them across all stages.
 
 use rand::RngExt;
 
 use crate::noise::{rng::rng_from_seed, seed::derive_forward_seed};
 use crate::tree::opening_tree::OpeningTreeView;
 
-/// Select a scenario opening from the tree for a given `(stage, iteration, scenario)` context.
-///
-/// Deterministically chooses an opening index by deriving a seed from
-/// `(base_seed, iteration, scenario, stage)` and sampling the RNG.
-/// Returns both the selected index and the corresponding noise slice.
+/// Deterministically select an opening (index + noise slice) for a given
+/// `(stage, iteration, scenario)` context.
 ///
 /// # Panics
 ///
@@ -128,7 +122,6 @@ mod tests {
         let tree = uniform_tree(2, 10, 2);
         let view = tree.view();
 
-        // Same stage_idx=0 but different stage domain IDs.
         let (idx_stage0, _) = sample_forward(&view, 42, 0, 0, 0, 0);
         let (idx_stage1, _) = sample_forward(&view, 42, 0, 0, 1, 0);
 
@@ -166,15 +159,15 @@ mod tests {
         let view = tree.view();
         let base_seed = 42;
 
-        // Simulate a continuous run: sample iterations 1..=5, record iteration 5.
+        // Continuous run: sample iterations 1..=5, record iteration 5.
         let mut continuous_results = Vec::new();
         for scenario in 0_u32..5 {
             let (idx, slice) = sample_forward(&view, base_seed, 5, scenario, 0, 0);
             continuous_results.push((idx, slice.to_vec()));
         }
 
-        // Simulate a resumed run: skip iterations 1..=3, sample only 4..=5.
-        // The resumed run at iteration 5 should produce identical noise.
+        // Resumed run: iteration-5 draws depend only on the iteration seed, so a
+        // run that skipped 1..=3 must reproduce the continuous iteration 5.
         let mut resumed_results = Vec::new();
         for scenario in 0_u32..5 {
             let (idx, slice) = sample_forward(&view, base_seed, 5, scenario, 0, 0);
