@@ -170,7 +170,6 @@ fn test_highs_add_rows_updates_dimensions() {
         4,
         "row_value buffer must be resized to 4 after add_rows"
     );
-    // Columns unchanged
     assert_eq!(solver.num_cols, 3, "num_cols must be unchanged by add_rows");
 }
 
@@ -180,7 +179,6 @@ fn test_highs_set_row_bounds_no_panic() {
     let template = make_fixture_stage_template();
     solver.load_model(&template);
 
-    // Patch row 0 to equality at 4.0. Must complete without panic.
     solver.set_row_bounds(&[0], &[4.0], &[4.0]);
 }
 
@@ -190,7 +188,6 @@ fn test_highs_set_col_bounds_no_panic() {
     let template = make_fixture_stage_template();
     solver.load_model(&template);
 
-    // Patch column 1 lower bound to 10.0. Must complete without panic.
     solver.set_col_bounds(&[1], &[10.0], &[f64::INFINITY]);
 }
 

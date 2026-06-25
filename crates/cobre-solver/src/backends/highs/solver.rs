@@ -1,13 +1,6 @@
 //! The [`HighsSolver`] handle wrapper, its lifecycle/solve primitives, and the
-//! `highs_version` free function.
-//!
-//! Owns the `HighsSolver` struct definition, the `unsafe impl Send`, the
-//! construction/configuration/solve helpers, the warm-start `solve_inner`
-//! orchestration (determinism-sensitive), the `Drop` handle teardown, the
-//! `highs_version` query, and the `test-support` accessor impl. The escalation
-//! ladder (`retry`) and the `SolverInterface` impl (`interface`) are additional
-//! `impl HighsSolver` blocks that reach this struct's fields and helpers via the
-//! child-module hierarchy.
+//! `highs_version` free function. The warm-start `solve_inner` orchestration is
+//! determinism-sensitive.
 
 use std::os::raw::c_void;
 use std::time::Instant;
@@ -20,11 +13,9 @@ use crate::{
 
 /// `HiGHS` LP solver instance implementing [`SolverInterface`](crate::SolverInterface).
 ///
-/// Owns an opaque `HiGHS` handle and pre-allocated buffers for solution
-/// extraction, scratch i32 index conversion, and statistics accumulation.
-///
-/// Construct with [`HighsSolver::new`]. The handle is destroyed automatically
-/// when the instance is dropped.
+/// Construct with [`HighsSolver::new`]; the handle is destroyed on `Drop`. The
+/// `Vec` buffers are reused across solves and grown but never shrunk, so the
+/// solve hot path never reallocates.
 ///
 /// # Example
 ///
@@ -35,55 +26,36 @@ use crate::{
 /// assert_eq!(solver.name(), "HiGHS");
 /// ```
 pub struct HighsSolver {
-    /// Opaque pointer to the `HiGHS` C++ instance, obtained from `cobre_highs_create()`.
+    /// Opaque pointer to the `HiGHS` C++ instance, from `cobre_highs_create()`.
     pub(super) handle: *mut c_void,
-    /// Pre-allocated buffer for primal column values extracted after each solve.
-    /// Resized in `load_model`; reused across solves to avoid per-solve allocation.
+    /// Primal column values extracted after each solve.
     pub(super) col_value: Vec<f64>,
-    /// Pre-allocated buffer for column dual values (reduced costs from `HiGHS` perspective).
-    /// Resized in `load_model`.
+    /// Column dual values (reduced costs from `HiGHS` perspective).
     pub(super) col_dual: Vec<f64>,
-    /// Pre-allocated buffer for row primal values (constraint activity).
-    /// Resized in `load_model`.
+    /// Row primal values (constraint activity).
     pub(super) row_value: Vec<f64>,
-    /// Pre-allocated buffer for row dual multipliers (shadow prices).
-    /// Resized in `load_model`.
+    /// Row dual multipliers (shadow prices).
     pub(super) row_dual: Vec<f64>,
-    /// Scratch buffer for converting `usize` indices to `i32` for the `HiGHS` C API.
-    /// Used by `add_rows`, `set_row_bounds`, and `set_col_bounds`.
-    /// Never shrunk -- only grows -- to prevent reallocation churn on the hot path.
+    /// `usize` → `i32` index conversion for the `HiGHS` C API.
     pub(super) scratch_i32: Vec<i32>,
-    /// Pre-allocated i32 buffer for column basis status codes.
-    /// Reused across warm-start `solve` and `get_basis` calls to avoid per-call allocation.
-    /// Resized in `load_model` to `num_cols`; never shrunk.
+    /// Column basis status codes.
     pub(super) basis_col_i32: Vec<i32>,
-    /// Pre-allocated i32 buffer for row basis status codes.
-    /// Reused across warm-start `solve` and `get_basis` calls to avoid per-call allocation.
-    /// Resized in `load_model` to `num_rows` and grown in `add_rows`.
+    /// Row basis status codes.
     pub(super) basis_row_i32: Vec<i32>,
-    /// Scratch buffer for dual-ray extraction in `interpret_terminal_status` (dual).
-    /// Grown lazily to `num_rows` via `resize`; contents are discarded after classification.
-    /// Retained across calls so repeated non-optimal solves do not re-allocate.
+    /// Dual-ray extraction scratch for `interpret_terminal_status`.
     pub(super) terminal_status_dual_scratch: Vec<f64>,
-    /// Scratch buffer for primal-ray extraction in `interpret_terminal_status` (primal).
-    /// Grown lazily to `num_cols` via `resize`; contents are discarded after classification.
-    /// Retained across calls so repeated non-optimal solves do not re-allocate.
+    /// Primal-ray extraction scratch for `interpret_terminal_status`.
     pub(super) terminal_status_primal_scratch: Vec<f64>,
-    /// Current number of LP columns (decision variables), updated by `load_model` and `add_rows`.
+    /// Current LP column count.
     pub(super) num_cols: usize,
-    /// Current number of LP rows (constraints), updated by `load_model` and `add_rows`.
+    /// Current LP row count.
     pub(super) num_rows: usize,
-    /// Whether a model is currently loaded. Set to `true` in `load_model`,
-    /// `false` in `reset` and `new`. Guards `solve`/`get_basis` contract.
+    /// Guards the `solve`/`get_basis` "model must be loaded" contract.
     pub(super) has_model: bool,
-    /// Accumulated solver statistics. Counters grow monotonically from zero;
-    /// not reset by `reset()`.
+    /// Accumulated statistics; counters grow monotonically and are not reset by `reset()`.
     pub(super) stats: SolverStatistics,
-    /// Cached solver profile applied by the last `set_*_profile` call.
-    ///
-    /// Initialised to `HighsProfile::default()` at construction, which
-    /// preserves the historical hardcoded behaviour bit-for-bit. Updated by
-    /// the four `SolverInterface` profile setter methods; read by
+    /// Cached solver profile. Initialised to `HighsProfile::default()` (which
+    /// preserves the historical hardcoded behaviour bit-for-bit) and read by
     /// `set_iteration_limits` on every solve attempt.
     pub(super) current_profile: HighsProfile,
 }
@@ -98,26 +70,8 @@ pub struct HighsSolver {
 unsafe impl Send for HighsSolver {}
 
 impl HighsSolver {
-    /// Creates a new `HiGHS` solver instance with performance-tuned defaults.
-    ///
-    /// Calls `cobre_highs_create()` to allocate the `HiGHS` handle, then applies
-    /// the thirteen default options defined in `HiGHS` Implementation SS4.1:
-    ///
-    /// | Option                                      | Value       | Type   |
-    /// |---------------------------------------------|-------------|--------|
-    /// | `solver`                                    | `"simplex"` | string |
-    /// | `simplex_strategy`                          | `1`         | int    |
-    /// | `simplex_scale_strategy`                    | `0`         | int    |
-    /// | `presolve`                                  | `"on"`      | string |
-    /// | `parallel`                                  | `"off"`     | string |
-    /// | `output_flag`                               | `0`         | bool   |
-    /// | `primal_feasibility_tolerance`              | `1e-9`      | double |
-    /// | `dual_feasibility_tolerance`                | `1e-9`      | double |
-    /// | `simplex_dual_edge_weight_strategy`         | `1`         | int    |
-    /// | `dual_simplex_cost_perturbation_multiplier` | `0.0`       | double |
-    /// | `simplex_initial_condition_check`           | `0`         | bool   |
-    /// | `simplex_price_strategy`                    | `1`         | int    |
-    /// | `rebuild_refactor_solution_error_tolerance` | `1e-6`      | double |
+    /// Creates a new `HiGHS` solver instance with the `default_options()`
+    /// performance-tuned defaults (`HiGHS` Implementation SS4.1).
     ///
     /// # Errors
     ///
@@ -141,8 +95,6 @@ impl HighsSolver {
             });
         }
 
-        // Apply performance-tuned configuration. On any failure, destroy the
-        // handle before returning to prevent a resource leak.
         if let Err(e) = Self::apply_default_config(handle) {
             // SAFETY: `handle` is a valid, non-null pointer obtained from
             // `cobre_highs_create()` in this same function. It has not been
@@ -174,11 +126,10 @@ impl HighsSolver {
         })
     }
 
-    /// Applies the thirteen performance-tuned `HiGHS` configuration options.
+    /// Applies the `default_options()` table to a fresh handle.
     ///
-    /// Called once during construction. Returns `Ok(())` if all options are set
-    /// successfully, or `Err(SolverError::InternalError)` with the failing
-    /// option name if any configuration call returns `HIGHS_STATUS_ERROR`.
+    /// Returns `Err(SolverError::InternalError)` naming the failing option if any
+    /// configuration call returns `HIGHS_STATUS_ERROR`.
     fn apply_default_config(handle: *mut c_void) -> Result<(), SolverError> {
         for opt in &default_options() {
             // SAFETY: `handle` is a valid, non-null HiGHS pointer.
@@ -213,9 +164,7 @@ impl HighsSolver {
                 self.row_dual.as_mut_ptr(),
             )
         };
-        // HiGHS documentation guarantees `cobre_highs_get_solution` returns
-        // non-ERROR status after `OPTIMAL` model status; this is a
-        // debug-build-only invariant check.
+        // HiGHS guarantees non-ERROR status after an `OPTIMAL` model status.
         debug_assert_ne!(
             status,
             ffi::HIGHS_STATUS_ERROR,
@@ -265,10 +214,9 @@ impl HighsSolver {
                 c"dual_feasibility_tolerance".as_ptr(),
                 self.current_profile.dual_feasibility_tolerance,
             );
-            // Also re-apply the algorithmic strategy int options. Post-retry
-            // `restore_default_settings` resets these to HiGHS defaults; the
-            // profile values must be reinstalled before the default-attempt
-            // path runs so backward-tuned profiles survive the retry boundary.
+            // The strategy int options must be reinstalled too: a preceding
+            // `restore_default_settings` reset them to HiGHS defaults, so without
+            // this a tuned profile would not survive the retry boundary.
             ffi::cobre_highs_set_int_option(
                 self.handle,
                 c"simplex_dual_edge_weight_strategy".as_ptr(),
@@ -340,23 +288,18 @@ impl HighsSolver {
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let simplex_iter_limit: i32 =
             if self.current_profile.simplex_iteration_limit == DEFAULT_PROFILE_HEURISTIC_SENTINEL {
-                // Heuristic fallback: scale with LP size to avoid runaway cycling.
                 let heuristic = self.num_cols.saturating_mul(50).max(100_000);
-                // `heuristic` is bounded by `usize::MAX`, but realistic LP sizes
-                // are well below `i32::MAX` (≈2.1 × 10^9 cols). Clamp defensively.
+                // Clamp to i32::MAX so the FFI cast cannot wrap.
                 (heuristic.min(i32::MAX as usize)) as i32
             } else {
-                // Profile literal value: apply verbatim, clamped for FFI cast.
-                // `.min(i32::MAX as u32)` ensures the value fits; the cast cannot wrap.
                 (self
                     .current_profile
                     .simplex_iteration_limit
                     .min(i32::MAX as u32)) as i32
             };
 
-        // IPM cap: 0 is the "unbounded" sentinel per trait contract; map it to
-        // i32::MAX so HiGHS does not interpret 0 as "no iterations allowed".
-        // Any positive value is applied verbatim (clamped for the FFI cast).
+        // Map the 0 sentinel to i32::MAX, else HiGHS reads 0 as "no iterations
+        // allowed" rather than "unbounded".
         #[allow(clippy::cast_possible_wrap)]
         let ipm_iter_limit: i32 =
             if self.current_profile.ipm_iteration_limit == DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL {
@@ -415,14 +358,7 @@ impl HighsSolver {
             }
             ffi::HIGHS_MODEL_STATUS_INFEASIBLE => Some(SolverError::Infeasible),
             ffi::HIGHS_MODEL_STATUS_UNBOUNDED_OR_INFEASIBLE => {
-                // Probe for a dual ray to classify as Infeasible, then a primal
-                // ray to classify as Unbounded. The ray values are not stored in
-                // the error -- only the classification matters.
-                //
-                // `num_rows` and `num_cols` are up-to-date because `load_model`
-                // and `add_rows` always update them before any solve that could
-                // reach this branch. The `resize` below matches the exact count
-                // that HiGHS writes into the buffer.
+                // A dual ray classifies as Infeasible, a primal ray as Unbounded.
                 let mut has_dual_ray: i32 = 0;
                 self.terminal_status_dual_scratch.resize(self.num_rows, 0.0);
                 // SAFETY: `self.handle` is a valid, non-null HiGHS pointer.
@@ -467,10 +403,8 @@ impl HighsSolver {
                     unsafe { ffi::cobre_highs_get_simplex_iteration_count(self.handle) } as u64;
                 Some(SolverError::IterationLimit { iterations })
             }
-            ffi::HIGHS_MODEL_STATUS_SOLVE_ERROR | ffi::HIGHS_MODEL_STATUS_UNKNOWN => {
-                // Signal to the caller that retry should continue.
-                None
-            }
+            // None = retryable, not terminal — do not fold into the `other` arm.
+            ffi::HIGHS_MODEL_STATUS_SOLVE_ERROR | ffi::HIGHS_MODEL_STATUS_UNKNOWN => None,
             other => Some(SolverError::InternalError {
                 message: format!("HiGHS returned unexpected model status {other}"),
                 error_code: Some(other),
@@ -507,11 +441,8 @@ impl HighsSolver {
     /// mechanism for the backward pass. No `Highs_clearSolver` call is issued —
     /// clearing the solver discards the retained basis and forfeits the warm start.
     pub(super) fn solve_inner(&mut self) -> Result<SolutionView<'_>, SolverError> {
-        // Safeguard: apply iteration limits before the initial attempt.
-        // Time limits are NOT set here — HiGHS tracks time cumulatively from
-        // instance creation, so a per-solve time_limit would fire spuriously
-        // on long-running solver instances. Instead, wall-clock time is checked
-        // after run_once() to detect stuck solves.
+        // Iteration limits only, no time_limit (see `set_iteration_limits`):
+        // wall-clock time is measured after `run_once` to detect stuck solves.
         self.set_iteration_limits();
 
         let t0 = Instant::now();
@@ -521,9 +452,8 @@ impl HighsSolver {
         self.stats.solve_count += 1;
 
         if model_status == ffi::HIGHS_MODEL_STATUS_OPTIMAL {
-            // Read iteration count from FFI BEFORE establishing the shared borrow
-            // via extract_solution_view, so stats can be updated without violating
-            // the aliasing rules.
+            // Read the iteration count before `extract_solution_view` borrows
+            // self, so stats can be updated without an aliasing conflict.
             // SAFETY: handle is valid non-null HiGHS pointer.
             #[allow(clippy::cast_sign_loss)]
             let iterations =
@@ -536,29 +466,15 @@ impl HighsSolver {
             return Ok(self.extract_solution_view(solve_time));
         }
 
-        // Check for a definitive terminal status (not a retry-able error).
-        // UNBOUNDED is retried: HiGHS dual simplex can report spurious UNBOUNDED
-        // on numerically difficult LPs with wide coefficient ranges. The retry
-        // escalation (especially presolve in the core sequence) often resolves these.
-        // ITERATION_LIMIT from the initial attempt is retryable — the retry
-        // sequence uses different strategies that may converge faster.
-        // TIME_LIMIT is retryable — HiGHS tracks time cumulatively from instance
-        // creation; a spurious TIME_LIMIT can fire even with time_limit=Infinity
-        // in edge cases. Retry level 0 (cold restart) recovers from this.
-        // Wall-clock > 15s is also retryable — detects stuck initial solves.
+        // UNBOUNDED / ITERATION_LIMIT / TIME_LIMIT and a >15s wall-clock are all
+        // retried, not treated as terminal: a warm-started dual simplex can
+        // report any of them spuriously on numerically hard LPs, and HiGHS tracks
+        // time cumulatively so TIME_LIMIT can fire even with time_limit=Infinity.
         let is_unbounded = model_status == ffi::HIGHS_MODEL_STATUS_UNBOUNDED;
-        // INFEASIBLE from the initial attempt is retryable. A warm-started dual
-        // simplex can FALSELY report INFEASIBLE on numerically difficult LPs --
-        // the same warm-start fragility that surfaces as spurious UNBOUNDED or
-        // ITERATION_LIMIT (retried above). Routing INFEASIBLE through the
-        // escalation runs level 0 first, which clears the warm basis
-        // (`cobre_highs_clear_solver`) and re-solves cold. A *genuinely* infeasible
-        // LP is confirmed by that cold solve and the escalation stops immediately
-        // (INFEASIBLE is terminal inside `retry_escalation`), so a true infeasible
-        // still returns `Err(Infeasible)` -- only one extra cold solve. A
-        // warm-start-only false infeasible is rescued (returns optimal). Without
-        // this, a false INFEASIBLE bypassed the escalation entirely and became a
-        // fatal training error. Mirrors the cold-solve escalation on the CLP path.
+        // INFEASIBLE is retried for the same reason: escalation level 0 clears the
+        // warm basis and re-solves cold, rescuing a warm-start-only false
+        // infeasible while a genuine one is confirmed and stays terminal inside
+        // `retry_escalation`. Mirrors the cold-solve escalation on the CLP path.
         let is_infeasible = model_status == ffi::HIGHS_MODEL_STATUS_INFEASIBLE;
         let initial_retryable = is_unbounded
             || is_infeasible
@@ -573,7 +489,6 @@ impl HighsSolver {
             return Err(terminal_err);
         }
 
-        // Delegate to the retry escalation method (restores limits internally).
         match self.retry_escalation(is_unbounded) {
             Ok(outcome) => {
                 self.stats.retry_count += outcome.attempts;
@@ -600,8 +515,6 @@ impl Drop for HighsSolver {
 }
 
 /// Returns the `HiGHS` version as a `"major.minor.patch"` string.
-///
-/// This is a free function — no solver instance is required.
 ///
 /// # Example
 ///
@@ -644,31 +557,19 @@ impl HighsSolver {
 
     /// Invoke `apply_retry_level_options` for a given level.
     ///
-    /// Thin test-support wrapper that exposes the private retry-level applier
-    /// so integration tests can verify option composition without driving a
-    /// full solve through the retry ladder.
-    ///
-    /// Only levels 0-4 are routed through this method; levels 5-11 delegate to
-    /// `apply_extended_retry_options_for_test`. Call the appropriate method
-    /// based on the level you want to test.
+    /// Levels 0-4 only; for 5-11 use `apply_extended_retry_options_for_test`.
     pub fn apply_retry_level_options_for_test(&mut self, level: u32) {
         self.apply_retry_level_options(level);
     }
 
     /// Invoke `apply_extended_retry_options` for a given level (5-11).
-    ///
-    /// Thin test-support wrapper that exposes the private extended retry-level
-    /// applier so integration tests can verify option composition without
-    /// driving a full solve.
     pub fn apply_extended_retry_options_for_test(&mut self, level: u32) {
         self.apply_extended_retry_options(level);
     }
 
-    /// Invoke `restore_default_settings` then `apply_profile_tolerances` in sequence.
-    ///
-    /// Mirrors the finalization path in `retry_escalation` so integration tests
-    /// can verify that profile tolerances survive a defaults-restore without
-    /// driving a full retry through a failing LP.
+    /// Invoke `restore_default_settings` then `apply_profile_tolerances`,
+    /// mirroring the `retry_escalation` finalization path so tests can verify
+    /// profile tolerances survive a defaults-restore.
     pub fn restore_defaults_then_apply_profile_for_test(&mut self) {
         self.restore_default_settings();
         self.apply_profile_tolerances();

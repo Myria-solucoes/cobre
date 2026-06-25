@@ -1,10 +1,4 @@
 //! `impl SolverInterface for HighsSolver`.
-//!
-//! Additional `impl` block (the struct and its solve primitives are owned by
-//! `solver`): the public [`SolverInterface`](crate::SolverInterface) surface —
-//! profile application, model loading, row/bound mutation, the warm-start
-//! `solve` entry point (which delegates to `solver`'s `solve_inner`), basis
-//! extraction, and statistics reporting.
 
 use std::time::Instant;
 
@@ -39,10 +33,8 @@ impl SolverInterface for HighsSolver {
                 profile.dual_feasibility_tolerance,
             );
         }
-        // The iteration-limit fields are cache-only (no FFI here); the actual
-        // caps are computed later by `set_iteration_limits`, which reads
-        // `self.current_profile`. The `self.current_profile = *profile` below
-        // covers all field caching.
+        // No FFI for the iteration-limit fields: `set_iteration_limits` computes
+        // those caps per solve from the cached `current_profile`.
         // SAFETY: self.handle is a valid HiGHS pointer; ffi setters accept any i32.
         unsafe {
             ffi::cobre_highs_set_int_option(
@@ -98,10 +90,9 @@ impl SolverInterface for HighsSolver {
             "num_nz {} overflows i32: LP exceeds HiGHS API limit",
             template.num_nz
         );
-        // Length guards: every slice handed to the HiGHS API must match the dimension
-        // it is keyed by. These are internally-constructed buffers, so a mismatch is a
-        // construction bug, not user input -- guard with debug_assert* (no release panic
-        // boundary). CSC column starts carry one extra trailing offset (`num_cols + 1`).
+        // These slices are internally constructed, so a length mismatch is a
+        // construction bug, not user input -- debug_assert, no release panic.
+        // CSC column starts carry one extra trailing offset (`num_cols + 1`).
         debug_assert_eq!(
             template.col_starts.len(),
             template.num_cols + 1,
@@ -209,15 +200,11 @@ impl SolverInterface for HighsSolver {
         self.num_rows = template.num_rows;
         self.has_model = true;
 
-        // Resize solution extraction buffers to match the new LP dimensions.
-        // Zero-fill is fine; these are overwritten in full by `cobre_highs_get_solution`.
         self.col_value.resize(self.num_cols, 0.0);
         self.col_dual.resize(self.num_cols, 0.0);
         self.row_value.resize(self.num_rows, 0.0);
         self.row_dual.resize(self.num_rows, 0.0);
 
-        // Resize basis status i32 buffers. Zero-fill is fine; values are overwritten before
-        // any FFI call. These never shrink -- only grow -- to prevent reallocation on hot path.
         self.basis_col_i32.resize(self.num_cols, 0);
         self.basis_row_i32.resize(self.num_rows, 0);
         self.stats.total_load_model_time_seconds += t0.elapsed().as_secs_f64();
@@ -269,11 +256,8 @@ impl SolverInterface for HighsSolver {
 
         self.num_rows += rows.num_rows;
 
-        // Grow row-indexed solution extraction buffers to cover the new rows.
         self.row_value.resize(self.num_rows, 0.0);
         self.row_dual.resize(self.num_rows, 0.0);
-
-        // Grow basis row i32 buffer to cover the new rows.
         self.basis_row_i32.resize(self.num_rows, 0);
     }
 
@@ -400,13 +384,10 @@ impl SolverInterface for HighsSolver {
                 basis.col_status.len(),
                 self.num_cols
             );
-            // An undersized row basis (fewer entries than the LP has rows, e.g.
-            // captured before `add_rows` grew the LP) cannot be padded soundly:
-            // a BASIC pad is wrong for newly added inequality rows, whose slacks
-            // should be non-basic at the appropriate bound. Reject it as a
-            // recoverable warm-start failure so the caller can fall back to a
-            // cold solve. This runs *before* `basis_offered` is incremented —
-            // a rejected basis was never offered to the solver.
+            // An undersized row basis cannot be padded soundly — a BASIC pad is
+            // wrong for inequality-row slacks — so reject it (recoverable; caller
+            // falls back to a cold solve). Runs before `basis_offered` increments:
+            // a rejected basis was never offered.
             if basis.row_status.len() < self.num_rows {
                 self.stats.basis_consistency_failures += 1;
                 return Err(SolverError::BasisRowCountMismatch {
@@ -415,18 +396,13 @@ impl SolverInterface for HighsSolver {
                 });
             }
 
-            // Track every warm-start call as a basis offer for diagnostics.
             self.stats.basis_offered += 1;
 
-            // Copy raw i32 codes directly into the pre-allocated buffers — no enum
-            // translation. Zero-copy warm-start path.
             self.basis_col_i32[..self.num_cols].copy_from_slice(&basis.col_status);
 
-            // The undersized case (`basis_rows < lp_rows`) is rejected above, so
-            // here `basis_rows >= lp_rows` always holds:
-            // - `basis_rows == lp_rows`: an exact copy.
-            // - `basis_rows > lp_rows`: truncate the trailing entries. The solver
-            //   ignores any basis entry beyond `num_rows`.
+            // Undersized is rejected above, so `basis_rows >= lp_rows`: copy the
+            // exact rows and truncate any oversized tail (the solver ignores
+            // entries beyond `num_rows`).
             let basis_rows = basis.row_status.len();
             let lp_rows = self.num_rows;
             let copy_len = basis_rows.min(lp_rows);
@@ -449,14 +425,10 @@ impl SolverInterface for HighsSolver {
                 )
             };
             if set_status == ffi::HIGHS_STATUS_ERROR {
-                // Non-alien rejected: the offered basis failed
-                // `isBasisConsistent` (total_basic != num_row).
-                // Count the rejection and surface it as a hard error.
+                // Non-alien rejected: the basis failed `isBasisConsistent`
+                // (total_basic != num_row). Surface it as a hard error.
                 self.stats.basis_consistency_failures += 1;
-                // Count basic entries from the already-populated buffers.
-                //
-                // `usize` -> `i64` is lossless for any basis that fits in memory:
-                // realistic LP sizes are bounded well below 2^63.
+                // `usize` -> `i64` is lossless for any basis that fits in memory.
                 #[allow(clippy::cast_possible_wrap)]
                 let col_basic = self.basis_col_i32[..self.num_cols]
                     .iter()
@@ -467,7 +439,7 @@ impl SolverInterface for HighsSolver {
                     .iter()
                     .filter(|&&s| s == ffi::HIGHS_BASIS_STATUS_BASIC)
                     .count() as i64;
-                // Accumulate the elapsed time even on early return.
+                // Accumulate the elapsed time even on this early return.
                 self.stats.total_basis_set_time_seconds += basis_set_start.elapsed().as_secs_f64();
                 #[allow(clippy::cast_possible_wrap)]
                 return Err(SolverError::BasisInconsistent {
@@ -480,10 +452,6 @@ impl SolverInterface for HighsSolver {
             self.stats.total_basis_set_time_seconds += basis_set_start.elapsed().as_secs_f64();
         }
 
-        // Basis is installed (warm path) or not needed (cold path); run the simplex.
-        // HiGHS retains its internal basis across consecutive solves on the same
-        // LP shape, giving the backward pass ~15x fewer simplex iterations on
-        // repeat solves at the same stage/opening.
         self.solve_inner()
     }
 

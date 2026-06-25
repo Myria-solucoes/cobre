@@ -1,15 +1,8 @@
 //! Generic `ProfiledSolver<S>` wrapper with per-phase LP-solver configuration.
 //!
-//! [`ProfiledSolver`] wraps any [`SolverInterface`] implementor, tracks the
-//! currently-applied solver profile (typed as `S::Profile`), and skips FFI
-//! option-setter calls when the new profile matches the current one
-//! (delta-only dispatch via `PartialEq`). All other [`SolverInterface`] methods
-//! are transparently forwarded to the inner solver.
-//!
-//! # Construction
-//!
-//! `ProfiledSolver::new(inner)` assumes the inner solver is in a state
-//! consistent with `S::Profile::default()` and issues no FFI calls.
+//! [`ProfiledSolver`] wraps any [`SolverInterface`] implementor and skips FFI
+//! option-setter calls when the new profile matches the current one (delta-only
+//! dispatch via `PartialEq`).
 //!
 //! # Usage
 //!
@@ -30,18 +23,10 @@ use crate::{
 };
 
 /// Wraps any [`SolverInterface`] implementor with per-phase profile
-/// configuration.
+/// configuration, forwarding every trait method to the inner solver.
 ///
-/// Tracks the currently-applied profile (typed as `S::Profile`) and skips
-/// no-op FFI calls when the same profile is reapplied (delta-only dispatch
-/// via `PartialEq`). The wrapper itself implements [`SolverInterface`] by
-/// transparently forwarding all method calls to the inner solver.
-/// [`ProfiledSolver::set_profile`] is the only non-trait-method addition.
-///
-/// # Generic parameter
-///
-/// `S` must implement [`SolverInterface`]. The wrapper is resolved at compile
-/// time (monomorphization) to preserve zero-cost forwarding on the hot path.
+/// Monomorphized over `S` (not `Box<dyn>`) to keep forwarding zero-cost on the
+/// hot path.
 pub struct ProfiledSolver<S: SolverInterface> {
     inner: S,
     current_profile: S::Profile,
@@ -50,10 +35,8 @@ pub struct ProfiledSolver<S: SolverInterface> {
 impl<S: SolverInterface> ProfiledSolver<S> {
     /// Wrap an existing solver with the default profile.
     ///
-    /// The wrapper does NOT issue any FFI calls on construction — the inner
-    /// solver is assumed to be in a state consistent with
-    /// `S::Profile::default()`, which is exactly how it has been
-    /// constructed historically.
+    /// Issues no FFI calls: the inner solver is assumed already consistent with
+    /// `S::Profile::default()`.
     pub fn new(inner: S) -> Self {
         Self {
             inner,
@@ -61,18 +44,11 @@ impl<S: SolverInterface> ProfiledSolver<S> {
         }
     }
 
-    /// Apply a new profile to the inner solver.
+    /// Apply a new profile to the inner solver, skipping the FFI calls when it
+    /// equals `current_profile`.
     ///
-    /// If `profile == current_profile`, this method returns immediately with
-    /// zero inner method calls. Otherwise it delegates to
-    /// `inner.apply_profile(profile)` which issues all necessary FFI calls.
-    ///
-    /// After the call returns, `current_profile() == profile`.
-    ///
-    /// # Call-site contract
-    ///
-    /// Callers invoke this once per phase boundary. It is NOT intended to be
-    /// called inside the hot solve loop.
+    /// Call once per phase boundary, NOT inside the hot solve loop — per-solve
+    /// calls defeat the delta-only dispatch.
     pub fn set_profile(&mut self, profile: &S::Profile) {
         if *profile == self.current_profile {
             return;
@@ -81,33 +57,22 @@ impl<S: SolverInterface> ProfiledSolver<S> {
         self.current_profile = *profile;
     }
 
-    /// Read-only access to the currently applied profile.
-    ///
-    /// Returns the profile that was last successfully applied via
-    /// [`ProfiledSolver::set_profile`], or `S::Profile::default()` if no
-    /// profile has been applied yet.
+    /// The currently applied profile.
     pub fn current_profile(&self) -> &S::Profile {
         &self.current_profile
     }
 
-    /// Shared reference to the wrapped inner solver.
-    ///
-    /// Intended for test code and rare adapter sites that need to inspect
-    /// mock-specific fields on the inner solver. Not used on the hot path.
+    /// Shared reference to the wrapped inner solver, for test/adapter inspection.
     pub fn inner(&self) -> &S {
         &self.inner
     }
 
-    /// Exclusive reference to the wrapped inner solver.
-    ///
-    /// Intended for test code and rare adapter sites that need to mutate
-    /// mock-specific state on the inner solver. Not used on the hot path.
+    /// Exclusive reference to the wrapped inner solver, for test/adapter mutation.
     pub fn inner_mut(&mut self) -> &mut S {
         &mut self.inner
     }
 }
 
-// Transparent `SolverInterface` forwarding.
 impl<S: SolverInterface> SolverInterface for ProfiledSolver<S> {
     type Profile = S::Profile;
 
@@ -133,12 +98,9 @@ impl<S: SolverInterface> SolverInterface for ProfiledSolver<S> {
     }
 
     fn solve(&mut self, basis: Option<&Basis>) -> Result<SolutionView<'_>, SolverError> {
-        // Direct forward: the profile is installed at phase boundaries via
-        // `set_profile`, and the retry-escalation path re-applies the full
-        // profile (tolerances + strategies) after `restore_default_settings`,
-        // so the inner solver's options already equal `current_profile` on
-        // entry to every solve. Result-neutral against the D01-D15 parity
-        // hashes.
+        // Forward directly without re-applying the profile: the inner options
+        // already equal `current_profile` on every solve (set at phase
+        // boundaries; the retry path restores them after a default reset).
         self.inner.solve(basis)
     }
 
@@ -171,10 +133,8 @@ impl<S: SolverInterface> SolverInterface for ProfiledSolver<S> {
     }
 }
 
-// This test module uses `HighsProfile` with field values for delta-tracking
-// assertions, so it cannot use the backend-agnostic fieldless mock profile. It
-// is gated behind `feature = "highs"`; `ProfiledSolver`'s delta-tracking is
-// backend-agnostic, so exercising it on the HiGHS job is sufficient coverage.
+// Gated on `highs`: the delta-tracking assertions need a profile with fields,
+// and exercising the backend-agnostic logic on one backend is sufficient.
 #[cfg(all(test, feature = "highs"))]
 mod tests {
     use std::cell::RefCell;
@@ -187,7 +147,6 @@ mod tests {
 
     // ── RecordingMockSolver ───────────────────────────────────────────────────
 
-    /// Recorded invocation of a [`SolverInterface`] method.
     #[derive(Debug, Clone, PartialEq)]
     enum RecordedCall {
         LoadModel,
@@ -198,12 +157,8 @@ mod tests {
         ApplyProfile(HighsProfile),
     }
 
-    /// A minimal [`SolverInterface`] implementor that records every invocation
-    /// into an interior-mutable call log.
-    ///
-    /// Returned `solve` results are always `Err(SolverError::InternalError)`
-    /// because the mock does not represent a real LP solver; callers only
-    /// inspect the call log in these unit tests.
+    /// Records every [`SolverInterface`] invocation into a call log; `solve`
+    /// always returns `Err` because the mock is not a real LP solver.
     struct RecordingMockSolver {
         calls: RefCell<Vec<RecordedCall>>,
     }
@@ -215,7 +170,6 @@ mod tests {
             }
         }
 
-        /// Returns a snapshot of all recorded calls.
         pub(crate) fn recorded_calls(&self) -> Vec<RecordedCall> {
             self.calls.borrow().clone()
         }
@@ -284,7 +238,6 @@ mod tests {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /// Filter recorded calls to extract only `apply_profile` calls.
     fn filter_profile_calls(calls: &[RecordedCall]) -> Vec<&RecordedCall> {
         calls
             .iter()
@@ -326,7 +279,6 @@ mod tests {
         }
     }
 
-    /// AC-3: `ProfiledSolver::new` must not dispatch any FFI setter calls.
     #[test]
     fn new_issues_no_ffi_calls() {
         let mock = RecordingMockSolver::new();
@@ -338,14 +290,11 @@ mod tests {
         );
     }
 
-    /// AC-4: `set_profile` with a profile equal to `current_profile` issues
-    /// zero `apply_profile` calls (noop delta-tracking).
     #[test]
     fn set_profile_noop_when_unchanged() {
         let mock = RecordingMockSolver::new();
         let mut solver = ProfiledSolver::new(mock);
 
-        // Apply the default profile — same as the initial `current_profile`.
         solver.set_profile(&HighsProfile::default());
 
         let calls = solver.inner.recorded_calls();
@@ -356,16 +305,11 @@ mod tests {
         );
     }
 
-    /// AC-5: `set_profile` with any field differing from `current_profile`
-    /// dispatches exactly one `apply_profile` call carrying the complete new
-    /// profile value.
-    ///
-    /// In the associated-type design, `apply_profile` is a single atomic call
-    /// on the inner solver — there is no per-field dispatch. The noop guard is
-    /// purely a `PartialEq` comparison on the whole profile.
+    /// Each per-field change dispatches a single `apply_profile` carrying the
+    /// whole profile — there is no per-field dispatch; the noop guard is a
+    /// `PartialEq` on the whole profile.
     #[test]
     fn set_profile_dispatches_apply_profile_when_changed() {
-        // ── sub-test 1: only primal tolerance changed ──
         {
             let mock = RecordingMockSolver::new();
             let mut solver = ProfiledSolver::new(mock);
@@ -383,7 +327,6 @@ mod tests {
             );
         }
 
-        // ── sub-test 2: only dual tolerance changed ──
         {
             let mock = RecordingMockSolver::new();
             let mut solver = ProfiledSolver::new(mock);
@@ -401,7 +344,6 @@ mod tests {
             );
         }
 
-        // ── sub-test 3: only simplex cap changed ──
         {
             let mock = RecordingMockSolver::new();
             let mut solver = ProfiledSolver::new(mock);
@@ -419,7 +361,6 @@ mod tests {
             );
         }
 
-        // ── sub-test 4: only IPM cap changed ──
         {
             let mock = RecordingMockSolver::new();
             let mut solver = ProfiledSolver::new(mock);
@@ -437,7 +378,6 @@ mod tests {
             );
         }
 
-        // ── sub-test 5: only dual edge weight strategy changed ──
         {
             let mock = RecordingMockSolver::new();
             let mut solver = ProfiledSolver::new(mock);
@@ -455,7 +395,6 @@ mod tests {
             );
         }
 
-        // ── sub-test 6: only price strategy changed ──
         {
             let mock = RecordingMockSolver::new();
             let mut solver = ProfiledSolver::new(mock);
@@ -474,9 +413,6 @@ mod tests {
         }
     }
 
-    /// AC-6: When all profile fields differ from the default, `set_profile`
-    /// dispatches exactly one `apply_profile` call carrying the complete new
-    /// profile.
     #[test]
     fn set_profile_full_change_dispatches_single_apply_profile() {
         let mock = RecordingMockSolver::new();
@@ -503,11 +439,8 @@ mod tests {
         );
     }
 
-    /// AC-7: `ProfiledSolver<S>` forwards `load_model`, `add_rows`,
-    /// `set_row_bounds`, `set_col_bounds`, and `solve` transparently to the
-    /// inner solver. `solve` delegates directly without re-applying the
-    /// profile — the profile is installed at phase boundaries via
-    /// `set_profile`, not per solve.
+    /// `solve` forwards directly without re-applying the profile (installed at
+    /// phase boundaries via `set_profile`, not per solve).
     #[test]
     fn solver_interface_methods_forward_to_inner() {
         let mock = RecordingMockSolver::new();
@@ -543,9 +476,6 @@ mod tests {
             calls.contains(&RecordedCall::Solve),
             "expected Solve in call log, got: {calls:?}"
         );
-        // `solve()` forwards directly to the inner solver and does NOT
-        // re-apply the profile (that happens at phase boundaries via
-        // `set_profile`), so no ApplyProfile call originates from solve().
         let profile_calls = filter_profile_calls(&calls);
         assert!(
             profile_calls.is_empty(),

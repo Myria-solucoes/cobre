@@ -1,8 +1,4 @@
 //! `HiGHS` tuning profile and the default configuration table.
-//!
-//! Leaf submodule: owns the `HighsProfile` value type plus the typed
-//! `OptionValue` / `DefaultOption` configuration table and `default_options()`.
-//! `solver` and `retry` read these via `super::config::{…}`.
 
 use std::ffi::CStr;
 use std::os::raw::c_void;
@@ -11,14 +7,8 @@ use crate::{DEFAULT_PROFILE_HEURISTIC_SENTINEL, ffi};
 
 /// HiGHS-specific solver profile carrying the full per-phase tuning surface.
 ///
-/// `HighsProfile` is the associated `Profile` type for `HighsSolver`. Other
-/// solvers (e.g. CLP) define their own concrete profile types with their
-/// native option names. Profile constants used by applications are typed as
-/// the concrete profile of the solver in use.
-///
-/// Field defaults match the historical hard-coded `default_options()` table
-/// bit-for-bit, so callers that never set a non-default profile observe no
-/// behavioral change.
+/// Field defaults match the `default_options()` table bit-for-bit, so callers
+/// that never set a non-default profile observe no behavioral change.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HighsProfile {
     /// Primal feasibility tolerance.
@@ -56,13 +46,6 @@ impl Default for HighsProfile {
         }
     }
 }
-
-// ─── Default HiGHS configuration ─────────────────────────────────────────────
-//
-// The thirteen performance-tuned options applied at construction and restored
-// after each retry escalation. Keeping them in a single array eliminates per-option
-// error branches that are structurally impossible to trigger in tests (HiGHS
-// never rejects valid static option names).
 
 /// A typed `HiGHS` option value for the configuration table.
 pub(super) enum OptionValue {
@@ -110,9 +93,8 @@ impl DefaultOption {
 
 /// Performance-tuned default options (`HiGHS` Implementation SS4.1).
 ///
-/// These thirteen options are applied at construction and restored after each
-/// retry escalation. The values are tuned for master LPs dominated by many
-/// slack rows that are warm-started across consecutive solves.
+/// Tuned for master LPs dominated by many slack rows that are warm-started
+/// across consecutive solves.
 ///
 /// `simplex_scale_strategy` is set to 0 (Off): cobre's offline prescaler
 /// (`lp_builder/scaling.rs`, applied in `setup/template_postprocess`) conditions
