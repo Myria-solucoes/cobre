@@ -25,7 +25,7 @@ with all foreign keys resolved and all domain rules verified.
 | `penalties`          | Global penalty defaults parser (`penalties.json`)                                                                                                                                                                                 |
 | `stages`             | Stage sequence and policy graph loading (`stages.json`), per-class scenario source parsing (`ScenarioSource`), and backward-incompatibility detection for removed fields                                                          |
 | `initial_conditions` | Reservoir initial storage loading                                                                                                                                                                                                 |
-| `validation`         | Layered validation pipeline and `ValidationContext`                                                                                                                                                                            |
+| `validation`         | Layered validation pipeline and `ValidationContext`                                                                                                                                                                               |
 | `resolution`         | Three-tier penalty and bound resolution into O(1) lookup tables                                                                                                                                                                   |
 | `pipeline`           | Orchestrator that wires all layers into a single `load_case` call                                                                                                                                                                 |
 | `report`             | Structured validation report generation                                                                                                                                                                                           |
@@ -527,13 +527,12 @@ compatibility check.
 all five validation layers collect diagnostics into a shared `ValidationContext`
 before failing. When `load_case` returns a `ConstraintError`, the `description`
 field contains every problem found in a single report. This avoids the
-frustrating fix-one-error-re-run-repeat cycle on large cases.
+fix-one-error-re-run-repeat cycle on large cases.
 
 **File-format split.** Entity identity data (IDs, names, topology, static
 parameters) lives in JSON. Time-varying and per-stage data (bounds, penalty
 overrides, statistical parameters, scenarios) lives in Parquet. JSON is easy to
-read and edit by hand; Parquet handles large numeric tables efficiently. The two
-formats complement each other without overlap.
+read and edit by hand; Parquet handles large numeric tables efficiently.
 
 **Resolution separates concerns.** The three-tier cascade is resolved once at
 load time into dense arrays, not at every solver call. Downstream solver crates

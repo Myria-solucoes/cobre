@@ -17,27 +17,27 @@ for deterministic noise generation.
 
 ## Module overview
 
-| Module                    | Purpose                                                                                                                                                                             |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `par`                     | PAR(p) coefficient preprocessing: validation, original-unit conversion, and the `PrecomputedPar` cache                                                                              |
-| `par::evaluate`           | PAR model forward evaluation (`evaluate_par`) and inverse noise solving (`solve_par_noise`)                                                                                         |
-| `par::fitting`            | PAR model estimation: Levinson-Durbin recursion, seasonal statistics, AR coefficient and correlation estimation, PACF/AIC order selection                                           |
-| `noise`                   | Deterministic noise generation: SipHash-1-3 seed derivation (`seed`) and `Pcg64` RNG construction (`rng`)                                                                           |
-| `noise::quantile`         | Beasley-Springer-Moro inverse normal CDF (`norm_quantile`)                                                                                                                          |
-| `normal`                  | Normal noise precomputation for load demand modeling: `PrecomputedNormal` cache with stage-major layout                                                                             |
-| `correlation`             | Spectral spatial correlation: eigendecomposition (`spectral`) and profile resolution (`resolve`)                                                                                    |
-| `tree`                    | Opening scenario tree: flat storage structure (`opening_tree`) and tree generation (`generate`)                                                                                     |
-| `tree::lhs`               | Latin Hypercube Sampling: batch `generate_lhs` and point-wise `sample_lhs_point`                                                                                                    |
-| `tree::qmc_sobol`         | Sobol QMC sequence generation with Joe-Kuo direction tables and Matousek scrambling                                                                                                 |
-| `tree::qmc_halton`        | Halton QMC sequence generation with Owen-style digit scrambling and prime sieve                                                                                                     |
+| Module                    | Purpose                                                                                                                                                                                                                        |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `par`                     | PAR(p) coefficient preprocessing: validation, original-unit conversion, and the `PrecomputedPar` cache                                                                                                                         |
+| `par::evaluate`           | PAR model forward evaluation (`evaluate_par`) and inverse noise solving (`solve_par_noise`)                                                                                                                                    |
+| `par::fitting`            | PAR model estimation: Levinson-Durbin recursion, seasonal statistics, AR coefficient and correlation estimation, PACF/AIC order selection                                                                                      |
+| `noise`                   | Deterministic noise generation: SipHash-1-3 seed derivation (`seed`) and `Pcg64` RNG construction (`rng`)                                                                                                                      |
+| `noise::quantile`         | Beasley-Springer-Moro inverse normal CDF (`norm_quantile`)                                                                                                                                                                     |
+| `normal`                  | Normal noise precomputation for load demand modeling: `PrecomputedNormal` cache with stage-major layout                                                                                                                        |
+| `correlation`             | Spectral spatial correlation: eigendecomposition (`spectral`) and profile resolution (`resolve`)                                                                                                                               |
+| `tree`                    | Opening scenario tree: flat storage structure (`opening_tree`) and tree generation (`generate`)                                                                                                                                |
+| `tree::lhs`               | Latin Hypercube Sampling: batch `generate_lhs` and point-wise `sample_lhs_point`                                                                                                                                               |
+| `tree::qmc_sobol`         | Sobol QMC sequence generation with Joe-Kuo direction tables and Matousek scrambling                                                                                                                                            |
+| `tree::qmc_halton`        | Halton QMC sequence generation with Owen-style digit scrambling and prime sieve                                                                                                                                                |
 | `sampling`                | Forward-pass sampling abstraction: `ForwardSampler` struct (composite sampler), `ClassSampler` enum, `build_forward_sampler` factory, `SampleRequest` and `ForwardNoise` types; `insample` sub-module for tree-based selection |
-| `sampling::out_of_sample` | Out-of-sample fresh noise generation dispatching over `NoiseMethod`                                                                                                                 |
-| `sampling::historical`    | Historical inflow replay: `HistoricalScenarioLibrary` construction, window discovery, eta standardization, lag seeding, and forward-pass window selection                           |
-| `sampling::external`      | External scenario sources: `ExternalScenarioLibrary` construction, per-class standardization (PAR inversion for inflow, mean/std for load and NCS), and forward-pass scenario lookup |
-| `sampling::class_sampler` | Per-class noise source enum (`ClassSampler`): InSample tree segment copy, OutOfSample fresh noise, Historical window replay, and External library lookup                         |
-| `sampling::window`        | Historical window discovery: `discover_historical_windows` finds contiguous year spans covering the study period in `inflow_history.parquet`                                     |
-| `context`                 | `StochasticContext` integration type and `build_stochastic_context` pipeline entry point                                                                                            |
-| `error`                   | `StochasticError` with nine variants covering six failure domains of the stochastic layer                                                                                           |
+| `sampling::out_of_sample` | Out-of-sample fresh noise generation dispatching over `NoiseMethod`                                                                                                                                                            |
+| `sampling::historical`    | Historical inflow replay: `HistoricalScenarioLibrary` construction, window discovery, eta standardization, lag seeding, and forward-pass window selection                                                                      |
+| `sampling::external`      | External scenario sources: `ExternalScenarioLibrary` construction, per-class standardization (PAR inversion for inflow, mean/std for load and NCS), and forward-pass scenario lookup                                           |
+| `sampling::class_sampler` | Per-class noise source enum (`ClassSampler`): InSample tree segment copy, OutOfSample fresh noise, Historical window replay, and External library lookup                                                                       |
+| `sampling::window`        | Historical window discovery: `discover_historical_windows` finds contiguous year spans covering the study period in `inflow_history.parquet`                                                                                   |
+| `context`                 | `StochasticContext` integration type and `build_stochastic_context` pipeline entry point                                                                                                                                       |
+| `error`                   | `StochasticError` with nine variants covering six failure domains of the stochastic layer                                                                                                                                      |
 
 ## Architecture
 
@@ -315,6 +315,7 @@ bundles all construction parameters:
   required when the corresponding class scheme is `External`.
 
 Returns `StochasticError::MissingScenarioSource` when:
+
 - `OutOfSample` is requested but no `forward_seed` is configured in `ctx`.
 - `Historical` is requested for the inflow class but `historical_library` is `None`.
 - `Historical` is requested for load or NCS (only inflow is supported).
@@ -378,6 +379,7 @@ The correlation transform calls `decomposed.apply_correlation_for_class(stage,
 buf, entity_order, class_name)` in-place, transforming the independent N(0,1)
 noise to spatially correlated noise. The final `ForwardNoise` wraps the full
 combined buffer slice.
+
 ### `StochasticContext` as the integration entry point
 
 `StochasticContext` bundles the three independently-built components into a
@@ -612,12 +614,12 @@ data. See "Forward sampler architecture" above.
 
 Per-entity-class noise source enum. Four variants:
 
-| Variant       | Description                                                      |
-| ------------- | ---------------------------------------------------------------- |
-| `InSample`    | Copies a segment from the pre-generated opening tree             |
-| `OutOfSample` | Generates fresh independent N(0,1) noise on-the-fly              |
+| Variant       | Description                                                        |
+| ------------- | ------------------------------------------------------------------ |
+| `InSample`    | Copies a segment from the pre-generated opening tree               |
+| `OutOfSample` | Generates fresh independent N(0,1) noise on-the-fly                |
 | `Historical`  | Replays a pre-standardized window from `HistoricalScenarioLibrary` |
-| `External`    | Reads from a pre-standardized `ExternalScenarioLibrary`          |
+| `External`    | Reads from a pre-standardized `ExternalScenarioLibrary`            |
 
 The `fill()` method writes exactly `output.len()` f64 values into the
 caller-provided buffer. For `InSample`, `Historical`, and `External` the
@@ -651,6 +653,7 @@ pub fn build_forward_sampler(
 Constructs a `ForwardSampler` from a `ForwardSamplerConfig` struct. Returns
 `StochasticError::MissingScenarioSource` when required resources are absent
 for the configured scheme. See "Forward sampler architecture" above.
+
 ### `StochasticError`
 
 Returned by all fallible APIs. Nine variants covering six failure domains:
@@ -845,9 +848,7 @@ pre-computation, `apply_correlation` would perform an O(n) linear scan and a
 Inside `apply_correlation`, intermediate working buffers for correlation groups
 with at most 64 entities are stack-allocated (using `arrayvec` or a fixed-size
 array on the stack). Groups larger than this threshold fall back to
-heap-allocated `Vec`. The fast path covers the overwhelming majority of
-practical correlation groups, eliminating heap allocation from the inner loop
-for typical study configurations.
+heap-allocated `Vec`.
 
 ### Dense mat-vec in spectral transform
 

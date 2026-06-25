@@ -50,19 +50,19 @@ For the full dependency graph and crate responsibilities, see the [methodology r
 
 ## Feature Summary
 
-The ecosystem delivers a full SDDP training and simulation pipeline:
+The workspace provides an SDDP training and simulation pipeline:
 
 - **Entity model and topology validation** (`cobre-core`)
 - **JSON/Parquet case loading** with layered validation (`cobre-io`)
-- **LP solver abstraction** with HiGHS backend, warm-start basis management, and 12-level retry escalation (`cobre-solver`)
+- **LP solver abstraction** with HiGHS backend, warm-start basis management, and bounded retry escalation (`cobre-solver`)
 - **Pluggable communication** with MPI and local backends, execution topology reporting, and SLURM integration (`cobre-comm`)
 - **PAR(p) inflow models** with deterministic correlated scenario generation, per-class sampling (InSample, OutOfSample, Historical, External), and inflow non-negativity enforcement (`cobre-stochastic`)
 - **SDDP training loop** with forward/backward passes, Benders cut generation, cut synchronization, and composite stopping rules (`cobre-sddp`)
 - **Two-stage cut management pipeline** with strategy-based selection (Level1/LML1/Dominated) and budget enforcement (`cobre-sddp`)
-- **Performance accelerators**: LP scaling, model persistence, incremental cut injection, backward-pass work-stealing, parallel lower bound evaluation, basis-aware padding, and zero-allocation hot paths (`cobre-sddp`, `cobre-solver`)
+- **Performance accelerators**: LP scaling, model persistence, incremental cut injection, backward-pass work-stealing, parallel lower bound evaluation, basis-aware padding, and pre-allocated hot-path workspaces (`cobre-sddp`, `cobre-solver`)
 - **Simulation pipeline** with Hive-partitioned Parquet output and FlatBuffers policy checkpointing (`cobre-sddp`)
 - **Policy warm-start and resume** from checkpoint with per-stage cut counts (`cobre-sddp`)
-- **CLI** with seven subcommands (`run`, `validate`, `report`, `init`, `schema`, `summary`, `version`), rayon-based intra-rank thread parallelism, progress bars, and post-run summary (`cobre-cli`)
+- **CLI subcommands** (`run`, `validate`, `report`, `init`, `schema`, `summary`, `version`), rayon-based intra-rank thread parallelism, progress bars, and post-run summary (`cobre-cli`)
 - **Python bindings** via PyO3 with Arrow zero-copy result loading (`cobre-python`)
 - **JSON Schema** files for all input types, hosted for `$schema` editor integration
 

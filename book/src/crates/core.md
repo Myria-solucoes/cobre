@@ -117,7 +117,7 @@ for thermal units that require advance scheduling).
 #### Hydro
 
 The most complex entity type: a hydroelectric plant with a reservoir, turbines,
-and optional cascade connectivity. It has 22 fields.
+and optional cascade connectivity.
 
 **Identity and connectivity:**
 
@@ -213,8 +213,8 @@ Fields: `id`, `name`, `bus_id`, `contract_type` (`ContractType::Import` or
 | `ContractType`         | `Import`, `Export`                                                                  | Energy flow direction for bilateral contracts         |
 
 `ConstantProductivity` is used universally and is the minimal viable model.
-`LinearizedHead` is for high-fidelity analyses where head-dependent terms matter.
-`Fpha` is the full production function with head-area-productivity tables for detailed modeling.
+`LinearizedHead` adds a head-dependent term to the production function.
+`Fpha` is the full production function with head-area-productivity tables.
 
 ### Structs
 
@@ -476,7 +476,7 @@ The `temporal` module defines the time structure of a multi-stage stochastic
 optimization problem. These types are loaded from `stages.json` by `cobre-io`
 and stored on `System`.
 
-There are 13 types in total: 5 enums and 8 structs.
+The types fall into two categories: enums and structs.
 
 ### Enums
 

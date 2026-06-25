@@ -236,7 +236,7 @@ all DCS parameters.
 
 ### `StudySetup`
 
-`StudySetup` is constructed once by `StudySetup::new` from a validated `System` and `Config`. It owns all precomputed state — stage templates, stochastic context, FCF, indexer, initial state, risk measures, and entity counts — and holds it across async boundaries without lifetime issues.
+`StudySetup` is constructed once by `StudySetup::new` from a validated `System` and `Config`. It owns all precomputed state — stage templates, stochastic context, FCF, indexer, initial state, risk measures, and entity counts — and holds it across async boundaries as owned (non-borrowed) data.
 
 Four optional library fields are built conditionally based on per-class `SamplingScheme` selections:
 
@@ -286,12 +286,6 @@ The worst-case coefficient storage per rank is bounded by:
 ```text
 populated_per_stage × state_dimension × 8 bytes × num_stages
 ```
-
-For the convertido production scale (117 stages, 159 state dimensions, up to
-10 000 populated cuts per stage) this formula gives approximately 1.5 GB per
-rank. The measured peak coefficient storage at process end is bounded above by
-this analytic estimate; for the convertido scale it stays within the ≈1.5 GB-per-rank
-bound derived above.
 
 Inactive cuts still consume pricing time during the LP solve: the row
 coefficients participate in dual-simplex scanning even when the RHS is at the
