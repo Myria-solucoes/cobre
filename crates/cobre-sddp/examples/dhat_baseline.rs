@@ -1,34 +1,16 @@
-//! DHAT heap allocation baseline for the cobre-sddp backward pass.
-//!
-//! This example runs the D19 test case (multi-hydro PAR, 4 plants, 12 stages)
-//! under DHAT heap instrumentation to capture a quantitative allocation
-//! baseline for the backward pass hot path.
-//!
-//! # Usage
+//! DHAT heap-allocation baseline for the backward-pass hot path (D19 case).
 //!
 //! ```text
 //! cargo run --example dhat_baseline --features dhat-heap -p cobre-sddp --profile profiling
 //! ```
 //!
-//! A `--release`-level optimisation profile is mandatory: debug builds have
-//! different allocation behaviour due to optimizer differences and are not
-//! representative of the production hot path. The `profiling` profile inherits
-//! `release` optimisations but retains line-number debug info so DHAT
-//! resolves allocation sites to source locations; plain `--release` strips
-//! symbols and the DHAT viewer will only show addresses.
+//! The `profiling` profile (not plain `--release`) is mandatory: a `release`
+//! optimisation level is required to be representative, but `profiling` also
+//! keeps line-number debug info so DHAT resolves allocation sites to source
+//! rather than bare addresses.
 //!
-//! # Feature gate
-//!
-//! The DHAT global allocator is only installed when the `dhat-heap` feature is
-//! enabled. Without the feature, the example still compiles and runs, but no
-//! profiling is performed and no `dhat-heap.json` is written.
-//!
-//! # Output
-//!
-//! On exit the DHAT profiler writes `dhat-heap.json` in the current working
-//! directory. Open it in the DHAT viewer at
-//! <https://nnethercote.github.io/dh_view/dh_view.html> to inspect per-site
-//! allocation counts.
+//! On exit DHAT writes `dhat-heap.json` in the working directory; view it at
+//! <https://nnethercote.github.io/dh_view/dh_view.html>.
 
 #![allow(
     clippy::expect_used,
@@ -55,7 +37,7 @@ use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_
 #[cfg(feature = "highs")]
 use cobre_solver::highs::HighsSolver;
 
-/// Single-rank stub communicator — mirrors the one in `tests/deterministic.rs`.
+/// Single-rank stub communicator (mirrors `tests/deterministic.rs`).
 #[cfg(feature = "highs")]
 struct StubComm;
 
