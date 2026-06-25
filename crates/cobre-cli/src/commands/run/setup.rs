@@ -1,9 +1,7 @@
 //! Case-load, communicator setup, broadcast, and pre-training phases for `cobre run`.
 //!
 //! Rank 0 loads from disk; system and config are broadcast to all ranks, which
-//! then build `StudySetup` from the shared data. Pre-training data-preparation
-//! outputs (hydro-model summary, provenance, scaling report, stochastic export)
-//! also live here.
+//! then build `StudySetup` from the shared data.
 
 use std::path::{Path, PathBuf};
 
@@ -42,11 +40,9 @@ pub(super) fn resolve_thread_count(cli_threads: Option<u32>) -> usize {
     1
 }
 
-/// Values loaded on rank 0 by [`load_case_and_config`].
-///
-/// The trailing [`cobre_io::SetupTimings`] carries the per-phase load/fit wall
-/// times measured on rank 0; `broadcast_seconds` is left zero here and filled in
-/// by [`broadcast_and_build_setup`] once the broadcast region has run.
+/// Values loaded on rank 0 by [`load_case_and_config`]. The trailing
+/// [`cobre_io::SetupTimings`] leaves `broadcast_seconds` zero;
+/// [`broadcast_and_build_setup`] fills it after the broadcast region runs.
 type LoadedCase = (
     PrepareStochasticResult,
     PrepareHydroModelsResult,
@@ -74,12 +70,8 @@ fn load_case_and_config(
     if !quiet {
         let _ = stderr.write_line(&format!("Loading case: {}", args.case_dir.display()));
     }
-    // Single-source case load: `load_case_with_artifacts` runs the full
-    // validation pipeline once and returns both the System and the
-    // already-parsed parquet/JSON rows (production models, hydro geometry,
-    // FPHA hyperplanes, scalar parameters). Downstream consumers
-    // (`prepare_hydro_models_from_artifacts`, ConstructionConfig) receive
-    // these rows directly instead of re-reading the same files from disk.
+    // Single load: downstream consumers reuse the artifacts returned here instead
+    // of re-reading the same files from disk.
     let mut timings = cobre_io::SetupTimings::default();
 
     let load_start = std::time::Instant::now();
@@ -103,9 +95,6 @@ fn load_case_and_config(
     .map_err(CliError::from)?;
     timings.stochastic_fit_seconds = stochastic_start.elapsed().as_secs_f64();
 
-    // Production and evaporation fitting are timed independently inside
-    // `prepare_hydro_models_from_artifacts` via the `HydroFitTimings` out-param
-    // and copied onto the two corresponding `SetupTimings` fields.
     let mut hydro_timings = cobre_sddp::HydroFitTimings::default();
     let hydro_models = cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts(
         &prepared.system,
@@ -127,22 +116,18 @@ fn load_case_and_config(
     ))
 }
 
-/// Output of [`broadcast_and_build_setup`]: system, setup, config, and metadata.
+/// Output of [`broadcast_and_build_setup`]. `root_*` fields are `Some` only on
+/// rank 0 (used for output writing); the flag fields are broadcast from rank 0.
 pub(super) struct LoadBroadcastResult {
     pub(super) system: System,
     pub(super) setup: StudySetup,
-    /// Root-only config for output writing (None on non-root ranks).
     pub(super) root_config: Option<cobre_io::Config>,
-    /// Root-only estimation report for summaries (None on non-root ranks).
     pub(super) root_estimation_report: Option<EstimationReport>,
-    /// Root-only estimation path from stochastic preprocessing (None on non-root ranks).
     pub(super) root_estimation_path: Option<cobre_sddp::EstimationPath>,
-    /// Whether the training phase is enabled (broadcast from rank 0).
     pub(super) training_enabled: bool,
-    /// Policy initialization mode (broadcast from rank 0).
     pub(super) policy_mode: cobre_io::PolicyMode,
-    /// Per-phase setup wall time collected on rank 0 (`None` on non-root ranks,
-    /// which reconstruct setup independently and never write metadata).
+    /// `None` on non-root ranks, which reconstruct setup independently and never
+    /// write metadata.
     pub(super) setup_timings: Option<cobre_io::SetupTimings>,
 }
 
@@ -154,9 +139,8 @@ pub(super) fn setup_communicator(
     let is_root = comm.rank() == 0;
     let quiet = args.quiet || !is_root;
 
-    // Under MPI, mpiexec pipes rank 0's stderr through to the user's terminal
-    // without allocating a PTY. Force color and terminal rendering on rank 0
-    // so the banner and progress bars display correctly.
+    // mpiexec pipes rank 0's stderr without a PTY, so force colors on; console
+    // would otherwise disable them on the non-TTY pipe.
     let mpi_active = comm.size() > 1;
     if mpi_active && is_root && !args.quiet {
         console::set_colors_enabled_stderr(true);
@@ -165,7 +149,6 @@ pub(super) fn setup_communicator(
     let stderr = Term::stderr();
 
     // Gather topology while the concrete backend type is still in scope.
-    // `comm.topology()` is non-collective and allocation-free after this point.
     let topology = comm.topology().clone();
 
     let configured_threads = resolve_thread_count(args.threads);
@@ -226,20 +209,15 @@ pub(super) fn setup_communicator(
 }
 
 /// Load the case on rank 0, broadcast system/config/tree, and build `StudySetup` on all ranks.
-// Rationale: the function is a single MPI coordination seam — rank 0 loads
-// and serialises, all ranks receive, and every rank builds StudySetup from the
-// shared data. Splitting it would scatter the ordered broadcast-receive-build
-// sequence across multiple callsites and obscure the one-shot coordination
-// contract that the entire startup path depends on.
+// Rationale: one MPI coordination seam — splitting it would scatter the ordered
+// broadcast-receive-build sequence across callsites.
 #[allow(clippy::too_many_lines)]
 pub(super) fn broadcast_and_build_setup(
     ctx: &RunContext<impl Communicator>,
     args: &RunArgs,
 ) -> Result<LoadBroadcastResult, CliError> {
-    // Rank-0 setup timings: the load/fit portion is collected by
-    // `load_case_and_config`; `broadcast_seconds` is filled below once the
-    // broadcast region runs. Kept out of the broadcast tuple because the
-    // timings are never broadcast — only rank 0 writes metadata.
+    // Kept out of the broadcast tuple: timings are never broadcast — only rank 0
+    // writes metadata.
     let mut root_setup_timings: Option<cobre_io::SetupTimings> = None;
     let (
         raw_system,
@@ -322,10 +300,8 @@ pub(super) fn broadcast_and_build_setup(
 
     let seed = bcast_config.seed;
 
-    // Rank 0 uses the stochastic context already built by `prepare_stochastic`.
-    // Non-root ranks reconstruct it from the broadcast system, opening tree,
-    // and case directory. All factor entries (load, NCS) and the forward seed
-    // must match rank 0's values for MPI reproducibility.
+    // Non-root reconstruction must reproduce rank 0's factor entries (load, NCS)
+    // and forward seed exactly, for MPI reproducibility.
     let stochastic = if ctx.is_root {
         drop(tree_result);
         root_stochastic.ok_or_else(|| CliError::Internal {
@@ -343,17 +319,13 @@ pub(super) fn broadcast_and_build_setup(
         )?
     };
 
-    // Rank 0 uses the hydro models result already built by `prepare_hydro_models`.
-    // Non-root ranks reconstruct it independently from the system and case_dir.
     let hydro_models = if ctx.is_root {
         root_hydro_models.ok_or_else(|| CliError::Internal {
             message: "hydro models missing on rank 0 after successful load".to_string(),
         })?
     } else {
-        // Non-root ranks reconstruct the hydro models only to build their own
-        // `StudySetup`; they never reach the deviation-points write site (only
-        // rank 0 writes outputs). Collecting the points here would be pure waste,
-        // so the opt-in is `false` regardless of the run-level export flag.
+        // Deviation-points opt-in is `false` regardless of the run-level export
+        // flag: non-root ranks never reach the write site (only rank 0 writes).
         prepare_hydro_models(&system, &args.case_dir, false).map_err(|e| CliError::Internal {
             message: format!("hydro model preprocessing error on non-root rank: {e}"),
         })?
@@ -373,9 +345,6 @@ pub(super) fn broadcast_and_build_setup(
         scalar_parameters,
     )?;
 
-    // Record the broadcast-region wall time onto the rank-0 timings. On non-root
-    // ranks `root_setup_timings` is `None`, so nothing is recorded and the
-    // result's `setup_timings` stays `None`.
     if let Some(timings) = root_setup_timings.as_mut() {
         timings.broadcast_seconds = broadcast_start.elapsed().as_secs_f64();
     }
@@ -443,9 +412,8 @@ fn reconstruct_stochastic_context_non_root(
             user_tree,
             historical_library: opening_tree_library.as_ref(),
             external_scenario_counts: None,
-            // noise_group_ids: None for non-root ranks — the opened tree
-            // is broadcast from rank 0 when auto-generated, so independent
-            // noise per stage is acceptable here.
+            // None is safe: the auto-generated tree is broadcast from rank 0, so
+            // independent per-stage noise here never reaches the result.
             // TODO(noise-group-non-root-saa-tree): wire noise_group_ids for non-root SAA tree generation
             noise_group_ids: None,
         },
@@ -467,8 +435,8 @@ fn rebuild_historical_library_non_root(
 ) -> Result<Option<cobre_stochastic::HistoricalScenarioLibrary>, CliError> {
     use cobre_core::temporal::NoiseMethod;
 
-    // Build HistoricalScenarioLibrary on non-root ranks when any stage
-    // uses HistoricalResiduals (mirrors prepare_stochastic on rank 0).
+    // Mirrors `prepare_stochastic` on rank 0: build the library when any stage
+    // uses HistoricalResiduals.
     let needs_historical_tree = system
         .stages()
         .iter()
@@ -517,13 +485,10 @@ fn rebuild_historical_library_non_root(
             max_order,
             window_years.clone(),
         );
-        // Pass past_inflows so the η-inversion rolling chain is seeded
-        // from the same x₀ as the forward pass (hydrological-tendency
-        // convention). Compute stage_lag_transitions explicitly via the
-        // same helper the production setup path uses, so the broadcast
-        // path stays correct under non-monthly study grids should they
-        // ever land (the in-function uniform-monthly fallback would
-        // silently misroute those).
+        // past_inflows seeds the η-inversion chain from the same x₀ as the
+        // forward pass. Compute stage_lag_transitions via the production helper,
+        // not the in-function uniform-monthly fallback, which silently misroutes
+        // non-monthly study grids.
         let noop_season_map;
         let season_map_for_transitions: &cobre_core::temporal::SeasonMap =
             if let Some(sm) = system.policy_graph().season_map.as_ref() {
@@ -558,10 +523,8 @@ fn rebuild_historical_library_non_root(
 }
 
 /// Construct `StudySetup` on all ranks from broadcast parameters.
-// Rationale: `stochastic`, `hydro_models`, and `scalar_parameters` are taken by
-// value because `StudySetup` construction consumes (moves) them into the setup —
-// passing by reference would force an internal clone, so by-value is correct, not
-// needless.
+// Rationale: by-value because `StudySetup` construction moves these in; a
+// reference would force an internal clone.
 #[allow(clippy::needless_pass_by_value)]
 fn build_study_setup(
     system: &System,
@@ -606,10 +569,8 @@ pub(super) fn run_pre_training(
     root_estimation_path: Option<cobre_sddp::EstimationPath>,
     setup_timings: Option<&cobre_io::SetupTimings>,
 ) -> Result<(), CliError> {
-    // The Setup block renders ahead of the Hydro models block so the per-phase
-    // load/fit/broadcast timings sit with the other setup summaries. Gated on
-    // root + non-quiet; `setup_timings` is `Some` only on rank 0 (collected
-    // during load/broadcast), so non-root ranks never reach the print.
+    // Renders before the Hydro models block so the setup timings sit with the
+    // other setup summaries.
     if ctx.is_root
         && !ctx.quiet
         && let Some(timings) = setup_timings
@@ -617,9 +578,8 @@ pub(super) fn run_pre_training(
         crate::summary::print_setup_summary(&ctx.stderr, timings);
     }
 
-    // Build the hydro-model summary once on the root rank, independent of
-    // `quiet`: it feeds both the optional on-screen print and the persisted
-    // `training/hydro_models.json` sidecar consumed by `cobre summary`.
+    // Built regardless of `quiet`: it also feeds the persisted sidecar consumed
+    // by `cobre summary`, not just the optional print.
     if ctx.is_root {
         let hydro_summary = build_hydro_model_summary(&setup.hydro_models, system);
         if !ctx.quiet {

@@ -1,18 +1,5 @@
-//! `cobre run <CASE_DIR>` subcommand.
-//!
-//! Executes the full solve lifecycle:
-//!
-//! 1. Load the case directory (`cobre_io::load_case`) on rank 0, then broadcast.
-//! 2. Parse `config.json` (`cobre_io::parse_config`) on rank 0. Extract a
-//!    postcard-safe [`BroadcastConfig`](super::broadcast::BroadcastConfig) and broadcast it to all ranks.
-//!    The raw `Config` stays on rank 0 for output writing only.
-//! 3. Build stage LP templates (`cobre_sddp::build_stage_templates`) on all ranks.
-//! 4. Build the stochastic context (`cobre_stochastic::build_stochastic_context`) on all ranks.
-//!    If `scenarios/noise_openings.parquet` is present, the user-supplied opening tree is
-//!    loaded on rank 0, broadcast to all ranks, and passed to `build_stochastic_context`.
-//! 5. Train the SDDP policy (`cobre_sddp::train`).
-//! 6. Optionally run simulation (`cobre_sddp::simulate`).
-//! 7. Write all outputs (`cobre_io::write_results`).
+//! `cobre run <CASE_DIR>` subcommand: load, train the SDDP policy, optionally
+//! simulate, and write outputs.
 
 mod outputs;
 mod policy;
@@ -50,13 +37,8 @@ pub struct RunArgs {
     #[arg(long)]
     pub quiet: bool,
 
-    /// Number of worker threads for parallel scenario processing within each
-    /// MPI rank.  Each thread solves its own LP instances sequentially; multiple
-    /// scenarios (forward passes, backward trial points, simulation runs) are
-    /// processed in parallel across threads.
-    ///
-    /// Resolves in this order: (1) this flag, (2) `COBRE_THREADS` env var,
-    /// (3) default of 1.
+    /// Worker threads per MPI rank for parallel scenario processing. Resolves
+    /// in order: this flag, then `COBRE_THREADS`, then a default of 1.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     pub threads: Option<u32>,
 }
@@ -77,35 +59,26 @@ pub(super) struct RunContext<C: Communicator> {
     pub(super) term_width: u16,
     /// Terminal handle for stderr output.
     pub(super) stderr: Term,
-    /// Rendering strategy for progress events — chosen once at startup
-    /// from stderr's TTY status so non-TTY streams (mpirun pipes, log
-    /// files, CI) get append-only lines instead of cursor-driven bars.
+    /// Rendering strategy for progress events; non-TTY stderr gets append-only
+    /// lines instead of cursor-driven bars.
     pub(super) render_mode: crate::progress::RenderMode,
     /// Execution topology gathered during communicator setup.
     pub(super) topology: ExecutionTopology,
-    /// Solver version string (e.g. `"1.8.0"`).
+    /// Solver version string.
     pub(super) solver_version: String,
 }
 
 /// Execute the `run` subcommand.
 ///
-/// Runs the full lifecycle: load → build templates → train → simulate → write.
-///
-/// Under MPI, only rank 0 loads from disk. The loaded `System` is serialized
-/// with postcard and broadcast to all other ranks. The raw `Config` is parsed
-/// on rank 0 only; a postcard-safe [`BroadcastConfig`](super::broadcast::BroadcastConfig) is extracted and
-/// broadcast so that non-root ranks receive training and simulation parameters
-/// without needing to deserialize the `Config` types that use
-/// `#[serde(tag)]` (internally-tagged enums that postcard cannot handle).
-///
-/// All I/O, UI, and output writing is performed exclusively by rank 0.
-/// Non-root ranks always behave as if `--quiet` is set, participating in MPI
-/// collectives but producing no terminal output and writing no files.
+/// Under MPI, only rank 0 loads from disk and writes outputs; non-root ranks
+/// always behave as if `--quiet` is set, participating in collectives but
+/// producing no terminal output and writing no files. The raw `Config` stays on
+/// rank 0; a postcard-safe [`BroadcastConfig`](super::broadcast::BroadcastConfig)
+/// is broadcast because the `Config` `#[serde(tag)]` enums postcard cannot handle.
 ///
 /// # Errors
 ///
 /// Returns [`CliError`] when loading, training, simulation, or I/O fails.
-/// The exit code indicates the category of failure.
 pub fn execute(args: &RunArgs) -> Result<(), CliError> {
     let ctx = setup_communicator(args)?;
     let result = execute_inner(&ctx, args);
@@ -129,8 +102,7 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
         setup_timings,
     } = broadcast_and_build_setup(ctx, args)?;
 
-    // Pre-training outputs (estimation artifacts, scaling report) run
-    // regardless of training_enabled — they are data preparation outputs.
+    // Pre-training data-preparation outputs run regardless of training_enabled.
     run_pre_training(
         ctx,
         &system,
@@ -141,7 +113,6 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
         setup_timings.as_ref(),
     )?;
 
-    // Shared runtime context for metadata output files.
     let hostname = ctx.topology.leader_hostname().to_string();
     let mpi_world_size = u32::try_from(ctx.topology.world_size).unwrap_or(u32::MAX);
 
@@ -151,8 +122,8 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
         let training = run_training_phase(ctx, &mut setup)?;
         let training_completed_at = cobre_io::now_iso8601();
 
-        // Write training outputs immediately (before simulation), so training
-        // artifacts are persisted even if simulation fails.
+        // Write training outputs before simulation so they persist even if
+        // simulation fails.
         if ctx.is_root {
             let config = root_config.take().ok_or_else(|| CliError::Internal {
                 message: "root_config was None on rank 0 — internal invariant violated".to_string(),
@@ -164,12 +135,7 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
                 started_at: training_started_at,
                 completed_at: training_completed_at,
                 distribution: build_distribution_info(&ctx.topology, ctx.n_threads, mpi_world_size),
-                // Rank-0 setup timings flow into `training/metadata.json` via the
-                // output context. This branch is rank-0-only, so the value is the
-                // `Some(..)` collected during load/broadcast.
                 setup: setup_timings,
-                // Roll the computed-FPHA fit deviations up into the metadata
-                // aggregate; `None` for a run that fitted no computed model.
                 production_fit_deviation: cobre_sddp::build_deviation_summary(
                     &setup.hydro_models.fpha_fit_deviations,
                 ),
@@ -189,8 +155,6 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
             drop(config);
         }
 
-        // If training failed mid-iteration, report the error after writing
-        // partial outputs. All ranks return here — simulation is skipped.
         if let Some(ref training_error) = training.error {
             if ctx.is_root {
                 tracing::error!(
@@ -214,7 +178,6 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
             run_simulation_phase(ctx, &system, &mut setup, &training.result, &hostname)?;
         }
     } else if setup.simulation_config.n_scenarios > 0 {
-        // Training disabled but simulation requested: load policy from disk.
         let training_result =
             load_policy_for_simulation(ctx, &system, &mut setup, root_config.as_ref())?;
         run_simulation_phase(ctx, &system, &mut setup, &training_result, &hostname)?;
@@ -230,21 +193,15 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
     Ok(())
 }
 
-/// Guard-rail for the `u64 as f64` cast performed before packing solver-stats
-/// counters into an MPI `allreduce(Sum)` buffer via [`cobre_sddp::pack_delta_scalars`].
+/// Guard the `u64 as f64` cast in [`cobre_sddp::pack_delta_scalars`] before the
+/// MPI `allreduce(Sum)`: a `u64` above `2^53` loses precision as `f64`, silently
+/// corrupting the global totals. The body's field list is the authoritative set
+/// of guarded counters; native-`f64` timing fields are excluded as they need no
+/// cast.
 ///
-/// `f64` can represent all integers exactly up to `2^53`. Any `u64` value greater
-/// than `2^53` loses precision when cast to `f64`, which would produce incorrect
-/// global totals after `allreduce(Sum)`. This function checks every `u64` field
-/// of [`cobre_sddp::SolverStatsDelta`] that is cast to `f64` by
-/// [`cobre_sddp::pack_delta_scalars`] and returns `Err` if any exceeds the limit.
-/// The list of checked fields in the function body is the authoritative
-/// specification of which counters are guarded.
+/// # Errors
 ///
-/// The `f64` timing fields (`solve_time_ms`, `load_model_time_ms`,
-/// `set_bounds_time_ms`, `basis_set_time_ms`) are native `f64` and excluded from
-/// this check. `retry_level_histogram` is not packed by `pack_delta_scalars` and
-/// is also excluded.
+/// Returns [`CliError`] when any guarded counter exceeds `2^53`.
 pub(super) fn check_stats_overflow(delta: &cobre_sddp::SolverStatsDelta) -> Result<(), CliError> {
     const F64_INTEGER_LIMIT: u64 = 1u64 << 53;
     for (label, value) in [
@@ -304,15 +261,8 @@ pub(super) fn build_distribution_info(
     }
 }
 
-/// Map the per-host rank assignments from the execution topology into the
-/// cobre-io [`cobre_io::HostLayout`] carrier.
-///
-/// Host ordering (already ordered by first rank in
-/// [`ExecutionTopology`](cobre_comm::ExecutionTopology)) is preserved. Each
-/// `usize` rank is narrowed to `u32` with the saturating-cast convention used
-/// throughout [`build_distribution_info`], so an out-of-range rank maps to
-/// `u32::MAX` rather than panicking. Local single-process runs yield a single
-/// `HostLayout` with `ranks == vec![0]`.
+/// Map per-host rank assignments into [`cobre_io::HostLayout`] carriers,
+/// preserving the topology's host ordering (first-rank order).
 fn host_layouts(topology: &ExecutionTopology) -> Vec<cobre_io::HostLayout> {
     topology
         .hosts
@@ -404,7 +354,6 @@ mod tests {
 
     #[test]
     fn test_delta_to_stats_row_backward_carries_opening_rank_worker() {
-        // Backward rows must carry Some(opening), Some(rank), Some(worker_id).
         let delta = make_delta(10);
         let row = delta_to_stats_row(1, "backward", 2, Some(0), Some(1), Some(3), &delta);
         assert_eq!(row.opening, Some(0));
@@ -417,8 +366,7 @@ mod tests {
 
     #[test]
     fn test_delta_to_stats_row_forward_opening_and_worker_id_are_none() {
-        // Forward rows must carry None for opening and worker_id; rank is Some.
-        // forward rows use stage = real stage index, not -1.
+        // Forward rows use the real stage index, not the -1 sentinel.
         let delta = make_delta(4);
         let row = delta_to_stats_row(1, "forward", 0, None, Some(0), None, &delta);
         assert_eq!(row.opening, None);
@@ -430,7 +378,6 @@ mod tests {
 
     #[test]
     fn test_delta_to_stats_row_simulation_rank_and_worker_id_are_none() {
-        // Simulation rows must carry None for opening, rank, and worker_id.
         let delta = make_delta(7);
         let row = delta_to_stats_row(42, "simulation", -1, None, None, None, &delta);
         assert_eq!(row.opening, None);
@@ -458,9 +405,6 @@ mod tests {
         d
     }
 
-    /// AC1: every u64 counter packed by `pack_delta_scalars` must be rejected
-    /// with an error containing "exceeds 2^53" and the field label when its
-    /// value exceeds 2^53.
     #[test]
     fn test_overflow_guard_rejects_excessive_counter() {
         let over_limit = (1u64 << 53) + 1;
@@ -492,8 +436,8 @@ mod tests {
         }
     }
 
-    /// AC2: a counter exactly equal to 2^53 (the largest integer exactly
-    /// representable as f64) must NOT trigger the guard.
+    /// `2^53` is the largest integer exactly representable as `f64`, so it must
+    /// NOT trip the guard.
     #[test]
     fn test_overflow_guard_allows_exact_limit() {
         let at_limit = 1u64 << 53;

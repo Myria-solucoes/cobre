@@ -77,9 +77,7 @@ pub struct ReportArgs {
 
 /// Execute the `report` subcommand.
 ///
-/// Reads manifest and metadata files from `args.results_dir` and prints a
-/// pretty-printed JSON summary to stdout. The output format is stable and
-/// suitable for piping to `jq`.
+/// Prints a stable, `jq`-friendly JSON summary of `args.results_dir` to stdout.
 ///
 /// # Errors
 ///
@@ -89,7 +87,6 @@ pub struct ReportArgs {
 pub fn execute(args: ReportArgs) -> Result<(), CliError> {
     let results_dir = args.results_dir;
 
-    // Verify the results directory exists before attempting to read any files.
     if !results_dir.try_exists().map_err(|e| CliError::Io {
         source: e,
         context: results_dir.display().to_string(),
@@ -119,8 +116,7 @@ pub fn execute(args: ReportArgs) -> Result<(), CliError> {
 
     let status = training.status.clone();
 
-    // Capture the headline convenience values before moving `training` and
-    // `simulation` into the struct, avoiding a borrow-after-move.
+    // Capture convenience values before `training`/`simulation` move into the struct.
     let bounds = training.bounds.clone();
     let cost = simulation.as_ref().and_then(|s| s.cost.clone());
 
@@ -152,8 +148,6 @@ fn read_optional_metadata<T>(path: &std::path::Path) -> Result<Option<T>, CliErr
 where
     T: serde::de::DeserializeOwned,
 {
-    // Deserialize via serde_json directly, mirroring the pattern used by the
-    // manifest readers, but treating file-not-found as an absent optional.
     match std::fs::read_to_string(path) {
         Ok(content) => {
             let value: T = serde_json::from_str(&content).map_err(|e| CliError::Internal {

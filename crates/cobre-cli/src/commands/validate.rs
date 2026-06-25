@@ -54,12 +54,8 @@ fn format_constraint_description(
     }
 }
 
-/// Format and print a pre-solver preparation error to `stdout`.
-///
-/// Delegates the phase→file-label and phase→kind mapping to
-/// [`prep_phase_metadata`], then writes one summary line and one error line to
-/// `term`. Returns the `"file_label: message"` string so the caller can embed
-/// it in a [`CliError`].
+/// Print a pre-solver preparation error to `term` and return the
+/// `"file_label: message"` string for the caller to embed in a [`CliError`].
 fn format_prep_error(
     term: &Term,
     phase: PrepPhase,
@@ -79,14 +75,9 @@ fn format_prep_error(
     format!("{file_label}: {message}")
 }
 
-/// Execute the `validate` subcommand.
-///
-/// Calls the six-layer IO pipeline followed by the three pre-solver preparation
-/// phases. Prints a structured diagnostic report to stdout, including any warnings
-/// collected during the pipeline.
-///
-/// The validation contract: if this command exits 0, `cobre run <CASE_DIR>` will
-/// not fail in any phase before the solver begins iterating.
+/// Execute the `validate` subcommand, printing a structured diagnostic report
+/// (with any pipeline warnings) to stdout. Honors the module's validation contract:
+/// exit 0 implies `cobre run` will not fail before the solver begins iterating.
 ///
 /// # Errors
 ///
@@ -107,10 +98,8 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
         });
     }
 
-    // Phase 1-6: IO pipeline (structural + schema + referential + dimensional +
-    // semantic + cross-file resolution). Use the _with_artifacts variant so we
-    // get the pre-parsed CaseArtifacts needed by phase 3 below without a second
-    // disk read.
+    // _with_artifacts returns the pre-parsed CaseArtifacts the hydro-models phase
+    // needs, avoiding a second disk read.
     let (loaded, report) = match cobre_io::validate_case_with_artifacts(&args.case_dir) {
         Ok(result) => result,
         Err(cobre_io::LoadError::IoError { path, source }) => {
@@ -137,12 +126,9 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
     let system = loaded.system;
     let artifacts = loaded.artifacts;
 
-    // Phase 7: Parse config.json and validate solver-level config fields.
     let config_path = args.case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path).map_err(CliError::from)?;
 
-    // Phase 8: StudyParams::from_config — catches unsupported stopping rules,
-    // cut-selection config errors, and emits warnings for deprecated fields.
     let study_params = match StudyParams::from_config(&config) {
         Ok(p) => p,
         Err(ref err) => {
@@ -156,16 +142,14 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
 
     let seed = study_params.seed;
 
-    // Extract the training scenario source (needed by prepare_stochastic).
-    // Use config_path as the sentinel — training_scenario_source only uses it
-    // for historical-years file look-up and error messages.
+    // config_path is a sentinel here: training_scenario_source uses it only for
+    // historical-years look-up and error messages.
     let training_source = config
         .training_scenario_source(&config_path)
         .map_err(CliError::from)?;
 
-    // Phase 9: prepare_stochastic — runs PAR estimation from history, loads user
-    // opening trees, builds the stochastic context. This is the most expensive
-    // step; the user has explicitly accepted the cost for full parity.
+    // The most expensive step (PAR estimation, opening trees); validate runs it
+    // anyway so an exit-0 guarantees full parity with `run`.
     let prepared = match prepare_stochastic(system, &args.case_dir, &config, seed, &training_source)
     {
         Ok(p) => p,
@@ -178,9 +162,7 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
         }
     };
 
-    // Phase 10: prepare_hydro_models_from_artifacts — resolves production and
-    // evaporation models. Uses the already-parsed artifacts bundle from phase 1-6
-    // to avoid re-reading disk.
+    // Reuses the already-parsed artifacts bundle to avoid re-reading disk.
     if let Err(ref err) =
         prepare_hydro_models_from_artifacts(&prepared.system, &artifacts, false, None)
     {
@@ -191,7 +173,6 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
         });
     }
 
-    // All phases passed — print entity counts and any pipeline warnings.
     let _ = stdout.write_line(&format!(
         "Valid case: {} buses, {} hydros, {} thermals, {} lines",
         prepared.system.n_buses(),

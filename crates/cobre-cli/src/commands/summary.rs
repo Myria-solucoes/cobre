@@ -1,32 +1,19 @@
 //! `cobre summary <OUTPUT_DIR>` subcommand.
 //!
-//! Reads the training metadata and convergence log from a completed run's output
-//! directory and prints the same human-readable summary as `cobre run` to stderr.
-//! This lets users inspect a past run without re-executing the study.
+//! Reprints the human-readable end-block of a completed run, reusing the live
+//! `print_*` renderers so the output matches a live run by construction.
 //!
-//! # Behavior
-//!
-//! The live end-block sections are reproduced in top-to-bottom order:
-//! Execution topology → Hydro models → Model provenance → Training →
-//! Simulation. Each section reuses the shared `print_*` renderer the
-//! live run uses, so the output matches the live block by construction.
+//! Per-file contract (drives error vs. skip):
 //!
 //! - `training/metadata.json` — required; missing file returns [`CliError::Io`].
-//!   Drives the always-printed Execution topology and Training sections.
 //! - `training/convergence.parquet` — optional; missing file falls back to
 //!   zero-valued bounds (`lp_solves` and timing reported as 0).
-//! - `training/hydro_models.json` — optional; missing file skips the Hydro
-//!   models section.
-//! - `training/model_provenance.json` — optional; missing file skips the Model
-//!   provenance section.
-//! - `simulation/metadata.json` — optional; missing file silently skips the
-//!   simulation section in the output.
+//! - `training/hydro_models.json`, `training/model_provenance.json`,
+//!   `simulation/metadata.json` — optional; a missing file skips its section.
 //!
-//! A *present but malformed* optional sidecar is a real error and is propagated
-//! as [`CliError::Internal`], not skipped.
+//! A *present but malformed* optional sidecar is a real error, not a skip.
 //!
-//! All output goes to stderr, matching the `cobre run` convention. stdout is
-//! reserved for machine-readable output (see `cobre report`).
+//! All output goes to stderr; stdout is reserved for `cobre report`.
 
 use std::path::PathBuf;
 
@@ -63,9 +50,8 @@ pub struct SummaryArgs {
 
 /// Execute the `summary` subcommand.
 ///
-/// Reads metadata and convergence data from `args.output_dir` and prints
-/// the human-readable training (and optionally simulation) summary to stderr.
-/// The format matches what `cobre run` prints at the end of a completed study.
+/// Prints the training (and optionally simulation) summary for `args.output_dir`
+/// to stderr, matching what `cobre run` prints at the end of a study.
 ///
 /// # Errors
 ///
@@ -85,19 +71,16 @@ pub fn execute(args: SummaryArgs) -> Result<(), CliError> {
         });
     }
 
-    // training/metadata.json is required; absence is an error.
     let training_metadata_path = output_dir.join("training/metadata.json");
     let metadata: TrainingMetadata =
         read_training_metadata(&training_metadata_path).map_err(CliError::from)?;
 
-    // training/convergence.parquet is optional; fall back to zero-valued summary on error.
+    // convergence.parquet optional: any read error falls back to a zero-valued summary.
     let convergence_path = output_dir.join("training/convergence.parquet");
     let convergence = read_convergence_summary(&convergence_path)
         .unwrap_or_else(|_| convergence_fallback(&metadata));
     let initial_gap_percent = cobre_io::output::read_initial_gap_percent(&convergence_path);
 
-    // training/hydro_models.json and training/model_provenance.json are optional
-    // sidecars; a missing file skips its section, a malformed file is an error.
     let hydro_models_path = output_dir.join("training/hydro_models.json");
     let hydro_models: Option<HydroModelSummary> =
         read_optional_sidecar(read_hydro_model_summary(&hydro_models_path))?;
@@ -106,7 +89,6 @@ pub fn execute(args: SummaryArgs) -> Result<(), CliError> {
     let provenance: Option<ModelProvenanceReport> =
         read_optional_sidecar(read_provenance_report(&provenance_path))?;
 
-    // simulation/metadata.json is optional; missing file is silently skipped.
     let simulation_metadata_path = output_dir.join("simulation/metadata.json");
     let simulation: Option<SimulationMetadata> =
         read_optional_sidecar(read_simulation_metadata(&simulation_metadata_path))?;
@@ -114,11 +96,7 @@ pub fn execute(args: SummaryArgs) -> Result<(), CliError> {
     let training_summary = build_training_summary(&metadata, &convergence, initial_gap_percent);
     let stderr = Term::stderr();
 
-    // Reproduce the live end-block in top-to-bottom order, reusing the shared
-    // renderers so the output matches the live run by construction. Sections are
-    // separated by a blank line; an absent optional section drops its separator.
-
-    // 1. Execution topology — always printed (derives from required metadata).
+    // Sections are blank-line separated; an absent optional section drops its separator.
     let topology = reconstruct_topology(&metadata.distribution);
     print_execution_topology(
         &stderr,
@@ -128,23 +106,19 @@ pub fn execute(args: SummaryArgs) -> Result<(), CliError> {
         metadata.solver_version.as_deref(),
     );
 
-    // 2. Hydro models — only when the sidecar was present.
     if let Some(hydro) = &hydro_models {
         let _ = stderr.write_line("");
         print_hydro_model_summary(&stderr, hydro);
     }
 
-    // 3. Model provenance — only when the sidecar was present.
     if let Some(report) = &provenance {
         let _ = stderr.write_line("");
         print_provenance_summary(&stderr, report);
     }
 
-    // 4. Training — always printed.
     let _ = stderr.write_line("");
     print_training_summary(&stderr, &training_summary);
 
-    // 5. Simulation — only when the metadata was present.
     if let Some(sim) = simulation {
         let simulation_summary = build_simulation_summary(&sim);
         let _ = stderr.write_line("");
@@ -156,10 +130,8 @@ pub fn execute(args: SummaryArgs) -> Result<(), CliError> {
 
 // ── Private helpers ──────────────────────────────────────────────────────────
 
-/// Construct a zero-valued [`ConvergenceSummary`] that derives bounds from the
-/// metadata's `convergence.final_gap_percent` field.
-///
-/// Used when `convergence.parquet` is missing or unreadable.
+/// Zero-valued [`ConvergenceSummary`] used when `convergence.parquet` is missing
+/// or unreadable; carries over the metadata's `final_gap_percent`.
 fn convergence_fallback(metadata: &TrainingMetadata) -> ConvergenceSummary {
     ConvergenceSummary {
         total_lp_solves: 0,
@@ -171,7 +143,6 @@ fn convergence_fallback(metadata: &TrainingMetadata) -> ConvergenceSummary {
     }
 }
 
-/// Build a [`TrainingSummary`] by mapping fields from the metadata and convergence data.
 fn build_training_summary(
     metadata: &TrainingMetadata,
     convergence: &ConvergenceSummary,
@@ -214,10 +185,9 @@ fn build_training_summary(
     }
 }
 
-/// Build a [`SimulationSummary`] from a [`SimulationMetadata`].
 fn build_simulation_summary(metadata: &SimulationMetadata) -> SimulationSummary {
-    // `duration_seconds` is a non-negative wall-clock measurement, so the
-    // round-and-truncate to milliseconds cannot lose sign or overflow in practice.
+    // duration_seconds is non-negative wall-clock, so the ms round-and-truncate
+    // cannot lose sign or overflow.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let total_time_ms = (metadata.duration_seconds * 1000.0).round() as u64;
 
@@ -237,12 +207,8 @@ fn build_simulation_summary(metadata: &SimulationMetadata) -> SimulationSummary 
     }
 }
 
-/// Map an optional-sidecar read result to graceful degradation.
-///
-/// A missing file (an [`OutputError::IoError`] whose `source.kind()` is
-/// [`std::io::ErrorKind::NotFound`]) maps to `Ok(None)` so the caller can skip
-/// the corresponding section. Any other error — including a present-but-malformed
-/// file ([`OutputError::ManifestError`]) — is propagated as a [`CliError`].
+/// A `NotFound` [`OutputError::IoError`] maps to `Ok(None)` (caller skips the
+/// section); every other error — including a malformed file — propagates.
 fn read_optional_sidecar<T>(result: Result<T, OutputError>) -> Result<Option<T>, CliError> {
     match result {
         Ok(value) => Ok(Some(value)),
@@ -255,17 +221,11 @@ fn read_optional_sidecar<T>(result: Result<T, OutputError>) -> Result<Option<T>,
     }
 }
 
-/// Reconstruct an [`ExecutionTopology`] from the persisted [`DistributionInfo`].
+/// Rebuild an [`ExecutionTopology`] from the persisted [`DistributionInfo`] so
+/// `summary` can reuse the live [`print_execution_topology`] renderer.
 ///
-/// Topology is not persisted directly as an `ExecutionTopology`; only the
-/// `DistributionInfo` embedded in the training metadata is. Rebuilding the
-/// topology here lets `summary` reuse the live [`print_execution_topology`]
-/// renderer, keeping the section parity-correct by construction.
-///
-/// Some fields are not persisted in `DistributionInfo` and are therefore
-/// reconstructed as `None`: a SLURM job carries only its `job_id` (no
-/// `node_list` / `cpus_per_task`), and `mpi` is `Some` only when all three MPI
-/// strings (`mpi_library`, `mpi_standard`, `thread_level`) are present.
+/// Fields absent from `DistributionInfo` reconstruct as `None`: a SLURM job keeps
+/// only `job_id`; `mpi` is `Some` only when all three MPI strings are present.
 fn reconstruct_topology(dist: &DistributionInfo) -> ExecutionTopology {
     let backend = match dist.backend.as_str() {
         "mpi" => BackendKind::Mpi,
@@ -406,9 +366,8 @@ mod tests {
 
     fn make_convergence_summary() -> ConvergenceSummary {
         ConvergenceSummary {
-            // Deliberately distinct from the metadata `solve_stats.total_lp_solves`
-            // (84_000) so the training-summary test can prove the count is sourced
-            // from the convergence parquet, not the metadata.
+            // Distinct from metadata.solve_stats.total_lp_solves (84_000) so the
+            // training-summary test proves the count comes from the parquet.
             total_lp_solves: 70_000,
             total_time_ms: 12_345,
             final_lower_bound: 48_500.0,
@@ -487,11 +446,10 @@ mod tests {
         assert!((summary.gap_percent - 1.03).abs() < 1e-9);
         assert_eq!(summary.total_rows_active, 980_000);
         assert_eq!(summary.total_rows_generated, 1_250_000);
-        // total_lp_solves / total_time_ms come from the convergence parquet, not
-        // metadata.solve_stats (which carries a different 84_000 value).
+        // From the parquet (70_000), not metadata.solve_stats (84_000).
         assert_eq!(summary.total_lp_solves, 70_000);
         assert_eq!(summary.total_time_ms, 12_345);
-        // Solve-stats are sourced from metadata, not the parquet convergence summary.
+        // Solve-stats are sourced from metadata, not the parquet.
         assert_eq!(summary.total_first_try, Some(80_000));
         assert_eq!(summary.total_retried, Some(3_800));
         assert_eq!(summary.total_failed, Some(200));
@@ -526,7 +484,6 @@ mod tests {
     #[test]
     fn build_training_summary_bounds_fall_back_to_parquet_when_metadata_default() {
         let mut metadata = make_training_metadata();
-        // Legacy/default bounds: lower=0.0, uppers=None.
         metadata.bounds = MetadataBounds {
             final_lower_bound: 0.0,
             final_upper_bound: None,
@@ -541,10 +498,9 @@ mod tests {
 
         let summary = build_training_summary(&metadata, &convergence, None);
 
-        // Lower bound recovers the parquet value when metadata carries the default
-        // (zero), matching the upper-bound fallback so legacy dirs stay consistent.
+        // A zero lower bound in metadata is treated as "default" and recovers the
+        // parquet value, matching the upper-bound fallback for legacy dirs.
         assert!((summary.lower_bound - 48_500.0).abs() < f64::EPSILON);
-        // Upper bounds recover the parquet values when metadata omits them.
         assert!((summary.upper_bound - 49_000.0).abs() < f64::EPSILON);
         assert!((summary.upper_bound_std - 250.0).abs() < f64::EPSILON);
     }
@@ -696,7 +652,6 @@ mod tests {
         assert!(slurm.node_list.is_none());
         assert!(slurm.cpus_per_task.is_none());
 
-        // Ranks widen u32 -> usize preserving order, per host.
         assert_eq!(topology.hosts[0].hostname, "node-a");
         assert_eq!(topology.hosts[0].ranks, vec![0_usize, 1, 2, 3]);
         assert_eq!(topology.hosts[1].hostname, "node-b");
