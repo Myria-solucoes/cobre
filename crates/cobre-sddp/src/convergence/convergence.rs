@@ -4,26 +4,8 @@
 //! and per-iteration history across training iterations, and evaluates the
 //! configured stopping rules to determine when training should terminate.
 //!
-//! ## Design
-//!
-//! The monitor is a pure computation component: it receives bound values as
-//! inputs and produces termination decisions as outputs. It does not run
-//! simulations, emit events, or perform checkpointing — those responsibilities
-//! belong to the training loop orchestrator.
-//!
-//! The LB is received as a separate scalar from [`crate::lower_bound::evaluate_lower_bound`]
-//! (evaluated after the backward pass). It is **not** derived from the forward
-//! synchronisation step. The UB statistics come from [`crate::forward::SyncResult`]
-//! produced by [`crate::forward::sync_forward`].
-//!
-//! ## Gap formula
-//!
-//! The convergence gap is computed as:
-//!
-//! `gap = (UB - LB) / max(1.0, |UB|)`
-//!
-//! The `max(1.0, |UB|)` guard prevents division by zero when the UB is near
-//! zero.
+//! [`ConvergenceMonitor::upper_bound`] returns the raw per-iteration UB with
+//! **no** exponential smoothing — a deliberate contract, not an oversight.
 //!
 //! ## Usage
 //!
@@ -61,30 +43,12 @@ use crate::{
     stopping_rule::{MonitorState, StoppingRuleSet},
 };
 
-// ---------------------------------------------------------------------------
-// ConvergenceMonitor
-// ---------------------------------------------------------------------------
-
 /// Tracks bound statistics and evaluates stopping rules across training
 /// iterations.
 ///
 /// Constructed once before the training loop begins. On each iteration, the
 /// training loop calls [`ConvergenceMonitor::update`] with the latest LB and
 /// UB statistics, which returns the termination decision.
-///
-/// ## Fields (private)
-///
-/// - `rule_set` — the configured stopping rules and combination mode.
-/// - `lower_bound` — latest LB value (0.0 before first update).
-/// - `upper_bound` — latest UB mean (0.0 before first update).
-/// - `upper_bound_std` — latest UB standard deviation.
-/// - `ci_95_half_width` — latest 95% CI half-width.
-/// - `gap` — latest convergence gap: `(UB - LB) / max(1.0, |UB|)`.
-/// - `lower_bound_history` — all LB values in chronological order.
-/// - `iteration_count` — 0-based counter, incremented by each `update` call.
-/// - `start_time` — wall-clock origin set at construction.
-/// - `shutdown_requested` — set by [`ConvergenceMonitor::set_shutdown`].
-/// - `simulation_costs` — set by [`ConvergenceMonitor::set_simulation_costs`].
 #[derive(Debug)]
 pub struct ConvergenceMonitor {
     rule_set: StoppingRuleSet,
@@ -121,38 +85,22 @@ impl ConvergenceMonitor {
 
     /// Update bound statistics and evaluate stopping rules.
     ///
-    /// Incorporates the latest lower bound and forward-pass UB statistics,
-    /// increments the iteration counter, appends `lb` to the history, and
-    /// evaluates the configured stopping rules via [`StoppingRuleSet::evaluate`].
-    ///
-    /// Returns `(should_stop, results)` where:
-    /// - `should_stop` is the combined termination decision.
-    /// - `results` lists the evaluation result for every configured rule.
-    ///
-    /// This method is infallible. Gap computation uses `max(1.0, |UB|)` in the
-    /// denominator to guard against division by zero.
-    ///
-    /// # Arguments
-    ///
-    /// - `lb` — lower bound from [`crate::lower_bound::evaluate_lower_bound`],
-    ///   evaluated after the backward pass.
-    /// - `sync_result` — global UB statistics from
-    ///   [`crate::forward::sync_forward`], evaluated after the forward pass.
+    /// Returns `(should_stop, results)`: the combined termination decision and
+    /// the per-rule evaluation results. Gap uses a `max(1.0, |UB|)` denominator
+    /// to guard against division by zero.
     pub fn update(&mut self, lb: f64, sync_result: &SyncResult) -> (bool, Vec<StoppingRuleResult>) {
         self.lower_bound = lb;
         self.upper_bound = sync_result.global_ub_mean;
         self.upper_bound_std = sync_result.global_ub_std;
         self.ci_95_half_width = sync_result.ci_95_half_width;
 
-        // gap = (UB - LB) / max(1.0, |UB|)
         let denominator = self.upper_bound.abs().max(1.0_f64);
         self.gap = (self.upper_bound - lb) / denominator;
 
         self.iteration_count += 1;
         self.lower_bound_history.push(lb);
 
-        // Move vecs into MonitorState without cloning. Take them out, evaluate,
-        // then restore so the monitor retains its data for the next iteration.
+        // Move the vecs into MonitorState without cloning, then restore them.
         let history = std::mem::take(&mut self.lower_bound_history);
         let sim_costs = std::mem::take(&mut self.simulation_costs);
         let state = MonitorState {
@@ -165,27 +113,20 @@ impl ConvergenceMonitor {
         };
 
         let result = self.rule_set.evaluate(&state);
-        // Restore the data back into the monitor.
         self.lower_bound_history = state.lower_bound_history;
         self.simulation_costs = state.simulation_costs;
         result
     }
 
-    /// Signal a graceful shutdown request.
-    ///
-    /// After this call, the next [`ConvergenceMonitor::update`] will return
-    /// `(true, results)` with the `GracefulShutdown` rule reporting
-    /// `triggered: true`.
+    /// Signal a graceful shutdown request; the next [`ConvergenceMonitor::update`]
+    /// returns `(true, _)` with the `GracefulShutdown` rule triggered.
     pub fn set_shutdown(&mut self) {
         self.shutdown_requested = true;
     }
 
-    /// Provide simulation costs for the [`crate::stopping_rule::StoppingRule::SimulationBased`] rule.
-    ///
-    /// The training loop calls this before [`ConvergenceMonitor::update`] on
-    /// check iterations where a Monte Carlo simulation has been run. The costs
-    /// are forwarded into [`MonitorState::simulation_costs`] during the next
-    /// `update` call.
+    /// Provide simulation costs for the [`crate::stopping_rule::StoppingRule::SimulationBased`]
+    /// rule; forwarded into [`MonitorState::simulation_costs`] on the next
+    /// [`ConvergenceMonitor::update`].
     pub fn set_simulation_costs(&mut self, costs: Vec<f64>) {
         self.simulation_costs = Some(costs);
     }
