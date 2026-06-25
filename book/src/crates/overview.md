@@ -1,6 +1,6 @@
 # Crate Overview
 
-Cobre is organized as a Rust workspace with 14 crates. Each crate has a single responsibility and well-defined boundaries.
+Cobre is organized as a Rust workspace of focused crates, each with a single responsibility and well-defined boundaries.
 
 ```
 cobre/crates/
@@ -66,6 +66,7 @@ The ecosystem delivers a full SDDP training and simulation pipeline:
 - **Python bindings** via PyO3 with Arrow zero-copy result loading (`cobre-python`)
 - **JSON Schema** files for all input types, hosted for `$schema` editor integration
 
-The workspace is verified by over 3,450 tests, including 29 deterministic
-example regression cases (D01--D17, D19--D30; the D18 index is reserved —
-no example directory exists, though an integration test covers that scenario).
+The workspace is covered by an automated test suite (`cargo nextest run --workspace`),
+including the deterministic example regression cases under `examples/deterministic/` — one
+per modeled feature; see the
+[Deterministic Regression Suite](../examples/deterministic-suite.md).
