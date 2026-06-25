@@ -1,19 +1,17 @@
 //! Spectral decomposition of correlation matrices.
 //!
 //! Computes the symmetric matrix square root `D` of a symmetric correlation
-//! matrix `C` such that `C = D * Dᵀ`. Unlike Cholesky factorisation, which
-//! requires the input to be strictly positive-definite, the spectral approach
-//! eigendecomposes `C = V * diag(λ) * Vᵀ`, clips any negative eigenvalues to
-//! 0.0, and computes `D = V * diag(√λ) * Vᵀ`. This handles non-positive-
-//! definite and rank-deficient matrices naturally.
+//! matrix `C` such that `C = D * Dᵀ`, via the eigendecomposition
+//! `C = V * diag(λ) * Vᵀ` with negative eigenvalues clipped to 0.0:
+//! `D = V * diag(√λ) * Vᵀ`. Spectral, not Cholesky, so non-positive-definite and
+//! rank-deficient inputs decompose to the nearest PSD approximation instead of
+//! erroring.
 //!
-//! The transform `b = D * z` where `z ~ N(0, I)` produces
-//! spatially correlated noise `b` with covariance `D * Dᵀ = C` (or the nearest
-//! positive-semidefinite approximation to `C` in the spectral sense).
+//! The transform `b = D * z` where `z ~ N(0, I)` yields correlated noise `b` with
+//! covariance `D * Dᵀ = C`.
 
 use crate::StochasticError;
 
-/// Symmetry tolerance for input matrix validation.
 const SYMMETRY_TOL: f64 = 1e-10;
 
 /// Threshold separating round-off-scale negative eigenvalues from genuinely
@@ -28,36 +26,22 @@ const SYMMETRY_TOL: f64 = 1e-10;
 /// warning. `1e-9` sits comfortably between the two regimes.
 pub(crate) const NEGLIGIBLE_NEGATIVE_EIGENVALUE: f64 = 1e-9;
 
-/// Diagnostics from a single spectral decomposition describing how much
-/// negative-eigenvalue clipping (positive-semidefinite projection) was applied.
-///
-/// Returned by [`SpectralFactor::decompose_with_diagnostics`] so a caller that
-/// decomposes many matrices can aggregate clipping into one report instead of
-/// logging once per matrix.
+/// Negative-eigenvalue clipping (PSD projection) applied by one decomposition,
+/// returned so a caller decomposing many matrices aggregates into one report
+/// instead of logging per matrix.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ClipDiagnostics {
-    /// Number of negative eigenvalues clipped to zero.
+    /// Count of negative eigenvalues clipped to zero.
     pub clipped_count: usize,
-    /// Largest absolute magnitude among the clipped negative eigenvalues.
+    /// Largest absolute magnitude among the clipped eigenvalues.
     pub largest_magnitude: f64,
 }
 
-/// Symmetric matrix square root of a correlation matrix (spectral factor).
-///
-/// Stores `D` such that `Sigma ≈ D * Dᵀ`, where `D = V * diag(√λ) * Vᵀ` is
-/// computed from the eigendecomposition `Sigma = V * diag(λ) * Vᵀ`. Negative
-/// eigenvalues are clipped to 0.0 before taking the square root, so the factor
-/// represents the nearest positive-semidefinite matrix in the spectral sense.
-///
-/// The factor is stored as a dense `n × n` matrix in row-major order.
-///
-/// Used to transform independent standard-normal samples into spatially
-/// correlated samples: `b = D * z` where `z ~ N(0, I)`.
+/// Symmetric matrix square root `D` of a correlation matrix (module-doc `D`),
+/// stored dense row-major.
 #[derive(Debug, Clone)]
 pub struct SpectralFactor {
-    /// Dense n × n transform matrix D in row-major order.
-    /// Length: n * n where n is the matrix dimension.
-    /// Element (i, j) is at index i * n + j.
+    /// Row-major `dim × dim` matrix `D`; element `(i, j)` at index `i * dim + j`.
     data: Box<[f64]>,
     /// Matrix dimension (number of entities in the correlation group).
     dim: usize,
@@ -65,15 +49,8 @@ pub struct SpectralFactor {
 
 impl SpectralFactor {
     /// Computes the spectral factor of `matrix` using cyclic Jacobi
-    /// eigendecomposition.
-    ///
-    /// Eigendecomposes the input as `C = V * diag(λ) * Vᵀ`, clips negative
-    /// eigenvalues to 0.0, and returns `D = V * diag(√λ) * Vᵀ` such that
-    /// `D * Dᵀ ≈ C`. To observe how much clipping occurred, use the
+    /// eigendecomposition. To observe how much clipping occurred, use the
     /// crate-internal `decompose_with_diagnostics`.
-    ///
-    /// Unlike Cholesky decomposition, this method succeeds for non-positive-
-    /// definite and rank-deficient matrices.
     ///
     /// # Errors
     ///
@@ -185,12 +162,7 @@ impl SpectralFactor {
         ))
     }
 
-    /// Applies the spectral factor to transform independent noise into correlated noise.
-    ///
-    /// Computes `correlated = D * independent` where `D` is the symmetric
-    /// matrix square root. Both slices must have length `self.dim`.
-    ///
-    /// Writes directly into `correlated` without any intermediate allocation.
+    /// Computes `correlated = D * independent` in place, no intermediate allocation.
     ///
     /// # Panics
     ///
@@ -231,25 +203,16 @@ impl SpectralFactor {
     }
 }
 
-/// Cyclic Jacobi eigendecomposition for a symmetric `n × n` matrix.
+/// Cyclic Jacobi eigendecomposition of the symmetric row-major `n × n` matrix `a`,
+/// diagonalised in place.
 ///
-/// Diagonalises the symmetric matrix `a` (given as a flat row-major slice of
-/// length `n * n`) using the classical cyclic Jacobi algorithm. The input
-/// matrix is modified in-place; on return it is approximately diagonal.
+/// Returns `(eigenvalues, eigenvectors)`; `eigenvectors` is flat row-major with the
+/// `k`-th eigenvector in column `k` (`V[i][k] = eigenvectors[i * n + k]`). On
+/// reaching the sweep cap without convergence it logs a warning and returns the
+/// current near-diagonal state.
 ///
-/// Returns `(eigenvalues, eigenvectors)` where:
-/// - `eigenvalues` is a `Vec<f64>` of length `n` (the diagonal of the
-///   diagonalised matrix).
-/// - `eigenvectors` is a flat row-major `Vec<f64>` of length `n * n`; the
-///   `k`-th eigenvector occupies column `k`, i.e. `V[i][k] = eigenvectors[i * n + k]`.
-///
-/// Convergence criterion: the off-diagonal Frobenius norm drops below 1e-12.
-/// Maximum iterations: `100 * n * n` sweeps. If the maximum is reached without
-/// convergence, a warning is logged and the current (approximately diagonal)
-/// state is returned.
-///
-/// Variable names use single characters (a, v, t, c, s, tau, `a_pq`, etc.) to
-/// match the mathematical specification; renaming would obscure the derivation.
+/// Single-character names (a, v, t, c, s, tau, `a_pq`) track the mathematical
+/// derivation; renaming would obscure it (justifies the lint allow below).
 #[allow(clippy::many_single_char_names, clippy::similar_names)]
 fn jacobi_eigen(a: &mut [f64], n: usize) -> (Vec<f64>, Vec<f64>) {
     let mut v = vec![0.0_f64; n * n];
@@ -593,8 +556,6 @@ mod tests {
     #[test]
     fn spectral_matches_cholesky_for_pd_matrix() {
         // For a PD correlation matrix, D*D^T must equal the original within 1e-8.
-        // This is the same property that the former Cholesky factor satisfied
-        // (L*L^T = Sigma), so the spectral factor is a drop-in replacement.
         let matrix = vec![
             vec![1.0, 0.5, 0.2],
             vec![0.5, 1.0, 0.4],
