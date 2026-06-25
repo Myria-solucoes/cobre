@@ -2,14 +2,7 @@
 //!
 //! [`run_progress_thread`] spawns a background thread that consumes
 //! [`TrainingEvent`] values from an `mpsc::Receiver` and reports progress
-//! through one of two [`RenderMode`] strategies:
-//!
-//! - [`RenderMode::Interactive`] — live-redrawn [`indicatif`] progress bars,
-//!   appropriate when stderr is a user-attended terminal.
-//! - [`RenderMode::Log`] — plain append-only log lines, appropriate for
-//!   non-TTY streams (pipes, log files, `mpirun` aggregators, CI). Bars
-//!   would otherwise degrade into streams of ANSI cursor escapes and
-//!   appear as duplicated lines in captured output.
+//! through one of two [`RenderMode`] strategies.
 //!
 //! Both strategies collect every received event verbatim and return the full
 //! sequence via [`ProgressHandle::join`], so the caller can feed the events
@@ -113,9 +106,6 @@ pub enum RenderMode {
 
 impl RenderMode {
     /// Pick the mode from stderr's TTY status.
-    ///
-    /// [`RenderMode::Interactive`] when stderr is a terminal, otherwise
-    /// [`RenderMode::Log`].
     #[must_use]
     pub fn auto() -> Self {
         if Term::stderr().is_term() {
@@ -132,10 +122,8 @@ pub struct ProgressHandle {
 }
 
 impl ProgressHandle {
-    /// Wait for the progress thread to finish and return all collected events.
-    ///
-    /// Events are returned in receive order. The caller is expected to pass
-    /// them to the output pipeline (e.g., `build_training_output`).
+    /// Wait for the progress thread to finish and return all collected events
+    /// in receive order.
     ///
     /// # Panics
     ///
@@ -150,9 +138,7 @@ impl ProgressHandle {
 /// Spawn a background thread that consumes events and renders progress
 /// according to `mode`.
 ///
-/// `max_iterations` is used to size the training bar and to render the
-/// `iter/max` ratio in log lines. `term_width` is consulted only in
-/// [`RenderMode::Interactive`].
+/// `term_width` is consulted only in [`RenderMode::Interactive`].
 pub fn run_progress_thread(
     receiver: mpsc::Receiver<TrainingEvent>,
     mode: RenderMode,
@@ -172,9 +158,8 @@ pub fn run_progress_thread(
     ProgressHandle { handle }
 }
 
-/// Resolve the terminal width for progress bar rendering.
-///
-/// Tries: `Term::stderr()` detection, `$COLUMNS` environment variable, then 120.
+/// Resolve the terminal width for progress bar rendering, falling back to
+/// `$COLUMNS` then a fixed default when stderr reports no size.
 pub fn resolve_term_width() -> u16 {
     let term = Term::stderr();
     if let Some((_, w)) = term.size_checked() {
@@ -681,9 +666,8 @@ mod tests {
 
     #[test]
     fn simulation_started_event_is_preserved_and_renders_banner() {
-        // Log mode exercises the `SimulationStarted` arm and writes a banner
-        // to stderr (not captured here); we rely on the channel round-trip
-        // to verify event propagation.
+        // The rendered banner is not captured; this asserts only the channel
+        // round-trip.
         let (tx, rx) = mpsc::channel::<TrainingEvent>();
         let handle = run_progress_thread(rx, RenderMode::Log, 10, 120);
 
@@ -1099,8 +1083,6 @@ mod tests {
     // Log mode coverage
     // -------------------------------------------------------------------
 
-    /// Log mode must collect the same events as bar mode and not panic when
-    /// rendering writes to the (captured-in-tests) stderr.
     #[test]
     fn test_log_mode_training_events_round_trip() {
         let (tx, rx) = mpsc::channel::<TrainingEvent>();
@@ -1168,9 +1150,8 @@ mod tests {
 
     #[test]
     fn test_render_mode_auto_returns_a_variant() {
-        // `is_term()` depends on the test runner; just assert we resolve to
-        // one of the two defined variants (the match is exhaustive, so a
-        // future variant would force this test to be updated).
+        // `is_term()` depends on the test runner, so assert only that we resolve
+        // to a defined variant; the exhaustive match forces an update on a new one.
         match RenderMode::auto() {
             RenderMode::Interactive | RenderMode::Log => {}
         }

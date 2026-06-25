@@ -1,6 +1,5 @@
 //! Terminal banner for the `cobre` CLI.
 //!
-//! Renders the three-line copper busbar banner with the Cobre brand identity.
 //! Color output is gated on `NO_COLOR` and terminal color support, following
 //! the [no-color.org](https://no-color.org) convention.
 //!
@@ -20,9 +19,6 @@ use console::Term;
 /// When `use_color` is `true`, the returned string contains ANSI 256-color
 /// escape sequences. When `false`, the same Unicode characters are returned
 /// without any escape codes.
-///
-/// This function is intentionally side-effect-free so that the banner content
-/// can be verified in unit tests without requiring a real terminal.
 pub(crate) fn render_banner_string(use_color: bool) -> String {
     let version = env!("CARGO_PKG_VERSION");
 
@@ -45,13 +41,10 @@ pub(crate) fn render_banner_string(use_color: bool) -> String {
 
 /// Write the three-line Cobre banner followed by an empty line to `stderr`.
 ///
-/// Color is enabled when [`console::colors_enabled_stderr`] returns `true`
-/// and the `NO_COLOR` environment variable is absent. This follows the
-/// [no-color.org](https://no-color.org) convention.
-///
-/// Write errors are silently ignored — banner rendering is fire-and-forget.
-/// The caller is responsible for the display conditions (`--quiet`,
-/// terminal detection).
+/// Color is enabled when [`console::colors_enabled_stderr`] returns `true` and
+/// `NO_COLOR` is absent ([no-color.org](https://no-color.org)). Write errors are
+/// silently ignored; the caller owns the display conditions (`--quiet`, TTY
+/// detection).
 pub fn print_banner(stderr: &Term) {
     let use_color = console::colors_enabled_stderr() && std::env::var_os("NO_COLOR").is_none();
     let banner = render_banner_string(use_color);
@@ -99,7 +92,6 @@ mod tests {
 
     #[test]
     fn test_print_banner_does_not_panic() {
-        // Smoke test: calling print_banner with a buffered stderr must not panic.
         print_banner(&Term::buffered_stderr());
     }
 }
