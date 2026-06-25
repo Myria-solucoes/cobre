@@ -1,37 +1,23 @@
 //! Halton quasi-Monte Carlo sequence building blocks and generators.
 //!
-//! The Halton sequence is a low-discrepancy sequence that assigns each
-//! dimension a distinct prime base. Dimension `d` (1-indexed) uses the
-//! `d`-th prime: 2, 3, 5, 7, 11, … The coordinate of point `n` in
-//! dimension `d` is `radical_inverse(n, p_d)`.
-//!
-//! ## Dimension numbering
-//!
-//! - Dimension 1 uses base 2 (van der Corput sequence).
-//! - Dimension 2 uses base 3.
-//! - Dimension `d` uses `sieve_primes(d)[d-1]`.
+//! The Halton sequence assigns dimension `d` (1-indexed) the `d`-th prime base
+//! (2, 3, 5, …); point `n`'s coordinate in dimension `d` is
+//! `radical_inverse(n, p_d)`, with dimension 1 the van der Corput base-2 sequence.
 //!
 //! ## Entry points
 //!
-//! - `sieve_primes`: compute the first `count` primes at generator
-//!   initialisation time using the sieve of Eratosthenes.
-//! - `radical_inverse`: compute the base-`b` radical inverse of integer
-//!   `n` (pure digit-reflection, no scrambling).
-//! - [`generate_qmc_halton`]: batch generation for all openings of a stage,
-//!   with Owen-style random digit scrambling for decorrelation.
-//! - [`scrambled_halton_point`]: single-scenario point-wise generation for
-//!   the out-of-sample forward pass, independent of all other scenarios.
+//! - `sieve_primes` / `radical_inverse`: building blocks (the latter is pure
+//!   digit-reflection, no scrambling).
+//! - [`generate_qmc_halton`]: batch generation for all openings of a stage.
+//! - [`scrambled_halton_point`]: single-scenario point-wise generation for the
+//!   out-of-sample forward pass, independent of all other scenarios.
 //!
 //! ## Scrambling
 //!
-//! The plain Halton sequence suffers from correlation artifacts in high
-//! dimensions (the "Halton curse"). Owen-style random digit scrambling
-//! breaks these correlations by applying a random permutation to each
-//! digit position in each dimension. For dimension `d` with prime base
-//! `p_d` and digit position `j`, a permutation table `pi[d][j]` of size
-//! `p_d` is applied: `scrambled_digit = pi[d][j][original_digit]`.
-//! Permutation tables are derived deterministically from the stage seed,
-//! ensuring reproducibility.
+//! The plain Halton sequence suffers correlation artifacts in high dimensions
+//! (the "Halton curse"). Owen-style random digit scrambling breaks these by
+//! permuting each digit position per dimension via tables derived
+//! deterministically from the stage seed (so output is reproducible).
 
 use crate::noise::{
     quantile::norm_quantile,
@@ -41,44 +27,31 @@ use crate::noise::{
 
 use super::lhs::fisher_yates;
 
-/// Return the first `count` prime numbers in ascending order.
-///
-/// Uses the sieve of Eratosthenes. For `count == 0`, returns an empty
-/// vector. This function runs once per generator initialisation and is
-/// never called on a hot path.
-///
-/// # Examples
-///
-/// ```no_run
-/// // sieve_primes(5) returns [2, 3, 5, 7, 11]
-/// ```
+/// Return the first `count` primes in ascending order via the sieve of
+/// Eratosthenes; empty for `count == 0`.
 #[must_use]
 pub(crate) fn sieve_primes(count: usize) -> Vec<u32> {
     if count == 0 {
         return Vec::new();
     }
 
-    // Upper bound for the n-th prime via the prime number theorem:
-    //   p_n < n * (ln(n) + ln(ln(n))) + 2  for n >= 6.
-    // For small n we use a hard floor of 30 to avoid negative or zero bounds.
+    // Prime number theorem n-th-prime bound p_n < n*(ln n + ln ln n) + 2 for
+    // n >= 6; hard floor 30 below that avoids non-positive bounds.
     let upper_bound: usize = if count < 6 {
         30
     } else {
-        // Precision loss is acceptable: this is an upper-bound estimate.
-        // The mantissa of f64 (52 bits) is sufficient for sieve sizes that
-        // fit in practical memory. count values near 2^52 are unreachable.
+        // Upper-bound estimate; f64's 52-bit mantissa covers any practical
+        // sieve size (count near 2^52 is unreachable).
         #[allow(clippy::cast_precision_loss)]
         let n = count as f64;
         let ln_n = n.ln();
         let ln_ln_n = ln_n.ln();
-        // The expression is always positive and finite for n >= 6 (ln(ln(6)) > 0).
-        // Truncation to usize is safe: the result is a small positive integer.
+        // Positive and finite for n >= 6; truncation yields a small positive int.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let bound = (n * (ln_n + ln_ln_n) + 4.0) as usize + 4;
         bound
     };
 
-    // Boolean sieve: `composite[i]` is true if `i` is not prime.
     let mut composite = vec![false; upper_bound + 1];
     composite[0] = true;
     composite[1] = true;
@@ -95,9 +68,8 @@ pub(crate) fn sieve_primes(count: usize) -> Vec<u32> {
         p += 1;
     }
 
-    // Sieve indices are bounded by upper_bound, which the prime number theorem
-    // guarantees holds all `count` primes; all such primes fit in u32 for any
-    // practical dimension count (the 1,000,000th prime is 15,485,863).
+    // Primes fit in u32 for any practical dimension count (the 1,000,000th prime
+    // is 15,485,863).
     #[allow(clippy::cast_possible_truncation)]
     composite
         .iter()
@@ -108,32 +80,16 @@ pub(crate) fn sieve_primes(count: usize) -> Vec<u32> {
         .collect()
 }
 
-/// Compute the base-`b` radical inverse of integer `n`.
-///
-/// The radical inverse reflects the base-`b` digits of `n` about the
-/// decimal point. If `n = d_k d_{k-1} … d_1 d_0` in base `b`, then
-/// `radical_inverse(n, b) = 0.d_0 d_1 … d_{k-1} d_k` as a floating-point
-/// number.
-///
-/// Returns `0.0` for `n == 0`. Returns a value in `[0.0, 1.0)` for all
-/// valid inputs.
+/// Compute the base-`b` radical inverse of integer `n`: reflecting the base-`b`
+/// digits of `n` about the point, so `n = d_k … d_0` maps to `0.d_0 … d_k`.
+/// Returns `0.0` for `n == 0`, else a value in `[0.0, 1.0)`.
 ///
 /// # Preconditions
 ///
-/// `base` must be `>= 2`. In debug builds a `debug_assert!` enforces this.
-/// In release mode, `base < 2` causes the loop to not execute and returns
-/// `0.0` without panicking.
-///
-/// # Examples
-///
-/// ```no_run
-/// // radical_inverse(0, 2) == 0.0
-/// // radical_inverse(1, 2) == 0.5   (binary 1 -> 0.1 = 0.5)
-/// // radical_inverse(5, 2) == 0.625 (binary 101 -> 0.101 = 5/8)
-/// ```
-// `radical_inverse` is a module primitive used in unit tests and available
-// for downstream integration. It is not yet called from production code outside
-// `#[cfg(test)]` because the generators use `scrambled_radical_inverse`.
+/// `base >= 2` (a `debug_assert!` enforces it; in release `base < 2` returns
+/// `0.0` without panicking).
+// Module primitive: the generators use `scrambled_radical_inverse`, so this is
+// reached only from tests until a downstream caller wires it in.
 #[allow(dead_code)]
 #[must_use]
 pub(crate) fn radical_inverse(n: u32, base: u32) -> f64 {
@@ -155,28 +111,21 @@ pub(crate) fn radical_inverse(n: u32, base: u32) -> f64 {
 
 /// Build Owen-style random digit scramble tables for all dimensions.
 ///
-/// Returns `tables[d][j][digit]` — for dimension `d` with prime base
-/// `primes[d]`, digit position `j` (0-indexed from least significant),
-/// the scrambled value of `digit` in `0..primes[d]`.
-///
-/// The number of digit positions for dimension `d` is
-/// `ceil(log_{p_d}(max_n))` with a minimum of 1.
-///
-/// All permutations are generated from a single RNG seeded with `seed`,
-/// advancing sequentially across all dimensions and digit positions to
-/// ensure independence between dimensions.
+/// Returns `tables[d][j][digit]`: the scrambled value of `digit` in
+/// `0..primes[d]` at digit position `j` (0-indexed, least-significant first) for
+/// dimension `d`; each dimension has `max(1, ceil(log_{p_d}(max_n)))` positions.
+/// A single `seed`-seeded RNG advances sequentially across all dimensions and
+/// positions, so the tables are deterministic and independent between dimensions.
 fn build_scramble_tables(seed: u64, primes: &[u32], max_n: usize) -> Vec<Vec<Vec<u32>>> {
     let mut rng = rng_from_seed(seed);
     let mut tables = Vec::with_capacity(primes.len());
 
     for &base in primes {
-        // Compute the number of digit positions needed to represent max_n in base p.
-        // max_digits = max(1, ceil(log_base(max_n))).
         let max_digits = if max_n <= 1 {
             1
         } else {
-            // Count digits by repeatedly dividing: how many times can we divide
-            // (max_n - 1) by base before reaching 0? That equals floor(log_base(max_n - 1)) + 1.
+            // Divide (max_n - 1), not max_n: counts floor(log_base(max_n-1)) + 1
+            // digits, the largest index actually generated.
             let mut digits = 0usize;
             let mut val = max_n - 1;
             while val > 0 {
@@ -186,18 +135,16 @@ fn build_scramble_tables(seed: u64, primes: &[u32], max_n: usize) -> Vec<Vec<Vec
             digits.max(1)
         };
 
-        // For each digit position, generate a random permutation of 0..base.
         let base_usize = base as usize;
         let mut dim_table: Vec<Vec<u32>> = Vec::with_capacity(max_digits);
         let mut work: Vec<usize> = (0..base_usize).collect();
 
         for _ in 0..max_digits {
-            // Reset work buffer to identity permutation.
             for (i, slot) in work.iter_mut().enumerate() {
                 *slot = i;
             }
             fisher_yates(&mut work, &mut rng);
-            // Cast from usize to u32 is safe: values are in 0..base where base is u32.
+            // Values are in 0..base, so the u32 cast cannot truncate.
             #[allow(clippy::cast_possible_truncation)]
             let perm: Vec<u32> = work.iter().map(|&v| v as u32).collect();
             dim_table.push(perm);
@@ -224,8 +171,7 @@ fn scrambled_radical_inverse(n: u32, base: u32, perm_table: &[Vec<u32>]) -> f64 
 
     while n > 0 {
         let digit = n % base;
-        // Apply the permutation for digit position j if available; fall back to
-        // identity if the table has fewer positions than the number of digits in n.
+        // Identity fallback when n has more digits than the table has positions.
         let scrambled = if j < perm_table.len() {
             perm_table[j][digit as usize]
         } else {
@@ -240,14 +186,10 @@ fn scrambled_radical_inverse(n: u32, base: u32, perm_table: &[Vec<u32>]) -> f64 
     result
 }
 
-/// Fill `output` with `n_openings × dim` standard-normal N(0,1) values
-/// using scrambled Halton QMC with Owen-style random digit permutations.
-///
-/// Output layout: opening-major `output[opening * dim + entity]`.
-///
-/// Each dimension uses a different prime base and the same number of
-/// scrambling tables built once from the stage-derived seed. Different
-/// stages produce different scrambling and therefore different samples.
+/// Fill `output` with `n_openings × dim` standard-normal N(0,1) values using
+/// scrambled Halton QMC. Output layout: opening-major
+/// `output[opening * dim + entity]`. The scramble tables derive from the
+/// stage-derived seed, so distinct stages produce distinct samples.
 ///
 /// # Panics
 ///
@@ -275,7 +217,7 @@ pub fn generate_qmc_halton(
     let tables = build_scramble_tables(seed, &primes, n_openings);
 
     for n in 0..n_openings {
-        // Cast to u32 is safe in practice: opening counts never exceed u32::MAX.
+        // Opening counts never exceed u32::MAX, so the cast cannot truncate.
         #[allow(clippy::cast_possible_truncation)]
         let n_u32 = n as u32;
         for d in 0..dim {

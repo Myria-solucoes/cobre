@@ -19,63 +19,39 @@ use crate::{
     },
 };
 
-/// Per-class entity counts for the noise dimension.
-///
-/// The canonical noise vector layout is `[hydros | load buses | NCS entities]`.
-/// These counts split the flat noise vector into per-class segments for independent
-/// spectral correlation application within each entity class.
-///
-/// # Invariant
-///
-/// `n_hydros + n_load_buses + n_ncs` must equal the `dim` argument passed to
+/// Per-class entity counts splitting the flat noise vector into segments for
+/// independent spectral correlation. Layout is `[hydros | load buses | NCS]`;
+/// `n_hydros + n_load_buses + n_ncs` must equal the `dim` argument to
 /// `generate_opening_tree`.
 #[derive(Debug, Clone, Copy)]
 pub struct ClassDimensions {
-    /// Number of hydro entities (inflow class) in the noise vector.
+    /// Hydro (inflow) entities.
     pub n_hydros: usize,
-    /// Number of stochastic load bus entities (load class) in the noise vector.
+    /// Stochastic load-bus (load) entities.
     pub n_load_buses: usize,
-    /// Number of stochastic NCS entities (ncs class) in the noise vector.
+    /// Stochastic NCS entities.
     pub n_ncs: usize,
 }
 
-/// Optional input bundle for [`generate_opening_tree`].
-///
-/// Groups the three optional parameters that extend the basic noise generation:
-/// a historical scenario library used when any stage is configured with
-/// [`cobre_core::temporal::NoiseMethod::HistoricalResiduals`],
-/// a pre-padding external scenario count per stage used to clamp openings, and
-/// per-stage noise group IDs for the noise-group sharing feature.
-///
-/// When all fields are `None` the opening tree is generated from SAA/LHS/QMC
-/// noise depending on each stage's `scenario_config.noise_method`.
+/// Optional input bundle for [`generate_opening_tree`]. When every field is
+/// `None`, the tree is generated from each stage's `scenario_config.noise_method`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OpeningTreeGenerationInputs<'a> {
-    /// Historical scenario library used for [`cobre_core::temporal::NoiseMethod::HistoricalResiduals`]
-    /// stages. Required when any study stage uses that noise method.
+    /// Required when any stage uses [`cobre_core::temporal::NoiseMethod::HistoricalResiduals`].
     pub historical_library: Option<&'a HistoricalScenarioLibrary>,
-    /// Pre-padding external scenario count per stage. Used to clamp opening
-    /// tree openings for stages with fewer external scenarios than the
-    /// configured branching factor. When `Some`, length must equal the number
-    /// of study stages.
+    /// Per-stage external scenario count clamping opening counts where the
+    /// external library was padded from fewer raw scenarios. `Some` length must
+    /// equal the stage count.
     pub external_scenario_counts: Option<&'a [usize]>,
-    /// Noise group IDs for noise-group sharing, indexed by stage array index.
-    ///
-    /// Stages with the same group ID share the same noise draw in the opening
-    /// tree. When `None`, each stage generates independent noise. When `Some`,
-    /// length must equal the number of study stages.
+    /// Per-stage (stage-array-indexed) group IDs; consecutive stages sharing an
+    /// ID share one noise draw, else each draws independently. `Some` length
+    /// must equal the stage count.
     pub noise_group_ids: Option<&'a [u32]>,
 }
 
-/// Compute the effective opening count for each stage after applying all clamping rules.
-///
-/// Two independent clamping steps are applied in order:
-///   1. `HistoricalResiduals`: clamp to `n_windows` to reduce duplicate window
-///      selections (existing behaviour).
-///   2. External: clamp to `external_scenario_counts[stage_idx]` to avoid redundant
-///      LP solves when the external library was padded from fewer raw scenarios.
-///
-/// Both clamps apply when both are configured; the tighter one wins.
+/// Effective opening count per stage: `branching_factor` clamped by the
+/// `HistoricalResiduals` window count and by `external_scenario_counts`. When both
+/// clamps apply, the tighter one wins.
 fn compute_effective_opening_counts(
     stages: &[Stage],
     historical_library: Option<&HistoricalScenarioLibrary>,
@@ -87,14 +63,12 @@ fn compute_effective_opening_counts(
         .map(|(stage_idx, s)| {
             let mut effective = s.scenario_config.branching_factor;
 
-            // Historical residuals clamping (existing logic).
             if s.scenario_config.noise_method == NoiseMethod::HistoricalResiduals
                 && let Some(lib) = historical_library
             {
                 effective = effective.min(lib.n_windows());
             }
 
-            // External scenario clamping.
             if let Some(counts) = external_scenario_counts {
                 let raw = counts[stage_idx];
                 if raw < s.scenario_config.branching_factor && raw <= effective {
@@ -115,15 +89,9 @@ fn compute_effective_opening_counts(
         .collect()
 }
 
-/// Apply the noise-group copy fast path for a stage.
-///
-/// When `stage_idx > 0` and the stage shares its group ID with the immediately
-/// preceding stage, copies already-generated and already-correlated noise from
-/// the source stage's buffer segment into the destination stage's buffer segment.
-///
-/// The copy covers `min(src_openings, dst_openings) * dim` contiguous elements.
-/// Returns `true` if the copy was performed (caller should `continue` the outer
-/// loop); returns `false` when no copy is needed.
+/// Copy already-correlated noise from the preceding stage when `stage_idx > 0`
+/// and both share a group ID. Returns `true` when the copy was performed (caller
+/// should `continue`), `false` when no copy is needed.
 fn try_copy_noise_group(
     stage_idx: usize,
     noise_group_ids: Option<&[u32]>,
@@ -144,18 +112,22 @@ fn try_copy_noise_group(
     let offset = stage_offsets[stage_idx];
     let copy_openings = src_n_openings.min(n_openings);
     let copy_len = copy_openings * dim;
-    // `src_offset` and `offset` do not overlap: stage buffers are
-    // non-overlapping contiguous segments of `data`.
     data.copy_within(src_offset..src_offset + copy_len, offset);
     true
 }
 
-/// Generate raw noise for one stage into `stage_slice` using the stage's configured method.
+/// Generate raw noise for one stage into `stage_slice` using its configured method.
 ///
-/// Returns `Ok(true)` when the noise method uses its own correlation embedding
-/// (`HistoricalResiduals`) and the caller should `continue` without applying
-/// spectral correlation. Returns `Ok(false)` when spectral correlation must be
-/// applied after this call. Returns `Err` on unsupported method or missing library.
+/// Returns `Ok(true)` when the method embeds its own correlation
+/// (`HistoricalResiduals`) so the caller must skip spectral correlation;
+/// `Ok(false)` when spectral correlation must follow.
+///
+/// # Errors
+///
+/// Returns [`StochasticError::UnsupportedNoiseMethod`] for `Selective`, or for
+/// `HistoricalResiduals` when `historical_library` is `None`; and
+/// [`StochasticError::DimensionExceedsCapacity`] when `QmcSobol` exceeds
+/// `MAX_SOBOL_DIM`.
 fn generate_stage_raw_noise(
     base_seed: u64,
     stage: &Stage,
@@ -229,7 +201,6 @@ fn generate_stage_raw_noise(
                 let eta = lib.eta_slice(window_idx, stage_idx);
                 noise_slice[..dims.n_hydros].copy_from_slice(eta);
             }
-            // HistoricalResiduals embeds empirical correlation; skip spectral application.
             return Ok(true);
         }
     }
@@ -252,52 +223,27 @@ fn generate_saa(base_seed: u64, stage: &Stage, n_openings: usize, dim: usize, ou
 
 /// Generate a fixed opening tree with correlated noise realisations.
 ///
-/// For each stage, all openings are generated together using the configured noise method.
-/// SAA, LHS, QMC-Sobol, QMC-Halton, and `HistoricalResiduals` are fully implemented.
-/// The `Selective` method returns an error.
+/// Generation is stage-major (outer: stages, inner: openings) so batch methods
+/// like LHS see all of a stage's openings at once. Spectral correlation is then
+/// applied per class in-place, except for `HistoricalResiduals` stages whose
+/// residuals already embed empirical cross-entity correlation. `Selective`
+/// returns an error; the other methods are supported. Per-stage opening counts
+/// and `noise_group_ids` sharing are described on [`OpeningTreeGenerationInputs`].
 ///
-/// Generation order is stage-major (outer: stages, inner: openings) to support batch methods
-/// like LHS that require all openings for a stage simultaneously. Spectral correlation
-/// is applied per class (inflow, load, ncs) in-place after noise generation, except for
-/// `HistoricalResiduals` stages where empirical cross-entity correlation is already embedded
-/// in the residuals.
-///
-/// The `entity_order` slice must have layout `[hydros | load buses | NCS entities]` and
+/// `entity_order` must have layout `[hydros | load buses | NCS]` and
 /// `dims.n_hydros + dims.n_load_buses + dims.n_ncs` must equal `dim`.
-///
-/// When `HistoricalResiduals` is used and `n_windows < branching_factor`, the stage's
-/// opening count is clamped to `n_windows`. Windows are selected via hash with
-/// replacement, so duplicate selections are possible even after clamping.
-/// A `tracing::warn!` is emitted per stage when clamping occurs.
-///
-/// When `external_scenario_counts` is `Some`, each stage's opening count is additionally
-/// clamped to the corresponding element of that slice. This prevents redundant LP solves
-/// for stages where the external library was padded from fewer raw scenarios. A
-/// `tracing::warn!` is emitted per stage when External clamping reduces the opening count.
-/// The effective opening count is `min(branching_factor, historical_clamp, external_clamp)`.
-///
-/// When `noise_group_ids` is `Some(ids)`, consecutive stages with the same group ID share
-/// identical noise: the noise (including applied spatial correlation) from the first stage
-/// of each group is copied into all subsequent stages of that group. When `None`, each stage
-/// generates independent noise (the original behaviour). The length of `ids` must equal
-/// `stages.len()` when `Some`.
 ///
 /// # Errors
 ///
-/// - Returns [`StochasticError::UnsupportedNoiseMethod`] if any stage uses
-///   [`NoiseMethod::Selective`].
-/// - Returns [`StochasticError::UnsupportedNoiseMethod`] if any stage uses
-///   [`NoiseMethod::HistoricalResiduals`] and `historical_library` is `None`.
+/// Returns [`StochasticError::UnsupportedNoiseMethod`] if any stage uses
+/// [`NoiseMethod::Selective`], or [`NoiseMethod::HistoricalResiduals`] with no
+/// `historical_library`; and [`StochasticError::DimensionExceedsCapacity`] when a
+/// `QmcSobol` stage exceeds `MAX_SOBOL_DIM`.
 ///
 /// # Panics
 ///
-/// Panics if `external_scenario_counts` is `Some` and its length differs
-/// from `stages.len()`.
-///
-/// Panics (debug-only) if `noise_group_ids` is `Some` and its length differs
-/// from `stages.len()`.
-///
-/// The optional inputs are bundled in the `inputs` [`OpeningTreeGenerationInputs`] parameter.
+/// Panics if `external_scenario_counts` is `Some` with length `!= stages.len()`;
+/// debug-only for the same `noise_group_ids` mismatch.
 pub fn generate_opening_tree<'a>(
     base_seed: u64,
     stages: &'a [Stage],
@@ -350,9 +296,6 @@ pub fn generate_opening_tree<'a>(
         let n_openings = openings_per_stage[stage_idx];
         let offset = stage_offsets[stage_idx];
 
-        // Noise-group copy fast path: same-group stages share already-correlated noise.
-        // In practice same-group stages always share the same branching factor, so
-        // `copy_openings == n_openings` universally.
         if try_copy_noise_group(
             stage_idx,
             noise_group_ids,
@@ -711,7 +654,6 @@ mod tests {
         )
         .unwrap();
 
-        // Collect all dim=1 noise values.
         let values: Vec<f64> = (0..n_openings).map(|o| tree.opening(0, o)[0]).collect();
 
         let mean = values.iter().sum::<f64>() / values.len() as f64;
@@ -795,7 +737,6 @@ mod tests {
         )
         .unwrap();
 
-        // Collect paired samples.
         let pairs: Vec<(f64, f64)> = (0..n_openings)
             .map(|o| {
                 let s = tree.opening(0, o);
@@ -861,11 +802,10 @@ mod tests {
         );
     }
 
-    /// SAA bitwise compatibility: the stage-major refactor must produce
-    /// bit-for-bit identical output for SAA stages.
+    /// SAA stages must produce bit-for-bit stable output.
     ///
-    /// Golden values captured from the pre-refactor opening-major implementation
-    /// with seed=42, 3 stages (Saa, bf=3), dim=2, identity correlation on [1, 2].
+    /// Golden values pinned for seed=42, 3 stages (Saa, bf=3), dim=2, identity
+    /// correlation on [1, 2].
     #[test]
     #[allow(clippy::float_cmp)]
     fn saa_bitwise_compatible_with_pre_refactor_golden_values() {
@@ -893,7 +833,6 @@ mod tests {
         )
         .unwrap();
 
-        // Golden values from pre-refactor opening-major implementation.
         assert_eq!(
             tree.opening(0, 0)[0],
             4.009_893_649_649_564_6e-1,
@@ -1045,7 +984,6 @@ mod tests {
         assert_eq!(tree.n_openings(0), n_openings, "stage 0 opening count");
         assert_eq!(tree.n_openings(1), n_openings, "stage 1 opening count");
 
-        // All values for both stages must be finite.
         for s in 0..2 {
             for o in 0..n_openings {
                 for &v in tree.opening(s, o) {
@@ -1348,18 +1286,15 @@ mod tests {
 
         let stages = vec![make_stage(0, 0, 5), make_stage(1, 1, 5)];
         let entity_order = vec![EntityId(1), EntityId(2)];
-        // All entities are inflow: n_hydros=2, n_load_buses=0, n_ncs=0.
         let dims = ClassDimensions {
             n_hydros: 2,
             n_load_buses: 0,
             n_ncs: 0,
         };
 
-        // Build two independent DecomposedCorrelation instances from the same model.
         let corr_per_class = DecomposedCorrelation::build(&corr_model).unwrap();
         let mut corr_full = DecomposedCorrelation::build(&corr_model).unwrap();
 
-        // Generate tree via the new per-class path (the only path in generate_opening_tree).
         let tree_per_class = generate_opening_tree(
             77,
             &stages,
@@ -1371,9 +1306,8 @@ mod tests {
         )
         .unwrap();
 
-        // Reproduce the old full-vector path manually: generate noise then call
-        // apply_correlation on the full vector (not per-class).
-
+        // Reproduce the full-vector path: noise then apply_correlation on the
+        // full vector, not per-class.
         corr_full.resolve_positions(&entity_order);
 
         let n_stages = stages.len();
@@ -1407,7 +1341,6 @@ mod tests {
             }
         }
 
-        // Compare every value: per-class and full-vector must be bit-identical.
         for stage_idx in 0..n_stages {
             let n_openings = openings_per_stage[stage_idx];
             for opening_idx in 0..n_openings {
@@ -1602,7 +1535,6 @@ mod tests {
         let corr_per_class = DecomposedCorrelation::build(&corr_model).unwrap();
         let mut corr_full = DecomposedCorrelation::build(&corr_model).unwrap();
 
-        // Generate tree via the per-class path.
         let tree_per_class = generate_opening_tree(
             base_seed,
             &stages,
@@ -1614,8 +1546,6 @@ mod tests {
         )
         .unwrap();
 
-        // Reproduce the full-vector path: generate all openings for a stage
-        // in one LHS batch, then apply full-vector spectral per opening.
         corr_full.resolve_positions(&entity_order);
 
         let n_stages = stages.len();
@@ -1714,7 +1644,6 @@ mod tests {
         let corr_per_class = DecomposedCorrelation::build(&corr_model).unwrap();
         let mut corr_full = DecomposedCorrelation::build(&corr_model).unwrap();
 
-        // Generate tree via the per-class path.
         let tree_per_class = generate_opening_tree(
             base_seed,
             &stages,
@@ -1726,8 +1655,6 @@ mod tests {
         )
         .unwrap();
 
-        // Reproduce the full-vector path: generate all openings for a stage
-        // in one QMC-Halton batch, then apply full-vector spectral per opening.
         corr_full.resolve_positions(&entity_order);
 
         let n_stages = stages.len();
@@ -2239,7 +2166,6 @@ mod tests {
             n_ncs: 0,
         };
 
-        // Tree generated with no noise groups.
         let tree_none = generate_opening_tree(
             42,
             &stages,
@@ -2251,7 +2177,6 @@ mod tests {
         )
         .unwrap();
 
-        // Tree generated with all-unique group IDs — no copying should occur.
         let unique_ids = [0u32, 1, 2, 3];
         let tree_unique = generate_opening_tree(
             42,
@@ -2313,12 +2238,10 @@ mod tests {
         )
         .unwrap();
 
-        // All stages must have 3 openings.
         for s in 0..4 {
             assert_eq!(tree.n_openings(s), 3, "stage {s} must have 3 openings");
         }
 
-        // Stages 1, 2, 3 must be bit-identical to stage 0 for each opening.
         for s in 1..4 {
             for o in 0..3 {
                 assert_eq!(
@@ -2363,7 +2286,6 @@ mod tests {
         )
         .unwrap();
 
-        // Intra-group: stage 1 must match stage 0.
         for o in 0..3 {
             assert_eq!(
                 tree.opening(0, o),
@@ -2372,7 +2294,6 @@ mod tests {
             );
         }
 
-        // Intra-group: stage 3 must match stage 2.
         for o in 0..3 {
             assert_eq!(
                 tree.opening(2, o),

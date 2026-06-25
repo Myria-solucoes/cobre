@@ -1,21 +1,11 @@
 //! Latin Hypercube Sampling (LHS) for batch and point-wise noise generation.
 //!
 //! - [`generate_lhs`]: batch LHS filling `n_openings × dim` N(0,1) values.
-//! - [`sample_lhs_point`]: point-wise LHS for a single scenario, no inter-worker coordination.
+//! - [`sample_lhs_point`]: point-wise LHS for a single scenario, no inter-worker
+//!   coordination.
 //!
-//! Both methods stratify each dimension into `n_openings` equal-probability strata,
-//! apply Fisher-Yates shuffling to break diagonal structure, and ensure marginal uniformity.
-//!
-//! **Batch algorithm**: for each dimension, generate stratified samples `u[k] = (k + U_k) / N`,
-//! shuffle a permutation, and write `output[perm[k] * dim + d] = norm_quantile(u[k])`.
-//!
-//! **Point-wise algorithm**: derive per-dimension permutations identically on all workers via
-//! `(sampling_seed, iteration, stage_id)`, look up `scenario`'s stratum, sample within-stratum
-//! offset independently, and compute `norm_quantile((stratum + offset) / N)`.
-//!
-//! Output layout: opening-major `output[opening * dim + entity]`.
-//!
-//! Determinism: same `(base_seed, stage_id)` always produces identical output.
+//! Output layout is opening-major: `output[opening * dim + entity]`. Determinism:
+//! the same `(base_seed, stage_id)` always produces identical output.
 
 use rand::RngExt;
 use rand_distr::Uniform;
@@ -37,10 +27,9 @@ pub(crate) fn fisher_yates(perm: &mut [usize], rng: &mut impl rand::Rng) {
 
 /// Fill `output` with `n_openings × dim` standard-normal N(0,1) values using LHS.
 ///
-/// Each dimension is independently stratified: the `N = n_openings` strata
-/// `[k/N, (k+1)/N)` each contribute exactly one sample, and a Fisher-Yates
-/// shuffle independently assigns strata to openings for every dimension.
-/// Output layout: `output[opening * dim + entity]`.
+/// Each dimension is independently stratified into `N = n_openings` strata, one
+/// sample each, with a per-dimension Fisher-Yates shuffle assigning strata to
+/// openings. Output layout: `output[opening * dim + entity]`.
 ///
 /// # Panics
 ///
@@ -74,8 +63,8 @@ pub fn generate_lhs(
     let n_f = n_openings as f64;
 
     for d in 0..dim {
-        // Generate stratified samples: u[k] = (k + U_k) / N where U_k ~ U(0,1).
-        // norm_quantile requires strictly positive input, so guard the k=0 case where u[0]=0.0 is possible.
+        // norm_quantile requires strictly positive input; clamp guards the k=0
+        // case where u[0] can be 0.0.
         #[allow(clippy::cast_precision_loss)]
         for (k, sample) in samples.iter_mut().enumerate() {
             let u = rng.sample(uniform);
@@ -83,13 +72,11 @@ pub fn generate_lhs(
             *sample = s.clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
         }
 
-        // Reset permutation to identity and shuffle.
         for (i, p) in perm.iter_mut().enumerate() {
             *p = i;
         }
         fisher_yates(&mut perm, &mut rng);
 
-        // Write permuted, quantile-transformed samples to output.
         for k in 0..n_openings {
             output[perm[k] * dim + d] = norm_quantile(samples[k]);
         }
@@ -155,7 +142,7 @@ pub fn sample_lhs_point(spec: &LhsPointSpec, output: &mut [f64], perm_scratch: &
     let scenario_idx = spec.scenario as usize;
 
     for slot in output.iter_mut().take(spec.dim) {
-        // Reset permutation to identity and shuffle. perm_rng advances identically on all workers.
+        // perm_rng advances identically on all workers, so the permutation matches.
         for (i, p) in perm.iter_mut().enumerate() {
             *p = i;
         }
@@ -258,8 +245,6 @@ mod tests {
         let dim = 4;
         let mut output = vec![0.0_f64; n_openings * dim];
         generate_lhs(1, 2, n_openings, dim, &mut output);
-        // The length contract is enforced by the caller; we verify it wasn't
-        // truncated or over-written by checking that all positions were touched.
         assert_eq!(output.len(), n_openings * dim);
     }
 
@@ -275,22 +260,8 @@ mod tests {
         }
     }
 
-    /// Each dimension must have exactly one sample per stratum (marginal uniformity).
-    ///
-    /// After applying Φ (the standard normal CDF) to the output values, the
-    /// stratum index `floor(Φ(x) * N)` must be a permutation of {0, …, N-1}.
-    ///
-    /// We use the complementary property of the BSM approximation:
-    /// `Φ(norm_quantile(p)) ≈ p`, so instead of applying the full CDF we
-    /// invert back: `floor(samples[k] * N)` must yield all values in 0..N,
-    /// where `samples[k]` is the original stratified sample.
-    ///
-    /// Because we do not expose `samples` from `generate_lhs`, we verify the
-    /// acceptance criterion directly: for each dimension, the floor indices
-    /// of the CDF-transformed output values form a permutation of {0, …, N-1}.
-    ///
-    /// `Φ(z)` is approximated via the logistic surrogate `1/(1+exp(-z * π/√3))`
-    /// for the acceptance test (sufficient precision for the stratum floor test).
+    /// Marginal uniformity: for each dimension, `floor(Φ(x) * N)` over the output
+    /// must be a permutation of {0, …, N-1} (Φ approximated via `libm_erf`).
     #[test]
     #[allow(
         clippy::cast_sign_loss,
@@ -304,7 +275,6 @@ mod tests {
         generate_lhs(42, 0, n_openings, dim, &mut output);
 
         let n_f = n_openings as f64;
-        // Approximate Φ(z) via the standard normal CDF using a simple approximation.
         let approx_cdf = |z: f64| -> f64 { 0.5 * (1.0 + libm_erf(z / std::f64::consts::SQRT_2)) };
 
         for d in 0..dim {
@@ -494,7 +464,6 @@ mod tests {
         let n_f = n as f64;
         let approx_cdf = |z: f64| -> f64 { 0.5 * (1.0 + libm_erf(z / std::f64::consts::SQRT_2)) };
 
-        // Collect per-dimension stratum indices across all scenarios.
         let mut strata_by_dim: Vec<Vec<usize>> = (0..dim).map(|_| Vec::with_capacity(n)).collect();
         for scenario in 0..n {
             let mut output = vec![0.0_f64; dim];
