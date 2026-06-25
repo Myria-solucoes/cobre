@@ -1,23 +1,12 @@
 //! Strongly-typed entity identifier used across all entity collections.
-//!
-//! [`EntityId`] wraps an `i32` (the type used in JSON input schemas) and
-//! prevents accidental confusion between entity IDs and collection indices.
 
 use core::fmt;
 
 /// Strongly-typed entity identifier.
 ///
-/// Wraps the `i32` identifier from JSON input files. The newtype pattern prevents
-/// accidental confusion between entity IDs and collection indices (`usize`), which
-/// is a common source of bugs in systems with both ID-based lookup and index-based
-/// access. `EntityId` is used as the key in `HashMap<EntityId, usize>` lookup tables
-/// and as the value in cross-reference fields (e.g., `Hydro::bus_id`, `Line::source_bus_id`).
-///
-/// Why `i32` and not `String`: All JSON entity schemas use integer IDs (`i32`). Integer
-/// keys are cheaper to hash, compare, and copy than strings — important because
-/// `EntityId` appears in every lookup table and cross-reference field. If a future
-/// input format requires string IDs, the newtype boundary isolates the change to
-/// `EntityId`'s internal representation and its `From`/`Into` impls.
+/// Newtype over the `i32` id from input schemas: distinguishing entity IDs from
+/// collection indices (`usize`) at the type level prevents confusing the two in
+/// systems with both ID-based lookup and index-based access.
 ///
 /// # Examples
 ///
