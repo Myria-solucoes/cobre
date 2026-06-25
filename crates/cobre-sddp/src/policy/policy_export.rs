@@ -3,9 +3,6 @@
 //! Shared conversion logic for extracting active cuts and basis data from a
 //! trained [`FutureCostFunction`] and [`TrainingResult`] into the `cobre-io`
 //! policy types needed by [`cobre_io::write_policy_checkpoint`].
-//!
-//! This module eliminates the duplicated conversion that previously existed
-//! independently in `cobre-cli` and `cobre-python`.
 
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
@@ -18,12 +15,8 @@ use crate::training::TrainingResult;
 
 /// Build per-stage vectors of **all** populated [`PolicyCutRecord`]s from the FCF pools.
 ///
-/// Both active and inactive cuts are included so the checkpoint preserves
-/// the full training history. Use [`build_active_indices`] to obtain the
-/// subset that is currently active in the LP.
-///
-/// Each record borrows its `coefficients` slice from the FCF, so the returned
-/// vectors are valid as long as `fcf` is alive.
+/// Both active and inactive cuts are included so the checkpoint preserves the
+/// full training history. Use [`build_active_indices`] for the active subset.
 #[must_use]
 pub fn build_stage_cut_records(fcf: &FutureCostFunction) -> Vec<Vec<PolicyCutRecord<'_>>> {
     fcf.pools
@@ -50,8 +43,6 @@ pub fn build_stage_cut_records(fcf: &FutureCostFunction) -> Vec<Vec<PolicyCutRec
 }
 
 /// Build per-stage active cut index lists from the stage cut records.
-///
-/// Returns only the `slot_index` values of records where `is_active` is `true`.
 #[must_use]
 pub fn build_active_indices(stage_records: &[Vec<PolicyCutRecord<'_>>]) -> Vec<Vec<u32>> {
     stage_records

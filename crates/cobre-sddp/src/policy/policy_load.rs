@@ -1,10 +1,5 @@
 //! Policy loading and compatibility validation.
 //!
-//! This module contains the validation logic for checking whether a loaded
-//! policy checkpoint is compatible with the current system configuration,
-//! and helpers for reconstructing solver state from deserialized checkpoint
-//! data.
-//!
 //! [`FutureCostFunction`]: crate::FutureCostFunction
 
 use cobre_io::PolicyCheckpointMetadata;
@@ -18,30 +13,23 @@ use crate::workspace::CapturedBasis;
 /// Resolve the per-stage warm-start cut counts from a loaded policy checkpoint.
 ///
 /// Returns a `Vec<u32>` of length `num_stages` for [`FutureCostFunction::new`].
-///
-/// - If `metadata.warm_start_counts` is non-empty, it is returned after length validation.
-/// - If `metadata.warm_start_counts` is empty (old checkpoint format), the scalar
-///   `warm_start_cuts` is broadcast to all stages.
+/// An empty `metadata.warm_start_counts` (old checkpoint format) broadcasts the
+/// scalar `warm_start_cuts` to all stages.
 ///
 /// # Errors
 ///
 /// Returns [`SddpError::Validation`] if `warm_start_counts.len() != num_stages`.
 ///
 /// [`FutureCostFunction::new`]: crate::FutureCostFunction::new
-///
-/// Currently unused in production code — the active warm-start path consumes
-/// `metadata.warm_start_counts` directly. Retained for the planned
-/// checkpoint-migration tool and is exercised by this module's own tests.
-// Rationale: exercised by this module's unit tests and kept as the public seam for a
-// checkpoint-migration tool that validates per-stage warm_start_counts compatibility;
-// removing it would leave that migration path without a validated entry point.
+// Rationale: kept as the validated entry point for the planned checkpoint-migration
+// tool (and exercised by this module's tests); the active path consumes
+// `metadata.warm_start_counts` directly.
 #[allow(dead_code)]
 pub(crate) fn resolve_warm_start_counts(
     metadata: &PolicyCheckpointMetadata,
     num_stages: usize,
 ) -> Result<Vec<u32>, SddpError> {
     if metadata.warm_start_counts.is_empty() {
-        // Old checkpoint: broadcast scalar to all stages.
         Ok(vec![metadata.warm_start_cuts; num_stages])
     } else if metadata.warm_start_counts.len() != num_stages {
         Err(SddpError::Validation(format!(
@@ -85,36 +73,24 @@ pub fn validate_policy_compatibility(
 
 /// Build a basis cache from deserialized checkpoint basis records.
 ///
-/// Returns a `Vec<Option<CapturedBasis>>` with one entry per stage. Stages with
-/// a matching record get `Some(CapturedBasis)` (with `u8` status codes widened
-/// to `i32`); stages without a record get `None`.
+/// Returns a `Vec<Option<CapturedBasis>>`, one entry per stage; stages without a
+/// matching record get `None` (`u8` status codes widen to `i32`).
 ///
 /// # Cut-slot reconstruction
 ///
-/// A checkpoint [`OwnedPolicyBasisRecord`](cobre_io::OwnedPolicyBasisRecord)
-/// stores `row_status` as `[template rows…, cut rows…]`, where the trailing
-/// `num_cut_rows` entries are the cut rows in capture-time
-/// [`CutPool::active_cuts`](crate::cut::pool::CutPool::active_cuts) order
-/// (active slots, increasing). To recover slot identity — which lets
-/// `reconstruct_basis` preserve a cut row's stored status across cut-set churn
-/// instead of falling back to BASIC — this function matches each basis record
-/// to its [`StageCutsReadResult`](cobre_io::StageCutsReadResult) by `stage_id`
-/// and derives `cut_row_slots` from the active cut records' `slot_index`
-/// values, in increasing order. `base_row_count` is then
-/// `row_status.len() - num_cut_rows`.
+/// `row_status` is `[template rows…, cut rows…]`, the trailing `num_cut_rows` in
+/// capture-time [`CutPool::active_cuts`](crate::cut::pool::CutPool::active_cuts)
+/// order (active slots, increasing). Slot identity is recovered by matching each
+/// basis record to its [`StageCutsReadResult`](cobre_io::StageCutsReadResult) by
+/// `stage_id` and taking the active records' `slot_index` in increasing order, so
+/// `reconstruct_basis` preserves stored cut-row statuses across cut-set churn.
 ///
 /// # Graceful fallback
 ///
-/// When the derived active-slot count does not equal `num_cut_rows`
-/// (e.g. cut selection deactivated cuts between capture and export, so the
-/// exported `num_cut_rows` — a populated-slot count — exceeds the active-slot
-/// count that the captured basis actually carries), or when a basis record has
-/// no matching cut record at all, this function falls back to the safe
-/// all-template behavior: `base_row_count = row_status.len()` and
-/// `cut_row_slots` empty. `reconstruct_basis` then copies the first
-/// `target.base_row_count` template statuses positionally and reconstructs
-/// every current cut row as BASIC (non-binding). This only changes the
-/// warm-start solve path, never the optimum.
+/// When the derived active-slot count ≠ `num_cut_rows` (cut selection deactivated
+/// cuts between capture and export) or no cut record matches, fall back to safe
+/// all-template behavior (empty `cut_row_slots`; every cut row reconstructs
+/// BASIC). This changes only the warm-start solve path, never the optimum.
 #[must_use]
 pub fn build_basis_cache_from_checkpoint(
     num_stages: usize,
@@ -131,11 +107,9 @@ pub fn build_basis_cache_from_checkpoint(
         let row_status: Vec<i32> = record.row_status.iter().map(|&r| i32::from(r)).collect();
 
         let num_cut = record.num_cut_rows as usize;
-        // Derive the active slot ids for this stage from the matched cut record.
-        // `build_stage_cut_records` exports cuts with `slot_index` equal to the
-        // pool slot, so the active records' `slot_index` values — taken in
-        // increasing order — reproduce the capture-time `active_cuts()` order
-        // that the basis row block was captured in.
+        // `build_stage_cut_records` sets `slot_index` to the pool slot, so the
+        // active records' `slot_index` in increasing order reproduce the
+        // capture-time `active_cuts()` order.
         let active_slots: Option<Vec<u32>> = stage_cuts
             .iter()
             .find(|sc| sc.stage_id == record.stage_id)
@@ -147,10 +121,6 @@ pub fn build_basis_cache_from_checkpoint(
                     .collect()
             });
 
-        // Slot-matched path: a cut record exists and its active-slot count
-        // matches the basis's trailing cut-row count, so the stored cut rows
-        // can be bound to slots. Otherwise fall back to the safe all-template
-        // behavior (empty `cut_row_slots`, every cut row reconstructs BASIC).
         let (base_row_count, cut_row_slots) = match active_slots {
             Some(slots) if slots.len() == num_cut && num_cut <= row_status.len() => {
                 (row_status.len() - num_cut, slots)
@@ -293,7 +263,6 @@ mod tests {
         let coefficients = vec![1.0_f64; state_dim];
         let n_cuts = cut_intercepts.len();
 
-        // Build cut records for each stage.
         let cut_records: Vec<Vec<cobre_io::PolicyCutRecord<'_>>> = (0..n_stages)
             .map(|_| {
                 cut_intercepts
