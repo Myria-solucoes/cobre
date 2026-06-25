@@ -1,17 +1,12 @@
 //! Microbenchmark for Dynamic Cut Selection candidate scoring.
 //!
-//! AC5 perf witness: compares the production batched `score_violated_candidates`
-//! (one GEMM per scoring pass over all eligible candidates) against a faithful
-//! per-candidate baseline that scores each candidate with its own single-row
-//! `dgemm` call (the per-candidate kernel shape). Both use the same
-//! single-threaded `matrixmultiply::dgemm` kernel, so the comparison isolates
-//! the call-shape change (batched N-row GEMM vs N individual 1-row GEMMs).
+//! Compares the production batched `score_violated_candidates` (one N-row GEMM
+//! per pass) against a per-candidate baseline scoring each candidate with its
+//! own single-row `dgemm`. Both use the same single-threaded
+//! `matrixmultiply::dgemm` kernel, so the comparison isolates the call-shape
+//! change (one N-row GEMM vs N individual 1-row GEMMs).
 //!
-//! Parameterized by candidate count (including the ≥ 10,000 case AC5 requires)
-//! and `n_state`. The ≥ 30% threshold check is operator-run from the recorded
-//! Criterion numbers — this harness just produces the before/after pair.
-//!
-//! Run with `cargo bench -p cobre-sddp --bench dcs_batched_scoring`.
+//! Parameterized by candidate count (incl. a ≥ 10,000 case) and `n_state`.
 
 #![allow(
     missing_docs,
@@ -48,12 +43,10 @@ fn fill_f64(buf: &mut [f64], seed: u64) {
     }
 }
 
-// --- faithful per-candidate baseline kernel ---------------------------------
-//
-// Inline copy of `src/gemm.rs::gemm_block` (which is `pub(crate)` and so not
-// reachable from a bench). Same `matrixmultiply::dgemm` call, identical strides,
-// so a single-row (`k_rows == 1`) invocation reproduces the per-candidate
-// dispatch exactly.
+// Inline copy of `gemm::gemm_block` (`pub(crate)`, unreachable from a bench):
+// identical `matrixmultiply::dgemm` call and strides, so a single-row
+// (`k_rows == 1`) invocation reproduces the per-candidate dispatch exactly.
+// Must stay faithful to the original — a hand-rolled dot would break the witness.
 #[allow(clippy::cast_possible_wrap)]
 fn gemm_block(
     coef: &[f64],
@@ -91,10 +84,9 @@ fn gemm_block(
     }
 }
 
-/// Per-candidate baseline: replays the exact filter/gather/score logic of
-/// `score_violated_candidates` but scores each surviving candidate with its own
-/// `gemm_block(coef, x*, 1, n_state, 1, ..)` call, as the per-candidate kernel
-/// did. Returns the violated count (mirroring the production signature).
+/// Per-candidate baseline: replays the filter/gather/score logic of
+/// `score_violated_candidates` faithfully, but scores each surviving candidate
+/// with its own single-row `gemm_block` call. Returns the violated count.
 #[allow(clippy::too_many_arguments)]
 fn score_per_candidate_baseline(
     pool: &CutPool,
@@ -159,9 +151,8 @@ fn score_per_candidate_baseline(
 
 // --- fixtures ---------------------------------------------------------------
 
-/// Build a pool of `k` active, non-resident, in-window candidate cuts with
-/// `n_state` coefficients each (state-dim = n_state), all generated at iteration
-/// 1. Deterministic in `seed`.
+/// Build a pool of `k` active, non-resident, in-window cuts (each one a
+/// candidate) with `n_state` coefficients, all generated at iteration 1.
 fn make_candidate_pool(k: usize, n_state: usize, seed: u64) -> CutPool {
     let mut pool = CutPool::new(k.max(1), n_state, k.max(1) as u32, 0);
     let mut state = seed;
@@ -176,8 +167,8 @@ fn make_candidate_pool(k: usize, n_state: usize, seed: u64) -> CutPool {
 }
 
 /// Primal vector for `StageIndexer::new(n_state, 0)`: state columns 0..n_state,
-/// theta at column 3*n_state. theta is driven strongly negative so most
-/// candidates are violated (exercises the sort + selection alongside scoring).
+/// theta at column 3*n_state, driven strongly negative so most candidates are
+/// violated (so the bench exercises the sort + selection alongside scoring).
 fn make_primal(n_state: usize, seed: u64) -> Vec<f64> {
     let theta = 3 * n_state;
     let mut primal = vec![0.0_f64; theta + 1];
@@ -191,7 +182,7 @@ fn bench_one(c: &mut Criterion, k: usize, n_state: usize) {
     let pool = make_candidate_pool(k, n_state, 0xDEAD_BEEF_CAFE_F00D);
     let primal = make_primal(n_state, 0xFEED_FACE_1234_5678);
     let resident = CutRowMap::new(k.max(1), 0); // empty: every cut a candidate
-    // nadic 10 mirrors the DcsParams default; k1 None = exactness path (all cuts).
+    // k1 None selects the exactness path (scores all cuts, no age cutoff).
     let params = DcsParams {
         k1: None,
         nadic: 10,
@@ -203,7 +194,6 @@ fn bench_one(c: &mut Criterion, k: usize, n_state: usize) {
     let mut group = c.benchmark_group("dcs_score");
     let id = format!("k{k}/n_state{n_state}");
 
-    // Batched (production) path.
     {
         let mut scratch = DcsScoringScratch::default();
         scratch.reserve(n_state, k);
@@ -226,7 +216,6 @@ fn bench_one(c: &mut Criterion, k: usize, n_state: usize) {
         });
     }
 
-    // Per-candidate baseline (per-candidate call shape).
     {
         let mut unscaled_state = Vec::with_capacity(n_state);
         let mut violations: Vec<(f64, u32)> = Vec::with_capacity(k);
