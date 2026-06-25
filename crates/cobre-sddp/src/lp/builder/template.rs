@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
-use cobre_core::{EntityId, Hydro, ResolvedBounds, Stage, System};
+use cobre_core::{ContractType, EntityId, Hydro, ResolvedBounds, Stage, System};
 use cobre_solver::StageTemplate;
 use cobre_stochastic::normal::precompute::PrecomputedNormal;
 use cobre_stochastic::par::precompute::PrecomputedPar;
@@ -265,6 +265,20 @@ pub struct StageGeometry {
     pub turbine_below_slack: Range<usize>,
     /// Generation-below-minimum slack column range (one per hydro per block).
     pub generation_below_slack: Range<usize>,
+    /// Import-contract column range (one per import contract per block); empty
+    /// `start..start` (not `0..0`) at the pumping-end column when there are none.
+    // Voice 4: the per-stage column-shape carrier; no production read site yet (the
+    // generic-constraint fill reads `StageLayout.contract_import`). The
+    // `#[allow(dead_code)]` refires when a reader lands.
+    #[allow(dead_code)]
+    pub contract_import: Range<usize>,
+    /// Export-contract column range (one per export contract per block); empty
+    /// `start..start` at the import-end column when there are none.
+    // Voice 4: the per-stage column-shape carrier; no production read site yet (the
+    // generic-constraint fill reads `StageLayout.contract_export`). The
+    // `#[allow(dead_code)]` refires when a reader lands.
+    #[allow(dead_code)]
+    pub contract_export: Range<usize>,
 
     // ── Per-stage row ranges, identity lists, and block count ────────────────
     /// Water-balance row range (one row per hydro). Count is stage-invariant
@@ -363,6 +377,10 @@ impl StageGeometry {
             outflow_above_slack: layout.outflow_above_slack.clone(),
             turbine_below_slack: layout.turbine_below_slack.clone(),
             generation_below_slack: layout.generation_below_slack.clone(),
+            contract_import: layout.col_contract_import_start
+                ..layout.col_contract_import_start + layout.n_contract_import * layout.n_blks,
+            contract_export: layout.col_contract_export_start
+                ..layout.col_contract_export_start + layout.n_contract_export * layout.n_blks,
             water_balance: layout.water_balance.clone(),
             load_balance: layout.load_balance.clone(),
             filling_target: layout.row_filling_target_start
@@ -812,6 +830,11 @@ pub(super) fn build_filling_v_target(
 ///
 /// Called once per `build_stage_templates` invocation, after the early-return
 /// guard for empty systems.
+// Rationale: too_many_lines — one linear pass of per-entity prep blocks (position
+// maps, anticipated metadata, contracts, discount factors) feeding a single
+// `TemplateBuildCtx` literal; splitting it would scatter the construction the
+// literal reads back, without removing any branching.
+#[allow(clippy::too_many_lines)]
 fn build_template_build_ctx<'a>(
     system: &'a System,
     inflow_method: InflowNonNegativityMethod,
@@ -863,6 +886,33 @@ fn build_template_build_ctx<'a>(
          station count disagrees with the entity slice",
         n_pumping,
         system.bounds().n_pumping()
+    );
+
+    // One id-sorted slice for both directions; the import/export split is derived
+    // here as counts (the dense per-direction column strides) by `contract_type`.
+    let contracts = system.contracts();
+    let contract_pos: BTreeMap<EntityId, usize> = contracts
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.id, i))
+        .collect();
+    let n_contract_import = contracts
+        .iter()
+        .filter(|c| c.contract_type == ContractType::Import)
+        .count();
+    let n_contract_export = contracts
+        .iter()
+        .filter(|c| c.contract_type == ContractType::Export)
+        .count();
+    // Fail fast on a contract-count divergence rather than silently reserving the
+    // wrong number of contract columns.
+    debug_assert_eq!(
+        contracts.len(),
+        system.bounds().n_contracts(),
+        "contracts.len() ({}) != bounds.n_contracts() ({}): resolved-bounds \
+         contract count disagrees with the entity slice",
+        contracts.len(),
+        system.bounds().n_contracts()
     );
 
     let load_bus_indices = collect_load_bus_indices(system, &bus_pos);
@@ -978,6 +1028,10 @@ fn build_template_build_ctx<'a>(
         pumping_stations,
         pumping_pos,
         n_pumping,
+        contracts,
+        contract_pos,
+        n_contract_import,
+        n_contract_export,
         diversion_upstream,
         n_hydros,
         n_thermals: system.thermals().len(),
@@ -1110,12 +1164,12 @@ mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
         AnticipatedConfig, Block, BlockMode, BoundsCountsSpec, BoundsDefaults, Bus,
-        BusStagePenalties, ContractStageBounds, DeficitSegment, EntityId, Hydro,
-        HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStagePenalties,
-        LineStageBounds, LineStagePenalties, LoadModel, NcsStagePenalties, NoiseMethod,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, PumpingStation, ResolvedBounds,
-        ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
-        SystemBuilder, Thermal, ThermalStageBounds,
+        BusStagePenalties, ContractStageBounds, ContractType, DeficitSegment, EnergyContract,
+        EntityId, Hydro, HydroGenerationModel, HydroPenalties, HydroStageBounds,
+        HydroStagePenalties, LineStageBounds, LineStagePenalties, LoadModel, NcsStagePenalties,
+        NoiseMethod, PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, PumpingStation,
+        ResolvedBounds, ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig, SystemBuilder, Thermal, ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -1634,6 +1688,384 @@ mod tests {
                 "stage {t}: scalar n_pumping must equal layout.n_pumping",
             );
         }
+    }
+
+    // ── Contract data threaded into TemplateBuildCtx and StageGeometry ─────────
+
+    /// Build an energy contract with the given id and direction (bus fixed to the
+    /// fixture bus; a non-degenerate price/power window).
+    fn fixture_contract(id: i32, contract_type: ContractType) -> EnergyContract {
+        EnergyContract {
+            id: EntityId(id),
+            name: format!("C{id}"),
+            bus_id: EntityId(1),
+            contract_type,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            price_per_mwh: 100.0,
+            min_mw: 0.0,
+            max_mw: 500.0,
+        }
+    }
+
+    /// Build a one-bus, two-hydro system with the supplied contracts and a single
+    /// `n_blks`-block study stage. `n_contracts` matches the slice so the
+    /// resolved-bounds count check holds; the two hydros and bus exist solely to
+    /// satisfy contract bus-reference validation and give the layout pumping-end
+    /// anchor a non-trivial column prefix.
+    fn system_with_contracts(contracts: Vec<EnergyContract>, n_blks: usize) -> cobre_core::System {
+        let n_contracts = contracts.len();
+        let n_hydros = 2_usize;
+        let n_stages = 1_usize;
+
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+
+        let hydros = vec![fixture_hydro(1), fixture_hydro(2)];
+
+        let blocks: Vec<Block> = (0..n_blks)
+            .map(|b| Block {
+                index: b,
+                name: format!("BLK{b}"),
+                duration_hours: 372.0,
+            })
+            .collect();
+
+        let stages: Vec<Stage> = vec![Stage {
+            index: 0,
+            id: 0,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks,
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: false,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }];
+
+        let load_models = vec![LoadModel {
+            bus_id: EntityId(1),
+            stage_id: 0,
+            mean_mw: 100.0,
+            std_mw: 0.0,
+        }];
+
+        let resolved_bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts,
+                n_stages,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 500.0,
+                    price_per_mwh: 100.0,
+                },
+            },
+        );
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages,
+            },
+            &PenaltiesDefaults {
+                hydro: default_hydro_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(hydros)
+            .contracts(contracts)
+            .stages(stages)
+            .load_models(load_models)
+            .bounds(resolved_bounds)
+            .penalties(penalties)
+            .build()
+            .expect("system_with_contracts: valid system")
+    }
+
+    /// One import + one export contract (declared out of ID order) are exposed
+    /// ID-sorted on the ctx; `contract_pos` maps each id to its slot, and the
+    /// per-direction counts are derived by `contract_type`.
+    #[test]
+    fn build_template_build_ctx_contracts_counted_and_pos_mapped() {
+        let contracts = vec![
+            fixture_contract(20, ContractType::Export),
+            fixture_contract(10, ContractType::Import),
+        ];
+        let system = system_with_contracts(contracts, 1);
+        let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+        let par_lp = PrecomputedPar::default();
+        let resolved_params = empty_resolved_params();
+
+        let (ctx, _, _) = super::build_template_build_ctx(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        );
+
+        assert_eq!(ctx.contracts.len(), 2);
+        let ids: Vec<i32> = ctx.contracts.iter().map(|c| c.id.0).collect();
+        assert_eq!(
+            ids,
+            vec![10, 20],
+            "ctx.contracts must be ID-sorted regardless of declaration order"
+        );
+        assert_eq!(ctx.n_contract_import, 1);
+        assert_eq!(ctx.n_contract_export, 1);
+        assert_eq!(ctx.contract_pos[&EntityId(10)], 0);
+        assert_eq!(ctx.contract_pos[&EntityId(20)], 1);
+        for (slot, contract) in ctx.contracts.iter().enumerate() {
+            assert_eq!(
+                ctx.contract_pos[&contract.id], slot,
+                "contract_pos[{:?}] must equal its slot in the sorted slice",
+                contract.id
+            );
+        }
+    }
+
+    /// With `n_blks == 2` and one import + one export contract, `from_layout`
+    /// populates each contract column range with `n_contracts * n_blks` columns:
+    /// import follows pumping, export follows import.
+    #[test]
+    fn stage_geometry_from_layout_populates_contract_ranges() {
+        let contracts = vec![
+            fixture_contract(10, ContractType::Import),
+            fixture_contract(20, ContractType::Export),
+        ];
+        let system = system_with_contracts(contracts, 2);
+        let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+        let par_lp = PrecomputedPar::default();
+        let resolved_params = empty_resolved_params();
+
+        let (ctx, _, _) = super::build_template_build_ctx(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        );
+        let stage = system
+            .stages()
+            .iter()
+            .find(|s| s.id >= 0)
+            .expect("one study stage");
+        let state = state_layout_for(&ctx);
+        let layout = super::super::layout::StageLayout::new(&ctx, &state, stage, 0);
+        let geometry = super::StageGeometry::from_layout(&layout);
+
+        assert_eq!(geometry.contract_import.len(), 2, "1 import * 2 blocks");
+        assert_eq!(geometry.contract_export.len(), 2, "1 export * 2 blocks");
+        assert_eq!(
+            geometry.contract_import.start, layout.col_contract_import_start,
+            "import range anchored at the layout import-block start"
+        );
+        assert_eq!(
+            geometry.contract_export.start, geometry.contract_import.end,
+            "export block immediately follows the import block"
+        );
+    }
+
+    /// A contract-free system yields empty contract ranges anchored at the
+    /// pumping-end column (`start..start`, not `0..0`), leaving the prior column
+    /// layout byte-identical (parity-neutral).
+    #[test]
+    fn stage_geometry_from_layout_empty_contracts_are_pumping_end_anchored() {
+        let system = system_with_contracts(vec![], 2);
+        let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+        let par_lp = PrecomputedPar::default();
+        let resolved_params = empty_resolved_params();
+
+        let (ctx, _, _) = super::build_template_build_ctx(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        );
+        let stage = system
+            .stages()
+            .iter()
+            .find(|s| s.id >= 0)
+            .expect("one study stage");
+        let state = state_layout_for(&ctx);
+        let layout = super::super::layout::StageLayout::new(&ctx, &state, stage, 0);
+        let col_pumping_end = layout.col_pumping_start + layout.n_pumping * layout.n_blks;
+        let geometry = super::StageGeometry::from_layout(&layout);
+
+        assert!(geometry.contract_import.is_empty());
+        assert!(geometry.contract_export.is_empty());
+        assert_eq!(
+            geometry.contract_import.start, col_pumping_end,
+            "empty import range anchors at the pumping-end column, not 0"
+        );
+        assert_eq!(
+            geometry.contract_export.start, col_pumping_end,
+            "empty export range anchors at the pumping-end column, not 0"
+        );
+    }
+
+    /// A resolved-bounds count divergence (one contract entity, `n_contracts: 0`
+    /// in the bounds table) trips the `debug_assert_eq!` in
+    /// `build_template_build_ctx`.
+    #[test]
+    #[should_panic(expected = "resolved-bounds")]
+    fn build_template_build_ctx_contract_count_divergence_panics() {
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+        let stages: Vec<Stage> = vec![Stage {
+            index: 0,
+            id: 0,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "BLK0".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: false,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }];
+        let load_models = vec![LoadModel {
+            bus_id: EntityId(1),
+            stage_id: 0,
+            mean_mw: 100.0,
+            std_mw: 0.0,
+        }];
+        // n_contracts: 0 in the bounds table while one contract entity exists.
+        let resolved_bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 1,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 0,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: 1,
+            },
+            &PenaltiesDefaults {
+                hydro: default_hydro_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+        let system = SystemBuilder::new()
+            .buses(vec![bus])
+            .contracts(vec![fixture_contract(1, ContractType::Import)])
+            .stages(stages)
+            .load_models(load_models)
+            .bounds(resolved_bounds)
+            .penalties(penalties)
+            .build()
+            .expect("valid system; the count mismatch is caught downstream");
+        let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+        let par_lp = PrecomputedPar::default();
+        let resolved_params = empty_resolved_params();
+
+        let _ = super::build_template_build_ctx(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        );
     }
 
     // ── AC-1 ─────────────────────────────────────────────────────────────────
@@ -2229,6 +2661,10 @@ mod tests {
             pumping_stations: ctx_a.pumping_stations,
             pumping_pos: ctx_a.pumping_pos.clone(),
             n_pumping: ctx_a.n_pumping,
+            contracts: ctx_a.contracts,
+            contract_pos: ctx_a.contract_pos.clone(),
+            n_contract_import: ctx_a.n_contract_import,
+            n_contract_export: ctx_a.n_contract_export,
             diversion_upstream: ctx_a.diversion_upstream.clone(),
             n_hydros: ctx_a.n_hydros,
             n_thermals: ctx_a.n_thermals,

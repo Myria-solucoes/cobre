@@ -1,4 +1,4 @@
-use cobre_core::Stage;
+use cobre_core::{ContractType, Stage};
 
 use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
 
@@ -52,6 +52,7 @@ pub(super) fn fill_stage_columns(
     fill_operational_slack_columns(ctx, stage, stage_idx, layout, b);
     fill_ncs_columns(ctx, stage, stage_idx, layout, b);
     fill_pumping_columns(ctx, stage, stage_idx, layout, b);
+    fill_contract_columns(ctx, stage, stage_idx, layout, b);
     fill_filling_target_columns(ctx, stage_idx, layout, b);
     fill_filled_min_storage_floor_columns(ctx, stage_idx, layout, b);
     fill_z_inflow_columns(layout, b);
@@ -741,6 +742,73 @@ pub(super) fn fill_pumping_columns(
     }
 }
 
+/// Energy-contract columns. The family base (`col_contract_import_start` /
+/// `col_contract_export_start`) is addressed by the PER-FAMILY slot (the running
+/// position within its own direction), not by `c_sys`.
+///
+/// A commissioning-dormant contract has BOTH bounds forced to `[0, 0]`: zeroing only
+/// `max` would leave the infeasible `[min > 0, 0]` for a take-or-pay floor.
+///
+/// The objective is `price_per_mwh * block_hours`, written UNSCALED and UNNEGATED for
+/// both families and regardless of commissioning — the stored price sign carries
+/// direction (import `> 0` cost, export `< 0` revenue) and the prescaling pass owns
+/// `col_scale`. A dormant `[0, 0]` column with a priced coefficient is a no-op.
+fn fill_contract_columns(
+    ctx: &TemplateBuildCtx<'_>,
+    stage: &Stage,
+    stage_idx: usize,
+    layout: &StageLayout,
+    bufs: &mut ColumnBufs<'_>,
+) {
+    let grid = layout.block_grid();
+    let mut import_slot = 0_usize;
+    let mut export_slot = 0_usize;
+    for (c_sys, contract) in ctx.contracts.iter().enumerate() {
+        let active = crate::lp_builder::commissioning_active(
+            contract.entry_stage_id,
+            contract.exit_stage_id,
+            stage.id,
+        );
+        let cb = ctx.resolved.bounds.contract_bounds(c_sys, stage_idx);
+        let (base, family_slot, family_count) = match contract.contract_type {
+            ContractType::Import => {
+                let slot = import_slot;
+                import_slot += 1;
+                (
+                    layout.col_contract_import_start,
+                    slot,
+                    layout.n_contract_import,
+                )
+            }
+            ContractType::Export => {
+                let slot = export_slot;
+                export_slot += 1;
+                (
+                    layout.col_contract_export_start,
+                    slot,
+                    layout.n_contract_export,
+                )
+            }
+        };
+        debug_assert!(
+            family_slot < family_count,
+            "contract family slot {family_slot} out of range {family_count} at stage {stage_idx}"
+        );
+        for blk in 0..layout.n_blks {
+            let col = grid.flat(base, family_slot, blk);
+            if active {
+                bufs.col_lower[col] = cb.min_mw;
+                bufs.col_upper[col] = cb.max_mw;
+            } else {
+                bufs.col_lower[col] = 0.0;
+                bufs.col_upper[col] = 0.0;
+            }
+            let block_hours = stage.blocks[blk].duration_hours;
+            bufs.objective[col] = cb.price_per_mwh * block_hours;
+        }
+    }
+}
+
 /// Per-stage `σ_fill`-target slack columns: one stage-level slack per Filling-phase
 /// filling hydro. `[0, +∞)`, objective is the RESOLVED `filling_target_violation_cost`,
 /// written UNSCALED (the caller divides non-theta entries by `COST_SCALE_FACTOR`).
@@ -1052,6 +1120,10 @@ mod diversion_bound_tests {
                 pumping_stations: &[],
                 pumping_pos: BTreeMap::new(),
                 n_pumping: 0,
+                contracts: &[],
+                contract_pos: BTreeMap::new(),
+                n_contract_import: 0,
+                n_contract_export: 0,
                 diversion_upstream: HashMap::new(),
                 n_hydros: 1,
                 n_thermals: 0,
@@ -1416,6 +1488,10 @@ mod filling_phase_gating_tests {
                 pumping_stations: &[],
                 pumping_pos: BTreeMap::new(),
                 n_pumping: 0,
+                contracts: &[],
+                contract_pos: BTreeMap::new(),
+                n_contract_import: 0,
+                n_contract_export: 0,
                 diversion_upstream: HashMap::new(),
                 n_hydros: 1,
                 n_thermals: 0,
@@ -2078,6 +2154,10 @@ mod anticipated_objective_tests {
                 pumping_stations: &[],
                 pumping_pos: BTreeMap::new(),
                 n_pumping: 0,
+                contracts: &[],
+                contract_pos: BTreeMap::new(),
+                n_contract_import: 0,
+                n_contract_export: 0,
                 diversion_upstream: HashMap::new(),
                 n_hydros: 0,
                 n_thermals: 2,
@@ -2551,6 +2631,10 @@ mod block_family_slack_tests {
                 pumping_stations: &[],
                 pumping_pos: BTreeMap::new(),
                 n_pumping: 0,
+                contracts: &[],
+                contract_pos: BTreeMap::new(),
+                n_contract_import: 0,
+                n_contract_export: 0,
                 diversion_upstream: HashMap::new(),
                 n_hydros: N_HYDROS,
                 n_thermals: 0,
@@ -2660,5 +2744,319 @@ mod block_family_slack_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::float_cmp,
+    clippy::similar_names
+)]
+mod contract_column_tests {
+    use std::collections::{BTreeMap, HashMap};
+
+    use cobre_core::entities::energy_contract::{ContractType, EnergyContract};
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, CascadeTopology, ContractStageBounds, EntityId,
+        HydroStageBounds, LineStageBounds, PumpingStageBounds, ResolvedBounds,
+        ResolvedExchangeFactors, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
+        ResolvedPenalties, ThermalStageBounds,
+    };
+    use cobre_stochastic::par::precompute::PrecomputedPar;
+
+    use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
+    use crate::resolved_parameters::ResolvedParameters;
+
+    use super::super::layout::ResolvedTables;
+    use super::super::test_support::state_layout_for;
+    use super::{ColumnBufs, StageLayout, TemplateBuildCtx, fill_contract_columns};
+
+    const N_STAGES: usize = 1;
+    const STAGE_IDX: usize = 0;
+    const BLOCK_HOURS: f64 = 730.0;
+
+    fn contract(
+        id: i32,
+        contract_type: ContractType,
+        entry_stage_id: Option<i32>,
+    ) -> EnergyContract {
+        EnergyContract {
+            id: EntityId(id),
+            name: format!("C{id}"),
+            bus_id: EntityId(1),
+            contract_type,
+            entry_stage_id,
+            exit_stage_id: None,
+            price_per_mwh: 0.0,
+            min_mw: 0.0,
+            max_mw: 0.0,
+        }
+    }
+
+    fn bounds_with_contracts(n_contracts: usize) -> ResolvedBounds {
+        ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts,
+                n_stages: N_STAGES,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 0.0,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 0.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    max_diversion_m3s: None,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        )
+    }
+
+    /// Owns the borrow targets for a contract-only `TemplateBuildCtx`.
+    struct ContractFixtures {
+        par_lp: PrecomputedPar,
+        cascade: CascadeTopology,
+        bounds: ResolvedBounds,
+        penalties: ResolvedPenalties,
+        production_models: ProductionModelSet,
+        evaporation_models: EvaporationModelSet,
+        resolved_generic_bounds: cobre_core::ResolvedGenericConstraintBounds,
+        resolved_load_factors: ResolvedLoadFactors,
+        resolved_exchange_factors: ResolvedExchangeFactors,
+        resolved_ncs_bounds: ResolvedNcsBounds,
+        resolved_ncs_factors: ResolvedNcsFactors,
+        resolved_parameters: ResolvedParameters,
+        contracts: Vec<EnergyContract>,
+    }
+
+    impl ContractFixtures {
+        fn new(contracts: Vec<EnergyContract>) -> Self {
+            Self {
+                par_lp: PrecomputedPar::default(),
+                cascade: CascadeTopology::build(&[]),
+                bounds: bounds_with_contracts(contracts.len()),
+                penalties: ResolvedPenalties::empty(),
+                production_models: ProductionModelSet::new(vec![], 0, 1),
+                evaporation_models: EvaporationModelSet::new(vec![]),
+                resolved_generic_bounds: cobre_core::ResolvedGenericConstraintBounds::empty(),
+                resolved_load_factors: ResolvedLoadFactors::empty(),
+                resolved_exchange_factors: ResolvedExchangeFactors::empty(),
+                resolved_ncs_bounds: ResolvedNcsBounds::empty(),
+                resolved_ncs_factors: ResolvedNcsFactors::empty(),
+                resolved_parameters: ResolvedParameters {
+                    per_param: vec![],
+                    id_to_slot: vec![],
+                },
+                contracts,
+            }
+        }
+
+        fn set_contract_bounds(&mut self, c_sys: usize, min_mw: f64, max_mw: f64, price: f64) {
+            let cell = self.bounds.contract_bounds_mut(c_sys, STAGE_IDX);
+            cell.min_mw = min_mw;
+            cell.max_mw = max_mw;
+            cell.price_per_mwh = price;
+        }
+
+        fn make_ctx(&self) -> TemplateBuildCtx<'_> {
+            let n_contract_import = self
+                .contracts
+                .iter()
+                .filter(|c| c.contract_type == ContractType::Import)
+                .count();
+            let n_contract_export = self
+                .contracts
+                .iter()
+                .filter(|c| c.contract_type == ContractType::Export)
+                .count();
+            let contract_pos: BTreeMap<EntityId, usize> = self
+                .contracts
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (c.id, i))
+                .collect();
+            TemplateBuildCtx {
+                hydros: &[],
+                thermals: &[],
+                lines: &[],
+                buses: &[],
+                load_models: &[],
+                cascade: &self.cascade,
+                resolved: ResolvedTables {
+                    bounds: &self.bounds,
+                    penalties: &self.penalties,
+                    resolved_generic_bounds: &self.resolved_generic_bounds,
+                    resolved_load_factors: &self.resolved_load_factors,
+                    resolved_exchange_factors: &self.resolved_exchange_factors,
+                    resolved_ncs_bounds: &self.resolved_ncs_bounds,
+                    resolved_ncs_factors: &self.resolved_ncs_factors,
+                    resolved_parameters: &self.resolved_parameters,
+                },
+                hydro_pos: BTreeMap::new(),
+                thermal_pos: BTreeMap::new(),
+                line_pos: BTreeMap::new(),
+                bus_pos: BTreeMap::new(),
+                par_lp: &self.par_lp,
+                production_models: &self.production_models,
+                evaporation_models: &self.evaporation_models,
+                generic_constraints: &[],
+                non_controllable_sources: &[],
+                pumping_stations: &[],
+                pumping_pos: BTreeMap::new(),
+                n_pumping: 0,
+                contracts: &self.contracts,
+                contract_pos,
+                n_contract_import,
+                n_contract_export,
+                diversion_upstream: HashMap::new(),
+                n_hydros: 0,
+                n_thermals: 0,
+                n_lines: 0,
+                n_buses: 0,
+                max_par_order: 0,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
+                anticipated_windows: vec![],
+                study_stage_ids: vec![],
+                has_penalty: false,
+                cumulative_discount_factors: vec![1.0; N_STAGES],
+                total_hours_per_stage: vec![744.0; N_STAGES],
+                filling_v_target: BTreeMap::new(),
+            }
+        }
+    }
+
+    /// Single-block stage at `STAGE_IDX` with `id = 0` and `BLOCK_HOURS` duration.
+    fn one_block_stage() -> cobre_core::Stage {
+        use chrono::NaiveDate;
+        use cobre_core::{
+            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+            StageStateConfig,
+        };
+        Stage {
+            index: STAGE_IDX,
+            id: 0,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "BLK0".to_string(),
+                duration_hours: BLOCK_HOURS,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: false,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }
+    }
+
+    /// Run `fill_contract_columns` and return `(col_lower, col_upper, objective)`
+    /// plus the two family-base offsets the assertions read.
+    fn run_fill(fixtures: &ContractFixtures) -> (Vec<f64>, Vec<f64>, Vec<f64>, usize, usize) {
+        let stage = one_block_stage();
+        let ctx = fixtures.make_ctx();
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, STAGE_IDX);
+        let mut col_lower = vec![0.0_f64; layout.num_cols];
+        let mut col_upper = vec![f64::INFINITY; layout.num_cols];
+        let mut objective = vec![0.0_f64; layout.num_cols];
+        let mut bufs = ColumnBufs {
+            col_lower: &mut col_lower,
+            col_upper: &mut col_upper,
+            objective: &mut objective,
+        };
+        fill_contract_columns(&ctx, &stage, STAGE_IDX, &layout, &mut bufs);
+        (
+            col_lower,
+            col_upper,
+            objective,
+            layout.col_contract_import_start,
+            layout.col_contract_export_start,
+        )
+    }
+
+    /// An active import contract carries its resolved `[min_mw, max_mw]` bounds and a
+    /// `price * block_hours` objective with the stored (positive = cost) sign.
+    #[test]
+    fn import_contract_bounds_and_objective() {
+        let mut fixtures = ContractFixtures::new(vec![contract(1, ContractType::Import, None)]);
+        fixtures.set_contract_bounds(0, 10.0, 100.0, 200.0);
+
+        let (col_lower, col_upper, objective, import_start, _) = run_fill(&fixtures);
+        assert_eq!(col_lower[import_start], 10.0);
+        assert_eq!(col_upper[import_start], 100.0);
+        assert_eq!(objective[import_start], 200.0 * BLOCK_HOURS);
+    }
+
+    /// An active export contract keeps the stored negative price sign in the
+    /// objective — the wiring must NOT negate it.
+    #[test]
+    fn export_contract_objective_keeps_negative_sign() {
+        let mut fixtures = ContractFixtures::new(vec![contract(1, ContractType::Export, None)]);
+        fixtures.set_contract_bounds(0, 0.0, 500.0, -150.0);
+
+        let (_, _, objective, _, export_start) = run_fill(&fixtures);
+        assert_eq!(objective[export_start], -150.0 * BLOCK_HOURS);
+    }
+
+    /// A contract whose entry window opens after the current stage is dormant: BOTH
+    /// bounds are pinned to zero at every block (never `[min > 0, 0]`).
+    #[test]
+    fn dormant_contract_zero_pins_both_bounds() {
+        let mut fixtures = ContractFixtures::new(vec![contract(1, ContractType::Import, Some(2))]);
+        fixtures.set_contract_bounds(0, 25.0, 100.0, 200.0);
+
+        let (col_lower, col_upper, _, import_start, _) = run_fill(&fixtures);
+        assert_eq!(col_lower[import_start], 0.0);
+        assert_eq!(col_upper[import_start], 0.0);
+    }
+
+    /// A take-or-pay floor (`min_mw > 0`) lands on `col_lower` as a hard lower bound.
+    #[test]
+    fn take_or_pay_floor_sets_col_lower() {
+        let mut fixtures = ContractFixtures::new(vec![contract(1, ContractType::Import, None)]);
+        fixtures.set_contract_bounds(0, 50.0, 100.0, 200.0);
+
+        let (col_lower, _, _, import_start, _) = run_fill(&fixtures);
+        assert_eq!(col_lower[import_start], 50.0);
     }
 }

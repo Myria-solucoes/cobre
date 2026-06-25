@@ -21,7 +21,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
-use cobre_core::{CascadeTopology, ConstraintExpression, EntityId, PumpingStation, VariableRef};
+use cobre_core::{
+    CascadeTopology, ConstraintExpression, ContractType, EnergyContract, EntityId, PumpingStation,
+    VariableRef,
+};
 
 use crate::hydro_models::{ProductionModelSet, ResolvedProductionModel};
 use crate::indexer::{BlockGrid, EvaporationIndices, StateLayout};
@@ -55,6 +58,10 @@ pub(crate) struct GenericResolverGeom<'a> {
     pub line_rev: &'a Range<usize>,
     /// Bus-excess column range.
     pub excess: &'a Range<usize>,
+    /// Import-contract column range (one per import contract per block).
+    pub contract_import: &'a Range<usize>,
+    /// Export-contract column range (one per export contract per block).
+    pub contract_export: &'a Range<usize>,
     /// FPHA generation column range.
     pub generation: &'a Range<usize>,
     /// Bus-deficit column range.
@@ -131,6 +138,18 @@ pub(crate) struct PumpingRefs<'a> {
     pub pumping_pos: &'a BTreeMap<EntityId, usize>,
 }
 
+/// Borrowed contract context for resolving `ContractImport`/`ContractExport`.
+/// Consulted only by those two arms; grouped to keep [`resolve_variable_ref`] under
+/// the `too_many_arguments` threshold.
+pub(crate) struct ContractRefs<'a> {
+    /// Energy contracts in canonical ID-sorted slot order (one slice for both
+    /// directions); [`contract_family_slot`] derives a contract's per-family slot by
+    /// counting same-direction contracts that precede it.
+    pub contracts: &'a [EnergyContract],
+    /// Contract id → combined slot into [`ContractRefs::contracts`].
+    pub contract_pos: &'a BTreeMap<EntityId, usize>,
+}
+
 /// Map a [`VariableRef`] and block index to LP column indices with multipliers.
 ///
 /// Returns a `Vec<(column_index, coefficient_multiplier)>`; the caller scales each
@@ -159,6 +178,7 @@ pub(crate) fn resolve_variable_ref(
     positions: &EntityPositionMaps<'_>,
     cascade_refs: &CascadeRefs<'_>,
     pumping_refs: &PumpingRefs<'_>,
+    contract_refs: &ContractRefs<'_>,
 ) -> Vec<(usize, f64)> {
     let hydro_pos = positions.hydro;
     let thermal_pos = positions.thermal;
@@ -306,27 +326,31 @@ pub(crate) fn resolve_variable_ref(
             |station| station.consumption_mw_per_m3s,
         ),
 
-        // Contracts carry no LP column: `block_col_range` resolves both contract
-        // families to the empty `0..0` range. The `debug_assert!` is the seam a
-        // future contract-column implementation extends — it fires if a non-empty
-        // range is wired without also emitting the resolved column(s) here, so the
-        // empty return cannot silently swallow real contract columns.
-        VariableRef::ContractImport { .. } => {
-            debug_assert!(
-                block_col_range(geom, ElementKind::ContractImport).is_empty(),
-                "ContractImport gained an LP column range but this arm still emits no \
-                 (column, coefficient) pair — wire the contract-column resolution here",
-            );
-            vec![]
-        }
-        VariableRef::ContractExport { .. } => {
-            debug_assert!(
-                block_col_range(geom, ElementKind::ContractExport).is_empty(),
-                "ContractExport gained an LP column range but this arm still emits no \
-                 (column, coefficient) pair — wire the contract-column resolution here",
-            );
-            vec![]
-        }
+        VariableRef::ContractImport {
+            contract_id,
+            block_id,
+        } => resolve_contract_column(
+            *contract_id,
+            *block_id,
+            block_idx,
+            grid,
+            block_col_range(geom, ElementKind::ContractImport).start,
+            ContractType::Import,
+            contract_refs,
+        ),
+
+        VariableRef::ContractExport {
+            contract_id,
+            block_id,
+        } => resolve_contract_column(
+            *contract_id,
+            *block_id,
+            block_idx,
+            grid,
+            block_col_range(geom, ElementKind::ContractExport).start,
+            ContractType::Export,
+            contract_refs,
+        ),
 
         // Registered in the data model but no LP decision column: withdrawal is a
         // schedule fixed by bounds; non-controllable sources carry no decision column.
@@ -682,6 +706,65 @@ fn resolve_pumping_column(
     vec![(col, coeff_fn(station))]
 }
 
+/// A contract's [`ContractType`] and its PER-FAMILY slot — the count of
+/// same-direction contracts that precede `c_sys` in the id-sorted `contracts` slice.
+///
+/// The dense column layout addresses each family by this per-family slot (the running
+/// position within its own direction), NOT the combined slot, so both the LP-column
+/// fill and the resolver must agree on it; sharing this one derivation keeps them
+/// consistent.
+pub(crate) fn contract_family_slot(
+    contracts: &[EnergyContract],
+    c_sys: usize,
+) -> (ContractType, usize) {
+    let contract_type = contracts[c_sys].contract_type;
+    let family_slot = contracts[..c_sys]
+        .iter()
+        .filter(|c| c.contract_type == contract_type)
+        .count();
+    (contract_type, family_slot)
+}
+
+/// Resolve `ContractImport`/`ContractExport` to the block-major contract column.
+///
+/// The injection/withdrawal LOAD-BALANCE sign is owned by the load-balance fill, not
+/// here: the resolved coefficient is the variable's own unit `+1.0` (the
+/// generic-constraint coefficient is the user's), matching `resolve_pumping_column`'s
+/// `|_| 1.0`.
+///
+/// The address `grid.flat(base, family_slot, eff_blk)` uses the contract's per-family
+/// slot ([`contract_family_slot`]) so the import block precedes the export block under
+/// the dense layout. A dormant (commissioning-window-inactive) contract keeps its
+/// `[0, 0]` column, so the column always exists.
+///
+/// Returns an empty vec on an unknown contract id (`contract_pos` miss) or a
+/// direction mismatch (the referenced family differs from the contract's
+/// `contract_type` — a referential-validation gap), mirroring the pumping precedent.
+/// No panic.
+fn resolve_contract_column(
+    contract_id: EntityId,
+    block_id: Option<usize>,
+    block_idx: usize,
+    grid: BlockGrid,
+    base: usize,
+    family: ContractType,
+    contract_refs: &ContractRefs<'_>,
+) -> Vec<(usize, f64)> {
+    let Some(&c_sys) = contract_refs.contract_pos.get(&contract_id) else {
+        return vec![];
+    };
+    let Some(contract) = contract_refs.contracts.get(c_sys) else {
+        return vec![];
+    };
+    if contract.contract_type != family {
+        return vec![];
+    }
+    let (_, family_slot) = contract_family_slot(contract_refs.contracts, c_sys);
+    let eff_blk = block_id.unwrap_or(block_idx);
+    let col = grid.flat(base, family_slot, eff_blk);
+    vec![(col, 1.0)]
+}
+
 /// Resolve a block-level LP variable to a `(column_index, multiplier)` pair via the
 /// single-owner [`BlockGrid::flat`] address (`eff_blk = ref_block_id.unwrap_or(...)`);
 /// empty vec on a `pos_map` miss.
@@ -726,12 +809,8 @@ enum ElementKind {
 /// `geom.spillage` for `Turbine`) is caught here once instead of open-coded and
 /// silently wrong at each `col_start` read.
 ///
-/// `ContractImport`/`ContractExport` return the empty `0..0` sentinel (no LP columns)
-/// — the single owner of the contract column range, so wiring real contract columns
-/// later is one edit here.
-///
-/// Returns an **owned** `Range<usize>` so the `0..0` sentinel is returnable without
-/// tying the result's lifetime to `geom`; do NOT change this to `&Range<usize>`.
+/// Returns an **owned** `Range<usize>` so an empty range is returnable without tying
+/// the result's lifetime to `geom`; do NOT change this to `&Range<usize>`.
 #[must_use]
 fn block_col_range(geom: &GenericResolverGeom<'_>, kind: ElementKind) -> Range<usize> {
     match kind {
@@ -742,7 +821,8 @@ fn block_col_range(geom: &GenericResolverGeom<'_>, kind: ElementKind) -> Range<u
         ElementKind::LineFwd => geom.line_fwd.clone(),
         ElementKind::LineRev => geom.line_rev.clone(),
         ElementKind::Excess => geom.excess.clone(),
-        ElementKind::ContractImport | ElementKind::ContractExport => 0..0,
+        ElementKind::ContractImport => geom.contract_import.clone(),
+        ElementKind::ContractExport => geom.contract_export.clone(),
     }
 }
 
@@ -757,11 +837,13 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
 
     use cobre_core::entities::{HydroGenerationModel, HydroPenalties};
-    use cobre_core::{CascadeTopology, EntityId, Hydro, PumpingStation, VariableRef};
+    use cobre_core::{
+        CascadeTopology, ContractType, EnergyContract, EntityId, Hydro, PumpingStation, VariableRef,
+    };
 
     use super::{
-        CascadeRefs, ElementKind, GenericResolverGeom, PumpingRefs, block_col_range,
-        resolve_variable_ref, variable_ref_is_block_independent,
+        CascadeRefs, ContractRefs, ElementKind, GenericResolverGeom, PumpingRefs, block_col_range,
+        contract_family_slot, resolve_variable_ref, variable_ref_is_block_independent,
     };
     use crate::hydro_models::{FphaPlane, ProductionModelSet, ResolvedProductionModel};
     use crate::indexer::StateLayout;
@@ -793,6 +875,27 @@ mod tests {
         max_deficit_segments: usize,
         anticipated_thermal_indices: &[usize],
     ) -> GenericResolverGeom<'a> {
+        make_geom_with_contracts(
+            indexer,
+            state,
+            max_deficit_segments,
+            anticipated_thermal_indices,
+            &indexer.contract_import,
+            &indexer.contract_export,
+        )
+    }
+
+    /// Like [`make_geom`], but with explicit contract column ranges. The
+    /// `geometry` fixture hardcodes both contract ranges to `0..0`, so the contract
+    /// resolution / `block_col_range` tests inject their own non-empty ranges here.
+    fn make_geom_with_contracts<'a>(
+        indexer: &'a StageGeometry,
+        state: &'a StateLayout,
+        max_deficit_segments: usize,
+        anticipated_thermal_indices: &[usize],
+        contract_import: &'a std::ops::Range<usize>,
+        contract_export: &'a std::ops::Range<usize>,
+    ) -> GenericResolverGeom<'a> {
         // Production builds the `anticipated_local_by_sys_pos` reverse map on the
         // per-stage `StageLayout`; the non-state anticipated identity list lives on
         // `StudyDimensions`, so the test passes it in here. Reconstruct the
@@ -814,6 +917,8 @@ mod tests {
             line_fwd: &indexer.line_fwd,
             line_rev: &indexer.line_rev,
             excess: &indexer.excess,
+            contract_import,
+            contract_export,
             generation: &indexer.generation,
             deficit: &indexer.deficit,
             max_deficit_segments,
@@ -1045,6 +1150,14 @@ mod tests {
             pumping_stations: &no_stations,
             pumping_pos: &empty_pumping_pos,
         };
+        // Non-contract paths ignore the contract context; pass an empty one, so the
+        // ContractImport/ContractExport lookup misses and yields [].
+        let no_contracts: Vec<EnergyContract> = Vec::new();
+        let empty_contract_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
+        let contract_refs = ContractRefs {
+            contracts: &no_contracts,
+            contract_pos: &empty_contract_pos,
+        };
         resolve_variable_ref(
             &var_ref,
             block_idx,
@@ -1054,6 +1167,7 @@ mod tests {
             &positions,
             &cascade_refs,
             &pumping_refs,
+            &contract_refs,
         )
     }
 
@@ -1099,6 +1213,12 @@ mod tests {
         // asserted columns to hold; pin that invariant rather than silently
         // diverging if a future fixture sets a mismatched stride.
         assert_eq!(n_blks, geom.n_blks);
+        let no_contracts: Vec<EnergyContract> = Vec::new();
+        let empty_contract_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
+        let contract_refs = ContractRefs {
+            contracts: &no_contracts,
+            contract_pos: &empty_contract_pos,
+        };
         resolve_variable_ref(
             &var_ref,
             block_idx,
@@ -1108,7 +1228,74 @@ mod tests {
             &positions,
             &cascade_refs,
             &pumping_refs,
+            &contract_refs,
         )
+    }
+
+    /// Resolve a `ContractImport`/`ContractExport` ref with an explicit contract
+    /// context (the id-sorted contract slice and its id→slot map), threaded the way
+    /// the production `fill_generic_constraint_entries` caller does so the contract
+    /// arms exercise their real per-family-slot column arithmetic. The column bases
+    /// ride on `geom.contract_import`/`contract_export`.
+    fn call_contract(
+        var_ref: VariableRef,
+        block_idx: usize,
+        geom: &GenericResolverGeom<'_>,
+        production_models: &ProductionModelSet,
+        contracts: &[EnergyContract],
+        contract_pos: &BTreeMap<EntityId, usize>,
+    ) -> Vec<(usize, f64)> {
+        let empty: BTreeMap<EntityId, usize> = BTreeMap::new();
+        let positions = super::EntityPositionMaps {
+            hydro: &empty,
+            thermal: &empty,
+            bus: &empty,
+            line: &empty,
+        };
+        let cascade = empty_cascade();
+        let diversion_upstream: HashMap<EntityId, Vec<usize>> = HashMap::new();
+        let cascade_refs = CascadeRefs {
+            cascade: &cascade,
+            diversion_upstream: &diversion_upstream,
+        };
+        let no_stations: Vec<PumpingStation> = Vec::new();
+        let empty_pumping_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
+        let pumping_refs = PumpingRefs {
+            col_pumping_start: 0,
+            pumping_stations: &no_stations,
+            pumping_pos: &empty_pumping_pos,
+        };
+        let contract_refs = ContractRefs {
+            contracts,
+            contract_pos,
+        };
+        resolve_variable_ref(
+            &var_ref,
+            block_idx,
+            0, // stage_idx = 0
+            geom,
+            production_models,
+            &positions,
+            &cascade_refs,
+            &pumping_refs,
+            &contract_refs,
+        )
+    }
+
+    /// An energy contract carrying only the `id`/`bus_id`/`contract_type` the
+    /// resolver and load-balance fill read; every other field is an inert value.
+    fn make_contract(id: i32, contract_type: ContractType) -> EnergyContract {
+        EnergyContract {
+            id: EntityId(id),
+            name: String::new(),
+            bus_id: EntityId(0),
+            contract_type,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            price_per_mwh: 0.0,
+            min_mw: 0.0,
+            max_mw: 1.0,
+        }
     }
 
     /// A pumping station carrying a `consumption_mw_per_m3s` rate; every other
@@ -1463,6 +1650,12 @@ mod tests {
         };
         let state = StateLayout::new(2, 0, 0, 0, vec![], &[0, 0]);
         let geom = make_geom(&evap_indexer, &state, 1, &[]);
+        let no_contracts: Vec<EnergyContract> = Vec::new();
+        let empty_contract_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
+        let contract_refs = ContractRefs {
+            contracts: &no_contracts,
+            contract_pos: &empty_contract_pos,
+        };
         let result = resolve_variable_ref(
             &VariableRef::HydroEvaporation {
                 hydro_id: EntityId(10),
@@ -1474,6 +1667,7 @@ mod tests {
             &positions,
             &cascade_refs,
             &pumping_refs,
+            &contract_refs,
         );
 
         assert_eq!(result, vec![(15, 1.0)]);
@@ -1531,6 +1725,12 @@ mod tests {
         };
         let state = StateLayout::new(2, 0, 0, 0, vec![], &[0, 0]);
         let geom = make_geom(&evap_indexer, &state, 1, &[]);
+        let no_contracts: Vec<EnergyContract> = Vec::new();
+        let empty_contract_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
+        let contract_refs = ContractRefs {
+            contracts: &no_contracts,
+            contract_pos: &empty_contract_pos,
+        };
         let result = resolve_variable_ref(
             &VariableRef::HydroEvaporation {
                 hydro_id: EntityId(20),
@@ -1542,6 +1742,7 @@ mod tests {
             &positions,
             &cascade_refs,
             &pumping_refs,
+            &contract_refs,
         );
 
         assert!(result.is_empty());
@@ -1844,21 +2045,133 @@ mod tests {
         ));
     }
 
-    // ── Stub entity tests ─────────────────────────────────────────────────────
+    // ── Contract resolution tests ─────────────────────────────────────────────
 
-    /// ContractImport returns empty vec.
+    /// `contract_family_slot` counts only same-direction contracts before `c_sys`.
+    /// Slice order: import(10), export(20), import(30), export(40) → import slots
+    /// 0,1 and export slots 0,1.
     #[test]
-    fn contract_import_returns_empty() {
+    fn contract_family_slot_counts_per_direction() {
+        let contracts = vec![
+            make_contract(10, ContractType::Import),
+            make_contract(20, ContractType::Export),
+            make_contract(30, ContractType::Import),
+            make_contract(40, ContractType::Export),
+        ];
+        assert_eq!(
+            contract_family_slot(&contracts, 0),
+            (ContractType::Import, 0)
+        );
+        assert_eq!(
+            contract_family_slot(&contracts, 1),
+            (ContractType::Export, 0)
+        );
+        assert_eq!(
+            contract_family_slot(&contracts, 2),
+            (ContractType::Import, 1)
+        );
+        assert_eq!(
+            contract_family_slot(&contracts, 3),
+            (ContractType::Export, 1)
+        );
+    }
+
+    /// AC: `ContractImport { contract_id, block_id: Some(0) }` resolves to exactly
+    /// one `(column, 1.0)` pair addressing the contract's block-0 column.
+    ///
+    /// Two imports + one export: import base 200 (2 imports * n_blks=3 → cols
+    /// 200..206), export base 206 (1 export * 3 → 206..209). The second import
+    /// (id 30, per-family slot 1) at block 0 is `grid.flat(200, 1, 0) = 203`.
+    #[test]
+    fn contract_import_resolves_to_column_with_unit_coefficient() {
         let indexer = make_indexer();
         let state = make_state();
-        let geom = make_geom(&indexer, &state, 2, &[]);
+        let import_range = 200..206;
+        let export_range = 206..209;
+        let geom = make_geom_with_contracts(&indexer, &state, 2, &[], &import_range, &export_range);
         let prod = make_production_models();
-        let hpos = make_hydro_pos();
-        let tpos = make_thermal_pos();
-        let bpos = make_bus_pos();
-        let lpos = make_line_pos();
+        let contracts = vec![
+            make_contract(10, ContractType::Import),
+            make_contract(30, ContractType::Import),
+            make_contract(20, ContractType::Export),
+        ];
+        let contract_pos: BTreeMap<EntityId, usize> = contracts
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.id, i))
+            .collect();
 
-        let result = call(
+        let result = call_contract(
+            VariableRef::ContractImport {
+                contract_id: EntityId(30),
+                block_id: Some(0),
+            },
+            0,
+            &geom,
+            &prod,
+            &contracts,
+            &contract_pos,
+        );
+
+        // import base 200, per-family slot 1, n_blks 3, block 0 → 200 + 1*3 + 0
+        assert_eq!(result, vec![(203, 1.0)]);
+    }
+
+    /// AC: a `ContractExport` ref resolves to exactly one `(column, 1.0)` pair on
+    /// the export family. The variable's own coefficient is `+1.0`; the
+    /// injection/withdrawal sign is owned by the load-balance fill, not here.
+    ///
+    /// Same fixture as the import test: export id 20 is per-family slot 0,
+    /// `grid.flat(206, 0, 2) = 208`.
+    #[test]
+    fn contract_export_resolves_to_column_with_unit_coefficient() {
+        let indexer = make_indexer();
+        let state = make_state();
+        let import_range = 200..206;
+        let export_range = 206..209;
+        let geom = make_geom_with_contracts(&indexer, &state, 2, &[], &import_range, &export_range);
+        let prod = make_production_models();
+        let contracts = vec![
+            make_contract(10, ContractType::Import),
+            make_contract(30, ContractType::Import),
+            make_contract(20, ContractType::Export),
+        ];
+        let contract_pos: BTreeMap<EntityId, usize> = contracts
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.id, i))
+            .collect();
+
+        let result = call_contract(
+            VariableRef::ContractExport {
+                contract_id: EntityId(20),
+                block_id: Some(2),
+            },
+            0,
+            &geom,
+            &prod,
+            &contracts,
+            &contract_pos,
+        );
+
+        // export base 206, per-family slot 0, n_blks 3, block 2 → 206 + 0*3 + 2
+        assert_eq!(result, vec![(208, 1.0)]);
+    }
+
+    /// An unknown contract id misses `contract_pos` and resolves to empty — the
+    /// defense-in-depth fallback past referential validation.
+    #[test]
+    fn contract_unknown_id_returns_empty() {
+        let indexer = make_indexer();
+        let state = make_state();
+        let import_range = 200..203;
+        let export_range = 203..203;
+        let geom = make_geom_with_contracts(&indexer, &state, 2, &[], &import_range, &export_range);
+        let prod = make_production_models();
+        let contracts = vec![make_contract(10, ContractType::Import)];
+        let contract_pos: BTreeMap<EntityId, usize> = [(EntityId(10), 0)].into_iter().collect();
+
+        let result = call_contract(
             VariableRef::ContractImport {
                 contract_id: EntityId(99),
                 block_id: None,
@@ -1866,44 +2179,14 @@ mod tests {
             0,
             &geom,
             &prod,
-            &hpos,
-            &tpos,
-            &bpos,
-            &lpos,
+            &contracts,
+            &contract_pos,
         );
 
         assert!(result.is_empty());
     }
 
-    /// ContractExport returns empty vec (the split-out export arm resolves through
-    /// `block_col_range` to the empty `0..0` range, so no columns).
-    #[test]
-    fn contract_export_returns_empty() {
-        let indexer = make_indexer();
-        let state = make_state();
-        let geom = make_geom(&indexer, &state, 2, &[]);
-        let prod = make_production_models();
-        let hpos = make_hydro_pos();
-        let tpos = make_thermal_pos();
-        let bpos = make_bus_pos();
-        let lpos = make_line_pos();
-
-        let result = call(
-            VariableRef::ContractExport {
-                contract_id: EntityId(99),
-                block_id: None,
-            },
-            0,
-            &geom,
-            &prod,
-            &hpos,
-            &tpos,
-            &bpos,
-            &lpos,
-        );
-
-        assert!(result.is_empty());
-    }
+    // ── Stub entity tests ─────────────────────────────────────────────────────
 
     /// NonControllableGeneration returns empty vec.
     #[test]
@@ -2513,13 +2796,16 @@ mod tests {
     // ── block_col_range tests ─────────────────────────────────────────────────
 
     /// Each equipment/line family maps to its matching `StageGeometry` range, and
-    /// the two contract families map to the empty `0..0` sentinel. This pins the
-    /// family↔range pairing the resolver's `col_start` reads depend on.
+    /// the two contract families map to their `geom.contract_import` /
+    /// `contract_export` ranges. This pins the family↔range pairing the resolver's
+    /// `col_start` reads depend on.
     #[test]
     fn block_col_range_maps_each_family_to_its_geometry_range() {
         let idx = make_indexer();
         let state = make_state();
-        let geom = make_geom(&idx, &state, 2, &[]);
+        let import_range = 200..206;
+        let export_range = 206..209;
+        let geom = make_geom_with_contracts(&idx, &state, 2, &[], &import_range, &export_range);
 
         assert_eq!(block_col_range(&geom, ElementKind::Turbine), idx.turbine);
         assert_eq!(block_col_range(&geom, ElementKind::Spillage), idx.spillage);
@@ -2532,8 +2818,14 @@ mod tests {
         assert_eq!(block_col_range(&geom, ElementKind::LineRev), idx.line_rev);
         assert_eq!(block_col_range(&geom, ElementKind::Excess), idx.excess);
 
-        assert_eq!(block_col_range(&geom, ElementKind::ContractImport), 0..0);
-        assert_eq!(block_col_range(&geom, ElementKind::ContractExport), 0..0);
+        assert_eq!(
+            block_col_range(&geom, ElementKind::ContractImport),
+            import_range
+        );
+        assert_eq!(
+            block_col_range(&geom, ElementKind::ContractExport),
+            export_range
+        );
     }
 
     // ── HydroTurbined / HydroSpillage tests ───────────────────────────────────

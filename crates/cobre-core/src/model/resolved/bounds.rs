@@ -467,6 +467,26 @@ impl ResolvedBounds {
         }
     }
 
+    /// Return the number of energy contracts.
+    ///
+    /// Derived from the `contract` Vec length and `n_stages` rather than a stored
+    /// count, since `n_contracts` is never serialized. The `n_stages == 0` guard
+    /// avoids divide-by-zero on [`ResolvedBounds::empty`].
+    #[inline]
+    #[must_use]
+    pub fn n_contracts(&self) -> usize {
+        if self.n_stages == 0 {
+            0
+        } else {
+            debug_assert_eq!(
+                self.contract.len() % self.n_stages,
+                0,
+                "contract Vec length must be a multiple of n_stages"
+            );
+            self.contract.len() / self.n_stages
+        }
+    }
+
     /// Return the stride used to index the thermal Vec; equals `n_stages() + k_max`.
     ///
     /// `k_max` is the maximum lead-stages across anticipated thermals. The thermal

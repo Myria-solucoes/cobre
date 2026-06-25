@@ -266,6 +266,11 @@ pub fn geometry(
         outflow_above_slack,
         turbine_below_slack,
         generation_below_slack,
+        // This fixture models no contract columns; the production
+        // `start..start`-at-pumping-end anchoring is owned by
+        // `StageGeometry::from_layout`.
+        contract_import: 0..0,
+        contract_export: 0..0,
         water_balance: water_balance_start..water_balance_start + hydro_count,
         load_balance: load_balance_start..load_balance_end,
         // This fixture models no filling hydros, so the terminal-target and

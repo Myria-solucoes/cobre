@@ -1,4 +1,4 @@
-use cobre_core::{CoefficientRef, ConstraintSense, Stage};
+use cobre_core::{CoefficientRef, ConstraintSense, ContractType, Stage};
 
 use crate::generic_constraints::resolve_variable_ref;
 use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
@@ -504,6 +504,27 @@ pub(super) fn fill_load_balance_entries(
         }
     }
 
+    // Import injects into its bus (`+1`), export withdraws (`-1`). This
+    // injection/withdrawal sign is INDEPENDENT of the stored price sign (which
+    // carries cost/revenue) — flipping it would make an export feed the bus.
+    // Written for every contract regardless of commissioning: a dormant contract's
+    // column is `[0, 0]`, so the term multiplies a zero column and injects nothing.
+    for (c_sys, contract) in ctx.contracts.iter().enumerate() {
+        let (contract_type, family_slot) =
+            crate::generic_constraints::contract_family_slot(ctx.contracts, c_sys);
+        let (base, sign) = match contract_type {
+            ContractType::Import => (layout.col_contract_import_start, 1.0),
+            ContractType::Export => (layout.col_contract_export_start, -1.0),
+        };
+        if let Some(&b_idx) = ctx.bus_pos.get(&contract.bus_id) {
+            for blk in 0..n_blks {
+                let row = grid.flat(row_load, b_idx, blk);
+                let col = grid.flat(base, family_slot, blk);
+                col_entries[col].push((row, sign));
+            }
+        }
+    }
+
     for (b_idx, bus) in ctx.buses.iter().enumerate() {
         for blk in 0..n_blks {
             let row = grid.flat(row_load, b_idx, blk);
@@ -681,6 +702,8 @@ pub(super) fn fill_generic_constraint_entries(
         line_fwd: &layout.line_fwd,
         line_rev: &layout.line_rev,
         excess: &layout.excess,
+        contract_import: &layout.contract_import,
+        contract_export: &layout.contract_export,
         generation: &layout.generation,
         deficit: &layout.deficit,
         max_deficit_segments: layout.max_deficit_segments,
@@ -710,6 +733,13 @@ pub(super) fn fill_generic_constraint_entries(
         col_pumping_start: layout.col_pumping_start,
         pumping_stations: ctx.pumping_stations,
         pumping_pos: &ctx.pumping_pos,
+    };
+    // Contract slice + id→slot map for the ContractImport/ContractExport arms. The
+    // column bases ride on `geom.contract_import`/`contract_export`; the resolver
+    // derives each contract's per-family slot from this slice.
+    let contract_refs = crate::generic_constraints::ContractRefs {
+        contracts: ctx.contracts,
+        contract_pos: &ctx.contract_pos,
     };
 
     for (entry_idx, entry) in layout.generic_constraint_rows.iter().enumerate() {
@@ -752,6 +782,7 @@ pub(super) fn fill_generic_constraint_entries(
                 &positions,
                 &cascade_refs,
                 &pumping_refs,
+                &contract_refs,
             );
             for (col, multiplier) in pairs {
                 let coef = match term.coefficient {
@@ -1706,6 +1737,10 @@ mod zero_cost_tests {
                 pumping_stations: &[],
                 pumping_pos: BTreeMap::new(),
                 n_pumping: 0,
+                contracts: &[],
+                contract_pos: BTreeMap::new(),
+                n_contract_import: 0,
+                n_contract_export: 0,
                 diversion_upstream: HashMap::new(),
                 n_hydros: 0,
                 n_thermals,
@@ -2239,13 +2274,13 @@ mod pumping_water_tests {
 
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, CascadeTopology, CoefficientRef,
-        ConstraintExpression, ConstraintSense, ContractStageBounds, DeficitSegment, EntityId,
-        GenericConstraint, Hydro, HydroGenerationModel, HydroStageBounds, HydroStagePenalties,
-        Line, LineStageBounds, LineStagePenalties, LinearTerm, NcsStagePenalties,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, PumpingStation, ResolvedBounds,
-        ResolvedExchangeFactors, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
-        ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, SlackConfig, Thermal,
-        ThermalStageBounds, VariableRef,
+        ConstraintExpression, ConstraintSense, ContractStageBounds, ContractType, DeficitSegment,
+        EnergyContract, EntityId, GenericConstraint, Hydro, HydroGenerationModel, HydroStageBounds,
+        HydroStagePenalties, Line, LineStageBounds, LineStagePenalties, LinearTerm,
+        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds,
+        PumpingStation, ResolvedBounds, ResolvedExchangeFactors, ResolvedGenericConstraintBounds,
+        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, SlackConfig,
+        Thermal, ThermalStageBounds, VariableRef,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -2455,11 +2490,17 @@ mod pumping_water_tests {
         buses: Vec<Bus>,
         thermals: Vec<Thermal>,
         lines: Vec<Line>,
+        /// Energy contracts, id-sorted; empty by default. The contract
+        /// load-balance-sign tests supply import/export contracts here.
+        contracts: Vec<EnergyContract>,
         hydro_pos: BTreeMap<EntityId, usize>,
         pumping_pos: BTreeMap<EntityId, usize>,
         bus_pos: BTreeMap<EntityId, usize>,
         thermal_pos: BTreeMap<EntityId, usize>,
         line_pos: BTreeMap<EntityId, usize>,
+        contract_pos: BTreeMap<EntityId, usize>,
+        n_contract_import: usize,
+        n_contract_export: usize,
         par_lp: PrecomputedPar,
         /// AR order the ctx exposes as `max_par_order`. Zero by default (no
         /// inflow-lag columns reserved); raised by [`PumpFixtures::with_par_lp`]
@@ -2503,6 +2544,23 @@ mod pumping_water_tests {
             Self::new_full(hydros, stations, buses, Vec::new(), Vec::new())
         }
 
+        /// Build a fixture with buses and energy contracts (no thermals/lines),
+        /// for the contract load-balance-sign tests.
+        fn new_with_contracts(
+            hydros: Vec<Hydro>,
+            buses: Vec<Bus>,
+            contracts: Vec<EnergyContract>,
+        ) -> Self {
+            Self::new_full_with_contracts(
+                hydros,
+                Vec::new(),
+                buses,
+                Vec::new(),
+                Vec::new(),
+                contracts,
+            )
+        }
+
         /// Build a fixture carrying hydros, stations, buses, thermals, and lines in
         /// arbitrary declaration order. Every slice is sorted by `id.0` before
         /// deriving its position map and bounds table, mirroring
@@ -2512,17 +2570,30 @@ mod pumping_water_tests {
         /// written per-entity from the sorted slices so a column/bound mislabel
         /// under permutation is observable.
         fn new_full(
+            hydros: Vec<Hydro>,
+            stations: Vec<PumpingStation>,
+            buses: Vec<Bus>,
+            thermals: Vec<Thermal>,
+            lines: Vec<Line>,
+        ) -> Self {
+            Self::new_full_with_contracts(hydros, stations, buses, thermals, lines, Vec::new())
+        }
+
+        #[allow(clippy::too_many_lines)]
+        fn new_full_with_contracts(
             mut hydros: Vec<Hydro>,
             mut stations: Vec<PumpingStation>,
             mut buses: Vec<Bus>,
             mut thermals: Vec<Thermal>,
             mut lines: Vec<Line>,
+            mut contracts: Vec<EnergyContract>,
         ) -> Self {
             hydros.sort_by_key(|h| h.id.0);
             stations.sort_by_key(|s| s.id.0);
             buses.sort_by_key(|b| b.id.0);
             thermals.sort_by_key(|t| t.id.0);
             lines.sort_by_key(|l| l.id.0);
+            contracts.sort_by_key(|c| c.id.0);
 
             let hydro_pos: BTreeMap<EntityId, usize> =
                 hydros.iter().enumerate().map(|(i, h)| (h.id, i)).collect();
@@ -2540,6 +2611,19 @@ mod pumping_water_tests {
                 .collect();
             let line_pos: BTreeMap<EntityId, usize> =
                 lines.iter().enumerate().map(|(i, l)| (l.id, i)).collect();
+            let contract_pos: BTreeMap<EntityId, usize> = contracts
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (c.id, i))
+                .collect();
+            let n_contract_import = contracts
+                .iter()
+                .filter(|c| c.contract_type == ContractType::Import)
+                .count();
+            let n_contract_export = contracts
+                .iter()
+                .filter(|c| c.contract_type == ContractType::Export)
+                .count();
 
             let mut bounds = ResolvedBounds::new(
                 &BoundsCountsSpec {
@@ -2547,12 +2631,23 @@ mod pumping_water_tests {
                     n_thermals: thermals.len(),
                     n_lines: lines.len(),
                     n_pumping: stations.len(),
-                    n_contracts: 0,
+                    n_contracts: contracts.len(),
                     n_stages: N_STAGES,
                     k_max: 0,
                 },
                 &default_bounds_defaults(),
             );
+            // Distinct per-contract bounds from the sorted slice so a column/bound
+            // mislabel under permutation is observable.
+            for (c_idx, c) in contracts.iter().enumerate() {
+                for stage_idx in 0..N_STAGES {
+                    *bounds.contract_bounds_mut(c_idx, stage_idx) = ContractStageBounds {
+                        min_mw: c.min_mw,
+                        max_mw: c.max_mw,
+                        price_per_mwh: c.price_per_mwh,
+                    };
+                }
+            }
             // Distinct per-station bounds so a column/bound mismatch is observable.
             for (p_idx, s) in stations.iter().enumerate() {
                 for stage_idx in 0..N_STAGES {
@@ -2612,11 +2707,15 @@ mod pumping_water_tests {
                 buses,
                 thermals,
                 lines,
+                contracts,
                 hydro_pos,
                 pumping_pos,
                 bus_pos,
                 thermal_pos,
                 line_pos,
+                contract_pos,
+                n_contract_import,
+                n_contract_export,
                 par_lp: PrecomputedPar::default(),
                 cascade,
                 max_par_order: 0,
@@ -2738,6 +2837,10 @@ mod pumping_water_tests {
                 pumping_stations: &self.stations,
                 pumping_pos: self.pumping_pos.clone(),
                 n_pumping: self.stations.len(),
+                contracts: &self.contracts,
+                contract_pos: self.contract_pos.clone(),
+                n_contract_import: self.n_contract_import,
+                n_contract_export: self.n_contract_export,
                 diversion_upstream: HashMap::new(),
                 n_hydros: self.hydros.len(),
                 n_thermals: self.thermals.len(),
@@ -2948,6 +3051,235 @@ mod pumping_water_tests {
                 "blk {blk}: pumping column must carry only the negative-injection entry"
             );
         }
+    }
+
+    /// An import-only `EnergyContract` on `bus_id` carrying `id`/`bus_id`/
+    /// `contract_type`; every other field inert.
+    fn contract(id: i32, bus_id: i32, contract_type: ContractType) -> EnergyContract {
+        EnergyContract {
+            id: EntityId(id),
+            name: format!("C{id}"),
+            bus_id: EntityId(bus_id),
+            contract_type,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            price_per_mwh: 0.0,
+            min_mw: 0.0,
+            max_mw: 100.0,
+        }
+    }
+
+    /// An import contract enters its bus load-balance row with `+1.0` per block —
+    /// injection into the bus. This sign is independent of the price sign.
+    #[test]
+    fn contract_import_enters_bus_row_with_plus_one() {
+        let fixtures = PumpFixtures::new_with_contracts(
+            vec![fixture_hydro(1), fixture_hydro(2)],
+            vec![fixture_bus(1)],
+            vec![contract(10, 1, ContractType::Import)],
+        );
+        let ctx = fixtures.make_ctx();
+        let stage = two_block_stage(0, [300.0, 444.0]);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_load_balance_entries(&ctx, 0, &layout, &mut col_entries);
+
+        let n_blks = layout.n_blks;
+        let b_idx = ctx.bus_pos[&EntityId(1)];
+        for blk in 0..n_blks {
+            let row = layout.row_load_balance_start() + b_idx * n_blks + blk;
+            let col = layout.col_contract_import_start + blk;
+            assert_eq!(
+                col_entries[col],
+                vec![(row, 1.0)],
+                "blk {blk}: import contract column must carry only (row, +1.0)"
+            );
+        }
+    }
+
+    /// An export contract enters its bus load-balance row with `-1.0` per block —
+    /// withdrawal from the bus. Flipping this would make an export feed the bus.
+    #[test]
+    fn contract_export_enters_bus_row_with_minus_one() {
+        let fixtures = PumpFixtures::new_with_contracts(
+            vec![fixture_hydro(1), fixture_hydro(2)],
+            vec![fixture_bus(1)],
+            vec![contract(10, 1, ContractType::Export)],
+        );
+        let ctx = fixtures.make_ctx();
+        let stage = two_block_stage(0, [300.0, 444.0]);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_load_balance_entries(&ctx, 0, &layout, &mut col_entries);
+
+        let n_blks = layout.n_blks;
+        let b_idx = ctx.bus_pos[&EntityId(1)];
+        for blk in 0..n_blks {
+            let row = layout.row_load_balance_start() + b_idx * n_blks + blk;
+            let col = layout.col_contract_export_start + blk;
+            assert_eq!(
+                col_entries[col],
+                vec![(row, -1.0)],
+                "blk {blk}: export contract column must carry only (row, -1.0)"
+            );
+        }
+    }
+
+    /// Mixed import/export at distinct per-family slots land on the right column
+    /// bases with the right signs: import at `col_contract_import_start`, export at
+    /// `col_contract_export_start`.
+    #[test]
+    fn contract_mixed_import_export_use_per_family_bases() {
+        let fixtures = PumpFixtures::new_with_contracts(
+            vec![fixture_hydro(1), fixture_hydro(2)],
+            vec![fixture_bus(1)],
+            vec![
+                contract(10, 1, ContractType::Import),
+                contract(20, 1, ContractType::Export),
+            ],
+        );
+        let ctx = fixtures.make_ctx();
+        let stage = two_block_stage(0, [300.0, 444.0]);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_load_balance_entries(&ctx, 0, &layout, &mut col_entries);
+
+        let n_blks = layout.n_blks;
+        let b_idx = ctx.bus_pos[&EntityId(1)];
+        for blk in 0..n_blks {
+            let row = layout.row_load_balance_start() + b_idx * n_blks + blk;
+            let import_col = layout.col_contract_import_start + blk;
+            let export_col = layout.col_contract_export_start + blk;
+            assert_eq!(
+                col_entries[import_col],
+                vec![(row, 1.0)],
+                "blk {blk}: import"
+            );
+            assert_eq!(
+                col_entries[export_col],
+                vec![(row, -1.0)],
+                "blk {blk}: export"
+            );
+        }
+    }
+
+    /// Two imports on one bus address distinct per-family slots: the first
+    /// (`family_slot` 0) lands on `col_contract_import_start + 0*n_blks + blk`, the
+    /// second (`family_slot` 1) on `col_contract_import_start + 1*n_blks + blk`. A
+    /// regression to using `c_sys` instead of `family_slot` would collide them.
+    #[test]
+    fn contract_second_import_uses_family_slot_one() {
+        let fixtures = PumpFixtures::new_with_contracts(
+            vec![fixture_hydro(1), fixture_hydro(2)],
+            vec![fixture_bus(1)],
+            vec![
+                contract(10, 1, ContractType::Import),
+                contract(20, 1, ContractType::Import),
+            ],
+        );
+        let ctx = fixtures.make_ctx();
+        let stage = two_block_stage(0, [300.0, 444.0]);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_load_balance_entries(&ctx, 0, &layout, &mut col_entries);
+
+        let n_blks = layout.n_blks;
+        let b_idx = ctx.bus_pos[&EntityId(1)];
+        for blk in 0..n_blks {
+            let row = layout.row_load_balance_start() + b_idx * n_blks + blk;
+            let slot0_col = layout.col_contract_import_start + blk;
+            let slot1_col = layout.col_contract_import_start + n_blks + blk;
+            assert_eq!(
+                col_entries[slot0_col],
+                vec![(row, 1.0)],
+                "blk {blk}: first import (family_slot 0)"
+            );
+            assert_eq!(
+                col_entries[slot1_col],
+                vec![(row, 1.0)],
+                "blk {blk}: second import (family_slot 1)"
+            );
+        }
+    }
+
+    /// A contract whose `bus_id` is absent from `bus_pos` writes no load-balance
+    /// entry and does not panic.
+    #[test]
+    fn contract_missing_bus_skips_without_panic() {
+        let fixtures = PumpFixtures::new_with_contracts(
+            vec![fixture_hydro(1), fixture_hydro(2)],
+            vec![fixture_bus(1)],
+            vec![contract(10, 99, ContractType::Import)],
+        );
+        let ctx = fixtures.make_ctx();
+        let stage = two_block_stage(0, [300.0, 444.0]);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_load_balance_entries(&ctx, 0, &layout, &mut col_entries);
+
+        let n_blks = layout.n_blks;
+        for blk in 0..n_blks {
+            let col = layout.col_contract_import_start + blk;
+            assert!(
+                col_entries[col].is_empty(),
+                "blk {blk}: contract on an unmapped bus must write no load-balance entry"
+            );
+        }
+    }
+
+    /// AC: a contracts-bearing system with a generic constraint referencing
+    /// `ContractImport` assembles its full stage matrix in a debug build with no
+    /// `debug_assert!` firing — the mandatory tripwire's terminal condition.
+    #[test]
+    fn contracts_with_generic_constraint_assemble_without_debug_assert() {
+        let import_term = LinearTerm {
+            variable: VariableRef::ContractImport {
+                contract_id: EntityId(10),
+                block_id: None,
+            },
+            coefficient: CoefficientRef::Literal(1.0),
+            scale: 1.0,
+        };
+        let constraint = GenericConstraint {
+            id: EntityId(1),
+            name: "c-import-cap".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![import_term],
+            },
+            sense: ConstraintSense::LessEqual,
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+        };
+        let fixtures = PumpFixtures::new_with_contracts(
+            vec![fixture_hydro(1), fixture_hydro(2)],
+            vec![fixture_bus(1)],
+            vec![contract(10, 1, ContractType::Import)],
+        )
+        .with_generic_constraint(constraint, 50.0);
+        let ctx = fixtures.make_ctx();
+        let stage = two_block_stage(0, [300.0, 444.0]);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        // Exercises fill_load_balance_entries (contract block) and
+        // fill_generic_constraint_entries (the resolved ContractImport arm). Under
+        // debug_assertions every debug_assert! is live; reaching the assertion below
+        // proves none fired.
+        let col_entries = build_stage_matrix_entries(&ctx, &stage, 0, &layout);
+        assert_eq!(col_entries.len(), layout.num_cols);
     }
 
     /// A station whose `bus_id` is absent from `bus_pos` writes no load-balance

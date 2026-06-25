@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
 use cobre_core::{
-    Bus, CascadeTopology, ConstraintSense, EntityId, GenericConstraint, Hydro, Line, LoadModel,
-    NonControllableSource, PumpingStation, ResolvedBounds, ResolvedExchangeFactors,
-    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-    ResolvedPenalties, Stage, Thermal,
+    Bus, CascadeTopology, ConstraintSense, EnergyContract, EntityId, GenericConstraint, Hydro,
+    Line, LoadModel, NonControllableSource, PumpingStation, ResolvedBounds,
+    ResolvedExchangeFactors, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
+    ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, Stage, Thermal,
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -82,6 +82,17 @@ pub(crate) struct TemplateBuildCtx<'a> {
     /// dense per-stage column-block stride: every station keeps a column at every
     /// stage, a commissioning-dormant one zeroed to `[0, 0]` rather than omitted.
     pub(crate) n_pumping: usize,
+    /// Energy contract entities, id-sorted (canonical slot order). One slice for
+    /// both directions; the import/export split is derived at fill time from
+    /// `contract_type`, not pre-partitioned.
+    pub(crate) contracts: &'a [EnergyContract],
+    /// Contract id → slot into `contracts`. `BTreeMap` for determinism, see
+    /// `hydro_pos`.
+    pub(crate) contract_pos: BTreeMap<EntityId, usize>,
+    /// Number of import-family contracts; the dense per-stage import-column stride.
+    pub(crate) n_contract_import: usize,
+    /// Number of export-family contracts; the dense per-stage export-column stride.
+    pub(crate) n_contract_export: usize,
     /// Target hydro ID → system indices of hydros diverting to it (each hydro `d`
     /// with `diversion.downstream_id == target_id`).
     pub(crate) diversion_upstream: HashMap<EntityId, Vec<usize>>,
@@ -201,6 +212,20 @@ pub(crate) struct StageLayout<'a> {
     /// each. Read into the scalar `StageTemplates::n_pumping` that bounds the
     /// per-(station, block) simulation primal read.
     pub(crate) n_pumping: usize,
+    /// Start of import-contract columns (one per import contract per block,
+    /// block-major): `col_contract_import_start + import_idx * n_blks + blk`. The
+    /// import block follows pumping; with `n_contract_import == 0` it is empty and
+    /// `col_contract_import_start == col_pumping_end`.
+    pub(crate) col_contract_import_start: usize,
+    /// Full import-contract count (identical at every stage).
+    pub(crate) n_contract_import: usize,
+    /// Start of export-contract columns (one per export contract per block,
+    /// block-major): `col_contract_export_start + export_idx * n_blks + blk`. The
+    /// export block follows the import block; with `n_contract_export == 0` it is
+    /// empty and `col_contract_export_start == col_contract_import_end`.
+    pub(crate) col_contract_export_start: usize,
+    /// Full export-contract count (identical at every stage).
+    pub(crate) n_contract_export: usize,
     /// Total column count.
     pub(crate) num_cols: usize,
     /// Start of generic constraint rows (one per active `(constraint, block)` pair),
@@ -250,6 +275,12 @@ pub(crate) struct StageLayout<'a> {
     pub(crate) max_deficit_segments: usize,
     /// Column range for bus excess variables (one per bus per block).
     pub(crate) excess: Range<usize>,
+    /// Column range for import-contract variables (one per import contract per
+    /// block); empty `start..start` at `col_pumping_end` with no import contracts.
+    pub(crate) contract_import: Range<usize>,
+    /// Column range for export-contract variables (one per export contract per
+    /// block); empty `start..start` at the import-block end with no export contracts.
+    pub(crate) contract_export: Range<usize>,
     /// Column range for inflow non-negativity slack (one per hydro, stage-level);
     /// `0..0` without the penalty or hydros. Stored first-class so the per-stage
     /// simulation geometry reads the stage-correct range — a single global stage-0
@@ -877,7 +908,17 @@ impl<'a> StageLayout<'a> {
         let col_pumping_start = col_ncs_end;
         let col_pumping_end = col_pumping_start + n_pumping * n_blks;
 
-        let col_generic_slack_start = col_pumping_end;
+        // Contract columns follow pumping, before the generic-slack columns:
+        // import block then export block. With both counts 0 the blocks are empty
+        // and col_generic_slack_start stays at col_pumping_end (parity-neutral).
+        let n_contract_import = ctx.n_contract_import;
+        let n_contract_export = ctx.n_contract_export;
+        let col_contract_import_start = col_pumping_end;
+        let col_contract_import_end = col_contract_import_start + n_contract_import * n_blks;
+        let col_contract_export_start = col_contract_import_end;
+        let col_contract_export_end = col_contract_export_start + n_contract_export * n_blks;
+
+        let col_generic_slack_start = col_contract_export_end;
         let generic =
             enumerate_generic_constraint_rows(ctx, stage, n_blks, col_generic_slack_start);
 
@@ -930,6 +971,10 @@ impl<'a> StageLayout<'a> {
             n_ncs,
             col_pumping_start,
             n_pumping,
+            col_contract_import_start,
+            n_contract_import,
+            col_contract_export_start,
+            n_contract_export,
             num_cols,
             row_generic_start,
             num_rows,
@@ -950,6 +995,8 @@ impl<'a> StageLayout<'a> {
             deficit: deficit_start..excess_start,
             max_deficit_segments,
             excess: excess_start..excess_end,
+            contract_import: col_contract_import_start..col_contract_import_end,
+            contract_export: col_contract_export_start..col_contract_export_end,
             inflow_slack,
             generation_col_start,
             generation,
@@ -1570,6 +1617,10 @@ mod tests {
                 pumping_stations: &[],
                 pumping_pos: BTreeMap::new(),
                 n_pumping: 0,
+                contracts: &[],
+                contract_pos: BTreeMap::new(),
+                n_contract_import: 0,
+                n_contract_export: 0,
                 diversion_upstream: HashMap::new(),
                 n_hydros: 0,
                 n_thermals: 0,
@@ -1808,6 +1859,10 @@ mod tests {
                 pumping_stations: &[],
                 pumping_pos: BTreeMap::new(),
                 n_pumping: 0,
+                contracts: &[],
+                contract_pos: BTreeMap::new(),
+                n_contract_import: 0,
+                n_contract_export: 0,
                 diversion_upstream: HashMap::new(),
                 n_hydros: 3,
                 n_thermals: 0,
@@ -1976,6 +2031,10 @@ mod tests {
                 pumping_stations: &[],
                 pumping_pos: BTreeMap::new(),
                 n_pumping: 0,
+                contracts: &[],
+                contract_pos: BTreeMap::new(),
+                n_contract_import: 0,
+                n_contract_export: 0,
                 diversion_upstream: HashMap::new(),
                 n_hydros: 2,
                 n_thermals: 0,
@@ -2865,6 +2924,10 @@ mod tests {
                 pumping_stations: &[],
                 pumping_pos: BTreeMap::new(),
                 n_pumping: 0,
+                contracts: &[],
+                contract_pos: BTreeMap::new(),
+                n_contract_import: 0,
+                n_contract_export: 0,
                 diversion_upstream: HashMap::new(),
                 n_hydros: 0,
                 n_thermals: 0,
@@ -3125,6 +3188,10 @@ mod tests {
                 pumping_stations: &self.stations,
                 pumping_pos: BTreeMap::new(),
                 n_pumping: self.bounds.n_pumping(),
+                contracts: &[],
+                contract_pos: BTreeMap::new(),
+                n_contract_import: 0,
+                n_contract_export: 0,
                 diversion_upstream: HashMap::new(),
                 n_hydros: 0,
                 n_thermals: 0,
@@ -3268,6 +3335,75 @@ mod tests {
             layout.num_cols,
             layout.col_pumping_start + n_pumping * n_blks,
             "the 6-column block ends at num_cols (no generic-slack columns here)"
+        );
+    }
+
+    /// With both contract counts 0 the import/export blocks collapse onto
+    /// `col_pumping_end` and the generic-slack start (here surfaced as
+    /// `col_filling_target_start()`, since no generic-slack columns exist) is
+    /// unshifted — the contract-free parity guarantee.
+    #[test]
+    fn contract_columns_empty_keep_generic_slack_at_pumping_end() {
+        let n_pumping = 2_usize;
+        let n_blks = 3_usize;
+        let fixtures = PumpingFixtures::new(n_pumping, 3);
+        let ctx = fixtures.make_ctx();
+        assert_eq!(ctx.n_contract_import, 0);
+        assert_eq!(ctx.n_contract_export, 0);
+
+        let stage = PumpingFixtures::stage_with_blocks(n_blks);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let col_pumping_end = layout.col_pumping_start + layout.n_pumping * n_blks;
+        assert_eq!(
+            layout.col_contract_import_start, col_pumping_end,
+            "empty import block starts at col_pumping_end"
+        );
+        assert_eq!(
+            layout.col_contract_export_start, col_pumping_end,
+            "empty export block collapses onto col_pumping_end"
+        );
+        assert_eq!(
+            layout.col_filling_target_start(),
+            col_pumping_end,
+            "generic-slack start is unshifted for a contract-free system"
+        );
+    }
+
+    /// `n_contract_import == 2`, `n_contract_export == 1`, `n_blks == 3`: the import
+    /// block (6 columns) starts at `col_pumping_end`, the export block (3 columns)
+    /// follows it, and the generic-slack start (`col_filling_target_start()` with no
+    /// generic-slack columns) shifts by `(2 + 1) * 3 == 9`.
+    #[test]
+    fn contract_columns_reserve_import_then_export_blocks() {
+        let n_pumping = 2_usize;
+        let n_blks = 3_usize;
+        let fixtures = PumpingFixtures::new(n_pumping, 3);
+        let ctx = TemplateBuildCtx {
+            n_contract_import: 2,
+            n_contract_export: 1,
+            ..fixtures.make_ctx()
+        };
+
+        let stage = PumpingFixtures::stage_with_blocks(n_blks);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let col_pumping_end = layout.col_pumping_start + layout.n_pumping * n_blks;
+        assert_eq!(
+            layout.col_contract_import_start, col_pumping_end,
+            "import block starts at col_pumping_end"
+        );
+        assert_eq!(
+            layout.col_contract_export_start,
+            col_pumping_end + 6,
+            "export block follows the 6-column import block"
+        );
+        assert_eq!(
+            layout.col_filling_target_start(),
+            col_pumping_end + 9,
+            "generic-slack start shifts by (2 + 1) * 3 == 9"
         );
     }
 
