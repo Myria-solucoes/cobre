@@ -26,13 +26,11 @@
 //!
 //! # Output
 //!
-//! - **stdout**: raw little-endian bytes of the `K × N` output matrix (`K=100`,
-//!   `N=16`, so `100 * 16 * 8 = 12800` bytes).
-//! - **stderr**: a one-line summary noting the byte count, intended as a hint
-//!   to pipe stdout through `sha256sum` for cross-host comparison.
+//! - **stdout**: raw little-endian bytes of the `K × N` output matrix.
+//! - **stderr**: a hint to pipe stdout through `sha256sum` for cross-host
+//!   comparison.
 //!
-//! The binary exits with status `1` if `dgemm` produces all-zero output
-//! (defensive check that the call actually ran).
+//! The binary exits with status `1` if `dgemm` produces all-zero output.
 
 // This example is a one-shot diagnostic, not library code. `expect`, `panic`,
 // `print_stderr`, and `as_*` casts are intentional and not bugs to be linted.
@@ -46,7 +44,7 @@
 
 use std::io::Write;
 
-/// Splitmix64 PRNG step. Reproducible without any external crate dependency.
+/// Hand-rolled splitmix64 — reproducible PRNG with no external crate dependency.
 fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut z = *state;
@@ -62,9 +60,6 @@ fn fill_matrix(rows: usize, cols: usize, seed: u64) -> Vec<f64> {
     let mut buf = Vec::with_capacity(rows * cols);
     for _ in 0..(rows * cols) {
         let r = splitmix64(&mut state);
-        // Map to roughly [-0.5, 0.5] using the high 52 bits as mantissa, then
-        // subtract 1.5 so the value lands in [-1.5, 0.5] with the implicit-bit
-        // representation of 1.0..2.0 minus 1.5.
         let bits = (r >> 12) & ((1_u64 << 52) - 1);
         let exp_bias = 1023_u64;
         let f = f64::from_bits((exp_bias << 52) | bits) - 1.5;
@@ -115,7 +110,6 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Write raw bytes to stdout.
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     for v in &c {
