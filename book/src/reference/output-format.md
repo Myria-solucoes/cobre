@@ -126,11 +126,11 @@ single file. Consumers should check `status` before interpreting other fields.
 ```json
 {
   "cobre_version": "0.8.2",
-  "hostname": "fedora",
+  "hostname": "<hostname>",
   "solver": "highs",
-  "solver_version": "1.13.1",
-  "started_at": "2026-06-09T14:09:50Z",
-  "completed_at": "2026-06-09T14:09:50Z",
+  "solver_version": "<solver version>",
+  "started_at": "<timestamp>",
+  "completed_at": "<timestamp>",
   "duration_seconds": 0.15,
   "status": "complete",
   "configuration": {
@@ -185,7 +185,7 @@ single file. Consumers should check `status` before interpreting other fields.
     "ranks_participated": 1,
     "num_nodes": 1,
     "threads_per_rank": 1,
-    "hosts": [{ "hostname": "fedora", "ranks": [0] }]
+    "hosts": [{ "hostname": "<hostname>", "ranks": [0] }]
   }
 }
 ```
@@ -197,7 +197,7 @@ single file. Consumers should check `status` before interpreting other fields.
 | `cobre_version`    | string | No       | Version of the cobre binary that produced this output (from `CARGO_PKG_VERSION`). |
 | `hostname`         | string | No       | Hostname of the machine that ran training.                                        |
 | `solver`           | string | No       | LP solver backend: `"highs"` or `"clp"`.                                          |
-| `solver_version`   | string | Yes      | LP solver library version string (e.g. `"1.13.1"`). Omitted when not available.   |
+| `solver_version`   | string | Yes      | Version string of the linked LP solver library. Omitted when not available.       |
 | `started_at`       | string | No       | ISO 8601 timestamp when training started.                                         |
 | `completed_at`     | string | No       | ISO 8601 timestamp when training completed.                                       |
 | `duration_seconds` | number | No       | Total training wall-clock duration in seconds.                                    |
@@ -493,7 +493,7 @@ release (the version field tracks breaking changes).
 ```json
 {
   "version": "1.0",
-  "generated_at": "2026-01-17T08:00:00Z",
+  "generated_at": "<timestamp>",
   "operative_state": {
     "0": "deactivated",
     "1": "maintenance",
@@ -724,10 +724,10 @@ LP solver statistics, and distribution information.
 ```json
 {
   "cobre_version": "0.8.2",
-  "hostname": "fedora",
+  "hostname": "<hostname>",
   "solver": "highs",
-  "started_at": "2026-06-09T14:09:50Z",
-  "completed_at": "2026-06-09T14:09:50Z",
+  "started_at": "<timestamp>",
+  "completed_at": "<timestamp>",
   "duration_seconds": 0.103,
   "status": "complete",
   "scenarios": {
@@ -755,7 +755,7 @@ LP solver statistics, and distribution information.
     "ranks_participated": 1,
     "num_nodes": 1,
     "threads_per_rank": 1,
-    "hosts": [{ "hostname": "fedora", "ranks": [0] }]
+    "hosts": [{ "hostname": "<hostname>", "ranks": [0] }]
   }
 }
 ```

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Check that all version references in book/src/**/*.md match the workspace Cargo.toml.
 
-Scans all Markdown files under book/src/ for two patterns:
-  - COBRE v<VERSION>      (uppercase banner, e.g. quickstart.md)
-  - cobre   v<VERSION>    (lowercase CLI output with three spaces, e.g. installation.md)
+Scans all Markdown files under book/src/ for three patterns:
+  - COBRE v<VERSION>             (uppercase banner, e.g. quickstart.md)
+  - cobre   v<VERSION>           (lowercase CLI output with three spaces, e.g. installation.md)
+  - "cobre_version": "<VERSION>" (JSON metadata samples, e.g. output-format.md)
 
 Parses the workspace version from `Cargo.toml` (the first `version = "..."` line)
 and reports any version reference that does not match.
@@ -59,6 +60,7 @@ def parse_cargo_rust_version(cargo_path: Path) -> str | None:
 _PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"COBRE v(\d+\.\d+\.\d+)"),
     re.compile(r"cobre\s{3}v(\d+\.\d+\.\d+)"),
+    re.compile(r'"cobre_version":\s*"(\d+\.\d+\.\d+)"'),
 ]
 
 # A minor-version token (e.g. "1.88"), optionally with a trailing "+" and/or a
