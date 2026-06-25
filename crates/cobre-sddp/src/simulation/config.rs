@@ -6,9 +6,8 @@
 
 /// Parameters controlling the SDDP simulation pipeline.
 ///
-/// Construct this struct directly — all fields are public and there is no
-/// builder or `Default` implementation. Every field must be set explicitly
-/// to prevent silent misconfiguration.
+/// No `Default`: every field must be set explicitly to prevent silent
+/// misconfiguration.
 ///
 /// # Examples
 ///
@@ -24,24 +23,14 @@
 /// ```
 #[derive(Debug)]
 pub struct SimulationConfig {
-    /// Total number of scenarios to simulate across all MPI ranks.
-    ///
-    /// Scenarios are distributed statically across ranks using the same
-    /// two-level distribution strategy as training (see
-    /// simulation-architecture.md SS3.1). Must be at least 1.
+    /// Total number of scenarios to simulate across all MPI ranks. Must be at
+    /// least 1. (Distribution strategy: simulation-architecture.md SS3.1.)
     pub n_scenarios: u32,
 
-    /// Bounded channel capacity for the background I/O thread.
-    ///
-    /// Controls the maximum number of [`SimulationScenarioResult`] instances
-    /// that can be buffered in the channel between simulation threads and the
-    /// background I/O thread. When the channel is full, simulation threads
-    /// block until the I/O thread consumes a result, providing backpressure.
-    ///
-    /// Larger values increase memory usage but allow the I/O thread more
-    /// headroom to absorb bursts. Default in practice is 64.
-    ///
-    /// [`SimulationScenarioResult`]: crate::simulation::SimulationScenarioResult
+    /// Bounded capacity of the
+    /// [`SimulationScenarioResult`](crate::simulation::SimulationScenarioResult)
+    /// channel to the background I/O thread; a full channel blocks simulation
+    /// threads, providing backpressure.
     pub io_channel_capacity: usize,
 }
 

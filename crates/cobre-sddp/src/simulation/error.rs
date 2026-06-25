@@ -1,27 +1,16 @@
 //! Error type for the SDDP simulation execution phase.
 //!
-//! [`SimulationError`] is the error type returned by the `fn simulate()`
-//! entry point. It covers LP-level failures, I/O failures from the output
-//! writer, policy compatibility errors, and channel failures.
-//!
-//! A `From<SimulationError> for SddpError` conversion is provided for
-//! contexts where a unified error type is required.
+//! [`SimulationError`] is returned by the `fn simulate()` entry point; a
+//! `From<SimulationError> for SddpError` conversion unifies it with `SddpError`.
 
 use crate::SddpError;
 
 /// Errors that can occur during simulation execution.
-///
-/// The `fn simulate()` function returns `Result<SimulationSummary, SimulationError>`.
-/// All variants implement `std::error::Error + Send + Sync + 'static`.
 #[derive(Debug, thiserror::Error)]
 pub enum SimulationError {
-    /// LP infeasibility at a simulation stage.
-    ///
-    /// This indicates a system error — recourse slack variables (deficit,
-    /// excess) should always make the LP feasible. If infeasibility occurs,
-    /// it indicates a bug in LP construction or a degenerate system
-    /// configuration. The error includes the scenario, stage, and solver
-    /// diagnostic to aid debugging.
+    /// LP infeasibility at a simulation stage. Signals a bug: recourse slack
+    /// variables should always make the LP feasible, so this is an LP-construction
+    /// defect or a degenerate system, not normal operation.
     #[error("LP infeasible at scenario {scenario_id}, stage {stage_id}: {solver_message}")]
     LpInfeasible {
         /// 0-based scenario identifier.
@@ -44,9 +33,8 @@ pub enum SimulationError {
         solver_message: String,
     },
 
-    /// I/O failure during output writing (disk full, permission denied,
-    /// Parquet encoding error). The simulation cannot continue if the output
-    /// writer fails because results would be lost.
+    /// I/O failure during output writing; the simulation cannot continue because
+    /// results would be lost.
     #[error("I/O error during simulation output: {message}")]
     IoError {
         /// Description of the I/O failure.

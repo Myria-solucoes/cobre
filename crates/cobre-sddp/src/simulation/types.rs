@@ -47,15 +47,10 @@ pub struct SimulationCostResult {
     // Resource costs
     /// Cost attributed to thermal generation dispatch.
     pub thermal_cost: f64,
-    /// Cost attributed to anticipated (forward-committed) thermal generation.
-    ///
-    /// Charged on the anticipated-decision column at the decision stage
-    /// (`cost_per_mwh * delivery_hours * discount[delivery]`), where the
-    /// delivery-stage generation cost is zeroed to avoid double-counting. This
-    /// is the fuel that `immediate_cost` already includes but `thermal_cost`
-    /// (which sums only the per-block generation columns) does not, so reporting
-    /// it as its own category lets the breakdown reconcile to `immediate_cost`.
-    /// Zero for cases with no anticipated thermals.
+    /// Cost of anticipated (forward-committed) thermal generation, charged on the
+    /// anticipated-decision column at the decision stage. The delivery-stage
+    /// generation cost is zeroed to avoid double-counting; reporting this as its
+    /// own category lets the breakdown reconcile to `immediate_cost`.
     pub anticipated_thermal_cost: f64,
     /// Cost attributed to contract energy delivery.
     pub contract_cost: f64,
@@ -276,12 +271,9 @@ pub struct SimulationPumpingResult {
     pub pumped_flow_m3s: f64,
     /// Active power consumed by pumping in MW.
     pub power_consumption_mw: f64,
-    /// Imputed pumping cost; the default is a fixed `0.0`. There is no
-    /// per-station cost input and no cost parquet, so this is the single
-    /// documented value. The forbidden alternative is recomputing a cost in the
-    /// output writer (`build_pumping_batch` forwards this verbatim into
-    /// `pumping_cost`); a writer-side cost would diverge from this default with
-    /// no authoritative source to reconcile against.
+    /// Imputed pumping cost, fixed `0.0` (no per-station cost input exists).
+    /// `build_pumping_batch` forwards this verbatim — do NOT recompute a cost in
+    /// the output writer; with no authoritative source it would diverge.
     pub pumping_cost: f64,
     /// Operative state code for this station at this block.
     pub operative_state_code: i8,
@@ -432,23 +424,9 @@ pub struct ScenarioCategoryCosts {
 
 /// Complete simulation result for one scenario.
 ///
-/// This is the payload type of the bounded channel connecting simulation
-/// threads to the background I/O thread (SS6.1).
-///
-/// # Send bound
-///
-/// [`SimulationScenarioResult`] implements `Send` because it is transferred
-/// across a thread boundary: the simulation thread that produces it sends it
-/// through the channel to the dedicated I/O thread. All constituent types are
-/// `Send`-safe (plain data, no `Rc`, no raw pointers, no non-`Send` interior
-/// mutability).
-///
-/// # Memory lifetime
-///
-/// Each instance is produced by a simulation thread, sent through the channel,
-/// consumed by the I/O thread for Parquet writing, and then dropped. At most
-/// `channel_capacity` instances exist simultaneously (bounded by channel
-/// backpressure). See SS3.3.
+/// Payload type of the bounded channel connecting simulation threads to the
+/// background I/O thread (SS6.1); at most `channel_capacity` instances exist at
+/// once (SS3.3). Must be `Send` — pinned by the `assert_send` static check below.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct SimulationScenarioResult {
     /// 0-based scenario identifier, unique across all MPI ranks.

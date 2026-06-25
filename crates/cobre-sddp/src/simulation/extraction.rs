@@ -1,12 +1,5 @@
 //! Scenario distribution and result extraction for the SDDP simulation phase.
 //!
-//! This module provides three pure functions consumed by the simulation forward
-//! pass:
-//!
-//! - [`assign_scenarios`] — static scenario-to-rank distribution.
-//! - [`extract_stage_result`] — LP solution → typed [`SimulationStageResult`].
-//! - [`accumulate_category_costs`] — running per-category cost totals.
-//!
 //! ## Column layout
 //!
 //! The state-region column layout is defined by [`StateLayout`]:
@@ -20,14 +13,8 @@
 //! [theta+1, ...)     equipment    — turbine, spillage, thermal, lines, deficit, excess
 //! ```
 //!
-//! The equipment column layout — including turbine, spillage, diversion, thermal,
-//! line, deficit, excess, inflow-slack, FPHA generation, evaporation,
-//! withdrawal slacks, operational violation slacks (outflow/turbine/generation
-//! min/max), NCS generation, pumping flow, and generic constraint slacks — is
-//! defined per stage by `StageLayout`, with the stage-correct ranges threaded
-//! into extraction via [`StageGeometry`](crate::lp_builder::StageGeometry).
-//! Stub entity types (contracts) that contribute zero LP variables remain as
-//! zero-valued placeholders.
+//! The equipment column layout is defined per stage by `StageLayout`, threaded
+//! into extraction as [`StageGeometry`](crate::lp_builder::StageGeometry).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -45,45 +32,27 @@ use crate::simulation::types::{
     SimulationStageResult, SimulationThermalResult,
 };
 
-/// Pre-computed reverse lookups from system hydro index to local
-/// FPHA/evaporation/filling-slack index, for **one stage**.
+/// Reverse lookups from system hydro index to local FPHA/evaporation/filling-slack
+/// slot, for **one stage**.
 ///
-/// FPHA/evaporation membership is per-`(hydro, stage)` — the resolved production
-/// model can change which hydros are FPHA from stage to stage — so this lookup is
-/// stage-specific, NOT study-invariant. The two filling-slack families share the
-/// same per-stage-sparse shape: `σ_fill` exists only at a filling hydro's terminal
-/// Filling stage and `σ^{v-}` only at its Operating stages, so their slack column is
-/// addressed by a system→slot reverse map exactly like FPHA/evap, never by the
-/// dense system index. The lookup is built from the per-stage [`StageGeometry`]
-/// (the stage-correct identity lists). A single global stage-0 list would describe
-/// stage 0 only and misclassify any stage whose membership differs. Build one per
-/// stage once per simulation run via [`HydroReverseLookup::build_per_stage`] and
-/// index by stage at extraction.
+/// Membership is per-`(hydro, stage)`: a hydro can be FPHA at one stage and not
+/// another, `σ_fill` exists only at a filling hydro's terminal Filling stage, and
+/// `σ^{v-}` only at its Operating stages. A single global stage-0 list would
+/// misclassify any stage whose membership differs. Each entry is `Some(slot)` /
+/// `None`; the column is `geometry.<family>_col.start + slot`.
 pub(crate) struct HydroReverseLookup {
-    /// `fpha[h]` is `Some(local_idx)` if hydro `h` is FPHA at this stage, `None` otherwise.
+    /// FPHA-local slot per hydro, `None` if not FPHA at this stage.
     pub(crate) fpha: Vec<Option<usize>>,
-    /// `evap[h]` is `Some(local_idx)` if hydro `h` has evaporation at this stage, `None` otherwise.
+    /// Evaporation-local slot per hydro, `None` if no evaporation at this stage.
     pub(crate) evap: Vec<Option<usize>>,
-    /// `filling_target[h]` is `Some(local_idx)` if hydro `h` owns a `σ_fill`-target
-    /// slack column at this stage (its terminal Filling stage), `None` otherwise.
-    /// The `σ_fill` column is then `geometry.filling_target_col.start + local_idx`.
+    /// `σ_fill`-target slot per hydro, `None` if it owns no target column at this stage.
     pub(crate) filling_target: Vec<Option<usize>>,
-    /// `filled_min_storage_floor[h]` is `Some(local_idx)` if hydro `h` owns a `σ^{v-}`
-    /// operating-floor slack column at this stage (an Operating stage of a filling
-    /// hydro), `None` otherwise. The `σ^{v-}` column is then
-    /// `geometry.filled_min_storage_floor_col.start + local_idx`.
+    /// `σ^{v-}` operating-floor slot per hydro, `None` if it owns no floor column at this stage.
     pub(crate) filled_min_storage_floor: Vec<Option<usize>>,
 }
 
 impl HydroReverseLookup {
     /// Build the reverse lookup for one stage from its [`StageGeometry`].
-    ///
-    /// Allocates four `Vec<Option<usize>>` of length `n_hydros`, populated from the
-    /// per-stage `fpha_hydro_indices` / `evap_hydro_indices` /
-    /// `filling_target_hydro_indices` / `filled_min_storage_floor_hydro_indices`. Reads the
-    /// stage-correct lists from `geometry`. Using a single global stage-0 list for a
-    /// stage whose membership differs IS the defect this per-stage build exists to
-    /// forbid.
     pub(crate) fn build(geometry: &crate::lp_builder::StageGeometry, n_hydros: usize) -> Self {
         let mut fpha = vec![None; n_hydros];
         for (local, &sys) in geometry.fpha_hydro_indices.iter().enumerate() {
@@ -113,12 +82,8 @@ impl HydroReverseLookup {
         }
     }
 
-    /// Build one [`HydroReverseLookup`] per stage from the per-stage geometry table.
-    ///
-    /// Allocates the full `Vec<HydroReverseLookup>` once per simulation run (or per
-    /// worker) so the per-`(scenario, stage)` extraction reads a pre-built lookup by
-    /// stage index — never reallocating on the hot path. Length equals
-    /// `geometry_per_stage.len()`.
+    /// Build one [`HydroReverseLookup`] per stage from the per-stage geometry table,
+    /// once per simulation run so per-`(scenario, stage)` extraction never reallocates.
     pub(crate) fn build_per_stage(
         geometry_per_stage: &[crate::lp_builder::StageGeometry],
         n_hydros: usize,
@@ -130,17 +95,8 @@ impl HydroReverseLookup {
     }
 }
 
-/// Read the primal value of a SPARSE per-hydro filling-slack column, or `0.0` when
-/// the hydro owns no column in that family at this stage.
-///
-/// `local_idx` is the hydro's slot within the family (resolved by the
-/// [`HydroReverseLookup`] system→slot map); `col_range` is the family's per-stage
-/// column range (`geometry.filling_target_col` / `geometry.filled_min_storage_floor_col`). When
-/// `local_idx` is `None` — the common non-filling / `PreFilling` / off-terminal case —
-/// the slack column does not exist for this `(stage, hydro)`, so the realized
-/// violation is `0.0`. Indexing is checked (`get().unwrap_or(0.0)`), so a malformed
-/// geometry can never panic; a `debug_assert!` flags a slot that escapes the range
-/// in debug builds.
+/// Read the primal of a SPARSE per-hydro filling-slack column, or `0.0` when
+/// `local_idx` is `None` (the hydro owns no column in that family at this stage).
 #[inline]
 fn read_filling_slack_primal(
     primal: &[f64],
@@ -157,29 +113,19 @@ fn read_filling_slack_primal(
     primal.get(col).copied().unwrap_or(0.0)
 }
 
-/// Pre-computed reverse lookup from system thermal index to anticipated-local index.
+/// Reverse lookup from system thermal index to anticipated-local index. Depends
+/// only on the study-invariant [`StudyDimensions`], so it is built once per run.
 ///
-/// Build once per simulation run via [`ThermalReverseLookup::build`] and reuse
-/// across all (scenario, stage) pairs.  The lookup depends only on the
-/// study-invariant [`StudyDimensions`] and `n_thermals`; it never changes between
-/// stages or scenarios.
-///
-/// Entry `t` is `Some(local_anticipated_idx)` when thermal `t` is anticipated,
-/// `None` otherwise. The `local_anticipated_idx` is the position of `t` within
-/// `study_dims.anticipated_thermal_indices`, which downstream callers use to address
-/// anticipated-decision columns.
+/// Entry `t` is `Some(local_anticipated_idx)` — the position of `t` within
+/// `study_dims.anticipated_thermal_indices`, used to address anticipated-decision
+/// columns — when thermal `t` is anticipated, `None` otherwise.
 pub(crate) struct ThermalReverseLookup {
-    /// `thermal_is_anticipated[t]` is `Some(local_anticipated_idx)` if thermal `t`
-    /// is anticipated, `None` otherwise.
+    /// Anticipated-local slot per thermal, `None` if not anticipated.
     pub(crate) thermal_is_anticipated: Vec<Option<usize>>,
 }
 
 impl ThermalReverseLookup {
     /// Build the reverse lookup table for anticipated thermal indices.
-    ///
-    /// Allocates a `Vec<Option<usize>>` of length `n_thermals`. Call this once
-    /// per simulation run (or once per worker) and pass the result by reference
-    /// into each per-stage extraction call.
     pub(crate) fn build(study_dims: &StudyDimensions, n_thermals: usize) -> Self {
         let mut thermal_is_anticipated = vec![None; n_thermals];
         for (local, &sys) in study_dims.anticipated_thermal_indices.iter().enumerate() {
@@ -195,20 +141,12 @@ impl ThermalReverseLookup {
     }
 }
 
-/// Return the primal value for the anticipated-decision column of a thermal plant.
+/// Primal of a thermal's anticipated-decision column, or `None` when the thermal
+/// is not anticipated or the decision is inactive at this stage.
 ///
-/// Returns `Some(v)` where `v = primal[anticipated_decision.start + local_idx]` when:
-/// - thermal `thermal_local` is anticipated (i.e., `lookup.thermal_is_anticipated[thermal_local]`
-///   is `Some(local_idx)`), AND
-/// - the decision is active at the current stage per the single-owner predicate
-///   [`StateLayout::is_anticipated_decision_active`].
-///
-/// Returns `None` silently under any of:
-/// - the thermal is not anticipated,
-/// - [`StateLayout::is_anticipated_decision_active`] is `false` (the decision is
-///   absent from the LP at this stage),
-/// - the plant is outside its entry/exit window (the LP builder sets `[0,0]` bounds for
-///   those columns; the activation predicate is the canonical test — do not read-then-check).
+/// Gates on [`StateLayout::is_anticipated_decision_active`] rather than reading
+/// then checking: an inactive column is pinned to `[0, 0]` and the predicate is
+/// the canonical single-owner test.
 #[inline]
 fn compute_anticipated_decision_mw(
     view: &SolutionView<'_>,
@@ -217,12 +155,6 @@ fn compute_anticipated_decision_mw(
     thermal_local: usize,
 ) -> Option<f64> {
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
-    // Gate on the cross-module single owner of the anticipated-decision predicate
-    // (horizon clause ∧ delivery-stage operation window),
-    // [`StateLayout::is_anticipated_decision_active`], so the simulation read
-    // cannot drift off the LP-build geometry. Inactive ⇒ the decision column is
-    // absent from the LP (pinned to `[0, 0]`), so return `None` (the early-`None`
-    // contract).
     if !spec.state.is_anticipated_decision_active(
         local_idx,
         spec.stage_index,
@@ -232,11 +164,8 @@ fn compute_anticipated_decision_mw(
     ) {
         return None;
     }
-    // `anticipated_decision` is the control-region priced column whose base is the
-    // per-stage `thermal.end` (n_blks-dependent), so it must come from the
-    // per-stage `equipment` geometry — never the global stage-0
-    // `indexer.anticipated_decision.start`, which addresses the wrong column at
-    // any stage whose block count differs from stage 0's.
+    // Base is the per-stage `thermal.end` (n_blks-dependent), so use `spec.geometry`,
+    // never the global stage-0 indexer — that addresses the wrong column off stage 0.
     let col = spec.geometry.anticipated_decision.start + local_idx;
     debug_assert!(
         col < view.primal.len(),
@@ -246,40 +175,13 @@ fn compute_anticipated_decision_mw(
     Some(view.primal[col])
 }
 
-/// Return the committed MW for an anticipated thermal at any stage
-/// in `[0, T-1]` (the always-active fishing predicate makes every
-/// stage a delivery stage; pre-horizon stages deliver the seeded
-/// `values_mw[slot 0]` advanced by the ring-buffer shift).
+/// Committed MW for an anticipated thermal, or `None` when not anticipated.
 ///
-/// Reads slot 0 of the `anticipated_state` ring buffer:
-/// `primal[anticipated_state.start + 0 * n_anticipated + local_idx]`
-/// = `primal[anticipated_state.start + local_idx]` (slot-major, plant-minor).
-///
-/// At extraction time slot 0 carries the committed MW, sourced as follows:
-///
-/// - **Per-block path** (`indexer.thermal.non_empty() && n_blks > 0`): the fishing
-///   constraint couples per-block thermal generation (`MWh`) to the slot-0 column
-///   (`MW × block_hours_total`), so the LP solver pins
-///   `s_{i,0} = (sum_blk h_blk * g_blk) / sum_blk h_blk` — the block-hours-weighted
-///   average MW, i.e., the committed scalar. This is NOT the same as any
-///   individual per-block generation `g_blk` when block hours or per-block
-///   generations are non-uniform.
-///
-/// - **No-block path** (`indexer.thermal.is_empty() || n_blks == 0`): the fishing
-///   constraint LHS sum over zero blocks vanishes, so the constraint does not
-///   couple slot 0 to anything. Category 6 (`anticipated_state_fixing`) instead
-///   pins `s_{i,0} = incoming_slot_0` from the ring buffer, which is the committed
-///   MW propagated from earlier stages via the ring-buffer shift (`noise::shift_anticipated_state`).
-///
-/// In both paths the correct read is the slot-0 column.
-///
-/// Returns `Some(v)` when thermal `thermal_local` is anticipated: the
-/// fishing constraint is always active for every anticipated plant, so the
-/// slot-0 read applies unconditionally. At pre-horizon stages, the value read
-/// is the seeded `values_mw[slot 0]` injected by the setup pipeline and
-/// advanced via the per-stage ring-buffer shift.
-///
-/// Returns `None` silently when the thermal is not anticipated.
+/// The committed scalar is slot 0 of the `anticipated_state` ring buffer
+/// (`anticipated_state.start + local_idx`), NOT a per-block thermal generation
+/// column — those differ when block hours or generations are non-uniform, and the
+/// fishing constraint pins slot 0 to the block-hours-weighted average. The read
+/// applies unconditionally for any anticipated plant.
 #[inline]
 fn compute_anticipated_committed_mw(
     view: &SolutionView<'_>,
@@ -288,11 +190,8 @@ fn compute_anticipated_committed_mw(
     thermal_local: usize,
 ) -> Option<f64> {
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
-    // Slot-major, plant-minor layout (see `StateLayout::anticipated_state`):
-    //   col = anticipated_state.start + slot * n_anticipated + plant
-    // Slot 0 = anticipated_state.start + local_idx (the `0 * n_anticipated` term).
-    // The anticipated-state ring buffer lives in the stage-invariant state region,
-    // so its base is read from the role-(a) `StateLayout`, not the geometry indexer.
+    // Ring buffer lives in the stage-invariant state region, so the base is the
+    // role-(a) `StateLayout`, not the geometry indexer. Slot 0 = start + local_idx.
     let col = spec.state.anticipated_state.start + local_idx;
     debug_assert!(
         col < view.primal.len(),
@@ -302,40 +201,29 @@ fn compute_anticipated_committed_mw(
     Some(view.primal[col])
 }
 
-/// System entity counts needed to populate per-entity result [`Vec`]s.
-///
-/// All counts are the number of entities that participate in the LP at runtime
-/// (i.e., entities in their active operative state). Entity types that
-/// contribute no columns at a given stage (e.g. contracts, which remain
-/// zero-valued stubs) still need counts so the caller can allocate zero-length
-/// or pre-allocated [`Vec`]s as appropriate.
-///
-/// # Entity IDs
-///
-/// The entity ID at position `h` in the hydro result vec is taken from
-/// `hydro_ids[h]`. For equipment types whose column layout is not yet
-/// exposed by the per-stage geometry, the corresponding ID slices are still
-/// iterated to produce stub zero-valued entries that preserve entity
-/// ordering for the output writer.
+/// System entity counts needed to populate per-entity result [`Vec`]s. Every ID
+/// list is in canonical ID-sorted order. Entity types that contribute no columns
+/// at a stage (e.g. contracts) still carry counts so stub zero-valued entries
+/// preserve entity ordering for the output writer.
 #[derive(Debug, Clone)]
 pub struct EntityCounts {
-    /// Entity IDs for operating hydro plants, in canonical ID-sorted order.
+    /// Operating hydro plant IDs.
     pub hydro_ids: Vec<i32>,
-    /// Entity IDs for thermal units, in canonical ID-sorted order.
+    /// Thermal unit IDs.
     pub thermal_ids: Vec<i32>,
-    /// Entity IDs for transmission lines, in canonical ID-sorted order.
+    /// Transmission line IDs.
     pub line_ids: Vec<i32>,
-    /// Entity IDs for buses, in canonical ID-sorted order.
+    /// Bus IDs.
     pub bus_ids: Vec<i32>,
     /// Length must equal `indexer.hydro_count`. Values are unused — per-stage
-    /// productivity is accessed through `StageExtractionSpec::hydro_productivities`
-    /// instead. This field is retained for the `debug_assert!` length invariant.
+    /// productivity is read through `StageExtractionSpec::hydro_productivities`;
+    /// retained for the `debug_assert!` length invariant.
     pub hydro_productivities: Vec<f64>,
-    /// Entity IDs for pumping stations (may be empty if none exist).
+    /// Pumping station IDs (empty if none).
     pub pumping_station_ids: Vec<i32>,
-    /// Entity IDs for contracts (may be empty if none exist).
+    /// Contract IDs (empty if none).
     pub contract_ids: Vec<i32>,
-    /// Entity IDs for non-controllable sources (may be empty if none exist).
+    /// Non-controllable source IDs (empty if none).
     pub non_controllable_ids: Vec<i32>,
 }
 
@@ -374,15 +262,13 @@ pub fn assign_scenarios(n_scenarios: u32, rank: usize, world_size: usize) -> Ran
     let n = n_scenarios as usize;
     let r = world_size;
 
-    // Number of "fat" ranks (each gets one extra scenario).
     let fat_count = n % r;
-    let fat_size = n / r + 1; // ceil(n / r)
-    let lean_size = n / r; // floor(n / r)
+    let fat_size = n / r + 1;
+    let lean_size = n / r;
 
     let (start, size): (usize, usize) = if rank < fat_count {
         (rank * fat_size, fat_size)
     } else {
-        // Lean group: fat group's total + lean offset.
         (
             fat_count * fat_size + (rank - fat_count) * lean_size,
             lean_size,
@@ -397,9 +283,6 @@ pub fn assign_scenarios(n_scenarios: u32, rank: usize, world_size: usize) -> Ran
 }
 
 /// LP solution view passed to result extraction helpers.
-///
-/// Bundles the five LP output arrays so that extraction helpers each receive
-/// a single `&SolutionView` instead of five separate slice parameters.
 pub struct SolutionView<'a> {
     /// Primal variable values from the LP solve.
     pub primal: &'a [f64],
@@ -415,52 +298,30 @@ pub struct SolutionView<'a> {
 
 /// Conversion factor from `hm³ · MW/(m³/s)` to `MWh`.
 ///
-/// Unit cancellation:
-/// `hm³ × 10⁶ m³/hm³ ÷ 3600 s/h × MW/(m³/s) = MWh`
-///
-/// Used to compute stored-energy fields:
-/// `stored_energy_mwh = (V_hm3 − V_min_hm3) · ρ_acum · ENERGY_FACTOR`.
+/// Unit cancellation: `hm³ × 10⁶ m³/hm³ ÷ 3600 s/h × MW/(m³/s) = MWh`.
 pub const ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S: f64 = 1.0e6 / 3600.0;
 
 /// Extraction parameters bundled for a single stage.
 ///
-/// Bundles the static configuration used by all per-entity extraction helpers
-/// so that `extract_stage_result` needs only three parameters.
+/// **Per-stage geometry contract.** Every block-major equipment read must take its
+/// base AND length from `n_blks` / `geometry` (this stage's values), never a global
+/// stage-0 geometry: under a non-uniform block schedule (e.g. `[1, 3, 2]`) a stage-0
+/// base/stride addresses the WRONG primal columns, silently misreporting equipment
+/// and the cost breakdown. `state` (role-(a), pure function of `(N, L, A, k_max)`)
+/// and `study_dims` (study-invariant non-state shape) instead resolve at every
+/// stage. For uniform-block studies the per-stage and stage-0 reads coincide.
 pub struct StageExtractionSpec<'a> {
-    /// Stage-invariant role-(a) state layout: the source of the state-region
-    /// column reads (`storage`, `storage_in`, `inflow_lags`, `anticipated_state`,
-    /// `max_par_order`) the extraction performs. These offsets are pure functions
-    /// of `(N, L, A, k_max)` and so resolve correctly at every stage.
+    /// Role-(a) state layout: source of the state-region column reads (`storage`,
+    /// `storage_in`, `inflow_lags`, `anticipated_state`, `max_par_order`).
     pub state: &'a StateLayout,
-    /// Single owner of the study-invariant, non-state LP shape: the non-state
-    /// entity counts and optional-column presence flags this extraction reads.
-    /// These facts are stage- and block-independent, so the single study-global
-    /// handle resolves correctly at every stage.
+    /// Single owner of the study-invariant, non-state LP shape (entity counts and
+    /// optional-column presence flags).
     pub study_dims: &'a StudyDimensions,
-    /// Per-stage dispatch block count for this stage, sourced from
-    /// `block_counts_per_stage[t]`.
-    ///
-    /// Every equipment-column family at this stage is striped by *this* stage's
-    /// block count (the LP template is built per-stage from `stage.blocks.len()`),
-    /// so all column-stride arithmetic during extraction must use this per-stage
-    /// `n_blks`. A single global stage-0 block count would stride every equipment
-    /// column off stage-0's block width, misreading any stage whose block count
-    /// differs — silently producing wrong reported outputs. For uniform-block
-    /// studies every stage's block count equals stage 0's and the reads coincide.
+    /// Per-stage dispatch block count, sourced from `block_counts_per_stage[t]`.
+    /// Strides every equipment-column family at this stage.
     pub n_blks: usize,
-    /// Stage-correct equipment geometry for the stage being extracted.
-    ///
-    /// Every block-major equipment family's base AND length must come from
-    /// **this stage's** geometry. A single global stage-0 geometry would carry
-    /// `<family>.start` and `<family>.end` both striped by stage 0's block count.
-    /// For any stage whose block count differs (a non-uniform schedule such as
-    /// `[1, 3, 2]`), reading the per-block `grid.flat(<family>.start, …)` base or
-    /// summing `range_sum(<family>.clone())` over the stage-0 range addresses the
-    /// WRONG primal columns — silently misreporting per-block equipment and the
-    /// cost breakdown. `geometry.<family>` is resolved per stage from `StageLayout`
-    /// (via `StageTemplates::geometry_per_stage`), so it addresses the columns the
-    /// solved primal actually occupies at this stage. For uniform-block studies
-    /// every stage's geometry equals stage 0's and the reads coincide.
+    /// Stage-correct equipment geometry, resolved per stage from `StageLayout`
+    /// (via `StageTemplates::geometry_per_stage`).
     pub geometry: &'a crate::lp_builder::StageGeometry,
     /// Entity ID lists and productivities needed to build result records.
     pub entity_counts: &'a EntityCounts,
@@ -469,138 +330,66 @@ pub struct StageExtractionSpec<'a> {
     /// Block hours per dispatch block, used to convert duals to spot prices.
     pub block_hours: &'a [f64],
     /// Per-row metadata for active generic constraint rows at this stage.
-    ///
-    /// Empty when no generic constraints are active.  Used by the extraction
-    /// pipeline to map LP row/column indices back to constraint identity and
-    /// block, and to read slack/dual values from the solution vectors.
     pub generic_constraint_entries: &'a [GenericConstraintRowEntry],
-    /// Column index of the first NCS generation variable at this stage.
-    ///
-    /// NCS columns are laid out as `ncs_col_start + local_idx * n_blks + blk`.
-    /// Zero when no NCS entities are active at this stage.
+    /// First NCS generation column; NCS columns are `ncs_col_start + local_idx * n_blks + blk`.
     pub ncs_col_start: usize,
     /// Number of active NCS entities at this stage.
     pub n_ncs: usize,
-    /// Entity IDs of active NCS entities at this stage, in ID-sorted order.
-    ///
-    /// Length equals `n_ncs`.  Empty when no NCS entities are active.
+    /// IDs of active NCS entities, in ID-sorted order. Length equals `n_ncs`.
     pub ncs_entity_ids: &'a [i32],
-    /// Column upper bounds for NCS columns at this stage.
-    ///
-    /// Slice into the stage template's `col_upper`, starting at `ncs_col_start`
-    /// with length `n_ncs * n_blks`.  Each entry is `available_gen * factor`,
-    /// representing the maximum generation for that (ncs, block) pair.
-    /// Empty when no NCS entities are active.
+    /// Per-(ncs, block) column upper bounds, `available_gen * factor`. Same
+    /// block-major layout as the NCS columns, length `n_ncs * n_blks`.
     pub ncs_col_upper: &'a [f64],
-    /// Column index of the first pumping-flow variable at this stage.
-    ///
-    /// Pumping columns are laid out block-major over ALL system stations (dense)
-    /// as `pumping_col_start + p_sys * n_blks + blk`, where `p_sys` is the SYSTEM
-    /// station index. Sourced from `StageLayout::col_pumping_start` (via
-    /// `StageTemplates::pumping_col_starts`), the sole owner of the pumping-flow
-    /// column base. Zero when there are no pumping stations.
+    /// First pumping-flow column. Dense over ALL system stations:
+    /// `pumping_col_start + p_sys * n_blks + blk` (`p_sys` = SYSTEM index).
     pub pumping_col_start: usize,
-    /// Number of pumping stations at this stage — the full system count (dense).
-    /// A commissioning-dormant station keeps its column (pinned to `[0, 0]`).
+    /// Full system station count (dense); a commissioning-dormant station keeps
+    /// its column pinned to `[0, 0]`.
     pub n_pumping: usize,
-    /// Per-station pumping power-consumption rate \[MW/(m³/s)\].
-    ///
-    /// The ID-sorted list (length = total stations), parallel to
-    /// `entity_counts.pumping_station_ids` and indexed by the SYSTEM station index
-    /// — which, under the dense layout, IS the column-block position, so extraction
-    /// reads it directly at the enumeration index. Used to compute
-    /// `power_consumption_mw = pumped_flow_m3s * consumption`. Empty when there are
-    /// no pumping stations.
+    /// Per-station pumping power-consumption rate \[MW/(m³/s)\]. ID-sorted, indexed
+    /// by SYSTEM station index — which under the dense layout IS the column-block
+    /// position, so extraction reads it at the enumeration index.
     pub pumping_consumption_mw_per_m3s: &'a [f64],
-    /// Mapping from target hydro ID to source hydro indices that divert to it.
-    ///
-    /// Used by the extraction pipeline to compute `diverted_inflow_m3s` for
-    /// each hydro that receives diversion from upstream sources.
-    /// Empty when no hydros have diversion.
+    /// Map from target hydro ID to source hydro indices that divert to it.
     pub diversion_upstream: &'a HashMap<EntityId, Vec<usize>>,
-    /// Per-hydro productivity at this stage, accounting for per-stage overrides.
-    ///
-    /// Length equals `indexer.hydro_count`.  For constant-productivity hydros
-    /// this is the per-stage override (or base if no override), for FPHA hydros
-    /// this is 0.0 (generation is read from the LP column instead).
+    /// Per-hydro productivity at this stage. `0.0` for FPHA hydros (generation is
+    /// read from the LP column instead). Length equals `indexer.hydro_count`.
     pub hydro_productivities: &'a [f64],
-    /// Column scaling factors from the stage template.
-    ///
-    /// Empty when no prescaling is applied.  Used to unscale per-variable cost
-    /// extraction (`c_original = c_scaled / col_scale[j]`).
+    /// Column scaling factors. Unscale per-variable cost: `c_orig = c_scaled / col_scale[j]`.
     pub col_scale: &'a [f64],
-    /// Row scaling factors from the stage template.
-    ///
-    /// Empty when no prescaling is applied.  Used to unscale row lower/upper
-    /// bounds at the extraction boundary.
+    /// Row scaling factors, to unscale row bounds at the extraction boundary.
     pub row_scale: &'a [f64],
-    /// Cumulative discount factor for this stage (for reporting).
-    ///
-    /// Product of all one-step discount factors for transitions preceding
-    /// this stage. `1.0` for stage 0.
+    /// Product of one-step discount factors for transitions before this stage; `1.0` for stage 0.
     pub cumulative_discount_factor: f64,
-    /// Pre-computed energy-conversion scalars for every `(hydro, stage)` pair.
-    ///
-    /// Provides `ρ_eq` (equivalent productivity) via
-    /// [`EnergyConversionSet::conversion`] and `ρ_acum` (accumulated cascade
-    /// productivity) via [`EnergyConversionSet::accumulated_productivity`].
-    /// Used to populate the five energy fields on [`crate::simulation::types::SimulationHydroResult`].
+    /// `ρ_eq` and `ρ_acum` scalars per `(hydro, stage)` via [`EnergyConversionSet`].
     pub energy_conversion: &'a EnergyConversionSet,
-    /// Minimum storage volume `V_min` per hydro plant (hm³), in canonical
-    /// ID-sorted order matching `entity_counts.hydro_ids`.
-    ///
-    /// Used to compute `stored_energy_mwh = (V - V_min) · ρ_acum · ENERGY_FACTOR`.
+    /// `V_min` per hydro (hm³), in `entity_counts.hydro_ids` order. Feeds
+    /// `stored_energy_mwh = (V - V_min) · ρ_acum · ENERGY_FACTOR`.
     pub hydro_min_storage_hm3: &'a [f64],
     /// Stage index within the planning horizon (0-based).
-    ///
-    /// Passed to [`EnergyConversionSet::conversion`] and
-    /// [`EnergyConversionSet::accumulated_productivity`] so that per-stage
-    /// productivity scalars are read for the correct stage.
     pub stage_index: usize,
-    /// Total number of study stages in the planning horizon. Used by
-    /// anticipated-thermal extraction to evaluate the horizon-boundary predicate
-    /// `t + K_i <= n_stages`.
+    /// Total study stages. Evaluates the horizon-boundary predicate `t + K_i <= n_stages`.
     pub n_stages: usize,
-    /// Per-plant commissioning window `(entry_stage_id, exit_stage_id)` for the
-    /// anticipated thermals, indexed by anticipated-local position.
-    ///
-    /// Threaded into [`StateLayout::is_anticipated_decision_active`] so the
-    /// simulation read gates the anticipated-decision column on the same
-    /// horizon-∧-operation-window predicate the LP builder used; reading the
-    /// column when the gate is `false` would report a decision for a stage whose
-    /// decision column was pinned to `[0, 0]`. Empty when there are no
-    /// anticipated thermals.
+    /// Per-plant commissioning window `(entry_stage_id, exit_stage_id)` for
+    /// anticipated thermals, by anticipated-local position. Gates the
+    /// anticipated-decision read via [`StateLayout::is_anticipated_decision_active`]
+    /// on the same predicate the LP builder used — reading when the gate is `false`
+    /// reports a decision for a `[0, 0]`-pinned column. Empty when none.
     pub anticipated_windows: &'a [(Option<i32>, Option<i32>)],
-    /// Study-stage commissioning id for each study stage index
-    /// (`study_stage_ids[t] = stage.id`).
-    ///
-    /// The gate keys its operation-window clause on the DELIVERY stage's
-    /// `stage.id`, so it maps the delivery stage index `t + K_i` to its id
-    /// through this slice. Length equals `n_stages`.
+    /// Study-stage commissioning id per stage index (`study_stage_ids[t] = stage.id`).
+    /// The gate keys its operation-window clause on the DELIVERY stage's id
+    /// (`t + K_i`). Length equals `n_stages`.
     pub study_stage_ids: &'a [i32],
 }
 
 impl StageExtractionSpec<'_> {
-    /// Return the [`BlockGrid`] address primitive striding by *this stage's*
-    /// block count.
-    ///
-    /// The grid carries `self.n_blks` (the per-stage block count). A single global
-    /// stage-0 block count would mis-stride: every equipment-column family at this
-    /// stage is striped by the per-stage block width (the LP template is built
-    /// per-stage from `stage.blocks.len()`), so the extraction decoders must
-    /// address columns through a grid carrying `self.n_blks`, or they misread any
-    /// stage whose block count differs from stage 0's. The deficit shape's second
-    /// constant `max_deficit_segments` is study-invariant and is taken from
-    /// `self.study_dims`, the single owner of the non-state study shape.
+    /// Return the [`BlockGrid`] address primitive striding by this stage's `n_blks`.
     #[inline]
     fn block_grid(&self) -> BlockGrid {
         BlockGrid::new(self.n_blks, self.study_dims.max_deficit_segments)
     }
 
-    /// Column scaling factor for a given column index.
-    ///
-    /// Returns `col_scale[col]` when the column is within the scale vector and
-    /// the factor is non-zero; returns 1.0 otherwise (no scaling or safety guard).
+    /// `col_scale[col]` when in range and non-zero; `1.0` otherwise.
     #[inline]
     fn col_scale_factor(&self, col: usize) -> f64 {
         if col < self.col_scale.len() {
@@ -630,10 +419,6 @@ fn extract_hydro_no_turbine(
     } else {
         0.0
     };
-    // inflow_slack / withdrawal_slack bases are stage-level (one column per hydro,
-    // `+ h` with no block stride) but their BASE rides `n_blks`-dependent prior
-    // families, so it shifts under a non-uniform schedule; read it from the
-    // per-stage `geometry`, not the global stage-0 `indexer`.
     let inflow_slack = if study_dims.has_inflow_penalty {
         view.primal[spec.geometry.inflow_slack.start + h]
     } else {
@@ -649,9 +434,6 @@ fn extract_hydro_no_turbine(
     } else {
         0.0
     };
-    // The water-balance row base is stage-invariant in count (one row per hydro)
-    // but its start rides the per-stage row layout, so read it from the per-stage
-    // `geometry`, not the global stage-0 `indexer`.
     let water_value = view
         .dual
         .get(spec.geometry.water_balance.start + h)
@@ -659,8 +441,7 @@ fn extract_hydro_no_turbine(
         .unwrap_or(0.0)
         * COST_SCALE_FACTOR;
 
-    // Operational violation slacks are per-block in rate units (m3/s or MW).
-    // Stage-level: hours-weighted average across blocks.
+    // Per-block slacks aggregated to stage-level as an hours-weighted average.
     let (turbined_slack, outflow_slack_below, outflow_slack_above, generation_slack) = if study_dims
         .has_operational_violations
     {
@@ -683,10 +464,6 @@ fn extract_hydro_no_turbine(
         (0.0, 0.0, 0.0, 0.0)
     };
 
-    // Evaporation: read from LP columns when present; fall back to 0.0. The three
-    // evaporation columns are anchored at the `n_blks`-dependent FPHA-generation
-    // end, so they come from the per-stage `equipment.evap_indices`, never the
-    // global stage-0 `indexer.evap_indices`.
     let (evaporation_m3s, evaporation_violation_neg_m3s, evaporation_violation_pos_m3s) =
         if let Some(local_evap_idx) = lookup.evap[h] {
             let ei = &spec.geometry.evap_indices[local_evap_idx];
@@ -698,7 +475,6 @@ fn extract_hydro_no_turbine(
             (Some(0.0), 0.0, 0.0)
         };
 
-    // Energy-conversion scalars from EnergyConversionSet.
     let conv = spec.energy_conversion.conversion(h, spec.stage_index);
     let rho_acum = spec
         .energy_conversion
@@ -707,11 +483,6 @@ fn extract_hydro_no_turbine(
     let storage_initial = view.primal[state.storage_in.start + h];
     let storage_final = view.primal[state.storage.start + h];
 
-    // Filling soft-penalty slacks (hm³): the realized `σ_fill` / `σ^{v-}` primal for
-    // a filling hydro, `0.0` when this hydro owns no slack column in that family at
-    // this stage (the sparse-family absence case). Both families are stage-level
-    // (one column per filling hydro, no block stride), so the stage-aggregate branch
-    // reads them once.
     let filling_target_violation = read_filling_slack_primal(
         view.primal,
         &spec.geometry.filling_target_col,
@@ -786,12 +557,9 @@ struct HydroStageContext {
     evaporation_m3s: Option<f64>,
     evaporation_violation_neg_m3s: f64,
     evaporation_violation_pos_m3s: f64,
-    /// Realized `σ_fill` terminal-target slack (hm³); `0.0` when this hydro owns no
-    /// `σ_fill` column at this stage. Stage-level (one column per filling hydro, no
-    /// block stride), so it is read once and repeated across the per-block rows.
+    /// `σ_fill` terminal-target slack (hm³); read once, repeated across per-block rows.
     filling_target_violation: f64,
-    /// Realized `σ^{v-}` operating-floor slack (hm³); `0.0` when this hydro owns no
-    /// `σ^{v-}` column at this stage. Stage-level like `filling_target_violation`.
+    /// `σ^{v-}` operating-floor slack (hm³); read once, repeated across per-block rows.
     storage_violation_below: f64,
 }
 
@@ -814,10 +582,6 @@ impl HydroStageContext {
         } else {
             0.0
         };
-        // inflow_slack / withdrawal_slack bases ride `n_blks`-dependent prior
-        // families even though each is a single stage-level column per hydro, so
-        // the base comes from the per-stage `geometry`, not the global stage-0
-        // `indexer`.
         let inflow_slack = if study_dims.has_inflow_penalty {
             view.primal[spec.geometry.inflow_slack.start + h]
         } else {
@@ -833,9 +597,6 @@ impl HydroStageContext {
         } else {
             0.0
         };
-        // Water-balance row base: stage-invariant in count (one row per hydro)
-        // but its start rides the per-stage row layout, so read it from the
-        // per-stage `geometry`, not the global stage-0 `indexer`.
         let water_value = view
             .dual
             .get(spec.geometry.water_balance.start + h)
@@ -843,21 +604,16 @@ impl HydroStageContext {
             .unwrap_or(0.0)
             * COST_SCALE_FACTOR;
         let fpha_local = lookup.fpha[h];
-        // Evaporation columns are anchored at the `n_blks`-dependent FPHA-
-        // generation end, so they come from the per-stage `geometry.evap_indices`.
         let (evaporation_m3s, evaporation_violation_neg_m3s, evaporation_violation_pos_m3s) =
             if let Some(lei) = lookup.evap[h] {
                 let ei = &spec.geometry.evap_indices[lei];
                 let evaporation_flow = view.primal[ei.evaporation_flow_col];
-                let neg = view.primal[ei.f_evap_plus_col];
-                let pos = view.primal[ei.f_evap_minus_col];
+                let neg = view.primal[ei.f_evap_plus_col]; // f_evap_plus = under-evaporation
+                let pos = view.primal[ei.f_evap_minus_col]; // f_evap_minus = over-evaporation
                 (Some(evaporation_flow), neg, pos)
             } else {
                 (Some(0.0), 0.0, 0.0)
             };
-        // Filling soft-penalty slacks (hm³): the realized `σ_fill` / `σ^{v-}` primal
-        // for a filling hydro, `0.0` when this hydro owns no slack column in that
-        // family at this stage (the sparse-family absence case).
         let filling_target_violation = read_filling_slack_primal(
             view.primal,
             &spec.geometry.filling_target_col,
@@ -913,34 +669,25 @@ fn extract_hydro_per_block<'a>(
     let n_blks = spec.n_blks;
     let grid = spec.block_grid();
 
-    // Extract stage-level scalars once; the per-block closure captures them.
     let ctx = HydroStageContext::new(view, spec, lookup, h);
 
-    // Look up diversion source indices for this hydro (for inflow computation).
     let hydro_entity_id = EntityId(hydro_id);
     let div_sources = spec.diversion_upstream.get(&hydro_entity_id);
 
     (0..n_blks).map(move |b| {
-        // `turbine.start` (= `theta + 1`) is the stage-invariant control-region
-        // start, so it reads correctly at every stage; it is taken from the
-        // per-stage `geometry`, the single source every sibling family read below
-        // already uses, rather than the global stage-0 indexer.
         let t_col = grid.flat(spec.geometry.turbine.start, h, b);
         let s_col = grid.flat(spec.geometry.spillage.start, h, b);
         let turbined = view.primal[t_col];
         let spillage = view.primal[s_col];
 
-        // Diversion outflow: read directly from the diversion column.
         let diverted_outflow = if spec.geometry.diversion.is_empty() {
             0.0
         } else {
             view.primal[grid.flat(spec.geometry.diversion.start, h, b)]
         };
 
-        // Diversion inflow: sum diversion primals from all hydros that divert to
-        // this hydro. The diversion columns are flat block-major over the source
-        // hydro index `d_idx` (entity-outer, block-inner), so this addresses the
-        // diversion family with `flat`, not the deficit shape.
+        // Diversion columns are flat block-major over the source hydro index, so
+        // address them with `flat`, not the 3-term deficit shape.
         let diverted_inflow = if let Some(sources) = div_sources {
             let mut total = 0.0;
             for &d_idx in sources {
@@ -951,15 +698,14 @@ fn extract_hydro_per_block<'a>(
             0.0
         };
 
-        // For FPHA hydros, read generation from the LP `g_{h,k}` column.
-        // For constant-productivity hydros, compute generation as turbined * productivity.
+        // FPHA hydros read generation from the LP `g_{h,k}` column; constant-
+        // productivity hydros compute it as turbined * productivity.
         let generation_mw = if let Some(local_fpha_idx) = ctx.fpha_local {
             view.primal[grid.flat(spec.geometry.generation.start, local_fpha_idx, b)]
         } else {
             turbined * spec.hydro_productivities[h]
         };
 
-        // Operational violation slacks: read per-block value directly (m3/s or MW).
         let (turbined_slack, outflow_slack_below, outflow_slack_above, generation_slack) =
             if study_dims.has_operational_violations {
                 (
@@ -1070,9 +816,7 @@ fn extract_thermals(
         for (t, &thermal_id) in spec.entity_counts.thermal_ids.iter().enumerate() {
             let is_anticipated = lookup.thermal_is_anticipated[t].is_some();
             let anticipated_decision_mw = compute_anticipated_decision_mw(view, spec, lookup, t);
-            // The committed value is per-plant per-stage (slot 0 of the
-            // anticipated_state ring buffer), so it does not vary across blocks.
-            // Hoisted out of the inner loop to compute once per thermal.
+            // Per-plant per-stage scalar; hoisted out of the per-block loop.
             let anticipated_committed_mw = compute_anticipated_committed_mw(view, spec, lookup, t);
             for b in 0..n_blks {
                 let col = grid.flat(spec.geometry.thermal.start, t, b);
@@ -1173,9 +917,6 @@ fn extract_buses(
             .collect()
     } else {
         let grid = spec.block_grid();
-        // `max_deficit_segments` is study-invariant (the deficit-segment stride is
-        // a study-global fact, not a per-stage one), so it reads from the single
-        // `study_dims` owner, never the global stage-0 `indexer`.
         let max_segs = spec.study_dims.max_deficit_segments;
         spec.entity_counts
             .bus_ids
@@ -1183,10 +924,8 @@ fn extract_buses(
             .enumerate()
             .flat_map(move |(bus_idx, &bus_id)| {
                 (0..n_blks).map(move |b| {
-                    // Sum all deficit segment columns for this bus/block. The
-                    // deficit family is the 3-term bus-outer / segment-middle /
-                    // block-inner shape, so this addresses it with `deficit`, not
-                    // `flat`.
+                    // Deficit is the 3-term bus-outer/segment-middle/block-inner
+                    // shape, so address it with `deficit`, not `flat`.
                     let deficit_mw: f64 = (0..max_segs)
                         .map(|s| {
                             let col = grid.deficit(spec.geometry.deficit.start, bus_idx, s, b);
@@ -1194,9 +933,6 @@ fn extract_buses(
                         })
                         .sum();
                     let excess_col = grid.flat(spec.geometry.excess.start, bus_idx, b);
-                    // load_balance is a row base whose start rides the per-stage row
-                    // layout, so it reads from the per-stage `geometry`, not the
-                    // global stage-0 `indexer`.
                     let load_row = grid.flat(spec.geometry.load_balance.start, bus_idx, b);
                     let raw_dual = view.dual.get(load_row).copied().unwrap_or(0.0);
                     let hrs = spec.block_hours.get(b).copied().unwrap_or(0.0);
@@ -1245,11 +981,8 @@ fn extract_buses(
 ///
 /// # Performance
 ///
-/// This public entry point builds the hydro and thermal reverse-lookup tables on
-/// every call.  On the hot simulation path, use the crate-internal
-/// `extract_stage_result_with_lookups` variant which accepts pre-built lookups
-/// built once per simulation run, eliminating per-(scenario, stage)
-/// allocations.
+/// Builds the reverse-lookup tables on every call. On the hot path use
+/// `extract_stage_result_with_lookups` with pre-built lookups instead.
 #[must_use]
 pub fn extract_stage_result(
     view: &SolutionView<'_>,
@@ -1314,12 +1047,8 @@ pub(crate) fn extract_stage_result_with_lookups(
         spec.entity_counts.hydro_productivities.len(),
         state.hydro_count
     );
-    // The load-balance read strides `load_balance.start + bus * n_blks + blk` with
-    // this stage's block count, so the bound it needs is the per-stage row end
-    // `load_balance.start + n_buses * n_blks` — computed from the per-stage `n_blks`
-    // and bus count, never the n_blks-dependent stage-0 `indexer.load_balance.end`.
-    // The base itself comes from the per-stage `geometry`, not the global stage-0
-    // `indexer`.
+    // Bound is the per-stage row end `start + n_buses * n_blks`, not `load_balance.end`,
+    // which is striped by stage 0's block count.
     let load_balance = &spec.geometry.load_balance;
     let load_balance_end = if load_balance.is_empty() {
         load_balance.end
@@ -1385,21 +1114,12 @@ impl HydroViolationCosts {
 }
 
 /// Compute the 6 per-constraint hydro violation costs from a solution view.
-///
-/// The slack column ranges summed here come from the per-stage `equipment`
-/// geometry, NOT the global stage-0 `indexer`: at a stage whose block count
-/// differs from stage 0's, the stage-0 withdrawal/operational-violation ranges
-/// have the wrong base AND length, so summing them would attribute cost from the
-/// wrong columns. `equipment.<family>` addresses the stage-correct columns.
 fn compute_hydro_violation_costs(
     study_dims: &StudyDimensions,
     equipment: &crate::lp_builder::StageGeometry,
     col_cost: impl Fn(usize) -> f64,
     range_sum: impl Fn(std::ops::Range<usize>) -> f64,
 ) -> HydroViolationCosts {
-    // Evaporation slack columns are anchored at the `n_blks`-dependent FPHA-
-    // generation end, so the cost sums the per-stage `equipment.evap_indices`,
-    // not the global stage-0 `indexer.evap_indices`.
     let evaporation = equipment
         .evap_indices
         .iter()
@@ -1474,27 +1194,16 @@ fn compute_cost_result(
     let future_cost = theta_contribution * COST_SCALE_FACTOR;
     let immediate_cost = (view.objective - theta_contribution) * COST_SCALE_FACTOR;
 
-    // Every priced-column range summed below comes from the per-stage `equipment`
-    // geometry, NOT the global stage-0 `indexer`. At a stage whose block count
-    // differs from stage 0's, the stage-0 ranges have the wrong base AND length,
-    // so summing them books cost from the wrong columns and breaks the
-    // `Σ(breakdown) == immediate_cost` reconciliation. `equipment.<family>` sums
-    // the columns the solved primal actually occupies at this stage.
+    // Every range summed below must sum the whole per-stage `equipment` family, not
+    // just active columns: this is what keeps `Σ(breakdown) == immediate_cost`.
     let thermal_cost = if equipment.thermal.is_empty() {
         0.0
     } else {
         range_sum(equipment.thermal.clone()) * COST_SCALE_FACTOR
     };
-    // Anticipated (forward-committed) thermal fuel is charged on the
-    // anticipated-decision columns at the decision stage. Inactive columns
-    // (non-decision stages, or boundary plants) are pinned to `[0, 0]`, so their
-    // primal is 0 and they contribute nothing — summing the whole range at every
-    // stage attributes the cost only where the decision is live, matching how
-    // `immediate_cost` books it. The decision block starts at the per-stage
-    // `thermal.end` (n_blks-dependent), so the range comes from `equipment`, not
-    // the stage-0 `indexer`, or the breakdown would not reconcile under a
-    // non-uniform block schedule. Same objective·primal·scale basis as the other
-    // categories, so the breakdown reconciles to `immediate_cost`.
+    // Inactive anticipated-decision columns are `[0, 0]`-pinned (primal 0), so
+    // summing the whole range books the fuel only where the decision is live —
+    // matching `immediate_cost`.
     let anticipated_thermal_cost = if equipment.anticipated_decision.is_empty() {
         0.0
     } else {
@@ -1577,13 +1286,8 @@ fn compute_cost_result(
 
 /// Extract generic constraint violation results from a solved LP.
 ///
-/// For each active generic constraint row, reads the slack value from the
-/// primal vector (for constraints with `slack.enabled`).  Returns the
-/// violation records and the total violation cost (sum of
-/// `slack_value * penalty * block_hours` across all active constraint rows).
-///
-/// For `==` sense constraints with two slack columns (positive and negative),
-/// the reported `slack_value` is the net violation: `s_plus - s_minus`.
+/// For an `==` constraint (two slack columns) the reported `slack_value` is the
+/// net violation `s_plus - s_minus`, while its cost charges both (`s_plus + s_minus`).
 fn extract_generic_violations(
     view: &SolutionView<'_>,
     spec: &StageExtractionSpec<'_>,
@@ -1598,10 +1302,8 @@ fn extract_generic_violations(
     let mut total_cost = 0.0;
 
     for entry in entries {
-        // Slack value from the LP column(s). A collapsed stage-level row is
-        // priced by the stage's total hours (matching the LP objective set in
-        // `fill_generic_constraint_entries`); a per-block row by its own block's
-        // hours.
+        // A stage-level row is priced by total stage hours (matching the LP
+        // objective in `fill_generic_constraint_entries`); a per-block row by its block's.
         let block_hours = if entry.is_stage_level {
             spec.block_hours.iter().sum()
         } else {
@@ -1613,11 +1315,9 @@ fn extract_generic_violations(
         let (slack_value, slack_cost) = if entry.slack_enabled {
             match entry.sense {
                 ConstraintSense::Equal => {
-                    // Two slack columns: s_plus and s_minus.
                     let s_plus = entry.slack_plus_col.map_or(0.0, |col| view.primal[col]);
                     let s_minus = entry.slack_minus_col.map_or(0.0, |col| view.primal[col]);
                     let net = s_plus - s_minus;
-                    // Cost is for both slack variables individually.
                     let cost = (s_plus + s_minus) * entry.slack_penalty * block_hours;
                     (net, cost)
                 }
@@ -1635,8 +1335,6 @@ fn extract_generic_violations(
 
         results.push(SimulationGenericViolationResult {
             stage_id,
-            // A collapsed stage-level row spans the whole stage, so it reports
-            // no block; a per-block row reports its block index.
             // SAFETY: block_idx is a stage block index, always < n_blocks which is << 2^32.
             #[allow(clippy::cast_possible_truncation)]
             block_id: if entry.is_stage_level {
@@ -1656,17 +1354,9 @@ fn extract_generic_violations(
 /// Extract NCS generation results from a solved LP — dense, one row per system
 /// NCS at every stage.
 ///
-/// For each NCS entity (iterated by dense system index), reads the generation
-/// value from the primal vector, computes curtailment as
-/// `available - generation`, and computes the curtailment cost contribution.
-/// Returns the result records and the total NCS curtailment cost (sum of
-/// `primal[col] * objective[col]` over all NCS columns, negated so the cost is
-/// positive in the cost breakdown). A commissioning-dormant NCS's column is
-/// pinned to `[0, 0]`, so it emits a ZERO row (`generation_mw == 0`) rather than
+/// The total curtailment cost is negated so it is positive in the breakdown. A
+/// commissioning-dormant NCS (`[0, 0]`-pinned column) emits a ZERO row rather than
 /// being absent — uniform with how thermal/line report a zeroed entity.
-///
-/// When the study has no NCS (`spec.n_ncs == 0`), returns empty results and zero
-/// cost.
 fn extract_non_controllables(
     view: &SolutionView<'_>,
     spec: &StageExtractionSpec<'_>,
@@ -1687,9 +1377,7 @@ fn extract_non_controllables(
         for blk in 0..n_blks {
             let col = grid.flat(col_start, local_idx, blk);
             let generation_mw = view.primal[col];
-            // Column upper bound encodes available_gen * block_factor. The
-            // `ncs_col_upper` slice is the same flat block-major (entity-outer /
-            // block-inner) layout zero-based, so the offset is `flat` from 0.
+            // `ncs_col_upper` is the same block-major layout zero-based, so `flat` from 0.
             let col_upper_offset = grid.flat(0, local_idx, blk);
             debug_assert!(
                 col_upper_offset < spec.ncs_col_upper.len(),
@@ -1698,10 +1386,7 @@ fn extract_non_controllables(
             );
             let available_mw = spec.ncs_col_upper[col_upper_offset];
             let curtailment_mw = available_mw - generation_mw;
-            // NCS objective coefficient is negative (-curtailment_penalty * block_hours / K * d).
-            // The curtailment cost is the penalty for NOT generating, i.e.,
-            //   curtailment_cost = curtailment_mw * penalty_rate
-            // where penalty_rate = -(obj_coeff / col_scale) * K = penalty * block_hours.
+            // NCS obj coefficient is negative, so negate to report a positive cost.
             let col_cost = -(curtailment_mw * view.objective_coeffs[col]
                 / spec.col_scale_factor(col))
                 * COST_SCALE_FACTOR;
@@ -1727,26 +1412,12 @@ fn extract_non_controllables(
 /// Extract one [`SimulationPumpingResult`] per (station, block) from the solved
 /// pumping-flow primals — dense, one row per system station at every stage.
 ///
-/// Reads `view.primal[pumping_col_start + p_sys * n_blks + blk]` for the pumped
-/// flow — block-major, mirroring [`extract_non_controllables`]' per-block read.
-/// `view.primal` is already unscaled (the extraction boundary unscales upstream),
-/// so the flow is NOT divided by `col_scale` — consistent with the NCS
-/// `generation_mw` read. The per-block power term is
-/// `power_consumption_mw = pumped_flow_m3s * consumption[p_sys]`, using the same
-/// `consumption_mw_per_m3s` coefficient the `PumpingPower` resolver arm applies
-/// on the bus load-balance row.
-///
-/// Under the dense layout the LP keeps one column block per system station at
-/// every stage, so the enumeration index IS the SYSTEM index `p_sys` — there is
-/// no active-local remap. A commissioning-dormant station's column is pinned to
-/// `[0, 0]`, so it emits a ZERO row (`pumped_flow_m3s == 0`) rather than being
-/// absent — uniform with how thermal/line report a zeroed entity.
-///
-/// `pumping_cost` is imputed as `0.0` here (finalized downstream by the output
-/// writer). `block_id` is `Some(blk)` for every row.
-///
-/// Returns an empty `Vec` when `n_pumping == 0 || n_blks == 0` (the loop body
-/// never runs).
+/// The flow is NOT divided by `col_scale` — `view.primal` is already unscaled —
+/// and `power_consumption_mw = pumped_flow_m3s * consumption[p_sys]` reuses the
+/// same coefficient the `PumpingPower` resolver applies on the bus load-balance
+/// row. Under the dense layout the enumeration index IS the SYSTEM index, so a
+/// commissioning-dormant station emits a ZERO row rather than being absent.
+/// `pumping_cost` is imputed `0.0` here, finalized by the output writer.
 fn extract_pumping_stations(
     view: &SolutionView<'_>,
     spec: &StageExtractionSpec<'_>,
@@ -1911,9 +1582,8 @@ fn extract_stub_collections(
 /// assert_eq!(accum.imputed_cost, 60.0);          // 60
 /// ```
 pub fn accumulate_category_costs(cost: &SimulationCostResult, accum: &mut ScenarioCategoryCosts) {
-    // Anticipated thermal fuel is a resource cost (forward-committed generation),
-    // so it rolls up alongside thermal/contract. Keeping it in the resource macro
-    // category preserves Σ(macro categories) == immediate_cost.
+    // Anticipated thermal fuel rolls up as a resource cost; this is what keeps
+    // Σ(macro categories) == immediate_cost.
     accum.resource_cost += cost.thermal_cost + cost.anticipated_thermal_cost + cost.contract_cost;
     accum.recourse_cost += cost.deficit_cost + cost.excess_cost;
     accum.violation_cost += cost.storage_violation_cost
@@ -1944,15 +1614,8 @@ mod tests {
     // HydroReverseLookup per-stage membership
     // -------------------------------------------------------------------------
 
-    /// FPHA/evaporation membership is per-`(hydro, stage)`: a hydro can be FPHA at
-    /// one stage and not another (the resolved production model varies by stage).
-    /// `build_per_stage` must therefore yield a distinct lookup per stage, reading
-    /// each stage's own `StageGeometry.fpha_hydro_indices` — never a single global
-    /// stage-0 list applied to every stage. This test pins exactly that distinction:
-    /// hydro 1 is FPHA only at stage 1, so the stage-0 lookup classifies it `None`
-    /// while the stage-1 lookup classifies it `Some(local)`. A once-per-run lookup
-    /// built from stage 0 would return the same value for both stages and so could
-    /// not satisfy the `stage 0 == None` / `stage 1 == Some` split asserted here.
+    /// Pins that `build_per_stage` reads each stage's own `fpha_hydro_indices`, not
+    /// a single global stage-0 list: hydro 1 is FPHA only at stage 1.
     #[test]
     fn build_per_stage_resolves_stage_varying_fpha_membership() {
         let n_hydros = 2;
@@ -1997,14 +1660,9 @@ mod tests {
     // Filling-slack (σ_fill / σ^{v-}) reverse-lookup membership
     // -------------------------------------------------------------------------
 
-    /// The `σ_fill` and `σ^{v-}` slack families are SPARSE — one column per FILLING
-    /// hydro, not per hydro — so a system hydro's slack column is resolved through a
-    /// system→slot reverse map exactly like FPHA/evap, never by the dense system
-    /// index. This pins that the reverse map (a) marks a filling hydro `Some(slot)`
-    /// at the slot its column occupies in `filling_*_col`, and (b) marks every
-    /// non-filling hydro `None` (so extraction reads `0.0`). The two families are
-    /// INDEPENDENT: a hydro can own a `σ^{v-}` column (Operating stage) without a
-    /// `σ_fill` column (which exists only at its single terminal Filling stage).
+    /// Pins that the SPARSE `σ_fill` / `σ^{v-}` families resolve through a
+    /// system→slot reverse map (filling hydro `Some(slot)`, others `None`) and are
+    /// INDEPENDENT: a hydro can own a `σ^{v-}` column without a `σ_fill` column.
     #[test]
     fn filling_reverse_lookup_resolves_sparse_membership() {
         let n_hydros = 3;
@@ -4337,7 +3995,7 @@ mod tests {
     }
 
     /// Regression guard: verify that using a pre-built
-    /// [`ThermalReverseLookup`] via [`extract_stage_result_with_lookups`]
+    /// [`ThermalReverseLookup`] via `extract_stage_result_with_lookups`
     /// produces bit-for-bit identical results to the standard
     /// [`extract_stage_result`] path (which builds the lookup internally).
     ///
@@ -4562,9 +4220,7 @@ mod tests {
             future_cost: 0.0,
             discount_factor: 1.0,
             thermal_cost: thermal,
-            // Exercised separately in the GNL end-to-end reconciliation test; the
-            // category-accumulation unit tests keep it at zero so the existing
-            // `resource_cost` expectations (thermal + contract) stay exact.
+            // Held at zero so the `resource_cost` expectations (thermal + contract) stay exact.
             anticipated_thermal_cost: 0.0,
             contract_cost: contract,
             deficit_cost: deficit,

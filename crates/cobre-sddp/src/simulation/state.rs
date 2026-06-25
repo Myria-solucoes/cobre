@@ -3,19 +3,9 @@
 //! [`SimulationState`] owns re-bake scratch buffers allocated once per run.
 //! [`SimulationInputs`] bundles per-call borrowed inputs (no per-scenario allocation).
 //!
-//! ## Callers
-//!
-//! Production call sites of [`crate::simulate`] (via `StudySetup::simulate`):
-//!
-//! | Caller | File | `baked_templates` |
-//! |--------|------|-------------------|
-//! | `run_simulation_phase` — training path | `crates/cobre-cli/src/commands/run.rs` | `Some(...)` from `TrainingResult` produced by `TrainingSession::finalize` |
-//! | `run_simulation_phase` — checkpoint path | `crates/cobre-cli/src/commands/run.rs` | `None` — baked templates are not stored in policy checkpoints; `rebake_templates_if_needed` rebuilds them once at startup |
-//! | `run_simulation_phase_py` — training path | `crates/cobre-python/src/run.rs` | `Some(...)` from `TrainingResult` produced by `TrainingSession::finalize` |
-//! | `run_simulation_phase_py` — checkpoint path | `crates/cobre-python/src/run.rs` | `None` — same checkpoint constraint as the CLI path |
-//!
-//! Tests in `crates/cobre-sddp/src/setup/mod.rs` pass `None` directly; this is
-//! intentional — tests use minimal fixtures and are not on the hot path.
+//! The training path passes `baked_templates: Some(..)`; the checkpoint path
+//! passes `None`, because checkpoints do not store baked templates, so
+//! [`rebake_templates_if_needed`] rebuilds them once at startup.
 //!
 //! ## Hot-path allocation discipline
 //!
@@ -84,9 +74,6 @@ pub(crate) struct SimulationInputs<'a, S: SolverInterface + Send, C> {
 
 impl<'a, S: SolverInterface + Send, C> SimulationInputs<'a, S, C> {
     /// Construct a `SimulationInputs` bundle from positional arguments.
-    ///
-    /// Equivalent to constructing the struct literal directly, but usable from
-    /// call sites that prefer a constructor to avoid a struct-literal import.
     pub(crate) fn new(
         workspaces: &'a mut [SolverWorkspace<S>],
         ctx: &'a StageContext<'a>,
@@ -112,22 +99,12 @@ impl<'a, S: SolverInterface + Send, C> SimulationInputs<'a, S, C> {
     }
 }
 
-/// Read-only captures shared across all rayon workers in the simulation pass.
+/// Read-only captures shared by reference across all rayon workers; the mutable
+/// per-worker [`SolverWorkspace`] rides on a separate `ws` argument.
 ///
-/// Built once by [`SimulationState::run`] after the resolved `baked_templates`
-/// binding and the sampler, then passed by shared reference
-/// (`&SimWorkerParams`) to every [`run_worker_scenarios`] invocation. All fields
-/// are either `Copy` scalars or immutable borrows; no field is mutated inside the
-/// worker. The mutable per-worker [`SolverWorkspace`] rides on a separate `ws`
-/// argument.
-///
-/// The single lifetime `'w` is the body scope of [`SimulationState::run`], not
-/// the `inputs` lifetime: `scenarios_complete` and `sampler` are run-local, and
-/// borrowing them is sound because `par_iter_mut` joins before `run` returns.
-///
-/// The struct is not generic over the solver type `S` because no field holds an
-/// `S`-typed value. The `SolverWorkspace<S>` is passed as a separate `ws`
-/// argument to [`run_worker_scenarios`].
+/// Lifetime `'w` is [`SimulationState::run`]'s body scope, not `inputs`:
+/// `scenarios_complete` and `sampler` are run-local, sound because `par_iter_mut`
+/// joins before `run` returns.
 pub(crate) struct SimWorkerParams<'w> {
     /// Stage-level LP context (templates, row counts, noise scales).
     ctx: &'w StageContext<'w>,
@@ -171,27 +148,17 @@ pub(crate) struct SimWorkerParams<'w> {
 ///
 /// If the caller always provides `baked_templates`, neither buffer is populated.
 pub(crate) struct SimulationState {
-    /// Owned baked templates built by the lazy re-bake branch.
-    ///
-    /// Populated by [`rebake_templates_if_needed`] when
-    /// `SimulationInputs::baked_templates` is `None`. Cleared and
-    /// repopulated on each `run()` call.
+    /// Owned baked templates built by the lazy re-bake branch (when
+    /// `baked_templates` is `None`).
     owned_baked: Option<Vec<StageTemplate>>,
-    /// Row-batch scratch used by the lazy re-bake loop.
-    ///
-    /// Initialized to an empty batch in [`SimulationState::new`].
+    /// Row-batch scratch for the lazy re-bake loop.
     bake_batch: RowBatch,
-    /// Reusable scratch for `bake_rows_into_template` (count/emit-pass temporaries).
-    ///
-    /// Reused across the lazy re-bake loop's `for t in 0..num_stages` iterations.
+    /// Reusable scratch for `bake_rows_into_template`, reused across re-bake stages.
     baking_scratch: cobre_solver::BakingScratch,
 }
 
 impl SimulationState {
     /// Construct a new `SimulationState` with empty re-bake buffers.
-    ///
-    /// `owned_baked` is initialized to `None` and populated lazily on the first
-    /// run that requires re-baking.
     #[must_use]
     pub(crate) fn new(_num_stages: usize) -> Self {
         Self {
@@ -208,12 +175,9 @@ impl SimulationState {
         }
     }
 
-    /// Execute a simulation run.
-    ///
-    /// Evaluates the trained SDDP policy on `inputs.config.n_scenarios` scenarios
-    /// by running a forward-only pass through all stages, extracting per-entity
-    /// results at each stage, streaming completed scenario results through a
-    /// bounded channel, and returning a compact cost buffer for MPI aggregation.
+    /// Execute a simulation run, evaluating the trained SDDP policy on
+    /// `inputs.config.n_scenarios` scenarios and returning a compact cost buffer
+    /// for MPI aggregation.
     ///
     /// # Errors
     ///
@@ -261,7 +225,6 @@ impl SimulationState {
             )));
         }
 
-        // Populate `self.owned_baked` when the caller did not provide templates.
         rebake_templates_if_needed(
             inputs.fcf,
             inputs.ctx,
@@ -288,10 +251,8 @@ impl SimulationState {
         let sim_start = Instant::now();
         let scenarios_complete = AtomicU32::new(0);
 
-        // Emit SimulationStarted once per rank before the parallel region so
-        // rank 0's progress thread can render a banner before any scenario
-        // completes. Non-root ranks' senders are None; this is a no-op on
-        // those ranks.
+        // Before the parallel region so rank 0's progress thread can render a
+        // banner before any scenario completes (no-op on non-root ranks: sender None).
         if let Some(sender) = inputs.output.event_sender.as_ref() {
             #[allow(clippy::cast_possible_truncation)]
             let _ = sender.send(TrainingEvent::SimulationStarted {
@@ -306,12 +267,9 @@ impl SimulationState {
 
         let sampler = build_sim_sampler(training_ctx)?;
 
-        // Apply the simulation solver profile to every worker workspace before the
-        // parallel region (mirrors `forward_pass_state` / `backward_pass_state`,
-        // which the simulation phase previously omitted — so the solver ran on its
-        // backend-native defaults). For CLP this selects the primal simplex, which
-        // eliminates the dual simplex's false-infeasibility on the warm-started,
-        // fully-baked cut-laden simulation LPs.
+        // Apply the simulation solver profile before the parallel region. For CLP
+        // this selects the primal simplex, which eliminates the dual simplex's
+        // false-infeasibility on the warm-started, fully-baked cut-laden LPs.
         let simulation_profile = crate::solver_phase::Phase::Simulation.profile();
         for ws in inputs.workspaces.iter_mut() {
             ws.solver.set_profile(&simulation_profile);
@@ -349,11 +307,8 @@ impl SimulationState {
             all_costs.extend(costs);
             all_stats.extend(stats);
         }
-        // Workers are spawned in `par_iter_mut().enumerate()` order, each
-        // emitting a contiguous ascending range `[scenario_start +
-        // start_local, scenario_start + end_local)`. The sequential
-        // `extend` preserves order, so `all_costs` and `all_stats` are
-        // already sorted by `scenario_id` — no sort needed.
+        // Each worker emits a contiguous ascending scenario_id range, so the
+        // sequential `extend` leaves `all_costs`/`all_stats` sorted — no sort needed.
         debug_assert!(
             all_costs.windows(2).all(|w| w[0].0 <= w[1].0),
             "all_costs not pre-sorted: workers must emit ascending scenario_id"
@@ -378,11 +333,8 @@ impl SimulationState {
     }
 }
 
-/// Assert simulation preconditions in debug builds.
-///
-/// Panics in debug builds if template or base-row slice lengths do not match
-/// `num_stages`, or if the initial state length does not match `n_state`.
-/// Compiled away in release builds (all assertions are `debug_assert`).
+/// Assert template/base-row slice lengths match `num_stages` and the initial
+/// state length matches `n_state`; debug builds only.
 fn debug_assert_inputs(
     ctx: &StageContext<'_>,
     num_stages: usize,
@@ -409,11 +361,6 @@ fn debug_assert_inputs(
 
 /// Execute one worker's share of scenarios in the rayon parallel region.
 ///
-/// Called once per worker thread by [`SimulationState::run`] via `par_iter_mut`.
-/// Partitions `local_count` scenarios across `n_workers` workers using
-/// [`fn@partition`], drives per-scenario LP solves, accumulates costs and solver
-/// statistics, and streams progress events through the output channel.
-///
 /// Returns `(worker_costs, worker_stats)` for the worker's assigned scenarios,
 /// or a [`SimulationError`] if any scenario LP fails or the channel is closed.
 fn run_worker_scenarios<S: SolverInterface + Send>(
@@ -426,8 +373,7 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
     let n_scenarios = end_local - start_local;
     let mut worker_costs = Vec::with_capacity(n_scenarios);
     let mut worker_stats = Vec::with_capacity(n_scenarios);
-    // Sampling scratch: resize ws.scratch buffers once per worker, reuse across
-    // scenarios. Avoids per-worker vec![...] allocations on the hot path.
+    // Resize once per worker, reuse across scenarios: no per-scenario allocation.
     let noise_dim = params.training_ctx.stochastic.dim();
     ws.scratch.raw_noise_buf.resize(noise_dim, 0.0_f64);
     #[allow(clippy::cast_possible_truncation)]
@@ -435,12 +381,9 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
         .perm_scratch
         .resize(params.config.n_scenarios.max(1) as usize, 0_usize);
 
-    // Build the reverse-lookup tables once per worker thread. The thermal lookup is
-    // study-invariant; the hydro lookups are one-per-stage (FPHA/evap membership is
-    // per-`(hydro, stage)`), sourced from the per-stage geometry table. Building
-    // them all up front eliminates the per-(scenario, stage) allocation that would
-    // otherwise occur inside extract_thermals / extract_hydros (600k allocs for 10k
-    // scenarios × 60 stages).
+    // Build once per worker: eliminates the per-(scenario, stage) allocation that
+    // would otherwise occur inside extract_thermals / extract_hydros (e.g. 600k
+    // allocs for 10k scenarios × 60 stages).
     let lookups = SimLookups::build(
         params.training_ctx.study_dims,
         params.ctx.geometry_per_stage,
@@ -458,10 +401,8 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
             baked_templates: params.baked_templates,
             stage_bases: params.stage_bases,
         };
-        // Split raw_noise_buf and perm_scratch out of ws.scratch so that the
-        // immutable borrows of those slices in ScenarioIds do not conflict with
-        // the &mut ws passed to process_scenario_stages.  Capacity is retained
-        // across calls via mem::take + swap-back.
+        // mem::take (capacity retained) so the immutable ScenarioIds borrows of
+        // these slices do not conflict with the `&mut ws` passed below.
         let mut raw_noise_buf = std::mem::take(&mut ws.scratch.raw_noise_buf);
         let mut perm_scratch = std::mem::take(&mut ws.scratch.perm_scratch);
         let result = process_scenario_stages(
@@ -489,8 +430,7 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
         let scenario_delta = SolverStatsDelta::from_snapshots(&stats_before, &stats_after);
         let scenario_solve_time_ms = scenario_delta.solve_time_ms;
         let scenario_lp_solves = scenario_delta.lp_solves;
-        // opening = -1: simulation has no opening loop (one solve per
-        // scenario×stage). The sentinel maps to NULL in parquet.
+        // opening = -1: no opening loop; the sentinel maps to NULL in parquet.
         worker_stats.push((scenario_id, -1_i32, scenario_delta));
 
         worker_costs.push(dispatch_scenario_result(
@@ -500,9 +440,8 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
             stage_results,
         )?);
         let completed = params.scenarios_complete.fetch_add(1, Ordering::Relaxed) + 1;
-        // Scale rank-local count to a global estimate assuming balanced
-        // workload across ranks (the assign_scenarios invariant). Clamp at
-        // the global total so the final scenario lands exactly on 100%.
+        // Scale rank-local count to a global estimate (balanced-workload
+        // assumption), clamped at the total so the last scenario lands on 100%.
         let completed_global = completed
             .saturating_mul(params.world_size)
             .min(params.config.n_scenarios);
@@ -520,11 +459,7 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
     Ok((worker_costs, worker_stats))
 }
 
-/// Build the forward sampler for a simulation run from the training context.
-///
-/// Constructs a [`ForwardSampler`] using the inflow, load, and NCS class schemes
-/// from `training_ctx`, together with the stochastic dimension metadata.
-/// Called once per [`SimulationState::run`] invocation before the rayon parallel region.
+/// Build the [`ForwardSampler`] for a simulation run from the training context.
 fn build_sim_sampler<'a>(
     training_ctx: &'a TrainingContext<'a>,
 ) -> Result<ForwardSampler<'a>, SimulationError> {
@@ -550,15 +485,10 @@ fn build_sim_sampler<'a>(
 
 /// Populate `owned_baked` when the caller did not provide pre-baked templates.
 ///
-/// If `caller_baked` is `Some`, this function is a no-op: the caller's slice is
-/// used directly and `owned_baked` is not touched.
-///
-/// If `caller_baked` is `None`, the function clears `owned_baked`, then rebuilds
-/// it from the FCF, context templates, and the state layout. `bake_batch` is used
-/// as scratch and its contents after the call are unspecified.
-///
-/// Cost is `O(num_stages * num_active_cuts)` — a one-time setup amortised across
-/// the simulation's per-scenario LP solves.
+/// No-op if `caller_baked` is `Some`. Otherwise rebuilds `owned_baked` from the
+/// FCF, context templates, and state layout, using `bake_batch` as scratch (its
+/// post-call contents are unspecified). Cost `O(num_stages * num_active_cuts)` —
+/// a one-time setup amortised across the per-scenario LP solves.
 fn rebake_templates_if_needed(
     fcf: &FutureCostFunction,
     ctx: &StageContext<'_>,
@@ -570,7 +500,6 @@ fn rebake_templates_if_needed(
     baking_scratch: &mut cobre_solver::BakingScratch,
 ) {
     if caller_baked.is_some() {
-        // Caller provided templates — skip re-bake entirely.
         *owned_baked = None;
         return;
     }
