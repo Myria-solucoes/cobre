@@ -1,9 +1,5 @@
-//! Reader for `training/convergence.parquet`.
-//!
-//! This module provides [`read_convergence_summary`], which reads the
-//! convergence log written by the training pipeline and returns an
-//! aggregated [`ConvergenceSummary`] suitable for display in post-run
-//! reporting commands.
+//! Reader for `training/convergence.parquet`, returning an aggregated
+//! [`ConvergenceSummary`] for post-run reporting commands.
 
 use std::path::Path;
 
@@ -13,11 +9,8 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use super::error::OutputError;
 
-/// Aggregated summary extracted from `training/convergence.parquet`.
-///
-/// Produced by [`read_convergence_summary`]. Fields are summed or sampled
-/// from the last row of the convergence table, so this struct is suitable
-/// for display without holding a full per-iteration record list.
+/// Aggregated summary of `training/convergence.parquet`: each field is either
+/// summed across iterations or taken from the final row.
 #[derive(Debug, Clone)]
 pub struct ConvergenceSummary {
     /// Total number of LP solves summed across all iterations.
@@ -35,9 +28,6 @@ pub struct ConvergenceSummary {
 }
 
 /// Read `training/convergence.parquet` and return an aggregated summary.
-///
-/// Reads all record batches from `path`, sums `lp_solves` and `time_total_ms`
-/// across every row, and takes the bound and gap fields from the last row.
 ///
 /// When the file contains zero rows, all numeric fields are zero and
 /// `final_gap_percent` is `None`.
@@ -115,13 +105,10 @@ impl BatchTotals {
     }
 }
 
-/// Read the first row's `gap_percent` value from `training/convergence.parquet`.
+/// Read the first row's `gap_percent` from `training/convergence.parquet`.
 ///
-/// Used by the post-run summary to display "Gap: X% (started at Y%)".
-/// Returns `None` when the file is empty, the gap column is null on the
-/// first row (e.g. upper-bound evaluation disabled), or the file cannot
-/// be read or parsed. Errors are not surfaced because the initial gap is
-/// a cosmetic enhancement, not a load-bearing data point.
+/// Returns `None` on empty file, null first-row gap, or any read/parse failure:
+/// the initial gap is cosmetic, so errors are swallowed rather than propagated.
 #[must_use]
 pub fn read_initial_gap_percent(path: &Path) -> Option<f64> {
     let file = std::fs::File::open(path).ok()?;
@@ -205,7 +192,7 @@ fn accumulate_batch(batch: &RecordBatch, totals: &mut BatchTotals) -> Result<(),
     totals.final_upper_bound_std = get_f64_column(batch, "upper_bound_std")?.value(last);
 
     let gap_arr = get_f64_column(batch, "gap_percent")?;
-    // gap_percent is nullable: distinguish null from 0.0 using is_valid.
+    // gap_percent is nullable — is_valid distinguishes null from a real 0.0.
     totals.final_gap_percent = if gap_arr.is_valid(last) {
         Some(gap_arr.value(last))
     } else {
@@ -386,7 +373,6 @@ mod tests {
     #[test]
     fn read_convergence_summary_from_real_parquet() {
         let tmp = tempfile::tempdir().unwrap();
-        // Three records with lp_solves = [40, 50, 60].
         let records = vec![
             make_iteration_record(1, 40),
             make_iteration_record(2, 50),

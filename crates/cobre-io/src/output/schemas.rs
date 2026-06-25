@@ -5,7 +5,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 
 /// Schema for `simulation/costs/` — stage and block-level cost breakdown.
 ///
-/// 26 fields. `block_id` is nullable. See output-schemas.md SS5.1.
+/// `block_id` is nullable. See output-schemas.md SS5.1.
 pub(crate) fn costs_schema() -> Schema {
     Schema::new(vec![
         Field::new("stage_id", DataType::Int32, false),
@@ -40,7 +40,7 @@ pub(crate) fn costs_schema() -> Schema {
 
 /// Schema for `simulation/hydros/` — hydro plant dispatch results.
 ///
-/// 35 fields. See output-schemas.md SS5.2.
+/// See output-schemas.md SS5.2.
 pub(crate) fn hydros_schema() -> Schema {
     Schema::new(vec![
         Field::new("stage_id", DataType::Int32, false),
@@ -99,7 +99,7 @@ pub(crate) fn hydros_schema() -> Schema {
 
 /// Schema for `simulation/thermals/` — thermal unit dispatch results.
 ///
-/// 10 fields. See output-schemas.md SS5.3.
+/// See output-schemas.md SS5.3.
 pub(crate) fn thermals_schema() -> Schema {
     Schema::new(vec![
         Field::new("stage_id", DataType::Int32, false),
@@ -117,7 +117,7 @@ pub(crate) fn thermals_schema() -> Schema {
 
 /// Schema for `simulation/exchanges/` — transmission line flow results.
 ///
-/// 11 fields. See output-schemas.md SS5.4.
+/// See output-schemas.md SS5.4.
 pub(crate) fn exchanges_schema() -> Schema {
     Schema::new(vec![
         Field::new("stage_id", DataType::Int32, false),
@@ -136,7 +136,7 @@ pub(crate) fn exchanges_schema() -> Schema {
 
 /// Schema for `simulation/buses/` — bus load balance results.
 ///
-/// 10 fields. See output-schemas.md SS5.5.
+/// See output-schemas.md SS5.5.
 pub(crate) fn buses_schema() -> Schema {
     Schema::new(vec![
         Field::new("stage_id", DataType::Int32, false),
@@ -154,7 +154,7 @@ pub(crate) fn buses_schema() -> Schema {
 
 /// Schema for `simulation/pumping_stations/` — pumping station results.
 ///
-/// 9 fields. See output-schemas.md SS5.6.
+/// See output-schemas.md SS5.6.
 pub(crate) fn pumping_stations_schema() -> Schema {
     Schema::new(vec![
         Field::new("stage_id", DataType::Int32, false),
@@ -171,7 +171,7 @@ pub(crate) fn pumping_stations_schema() -> Schema {
 
 /// Schema for `simulation/contracts/` — energy contract results.
 ///
-/// 8 fields. See output-schemas.md SS5.7.
+/// See output-schemas.md SS5.7.
 pub(crate) fn contracts_schema() -> Schema {
     Schema::new(vec![
         Field::new("stage_id", DataType::Int32, false),
@@ -187,7 +187,7 @@ pub(crate) fn contracts_schema() -> Schema {
 
 /// Schema for `simulation/non_controllables/` — non-controllable source results.
 ///
-/// 10 fields. See output-schemas.md SS5.8.
+/// See output-schemas.md SS5.8.
 pub(crate) fn non_controllables_schema() -> Schema {
     Schema::new(vec![
         Field::new("stage_id", DataType::Int32, false),
@@ -205,7 +205,7 @@ pub(crate) fn non_controllables_schema() -> Schema {
 
 /// Schema for `simulation/inflow_lags/` — autoregressive inflow state variables.
 ///
-/// 4 fields. See output-schemas.md SS5.10.
+/// See output-schemas.md SS5.10.
 pub(crate) fn inflow_lags_schema() -> Schema {
     Schema::new(vec![
         Field::new("stage_id", DataType::Int32, false),
@@ -217,7 +217,7 @@ pub(crate) fn inflow_lags_schema() -> Schema {
 
 /// Schema for `simulation/violations/generic/` — generic constraint violations.
 ///
-/// 5 fields. See output-schemas.md SS5.11.
+/// See output-schemas.md SS5.11.
 pub(crate) fn generic_violations_schema() -> Schema {
     Schema::new(vec![
         Field::new("stage_id", DataType::Int32, false),
@@ -230,7 +230,7 @@ pub(crate) fn generic_violations_schema() -> Schema {
 
 /// Schema for `training/convergence.parquet` — iteration-level convergence log.
 ///
-/// 14 fields. See output-schemas.md SS6.1.
+/// See output-schemas.md SS6.1.
 pub(crate) fn convergence_schema() -> Schema {
     Schema::new(vec![
         Field::new("iteration", DataType::Int32, false),
@@ -252,23 +252,17 @@ pub(crate) fn convergence_schema() -> Schema {
 
 /// Schema for `training/timing/iterations.parquet` — per-iteration timing breakdown.
 ///
-/// 19 fields. Row semantics: one row per `(iteration, rank)` for
-/// rank-only sequential values (`worker_id = NULL`), and one row per
-/// `(iteration, rank, worker_id)` for per-worker parallel-region values.
-/// `SUM(col) GROUP BY iteration` recovers the single-row-per-iteration
-/// value for each of the 16 timing columns.
+/// Row semantics: one row per `(iteration, rank)` for rank-only sequential values
+/// (`worker_id = NULL`), and one row per `(iteration, rank, worker_id)` for
+/// per-worker parallel-region values. `SUM(col) GROUP BY iteration` recovers the
+/// single-row-per-iteration value for each of the 16 timing columns.
 ///
-/// Top-level non-overlapping phases: `forward_wall_ms`,
-/// `backward_wall_ms`, `cut_selection_ms`, `mpi_allreduce_ms`,
-/// `lower_bound_ms`. Sub-components of backward: `cut_sync_ms`,
-/// `state_exchange_ms`, `cut_batch_build_ms`, `bwd_setup_ms`,
-/// `bwd_load_imbalance_ms`, `bwd_scheduling_overhead_ms`.
-/// Sub-components of forward: `fwd_setup_ms`, `fwd_load_imbalance_ms`,
-/// `fwd_scheduling_overhead_ms`. Residual: `overhead_ms`. The trailing
-/// `lazy_scoring_ms` column is the per-worker time spent in lazy
-/// candidate scoring inside the lazy-selection solve (0 when that solve
-/// path is not used); it is a sub-component of the forward/backward
-/// phases, not a top-level addend.
+/// Only the top-level non-overlapping phases (`forward_wall_ms`,
+/// `backward_wall_ms`, `cut_selection_ms`, `mpi_allreduce_ms`, `lower_bound_ms`)
+/// and `overhead_ms` are addends of the iteration total; the `*_setup_ms`,
+/// `*_load_imbalance_ms`, `*_scheduling_overhead_ms`, `cut_sync_ms`,
+/// `state_exchange_ms`, `cut_batch_build_ms`, and `lazy_scoring_ms` columns are
+/// sub-components nested under a pass, not top-level addends.
 pub(crate) fn iteration_timing_schema() -> Schema {
     Schema::new(vec![
         Field::new("iteration", DataType::Int32, false),
@@ -295,7 +289,7 @@ pub(crate) fn iteration_timing_schema() -> Schema {
 
 /// Schema for `training/timing/mpi_ranks.parquet` — per-rank timing statistics.
 ///
-/// 8 fields. See output-schemas.md SS6.3.
+/// See output-schemas.md SS6.3.
 pub(crate) fn rank_timing_schema() -> Schema {
     Schema::new(vec![
         Field::new("iteration", DataType::Int32, false),
@@ -312,11 +306,10 @@ pub(crate) fn rank_timing_schema() -> Schema {
 /// Schema for `training/solver/iterations.parquet` -- per-iteration, per-phase
 /// solver statistics for diagnosing LP conditioning and retry behavior.
 ///
-/// 18 columns. One row per (iteration, phase, stage, opening) tuple for
-/// backward rows; forward, `lower_bound`, and simulation rows carry
-/// `opening = NULL`. The `rank` and `worker_id` columns (positions 5 and 6,
-/// 0-indexed) are `Int32 nullable`; they are `NULL` for rank-aggregated rows
-/// and carry the producing rank's index and worker index respectively.
+/// One row per (iteration, phase, stage, opening) tuple for backward rows;
+/// forward, `lower_bound`, and simulation rows carry `opening = NULL`. The
+/// nullable `rank` and `worker_id` columns are `NULL` for rank-aggregated rows
+/// and otherwise carry the producing rank and worker index.
 pub(crate) fn solver_iterations_schema() -> Schema {
     Schema::new(vec![
         Field::new("iteration", DataType::UInt32, false),
@@ -343,8 +336,8 @@ pub(crate) fn solver_iterations_schema() -> Schema {
 /// Schema for `training/solver/retry_histogram.parquet` -- per-level retry
 /// success counts, normalized from the solver iterations table.
 ///
-/// 5 columns. One row per (iteration, phase, stage, `retry_level`) tuple where
-/// `count > 0` (sparse encoding).
+/// Sparse: one row per (iteration, phase, stage, `retry_level`) tuple where
+/// `count > 0`.
 pub(crate) fn retry_histogram_schema() -> Schema {
     Schema::new(vec![
         Field::new("iteration", DataType::UInt32, false),
@@ -357,8 +350,8 @@ pub(crate) fn retry_histogram_schema() -> Schema {
 
 /// Schema for `system/hydro_energy_productivity.parquet` — per-hydro productivity overrides.
 ///
-/// 6 fields. One row per (hydro, stage) override entry; null `stage_id` applies as
-/// a per-hydro default across all stages.
+/// One row per (hydro, stage) override; a null `stage_id` is a per-hydro default
+/// across all stages.
 pub(crate) fn hydro_energy_productivity_schema() -> Schema {
     Schema::new(vec![
         Field::new("hydro_id", DataType::Int32, false),
@@ -381,9 +374,8 @@ pub(crate) fn hydro_energy_productivity_schema() -> Schema {
 /// Schema for `training/cut_selection/iterations.parquet` — per-stage
 /// row-selection statistics.
 ///
-/// 10 fields. One row per (iteration, stage) pair. The two nullable Int32
-/// columns (`budget_evicted`, `active_after_budget`) are `None` when
-/// budget enforcement is disabled.
+/// One row per (iteration, stage) pair. The nullable `budget_evicted` and
+/// `active_after_budget` columns are `None` when budget enforcement is disabled.
 pub(crate) fn row_selection_schema() -> Schema {
     Schema::new(vec![
         Field::new("iteration", DataType::Int32, false),
@@ -529,8 +521,6 @@ mod tests {
     #[test]
     fn hydros_schema_field_count_and_names() {
         let schema = hydros_schema();
-        // The spec (output-schemas.md SS5.2) defines 35 data columns.
-        // Five energy columns replace the old `productivity_mw_per_m3s` field.
         assert_eq!(
             schema.fields().len(),
             35,
@@ -582,8 +572,6 @@ mod tests {
     #[test]
     fn hydros_schema_nullable_fields() {
         let schema = hydros_schema();
-        // block_id, evaporation_m3s, diverted_inflow_m3s, diverted_outflow_m3s
-        // are nullable per spec SS5.2
         for col in &[
             "block_id",
             "evaporation_m3s",
@@ -592,7 +580,6 @@ mod tests {
         ] {
             assert!(is_nullable(&schema, col), "column {col} must be nullable");
         }
-        // All other non-nullable columns
         for col in &[
             "stage_id",
             "hydro_id",
@@ -651,7 +638,6 @@ mod tests {
         assert!(!is_nullable(&schema, "is_anticipated"));
         assert_eq!(field_type(&schema, "is_anticipated"), DataType::Boolean);
         assert_eq!(field_type(&schema, "operative_state_code"), DataType::Int8);
-        // The field count test above ensures no legacy column names survive.
     }
 
     #[test]
@@ -744,7 +730,6 @@ mod tests {
             14,
             "convergence schema must have 14 fields"
         );
-        // spot-check types per spec SS6.1
         assert_eq!(field_type(&schema, "iteration"), DataType::Int32);
         assert_eq!(field_type(&schema, "lower_bound"), DataType::Float64);
         assert_eq!(field_type(&schema, "upper_bound_mean"), DataType::Float64);
@@ -760,7 +745,6 @@ mod tests {
         let schema = convergence_schema();
         // gap_percent is nullable (None when LB <= 0)
         assert!(is_nullable(&schema, "gap_percent"));
-        // all other fields must not be nullable
         for name in &[
             "iteration",
             "lower_bound",
@@ -795,7 +779,6 @@ mod tests {
     #[test]
     fn iteration_timing_schema_rank_worker_nullable() {
         let schema = iteration_timing_schema();
-        // rank (position 1) and worker_id (position 2) must be nullable.
         let rank_field = schema
             .field_with_name("rank")
             .expect("rank field must exist");
@@ -804,7 +787,6 @@ mod tests {
             .field_with_name("worker_id")
             .expect("worker_id field must exist");
         assert!(worker_id_field.is_nullable(), "worker_id must be nullable");
-        // All other 17 timing columns must be non-nullable.
         for field in schema.fields() {
             if field.name() != "rank" && field.name() != "worker_id" {
                 assert!(
@@ -846,16 +828,13 @@ mod tests {
             10,
             "cut_selection schema must have 10 fields"
         );
-        // First 7 fields (indices 0-6) are non-nullable Int32.
         for field in &schema.fields()[..7] {
             assert_eq!(field.data_type(), &DataType::Int32);
             assert!(!field.is_nullable());
         }
-        // Field 8 (index 7): selection_time_ms, Float64, non-nullable.
         assert_eq!(schema.fields()[7].name(), "selection_time_ms");
         assert_eq!(schema.fields()[7].data_type(), &DataType::Float64);
         assert!(!schema.fields()[7].is_nullable());
-        // Fields 9-10 (indices 8-9): nullable Int32.
         for &name in &["budget_evicted", "active_after_budget"] {
             let field = schema
                 .field_with_name(name)
@@ -942,8 +921,6 @@ mod tests {
 
     #[test]
     fn all_schema_functions_return_valid_schemas() {
-        // Call all schema functions and verify they return non-empty schemas
-        // without panicking.
         let schemas: Vec<(Schema, &str)> = vec![
             (costs_schema(), "costs"),
             (hydros_schema(), "hydros"),
@@ -968,7 +945,6 @@ mod tests {
                 "schema '{name}' must have at least one field"
             );
         }
-        // Verify total counts per spec
         let counts: Vec<(&str, usize)> = schemas
             .iter()
             .map(|(s, n)| (*n, s.fields().len()))

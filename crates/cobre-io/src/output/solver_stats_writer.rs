@@ -63,9 +63,6 @@ pub struct SolverStatsRow {
 
 /// Write training solver statistics to `training/solver/iterations.parquet`.
 ///
-/// Creates the `training/solver/` directory if it does not exist. Uses atomic
-/// write (`.tmp` + rename).
-///
 /// # Errors
 ///
 /// Returns [`OutputError`] on filesystem or serialization failures.
@@ -74,9 +71,6 @@ pub fn write_solver_stats(output_dir: &Path, rows: &[SolverStatsRow]) -> Result<
 }
 
 /// Write simulation solver statistics to `simulation/solver/iterations.parquet`.
-///
-/// Creates the `simulation/solver/` directory if it does not exist. Uses atomic
-/// write (`.tmp` + rename).
 ///
 /// # Errors
 ///
@@ -209,19 +203,16 @@ fn build_retry_histogram_batch(rows: &[SolverStatsRow]) -> Result<RecordBatch, O
 fn write_solver_stats_to(dir: &Path, rows: &[SolverStatsRow]) -> Result<(), OutputError> {
     std::fs::create_dir_all(dir).map_err(|e| OutputError::io(dir, e))?;
 
-    // The shared atomic helper honors `ParquetWriterConfig`; the crate-wide
-    // default (Zstd-3, dictionary on) is used so solver-stats files match every
-    // other Parquet output rather than carrying a bespoke codec.
+    // Crate-wide default so solver-stats files match every other Parquet
+    // output rather than carrying a bespoke codec.
     let config = ParquetWriterConfig::default();
 
-    // iterations.parquet — scalar metrics
     let iter_schema = Arc::new(solver_iterations_schema());
     let columns = build_iterations_columns(rows);
     let iter_batch = RecordBatch::try_new(Arc::clone(&iter_schema), columns)
         .map_err(|e| OutputError::serialization("solver_stats", format!("RecordBatch: {e}")))?;
     write_parquet_atomic(&dir.join("iterations.parquet"), &iter_batch, &config)?;
 
-    // retry_histogram.parquet — normalized per-level retry counts
     let hist_batch = build_retry_histogram_batch(rows)?;
     write_parquet_atomic(&dir.join("retry_histogram.parquet"), &hist_batch, &config)?;
 

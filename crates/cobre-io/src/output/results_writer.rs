@@ -1,13 +1,4 @@
 //! Aggregate output writers that combine training and simulation artifacts.
-//!
-//! [`write_training_results`] creates the full `training/` directory tree
-//! (dictionaries, convergence Parquet, metadata, `_SUCCESS` marker)
-//! and an empty `simulation/` directory.
-//!
-//! [`write_simulation_results`] writes the `simulation/metadata.json` and
-//! `_SUCCESS` marker.
-//!
-//! [`write_results`] is a convenience wrapper that calls both in sequence.
 
 use std::path::Path;
 
@@ -28,10 +19,8 @@ use crate::config::StoppingRuleConfig;
 
 /// Write all training artifacts to the output directory.
 ///
-/// Creates the `training/` subdirectory structure (dictionaries, convergence
-/// Parquet, timing, metadata) and writes the `training/_SUCCESS` marker on
-/// completion. Also creates an empty `simulation/` directory so downstream
-/// code can unconditionally write into it.
+/// Also creates an empty `simulation/` directory so downstream code can
+/// unconditionally write into it.
 ///
 /// # Errors
 ///
@@ -124,7 +113,6 @@ pub fn write_training_results(
 
 /// Write simulation artifacts to the output directory.
 ///
-/// Writes `simulation/metadata.json` and the `simulation/_SUCCESS` marker.
 /// The `simulation/` directory must already exist (created by
 /// [`write_training_results`]).
 ///
@@ -165,8 +153,7 @@ pub fn write_simulation_results(
 
 /// Write all output artifacts (training + simulation) to the output directory.
 ///
-/// Convenience wrapper that calls [`write_training_results`] followed by
-/// [`write_simulation_results`] (when simulation output is present).
+/// Simulation artifacts are written only when `simulation_output` is `Some`.
 ///
 /// # Errors
 ///

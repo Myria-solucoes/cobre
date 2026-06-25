@@ -1,15 +1,11 @@
-//! Dictionary file writers for self-documenting output.
-//!
-//! This module provides [`write_dictionaries`], a standalone function that writes
-//! five self-documenting files to the `training/dictionaries/` directory:
+//! [`write_dictionaries`] writes five self-documenting files to
+//! `training/dictionaries/`:
 //!
 //! - `codes.json` — categorical code mappings (operative state, bound type, etc.)
 //! - `entities.csv` — one row per entity with id, name, bus, and system columns
 //! - `variables.csv` — one row per column across all output Parquet schemas
 //! - `bounds.parquet` — per-entity, per-stage bound values
 //! - `state_dictionary.json` — state space structure (storage + inflow lags)
-//!
-//! All files are written atomically (`.tmp` + rename) to prevent partial writes.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -54,16 +50,10 @@ const BOUND_FLOW_MAX: i8 = 9;
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
-/// Write all five self-documenting dictionary files to `path`.
+/// Write all five dictionary files (see module doc) to `path`.
 ///
-/// The `path` argument must point to an already-created dictionaries directory
-/// (typically `output_dir/training/dictionaries/`). Five files are written:
-///
-/// - `codes.json` — static categorical code mappings
-/// - `entities.csv` — one row per entity
-/// - `variables.csv` — one row per output column across all schemas
-/// - `bounds.parquet` — per-entity, per-stage resolved bounds
-/// - `state_dictionary.json` — state space structure
+/// `path` must point to an already-created dictionaries directory (typically
+/// `output_dir/training/dictionaries/`).
 ///
 /// # Errors
 ///
@@ -86,10 +76,8 @@ pub fn write_dictionaries(
 
 // ─── codes.json ──────────────────────────────────────────────────────────────
 
-/// Write `codes.json` with static categorical code mappings.
-///
-/// The file contains the version, generation timestamp, and the code-to-label
-/// mappings for all categorical integer codes used in the Parquet output files.
+/// Write `codes.json`: code-to-label mappings for every categorical integer
+/// code used in the Parquet output files.
 fn write_codes_json(path: &Path) -> Result<(), OutputError> {
     let generated_at = chrono::Utc::now().to_rfc3339();
 
@@ -146,11 +134,8 @@ fn write_codes_json(path: &Path) -> Result<(), OutputError> {
 
 // ─── entities.csv ────────────────────────────────────────────────────────────
 
-/// Write `entities.csv` with one row per entity across all entity types.
-///
-/// Header: `entity_type_code,entity_id,name,bus_id,system_id`.
-/// Rows are ordered by `entity_type_code` ascending, then by entity ID (canonical
-/// order, as returned by the system accessors).
+/// Write `entities.csv`, one row per entity, ordered by `entity_type_code`
+/// ascending then by entity ID (canonical accessor order).
 fn write_entities_csv(path: &Path, system: &System) -> Result<(), OutputError> {
     let file_path = path.join("entities.csv");
     let mut wtr = csv::Writer::from_path(&file_path)
@@ -251,10 +236,8 @@ fn write_entities_csv(path: &Path, system: &System) -> Result<(), OutputError> {
 
 // ─── variables.csv ───────────────────────────────────────────────────────────
 
-/// Write `variables.csv` with one row per column across all 13 output schemas.
-///
-/// Header: `file,column,type,unit,description,nullable`.
-/// Rows are grouped by schema (file), ordered by column position within each schema.
+/// Write `variables.csv`, one row per column across every output schema, grouped
+/// by file and ordered by column position within each schema.
 fn write_variables_csv(path: &Path) -> Result<(), OutputError> {
     let file_path = path.join("variables.csv");
     let mut wtr = csv::Writer::from_path(&file_path)
@@ -328,13 +311,11 @@ fn arrow_type_str(dt: &DataType) -> &'static str {
 /// Return the physical unit string for a given (file, column) pair.
 ///
 /// Returns `""` for dimensionless columns or columns without a defined unit.
-// Rationale: the function is the single authoritative mapping from every (file, column) pair
-// in the output catalog to its physical unit string; identical arms are intentional because
-// the same unit may apply to identically named columns across different output schemas, and
-// splitting by schema or collapsing arms would degrade the catalog's clarity as a lookup table.
+// Rationale: one authoritative (file, column) → unit lookup table; identical
+// arms are intentional (same unit recurs across schemas), so splitting or
+// collapsing arms would degrade it as a catalog.
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 fn unit_for(file: &str, column: &str) -> &'static str {
-    // Columns whose unit is independent of which file they appear in.
     match column {
         "stage_id"
         | "block_id"
@@ -449,7 +430,6 @@ fn unit_for(file: &str, column: &str) -> &'static str {
         | "selection_time_ms" => return "ms",
         _ => {}
     }
-    // File-specific columns that need special handling.
     match (file, column) {
         (_, "total_cost" | "pumping_cost" | "spillage_cost" | "exchange_cost") => "$",
         ("hydros", "water_value_per_hm3") => "$/hm3",
@@ -466,14 +446,12 @@ fn unit_for(file: &str, column: &str) -> &'static str {
 /// Return a short description for a given (file, column) pair.
 ///
 /// Returns `""` for columns without a registered description.
-// Rationale: the function is the single authoritative mapping from every (file, column) pair
-// in the output catalog to its human-readable description string; identical arms are intentional
-// because the same description text may apply to the same column across multiple output schemas,
-// and collapsing arms would make additions and per-schema divergence harder to track.
+// Rationale: one authoritative (file, column) → description lookup table;
+// identical arms are intentional, so collapsing them would hide additions and
+// per-schema divergence.
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 fn description_for(file: &str, column: &str) -> &'static str {
     match (file, column) {
-        // ── costs ──────────────────────────────────────────────────────────
         ("costs", "stage_id") => "Stage index",
         ("costs", "block_id") => "Block index within stage (nullable)",
         ("costs", "total_cost") => "Total stage cost",
@@ -503,7 +481,6 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("costs", "curtailment_cost") => "Total curtailment cost",
         ("costs", "exchange_cost") => "Total exchange regularization cost",
         ("costs", "pumping_cost") => "Total pumping cost",
-        // ── hydros ─────────────────────────────────────────────────────────
         ("hydros", "stage_id") => "Stage index",
         ("hydros", "block_id") => "Block index within stage (nullable)",
         ("hydros", "hydro_id") => "Hydro plant identifier",
@@ -545,7 +522,6 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("hydros", "inflow_nonnegativity_slack_m3s") => "Inflow non-negativity slack",
         ("hydros", "water_withdrawal_violation_pos_m3s") => "Over-withdrawal constraint violation",
         ("hydros", "water_withdrawal_violation_neg_m3s") => "Under-withdrawal constraint violation",
-        // ── thermals ───────────────────────────────────────────────────────
         ("thermals", "stage_id") => "Stage index",
         ("thermals", "block_id") => "Block index within stage (nullable)",
         ("thermals", "thermal_id") => "Thermal plant identifier",
@@ -556,7 +532,6 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("thermals", "anticipated_committed_mw") => "Anticipated committed capacity (nullable)",
         ("thermals", "anticipated_decision_mw") => "Anticipated dispatch decision (nullable)",
         ("thermals", "operative_state_code") => "Operative state code",
-        // ── exchanges ──────────────────────────────────────────────────────
         ("exchanges", "stage_id") => "Stage index",
         ("exchanges", "block_id") => "Block index within stage (nullable)",
         ("exchanges", "line_id") => "Transmission line identifier",
@@ -568,7 +543,6 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("exchanges", "losses_mwh") => "Transmission energy losses",
         ("exchanges", "exchange_cost") => "Exchange regularization cost",
         ("exchanges", "operative_state_code") => "Operative state code",
-        // ── buses ──────────────────────────────────────────────────────────
         ("buses", "stage_id") => "Stage index",
         ("buses", "block_id") => "Block index within stage (nullable)",
         ("buses", "bus_id") => "Bus identifier",
@@ -579,7 +553,6 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("buses", "excess_mw") => "Excess generation absorbed",
         ("buses", "excess_mwh") => "Excess energy absorbed",
         ("buses", "spot_price") => "Bus spot price (dual of balance constraint)",
-        // ── pumping_stations ───────────────────────────────────────────────
         ("pumping_stations", "stage_id") => "Stage index",
         ("pumping_stations", "block_id") => "Block index within stage (nullable)",
         ("pumping_stations", "pumping_station_id") => "Pumping station identifier",
@@ -589,7 +562,6 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("pumping_stations", "energy_consumption_mwh") => "Electrical energy consumed",
         ("pumping_stations", "pumping_cost") => "Pumping operation cost",
         ("pumping_stations", "operative_state_code") => "Operative state code",
-        // ── contracts ──────────────────────────────────────────────────────
         ("contracts", "stage_id") => "Stage index",
         ("contracts", "block_id") => "Block index within stage (nullable)",
         ("contracts", "contract_id") => "Contract identifier",
@@ -598,7 +570,6 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("contracts", "price_per_mwh") => "Effective contract price",
         ("contracts", "total_cost") => "Total contract cost",
         ("contracts", "operative_state_code") => "Operative state code",
-        // ── non_controllables ──────────────────────────────────────────────
         ("non_controllables", "stage_id") => "Stage index",
         ("non_controllables", "block_id") => "Block index within stage (nullable)",
         ("non_controllables", "non_controllable_id") => "Non-controllable source identifier",
@@ -609,18 +580,15 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("non_controllables", "curtailment_mwh") => "Curtailed energy",
         ("non_controllables", "curtailment_cost") => "Curtailment cost",
         ("non_controllables", "operative_state_code") => "Operative state code",
-        // ── inflow_lags ────────────────────────────────────────────────────
         ("inflow_lags", "stage_id") => "Stage index",
         ("inflow_lags", "hydro_id") => "Hydro plant identifier",
         ("inflow_lags", "lag_index") => "AR lag index (1-based)",
         ("inflow_lags", "inflow_m3s") => "Historical inflow for this lag",
-        // ── generic_violations ─────────────────────────────────────────────
         ("generic_violations", "stage_id") => "Stage index",
         ("generic_violations", "block_id") => "Block index within stage (nullable)",
         ("generic_violations", "constraint_id") => "Generic constraint identifier",
         ("generic_violations", "slack_value") => "Constraint slack value",
         ("generic_violations", "slack_cost") => "Constraint slack penalty cost",
-        // ── convergence ────────────────────────────────────────────────────
         ("convergence", "iteration") => "Iteration number (1-based)",
         ("convergence", "lower_bound") => "Lower bound on the optimal value",
         ("convergence", "upper_bound_mean") => "Mean upper bound estimate (nullable)",
@@ -638,7 +606,6 @@ fn description_for(file: &str, column: &str) -> &'static str {
             "Mean resident rows loaded per lazy-selection LP solve this iteration \
              (0 when no lazy selection ran)"
         }
-        // ── iteration_timing ──────────────────────────────────────────────
         ("iteration_timing", "iteration") => "Iteration number (1-based)",
         ("iteration_timing", "rank") => {
             "MPI rank that produced this row. Always set; \
@@ -682,7 +649,6 @@ fn description_for(file: &str, column: &str) -> &'static str {
              lazy-selection solve; 0 when that solve path is not used. A \
              sub-component of the forward/backward phases."
         }
-        // ── rank_timing ────────────────────────────────────────────────────
         ("rank_timing", "iteration") => "Iteration number (1-based)",
         ("rank_timing", "rank") => "MPI rank",
         ("rank_timing", "forward_time_ms") => "Forward-pass time for this rank",
@@ -691,7 +657,6 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("rank_timing", "idle_time_ms") => "Idle time for this rank",
         ("rank_timing", "lp_solves") => "LP solves on this rank",
         ("rank_timing", "scenarios_processed") => "Scenarios processed by this rank",
-        // ── cut_selection ──────────────────────────────────────────────────
         ("cut_selection", "iteration") => "Iteration number (1-based)",
         ("cut_selection", "stage") => "Stage index (0-based)",
         ("cut_selection", "cuts_populated") => "Total cuts ever generated at this stage",
@@ -708,7 +673,6 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("cut_selection", "active_after_budget") => {
             "Active cuts after budget enforcement (null when budget disabled)"
         }
-        // ── solver_iterations ─────────────────────────────────────────────
         ("solver_iterations", "iteration") => "Iteration number (1-based) or scenario ID (0-based)",
         ("solver_iterations", "phase") => {
             "Solver phase (forward, backward, lower_bound, simulation)"
@@ -742,7 +706,6 @@ fn description_for(file: &str, column: &str) -> &'static str {
             "Worker thread index within the rank's pool that produced this row. \
              NULL for rank-aggregated rows."
         }
-        // ── retry_histogram ───────────────────────────────────────────────
         ("retry_histogram", "iteration") => "Iteration number (1-based) or scenario ID (0-based)",
         ("retry_histogram", "phase") => "Solver phase (forward, backward, lower_bound, simulation)",
         ("retry_histogram", "stage") => "Stage index (-1 for non-per-stage phases)",
@@ -754,18 +717,11 @@ fn description_for(file: &str, column: &str) -> &'static str {
 
 // ─── bounds.parquet ──────────────────────────────────────────────────────────
 
-/// Write `bounds.parquet` with per-entity, per-stage resolved bounds.
-///
-/// Schema: `entity_type_code: i8, entity_id: i32, stage_id: i32,
-/// block_id: i32 (nullable), bound_type_code: i8, bound_value: f64`.
-///
-/// One row per (entity, stage, `bound_type`). `block_id` is always null.
-// Rationale: five distinct entity classes (hydro, thermal, line, pumping station,
-// contract) each contribute different bound types, and all share the same
-// pre-allocated Arrow column builders; splitting into per-entity helpers would
-// require either passing six mutable builders through each helper or rebuilding
-// the builders per class, eliminating the single pre-estimated capacity
-// allocation that makes this function allocation-efficient.
+/// Write `bounds.parquet` with per-entity, per-stage resolved bounds: one row
+/// per (entity, stage, `bound_type`), `block_id` always null.
+// Rationale: all five entity classes share the pre-allocated Arrow column
+// builders; per-entity helpers would force passing six builders through each or
+// rebuilding per class, losing the single pre-estimated capacity allocation.
 #[allow(clippy::too_many_lines)]
 fn write_bounds_parquet(
     path: &Path,
@@ -775,8 +731,7 @@ fn write_bounds_parquet(
     let schema = Arc::new(bounds_schema());
     let n_stages = system.bounds().n_stages();
 
-    // Pre-estimate capacity: each hydro contributes up to 8 bound types per stage,
-    // thermals 2, lines 2, pumping stations 2, contracts 2.
+    // Over-estimate: the optional max-outflow bound may be skipped per hydro.
     let capacity = (system.n_hydros() * 8
         + system.n_thermals() * 2
         + system.n_lines() * 2
@@ -787,12 +742,10 @@ fn write_bounds_parquet(
     let mut entity_type_codes = Int8Builder::with_capacity(capacity);
     let mut entity_ids = Int32Builder::with_capacity(capacity);
     let mut stage_ids = Int32Builder::with_capacity(capacity);
-    // block_id is always null — use nullable builder
     let mut block_ids = Int32Builder::with_capacity(capacity);
     let mut bound_type_codes = Int8Builder::with_capacity(capacity);
     let mut bound_values = Float64Builder::with_capacity(capacity);
 
-    // Helper macro to append a single bound row.
     macro_rules! append_bound {
         ($entity_type:expr, $entity_id:expr, $stage_id:expr, $bound_type:expr, $value:expr) => {
             entity_type_codes.append_value($entity_type);
@@ -804,7 +757,6 @@ fn write_bounds_parquet(
         };
     }
 
-    // ── Hydro bounds (storage, turbined, outflow, generation) ────────────────
     for (hydro_idx, hydro) in system.hydros().iter().enumerate() {
         let entity_id = hydro.id.0;
         for stage_idx in 0..n_stages {
@@ -872,7 +824,6 @@ fn write_bounds_parquet(
         }
     }
 
-    // ── Thermal bounds (generation min/max) ──────────────────────────────────
     for (thermal_idx, thermal) in system.thermals().iter().enumerate() {
         let entity_id = thermal.id.0;
         for stage_idx in 0..n_stages {
@@ -896,14 +847,12 @@ fn write_bounds_parquet(
         }
     }
 
-    // ── Line bounds (flow_min=0, flow_max for direct and reverse) ────────────
     for (line_idx, line) in system.lines().iter().enumerate() {
         let entity_id = line.id.0;
         for stage_idx in 0..n_stages {
             let stage_id = system.stages()[stage_idx].id;
             let b = system.bounds().line_bounds(line_idx, stage_idx);
 
-            // Direct direction: flow_min = 0, flow_max = direct_mw
             append_bound!(
                 ENTITY_TYPE_LINE,
                 entity_id,
@@ -921,7 +870,6 @@ fn write_bounds_parquet(
         }
     }
 
-    // ── Pumping station bounds (flow min/max) ─────────────────────────────────
     for (pumping_idx, pumping) in system.pumping_stations().iter().enumerate() {
         let entity_id = pumping.id.0;
         for stage_idx in 0..n_stages {
@@ -945,7 +893,6 @@ fn write_bounds_parquet(
         }
     }
 
-    // ── Contract bounds (min/max MW) ──────────────────────────────────────────
     for (contract_idx, contract) in system.contracts().iter().enumerate() {
         let entity_id = contract.id.0;
         for stage_idx in 0..n_stages {
@@ -1000,15 +947,12 @@ fn bounds_schema() -> Schema {
 
 // ─── state_dictionary.json ───────────────────────────────────────────────────
 
-/// Write `state_dictionary.json` describing the state space of the model.
-///
-/// Contains one `"storage"` entry per hydro, plus `"inflow_lag"` entries for
-/// each hydro that has an AR model with order > 0, plus `"anticipated_state"`
-/// entries for each `(slot, plant)` pair when anticipated thermals are present.
+/// Write `state_dictionary.json`: one `"storage"` entry per hydro, an
+/// `"inflow_lag"` entry per (hydro, lag) where AR order > 0, and an
+/// `"anticipated_state"` entry per (slot, plant) when anticipated thermals exist.
 fn write_state_dictionary_json(path: &Path, system: &System) -> Result<(), OutputError> {
     let mut state_variables = Vec::new();
 
-    // One storage variable per hydro plant.
     for hydro in system.hydros() {
         state_variables.push(serde_json::json!({
             "type": "storage",
@@ -1018,11 +962,9 @@ fn write_state_dictionary_json(path: &Path, system: &System) -> Result<(), Outpu
         }));
     }
 
-    // Inflow lag variables: one per (hydro, lag) pair where AR order > 0.
     for hydro_idx in 0..system.hydros().len() {
         let hydro_id = system.hydros()[hydro_idx].id.0;
 
-        // Find the maximum AR order for this hydro across all stages.
         let max_order = system
             .inflow_models()
             .iter()
@@ -1031,7 +973,6 @@ fn write_state_dictionary_json(path: &Path, system: &System) -> Result<(), Outpu
             .max()
             .unwrap_or(0);
 
-        // Emit one inflow_lag entry per lag (1-based).
         for lag_index in 1..=max_order {
             state_variables.push(serde_json::json!({
                 "type": "inflow_lag",
@@ -1043,16 +984,10 @@ fn write_state_dictionary_json(path: &Path, system: &System) -> Result<(), Outpu
         }
     }
 
-    // Anticipated-state slot variables: one per (slot, plant) pair.
-    // Ordering matches the LP layout
-    // `anticipated_state.start + slot * n_anticipated + plant`.
-    //
-    // For a plant with `lead_stages = K_i`, slots `0..K_i` carry real
-    // pending commitments and slots `K_i..k_max` are structural padding
-    // (deterministically zero, kept to align the ring buffer to a
-    // uniform stride). The `lead_stages` field below lets consumers
-    // distinguish "active" slots (`slot_index < lead_stages`) from
-    // padding slots (`slot_index >= lead_stages`).
+    // Emit slot-major to match the LP layout
+    // `anticipated_state.start + slot * n_anticipated + plant`. Slots
+    // `lead_stages..k_max` are zero padding; the `lead_stages` field lets
+    // consumers tell active slots (`slot_index < lead_stages`) from padding.
     let anticipated_thermals: Vec<&cobre_core::Thermal> = system
         .thermals()
         .iter()
@@ -1412,24 +1347,20 @@ mod tests {
             .map(|r| r.unwrap().iter().map(ToString::to_string).collect())
             .collect();
 
-        // 2 hydros + 1 thermal + 1 bus = 4 rows
         assert_eq!(
             rows.len(),
             4,
             "expected 4 data rows (2 hydros + 1 thermal + 1 bus)"
         );
 
-        // Row 0: hydro with id=1
         assert_eq!(rows[0][0], "0", "row 0: entity_type_code must be 0 (hydro)");
         assert_eq!(rows[0][1], "1", "row 0: entity_id must be 1");
         assert_eq!(rows[0][2], "Hydro1", "row 0: name must be Hydro1");
 
-        // Row 1: hydro with id=2
         assert_eq!(rows[1][0], "0", "row 1: entity_type_code must be 0 (hydro)");
         assert_eq!(rows[1][1], "2", "row 1: entity_id must be 2");
         assert_eq!(rows[1][2], "Hydro2", "row 1: name must be Hydro2");
 
-        // Row 2: thermal with id=1
         assert_eq!(
             rows[2][0], "1",
             "row 2: entity_type_code must be 1 (thermal)"
@@ -1452,7 +1383,6 @@ mod tests {
             .map(|r| r.unwrap().get(0).unwrap().parse::<i8>().unwrap())
             .collect();
 
-        // Verify non-decreasing entity_type_code order.
         for window in type_codes.windows(2) {
             assert!(
                 window[0] <= window[1],
@@ -1544,7 +1474,6 @@ mod tests {
         let content = std::fs::read_to_string(tmp.path().join("variables.csv")).unwrap();
         let mut rdr = csv::Reader::from_reader(content.as_bytes());
 
-        // Find the block_id column in costs — it is nullable.
         let block_id_nullable = rdr
             .records()
             .find(|r| {
@@ -1588,7 +1517,6 @@ mod tests {
             "1 hydro × 2 stages × 7 bounds = 14 rows"
         );
 
-        // Find rows for stage 0, storage_min (bound_type_code=0) and storage_max (1).
         let entity_type_col = batch
             .column_by_name("entity_type_code")
             .unwrap()
@@ -1609,7 +1537,6 @@ mod tests {
             .unwrap();
         let block_id_col = batch.column_by_name("block_id").unwrap();
 
-        // Verify all block_id entries are null.
         for row in 0..batch.num_rows() {
             assert!(
                 block_id_col.is_null(row),
@@ -1617,7 +1544,6 @@ mod tests {
             );
         }
 
-        // Find storage_min row for hydro entity type.
         let storage_min_row = (0..batch.num_rows()).find(|&i| {
             entity_type_col.value(i) == ENTITY_TYPE_HYDRO
                 && bound_type_col.value(i) == BOUND_STORAGE_MIN
@@ -1633,7 +1559,6 @@ mod tests {
             bound_value_col.value(row)
         );
 
-        // Find storage_max row.
         let storage_max_row = (0..batch.num_rows()).find(|&i| {
             entity_type_col.value(i) == ENTITY_TYPE_HYDRO
                 && bound_type_col.value(i) == BOUND_STORAGE_MAX
@@ -1677,7 +1602,6 @@ mod tests {
             "must have exactly 2 storage entries (one per hydro)"
         );
 
-        // Verify entity_type is "hydro" for all storage entries.
         for entry in &storage_entries {
             assert_eq!(
                 entry["entity_type"],
@@ -1861,8 +1785,6 @@ mod tests {
 
     #[test]
     fn state_dictionary_zero_anticipated_emits_no_anticipated_entries() {
-        // AC-1: system with no anticipated thermals produces zero
-        // "anticipated_state" entries.
         let system = make_system_2h_1t();
         let state_vars = parse_state_variables(&system);
 
@@ -1880,8 +1802,6 @@ mod tests {
 
     #[test]
     fn state_dictionary_single_anticipated_k1_emits_one_entry() {
-        // AC-2: one anticipated thermal (id=7, lead_stages=1), zero hydros.
-        // Expect exactly one "anticipated_state" entry with the correct fields.
         let t = Thermal {
             anticipated_config: Some(AnticipatedConfig { lead_stages: 1 }),
             ..make_thermal(7, "Thermal7", 1)
@@ -1923,8 +1843,7 @@ mod tests {
 
     #[test]
     fn state_dictionary_two_anticipated_k3_slot_major_ordering() {
-        // AC-3: two anticipated thermals (id=5, lead=2; id=8, lead=3).
-        // Expect 6 entries (A*K_max = 2*3) in slot-major order:
+        // 6 entries (A*K_max = 2*3) in slot-major order:
         // slot 0: [5, 8], slot 1: [5, 8], slot 2: [5, 8].
         let t5 = Thermal {
             anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
@@ -1962,9 +1881,8 @@ mod tests {
 
     #[test]
     fn state_dictionary_total_length_equals_n_state() {
-        // AC-4: 2 hydros (one with ar_order=1, one with ar_order=0),
-        // 1 anticipated thermal (K=2).
-        // Expected total = 2 (storage) + 1 (inflow_lag) + 1*2 (anticipated) = 5.
+        // 2 hydros (ar_order 1 and 0), 1 anticipated thermal (K=2):
+        // total = 2 (storage) + 1 (inflow_lag) + 1*2 (anticipated) = 5.
         let bus = make_bus(1);
         let h1 = make_hydro(1, "Hydro1", 1);
         let h2 = make_hydro(2, "Hydro2", 1);

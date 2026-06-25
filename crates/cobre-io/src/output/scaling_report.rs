@@ -9,12 +9,10 @@ use std::path::Path;
 use super::atomic::write_json_atomic;
 use super::error::OutputError;
 
-/// Write a scaling report as pretty-printed JSON.
+/// Write a scaling report as pretty-printed JSON, atomically.
 ///
-/// Accepts any `Serialize`-implementing value to avoid cross-crate type
-/// dependencies (the report struct is defined in the calling algorithm crate).
-///
-/// Uses atomic write: writes to a `.json.tmp` file first, then renames.
+/// Generic over `Serialize` so the report struct stays in the calling algorithm
+/// crate, keeping this crate algorithm-agnostic.
 ///
 /// # Errors
 ///

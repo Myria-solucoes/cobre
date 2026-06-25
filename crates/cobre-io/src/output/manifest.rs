@@ -1,18 +1,12 @@
-//! Metadata writers for the output pipeline.
+//! JSON metadata writers for the output pipeline:
 //!
-//! This module provides JSON writers for two metadata files:
+//! - [`write_training_metadata`] — `training/metadata.json` (run context,
+//!   configuration, convergence, row-pool statistics).
+//! - [`write_simulation_metadata`] — `simulation/metadata.json` (run context,
+//!   scenario completion counts).
 //!
-//! - [`write_training_metadata`] — writes `training/metadata.json` capturing
-//!   run context, configuration, convergence, and row-pool statistics.
-//! - [`write_simulation_metadata`] — writes `simulation/metadata.json` capturing
-//!   run context and scenario completion counts.
-//!
-//! Each output directory gets a single merged metadata file. The `_SUCCESS`
-//! marker signals completion; metadata files capture the run details.
-//!
-//! All writers use an atomic write pattern: data is serialized to a `.tmp` file
-//! first, then atomically renamed to the target path. This prevents partial files
-//! from being visible to readers.
+//! Each output directory gets a single merged metadata file; the `_SUCCESS`
+//! marker signals completion.
 
 use std::path::Path;
 
@@ -210,10 +204,8 @@ pub struct MetadataBounds {
     pub final_upper_bound_std: Option<f64>,
 }
 
-/// Default bounds used when legacy metadata omits the `bounds` field.
-///
-/// Yields zeroed bounds matching the historical fallback behaviour: a
-/// `final_lower_bound` of `0.0` and absent upper bounds.
+/// Default bounds (`final_lower_bound` `0.0`, absent upper bounds) used when
+/// metadata omits the `bounds` field.
 #[must_use]
 pub fn default_bounds() -> MetadataBounds {
     MetadataBounds {
@@ -245,13 +237,12 @@ pub struct MetadataTrainingSolveStats {
     pub parallelism: Option<u32>,
 }
 
-/// Per-phase setup wall time embedded in [`TrainingMetadata`].
+/// Per-phase setup wall time (wall-clock seconds) embedded in
+/// [`TrainingMetadata`].
 ///
-/// Each field is wall-clock seconds for one setup phase. These values are
-/// **non-deterministic** (informational, never hashed): they vary run-to-run
-/// with machine load and are excluded from any parity computation. All fields
-/// are `#[serde(default)]` so metadata produced before this section existed
-/// reads back as zeros.
+/// **Non-deterministic** — informational, never hashed, excluded from any parity
+/// computation. All fields are `#[serde(default)]`, so pre-section metadata reads
+/// back as zeros.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SetupTimings {
     /// Wall-clock seconds spent loading the input case.
@@ -274,13 +265,10 @@ pub struct SetupTimings {
 /// Run-level rollup of a per-entity model-fit deviation, embedded in
 /// [`TrainingMetadata`].
 ///
-/// A generic, informational aggregate over per-entity fit deviations: the entry
-/// count, the mean and max absolute deviation magnitudes across all entries, and
-/// the single worst entry by relative deviation. The producer maps its own
-/// per-entity deviation records into this shape; the field names carry no
-/// producer-specific meaning so the metadata struct stays free of algorithm
-/// vocabulary. All fields are `#[serde(default)]` so metadata produced before
-/// this section existed reads back as zeros / `None`.
+/// Field names are deliberately generic — the producer maps its records into
+/// this shape — so the metadata struct stays free of algorithm vocabulary. All
+/// fields are `#[serde(default)]`, so pre-section metadata reads back as zeros /
+/// `None`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeviationSummary {
     /// Number of per-entity entries the rollup summarizes (`>= 1` whenever the
@@ -303,10 +291,8 @@ pub struct DeviationSummary {
 
 /// The single worst per-entity entry of a [`DeviationSummary`].
 ///
-/// Identifies one entity / stage pair and carries that entry's deviation
-/// magnitudes verbatim. The field names are generic (no producer-specific
-/// vocabulary); `entity_id` and `stage_id` mirror the integer identifiers the
-/// producer keys its entries by. All fields are `#[serde(default)]`.
+/// Field names are deliberately generic (no producer-specific vocabulary); all
+/// fields are `#[serde(default)]`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeviationWorstEntry {
     /// Integer identifier of the entity owning the worst entry.
@@ -463,7 +449,7 @@ pub struct SimulationMetadata {
 
 // ── Writers ──────────────────────────────────────────────────────────────────
 
-/// Write training metadata to `path` using the atomic write pattern.
+/// Write training metadata to `path` atomically.
 ///
 /// # Errors
 ///
@@ -476,7 +462,7 @@ pub fn write_training_metadata(
     write_json_atomic(path, metadata, "training_metadata")
 }
 
-/// Write simulation metadata to `path` using the atomic write pattern.
+/// Write simulation metadata to `path` atomically.
 ///
 /// # Errors
 ///
@@ -529,10 +515,9 @@ fn write_json_atomic<T: Serialize>(
     value: &T,
     manifest_type: &str,
 ) -> Result<(), OutputError> {
-    // Serialize here (not via the shared JSON helper) to keep the
-    // `ManifestError` failure variant this writer's callers expect; the bytes
-    // produced are identical to the shared helper's pretty output. The shared
-    // helper then owns the crash-safe write (flush before rename).
+    // Serialize here, not via the shared JSON helper, to keep the `ManifestError`
+    // failure variant callers expect (bytes are identical); the shared helper
+    // then owns the crash-safe write.
     let json = serde_json::to_string_pretty(value).map_err(|e| OutputError::ManifestError {
         manifest_type: manifest_type.to_string(),
         message: e.to_string(),
@@ -780,8 +765,6 @@ mod tests {
 
     #[test]
     fn simulation_metadata_back_compat_without_cost_or_solve_stats() {
-        // Legacy metadata predating the `cost`/`solve_stats` fields omits both
-        // keys entirely.
         let legacy = r#"{
             "cobre_version": "0.0.0",
             "hostname": "legacy-host",
@@ -844,7 +827,6 @@ mod tests {
 
     #[test]
     fn distribution_info_back_compat_without_hosts() {
-        // Legacy metadata predating the `hosts` field omits the key entirely.
         let legacy = r#"{
             "backend": "local",
             "world_size": 1,
@@ -918,8 +900,6 @@ mod tests {
 
     #[test]
     fn training_metadata_back_compat_without_bounds_or_solve_stats() {
-        // Legacy metadata predating the `bounds`/`solve_stats` fields omits both
-        // keys entirely.
         let legacy = r#"{
             "cobre_version": "0.0.0",
             "hostname": "legacy-host",
@@ -1001,8 +981,6 @@ mod tests {
 
     #[test]
     fn training_metadata_without_setup_reads_as_none() {
-        // Metadata that omits the `setup` key entirely (legacy or a run that did
-        // not collect timings) must deserialize with `setup == None`.
         let without_setup = r#"{
             "cobre_version": "0.0.0",
             "hostname": "legacy-host",
@@ -1111,8 +1089,6 @@ mod tests {
 
     #[test]
     fn training_metadata_without_deviation_reads_as_none() {
-        // Metadata that omits the `production_fit_deviation` key entirely (legacy
-        // or a run with no measured fit) must deserialize with the field `None`.
         let without_deviation = r#"{
             "cobre_version": "0.0.0",
             "hostname": "legacy-host",
@@ -1320,7 +1296,6 @@ mod tests {
     #[test]
     fn now_iso8601_returns_valid_format() {
         let ts = now_iso8601();
-        // Must match pattern like "2026-04-05T14:30:00Z"
         assert!(ts.ends_with('Z'), "timestamp must end with Z: {ts}");
         assert!(ts.contains('T'), "timestamp must contain T separator: {ts}");
     }

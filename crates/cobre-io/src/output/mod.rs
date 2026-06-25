@@ -54,10 +54,12 @@ pub use stochastic::{
 };
 pub use training_writer::{TrainingParquetWriter, write_row_selection_records};
 
-/// One row of convergence data corresponding to a single training iteration.
+/// One row of convergence data for a single training iteration, written to
+/// `training/convergence.parquet`.
 ///
-/// Instances are accumulated in [`TrainingOutput::convergence_records`] and are
-/// written verbatim to `training/convergence.parquet` by the convergence writer.
+/// `time_*` fields whose doc names a column map to that column in
+/// `training/timing/iterations.parquet`; those tagged a sub-component of a pass
+/// nest under that pass's wall-clock total rather than adding to the top level.
 #[derive(Debug, Clone)]
 pub struct IterationRecord {
     /// Sequential iteration number (1-based).
@@ -95,90 +97,50 @@ pub struct IterationRecord {
     /// Total wall-clock time for this iteration (ms).
     pub time_total_ms: u64,
 
-    /// Forward pass wall-clock time (ms).
-    ///
-    /// Maps to `forward_wall_ms` in `training/timing/iterations.parquet`.
+    /// Forward pass wall-clock time (ms) → `forward_wall_ms`.
     pub time_forward_wall_ms: u64,
 
-    /// Backward pass wall-clock time (ms).
-    ///
-    /// Maps to `backward_wall_ms` in `training/timing/iterations.parquet`.
+    /// Backward pass wall-clock time (ms) → `backward_wall_ms`.
     pub time_backward_wall_ms: u64,
 
-    /// Wall-clock time for the row-selection phase (ms).
-    ///
-    /// Maps to `cut_selection_ms` in `training/timing/iterations.parquet`.
+    /// Row-selection phase time (ms) → `cut_selection_ms`.
     pub time_cut_selection_ms: u64,
 
-    /// Wall-clock time for MPI allreduce (forward bound synchronization) (ms).
-    ///
-    /// Maps to `mpi_allreduce_ms` in `training/timing/iterations.parquet`.
+    /// MPI allreduce (forward bound synchronization) time (ms) → `mpi_allreduce_ms`.
     pub time_mpi_allreduce_ms: u64,
 
-    /// Wall-clock time for per-stage row-sync allgatherv (ms).
-    ///
-    /// Sub-component of the backward pass wall-clock.
-    /// Maps to `cut_sync_ms` in `training/timing/iterations.parquet`.
+    /// Per-stage row-sync allgatherv time (ms) → `cut_sync_ms`. Backward sub-component.
     pub time_cut_sync_ms: u64,
 
-    /// Wall-clock time for lower bound evaluation (ms).
-    ///
-    /// Maps to `lower_bound_ms` in `training/timing/iterations.parquet`.
+    /// Lower bound evaluation time (ms) → `lower_bound_ms`.
     pub time_lower_bound_ms: u64,
 
-    /// Wall-clock time for state exchange (`allgatherv`) in the backward pass (ms).
-    ///
-    /// Sub-component of the backward pass wall-clock.
-    /// Maps to `state_exchange_ms` in `training/timing/iterations.parquet`.
+    /// State-exchange (`allgatherv`) time (ms) → `state_exchange_ms`. Backward sub-component.
     pub time_state_exchange_ms: u64,
 
-    /// Wall-clock time for row-batch assembly in the backward pass (ms).
-    ///
-    /// Sub-component of the backward pass wall-clock.
-    /// Maps to `cut_batch_build_ms` in `training/timing/iterations.parquet`.
+    /// Row-batch assembly time (ms) → `cut_batch_build_ms`. Backward sub-component.
     pub time_cut_batch_build_ms: u64,
 
-    /// Thread-pool setup time before the parallel backward pass loop began (ms).
-    ///
-    /// Sub-component of the backward pass wall-clock.
-    /// Maps to `bwd_setup_ms` in `training/timing/iterations.parquet`.
+    /// Backward thread-pool setup time (ms) → `bwd_setup_ms`. Backward sub-component.
     pub time_bwd_setup_ms: u64,
 
-    /// Estimated load imbalance across worker threads in the backward pass (ms).
-    ///
-    /// Sub-component of the backward pass wall-clock.
-    /// Maps to `bwd_load_imbalance_ms` in `training/timing/iterations.parquet`.
+    /// Estimated backward worker load imbalance (ms) → `bwd_load_imbalance_ms`. Backward sub-component.
     pub time_bwd_load_imbalance_ms: u64,
 
-    /// Scheduling and synchronisation overhead in the backward pass (ms).
-    ///
-    /// Sub-component of the backward pass wall-clock.
-    /// Maps to `bwd_scheduling_overhead_ms` in `training/timing/iterations.parquet`.
+    /// Backward scheduling/sync overhead (ms) → `bwd_scheduling_overhead_ms`. Backward sub-component.
     pub time_bwd_scheduling_overhead_ms: u64,
 
-    /// Thread-pool setup time before the forward pass parallel loop began (ms).
-    ///
-    /// Sub-component of the forward pass wall-clock.
-    /// Maps to `fwd_setup_ms` in `training/timing/iterations.parquet`.
+    /// Forward thread-pool setup time (ms) → `fwd_setup_ms`. Forward sub-component.
     pub time_fwd_setup_ms: u64,
 
-    /// Estimated load imbalance across worker threads in the forward pass (ms).
-    ///
-    /// Sub-component of the forward pass wall-clock.
-    /// Maps to `fwd_load_imbalance_ms` in `training/timing/iterations.parquet`.
+    /// Estimated forward worker load imbalance (ms) → `fwd_load_imbalance_ms`. Forward sub-component.
     pub time_fwd_load_imbalance_ms: u64,
 
-    /// Scheduling and synchronisation overhead in the forward pass (ms).
-    ///
-    /// Sub-component of the forward pass wall-clock.
-    /// Maps to `fwd_scheduling_overhead_ms` in `training/timing/iterations.parquet`.
+    /// Forward scheduling/sync overhead (ms) → `fwd_scheduling_overhead_ms`. Forward sub-component.
     pub time_fwd_scheduling_overhead_ms: u64,
 
-    /// Residual wall-clock time not attributed to any specific phase (ms).
-    ///
-    /// Computed as `time_total_ms - (forward + backward + cut_selection +
-    /// mpi_allreduce + lower_bound)`.
-    /// Maps to `overhead_ms` in `training/timing/iterations.parquet`.
+    /// Residual time not attributed to any phase (ms) → `overhead_ms`. Computed as
+    /// `time_total_ms - (forward + backward + cut_selection + mpi_allreduce + lower_bound)`.
     pub time_overhead_ms: u64,
 
     /// Number of forward-pass scenarios solved in this iteration.
@@ -253,11 +215,11 @@ pub struct RowSelectionRecord {
     pub cuts_active_after: u32,
     /// Wall-clock time for selection at this stage, in milliseconds.
     pub selection_time_ms: f64,
-    /// Cuts evicted by budget enforcement (Step 4b) at this stage.
+    /// Cuts evicted by budget enforcement at this stage.
     ///
     /// `None` when budget enforcement is disabled (`max_active_per_stage` is absent).
     pub budget_evicted: Option<u32>,
-    /// Active cuts after budget enforcement (Step 4b).
+    /// Active cuts after budget enforcement.
     ///
     /// `None` when budget enforcement is disabled.
     pub active_after_budget: Option<u32>,
@@ -811,7 +773,6 @@ mod tests {
             solve_stats: MetadataSimulationSolveStats::default(),
         };
         let merged = SimulationOutput::merge(&[a, b]);
-        // Partitions must be sorted regardless of input order
         let expected = vec![
             "simulation/costs/scenario_id=0001/data.parquet".to_string(),
             "simulation/costs/scenario_id=0002/data.parquet".to_string(),
@@ -869,7 +830,6 @@ mod tests {
         let merged_ab = SimulationOutput::merge(&[a.clone(), b.clone()]);
         let merged_ba = SimulationOutput::merge(&[b, a]);
 
-        // Summed count fields are order-invariant.
         assert_eq!(
             merged_ab.solve_stats.total_lp_solves,
             merged_ba.solve_stats.total_lp_solves
@@ -885,21 +845,18 @@ mod tests {
         assert_eq!(merged_ab.solve_stats.failed, Some(2));
         assert_eq!(merged_ab.solve_stats.failed, merged_ba.solve_stats.failed);
 
-        // Summed solve_seconds is order-invariant.
         assert_eq!(merged_ab.solve_stats.solve_seconds, Some(4.0));
         assert_eq!(
             merged_ab.solve_stats.solve_seconds,
             merged_ba.solve_stats.solve_seconds
         );
 
-        // parallelism takes the max regardless of order.
         assert_eq!(merged_ab.solve_stats.parallelism, Some(8));
         assert_eq!(
             merged_ab.solve_stats.parallelism,
             merged_ba.solve_stats.parallelism
         );
 
-        // cost is first-present (rank-0 authoritative ordering supplied by producer).
         assert_eq!(
             merged_ab.cost.as_ref().map(|c| c.mean_cost),
             Some(100.0),

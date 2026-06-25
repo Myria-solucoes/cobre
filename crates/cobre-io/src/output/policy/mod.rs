@@ -1,64 +1,16 @@
 //! `FlatBuffers` builder and reader types for policy checkpoint serialization.
 //!
-//! This module defines the input types and builder functions used to serialize policy
-//! data (cuts and solver bases) to `FlatBuffers` binary format for checkpoint persistence,
-//! as well as owned output types and reader functions for deserializing those buffers.
+//! Types use generic names to maintain infrastructure crate genericity; conversion
+//! from algorithm-specific types is the calling crate's responsibility.
 //!
-//! ## Design
-//!
-//! Types in this module use generic names to maintain infrastructure crate genericity.
-//! They mirror the mathematical concepts (cut intercepts, gradient coefficients, simplex
-//! basis status codes) without referencing any specific optimization algorithm. Conversion
-//! from algorithm-specific types to these input types is the responsibility of the calling
-//! crate.
-//!
-//! ## `FlatBuffers` schema
-//!
-//! The canonical wire-format description is `schemas/policy.fbs` in this
-//! crate (namespace `Cobre.IO.Policy`, tables `StageCuts`, `Cut`,
-//! `StageBasis`, `StageStates`). External consumers generate typed readers
-//! in their language of choice via `flatc`; the schema is not consumed by
-//! the cobre Rust build itself, because this module hand-writes both the
-//! builder calls and the safe raw-byte parser. The `*_FIELD_*: u16`
-//! slot constants in `codec` mirror the `(id: N)` attributes in the schema
-//! via the formula `slot = (id + 2) * 2`. They MUST stay in sync; the
-//! `flatc-conformance` cargo feature gates a round-trip test in
-//! `tests/flatbuffers_schema_conformance.rs` that fails when they diverge.
-//!
-//! ## Format details
-//!
-//! Buffers are written using the `FlatBuffers` runtime builder API with
-//! [`flatbuffers::FlatBufferBuilder`]. Output is little-endian and deterministic for the
-//! same input — field order is fixed by the builder call sequence, matching the field
-//! `(id: N)` declarations in `schemas/policy.fbs`.
-//!
-//! ## Reading policy checkpoints
-//!
-//! The reader functions ([`deserialize_stage_cuts`], [`deserialize_stage_basis`],
-//! [`read_policy_checkpoint`]) use **safe raw byte parsing** of the `FlatBuffers` wire
-//! format instead of the generated `Table::get` API (which is `unsafe fn`). This is
-//! required because the workspace forbids `unsafe_code`.
-//!
-//! ### Wire format summary
-//!
-//! A finished `FlatBuffers` buffer layout (produced by [`flatbuffers::FlatBufferBuilder::finish_minimal`]):
-//!
-//! ```text
-//! offset 0: u32 root_offset — byte offset from position 0 to the root table
-//! ...data written right-to-left by the builder...
-//! vtable:
-//!   u16 vtable_bytesize
-//!   u16 table_data_bytesize
-//!   u16 field_0_data_offset   (or 0 if field absent)
-//!   u16 field_1_data_offset   ...
-//! root_table at root_offset:
-//!   i32 soffset_to_vtable     (= table_pos - vtable_pos; positive = vtable before table)
-//!   ...inline field data...
-//! ```
-//!
-//! Nested table fields and vector fields store a `u32` forward offset from the field's
-//! own buffer position to the nested object. Vectors are: `u32 length`, then
-//! `length × element_size` bytes of element data.
+//! The canonical wire-format description is `schemas/policy.fbs` in this crate
+//! (namespace `Cobre.IO.Policy`, tables `StageCuts`, `Cut`, `StageBasis`,
+//! `StageStates`); the build hand-writes both the builder calls and the safe
+//! raw-byte parser rather than consuming the schema. The `*_FIELD_*: u16` slot
+//! constants in `codec` mirror the schema's `(id: N)` attributes via
+//! `slot = (id + 2) * 2` and MUST stay in sync — the `flatc-conformance` feature
+//! gates the round-trip test in `tests/flatbuffers_schema_conformance.rs` that
+//! fails when they diverge. The wire layout itself is documented at `codec`.
 
 pub mod checkpoint;
 pub mod codec;
@@ -114,8 +66,6 @@ mod tests {
         let buf = serialize_stage_cuts(0, 3, 100, 0, &[cut], &[0], 1);
 
         assert!(!buf.is_empty(), "buffer must not be empty");
-        // A `FlatBuffers` buffer always starts with a 4-byte root offset (little-endian u32).
-        // Verify that the first 4 bytes decode to a non-zero, in-range offset.
         assert!(buf.len() >= 4, "buffer must have at least 4 bytes");
         let root_offset = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
         assert!(
@@ -508,7 +458,6 @@ mod tests {
             let p = tmp.path().join(format!("cuts/stage_{i:03}.bin"));
             let bytes = std::fs::read(&p).unwrap();
             assert!(!bytes.is_empty(), "cuts/stage_{i:03}.bin must not be empty");
-            // Verify FlatBuffers root offset is in-range.
             assert!(
                 bytes.len() >= 4,
                 "cuts/stage_{i:03}.bin must have >= 4 bytes"
@@ -1254,7 +1203,6 @@ mod tests {
 
     #[test]
     fn policy_checkpoint_metadata_warm_start_counts_absent_defaults_to_empty() {
-        // Simulate an old checkpoint JSON that has no warm_start_counts field.
         let json = r#"{
             "cobre_version": "0.0.1",
             "created_at": "2026-01-01T00:00:00Z",
