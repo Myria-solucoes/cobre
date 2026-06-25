@@ -1,11 +1,7 @@
-//! Online accumulator for running mean and variance using Welford's algorithm.
-//!
-//! Accumulates one value at a time with O(1) updates and O(1) statistics
-//! queries, with no re-scanning of previous data. Useful for streaming statistics
-//! in iterative algorithms where values arrive one at a time and the full dataset
-//! is not stored.
+//! Online accumulator for running mean and variance using Welford's algorithm,
+//! which avoids the catastrophic cancellation of the two-pass naive formula.
 
-/// Online accumulator for running mean and variance using Welford's algorithm.
+/// Running mean and variance via Welford's single-pass online update.
 #[derive(Debug)]
 pub struct WelfordAccumulator {
     count: u64,
@@ -29,7 +25,7 @@ impl WelfordAccumulator {
     pub fn update(&mut self, value: f64) {
         self.count += 1;
         let delta = value - self.mean;
-        #[allow(clippy::cast_precision_loss)] // count is bounded by scenario counts (u32-range)
+        #[allow(clippy::cast_precision_loss)] // count stays in u32 range; f64 is exact there
         let count_f64 = self.count as f64;
         self.mean += delta / count_f64;
         let delta2 = value - self.mean;
@@ -66,11 +62,11 @@ impl WelfordAccumulator {
         self.variance().sqrt()
     }
 
-    /// Sample variance (`m2 / (n-1)`) using Bessel's correction, or `0.0`
-    /// if fewer than 2 observations.
+    /// Sample variance (`m2 / (n-1)`) with Bessel's correction, or `0.0` if
+    /// fewer than 2 observations.
     ///
-    /// Use this instead of [`variance`] when the accumulator holds a sample
-    /// drawn from a population and an unbiased variance estimate is needed.
+    /// Prefer this over [`variance`] when the data are a sample of a larger
+    /// population, not the whole population.
     ///
     /// [`variance`]: WelfordAccumulator::variance
     #[must_use]
@@ -159,7 +155,6 @@ mod tests {
         );
     }
 
-    /// Single value: mean equals that value, `std_dev`=0.0, CI half-width=0.0.
     #[test]
     fn welford_single_value_no_variance() {
         let mut acc = WelfordAccumulator::new();
@@ -181,7 +176,6 @@ mod tests {
         );
     }
 
-    /// Zero updates: mean=0.0, `std_dev`=0.0.
     #[test]
     fn welford_zero_updates() {
         let acc = WelfordAccumulator::new();
@@ -193,7 +187,6 @@ mod tests {
         );
     }
 
-    /// `count()` returns 0 before any updates and tracks each update correctly.
     #[test]
     fn welford_count_tracks_updates() {
         let mut acc = WelfordAccumulator::new();
