@@ -140,13 +140,8 @@ pub struct StageRange {
     /// Optional reference operating volume, a sibling of `fpha_config`. `None`
     /// when not declared; a default is applied later in resolution, not here.
     pub reference_volume: Option<ReferenceVolume>,
-    /// Per-stage productivity coefficient [MW/(m³/s)].
-    ///
-    /// Optional for `"constant_productivity"` and `"linearized_head"` models. When `None`,
-    /// the value is supplied by `system/hydro_energy_productivity.parquet`; cross-file
-    /// resolution is enforced by `validation::productivity_resolution`. When present, must
-    /// be finite and non-negative (`>= 0.0`); `0.0` is accepted as a planned-outage marker.
-    /// Must be `None` for `"fpha"` (FPHA derives productivity from its hyperplane geometry).
+    /// Per-stage productivity coefficient [MW/(m³/s)]; see the module doc for the
+    /// optional / `0.0`-outage / `None`-for-fpha rules.
     pub productivity_mw_per_m3s: Option<f64>,
 }
 
@@ -162,13 +157,8 @@ pub struct SeasonConfig {
     /// Optional reference operating volume, a sibling of `fpha_config`. `None`
     /// when not declared; a default is applied later in resolution, not here.
     pub reference_volume: Option<ReferenceVolume>,
-    /// Per-season productivity coefficient [MW/(m³/s)].
-    ///
-    /// Optional for `"constant_productivity"` and `"linearized_head"` models. When `None`,
-    /// the value is supplied by `system/hydro_energy_productivity.parquet`; cross-file
-    /// resolution is enforced by `validation::productivity_resolution`. When present, must
-    /// be finite and non-negative (`>= 0.0`); `0.0` is accepted as a planned-outage marker.
-    /// Must be `None` for `"fpha"` (FPHA derives productivity from its hyperplane geometry).
+    /// Per-season productivity coefficient [MW/(m³/s)]; see the module doc for the
+    /// optional / `0.0`-outage / `None`-for-fpha rules.
     pub productivity_mw_per_m3s: Option<f64>,
 }
 
@@ -496,10 +486,8 @@ struct RawReferenceVolume {
 /// println!("loaded {} hydro model configs", file.configs.len());
 /// ```
 pub fn parse_production_models(path: &Path) -> Result<ProductionModelFile, LoadError> {
-    // Step 1: Read file.
     let raw_text = std::fs::read_to_string(path).map_err(|e| LoadError::io(path, e))?;
 
-    // Step 2: Deserialize. Unrecognised `selection_mode` produces a serde error.
     let raw: RawProductionModelFile = serde_json::from_str(&raw_text).map_err(|e| {
         let msg = e.to_string();
         if msg.contains("unknown variant") {
@@ -513,14 +501,12 @@ pub fn parse_production_models(path: &Path) -> Result<ProductionModelFile, LoadE
         }
     })?;
 
-    // Step 3: Validate cross-entry constraints and the file-level reduction block.
     validate_production_models(
         &raw.production_models,
         raw.fpha_plane_reduction.as_ref(),
         path,
     )?;
 
-    // Step 4: Convert and sort.
     let mut configs: Vec<ProductionModelConfig> = raw
         .production_models
         .into_iter()
@@ -551,7 +537,6 @@ fn validate_production_models(
     let mut seen_ids: HashSet<i32> = HashSet::new();
 
     for (entry_idx, model) in models.iter().enumerate() {
-        // Duplicate hydro_id check.
         if !seen_ids.insert(model.hydro_id) {
             return Err(LoadError::SchemaError {
                 path: path.to_path_buf(),
@@ -563,7 +548,6 @@ fn validate_production_models(
             });
         }
 
-        // Mode-specific validation.
         match &model.selection {
             RawSelectionMode::StageRanges { stage_ranges } => {
                 for (range_idx, range) in stage_ranges.iter().enumerate() {
@@ -576,7 +560,6 @@ fn validate_production_models(
                         "production_models[{entry_idx}].seasons[{season_idx}].productivity_mw_per_m3s"
                     );
 
-                    // Reject productivity_mw_per_m3s on FPHA seasons.
                     if season.model == "fpha" && season.productivity_mw_per_m3s.is_some() {
                         return Err(LoadError::SchemaError {
                             path: path.to_path_buf(),
@@ -586,9 +569,7 @@ fn validate_production_models(
                         });
                     }
 
-                    // Validate productivity_mw_per_m3s value when present for non-FPHA seasons.
-                    // `0.0` is accepted as a planned-outage marker; reject only negative
-                    // or non-finite values.
+                    // `0.0` is a planned-outage marker; reject only negative or non-finite.
                     if season.model != "fpha"
                         && let Some(val) = season.productivity_mw_per_m3s
                         && (val < 0.0 || !val.is_finite())
@@ -626,7 +607,6 @@ fn validate_production_models(
         }
     }
 
-    // File-level reduction block: validated once, not per entry.
     if let Some(reduction) = plane_reduction {
         validate_plane_reduction(reduction, path)?;
     }
@@ -641,7 +621,6 @@ fn validate_stage_range(
     range_idx: usize,
     path: &Path,
 ) -> Result<(), LoadError> {
-    // start_stage_id must not exceed end_stage_id.
     if let Some(end) = range.end_stage_id
         && range.start_stage_id > end
     {
@@ -661,7 +640,6 @@ fn validate_stage_range(
     let field_base =
         format!("production_models[{entry_idx}].stage_ranges[{range_idx}].productivity_mw_per_m3s");
 
-    // Reject productivity_mw_per_m3s on FPHA stages.
     if range.model == "fpha" && range.productivity_mw_per_m3s.is_some() {
         return Err(LoadError::SchemaError {
             path: path.to_path_buf(),
@@ -670,9 +648,7 @@ fn validate_stage_range(
         });
     }
 
-    // Validate productivity_mw_per_m3s value when present for non-FPHA stages.
-    // `0.0` is accepted as a planned-outage marker; reject only negative or
-    // non-finite values.
+    // `0.0` is a planned-outage marker; reject only negative or non-finite.
     if range.model != "fpha"
         && let Some(val) = range.productivity_mw_per_m3s
         && (val < 0.0 || !val.is_finite())
@@ -684,7 +660,6 @@ fn validate_stage_range(
         });
     }
 
-    // Validate fitting_window if present.
     if let Some(cfg) = &range.fpha_config {
         validate_fitting_window(
             cfg,
@@ -695,7 +670,6 @@ fn validate_stage_range(
         )?;
     }
 
-    // Validate reference_volume if present.
     if let Some(rv) = &range.reference_volume {
         validate_reference_volume(
             rv,
@@ -707,10 +681,8 @@ fn validate_stage_range(
     Ok(())
 }
 
-/// Validate the mutually-exclusive fitting window bounds.
-///
-/// The spec states: use absolute bounds (`volume_min_hm3`, `volume_max_hm3`) OR
-/// percentiles (`volume_min_percentile`, `volume_max_percentile`), not both.
+/// Reject a fitting window that sets an absolute bound and its percentile
+/// counterpart together (the two are mutually exclusive per bound).
 fn validate_fitting_window(
     cfg: &RawFphaColumnLayout,
     field_prefix: &str,
@@ -745,10 +717,8 @@ fn validate_fitting_window(
 
 /// Validate a reference-volume entry's absolute-XOR-percentile invariant.
 ///
-/// Exactly one of `volume_hm3` or `percentile` must be set. An absolute volume
-/// must be finite and `> 0.0`; a percentile must be finite and in `[0.0, 1.0]`.
-/// Validation runs before conversion, so a value that passes here has exactly
-/// one field `Some`.
+/// A value that passes here has exactly one of `volume_hm3` / `percentile` set —
+/// `convert_reference_volume` relies on this to disambiguate.
 fn validate_reference_volume(
     rv: &RawReferenceVolume,
     field_prefix: &str,
@@ -889,11 +859,9 @@ fn convert_season_config(raw: RawSeasonConfig) -> SeasonConfig {
 
 /// Pick the public variant from whichever field is `Some`.
 ///
-/// `validate_reference_volume` runs first and enforces that exactly one field is
-/// `Some`, so `volume_hm3` taking priority is unambiguous: it is `Some` only when
-/// `percentile` is `None`, and the `percentile` branch is reached only when
-/// `volume_hm3` is `None`. The `unwrap_or` default is unreachable under that
-/// contract; it exists solely to keep this conversion total without a panic.
+/// `validate_reference_volume` guarantees exactly one field is `Some`, so the
+/// `volume_hm3` priority is unambiguous and the `unwrap_or` default is
+/// unreachable — it only keeps the conversion total without a panic.
 fn convert_reference_volume(raw: &RawReferenceVolume) -> ReferenceVolume {
     match raw.volume_hm3 {
         Some(vol) => ReferenceVolume::AbsoluteHm3(vol),

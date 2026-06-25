@@ -143,7 +143,6 @@ pub fn parse_tailrace_curves(path: &Path) -> Result<Vec<TailraceCurveRow>, LoadE
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Extract columns by name ───────────────────────────────────────────
         let hydro_id_col = extract_int32_column(&batch, "hydro_id", path)?;
         let family_id_col = extract_int32_column(&batch, "family_id", path)?;
         let segment_id_col = extract_int32_column(&batch, "segment_id", path)?;
@@ -157,7 +156,6 @@ pub fn parse_tailrace_curves(path: &Path) -> Result<Vec<TailraceCurveRow>, LoadE
         let coefficient_3_col = extract_float64_column(&batch, "coefficient_3", path)?;
         let coefficient_4_col = extract_float64_column(&batch, "coefficient_4", path)?;
 
-        // ── Build rows with per-row validation ───────────────────────────────
         let n = batch.num_rows();
         let base_idx = rows.len();
         rows.reserve(n);
@@ -169,8 +167,6 @@ pub fn parse_tailrace_curves(path: &Path) -> Result<Vec<TailraceCurveRow>, LoadE
             let family_id = family_id_col.value(i);
             let segment_id = segment_id_col.value(i);
 
-            // A null `downstream_reference_level_m` is a valid "single family / no reference level"
-            // marker; a present value must clear the non-negative-finite gate.
             let downstream_reference_level_m = if reference_level_col.is_null(i) {
                 None
             } else {
@@ -224,11 +220,8 @@ pub fn parse_tailrace_curves(path: &Path) -> Result<Vec<TailraceCurveRow>, LoadE
         }
     }
 
-    // ── Sort by (hydro_id, family_id, segment_id) ascending ──────────────────
-    //
-    // Integer keys only — no `total_cmp` on `downstream_reference_level_m` or a coefficient. A
-    // float key would make tie-ordering depend on float values and break the
-    // declaration-order-invariance contract downstream consumers rely on.
+    // Integer keys only — a float key (`total_cmp` on a level or coefficient) would
+    // make tie-ordering depend on float values and break declaration-order-invariance.
     rows.sort_by(|a, b| {
         a.hydro_id
             .0

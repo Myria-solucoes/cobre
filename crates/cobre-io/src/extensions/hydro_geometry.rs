@@ -38,11 +38,9 @@ use std::path::Path;
 
 use crate::LoadError;
 
-/// A single row from `system/hydro_geometry.parquet`.
-///
-/// Each row is one point on the Volume-Height-Area (VHA) curve for the hydro
-/// plant identified by `hydro_id`. A complete curve consists of multiple rows
-/// with the same `hydro_id`, sorted by ascending `volume_hm3`.
+/// One point on the Volume-Height-Area (VHA) curve for a hydro plant; a complete
+/// curve is multiple same-`hydro_id` rows sorted by ascending `volume_hm3`. All
+/// non-id values are non-negative and finite.
 ///
 /// # Examples
 ///
@@ -63,18 +61,16 @@ use crate::LoadError;
 pub struct HydroGeometryRow {
     /// Hydro plant this curve point belongs to.
     pub hydro_id: EntityId,
-    /// Total reservoir volume at this point (hm³). Non-negative.
+    /// Total reservoir volume at this point (hm³).
     pub volume_hm3: f64,
-    /// Reservoir surface elevation at this volume (m). Non-negative.
+    /// Reservoir surface elevation at this volume (m).
     pub height_m: f64,
-    /// Water surface area at this volume (km²). Non-negative.
+    /// Water surface area at this volume (km²).
     pub area_km2: f64,
 }
 
-/// Parse `system/hydro_geometry.parquet` and return a sorted VHA curve table.
-///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(hydro_id, volume_hm3)` ascending.
+/// Parse `system/hydro_geometry.parquet` into a VHA curve table sorted by
+/// `(hydro_id, volume_hm3)` ascending.
 ///
 /// # Errors
 ///
@@ -110,13 +106,11 @@ pub fn parse_hydro_geometry(path: &Path) -> Result<Vec<HydroGeometryRow>, LoadEr
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Extract columns by name ───────────────────────────────────────────
         let hydro_id_col = extract_int32_column(&batch, "hydro_id", path)?;
         let volume_col = extract_float64_column(&batch, "volume_hm3", path)?;
         let height_col = extract_float64_column(&batch, "height_m", path)?;
         let area_col = extract_float64_column(&batch, "area_km2", path)?;
 
-        // ── Build rows with per-row validation ───────────────────────────────
         let n = batch.num_rows();
         let base_idx = rows.len();
         rows.reserve(n);
@@ -140,7 +134,6 @@ pub fn parse_hydro_geometry(path: &Path) -> Result<Vec<HydroGeometryRow>, LoadEr
         }
     }
 
-    // ── Sort by (hydro_id, volume_hm3) ascending ─────────────────────────────
     rows.sort_by(|a, b| {
         a.hydro_id
             .0
@@ -151,8 +144,6 @@ pub fn parse_hydro_geometry(path: &Path) -> Result<Vec<HydroGeometryRow>, LoadEr
     Ok(rows)
 }
 
-/// Extract a column as [`Int32Array`] by name, returning [`LoadError::SchemaError`]
-/// if the column is absent or has the wrong Arrow type.
 fn extract_int32_column<'a>(
     batch: &'a arrow::record_batch::RecordBatch,
     name: &str,
@@ -177,8 +168,6 @@ fn extract_int32_column<'a>(
         })
 }
 
-/// Extract a column as [`Float64Array`] by name, returning [`LoadError::SchemaError`]
-/// if the column is absent or has the wrong Arrow type.
 fn extract_float64_column<'a>(
     batch: &'a arrow::record_batch::RecordBatch,
     name: &str,
@@ -203,9 +192,6 @@ fn extract_float64_column<'a>(
         })
 }
 
-/// Validate that a `f64` value is non-negative and finite, returning a
-/// [`LoadError::SchemaError`] with the field path `"hydro_geometry[N].column_name"`
-/// if the check fails.
 fn validate_non_negative(
     value: f64,
     row_idx: usize,
@@ -243,7 +229,6 @@ mod tests {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /// Build a record batch with the canonical four-column schema.
     fn make_batch(
         hydro_ids: &[i32],
         volumes: &[f64],
@@ -268,8 +253,7 @@ mod tests {
         .expect("valid batch construction")
     }
 
-    /// Write a single record batch to a temporary Parquet file and return the
-    /// temporary file handle (keeps the file alive until dropped).
+    /// Returns the temp handle so the file stays alive until the caller drops it.
     fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
         let tmp = NamedTempFile::new().expect("tempfile");
         let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
@@ -279,7 +263,6 @@ mod tests {
         tmp
     }
 
-    /// Write multiple record batches to a temporary Parquet file.
     fn write_parquet_batches(batches: &[RecordBatch]) -> NamedTempFile {
         assert!(!batches.is_empty(), "must provide at least one batch");
         let tmp = NamedTempFile::new().expect("tempfile");
@@ -295,8 +278,7 @@ mod tests {
 
     // ── AC: valid single-hydro file ───────────────────────────────────────────
 
-    /// Valid Parquet with 5 rows for hydro 42 (Sobradinho-style VHA curve).
-    /// Result: Ok with 5 rows, all hydro_id = EntityId(42), sorted by volume.
+    /// A Sobradinho-style 5-point VHA curve for one hydro, returned sorted by volume.
     #[test]
     fn test_valid_single_hydro_five_rows() {
         let batch = make_batch(
@@ -312,7 +294,6 @@ mod tests {
         for row in &rows {
             assert_eq!(row.hydro_id, EntityId::from(42));
         }
-        // Verify sorted by volume_hm3
         let volumes: Vec<f64> = rows.iter().map(|r| r.volume_hm3).collect();
         assert_eq!(volumes, vec![0.0, 2_000.0, 10_000.0, 24_500.0, 34_116.0]);
     }
@@ -334,7 +315,6 @@ mod tests {
 
         assert_eq!(rows.len(), 5);
 
-        // First three rows: hydro 10, sorted by volume
         assert_eq!(rows[0].hydro_id, EntityId::from(10));
         assert_eq!(rows[0].volume_hm3, 100.0);
         assert_eq!(rows[1].hydro_id, EntityId::from(10));
@@ -342,7 +322,6 @@ mod tests {
         assert_eq!(rows[2].hydro_id, EntityId::from(10));
         assert_eq!(rows[2].volume_hm3, 300.0);
 
-        // Last two rows: hydro 99, sorted by volume
         assert_eq!(rows[3].hydro_id, EntityId::from(99));
         assert_eq!(rows[3].volume_hm3, 100.0);
         assert_eq!(rows[4].hydro_id, EntityId::from(99));
@@ -592,7 +571,6 @@ mod tests {
         let rows = parse_hydro_geometry(tmp.path()).unwrap();
 
         assert_eq!(rows.len(), 3);
-        // Must be sorted by volume_hm3
         assert_eq!(rows[0].volume_hm3, 100.0);
         assert_eq!(rows[1].volume_hm3, 200.0);
         assert_eq!(rows[2].volume_hm3, 300.0);

@@ -5,8 +5,7 @@
 //! around a reference volume `reference_volume_hm3` for a `(hydro, stage)` pair.
 //! [`parse_evaporation_models`] reads a Parquet file written by
 //! `crate::output::write_evaporation_models` back into a sorted
-//! `Vec<EvaporationModelRow>`, enabling a round-trip between the writer and the
-//! reader.
+//! `Vec<EvaporationModelRow>`.
 //!
 //! ## Parquet schema
 //!
@@ -36,11 +35,6 @@ use crate::parquet_helpers::{
 };
 
 /// A single fitted evaporation-model coefficient row.
-///
-/// Each row holds the linearized evaporation model
-/// `evaporation_outflow = intercept_m3s + volume_slope_m3s_per_hm3·v` for the
-/// hydro identified by `hydro_id`, fitted around `reference_volume_hm3`. A
-/// `None` `stage_id` means the coefficient applies to all stages.
 ///
 /// # Examples
 ///
@@ -74,11 +68,8 @@ pub struct EvaporationModelRow {
     pub source: String,
 }
 
-/// Parse an evaporation-models Parquet file into a sorted coefficient table.
-///
-/// Reads all record batches from the Parquet file at `path`, then returns the
-/// rows sorted by `(hydro_id, stage_id)` ascending. Null `stage_id` values sort
-/// before any non-null stage.
+/// Parse an evaporation-models Parquet file into a coefficient table sorted by
+/// `(hydro_id, stage_id)` ascending (NULL `stage_id` before any non-null stage).
 ///
 /// # Errors
 ///
@@ -103,17 +94,14 @@ pub fn parse_evaporation_models(path: &Path) -> Result<Vec<EvaporationModelRow>,
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required columns ──────────────────────────────────────────────────
         let hydro_id_col = extract_required_int32(&batch, "hydro_id", path)?;
         let intercept_col = extract_required_float64(&batch, "intercept_m3s", path)?;
         let volume_slope_col = extract_required_float64(&batch, "volume_slope_m3s_per_hm3", path)?;
         let reference_volume_col = extract_required_float64(&batch, "reference_volume_hm3", path)?;
         let source_col = extract_required_string(&batch, "source", path)?;
 
-        // ── Optional columns — check existence first ──────────────────────────
         let stage_id_col = extract_optional_int32(&batch, "stage_id", path)?;
 
-        // ── Build rows ────────────────────────────────────────────────────────
         let n = batch.num_rows();
         rows.reserve(n);
 
@@ -123,9 +111,7 @@ pub fn parse_evaporation_models(path: &Path) -> Result<Vec<EvaporationModelRow>,
             let volume_slope_m3s_per_hm3 = volume_slope_col.value(i);
             let reference_volume_hm3 = reference_volume_col.value(i);
 
-            // Reject non-finite coefficients, mirroring the finiteness checks the
-            // sibling parquet readers (e.g. hydro_geometry) enforce: a NaN/±Inf in
-            // any coefficient is corrupt input, not a meaningful evaporation model.
+            // A NaN/±Inf in any coefficient is corrupt input, not a model.
             for (value, column) in [
                 (intercept_m3s, "intercept_m3s"),
                 (volume_slope_m3s_per_hm3, "volume_slope_m3s_per_hm3"),
@@ -142,7 +128,6 @@ pub fn parse_evaporation_models(path: &Path) -> Result<Vec<EvaporationModelRow>,
 
             let source = source_col.value(i).to_string();
 
-            // stage_id: None if column is absent or null at this row.
             let stage_id = stage_id_col
                 .filter(|col| !col.is_null(i))
                 .map(|col| col.value(i));
@@ -158,8 +143,6 @@ pub fn parse_evaporation_models(path: &Path) -> Result<Vec<EvaporationModelRow>,
         }
     }
 
-    // ── Sort by (hydro_id, stage_id) ascending ───────────────────────────────
-    // Null stage_id sorts before any non-null value (None < Some(_)).
     rows.sort_by(|a, b| {
         a.hydro_id
             .0
@@ -170,9 +153,6 @@ pub fn parse_evaporation_models(path: &Path) -> Result<Vec<EvaporationModelRow>,
     Ok(rows)
 }
 
-/// Extract a required column as [`StringArray`] by name.
-///
-/// Returns `SchemaError` if the column is absent or has the wrong Arrow type.
 /// Local to this module because `source` is the only Utf8 column the extension
 /// readers consume; the shared `parquet_helpers` cover only the numeric types.
 fn extract_required_string<'a>(

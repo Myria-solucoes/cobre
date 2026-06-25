@@ -6,8 +6,7 @@
 //! `deviation`, and `relative` (the absolute deviation against the grid peak).
 //! [`parse_fpha_deviation_points`] reads a Parquet file written by
 //! `crate::output::write_fpha_deviation_points` back into a sorted
-//! `Vec<FphaDeviationPointRow>`, enabling a round-trip between the writer and the
-//! reader.
+//! `Vec<FphaDeviationPointRow>`.
 //!
 //! ## Parquet schema
 //!
@@ -39,11 +38,7 @@ use crate::parquet_helpers::{
     extract_optional_int32, extract_required_float64, extract_required_int32,
 };
 
-/// A single per-sampled-point computed-FPHA fit-deviation row.
-///
-/// Each row holds the exact and fitted production values at one `(v, q)` grid
-/// point (spillage = 0) for the hydro identified by `hydro_id`. A `None`
-/// `stage_id` means the fit covering this point applies to all stages.
+/// A single per-sampled-point computed-FPHA fit-deviation row at spillage = 0.
 ///
 /// # Examples
 ///
@@ -83,11 +78,8 @@ pub struct FphaDeviationPointRow {
     pub relative: f64,
 }
 
-/// Parse an FPHA-deviation-points Parquet file into a sorted table.
-///
-/// Reads all record batches from the Parquet file at `path`, then returns the
-/// rows sorted by `(hydro_id, stage_id)` ascending. Null `stage_id` values sort
-/// before any non-null stage; the within-block grid order is preserved.
+/// Parse an FPHA-deviation-points Parquet file into a table sorted by `(hydro_id,
+/// stage_id)` ascending (NULL `stage_id` first; within-block grid order preserved).
 ///
 /// # Errors
 ///
@@ -150,8 +142,7 @@ pub fn parse_fpha_deviation_points(path: &Path) -> Result<Vec<FphaDeviationPoint
         }
     }
 
-    // Null stage_id sorts before any non-null value (None < Some(_)). A stable
-    // sort preserves the within-block canonical grid order.
+    // Stable sort: preserves the within-block canonical grid order.
     rows.sort_by(|a, b| {
         a.hydro_id
             .0

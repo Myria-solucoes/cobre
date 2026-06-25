@@ -24,6 +24,12 @@
 //! Cross-reference validation (checking that referenced entity IDs exist in
 //! their registries) is deferred to Layer 3. Monotonicity and other
 //! multi-row semantic constraints are deferred to Layer 5.
+//!
+//! ## `load_*` wrappers
+//!
+//! Each `load_*(path: Option<&Path>)` is the pipeline entry point for an optional
+//! file: `None` returns the empty result without touching the filesystem; `Some`
+//! delegates to the matching `parse_*` and propagates its [`LoadError`].
 
 pub mod evaporation_models;
 pub mod fpha_deviation_points;
@@ -54,12 +60,7 @@ pub use tailrace_curves::{TailraceCurveRow, parse_tailrace_curves};
 use crate::LoadError;
 use std::path::Path;
 
-/// Load `system/hydro_geometry.parquet` when the path is known, or return
-/// an empty `Vec` when the file is absent (optional file).
-///
-/// This wrapper is the standard entry point used by the loading pipeline. When
-/// `path` is `None` (the structural validation step found no file at the expected
-/// location), it returns `Ok(Vec::new())` without touching the filesystem.
+/// Load `system/hydro_geometry.parquet`, or an empty `Vec` when `path` is `None`.
 ///
 /// # Errors
 ///
@@ -81,13 +82,8 @@ pub fn load_hydro_geometry(path: Option<&Path>) -> Result<Vec<HydroGeometryRow>,
     }
 }
 
-/// Load `system/hydro_production_models.json` when the path is known, or return
-/// an empty [`ProductionModelFile`] when the file is absent (optional file).
-///
-/// This wrapper is the standard entry point used by the loading pipeline. When
-/// `path` is `None` (the structural validation step found no file at the expected
-/// location), it returns `Ok(ProductionModelFile::default())` (empty configs, no
-/// reduction) without touching the filesystem.
+/// Load `system/hydro_production_models.json`, or an empty
+/// [`ProductionModelFile`] (no configs, no reduction) when `path` is `None`.
 ///
 /// # Errors
 ///
@@ -110,12 +106,7 @@ pub fn load_production_models(path: Option<&Path>) -> Result<ProductionModelFile
     }
 }
 
-/// Load `system/fpha_hyperplanes.parquet` when the path is known, or return
-/// an empty `Vec` when the file is absent (optional file).
-///
-/// This wrapper is the standard entry point used by the loading pipeline. When
-/// `path` is `None` (the structural validation step found no file at the expected
-/// location), it returns `Ok(Vec::new())` without touching the filesystem.
+/// Load `system/fpha_hyperplanes.parquet`, or an empty `Vec` when `path` is `None`.
 ///
 /// # Errors
 ///
@@ -137,12 +128,8 @@ pub fn load_fpha_hyperplanes(path: Option<&Path>) -> Result<Vec<FphaHyperplaneRo
     }
 }
 
-/// Load `system/hydro_energy_productivity.parquet` when the path is known, or
-/// return an empty `Vec` when the file is absent (optional file).
-///
-/// This wrapper is the standard entry point used by the loading pipeline. When
-/// `path` is `None` (the structural validation step found no file at the expected
-/// location), it returns `Ok(Vec::new())` without touching the filesystem.
+/// Load `system/hydro_energy_productivity.parquet`, or an empty `Vec` when
+/// `path` is `None`.
 ///
 /// # Errors
 ///
@@ -167,12 +154,7 @@ pub fn load_hydro_energy_productivity(
     }
 }
 
-/// Load `system/tailrace_curves.parquet` when the path is known, or return an
-/// empty `Vec` when the file is absent (optional file).
-///
-/// This wrapper is the standard entry point used by the loading pipeline. When
-/// `path` is `None` (the structural validation step found no file at the expected
-/// location), it returns `Ok(Vec::new())` without touching the filesystem.
+/// Load `system/tailrace_curves.parquet`, or an empty `Vec` when `path` is `None`.
 ///
 /// # Errors
 ///

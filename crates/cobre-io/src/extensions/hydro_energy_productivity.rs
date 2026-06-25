@@ -13,15 +13,13 @@
 //! pair — see [`crate::validation::productivity_resolution`].
 //!
 //! The other two override columns (`reference_outflow_m3s`,
-//! `specific_productivity_mw_per_m3s_per_m`) keep their existing per-row
-//! semantics independent of the generation model.
+//! `specific_productivity_mw_per_m3s_per_m`) apply independently of the
+//! generation model.
 //!
-//! The reference operating volume is no longer carried here: it is declared in
-//! `hydro_production_models.json` (`reference_volume`), the single source of
-//! truth. A stale `reference_volume_hm3` column in an older parquet is no
-//! longer read — the parser emits a one-time deprecation notice and ignores it
-//! rather than erroring, so an old file still loads while the behavior change is
-//! surfaced.
+//! The reference operating volume is declared in `hydro_production_models.json`
+//! (`reference_volume`), the single source of truth, not here. A stale
+//! `reference_volume_hm3` column is warned-and-ignored rather than erroring, so
+//! an old parquet still loads while the inert column is surfaced.
 //!
 //! ## Parquet schema
 //!
@@ -35,19 +33,11 @@
 //!
 //! ## Validation
 //!
-//! Per-row constraints enforced by [`parse_hydro_energy_productivity`]:
-//!
-//! - `hydro_id` must not be null.
-//! - `equivalent_productivity_mw_per_m3s`, when set, must be finite and `>= 0.0`. A
-//!   value of `0.0` is accepted (planned outage / zero-generation stage); the LP
-//!   treats `ρ_eq` as a multiplier so zero produces zero generation without any
-//!   division-by-zero hazard.
-//! - `reference_outflow_m3s`, when set, must be finite and `>= 0.0`.
-//! - `specific_productivity_mw_per_m3s_per_m`, when set, must be finite and `>= 0.0`. A
-//!   value of `0.0` mirrors the planned-outage marker on
-//!   `equivalent_productivity_mw_per_m3s`.
-//! - A row where all three override columns are NULL is accepted (carries no
-//!   information but is not an error).
+//! Each override column, when set, must be finite and `>= 0.0`; `hydro_id` must
+//! not be null. A `0.0` `equivalent_productivity_mw_per_m3s` is accepted as a
+//! planned-outage marker — the LP treats `ρ_eq` as a multiplier, so zero
+//! generation carries no division-by-zero hazard. An all-NULL override row is
+//! accepted.
 //!
 //! Duplicate `(hydro_id, stage_id)` detection is performed at build time by
 //! the consumer that assembles the loaded rows into the override table.
@@ -63,31 +53,23 @@ use crate::LoadError;
 
 /// A single row of the `system/hydro_energy_productivity.parquet` override table.
 ///
-/// All three override columns are nullable. A row where all three are `None` is
-/// accepted — it counts as a duplicate-detection key but carries no override
-/// information.
+/// An all-`None` override row is accepted as a duplicate-detection key.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HydroEnergyProductivityRow {
     /// Hydro plant this override applies to.
     pub hydro_id: EntityId,
-    /// Stage the override applies to. `None` means "applies to all stages for
-    /// this hydro" (a per-hydro default).
+    /// Stage the override applies to. `None` is a per-hydro default for all stages.
     pub stage_id: Option<i32>,
-    /// Direct `ρ_eq` override \[MW/(m³/s)\]. Finite and `>= 0.0` when set.
-    /// `0.0` is accepted as a planned-outage marker.
+    /// Direct `ρ_eq` override \[MW/(m³/s)\]. `0.0` is a planned-outage marker.
     pub equivalent_productivity_mw_per_m3s: Option<f64>,
-    /// `Q_ref` override \[m³/s\]. Finite and `>= 0.0` when set.
+    /// `Q_ref` override \[m³/s\].
     pub reference_outflow_m3s: Option<f64>,
-    /// `ρ_esp` override \[MW/(m³/s)/m\]. Finite and `>= 0.0` when set. `0.0`
-    /// mirrors the planned-outage marker on `equivalent_productivity_mw_per_m3s`.
+    /// `ρ_esp` override \[MW/(m³/s)/m\].
     pub specific_productivity_mw_per_m3s_per_m: Option<f64>,
 }
 
-/// Parse `system/hydro_energy_productivity.parquet`.
-///
-/// Rows are returned sorted by `(hydro_id.0, stage_id.unwrap_or(-1))` so that
-/// NULL `stage_id` (per-hydro default) sorts before any concrete stage within
-/// the same hydro.
+/// Parse `system/hydro_energy_productivity.parquet`, sorted by `(hydro_id,
+/// stage_id)` with NULL `stage_id` (per-hydro default) before any concrete stage.
 ///
 /// # Errors
 ///
@@ -111,11 +93,6 @@ pub fn parse_hydro_energy_productivity(
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // Forward-compat: a stale `reference_volume_hm3` column is no longer read
-        // (the reference volume now comes from `hydro_production_models.json`).
-        // Detect it and warn once, then ignore — erroring would break an old
-        // parquet for a purely structural removal, and silently ignoring would
-        // mask the behavior change for a user who had populated the column.
         warn_on_stale_reference_volume_column(&batch);
 
         let hydro_id_col = extract_int32_column(&batch, "hydro_id", path)?;
@@ -254,10 +231,9 @@ static STALE_REFERENCE_VOLUME_NOTICE: std::sync::Once = std::sync::Once::new();
 /// Emits a one-time deprecation notice when a batch still carries the retired
 /// `reference_volume_hm3` column, then returns so the caller ignores it.
 ///
-/// The reference operating volume now comes from `hydro_production_models.json`;
-/// the column here is no longer read. Warn-and-ignore (not hard-error) keeps an
-/// older parquet loadable while surfacing the behavior change — a user who had
-/// populated the column would otherwise see its value silently become inert.
+/// Warn-and-ignore (not hard-error) keeps an older parquet loadable while
+/// surfacing the now-inert column; hard-erroring would break an old file over a
+/// purely structural removal.
 fn warn_on_stale_reference_volume_column(batch: &arrow::record_batch::RecordBatch) {
     if batch
         .schema()
@@ -383,7 +359,6 @@ mod tests {
         let rows = parse_hydro_energy_productivity(tmp.path()).unwrap();
 
         assert_eq!(rows.len(), 3, "expected 3 rows");
-        // Sorted: (hydro=1, NULL) → (hydro=1, stage=0) → (hydro=2, NULL)
         assert_eq!(rows[0].hydro_id, EntityId::from(1));
         assert_eq!(rows[0].stage_id, None);
         assert_eq!(rows[1].hydro_id, EntityId::from(1));
@@ -566,11 +541,6 @@ mod tests {
         }
     }
 
-    // ── duplicate-key detection uses a HashSet ─────────────────────────────────
-    // Duplicate detection is the consumer's responsibility (the builder that
-    // assembles the loaded rows into the override table). The parser itself
-    // does NOT detect duplicates — it only validates per-row values.
-
     /// `reference_outflow_m3s = 0.0` must be accepted (zero outflow is valid).
     #[test]
     fn test_zero_q_ref_accepted() {
@@ -581,9 +551,8 @@ mod tests {
         assert_eq!(rows[0].reference_outflow_m3s, Some(0.0));
     }
 
-    /// Duplicate `(hydro_id, stage_id)` — the parser does NOT detect this.
-    /// Verification that two identical keys produce two distinct rows from the parser
-    /// (the builder test covers the error case).
+    /// Duplicate `(hydro_id, stage_id)` keys produce two distinct rows — the
+    /// parser does not detect duplicates (the builder test covers that).
     #[test]
     fn test_duplicate_keys_not_rejected_by_parser() {
         let batch = make_batch(
@@ -594,12 +563,10 @@ mod tests {
             &[None, None],
         );
         let tmp = write_parquet(&batch);
-        // The parser accepts both rows; builder would reject them.
         let rows = parse_hydro_energy_productivity(tmp.path()).unwrap();
         assert_eq!(rows.len(), 2);
     }
 
-    /// A `HashSet`-based note: the parser sorts by `(hydro_id, stage_id.unwrap_or(-1))`.
     #[test]
     fn test_sort_order_null_stage_before_concrete() {
         let batch = make_batch(
@@ -612,7 +579,6 @@ mod tests {
         let tmp = write_parquet(&batch);
         let rows = parse_hydro_energy_productivity(tmp.path()).unwrap();
 
-        // Expected order: (hydro=1, NULL) → (hydro=1, stage=5) → (hydro=2, NULL)
         assert_eq!(rows[0].hydro_id, EntityId::from(1));
         assert_eq!(rows[0].stage_id, None);
         assert_eq!(rows[1].hydro_id, EntityId::from(1));
