@@ -73,8 +73,8 @@ Create `my_study/config.json`:
 ```
 
 `forward_passes` controls how many scenario trajectories are drawn per training
-iteration. Start with 1 for fast iteration during case development; increase to
-50 or more for production runs where you want lower variance per iteration.
+iteration. Start with 1 for fast iteration during case development; raise it for
+production runs, where more trajectories lower the per-iteration variance.
 
 `stopping_rules` must contain at least one `iteration_limit` entry. The solver
 will run until one of the configured rules triggers. Here it stops after 128

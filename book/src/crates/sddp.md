@@ -329,7 +329,7 @@ The forward pass writes both regions (`fill_forward_patches`,
 `fill_col_state_patches`, and optionally `fill_load_patches`).
 
 When `n_load_buses == 0`, Category 4 is empty and `forward_patch_count`
-returns `N` unchanged, making load noise an optional zero-cost extension.
+returns `N` unchanged, so load noise adds no patch entries when absent.
 
 ### `ExchangeBuffers` and `CutSyncBuffers`
 

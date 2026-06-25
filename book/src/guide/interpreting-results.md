@@ -360,8 +360,8 @@ Possible causes:
 
 - **Too few iterations.** The most common cause. Increase the `iteration_limit`.
 - **Too few forward passes.** A `forward_passes` count of 1 (as in the
-  1dtoy tutorial) gives high variance in the upper bound estimate. Increase
-  to 10 or more for a stable gap reading.
+  1dtoy tutorial) gives high variance in the upper bound estimate. Raising the
+  `forward_passes` count averages the estimate over more scenarios per iteration.
 - **Numerically difficult stages.** Check `training/convergence.parquet` for
   iterations where `cuts_added` is zero — this can indicate stages where the
   backward pass is not generating improving cuts.

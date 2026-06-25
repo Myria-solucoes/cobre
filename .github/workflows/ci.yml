@@ -292,6 +292,8 @@ jobs:
         run: python3 scripts/check_python_parity.py --max 0
       - name: Check book version references
         run: python3 scripts/check_book_version.py
+      - name: Check doc voice (no hype / unpinned numbers)
+        run: python3 scripts/check_doc_voice.py
       - name: Advisory — code-quality hotspot report
         # ADVISORY: always exits 0. Prints a ranked "where to act first" table
         # (churn x size x suppression density x in-body banners) to the job log.

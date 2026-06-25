@@ -344,12 +344,12 @@ See `.claude/architecture-rules.md` for the full Python parity checklist.
 
 - The `SolverInterface` trait must remain backend-agnostic. HiGHS-specific code stays behind the `highs` feature flag.
 - Criterion benchmarks for solver interface changes are planned but not yet configured; they will be added in a future phase.
-- Basis warm-starting is a correctness feature, not just a performance optimization — validate it in tests.
+- Basis warm-starting affects correctness, not only performance — validate it in tests.
 
 #### cobre-comm
 
 - The `Communicator` trait must remain implementable by both backends (MPI and local).
-- Local backend has zero overhead — do not add indirection that penalizes single-process users.
+- The local backend's calls compile to no-ops on the hot path — do not add indirection that penalizes single-process users.
 - MPI code requires an MPI installation to test; gate MPI tests appropriately.
 
 #### cobre-mcp and cobre-python

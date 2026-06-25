@@ -193,7 +193,7 @@ For the hydro field reference, see [Case Format Reference](../reference/case-for
 ```
 
 Two single-segment thermals at different costs create a two-step merit order above
-zero-cost hydro. In each LP solve the solver dispatches UTE1 before UTE2 because
+zero-marginal-cost hydro. In each LP solve the solver dispatches UTE1 before UTE2 because
 it is cheaper, and it will only reach UTE2 when hydro and UTE1 combined cannot
 meet demand.
 
