@@ -7,9 +7,7 @@ Helper scripts for Cobre, grouped by role.
   Rust integration tests. The shell gates locate the repo root from their own
   path, so they run from anywhere; the Python gates default to the current
   directory (pass `--root` to override).
-- **`gen/`** — generators that produce committed source or release artifacts.
-- **`dev/`** — manual harnesses for local verification. Not run in CI (they need
-  an MPI build or a release binary).
+- **`gen/`** — generators for release/build artifacts.
 - **`pre-commit`** — the git pre-commit hook. Install with
   `ln -sf ../../scripts/pre-commit .git/hooks/pre-commit`.
 
@@ -43,15 +41,6 @@ still carry the canonical boundary regex).
 
 ## `gen/` — generators
 
-| Script                         | Purpose                                                                           |
-| ------------------------------ | --------------------------------------------------------------------------------- |
-| `generate_sobol_directions.py` | Regenerate the committed Sobol direction-number table used by `cobre-stochastic`. |
-| `inject_wheel_licenses.py`     | Bundle license files into built Python wheels (used by `release-python.yml`).     |
-
-## `dev/` — manual harnesses (not run in CI)
-
-| Script                           | Purpose                                                                                          |
-| -------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `reproducibility_baseline.sh`    | Byte-compare the 4ree `convergence.parquet` across 1/2/4 MPI ranks (needs an MPI release build). |
-| `test_per_opening_mpi_parity.sh` | Per-opening MPI parity harness (driven by `crates/cobre-cli/tests/per_opening_mpi_parity.rs`).   |
-| `compare_per_opening_parity.py`  | Comparator invoked by `test_per_opening_mpi_parity.sh`.                                          |
+| Script                     | Purpose                                                                       |
+| -------------------------- | ----------------------------------------------------------------------------- |
+| `inject_wheel_licenses.py` | Bundle license files into built Python wheels (used by `release-python.yml`). |
