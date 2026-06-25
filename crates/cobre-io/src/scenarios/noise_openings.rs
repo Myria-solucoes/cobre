@@ -1,11 +1,6 @@
 //! Parsing for `scenarios/noise_openings.parquet` — user-supplied noise
 //! realisations for the opening scenario tree.
 //!
-//! [`parse_noise_openings`] reads `scenarios/noise_openings.parquet` and returns a
-//! sorted `Vec<NoiseOpeningRow>`. [`validate_noise_openings`] checks dimension and
-//! stage coverage. [`assemble_opening_tree`] converts validated rows into an
-//! [`OpeningTree`].
-//!
 //! ## Parquet schema
 //!
 //! | Column           | Type    | Required | Description                                  |
@@ -15,19 +10,8 @@
 //! | `entity_index`   | UINT32  | Yes      | Entity index within the noise vector (0-based)|
 //! | `value`          | DOUBLE  | Yes      | Noise realisation value                      |
 //!
-//! ## Output ordering
-//!
-//! Rows are sorted by `(stage_id, opening_index, entity_index)` ascending, which
-//! matches the stage-major, row-major layout required by [`OpeningTree::from_parts`].
-//!
-//! ## Validation
-//!
-//! Cross-dimensional constraints enforced by [`validate_noise_openings`]:
-//!
-//! - Distinct `entity_index` count must equal `expected_dim`.
-//! - Distinct `stage_id` count must equal `expected_stages`.
-//! - For every `(stage, entity)`, the set of `opening_index` values must be exactly
-//!   `0..expected_openings_per_stage[stage]` (no gaps, no extras).
+//! Rows are sorted by `(stage_id, opening_index, entity_index)` ascending to match
+//! the stage-major, row-major layout required by [`OpeningTree::from_parts`].
 
 use std::path::PathBuf;
 
@@ -43,10 +27,6 @@ use crate::parquet_helpers::{
 };
 
 /// A single row from `scenarios/noise_openings.parquet`.
-///
-/// Each row carries a single noise realisation for one `(stage, opening, entity)`
-/// triple. Rows are sorted by `(stage_id, opening_index, entity_index)` after
-/// parsing to match the flat layout expected by [`OpeningTree::from_parts`].
 ///
 /// # Examples
 ///
@@ -76,12 +56,9 @@ pub struct NoiseOpeningRow {
     pub value: f64,
 }
 
-/// Parse `scenarios/noise_openings.parquet` and return a sorted row table.
-///
-/// Reads all record batches from the Parquet file at `path` and returns all rows
-/// sorted by `(stage_id, opening_index, entity_index)` ascending. No per-row
-/// value validation is applied here; cross-dimensional validation is deferred to
-/// [`validate_noise_openings`].
+/// Parse `scenarios/noise_openings.parquet` and return rows sorted by
+/// `(stage_id, opening_index, entity_index)` ascending. Cross-dimensional
+/// validation is deferred to [`validate_noise_openings`].
 ///
 /// # Errors
 ///
@@ -146,15 +123,8 @@ pub fn parse_noise_openings(path: &Path) -> Result<Vec<NoiseOpeningRow>, LoadErr
 
 /// Validate parsed noise opening rows against expected system dimensions.
 ///
-/// Checks that:
-/// - The number of distinct `entity_index` values equals `expected_dim`.
-/// - The number of distinct `stage_id` values equals `expected_stages`.
-/// - For each stage, the set of `opening_index` values across all entities is
-///   exactly `0..expected_openings_per_stage[stage]` (no gaps, no extras checked
-///   per entity).
-///
-/// This function assumes `rows` is already sorted by `(stage_id, opening_index,
-/// entity_index)` as produced by [`parse_noise_openings`].
+/// Assumes `rows` is already sorted by `(stage_id, opening_index, entity_index)`
+/// as produced by [`parse_noise_openings`].
 ///
 /// # Errors
 ///
@@ -186,7 +156,6 @@ pub fn validate_noise_openings(
     expected_stages: usize,
     expected_openings_per_stage: &[usize],
 ) -> Result<(), LoadError> {
-    // Collect distinct entity_index values across all rows.
     let distinct_entities: BTreeSet<u32> = rows.iter().map(|r| r.entity_index).collect();
     let actual_dim = distinct_entities.len();
     if actual_dim != expected_dim {
@@ -199,7 +168,6 @@ pub fn validate_noise_openings(
         });
     }
 
-    // Collect distinct stage_id values.
     let distinct_stages: BTreeSet<i32> = rows.iter().map(|r| r.stage_id).collect();
     let actual_stages = distinct_stages.len();
     if actual_stages != expected_stages {
@@ -379,12 +347,8 @@ mod tests {
 
     // ── parse_valid_file_returns_sorted_rows ──────────────────────────────────
 
-    /// Valid file with 12 rows (2 stages × 3 openings × 2 entities) written in
-    /// scrambled order. Parser must return exactly 12 rows sorted by
-    /// (stage_id, opening_index, entity_index).
     #[test]
     fn parse_valid_file_returns_sorted_rows() {
-        // Write rows in reversed order: stage 1 before stage 0, etc.
         let batch = make_batch(
             &[1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
             &[2, 2, 1, 1, 0, 0, 2, 2, 1, 1, 0, 0],
@@ -396,7 +360,6 @@ mod tests {
 
         assert_eq!(rows.len(), 12, "expected 12 rows");
 
-        // Verify sort order: (stage_id, opening_index, entity_index) ascending.
         for w in rows.windows(2) {
             let a = &w[0];
             let b = &w[1];
@@ -411,7 +374,6 @@ mod tests {
             );
         }
 
-        // First row must be (stage=0, opening=0, entity=0).
         assert_eq!(rows[0].stage_id, 0);
         assert_eq!(rows[0].opening_index, 0);
         assert_eq!(rows[0].entity_index, 0);
@@ -420,8 +382,6 @@ mod tests {
 
     // ── parse_missing_column_returns_schema_error ─────────────────────────────
 
-    /// File missing the `value` column must return `SchemaError` with field
-    /// containing "value".
     #[test]
     fn parse_missing_column_returns_schema_error() {
         let schema_no_value = Arc::new(Schema::new(vec![
@@ -458,7 +418,6 @@ mod tests {
 
     // ── validate_correct_dimensions_returns_ok ────────────────────────────────
 
-    /// 2 stages × 3 openings × dim=2 passes validation with matching expectations.
     #[test]
     fn validate_correct_dimensions_returns_ok() {
         let rows = make_rows(2, 3, 2);
@@ -467,11 +426,8 @@ mod tests {
 
     // ── validate_dimension_mismatch_returns_error ─────────────────────────────
 
-    /// Rows with 3 distinct entity_index values but expected_dim=2 must return
-    /// SchemaError containing "dimension mismatch".
     #[test]
     fn validate_dimension_mismatch_returns_error() {
-        // Build rows with dim=3 but validate against expected_dim=2.
         let rows = make_rows(2, 3, 3);
         let err = validate_noise_openings(&rows, 2, 2, &[3, 3]).unwrap_err();
 
@@ -488,8 +444,6 @@ mod tests {
 
     // ── validate_stage_count_mismatch_returns_error ───────────────────────────
 
-    /// Rows with 2 distinct stage_id values but expected_stages=3 must return
-    /// SchemaError containing "stage count mismatch".
     #[test]
     fn validate_stage_count_mismatch_returns_error() {
         let rows = make_rows(2, 3, 2);
@@ -508,12 +462,9 @@ mod tests {
 
     // ── validate_missing_openings_returns_error ───────────────────────────────
 
-    /// Stage 0 has opening indices {0, 2} (missing index 1). Validation with
-    /// expected_openings_per_stage=[3] must return SchemaError containing
-    /// "missing opening indices".
     #[test]
     fn validate_missing_openings_returns_error() {
-        // 1 stage, openings 0 and 2 only (index 1 missing), dim=2 → 4 rows.
+        // openings 0 and 2 only (index 1 missing), dim=2 → 4 rows.
         let rows: Vec<NoiseOpeningRow> = [0u32, 2u32]
             .iter()
             .flat_map(|&o| {
@@ -541,12 +492,9 @@ mod tests {
 
     // ── assemble_produces_correct_opening_tree ────────────────────────────────
 
-    /// Sorted rows for 2 stages × 3 openings × dim=2 assemble into an
-    /// OpeningTree whose opening() slices match the input values.
     #[test]
     fn assemble_produces_correct_opening_tree() {
         let rows = make_rows(2, 3, 2);
-        // Capture expected values before moving rows.
         let expected: Vec<f64> = rows.iter().map(|r| r.value).collect();
 
         let tree = assemble_opening_tree(rows, 2);
@@ -556,11 +504,9 @@ mod tests {
         assert_eq!(tree.n_openings(1), 3);
         assert_eq!(tree.dim(), 2);
 
-        // Verify that opening(s, o) slices contain the expected values.
-        // make_rows produces values in sequential order stage-major.
         assert_eq!(tree.data(), expected.as_slice());
 
-        // Spot-check individual opening slices.
+        // make_rows emits sequential stage-major values:
         // Stage 0, opening 0: values 0.0, 1.0
         assert_eq!(tree.opening(0, 0), &[0.0_f64, 1.0]);
         // Stage 0, opening 2: values 4.0, 5.0

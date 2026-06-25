@@ -230,7 +230,6 @@ pub fn parse_correlation(path: &Path) -> Result<CorrelationModel, LoadError> {
 /// Called before conversion so that error messages can reference JSON field
 /// paths rather than Rust field names.
 fn validate_raw(raw: &RawCorrelationFile, path: &Path) -> Result<(), LoadError> {
-    // Method must not be empty.
     if raw.method.is_empty() {
         return Err(LoadError::SchemaError {
             path: path.to_path_buf(),
@@ -239,7 +238,7 @@ fn validate_raw(raw: &RawCorrelationFile, path: &Path) -> Result<(), LoadError> 
         });
     }
 
-    // Warn on unrecognized methods for forward compatibility (do not reject).
+    // Unrecognized methods warn but are not rejected (forward compatibility).
     if raw.method != "spectral" && raw.method != "cholesky" {
         tracing::warn!(
             method = %raw.method,
@@ -248,7 +247,6 @@ fn validate_raw(raw: &RawCorrelationFile, path: &Path) -> Result<(), LoadError> 
         );
     }
 
-    // Profiles must not be empty.
     if raw.profiles.is_empty() {
         return Err(LoadError::SchemaError {
             path: path.to_path_buf(),
@@ -257,8 +255,7 @@ fn validate_raw(raw: &RawCorrelationFile, path: &Path) -> Result<(), LoadError> 
         });
     }
 
-    // Validate each profile.
-    // Sort keys for deterministic error ordering (consistent with BTreeMap output).
+    // Sort keys for deterministic error ordering (matches BTreeMap output).
     let mut sorted_keys: Vec<&String> = raw.profiles.keys().collect();
     sorted_keys.sort();
     for profile_name in sorted_keys {
@@ -268,7 +265,6 @@ fn validate_raw(raw: &RawCorrelationFile, path: &Path) -> Result<(), LoadError> 
         }
     }
 
-    // Validate schedule entries: each profile_name must exist in profiles.
     if let Some(schedule) = &raw.schedule {
         for (i, entry) in schedule.iter().enumerate() {
             if !raw.profiles.contains_key(&entry.profile_name) {
@@ -297,7 +293,6 @@ fn validate_matrix(
     let n_entities = group.entities.len();
     let n_rows = group.matrix.len();
 
-    // Matrix row count must equal entity count.
     let field_prefix = format!("profiles.{profile_name}.correlation_groups[{group_idx}].matrix");
     if n_rows != n_entities {
         return Err(LoadError::SchemaError {
@@ -307,7 +302,6 @@ fn validate_matrix(
         });
     }
 
-    // Each row must have exactly n_entities columns (square matrix).
     for (r, row) in group.matrix.iter().enumerate() {
         if row.len() != n_entities {
             return Err(LoadError::SchemaError {
@@ -321,12 +315,10 @@ fn validate_matrix(
         }
     }
 
-    // Per-element validation: range, diagonal, symmetry.
     for r in 0..n_entities {
         for c in 0..n_entities {
             let val = group.matrix[r][c];
 
-            // Range check: all elements must be in [-1.0, 1.0].
             if !(-1.0..=1.0).contains(&val) {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -335,7 +327,6 @@ fn validate_matrix(
                 });
             }
 
-            // Diagonal check: diagonal entries must be exactly 1.0.
             if r == c && (val - 1.0).abs() > f64::EPSILON {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -344,7 +335,6 @@ fn validate_matrix(
                 });
             }
 
-            // Symmetry check: |m[r][c] - m[c][r]| must be <= 1e-10.
             if r < c {
                 let mirror = group.matrix[c][r];
                 if (val - mirror).abs() > 1e-10 {
@@ -459,10 +449,6 @@ mod tests {
   }
 }"#;
 
-    // ── AC: valid file with 1 profile, 1 group, 3x3 identity ─────────────────
-
-    /// Valid file with 1 profile ("default"), 1 group, 3x3 identity matrix.
-    /// Verifies all fields are correctly populated.
     #[test]
     fn test_valid_3x3_identity_matrix() {
         let json = r#"{
@@ -509,10 +495,6 @@ mod tests {
         assert_eq!(group.entities[2].id, EntityId(30));
     }
 
-    // ── AC: 2 profiles + schedule ─────────────────────────────────────────────
-
-    /// Valid file with 2 profiles ("default", "wet_season") and a 2-entry schedule.
-    /// Verifies BTreeMap ordering, schedule entries, and method field.
     #[test]
     fn test_two_profiles_with_schedule() {
         let json = r#"{
@@ -557,7 +539,6 @@ mod tests {
         let tmp = write_json(json);
         let model = parse_correlation(tmp.path()).unwrap();
 
-        // AC: result has profiles.len() == 2, schedule.len() == 2, method == "spectral".
         assert_eq!(model.profiles.len(), 2);
         assert_eq!(model.schedule.len(), 2);
         assert_eq!(model.method, "spectral");
@@ -573,9 +554,6 @@ mod tests {
         assert_eq!(model.schedule[1].profile_name, "default");
     }
 
-    // ── AC: valid file without schedule -> empty schedule vec ─────────────────
-
-    /// Valid file without a `schedule` field produces an empty `schedule` vec.
     #[test]
     fn test_no_schedule_produces_empty_vec() {
         let tmp = write_json(VALID_JSON);
@@ -584,9 +562,6 @@ mod tests {
         assert!(model.schedule.is_empty());
     }
 
-    // ── AC: non-symmetric matrix -> SchemaError with "symmetric" ─────────────
-
-    /// Non-symmetric matrix (m[0][1]=0.8, m[1][0]=0.7) -> SchemaError.
     #[test]
     fn test_non_symmetric_matrix_rejected() {
         let json = r#"{
@@ -627,9 +602,6 @@ mod tests {
         }
     }
 
-    // ── AC: diagonal != 1.0 -> SchemaError ───────────────────────────────────
-
-    /// Diagonal entry != 1.0 -> SchemaError.
     #[test]
     fn test_diagonal_not_one_rejected() {
         let json = r#"{
@@ -670,9 +642,6 @@ mod tests {
         }
     }
 
-    // ── AC: matrix element > 1.0 -> SchemaError ──────────────────────────────
-
-    /// Off-diagonal element > 1.0 -> SchemaError.
     #[test]
     fn test_element_greater_than_one_rejected() {
         let json = r#"{
@@ -713,9 +682,6 @@ mod tests {
         }
     }
 
-    // ── AC: matrix element < -1.0 -> SchemaError ─────────────────────────────
-
-    /// Off-diagonal element < -1.0 -> SchemaError.
     #[test]
     fn test_element_less_than_minus_one_rejected() {
         let json = r#"{
@@ -756,9 +722,6 @@ mod tests {
         }
     }
 
-    // ── AC: non-square matrix -> SchemaError ──────────────────────────────────
-
-    /// Non-square matrix (2 entities, 3x3 matrix) -> SchemaError.
     #[test]
     fn test_non_square_matrix_rejected() {
         let json = r#"{
@@ -796,9 +759,6 @@ mod tests {
         }
     }
 
-    // ── AC: matrix row count != entity count -> SchemaError ──────────────────
-
-    /// 3 entities but only 2 matrix rows -> SchemaError with field "matrix".
     #[test]
     fn test_matrix_row_count_mismatch_rejected() {
         let json = r#"{
@@ -836,9 +796,6 @@ mod tests {
         }
     }
 
-    // ── AC: schedule references unknown profile -> SchemaError ────────────────
-
-    /// Schedule entry references a profile name not in `profiles` -> SchemaError.
     #[test]
     fn test_schedule_unknown_profile_rejected() {
         let json = r#"{
@@ -878,9 +835,6 @@ mod tests {
         }
     }
 
-    // ── AC: empty profiles -> SchemaError ─────────────────────────────────────
-
-    /// Empty `profiles` object -> SchemaError with field "profiles".
     #[test]
     fn test_empty_profiles_rejected() {
         let json = r#"{
@@ -901,9 +855,6 @@ mod tests {
         }
     }
 
-    // ── AC: empty method -> SchemaError ──────────────────────────────────────
-
-    /// Empty `method` string -> SchemaError with field "method".
     #[test]
     fn test_empty_method_rejected() {
         let json = r#"{
@@ -934,9 +885,6 @@ mod tests {
         }
     }
 
-    // ── AC: load_correlation(None) -> default model ───────────────────────────
-
-    /// `load_correlation(None)` returns `Ok(CorrelationModel::default())`.
     #[test]
     fn test_load_correlation_none_returns_default() {
         let result = super::super::load_correlation(None).unwrap();
@@ -946,9 +894,6 @@ mod tests {
         assert!(result.schedule.is_empty());
     }
 
-    // ── AC: 1x1 identity matrix (single entity) accepted ─────────────────────
-
-    /// Single entity with 1x1 identity matrix (trivial case) is valid.
     #[test]
     fn test_single_entity_1x1_matrix_valid() {
         let json = r#"{
@@ -972,11 +917,8 @@ mod tests {
         assert!((model.profiles["default"].groups[0].matrix[0][0] - 1.0).abs() < f64::EPSILON);
     }
 
-    // ── AC: backward compatibility — "cholesky" method still accepted ─────────
-
-    /// Existing case files with `"method": "cholesky"` must load without error.
-    /// This verifies backward compatibility is preserved after the default
-    /// changed to `"spectral"`.
+    /// `"cholesky"` must still load without error — backward compatibility with
+    /// existing case files (the default is `"spectral"`).
     #[test]
     fn parse_accepts_cholesky_method() {
         let json = r#"{

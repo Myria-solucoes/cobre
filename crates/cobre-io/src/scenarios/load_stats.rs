@@ -1,10 +1,7 @@
-//! Parsing for `scenarios/load_seasonal_stats.parquet` — per-bus-per-stage
-//! mean and standard deviation of load demand.
+//! Parsing for `scenarios/load_seasonal_stats.parquet` (spec SS3.3) —
+//! per-bus-per-stage mean and standard deviation of load demand.
 //!
-//! [`parse_load_seasonal_stats`] reads `scenarios/load_seasonal_stats.parquet`
-//! and returns a sorted `Vec<LoadSeasonalStatsRow>`.
-//!
-//! ## Parquet schema (spec SS3.3)
+//! ## Parquet schema
 //!
 //! | Column     | Type   | Required | Description                          |
 //! | ---------- | ------ | -------- | ------------------------------------ |
@@ -13,22 +10,7 @@
 //! | `mean_mw`  | DOUBLE | Yes      | Mean load demand (MW)                |
 //! | `std_mw`   | DOUBLE | Yes      | Standard deviation (MW), 0 = deterministic |
 //!
-//! ## Output ordering
-//!
-//! Rows are sorted by `(bus_id, stage_id)` ascending.
-//!
-//! ## Validation
-//!
-//! Per-row constraints enforced by this parser:
-//!
-//! - All four columns must be present with the correct types.
-//! - `mean_mw` must be finite (NaN and ±inf are rejected).
-//! - `std_mw` must be non-negative and finite.
-//!
-//! Deferred validations (not performed here):
-//!
-//! - `bus_id` existence in the bus registry — Layer 3.
-//! - `stage_id` existence in the stages registry — Layer 3.
+//! Entity-ID existence is deferred to Layer 3 referential validation.
 
 use cobre_core::EntityId;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -40,8 +22,7 @@ use crate::parquet_helpers::{extract_required_float64, extract_required_int32};
 
 /// A single row from `scenarios/load_seasonal_stats.parquet`.
 ///
-/// Carries the seasonal load statistics for a (bus, stage) pair. These rows
-/// are later assembled by [`crate::scenarios::assembly::assemble_load_models`] to produce
+/// Assembled by [`crate::scenarios::assembly::assemble_load_models`] into
 /// [`cobre_core::scenario::LoadModel`] entries.
 ///
 /// # Examples
@@ -72,10 +53,8 @@ pub struct LoadSeasonalStatsRow {
     pub std_mw: f64,
 }
 
-/// Parse `scenarios/load_seasonal_stats.parquet` and return a sorted row table.
-///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(bus_id, stage_id)` ascending.
+/// Parse `scenarios/load_seasonal_stats.parquet` and return rows sorted by
+/// `(bus_id, stage_id)` ascending.
 ///
 /// # Errors
 ///
@@ -112,13 +91,11 @@ pub fn parse_load_seasonal_stats(path: &Path) -> Result<Vec<LoadSeasonalStatsRow
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required columns ──────────────────────────────────────────────────
         let bus_id_col = extract_required_int32(&batch, "bus_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
         let mean_mw_col = extract_required_float64(&batch, "mean_mw", path)?;
         let std_mw_col = extract_required_float64(&batch, "std_mw", path)?;
 
-        // ── Build rows with per-row validation ────────────────────────────────
         let n = batch.num_rows();
         let base_idx = rows.len();
         rows.reserve(n);
@@ -131,7 +108,6 @@ pub fn parse_load_seasonal_stats(path: &Path) -> Result<Vec<LoadSeasonalStatsRow
             let mean_mw = mean_mw_col.value(i);
             let std_mw = std_mw_col.value(i);
 
-            // Validate mean_mw: must be finite (NaN and ±inf rejected).
             if !mean_mw.is_finite() {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -140,7 +116,6 @@ pub fn parse_load_seasonal_stats(path: &Path) -> Result<Vec<LoadSeasonalStatsRow
                 });
             }
 
-            // Validate std_mw: must be non-negative and finite.
             if !std_mw.is_finite() || std_mw < 0.0 {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -158,7 +133,6 @@ pub fn parse_load_seasonal_stats(path: &Path) -> Result<Vec<LoadSeasonalStatsRow
         }
     }
 
-    // ── Sort by (bus_id, stage_id) ascending ─────────────────────────────────
     rows.sort_by(|a, b| {
         a.bus_id
             .0
@@ -223,8 +197,6 @@ mod tests {
 
     // ── AC: valid file with 4 rows, verify sort order and field values ─────────
 
-    /// Valid 4-row file (2 buses x 2 stages) in scrambled order.
-    /// Result: sorted by (bus_id, stage_id); first row bus_id = EntityId(1).
     #[test]
     fn test_valid_4_rows_sorted_by_bus_stage() {
         // Input order: (3,1), (1,0), (3,0), (1,1) — out of sort order.
@@ -252,7 +224,6 @@ mod tests {
 
     // ── AC: std_mw = 0.0 (deterministic) is accepted ─────────────────────────
 
-    /// `std_mw = 0.0` is valid (deterministic load). Must not return an error.
     #[test]
     fn test_zero_std_mw_is_accepted() {
         let batch = make_batch(&[1], &[0], &[500.0], &[0.0]);
@@ -265,7 +236,6 @@ mod tests {
 
     // ── AC: std_mw negative -> SchemaError ───────────────────────────────────
 
-    /// `std_mw = -5.0` -> SchemaError with field path containing "std_mw".
     #[test]
     fn test_negative_std_mw() {
         let batch = make_batch(&[1], &[0], &[500.0], &[-5.0]);
@@ -285,7 +255,6 @@ mod tests {
 
     // ── AC: mean_mw NaN -> SchemaError ───────────────────────────────────────
 
-    /// `mean_mw = NaN` -> SchemaError with field path containing "mean_mw".
     #[test]
     fn test_nan_mean_mw() {
         let batch = make_batch(&[1], &[0], &[f64::NAN], &[50.0]);
@@ -305,7 +274,6 @@ mod tests {
 
     // ── AC: missing required column -> SchemaError ────────────────────────────
 
-    /// File missing `mean_mw` column -> SchemaError.
     #[test]
     fn test_missing_mean_mw_column() {
         let schema_no_mean = Arc::new(Schema::new(vec![
@@ -342,7 +310,6 @@ mod tests {
 
     // ── AC: empty file -> Ok(vec![]) ──────────────────────────────────────────
 
-    /// Empty Parquet (0 rows) -> Ok(Vec::new()).
     #[test]
     fn test_empty_parquet_returns_empty_vec() {
         let batch = make_batch(&[], &[], &[], &[]);
@@ -353,7 +320,6 @@ mod tests {
 
     // ── AC: declaration-order invariance ─────────────────────────────────────
 
-    /// Reordering the Parquet rows does not change the output ordering.
     #[test]
     fn test_declaration_order_invariance() {
         let batch_asc = make_batch(

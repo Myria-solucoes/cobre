@@ -142,7 +142,6 @@ pub fn parse_inflow_annual_component(
         for i in 0..n {
             let row_idx = base_idx + i;
 
-            // Reject null values in any required column.
             if hydro_id_col.is_null(i) {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -185,7 +184,6 @@ pub fn parse_inflow_annual_component(
             let annual_mean_m3s = annual_mean_m3s_col.value(i);
             let annual_std_m3s = annual_std_m3s_col.value(i);
 
-            // Validate annual_coefficient: must be finite.
             if !annual_coefficient.is_finite() {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -196,7 +194,6 @@ pub fn parse_inflow_annual_component(
                 });
             }
 
-            // Validate annual_mean_m3s: must be finite.
             if !annual_mean_m3s.is_finite() {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -207,7 +204,6 @@ pub fn parse_inflow_annual_component(
                 });
             }
 
-            // Validate annual_std_m3s: must be finite and strictly positive.
             if !annual_std_m3s.is_finite() || annual_std_m3s <= 0.0 {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -294,11 +290,9 @@ mod tests {
         .expect("valid batch")
     }
 
-    /// AC #1: Three rows for two hydros across two stages are returned sorted by
-    /// `(hydro_id, stage_id)` ascending.
     #[test]
     fn test_valid_three_rows_sorted_by_hydro_stage() {
-        // Deliberately insert out-of-order to confirm sorting.
+        // Input is deliberately out-of-order: confirms the parser sorts.
         let batch = make_batch(
             &[2, 1, 1],
             &[0, 1, 0],
@@ -311,7 +305,6 @@ mod tests {
 
         assert_eq!(rows.len(), 3);
 
-        // Sorted order: hydro 1 stage 0, hydro 1 stage 1, hydro 2 stage 0.
         assert_eq!(rows[0].hydro_id, EntityId::from(1));
         assert_eq!(rows[0].stage_id, 0);
         assert!((rows[0].annual_coefficient - 0.3).abs() < 1e-10);
@@ -327,8 +320,6 @@ mod tests {
         assert!((rows[2].annual_coefficient - 0.5).abs() < 1e-10);
     }
 
-    /// AC #2: A row with `annual_coefficient = NaN` returns `SchemaError` where
-    /// `field` contains `annual_coefficient` and `message` contains `finite`.
     #[test]
     fn test_annual_coefficient_nan_is_schema_error() {
         let batch = make_batch(&[1], &[0], &[f64::NAN], &[1500.0], &[300.0]);
@@ -350,8 +341,6 @@ mod tests {
         }
     }
 
-    /// AC #3: A row with `annual_std_m3s = 0.0` returns `SchemaError` where
-    /// `field` contains `annual_std_m3s` and `message` mentions positivity.
     #[test]
     fn test_annual_std_zero_is_schema_error() {
         let batch = make_batch(&[1], &[0], &[0.3], &[1500.0], &[0.0]);
@@ -373,8 +362,6 @@ mod tests {
         }
     }
 
-    /// AC #4: A row with `annual_std_m3s = f64::INFINITY` returns `SchemaError`
-    /// where `field` contains `annual_std_m3s`.
     #[test]
     fn test_annual_std_infinity_is_schema_error() {
         let batch = make_batch(&[1], &[0], &[0.3], &[1500.0], &[f64::INFINITY]);
@@ -392,9 +379,6 @@ mod tests {
         }
     }
 
-    /// AC #5: A parquet file missing the `annual_mean_m3s` column returns
-    /// `SchemaError` where `field` contains `annual_mean_m3s` and `message`
-    /// contains `missing required column`.
     #[test]
     fn test_missing_annual_mean_m3s_column() {
         let schema_no_mean = Arc::new(Schema::new(vec![
@@ -431,9 +415,6 @@ mod tests {
         }
     }
 
-    /// AC #6: A parquet file where `annual_coefficient` is declared nullable and
-    /// contains a null at row 0 returns `SchemaError` with `field` referencing
-    /// `annual_coefficient`.
     #[test]
     fn test_null_annual_coefficient_value_is_schema_error() {
         let schema_nullable_coeff = Arc::new(Schema::new(vec![
@@ -468,8 +449,6 @@ mod tests {
         }
     }
 
-    /// A nullable `hydro_id` column with a null at row 0 returns `SchemaError`
-    /// referencing `hydro_id`.
     #[test]
     fn test_null_hydro_id_value_is_schema_error() {
         let schema_nullable_hydro = Arc::new(Schema::new(vec![
@@ -504,8 +483,6 @@ mod tests {
         }
     }
 
-    /// A nullable `stage_id` column with a null at row 0 returns `SchemaError`
-    /// referencing `stage_id`.
     #[test]
     fn test_null_stage_id_value_is_schema_error() {
         let schema_nullable_stage = Arc::new(Schema::new(vec![
@@ -540,7 +517,6 @@ mod tests {
         }
     }
 
-    /// AC #7: A non-existent path returns `LoadError::IoError`.
     #[test]
     fn test_nonexistent_path_returns_io_error() {
         let err = parse_inflow_annual_component(std::path::Path::new(
@@ -554,7 +530,6 @@ mod tests {
         }
     }
 
-    /// AC #8: A zero-row parquet with the correct schema returns `Ok(vec![])`.
     #[test]
     fn test_empty_parquet_returns_empty_vec() {
         let batch = make_batch(&[], &[], &[], &[], &[]);
@@ -563,8 +538,7 @@ mod tests {
         assert!(rows.is_empty());
     }
 
-    /// Sanity: a negative ψ value (`-0.25`) round-trips without rejection.
-    /// Confirms the "no range check" rule for `annual_coefficient`.
+    /// A negative ψ round-trips without rejection: `annual_coefficient` has no range check.
     #[test]
     fn test_negative_psi_value_preserved() {
         let batch = make_batch(&[42], &[3], &[-0.25], &[1200.0], &[250.0]);

@@ -1,37 +1,6 @@
 //! Parsing for `scenarios/non_controllable_factors.json` — per-NCS-per-stage
-//! block-level generation scaling factors.
-//!
-//! [`parse_non_controllable_factors`] reads `scenarios/non_controllable_factors.json`
-//! and returns a sorted `Vec<NcsFactorEntry>`. When the file is absent, the optional
-//! `load_non_controllable_factors` wrapper in `scenarios/mod.rs` returns `Ok(Vec::new())`.
-//!
-//! ## JSON structure
-//!
-//! ```json
-//! {
-//!   "$schema": "...",
-//!   "non_controllable_factors": [
-//!     {
-//!       "ncs_id": 0,
-//!       "stage_id": 0,
-//!       "block_factors": [
-//!         { "block_id": 0, "factor": 0.6 },
-//!         { "block_id": 1, "factor": 0.8 }
-//!       ]
-//!     }
-//!   ]
-//! }
-//! ```
-//!
-//! ## Output ordering
-//!
-//! Entries are sorted by `(ncs_id, stage_id)` ascending. The `block_factors`
-//! within each entry are sorted by `block_id` ascending.
-//!
-//! ## Validation
-//!
-//! - No two entries share the same `(ncs_id, stage_id)` pair.
-//! - Every `factor` value must be strictly positive (> 0.0) and finite.
+//! block-level generation scaling factors. Mirrors `load_factors.json`
+//! parsing, keyed by `ncs_id` instead of `bus_id`.
 
 use cobre_core::EntityId;
 use serde::Deserialize;
@@ -116,11 +85,9 @@ pub struct NcsFactorEntry {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Parse `scenarios/non_controllable_factors.json` and return a sorted entry list.
-///
-/// Reads the JSON file at `path`, deserializes it through intermediate types,
-/// validates per-entry and per-block constraints, then returns all entries
-/// sorted by `(ncs_id, stage_id)` ascending.
+/// Parse `scenarios/non_controllable_factors.json` and return entries sorted by
+/// `(ncs_id, stage_id)` ascending, each entry's `block_factors` sorted by
+/// `block_id` ascending.
 ///
 /// # Errors
 ///

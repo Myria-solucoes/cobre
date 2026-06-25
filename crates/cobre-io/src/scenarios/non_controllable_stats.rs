@@ -1,9 +1,6 @@
 //! Parsing for `scenarios/non_controllable_stats.parquet` — per-NCS-per-stage
 //! mean and standard deviation of the stochastic availability factor.
 //!
-//! [`parse_ncs_stats`] reads `scenarios/non_controllable_stats.parquet`
-//! and returns a sorted `Vec<NcsModel>`.
-//!
 //! ## Parquet schema
 //!
 //! | Column     | Type   | Required | Description                                            |
@@ -13,22 +10,7 @@
 //! | `mean`     | DOUBLE | Yes      | Mean availability factor [0, 1]                        |
 //! | `std`      | DOUBLE | Yes      | Std dev of availability factor (>= 0), 0 = deterministic |
 //!
-//! ## Output ordering
-//!
-//! Rows are sorted by `(ncs_id, stage_id)` ascending.
-//!
-//! ## Validation
-//!
-//! Per-row constraints enforced by this parser:
-//!
-//! - All four columns must be present with the correct types.
-//! - `mean` must be finite and in `[0, 1]` (NaN, +/-inf, and out-of-range are rejected).
-//! - `std` must be non-negative and finite.
-//!
-//! Deferred validations (not performed here):
-//!
-//! - `ncs_id` existence in the NCS registry — Layer 3 referential validation.
-//! - `stage_id` existence in the stages registry — Layer 3 referential validation.
+//! Entity-ID existence is deferred to Layer 3 referential validation.
 
 use cobre_core::EntityId;
 use cobre_core::scenario::NcsModel;
@@ -39,10 +21,8 @@ use std::path::Path;
 use crate::LoadError;
 use crate::parquet_helpers::{extract_required_float64, extract_required_int32};
 
-/// Parse `scenarios/non_controllable_stats.parquet` and return a sorted `Vec<NcsModel>`.
-///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(ncs_id, stage_id)` ascending.
+/// Parse `scenarios/non_controllable_stats.parquet` and return rows sorted by
+/// `(ncs_id, stage_id)` ascending.
 ///
 /// # Errors
 ///
@@ -79,13 +59,11 @@ pub fn parse_ncs_stats(path: &Path) -> Result<Vec<NcsModel>, LoadError> {
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required columns ──────────────────────────────────────────────────
         let ncs_id_col = extract_required_int32(&batch, "ncs_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
         let mean_col = extract_required_float64(&batch, "mean", path)?;
         let std_col = extract_required_float64(&batch, "std", path)?;
 
-        // ── Build rows with per-row validation ────────────────────────────────
         let n = batch.num_rows();
         let base_idx = rows.len();
         rows.reserve(n);
@@ -98,7 +76,6 @@ pub fn parse_ncs_stats(path: &Path) -> Result<Vec<NcsModel>, LoadError> {
             let mean = mean_col.value(i);
             let std = std_col.value(i);
 
-            // Validate mean: must be finite and in [0, 1].
             if !mean.is_finite() || !(0.0..=1.0).contains(&mean) {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -107,7 +84,6 @@ pub fn parse_ncs_stats(path: &Path) -> Result<Vec<NcsModel>, LoadError> {
                 });
             }
 
-            // Validate std: must be non-negative and finite.
             if !std.is_finite() || std < 0.0 {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -125,7 +101,6 @@ pub fn parse_ncs_stats(path: &Path) -> Result<Vec<NcsModel>, LoadError> {
         }
     }
 
-    // ── Sort by (ncs_id, stage_id) ascending ─────────────────────────────────
     rows.sort_by(|a, b| {
         a.ncs_id
             .0
