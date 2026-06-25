@@ -1,33 +1,18 @@
-//! Cut selection strategy for controlling cut pool growth during SDDP
+//! Cut selection strategies for controlling cut pool growth during SDDP
 //! training.
 //!
-//! This module defines [`CutSelectionStrategy`] (three variants: Level1, LML1,
-//! Dominated), [`CutMetadata`] (per-cut tracking data), and
-//! [`CutActivityUpdates`] (the output of a selection scan for one stage).
+//! # Determinism
 //!
-//! # Kernel
+//! `matrixmultiply`'s micro-kernel is bit-deterministic for any given input
+//! shape, and the per-task OR-merge is commutative + associative, so
+//! `RAYON_NUM_THREADS=1` and `=96` produce identical output on the same binary.
 //!
-//! Selection runs as a `gemm_block`-based block-GEMM over trial
-//! points. Each rayon task computes one `K × M_BLOCK` panel of
-//! `V = coef · stateᵀ`, applies the per-column survival rule into a local
-//! accumulator bitmap, and returns. The final reduce ORs all per-task bitmaps.
+//! # Algorithm semantics
 //!
-//! The hot path never allocates beyond the bounded fold-leaf scratch.
-//!
-//! Determinism is preserved by two properties: `matrixmultiply`'s micro-kernel
-//! is bit-deterministic for any given input shape, and the OR-merge across
-//! tasks is commutative + associative. `RAYON_NUM_THREADS=1` and `=96` produce
-//! identical output on the same binary.
-//!
-//! See `docs/design/dynamic-cut-selection-design.md` for the full design,
-//! sizing model, and verification record.
-//!
-//! # Algorithm semantics (unchanged from value-evaluation kernel)
-//!
-//! All three variants share a single value-evaluation kernel in
-//! [`CutSelectionStrategy::select_for_stage`]. It evaluates ALL
-//! populated cuts (active AND inactive) at each visited forward-pass state and
-//! applies the method-specific survival rule:
+//! The value-based variants share a single value-evaluation kernel in
+//! [`CutSelectionStrategy::select_for_stage`], which evaluates ALL populated
+//! cuts (active AND inactive) at each visited forward-pass state and applies the
+//! method-specific survival rule:
 //!
 //! - **Level1**: retain any cut within `tie_tolerance` of the per-state maximum
 //!   at any visited state (de Matos 2015).
@@ -36,10 +21,6 @@
 //!   union across all visited states (Guigues & Bandarra 2019).
 //! - **Dominated**: same max-survival logic as Level1 using `threshold` as the
 //!   tolerance, applied across ALL populated cuts.
-//!
-//! Inactive cuts that are selected by the kernel produce `Reactivate` entries
-//! in the output; active cuts that are not selected produce `Deactivate`
-//! entries.
 //!
 //! # Usage
 //!
@@ -67,11 +48,8 @@ use crate::gemm::gemm_block;
 
 /// Number of trial points evaluated per `crate::gemm::gemm_block` call.
 ///
-/// Each rayon task computes one `K × M_BLOCK` GEMM panel, then
-/// applies the per-column selection rule. The initial value of 8 is a
-/// reasonable starting point for M = 192-384 (yields 24-48 tasks per
-/// stage — well above the rayon scheduling overhead floor, well below
-/// the load-imbalance threshold).
+/// 8 yields 24-48 tasks per stage for M = 192-384 — above the rayon
+/// scheduling-overhead floor, below the load-imbalance threshold.
 pub(crate) const M_BLOCK: usize = 8;
 
 // ---------------------------------------------------------------------------
@@ -79,42 +57,23 @@ pub(crate) const M_BLOCK: usize = 8;
 // ---------------------------------------------------------------------------
 
 /// Per-cut tracking metadata for cut selection strategies.
-///
-/// Stored alongside cut coefficients and intercepts in the pre-allocated
-/// cut pool. All fields are initialised to zero / default values when the
-/// cut slot is first populated. Updated inline during the backward pass
-/// in `crate::backward_pass_state::BackwardPassState` (the function
-/// that owns the per-stage cut-binding sync step).
 #[derive(Debug, Clone)]
 pub struct CutMetadata {
-    /// Iteration at which this cut was generated (1-based).
-    ///
-    /// Used to prevent deactivation of cuts generated in the current
-    /// iteration.
+    /// Iteration at which this cut was generated (1-based). Cuts from the
+    /// current iteration are never deactivated.
     pub iteration_generated: u64,
 
     /// Forward pass index that generated this cut.
-    ///
-    /// Combined with `iteration_generated`, uniquely identifies the
-    /// deterministic slot for this cut.
     pub forward_pass_index: u32,
 
-    /// Cumulative number of times this cut was binding at an LP solution.
-    ///
-    /// Used by budget enforcement (row eviction) and diagnostics; NOT used by
-    /// the value-based selection logic in [`CutSelectionStrategy::Level1`] or
-    /// [`CutSelectionStrategy::Lml1`].
-    /// Initialised to 0; incremented inline by the backward pass when the
-    /// associated cut row's dual exceeds `cut_activity_tolerance`.
+    /// Cumulative number of times this cut was binding at an LP solution. Used
+    /// by budget enforcement and diagnostics, NOT by the value-based selection
+    /// logic.
     pub active_count: u64,
 
-    /// Most recent iteration at which this cut was binding.
-    ///
-    /// Used by budget enforcement (staleness-based eviction ordering) and
-    /// diagnostics; NOT used by the value-based selection logic in
-    /// [`CutSelectionStrategy::Level1`] or [`CutSelectionStrategy::Lml1`].
-    /// Initialised to `iteration_generated`; updated inline by the backward
-    /// pass during the per-stage cut-binding sync.
+    /// Most recent iteration at which this cut was binding. Used by budget
+    /// enforcement (staleness eviction) and diagnostics, NOT by the value-based
+    /// selection logic.
     pub last_active_iter: u64,
 }
 
@@ -124,11 +83,7 @@ pub struct CutMetadata {
 
 /// Set of cut activity updates at a single stage.
 ///
-/// Returned by [`CutSelectionStrategy::select`]. `updates` contains slot
-/// indices to deactivate; `reactivations` contains slot indices to reactivate.
-/// Either list may be empty.
-///
-/// The caller applies changes to the activity bitmap via
+/// The caller applies the changes to the activity bitmap via
 /// [`crate::cut::CutPool::apply_updates`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct CutActivityUpdates {
@@ -141,11 +96,7 @@ pub struct CutActivityUpdates {
 }
 
 impl CutActivityUpdates {
-    /// Construct a deactivation-only update set from a list of slot indices.
-    ///
-    /// The `reactivations` list is left empty. Use this constructor when only
-    /// deactivations are known and reactivations will be added separately or
-    /// are not applicable.
+    /// Construct a deactivation-only update set, leaving `reactivations` empty.
     #[must_use]
     pub fn deactivations_only(stage_index: u32, indices: Vec<u32>) -> Self {
         Self {
@@ -174,65 +125,43 @@ impl CutActivityUpdates {
 
 /// Cut selection strategy for controlling cut pool growth during SDDP training.
 ///
-/// One strategy is active for the entire training run (global setting, one
-/// variant per run). All stages use the same strategy. Selection runs
-/// periodically via [`should_run`] to amortize the cost of scanning the pool.
+/// One strategy is active for the entire training run; all stages use it.
 ///
-/// This type derives [`serde::Serialize`] and [`serde::Deserialize`] so it can
-/// be postcard-serialized directly for MPI broadcast without a wrapper enum.
-/// Variant names and field names are stable wire-format identifiers — do not
-/// rename them without a migration.
-///
-/// [`should_run`]: CutSelectionStrategy::should_run
+/// Variant names and field names are stable wire-format identifiers (postcard
+/// MPI broadcast via the derived serde impls) — do not rename them without a
+/// migration.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum CutSelectionStrategy {
-    /// Level-1 selection: retain any cut that is near-optimal at some visited
-    /// state (de Matos 2015).
-    ///
-    /// A cut is deactivated if, at every visited forward-pass state, its value
-    /// is more than `tie_tolerance` below the maximum cut value at that state.
-    /// The maximum is computed over ALL populated cuts (active and inactive).
-    /// Cuts that achieve within `tie_tolerance` of the maximum at any state are
-    /// kept. This is the least aggressive value-based strategy and preserves
-    /// the convergence guarantee.
+    /// Level-1 selection: retain any cut within `tie_tolerance` of the per-state
+    /// maximum at some visited state (de Matos 2015). The least aggressive
+    /// value-based strategy; preserves the convergence guarantee.
     Level1 {
         /// Number of iterations between selection runs. Must be > 0.
         check_frequency: u64,
 
-        /// Absolute tolerance for tie-breaking: a cut is considered active at a
-        /// state when its value is within `tie_tolerance` of the best cut value
-        /// at that state. Default: `1e-10`.
+        /// Tie-break tolerance: a cut is active at a state when within
+        /// `tie_tolerance` of the best value there. Default: `1e-10`.
         tie_tolerance: f64,
     },
 
-    /// Limited Memory Level-1 (LML1): value-based selection retaining only the
-    /// oldest eligible near-optimal cut per visited state (Guigues & Bandarra 2019).
-    ///
-    /// At each visited state, only the oldest eligible cut (smallest slot index
-    /// `>= warm_start_count`) whose value is within `tie_tolerance` of the
-    /// maximum survives. The selected set is the union of oldest-at-max cuts
-    /// across all visited states. More aggressive than Level1 because multiple
-    /// cuts tied at the same state compete and only the oldest wins.
+    /// Limited Memory Level-1 (LML1): retain only the oldest eligible cut within
+    /// `tie_tolerance` of the maximum per visited state, unioned across states
+    /// (Guigues & Bandarra 2019). More aggressive than Level1.
     Lml1 {
         /// Number of iterations between selection runs. Must be > 0.
         check_frequency: u64,
 
-        /// Absolute tolerance for tie-breaking: a cut is considered active at a
-        /// state when its value is within `tie_tolerance` of the best cut value
-        /// at that state. Default: `1e-10`.
+        /// Tie-break tolerance: a cut is active at a state when within
+        /// `tie_tolerance` of the best value there. Default: `1e-10`.
         tie_tolerance: f64,
     },
 
-    /// Dominated cut detection: remove cuts dominated at all visited states.
-    ///
-    /// A cut is dominated if at every visited forward pass state, the maximum
-    /// over ALL populated cuts (active and inactive) exceeds the cut's value
-    /// by more than `threshold`. Dominated cuts contribute nothing to the
-    /// policy and can safely be deactivated. Inactive cuts that achieve the
-    /// maximum are reactivated.
+    /// Dominated cut detection: deactivate cuts dominated (by more than
+    /// `threshold`) at every visited state; reactivate inactive cuts that
+    /// achieve the maximum.
     Dominated {
-        /// Activity threshold epsilon. A cut survives if its value is within
-        /// `threshold` of the maximum at any visited state.
+        /// A cut survives if its value is within `threshold` of the maximum at
+        /// any visited state.
         threshold: f64,
 
         /// Number of iterations between selection runs. Must be > 0.
@@ -240,40 +169,26 @@ pub enum CutSelectionStrategy {
     },
 
     /// Dynamic Cut Selection (DCS): a per-solve lazy selection loop, NOT a
-    /// pool-level deactivation pass.
-    ///
-    /// Unlike [`Level1`](CutSelectionStrategy::Level1),
-    /// [`Lml1`](CutSelectionStrategy::Lml1), and
-    /// [`Dominated`](CutSelectionStrategy::Dominated), DCS never deactivates or
-    /// reactivates cuts at the pool level: [`should_run`] always returns
-    /// `false` and [`select_for_stage`] always returns empty
-    /// [`CutActivityUpdates`]. Instead, DCS operates lazily within each LP solve
-    /// (wired by later DCS work), treating every pool cut as a candidate when
-    /// `k1 = None` (∞). Because exactness rests on that `∞` default, DCS is
-    /// mutually exclusive with the value-based pool passes — selecting `dynamic`
-    /// guarantees Level1/Lml1/Dominated do not run.
+    /// pool-level deactivation pass. [`should_run`] always returns `false` and
+    /// [`select_for_stage`] always returns empty [`CutActivityUpdates`];
+    /// selection happens lazily inside each LP solve. Because exactness rests on
+    /// the `k1 = None` (∞) default, DCS is mutually exclusive with the
+    /// value-based pool passes.
     ///
     /// [`should_run`]: CutSelectionStrategy::should_run
     /// [`select_for_stage`]: CutSelectionStrategy::select_for_stage
     Dynamic {
-        /// Candidate-recency window.
-        ///
-        /// `None` means `∞`: every pool cut is a candidate. This is the
-        /// exactness-preserving default — when `k1 = None` every pool cut is
-        /// always a candidate, so no cut can be silently excluded from the lazy
-        /// loop.
-        ///
-        /// `Some(n)` restricts candidates to cuts whose `iteration_generated`
-        /// is within the last `n` SDDP iterations (the paper's windowed
-        /// behavior). This mode is deliberately NOT exact: cuts older than the
-        /// window are never added, even when violated.
+        /// Candidate-recency window. `None` ⇒ ∞ (every pool cut a candidate;
+        /// exactness-preserving). `Some(n)` ⇒ only cuts generated within the
+        /// last `n` iterations are candidates — deliberately NOT exact: older
+        /// cuts are never added even when violated.
         k1: Option<u32>,
 
         /// Maximum number of cuts added per lazy-solve round.
         k2: u32,
 
-        /// Number of most-violated candidate cuts considered per round (the
-        /// `n`-adic candidate count). Must be `>= 1`.
+        /// Number of most-violated candidate cuts considered per round. Must be
+        /// `>= 1`.
         nadic: u32,
 
         /// Absolute violation tolerance for accepting a candidate cut. Must be
@@ -288,9 +203,8 @@ pub enum CutSelectionStrategy {
 impl CutSelectionStrategy {
     /// Determine whether cut selection should run at the given iteration.
     ///
-    /// Returns `true` if `iteration > 0` and `iteration` is a multiple of
-    /// the variant's `check_frequency`. Never runs at iteration 0 (no cuts
-    /// exist yet).
+    /// `true` if `iteration > 0` and `iteration` is a multiple of the variant's
+    /// `check_frequency`. Always `false` for `Dynamic`.
     ///
     /// # Examples
     ///
@@ -315,34 +229,15 @@ impl CutSelectionStrategy {
             | Self::Dominated {
                 check_frequency, ..
             } => *check_frequency,
-            // DCS is a per-solve lazy loop, not a periodic pool-level pass, so
-            // it never runs as a pool selection scan.
             Self::Dynamic { .. } => return false,
         };
         iteration > 0 && iteration.is_multiple_of(freq)
     }
 
-    /// Scan the cut pool metadata for a single stage and identify cuts to
-    /// deactivate.
+    /// Scan the cut pool for stage 0 (a pure query: the pool is not modified).
     ///
-    /// Returns a [`CutActivityUpdates`] with deactivation and reactivation
-    /// entries. The caller is responsible for applying changes to the activity
-    /// bitmap. This method does not modify the pool — it is a pure query.
-    ///
-    /// `stage_index` identifies which stage this selection runs for (used to
-    /// populate [`CutActivityUpdates::stage_index`]).
-    ///
-    /// # Variant behavior
-    ///
-    /// - **Level1**: evaluates all cuts at visited states; retains any cut
-    ///   within `tie_tolerance` of the per-state maximum at any state.
-    /// - **Lml1**: at each visited state, retains only the oldest eligible
-    ///   cut within `tie_tolerance` of the maximum; selected set is the union
-    ///   across all visited states.
-    /// - **Dominated**: same max-survival logic as Level1 using `threshold`.
-    ///
-    /// When `visited_states` is empty, Level1 and Lml1 return empty updates
-    /// (no evidence for value evaluation). Dominated also returns empty.
+    /// Delegates to [`select_for_stage`](Self::select_for_stage) with
+    /// `stage_index = 0`.
     ///
     /// # Examples
     ///
@@ -368,35 +263,20 @@ impl CutSelectionStrategy {
         self.select_for_stage(pool, visited_states, current_iteration, 0)
     }
 
-    /// Scan the cut pool for a specific stage.
+    /// Scan the cut pool for a specific stage (a pure query: the pool is not
+    /// modified).
     ///
-    /// Accepts the full [`CutPool`](crate::cut::CutPool) reference so that
-    /// all variants can access coefficients and intercepts for value
-    /// evaluation.
+    /// `visited_states` is a flat row-major `&[f64]`, one state per
+    /// `pool.state_dimension` elements. When empty, returns empty updates.
     ///
-    /// `visited_states` is a flat `&[f64]` of visited forward-pass state
-    /// vectors (row-major, one state per `pool.state_dimension` elements).
-    /// When empty, the function returns empty updates immediately.
+    /// # Determinism
     ///
-    /// `stage_index` populates [`CutActivityUpdates::stage_index`].
-    ///
-    /// # Parallelism (m-block fold/reduce)
-    ///
-    /// Trial points are partitioned into `M_BLOCK`-sized blocks and each
-    /// block is dispatched to a rayon task that calls `gemm_block` once
-    /// then applies the per-column survival rule into a per-task accumulator
-    /// bitmap. The final reduce ORs all per-task bitmaps. Because trial
-    /// points are independent and the merge (union) is commutative and
-    /// associative, the final `is_selected` set is bit-for-bit identical
-    /// regardless of the number of threads or block boundaries — including
-    /// for Lml1, where the per-block "oldest at max" is taken over disjoint
-    /// trial-point subsets and the union across subsets equals the global
-    /// oldest-at-max union. The fold-leaf `v_block` and `accum_bitmap`
-    /// buffers are bounded by `min(n_blocks, num_workers)` per call, which
-    /// stays within the "never allocate on hot paths" rule in spirit —
-    /// allocations are bounded and amortised, not unbounded.
-    ///
-    /// [`select`]: CutSelectionStrategy::select
+    /// Trial points are partitioned into `M_BLOCK` blocks scored independently;
+    /// the per-task selection bitmaps are OR-merged. The union merge is
+    /// commutative and associative, so the result is bit-for-bit identical
+    /// regardless of thread count or block boundaries — including for Lml1,
+    /// where the union of per-block "oldest at max" over disjoint trial-point
+    /// subsets equals the global oldest-at-max union.
     #[must_use]
     pub fn select_for_stage(
         &self,
@@ -405,8 +285,6 @@ impl CutSelectionStrategy {
         current_iteration: u64,
         stage_index: u32,
     ) -> CutActivityUpdates {
-        // DCS performs no pool-level deactivation/reactivation — it selects
-        // lazily within each LP solve. Return an empty update set immediately.
         if let CutSelectionStrategy::Dynamic { .. } = self {
             return CutActivityUpdates {
                 stage_index,
@@ -441,13 +319,11 @@ impl CutSelectionStrategy {
 
         let n_states = visited_states.len() / n_state;
 
-        // Partition trial points into m-blocks. Ceiling-divide so the
-        // last block may be shorter than M_BLOCK.
         let n_blocks = n_states.div_ceil(M_BLOCK);
         let m_block_starts: Vec<usize> = (0..n_blocks).map(|i| i * M_BLOCK).collect();
 
-        // `pool.coefficients` is `capacity * n_state` long; trim to the
-        // populated prefix so dgemm sees exactly `populated * n_state`.
+        // `pool.coefficients` is `capacity * n_state` long; trim to the populated
+        // prefix so the GEMM sees exactly `populated * n_state`.
         let coef_slice = &pool.coefficients[..populated * n_state];
         let intercepts: &[f64] = &pool.intercepts[..populated];
 
@@ -456,9 +332,8 @@ impl CutSelectionStrategy {
             .fold(
                 || {
                     (
-                        // v_block: K × M_BLOCK row-major fold-leaf scratch.
+                        // populated × M_BLOCK row-major value-block scratch.
                         vec![0.0_f64; populated * M_BLOCK],
-                        // accum_bitmap: per-worker selection accumulator.
                         vec![false; populated],
                     )
                 },
@@ -477,8 +352,8 @@ impl CutSelectionStrategy {
                         v_block_active,
                     );
 
-                    // Add intercept broadcast in-place (linear order;
-                    // deterministic). Row-major: v_block[k * m_len + col].
+                    // Broadcast-add each cut's intercept in linear order (D5:
+                    // deterministic accumulation). Row-major v_block[k*m_len+col].
                     for (k, &intercept) in intercepts.iter().enumerate().take(populated) {
                         let row = k * m_len;
                         for col in 0..m_len {
@@ -486,7 +361,6 @@ impl CutSelectionStrategy {
                         }
                     }
 
-                    // Per-column survival rule into local bitmap.
                     for col in 0..m_len {
                         apply_column_rule(
                             self,
@@ -536,25 +410,15 @@ impl CutSelectionStrategy {
     }
 }
 
-/// Apply the per-column survival rule for the m-block fold/reduce kernel.
+/// Mark selected slots for column `col` of the row-major
+/// `populated × m_len` `v_block` panel into `bitmap`.
 ///
-/// Reads column `col` of the `populated × m_len` row-major `v_block` panel
-/// (where `v_block[k * m_len + col]` is the evaluated value of cut `k` at the
-/// `col`-th trial point in the m-block), computes the per-column max, and
-/// marks selected slots into `bitmap` according to the strategy's variant:
-///
-/// - **Level1 / Dominated**: every eligible cut within `tie_tolerance` of the
-///   max at this column is marked `true` (union of all near-max cuts).
-/// - **Lml1**: only the oldest eligible cut within `tie_tolerance` of the max
-///   at this column is marked `true` (oldest-at-max wins, break inner loop).
-///
-/// The max is computed over ALL populated cuts (active and inactive), matching
-/// the unified kernel semantics. The marking pass walks slot indices in
-/// ascending order so "oldest at max" is deterministic for the Lml1 variant.
-// Rationale: every parameter is a distinct dimension of the GEMM cut-selection kernel
-// (strategy, row-major value block, populated count, stride, column cursor, warm-start
-// fence, eligibility mask, output bitmap); collapsing any pair would obscure the kernel's
-// O(populated × m_len) sweep structure that the inline hint preserves for the GEMM hot path.
+/// The per-column max is computed over ALL populated cuts (active and inactive).
+/// Level1/Dominated mark every eligible cut within `tie_tolerance` of the max;
+/// Lml1 marks only the oldest such cut. The ascending slot walk makes Lml1's
+/// "oldest at max" deterministic (D5).
+// Rationale: each parameter is a distinct kernel dimension with no natural
+// grouping; collapsing any pair would obscure the O(populated × m_len) sweep.
 #[allow(clippy::too_many_arguments)]
 #[inline]
 fn apply_column_rule(
@@ -567,9 +431,6 @@ fn apply_column_rule(
     eligible: &[bool],
     bitmap: &mut [bool],
 ) {
-    // Compute per-column max over ALL populated cuts.
-    // v_block is K × m_len row-major; column `col` of cut k is at
-    // index `k * m_len + col`.
     let mut max_val = f64::NEG_INFINITY;
     for k in 0..populated {
         let v = v_block[k * m_len + col];
@@ -596,15 +457,10 @@ fn apply_column_rule(
             for k in warm_start..populated {
                 if eligible[k] && v_block[k * m_len + col] >= cutoff {
                     bitmap[k] = true;
-                    // Oldest at max wins; break inner loop for
-                    // this column.
                     break;
                 }
             }
         }
-        // Unreachable: `select_for_stage` short-circuits the `Dynamic` variant
-        // with an empty update set before the kernel is ever entered, so
-        // `apply_column_rule` is never called for DCS.
         CutSelectionStrategy::Dynamic { .. } => {
             unreachable!("Dynamic cut selection does not run the value-evaluation kernel")
         }
@@ -615,11 +471,7 @@ fn apply_column_rule(
 // Config parsing
 // ---------------------------------------------------------------------------
 
-/// Validate the periodic-pruning cadence (`check_frequency`) for the methods
-/// that use it (`level1` / `lml1` / `domination`).
-///
-/// `0` is meaningless for a pruning cadence and is rejected. The dynamic method
-/// does not call this helper — it carries no `check_frequency` field.
+/// Validate the periodic-pruning cadence (`check_frequency`).
 ///
 /// # Errors
 ///
@@ -634,18 +486,9 @@ fn validate_check_frequency(check_frequency: u32) -> Result<u32, String> {
 /// Parse a [`cobre_io::config::RowSelectionConfig`] into an optional
 /// [`CutSelectionStrategy`].
 ///
-/// Returns `None` when `selection` is absent (the default — row selection
-/// disabled). Otherwise maps the chosen [`SelectionMethod`] variant onto the
-/// matching [`CutSelectionStrategy`], validating the variant's numeric
-/// constraints.
-///
-/// Each method carries only its own parameters, so there is no cross-method
-/// field bleed: the periodic-pruning cadence (`check_frequency`) exists only on
-/// the periodic methods, and the dynamic seed/recency/round/violation knobs
-/// exist only on the dynamic variant. Internally the dynamic variant maps onto
-/// the wire-format `Dynamic` fields `k1` (candidate recency, `None` = ∞,
-/// exactness-preserving), `k2` (seed window), `nadic` (rows added per round),
-/// `epsilon_viol`, and `start_iteration`.
+/// Returns `None` when `selection` is absent (row selection disabled).
+/// Otherwise maps the chosen [`SelectionMethod`] onto the matching
+/// [`CutSelectionStrategy`], validating the variant's numeric constraints.
 ///
 /// # Errors
 ///
@@ -693,16 +536,12 @@ pub fn parse_cut_selection_config(
             max_added_per_round,
             violation_tolerance,
         } => {
-            // start_iteration is 1-based; the lazy loop never runs at iteration 0
-            // (no cuts exist yet), so 0 is rejected.
             if start_iteration == 0 {
                 return Err(
                     "cut_selection.start_iteration must be >= 1 for method='dynamic'".to_string(),
                 );
             }
 
-            // candidate_recency feeds k1: absent/None ⇒ ∞ (exactness-preserving);
-            // Some(0) is an error (use absent for the unbounded default).
             if candidate_recency == Some(0) {
                 return Err(
                     "cut_selection.candidate_recency must be >= 1 for method='dynamic' \
@@ -1082,8 +921,7 @@ mod tests {
         assert!(deact.reactivation_indices().is_empty());
     }
 
-    /// Previously: `ac_level1_threshold_0_deactivates_zero_activity_cut`.
-    /// New value-based version: a cut with lower value is deactivated.
+    /// A cut with lower value is deactivated.
     #[test]
     fn ac_level1_threshold_0_deactivates_zero_activity_cut() {
         let strategy = CutSelectionStrategy::Level1 {
@@ -1099,8 +937,7 @@ mod tests {
         assert!(deact.deactivation_indices().contains(&0));
     }
 
-    /// Previously: `ac_lml1_deactivates_cut_outside_memory_window`.
-    /// New value-based version: Lml1 deactivates a cut that is never oldest-at-max.
+    /// Lml1 deactivates a cut that is never oldest-at-max.
     #[test]
     fn ac_lml1_deactivates_cut_outside_memory_window() {
         let strategy = CutSelectionStrategy::Lml1 {
@@ -1388,9 +1225,8 @@ mod tests {
     // Skip already-inactive slot tests
     // -----------------------------------------------------------------------
 
-    /// Previously: `select_skips_already_inactive_slots`.
-    /// An already-inactive cut that is not at max produces no change.
-    /// An already-inactive cut that IS at max is reactivated.
+    /// An already-inactive cut that is not at max produces no change; one that
+    /// IS at max is reactivated.
     #[test]
     fn select_skips_already_inactive_slots() {
         let mut pool = CutPool::new(10, 1, 1, 0);
@@ -1844,13 +1680,9 @@ mod tests {
         );
     }
 
-    /// SS1.3 test 5 (updated): with 1 active and 2 inactive cuts, the unified
-    /// kernel evaluates ALL cuts for max. The highest inactive cut (intercept=3)
-    /// is selected (reactivated), and the only active cut (intercept=1) is deactivated.
-    ///
-    /// The old test asserted empty deactivations when only 1 active cut existed,
-    /// reflecting the old active-only max computation. The new kernel includes
-    /// inactive cuts in the max, which is the core correctness fix.
+    /// With 1 active and 2 inactive cuts, the max is taken over ALL cuts: the
+    /// highest inactive cut (intercept=3) is reactivated and the only active cut
+    /// (intercept=1) is deactivated.
     #[test]
     fn dominated_select_single_active_cut() {
         let strategy = CutSelectionStrategy::Dominated {

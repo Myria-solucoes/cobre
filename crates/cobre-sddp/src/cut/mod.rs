@@ -8,38 +8,21 @@
 //! ## Contents
 //!
 //! - [`pool`] — [`CutPool`]: pre-allocated per-stage cut storage with
-//!   deterministic slot assignment, activity tracking, and state evaluation.
-//!   [`CutPool::set_active`] is the canonical toggle for the activity flag;
-//!   [`CutPool::cuts_in_lp`] returns the LP-row-count metric (populated count).
+//!   deterministic slot assignment and activity tracking.
 //! - [`fcf`] — [`FutureCostFunction`]: all-stages container wrapping one
-//!   [`CutPool`] per stage; provides the high-level API for the training loop,
-//!   including [`FutureCostFunction::set_active`] and
-//!   [`FutureCostFunction::cuts_in_lp`].
-//! - [`wire`] — [`CutWireHeader`] and serialization functions for the MPI
-//!   cut-exchange wire format (24-byte header + variable coefficient tail).
-//! - [`row`] — cut-row construction for the SDDP LP; owns the cut-sign
-//!   convention (`push_scaled_coefficient`
-//!   negates the raw subgradient). Entry points:
-//!   [`build_cut_row_batch_into`](row::build_cut_row_batch_into),
-//!   [`append_new_cuts_to_lp`](row::append_new_cuts_to_lp),
-//!   [`append_slots_to_lp`](row::append_slots_to_lp).
+//!   [`CutPool`] per stage; the high-level API for the training loop.
+//! - [`wire`] — [`CutWireHeader`] and serialization for the MPI cut-exchange
+//!   wire format.
+//! - [`row`] — cut-row construction; owns the cut-sign convention
+//!   (`push_scaled_coefficient` negates the raw subgradient).
 //! - [`row_map`] — [`CutRowMap`]: slot-to-LP-row mapping that preserves cut-pool
 //!   slot identity for warm-start basis reconstruction.
-//! - [`cut_selection`] — [`CutSelectionStrategy`] (and `CutMetadata`): per-cut
-//!   activity tracking and the Level-1 / LML1 / domination periodic cut-selection
-//!   strategies.
+//! - [`cut_selection`] — [`CutSelectionStrategy`]: Level-1 / LML1 / domination
+//!   periodic cut-selection strategies.
 //! - [`dcs`] — Dynamic Cut Selection: scores all resident cuts per stage.
 //! - [`cut_sync`] — [`CutSyncBuffers`]: MPI cut-synchronization scratch space.
 //! - [`basis_reconstruct`] — warm-start basis reconstruction for the baked
 //!   hot path and the DCS path.
-//!
-//! ## Sentinel value
-//!
-//! [`WARM_START_ITERATION`] is the sentinel stored in
-//! [`CutMetadata::iteration_generated`](crate::cut_selection::CutMetadata::iteration_generated) for every cut loaded from a policy
-//! checkpoint.  Cut selection strategies may inspect this sentinel to apply
-//! warm-start-specific pruning policies (e.g., exempt warm-start cuts from
-//! LML1 deactivation).
 
 pub mod basis_reconstruct;
 pub mod cut_selection;

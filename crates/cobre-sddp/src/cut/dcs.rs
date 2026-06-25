@@ -1,20 +1,12 @@
-//! Dynamic Cut Selection (DCS) hyperparameters as a hot-path value type.
+//! Dynamic Cut Selection (DCS): a per-solve lazy selection loop that grows the
+//! LP's active cut set within each solve until no candidate cut is violated by
+//! more than `epsilon_viol` (or a bounded inner-iteration cap is hit), rather
+//! than deactivating cuts at the pool level.
 //!
-//! DCS is a per-solve lazy selection loop: rather than deactivating cuts at the
-//! pool level, it grows the LP's active cut set lazily within each solve until
-//! no candidate cut is violated by more than `epsilon_viol` (or a bounded
-//! inner-iteration cap is hit). See
-//! `docs/design/dynamic-cut-selection-design.md` for the full design.
-//!
-//! [`DcsParams`] is a small, `Copy`, allocation-free carrier for the DCS
-//! hyperparameters. It mirrors the values stored on
-//! [`CutSelectionStrategy::Dynamic`]
-//! (the serde-stable config representation) but is intentionally decoupled from
-//! it so the hot path is not coupled to config parsing. Construct one from a
-//! strategy via [`DcsParams::from_strategy`].
-//!
-//! This module defines the value type only — wiring it into a context struct or
-//! a pass is the responsibility of later DCS work.
+//! [`DcsParams`] is a `Copy`, allocation-free carrier for the DCS
+//! hyperparameters, decoupled from the serde-stable
+//! [`CutSelectionStrategy::Dynamic`] config so the hot path is not coupled to
+//! config parsing. Construct one via [`DcsParams::from_strategy`].
 
 use std::time::Instant;
 
@@ -35,20 +27,14 @@ use crate::workspace::CapturedBasis;
 
 /// Dynamic Cut Selection hyperparameters.
 ///
-/// A `Copy`, allocation-free value type. Field invariants (`nadic >= 1`,
-/// `epsilon_viol > 0`, `k1` either `None` or `Some(>= 1)`) are enforced by the
-/// config-parse step that produces
-/// [`CutSelectionStrategy::Dynamic`];
-/// `DcsParams` trusts its inputs and documents the invariants here.
+/// Field invariants (`nadic >= 1`, `epsilon_viol > 0`, `k1` either `None` or
+/// `Some(>= 1)`) are enforced by the config-parse step that produces
+/// [`CutSelectionStrategy::Dynamic`]; `DcsParams` trusts its inputs.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DcsParams {
-    /// Candidate-recency window.
-    ///
-    /// `None` ⇒ `∞`: every pool cut is a candidate. This is the
-    /// exactness-preserving default. `Some(n)` ⇒ only cuts whose
-    /// `iteration_generated` is within the last `n` SDDP iterations are
-    /// candidates (windowed, deliberately non-exact). Consumed by the scoring
-    /// kernel.
+    /// Candidate-recency window. `None` ⇒ ∞ (every pool cut a candidate;
+    /// exactness-preserving). `Some(n)` ⇒ only cuts generated within the last
+    /// `n` iterations are candidates (deliberately non-exact).
     pub k1: Option<u32>,
 
     /// Initial-set history window: how far back to seed the active set at the
@@ -84,13 +70,10 @@ impl Default for DcsParams {
 }
 
 impl DcsParams {
-    /// Build [`DcsParams`] from a cut-selection strategy.
-    ///
-    /// Returns `Some` only for the
-    /// [`Dynamic`](crate::cut_selection::CutSelectionStrategy::Dynamic) variant,
-    /// copying its five fields (`k1`, `k2`, `nadic`, `epsilon_viol`,
-    /// `start_iteration`) and taking `max_inner_iterations` from
-    /// [`DcsParams::default`]. Returns `None` for every other variant.
+    /// Build [`DcsParams`] from a cut-selection strategy: `Some` for the
+    /// [`Dynamic`](crate::cut_selection::CutSelectionStrategy::Dynamic) variant
+    /// (with `max_inner_iterations` from [`DcsParams::default`]), `None`
+    /// otherwise.
     #[must_use]
     pub fn from_strategy(strategy: &CutSelectionStrategy) -> Option<Self> {
         match strategy {
@@ -114,9 +97,8 @@ impl DcsParams {
         }
     }
 
-    /// Return whether DCS is active at the given 1-based SDDP `iteration`.
-    ///
-    /// `true` when `iteration >= self.start_iteration`.
+    /// Return whether DCS is active at the given 1-based SDDP `iteration`
+    /// (`iteration >= self.start_iteration`).
     #[must_use]
     pub fn is_active(&self, iteration: u64) -> bool {
         iteration >= self.start_iteration
@@ -127,33 +109,24 @@ impl DcsParams {
 // DcsScoringScratch
 // ---------------------------------------------------------------------------
 
-/// Reusable scratch buffers for [`score_violated_candidates`].
-///
-/// Held across solves so the scoring kernel allocates nothing on the hot path.
-/// Grow capacities once up front via [`DcsScoringScratch::reserve`]; the kernel
-/// only clears and re-fills.
+/// Reusable scratch buffers for [`score_violated_candidates`], held across
+/// solves so the scoring kernel allocates nothing on the hot path. Grow once via
+/// [`DcsScoringScratch::reserve`]; the kernel only clears and re-fills.
 #[derive(Default)]
 pub struct DcsScoringScratch {
-    /// Unscaled (raw) state vector at the current LP optimum, one entry per
-    /// state index (`indexer.n_state` long after fill).
+    /// Unscaled (raw) state vector at the current LP optimum (`n_state` long).
     pub unscaled_state: Vec<f64>,
 
-    /// Gathered coefficient rows of the eligible candidates for a single scoring
-    /// pass, row-major `k_rows × n_state`. Cleared and re-filled each pass; the
-    /// single batched `gemm_block` reads it as the GEMM left operand. Reserved
-    /// to `pool_capacity * n_state` so even an all-eligible pass needs no growth.
+    /// Gathered coefficient rows of the eligible candidates, row-major
+    /// `k_rows × n_state` — the batched `gemm_block` left operand.
     pub cand_coef_block: Vec<f64>,
 
-    /// Per-candidate activity output of the single batched GEMM, one entry per
-    /// gathered candidate (`alpha[i] = ∇·x*_raw` for candidate `i`, before the
-    /// per-candidate intercept is added). Length tracks the gathered candidate
-    /// count each pass.
+    /// Per-candidate GEMM output: `alpha[i] = ∇·x*_raw` for candidate `i`,
+    /// before its intercept is added.
     pub alpha: Vec<f64>,
 
     /// Slot id of each gathered candidate, parallel to the rows of
-    /// `cand_coef_block` and (after the GEMM) to `alpha`. Lets the post-GEMM
-    /// violation scan recover each activity entry's slot id (and, via
-    /// `pool.intercepts`, its intercept).
+    /// `cand_coef_block` and `alpha`.
     pub cand_slots: Vec<u32>,
 
     /// `(violation_magnitude, slot)` for each violated candidate, before the
@@ -163,13 +136,10 @@ pub struct DcsScoringScratch {
 
 impl DcsScoringScratch {
     /// Grow the scratch buffers to hold `n_state` state entries and up to
-    /// `pool_capacity` candidate cuts, without shrinking existing capacity
-    /// (growth-only, mirroring `workspace.rs`).
+    /// `pool_capacity` candidate cuts, growth-only.
     ///
-    /// `cand_coef_block` is reserved to `pool_capacity * n_state` — the worst
-    /// case where every active cut is an eligible (non-resident, in-window)
-    /// candidate — while `alpha`, `cand_slots`, and `violations` are reserved to
-    /// `pool_capacity` entries each.
+    /// `cand_coef_block` is reserved to `pool_capacity * n_state` (the
+    /// all-eligible worst case); the other buffers to `pool_capacity` each.
     pub fn reserve(&mut self, n_state: usize, pool_capacity: usize) {
         if self.unscaled_state.capacity() < n_state {
             self.unscaled_state
@@ -204,62 +174,47 @@ impl DcsScoringScratch {
 /// # Sign & scale contract
 ///
 /// Cut coefficients are stored **raw** (`∂Q/∂x`); the LP solves in **scaled**
-/// space. The cut row is `−∇·x + θ ≥ intercept` (the negation is applied by
-/// `push_scaled_coefficient` in `cut::row`),
-/// so the cut's `θ`-floor at the raw optimum `x*_raw` is
-/// `alpha = intercept + ∇·x*_raw`. A candidate is **violated** when the current
-/// LP `θ*_raw` falls below that floor by more than `epsilon_viol`, i.e.
-/// `v = alpha − theta_raw > epsilon_viol` (strict).
-///
-/// Both `θ*` and every state column are unscaled by `col_scale` before scoring
-/// (`x_raw = col_scale[c] · x_scaled`); mixing scaled state with raw
-/// coefficients is the classic silent bug. An empty `col_scale` means no
-/// scaling (factor 1.0).
-///
-/// State index → LP column mapping uses
-/// [`StateLayout::state_to_lp_column`], identical to the cut-row builder in
-/// `cut::row::build_cut_row_batch_into`, so scoring and row construction
-/// reference the same columns.
+/// space. The cut row is `−∇·x + θ ≥ intercept`, so the cut's `θ`-floor at the
+/// raw optimum is `alpha = intercept + ∇·x*_raw` and a candidate is **violated**
+/// when `v = alpha − theta_raw > epsilon_viol` (strict). Both `θ*` and every
+/// state column are unscaled by `col_scale` before scoring
+/// (`x_raw = col_scale[c] · x_scaled`, empty ⇒ factor 1.0) — **mixing scaled
+/// state with raw coefficients is the classic silent bug.** State index → LP
+/// column mapping uses [`StateLayout::state_to_lp_column`], identical to the
+/// cut-row builder, so scoring and row construction reference the same columns.
 ///
 /// # Batched scoring
 ///
-/// A single pass over [`CutPool::active_cuts`] (ascending-slot order) applies
-/// the filters below and **gathers** each surviving candidate's `coefficients`
-/// slice into the contiguous row-major `scratch.cand_coef_block`
-/// (`k_rows × n_state`), recording its slot in `scratch.cand_slots`. One
-/// `gemm_block` then fills `scratch.alpha[0..k_rows]` with every candidate's
-/// `∇·x*_raw` in a single dispatch. Because `gemm_block` computes each output
-/// row's dot product independently, a candidate's activity is **bit-identical**
-/// whether scored alone (`k_rows = 1`) or in a batch (`k_rows = N`); the
-/// per-candidate intercept (`pool.intercepts[slot]`) is added afterward, outside
-/// the GEMM. The violation scan, sort, and `nadic` truncation are unchanged.
+/// A single ascending-slot pass over [`CutPool::active_cuts`] applies the
+/// filters below and gathers each survivor's `coefficients` into row-major
+/// `scratch.cand_coef_block` (`k_rows × n_state`); one `gemm_block` then fills
+/// `scratch.alpha` with every candidate's `∇·x*_raw`. Each output row's dot
+/// product is independent, so a candidate's activity is bit-identical batched or
+/// scored alone; the intercept is added afterward, outside the GEMM.
 ///
 /// # `k1` candidate-recency window
 ///
 /// Applied first. A cut at slot `s` is eligible only when `params.k1` is `None`
-/// (∞ — every cut a candidate, the exactness path) or its age
+/// (∞, the exactness path) or its age
 /// `current_iteration.saturating_sub(pool.metadata[s].iteration_generated)` is
-/// `< k1`. Warm-start cuts carry `iteration_generated == u64::MAX`, so their
-/// saturating age is `0` and they are always inside any finite window. Cuts
-/// outside the window are skipped entirely — never scored, never added.
+/// `< k1`. Warm-start cuts (`iteration_generated == u64::MAX`) saturate to age 0
+/// and stay inside any finite window. Out-of-window cuts are never scored.
 ///
 /// # Selection & determinism
 ///
-/// Violated candidates are sorted by violation **descending**, ties broken by
-/// **ascending slot id** (via [`f64::total_cmp`], which is panic-free and
-/// NaN-stable — never `partial_cmp().unwrap()`). The first `nadic` slot ids are
-/// written to `out_selected` (cleared first). The choice is a deterministic
-/// function of `(pool contents, x*, ε_viol, nadic, k1, current_iteration)`.
+/// Violated candidates are sorted by violation **descending**, ties by
+/// **ascending slot id** via [`f64::total_cmp`] (panic-free and NaN-stable —
+/// never `partial_cmp().unwrap()`). The choice is a deterministic function of
+/// `(pool contents, x*, ε_viol, nadic, k1, current_iteration)`.
 ///
 /// # Returns
 ///
-/// The total count of violated candidates (≥ `out_selected.len()`). The caller
-/// uses this to detect the no-violation stop and drive the TC fallback.
+/// The total count of violated candidates (≥ `out_selected.len()`), used to
+/// detect the no-violation stop and drive the TC fallback.
 ///
 /// # Allocation
 ///
-/// Allocation-free beyond growth of the pre-reserved `scratch` vectors. Call
-/// [`DcsScoringScratch::reserve`] before the hot loop.
+/// Allocation-free beyond growth of the pre-reserved `scratch` vectors.
 pub fn score_violated_candidates(
     pool: &CutPool,
     state: &StateLayout,
@@ -274,8 +229,7 @@ pub fn score_violated_candidates(
     let n_state = state.n_state;
     let theta = state.theta;
 
-    // `primal.len() >= theta + 1` (i.e. the theta column is in range), written
-    // as `> theta` to satisfy clippy::int_plus_one.
+    // `> theta` rather than `>= theta + 1` to satisfy clippy::int_plus_one.
     debug_assert!(
         primal.len() > theta,
         "score_violated_candidates: primal.len() {} <= theta ({theta})",
@@ -286,10 +240,8 @@ pub fn score_violated_candidates(
         "score_violated_candidates: pool.state_dimension {} != state.n_state {}",
         pool.state_dimension, n_state,
     );
-    // When scaling is active, `col_scale` is per-column and must cover every LP
-    // column read below — both `col_scale[theta]` and `col_scale[c]` for each
-    // state column `c = state_to_lp_column(j)`. It is sized like `primal`
-    // (one entry per column), so a single length check covers both accesses.
+    // col_scale is per-column (sized like primal), so this one check covers both
+    // col_scale[theta] and every col_scale[state_to_lp_column(j)] read below.
     debug_assert!(
         col_scale.is_empty() || col_scale.len() == primal.len(),
         "score_violated_candidates: col_scale.len() {} != primal.len() {} (non-empty col_scale \
@@ -304,15 +256,12 @@ pub fn score_violated_candidates(
     scratch.cand_slots.clear();
     scratch.alpha.clear();
 
-    // Unscale θ*: scaled space ⇒ raw via col_scale[theta] (empty ⇒ factor 1.0).
     let theta_raw = if col_scale.is_empty() {
         primal[theta]
     } else {
         col_scale[theta] * primal[theta]
     };
 
-    // Unscale the raw state vector at the LP state columns. The column mapping
-    // mirrors `cut::row::build_cut_row_batch_into` exactly.
     scratch.unscaled_state.clear();
     for j in 0..n_state {
         let c = state.state_to_lp_column(j);
@@ -324,14 +273,7 @@ pub fn score_violated_candidates(
         scratch.unscaled_state.push(x_raw);
     }
 
-    // Gather pass: iterate active cuts in ascending-slot order, apply the k1
-    // window then the resident-skip, and copy each surviving candidate's
-    // coefficient row into the contiguous `cand_coef_block` block (recording its
-    // slot in `cand_slots`). The intercept is recovered later via
-    // `pool.intercepts[slot]`, so it need not be gathered here.
     for (slot, _intercept, coefficients) in pool.active_cuts() {
-        // k1 candidate-recency window (applied first). saturating_sub keeps
-        // warm-start cuts (iteration_generated == u64::MAX, age 0) eligible.
         if let Some(k1) = params.k1 {
             let age = current_iteration.saturating_sub(pool.metadata[slot].iteration_generated);
             if age >= u64::from(k1) {
@@ -339,7 +281,6 @@ pub fn score_violated_candidates(
             }
         }
 
-        // Skip slots already resident in the LP.
         if resident.lp_row_for_slot(slot).is_some() {
             continue;
         }
@@ -351,11 +292,6 @@ pub fn score_violated_candidates(
 
     let k_rows = scratch.cand_slots.len();
 
-    // One batched GEMM for the whole pass: alpha[i] = ∇_i · x*_raw for each
-    // gathered candidate i (single trial point, m_len = 1). gemm_block computes
-    // each output row independently, so each alpha is bit-identical to the
-    // per-candidate (k_rows = 1) call it replaces. A zero candidate count is a
-    // gemm_block no-op (it returns immediately for k_rows == 0).
     scratch.alpha.clear();
     scratch.alpha.resize(k_rows, 0.0);
     gemm_block(
@@ -367,8 +303,6 @@ pub fn score_violated_candidates(
         &mut scratch.alpha,
     );
 
-    // Violation scan over the batched activities: v = (intercept + ∇·x*_raw) −
-    // θ_raw, with the intercept recovered per candidate from `pool.intercepts`.
     for (i, &slot) in scratch.cand_slots.iter().enumerate() {
         let alpha = pool.intercepts[slot as usize] + scratch.alpha[i];
         let v = alpha - theta_raw;
@@ -379,8 +313,8 @@ pub fn score_violated_candidates(
 
     let violated_count = scratch.violations.len();
 
-    // Sort by violation descending, ties by ascending slot id. total_cmp is
-    // panic-free and NaN-stable (no partial_cmp().unwrap()).
+    // Descending violation, ascending-slot tie-break (D5): total_cmp, never
+    // partial_cmp().unwrap().
     scratch
         .violations
         .sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
@@ -405,24 +339,19 @@ pub struct DcsSolveContext {
     pub scenario_index: usize,
     /// Training iteration (1-based) feeding the `k1` recency window, or `None`
     /// off the training path (e.g. simulation). `None` is treated as `0`, which
-    /// disables the window: `0.saturating_sub(iteration_generated) == 0 < k1`,
-    /// so every cut is eligible.
+    /// disables the window (every cut age saturates to 0 ⇒ eligible).
     pub iteration: Option<u64>,
 
     /// Continue from a carried LP instead of starting a fresh solve.
     ///
-    /// `false` (the default for every fresh solve): reset the scratch
-    /// [`CutRowMap`], append `initial_resident`, and run the initial solve
-    /// (warm if a `stored_basis` was supplied, else cold). This is the only mode
-    /// the forward, simulation, and per-opening backward paths use.
+    /// `false` (fresh — forward, simulation, per-opening backward): reset the
+    /// scratch [`CutRowMap`], append `initial_resident`, and run the initial
+    /// solve (warm if `stored_basis` is supplied, else cold).
     ///
-    /// `true` (backward opening-reuse path, openings 1..): the solver already
-    /// holds the previous opening's cut rows (tracked in the carried scratch
-    /// `CutRowMap`) and a warm basis; only the opening's noise bounds changed.
-    /// Skip the reset / `initial_resident` append / model reload entirely; just
-    /// warm-`solve(None)` to re-optimize under the new bounds, then run the lazy
-    /// loop, which appends only the cuts this opening additionally violates.
-    /// `initial_resident` and `stored_basis` are ignored in this mode.
+    /// `true` (backward opening-reuse, openings 1..): the solver still holds the
+    /// previous opening's cut rows and warm basis; only the noise bounds changed.
+    /// Skip the reset / `initial_resident` append / reload — warm-`solve(None)`,
+    /// then run the lazy loop. `initial_resident` and `stored_basis` are ignored.
     pub continue_carry: bool,
 }
 
@@ -431,10 +360,8 @@ pub struct DcsSolveContext {
 // ---------------------------------------------------------------------------
 
 /// Reusable buffers for [`lazy_solve_preloaded`], held across solves so the
-/// steady-state hot path allocates nothing.
-///
-/// These buffers are held outside `SolverWorkspace` so `lazy_solve_preloaded`
-/// is testable in isolation.
+/// steady-state hot path allocates nothing. Held outside `SolverWorkspace` so
+/// `lazy_solve_preloaded` is testable in isolation.
 pub struct DcsSolveScratch {
     /// Add-row construction buffer for `add_rows`.
     pub batch: RowBatch,
@@ -444,30 +371,22 @@ pub struct DcsSolveScratch {
     pub out_selected: Vec<u32>,
     /// Destination basis for the initial uniform-BASIC reconstruction.
     pub recon_basis: Basis,
-    /// Slot→LP-row map for the cut rows resident in the loaded LP.
-    ///
-    /// Held in scratch (rather than allocated per call) so the steady-state hot
-    /// path does not allocate a fresh `vec![None; populated_count]` every solve,
-    /// and so the backward opening-reuse path can carry residency across a trial
-    /// point's openings: a fresh solve resets it (see
-    /// [`DcsSolveContext::continue_carry`]), a continued solve leaves it intact.
+    /// Slot→LP-row map for the cut rows resident in the loaded LP. Carried across
+    /// a trial point's openings: a fresh solve resets it, a continued solve
+    /// leaves it intact (see [`DcsSolveContext::continue_carry`]).
     pub row_map: CutRowMap,
     /// Owned copy of the final solve's primal vector (one entry per LP column).
     ///
-    /// [`lazy_solve_preloaded`] returns `Result<()>` rather than a borrowing
-    /// `SolutionView`: on the terminating path it copies the live solve's
-    /// solution into these caller-owned `res_*` buffers, and the caller rebuilds
-    /// a zero-cost view over them via [`DcsSolveScratch::result_view`]. This
-    /// avoids returning a loan obtained inside the lazy loop (rejected by stable
-    /// NLL) without keeping the redundant exit re-solve.
+    /// [`lazy_solve_preloaded`] returns `Result<()>` and the caller rebuilds a
+    /// view over these `res_*` buffers via [`DcsSolveScratch::result_view`] —
+    /// this avoids returning a loan obtained inside the lazy loop (rejected by
+    /// stable NLL) without keeping a redundant exit re-solve.
     pub res_primal: Vec<f64>,
-    /// Owned copy of the final solve's dual vector. On the DCS path this is the
-    /// FULL dual — structural rows followed by the resident cut rows — and is
-    /// copied verbatim (never truncated): the simulation reader relies on the
-    /// structural-row prefix and ignores the trailing cut-row entries.
+    /// Owned copy of the final solve's dual vector — the FULL dual (structural
+    /// rows then resident cut rows), copied verbatim (never truncated): the
+    /// simulation reader relies on the structural-row prefix.
     pub res_dual: Vec<f64>,
-    /// Owned copy of the final solve's reduced-cost vector (one entry per LP
-    /// column).
+    /// Owned copy of the final solve's reduced-cost vector (one per LP column).
     pub res_reduced_costs: Vec<f64>,
     /// Owned copy of the final solve's objective value.
     pub res_objective: f64,
@@ -475,28 +394,17 @@ pub struct DcsSolveScratch {
     pub res_iterations: u64,
     /// Owned copy of the final solve's wall-clock solve time, in seconds.
     pub res_solve_time_seconds: f64,
-    /// Cumulative wall time, in seconds, spent inside candidate-scoring
-    /// (`score_violated_candidates`) across every [`lazy_solve_preloaded`] call
-    /// that used this scratch. Grows monotonically and is never reset by the
-    /// solve loop, so a per-worker accumulator survives across all (stage,
-    /// solve) pairs. Read by instrumentation after a run to compute the
-    /// scoring-versus-solve split; pure measurement, off the steady-state hot
-    /// path when no observer reads it.
+    /// Cumulative wall time spent in `score_violated_candidates`. A per-worker
+    /// accumulator: never reset by the solve loop. Pure measurement.
     pub scoring_time_seconds: f64,
-    /// Cumulative sum of the resident cut-row count (`row_map.total_cut_rows()`)
-    /// over every solve that used this scratch — one term per
-    /// [`lazy_solve_preloaded`] completion (see `Self::store_result`). With
-    /// [`Self::rows_in_lp_count`] this yields the mean rows-in-LP per solve.
-    /// Grows monotonically; never reset by the solve loop (a per-worker
-    /// accumulator surviving across all (stage, solve) pairs, like
-    /// [`Self::scoring_time_seconds`]). Pure measurement, off the steady-state
-    /// hot path.
+    /// Cumulative sum of `row_map.total_cut_rows()`, one term per
+    /// [`lazy_solve_preloaded`] completion; with [`Self::rows_in_lp_count`]
+    /// yields the mean rows-in-LP. Never reset by the solve loop.
     pub rows_in_lp_sum: u64,
-    /// Number of solves folded into [`Self::rows_in_lp_sum`] (one per
-    /// `Self::store_result` call). The denominator for the mean.
+    /// Number of solves folded into [`Self::rows_in_lp_sum`] — the mean's
+    /// denominator.
     pub rows_in_lp_count: u64,
-    /// Largest resident cut-row count observed across every solve that used this
-    /// scratch.
+    /// Largest resident cut-row count observed across solves on this scratch.
     pub rows_in_lp_max: u64,
 }
 
@@ -538,15 +446,11 @@ impl DcsSolveScratch {
             self.out_selected
                 .reserve(pool_capacity - self.out_selected.capacity());
         }
-        // Pre-size the slot→row map so the first solve does not reallocate; the
-        // `base_row_offset` here is a placeholder (each fresh solve resets it to
-        // the loaded core's row count in `lazy_solve_preloaded`).
+        // base_row_offset 0 is a placeholder; each fresh solve resets it to the
+        // loaded core's row count in `lazy_solve_preloaded`.
         self.row_map.reset(pool_capacity, 0);
-        // Pre-grow the result buffers to a conservative non-zero capacity. Their
-        // exact lengths (num_cols for primal/reduced_costs; structural rows + cut
-        // rows for dual) depend on the loaded LP, not on these arguments, so the
-        // first fill may still grow them; from then on `clear()` + `extend_from_slice`
-        // reuses the warmed capacity (alloc-free steady state).
+        // Result-buffer lengths depend on the loaded LP, not these arguments, so
+        // the first fill may still grow them past this conservative pre-reserve.
         for buf in [
             &mut self.res_primal,
             &mut self.res_dual,
@@ -558,14 +462,11 @@ impl DcsSolveScratch {
         }
     }
 
-    /// Rebuild a zero-copy [`SolutionView`] over the result buffers filled by the
-    /// most recent [`lazy_solve_preloaded`] call.
+    /// Rebuild a zero-copy [`SolutionView`] over the result buffers.
     ///
-    /// The view borrows `self` immutably, so it composes with the other immutable
-    /// reads a caller performs after the solve (e.g. the resident `row_map`). It
-    /// is only meaningful immediately after a successful `lazy_solve_preloaded`
+    /// Only meaningful immediately after a successful [`lazy_solve_preloaded`]
     /// call that filled the buffers; the slices are exactly the final solve's
-    /// solution (the one the redundant exit re-solve used to recompute).
+    /// solution. Borrows `self` immutably, composing with other post-solve reads.
     #[must_use]
     pub fn result_view(&self) -> SolutionView<'_> {
         SolutionView {
@@ -580,10 +481,8 @@ impl DcsSolveScratch {
 
     /// Copy a live solve's solution into the reused result buffers.
     ///
-    /// `clear()` + `extend_from_slice` keeps the steady state allocation-free
-    /// (capacity persists across calls); the full slices are copied verbatim —
-    /// the dual in particular is NOT truncated, so the simulation reader still
-    /// sees the structural-row prefix it depends on.
+    /// The dual is copied verbatim — NOT truncated — so the simulation reader
+    /// still sees the structural-row prefix it depends on.
     fn store_result(&mut self, view: &SolutionView<'_>) {
         self.res_objective = view.objective;
         self.res_iterations = view.iterations;
@@ -595,11 +494,8 @@ impl DcsSolveScratch {
         self.res_reduced_costs.clear();
         self.res_reduced_costs.extend_from_slice(view.reduced_costs);
 
-        // Per-solve resident-set size (rows-in-LP): the number of cut rows
-        // resident in the LP at this solve's completion. Folded here because
-        // `store_result` is the single completion point of every lazy solve
-        // (both the exact-optimum and TC-fallback exits). Mirrors the
-        // `scoring_time_seconds` accumulator — cumulative, never reset.
+        // Folded here because `store_result` is the single completion point of
+        // every lazy solve (both the exact-optimum and TC-fallback exits).
         let rows_in_lp = self.row_map.total_cut_rows() as u64;
         self.rows_in_lp_sum += rows_in_lp;
         self.rows_in_lp_count += 1;
@@ -612,8 +508,7 @@ impl DcsSolveScratch {
 // ---------------------------------------------------------------------------
 
 /// Map a [`SolverError`] to an [`SddpError`] with stage/scenario/iteration
-/// context — the same contract `stage_solve::run_stage_solve` uses
-/// (`Infeasible` carries the context; everything else is `SddpError::Solver`).
+/// context — kept consistent with `stage_solve::run_stage_solve`.
 fn map_solver_error(e: SolverError, ctx: DcsSolveContext) -> SddpError {
     match e {
         SolverError::Infeasible => SddpError::Infeasible {
@@ -628,51 +523,31 @@ fn map_solver_error(e: SolverError, ctx: DcsSolveContext) -> SddpError {
 /// Solve one (stage, solve) lazily under Dynamic Cut Selection, given an
 /// already-loaded core LP.
 ///
-/// **The caller owns the model load and any bounds patch.** Before calling,
-/// the caller must have run `solver.load_model(core)` (the cut-free core LP)
-/// and applied every per-solve bound (state pinning, opening noise, etc.) on
-/// that loaded model. This routine does NOT call `load_model`; it only appends
-/// cut rows and solves. `core` is consulted for dimensions only
-/// (`num_rows` → cut-row offset and reconstruction `base_row_count`;
-/// `num_cols` → reconstruction `num_cols`). Because every cut row is appended
-/// to the loaded, already-patched LP and every inner re-solve is a warm
-/// `solve(None)` (never another `load_model`), the caller's bound patch
-/// survives the entire loop.
+/// **The caller owns the model load and any bounds patch.** This routine does
+/// NOT call `load_model` — it only appends cut rows and solves — so a caller
+/// that has not run `load_model(core)` plus its per-solve bounds patch will get
+/// wrong results; reloading here would instead discard the patch. `core` is
+/// consulted for dimensions only.
 ///
-/// Pass-agnostic: it builds the cut set incrementally and runs the lazy inner
-/// loop. On the terminating path it copies the final solve's solution into the
-/// caller-owned result buffers in `scratch` and returns `Ok(())`; the caller
-/// rebuilds a zero-cost [`SolutionView`] over those buffers via
-/// [`DcsSolveScratch::result_view`]. Returning by buffer rather than by borrowing
-/// view is what lets the no-violation arm avoid a redundant exit re-solve without
-/// returning a loan obtained inside the loop (which stable NLL rejects). Post-solve
-/// extraction (backward = dual, forward/simulation = primal) is the caller's job
-/// and is NOT done here.
+/// Pass-agnostic. On the terminating path it copies the final solve's solution
+/// into the `res_*` buffers and returns `Ok(())`; the caller rebuilds a view via
+/// [`DcsSolveScratch::result_view`]. Post-solve extraction (backward = dual,
+/// forward/simulation = primal) is the caller's job.
 ///
 /// # Algorithm
 ///
-/// 1. Build a fresh `CutRowMap::new(pool.populated_count, core.num_rows)` for
-///    the already-loaded core.
-/// 2. Append `initial_resident` (active, not-yet-resident slots) via
-///    [`append_slots_to_lp`].
-/// 3. Seed the warm basis: if `stored_basis` is `Some`, reconstruct it
-///    uniform-BASIC ([`reconstruct_basis_uniform_basic`]), repair the
-///    basic-count invariant ([`enforce_basic_count_invariant`]), and
-///    `solve(Some(..))`; else `solve(None)` (cold).
-/// 4. Inner loop, up to `params.max_inner_iterations`: score the omitted cuts
-///    at the live `view.primal` via [`score_violated_candidates`] (using
-///    `ctx.iteration.unwrap_or(0)` for the `k1` window); when none is violated
-///    (the **exact** optimum) copy the live view into the `res_*` buffers and
-///    return — **no re-solve**; else add the top-`nadic` violated slots, drop the
-///    view, and warm-`solve(None)` again.
-/// 5. **TC fallback**: if the cap is hit with violations remaining, add **all**
-///    remaining violated candidates and solve once (the LP changed, so this final
-///    solve is legitimate), copy that view into the `res_*` buffers, and return —
-///    preserving exactness.
+/// Append `initial_resident`, then run the initial solve: warm with a
+/// uniform-BASIC reconstruction of `stored_basis`
+/// ([`reconstruct_basis_uniform_basic`] + [`enforce_basic_count_invariant`]) if
+/// present, else cold. Then, up to `params.max_inner_iterations`:
+/// [`score_violated_candidates`] at the live primal; when none is violated (the
+/// exact optimum) copy the live view and return with NO re-solve, else add the
+/// top-`nadic` slots and warm-`solve(None)`. **TC fallback**: if the cap is hit
+/// with violations remaining, add ALL remaining candidates and solve once,
+/// preserving exactness.
 ///
-/// A cold mid-loop re-solve (a `solve(None)` whose retry ladder discarded the
-/// warm basis) is normal and tolerated — the loop never reads a stale basis
-/// between solves.
+/// A cold mid-loop re-solve (warm basis discarded by the retry ladder) is
+/// tolerated — the loop never reads a stale basis between solves.
 ///
 /// # Errors
 ///
@@ -683,12 +558,9 @@ fn map_solver_error(e: SolverError, ctx: DcsSolveContext) -> SddpError {
 /// # Allocation
 ///
 /// Steady-state allocation-free: all working buffers come from `scratch` (grow
-/// once via [`DcsSolveScratch::reserve`]); the result copy reuses the `res_*`
-/// buffers via `clear()` + `extend_from_slice`. The per-call `CutRowMap`
-/// allocation mirrors the per-(stage, solve) reset and is acceptable here.
-// The argument list is the spec-mandated signature: each item is a distinct
-// read-only input or scratch buffer with no natural grouping (the context-struct
-// rule already bundles the per-(stage, solve) scalars into `ctx`/`params`).
+/// once via [`DcsSolveScratch::reserve`]).
+// Rationale: each argument is a distinct input or scratch buffer with no natural
+// grouping; the per-(stage, solve) scalars are already bundled into `ctx`/`params`.
 #[allow(clippy::too_many_arguments)]
 pub fn lazy_solve_preloaded<S: SolverInterface>(
     solver: &mut ProfiledSolver<S>,
@@ -704,23 +576,15 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
 ) -> Result<(), SddpError> {
     let current_iteration = ctx.iteration.unwrap_or(0);
 
-    // Steps 1-3: prepare the LP and run the initial solve, producing the live
-    // `view` the lazy loop holds. Two modes (see `DcsSolveContext::continue_carry`).
+    // Two modes, see `DcsSolveContext::continue_carry`.
     let mut view = if ctx.continue_carry {
-        // CONTINUE (backward opening-reuse, openings 1..): the solver already
-        // holds the previous opening's cut rows (tracked in `scratch.row_map`)
-        // and a warm basis; the caller patched only the new opening's bounds. Do
-        // NOT reset the map, append the seed, or reload — just re-solve warm to
-        // re-optimize under the new bounds and fall through to the lazy loop,
-        // which appends only the cuts this opening additionally violates.
-        // `initial_resident` and `stored_basis` are ignored in this mode.
+        // CONTINUE: carry the loaded LP, resident rows, and warm basis; only the
+        // bounds changed. No reset / seed / reload — just re-solve warm.
         solver.solve(None).map_err(|e| map_solver_error(e, ctx))?
     } else {
-        // FRESH: reset the carried row map for the already-loaded core (the
-        // caller has run `load_model(core)` and applied any bounds patch; this
-        // routine must NOT reload — that would discard the patch), append the
-        // initial resident subset, then run the initial solve (warm uniform-
-        // BASIC if a stored basis exists, else cold).
+        // FRESH: reset the carried row map, append the seed, run the initial
+        // solve. Must NOT reload the model — that would discard the caller's
+        // bounds patch.
         scratch.row_map.reset(pool.populated_count, core.num_rows);
         append_slots_to_lp(
             solver,
@@ -752,22 +616,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
         }
     };
 
-    // Step 4/5: bounded lazy inner loop with TC fallback. The loop body scores
-    // the LIVE `view.primal` in place (no copy): `score_violated_candidates`
-    // borrows `scratch.scoring`/`scratch.row_map`, not the solver, so it composes
-    // with the held view. On the no-violation arm it copies the live view into the
-    // `res_*` buffers and returns `Ok(())` — NO redundant re-solve. On the add arm
-    // it drops the view, appends the selected slots, and re-solves to refresh it.
-    //
-    // Because the function returns `Result<()>` (not a borrowing view), `view`
-    // never escapes the loop, so holding it across the iteration is accepted by
-    // stable NLL — the Polonius "return a loan from a loop" gap is sidestepped.
     for _ in 0..params.max_inner_iterations {
-        // Cumulative scoring-time instrumentation: `scratch.scoring` (the inner
-        // scoring buffers) is borrowed during the call; the `+=` on
-        // `scratch.scoring_time_seconds` runs only after the call returns and
-        // touches a distinct field, so there is no borrow conflict. `view.primal`
-        // borrows the solver, which `score_violated_candidates` does not touch.
         let t0 = Instant::now();
         let violated = score_violated_candidates(
             pool,
@@ -783,18 +632,14 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
         scratch.scoring_time_seconds += t0.elapsed().as_secs_f64();
 
         if violated == 0 {
-            // Exact: the current resident subset reproduces the all-cuts optimum
-            // and the live view already holds it. Copy it into the result buffers
-            // and return — the LP is unchanged and re-solving would recompute the
-            // same point.
+            // Exact: the resident subset reproduces the all-cuts optimum, already
+            // held in `view`. Copy and return with no re-solve.
             scratch.store_result(&view);
             return Ok(());
         }
 
-        // A cut will be added, so the held view is stale: end its solver borrow
-        // here (`SolutionView` is `Copy`, so the borrow lasts only to its last
-        // use), then append the selected top-`nadic` slots and re-solve (warm;
-        // may escalate to cold — never assume the warm basis survived).
+        // End the view's solver borrow before mutating the solver, then append
+        // the top-`nadic` slots and re-solve.
         let _ = view;
         append_slots_to_lp(
             solver,
@@ -808,13 +653,10 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
         view = solver.solve(None).map_err(|e| map_solver_error(e, ctx))?;
     }
 
-    // TC fallback: the cap was hit with violations still present. Collect ALL
-    // remaining violated candidates (effective nadic = ∞) from the live primal,
-    // add them, and solve once. This degrades to a terminating-condition
-    // (all-cuts) solve for this (stage, solve) but preserves exactness.
+    // TC fallback (cap hit with violations remaining): add ALL remaining
+    // candidates (effective nadic = ∞) and solve once, preserving exactness.
     let mut all_params = *params;
     all_params.nadic = u32::MAX;
-    // Same cumulative-scoring instrumentation as the inner loop above.
     let t0 = Instant::now();
     let remaining = score_violated_candidates(
         pool,
@@ -828,8 +670,6 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
         &mut scratch.out_selected,
     );
     scratch.scoring_time_seconds += t0.elapsed().as_secs_f64();
-    // The live view's solver borrow must end before the appending re-solve
-    // (`SolutionView` is `Copy`, so the borrow lasts only to this last use).
     let _ = view;
     if remaining > 0 {
         append_slots_to_lp(
@@ -851,35 +691,20 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
 // build_initial_resident_set
 // ---------------------------------------------------------------------------
 
-/// Build the DCS initial resident-cut set from synchronized pool metadata.
+/// Build the DCS initial resident-cut set (the warm-start hint
+/// [`lazy_solve_preloaded`] consumes as `initial_resident`).
 ///
-/// The initial resident set is the warm-start hint [`lazy_solve_preloaded`] consumes as
-/// `initial_resident`. By exactness the converged optimum is independent of it,
-/// but the seed must be a deterministic function of the pool's per-slot
-/// metadata only — never of any solve trace, worker id, or MPI rank — so that
-/// results are invariant to the rank count. It reads only `last_active_iter`
-/// and `iteration_generated`, both maintained deterministically each iteration
-/// from the MPI-gathered visited states, so seeding from them preserves that
-/// invariance.
+/// Exactness makes the converged optimum independent of the seed, but the seed
+/// MUST be a deterministic function of pool metadata only — never of any solve
+/// trace, worker id, or MPI rank — so results stay invariant to the rank count
+/// (D5). It reads only `last_active_iter` and `iteration_generated`, both
+/// maintained deterministically, and emits slots in ascending order.
 ///
-/// Clears `out`, then for each populated slot `s` in ascending order
-/// (`0..pool.populated_count`) includes `s` iff `pool.active[s]` AND either:
-///
-/// - the slot was active within the last `k2` iterations
-///   (`current_iteration.saturating_sub(pool.metadata[s].last_active_iter) <= k2`),
-///   or
-/// - the slot was generated in the current iteration
-///   (`pool.metadata[s].iteration_generated == current_iteration`) — these cuts
-///   have not been tested yet and are always seeded (mirroring the
-///   current-iteration protection in `cut_selection`).
-///
-/// `saturating_sub` is required because `last_active_iter` can exceed
-/// `current_iteration` for current-iteration cuts; plain subtraction would
-/// underflow.
-///
-/// Ascending slot order makes the result deterministic and declaration-order
-/// invariant. Allocates nothing beyond growth of `out` (the caller pre-reserves
-/// to `pool.populated_count`).
+/// A populated slot `s` is included iff `pool.active[s]` AND it was active within
+/// the last `k2` iterations OR generated in the current iteration (current-iter
+/// cuts are untested, always seeded — mirroring `cut_selection`'s protection).
+/// `saturating_sub` guards the underflow when `last_active_iter` exceeds
+/// `current_iteration` for current-iteration cuts.
 pub fn build_initial_resident_set(
     pool: &CutPool,
     current_iteration: u64,
@@ -1989,10 +1814,9 @@ mod tests {
 
         // The optimum is the binding cut floor; no growth needed.
         assert_eq!(view.primal[LAZY_THETA_COL], 5.0);
-        // out_selected from the (single) scoring pass that found no violation.
         assert!(scratch.out_selected.is_empty());
-        // AC1: exactly ONE solve (was 2 before the redundant exit re-solve was
-        // removed): the initial solve, then the no-violation copy-and-return.
+        // AC1: exactly ONE solve — the initial solve, then the no-violation
+        // copy-and-return (no redundant exit re-solve).
         assert_eq!(
             solve_delta, 1,
             "no-violation path must issue exactly 1 solve (no redundant exit re-solve)"
@@ -2002,9 +1826,9 @@ mod tests {
     /// Omitting the binding cut forces at least one inner add_rows, and the
     /// final theta reflects the now-resident binding cut.
     ///
-    /// AC2: the one-addition path issues EXACTLY TWO LP solves (was 3: initial +
-    /// add/resolve + redundant exit) — the initial solve, then the add-and-resolve
-    /// whose rescore finds no violation and copies-and-returns with no third solve.
+    /// AC2: the one-addition path issues EXACTLY TWO LP solves — the initial
+    /// solve and the add-and-resolve whose rescore finds no violation and
+    /// copies-and-returns with no third solve.
     #[test]
     fn lazy_solve_grows_to_include_binding_cut() {
         let indexer = lazy_indexer();
@@ -2251,9 +2075,8 @@ mod tests {
     }
 
     /// A solve whose seed already contains the binding cut performs exactly one
-    /// scoring pass (no growth): the accumulator increases by that single pass
-    /// and the objective/theta result is unchanged from the pre-instrumentation
-    /// behavior (still the binding-cut optimum).
+    /// scoring pass (no growth): the accumulator advances by that single pass and
+    /// the result is the binding-cut optimum.
     #[test]
     fn scoring_time_single_pass_result_unchanged() {
         let indexer = lazy_indexer();
@@ -2280,13 +2103,10 @@ mod tests {
         .expect("lazy_solve_preloaded must succeed");
         let view = scratch.result_view();
 
-        // Single scoring pass still advances the accumulator.
         assert!(
             scratch.scoring_time_seconds >= before,
             "scoring accumulator must not decrease"
         );
-        // Result identical to the pre-instrumentation single-pass behavior: the
-        // binding-cut floor, no inner growth.
         assert_eq!(
             view.primal[LAZY_THETA_COL], 5.0,
             "single-pass optimum must be the binding-cut floor"

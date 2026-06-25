@@ -1,31 +1,21 @@
 //! Benders cut-row construction for the SDDP LP.
 //!
-//! Builds the LP rows that encode the Future Cost Function's cuts. The cut-sign
-//! convention is owned here: `push_scaled_coefficient` negates the stored raw
-//! subgradient so each row reads `−∇·x + θ ≥ intercept`, yielding the Benders
-//! cut `θ ≥ Q(x̂) + π'(x − x̂)`. See `push_scaled_coefficient` for the
-//! cut-sign negation contract and
-//! `training::backward::duals_extraction::extract_duals_from_view` for the
-//! subgradient-extraction side of the contract.
+//! Owns the cut-sign convention: `push_scaled_coefficient` negates the stored
+//! raw subgradient so each row reads `−∇·x + θ ≥ intercept`, the Benders cut
+//! `θ ≥ Q(x̂) + π'(x − x̂)`. The subgradient-extraction side lives in
+//! `training::backward::duals_extraction::extract_duals_from_view`.
 //!
-//! Consumers: the backward pass, simulation, lower-bound evaluation, and DCS
-//! (Dynamic Cut Selection). The forward training loop uses pre-baked templates
-//! and does not call these builders.
+//! The forward training loop uses pre-baked templates and does not call these
+//! builders; the backward pass, simulation, lower-bound evaluation, and DCS do.
 
 use cobre_solver::{RowBatch, SolverInterface};
 
 use crate::cut::FutureCostFunction;
 use crate::indexer::StateLayout;
 
-/// Push one negated, scaled coefficient entry into the cut row batch.
-///
-/// Shared per-coefficient emit helper. Used by [`build_cut_row_batch_into`]
-/// (the unified mask-driven path, via [`StateLayout::lp_column_for_state`]) and
-/// by [`build_delta_cut_row_batch_into`](crate::forward::build_delta_cut_row_batch_into)
-/// / [`push_cut_row`] (which retain their own sparse branching over
-/// [`StateLayout::state_to_lp_column`]). All three apply the same
-/// negate-and-divide-by-scale rule here so it cannot drift apart during
-/// maintenance.
+/// Push one cut-row coefficient: `-coeff * col_scale[j]` (sign negation per the
+/// module-doc Benders contract). Sole owner of the negate-and-scale rule, shared
+/// by all three cut-row builders so it cannot drift apart.
 #[inline]
 pub(crate) fn push_scaled_coefficient(
     batch: &mut RowBatch,
@@ -47,23 +37,13 @@ pub(crate) fn push_scaled_coefficient(
     batch.values.push(-coeff * d);
 }
 
-/// Append one Benders cut row to `batch` in CSR form.
+/// Append one Benders cut row to `batch` in CSR form, matching the layout of
+/// [`build_cut_row_batch_into`].
 ///
-/// Emits the negated-scaled state coefficients (via [`push_scaled_coefficient`],
-/// sparse over `state.nonzero_state_indices`), the positive scaled `theta`
-/// column entry, and the row bounds `row_lower = intercept`,
-/// `row_upper = +INFINITY` — exactly the layout [`build_cut_row_batch_into`] and
-/// [`append_new_cuts_to_lp`] use.
-///
-/// The mask is always finalized: [`StateLayout::new`] populates
-/// `nonzero_state_indices` (storage-only ⇒ `[0, n_state)` ascending;
-/// pure-thermal ⇒ empty with `n_state == 0`), so there is no dense fallback.
-///
-/// The caller pushes the `row_starts` offset for this row before calling (and
-/// the final terminator / `num_rows` / `add_rows` afterward); this helper only
-/// appends the row's non-zeros and bounds. Shared by `append_new_cuts_to_lp`
-/// ("all not-yet-resident" cuts) and the DCS `append_slots_to_lp` (an explicit
-/// slot set) so the two cannot drift apart.
+/// The caller pushes this row's `row_starts` offset before calling and the
+/// terminator / `num_rows` / `add_rows` afterward; this helper appends only the
+/// non-zeros and bounds. Shared by [`append_new_cuts_to_lp`] and the DCS
+/// [`append_slots_to_lp`] so the two cannot drift apart.
 #[inline]
 pub(crate) fn push_cut_row(
     batch: &mut RowBatch,
@@ -128,11 +108,8 @@ pub fn build_cut_row_batch_into(
     let theta_col = state.theta;
     let mask = &state.nonzero_state_indices;
 
-    // The cut-row loop is mask-driven only. `StateLayout::new` finalizes the
-    // mask and the `state_to_lp_column` precompute map unconditionally
-    // (storage-only → [0, n_state) ascending; pure-thermal → empty). Guard the
-    // missed-finalize regression — the constructor always finalizes, so this
-    // catches a malformed test layout, not a production miss.
+    // `StateLayout::new` always finalizes the map; this guards a malformed test
+    // layout, not a production miss.
     debug_assert!(
         !state.state_to_lp_column_map.is_empty() || state.n_state == 0,
         "state_to_lp_column_map not finalized before build_cut_row_batch_into"
@@ -145,9 +122,6 @@ pub fn build_cut_row_batch_into(
         return;
     }
 
-    // NNZ per cut = nonzero state entries + theta. For storage-only the mask is
-    // the full [0, n_state) range, so this equals the old dense `n_state + 1`;
-    // for pure-thermal it is `0 + 1`.
     let nnz_per_cut = mask.len() + 1;
     let total_nnz = num_cuts * nnz_per_cut;
 
@@ -165,20 +139,11 @@ pub fn build_cut_row_batch_into(
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         batch.row_starts.push(nz_offset as i32);
 
-        // Single mask-driven state coefficient loop. The mask carries the
-        // nonzero state indices in ascending order; `lp_column_for_state`
-        // reads the precomputed `state_to_lp_column(j)`.
-        //
-        // state_to_lp_column remaps outgoing-state indices to LP columns.
-        // For storage (j < N) the mapping is identity. For lag dimensions
-        // the outgoing state after shift_lag_state stores z_inflow at lag 0
-        // and shifted incoming lags at lag 1+, so the cut must reference the
-        // corresponding LP columns (z_inflow and incoming lag l−1).
-        //
-        // No padding-slot assert is needed here: the mask omits anticipated
-        // padding slots (`set_nonzero_mask` emits only `slot < k_i`, exactly
-        // the slots where `state_to_lp_column` is non-identity), so this loop
-        // never visits a padding slot.
+        // lp_column_for_state remaps outgoing-state index j to its LP column:
+        // identity for storage (j < N); for lag dimensions the outgoing state
+        // after shift_lag_state holds z_inflow at lag 0 and shifted incoming
+        // lags at lag 1+, so the cut references z_inflow and incoming lag l−1.
+        // The mask omits anticipated padding slots, so j is never a padding slot.
         for &j in mask {
             let lp_col = state.lp_column_for_state(j);
             push_scaled_coefficient(batch, lp_col, coefficients[j], col_scale);
@@ -237,37 +202,18 @@ pub fn build_cut_row_batch(
     batch
 }
 
-/// Append only the newly active cuts (not yet in the LP) to a live solver.
+/// Append only the newly active cuts (not yet in the LP) to a live solver,
+/// updating `row_map` with the new LP row indices and returning the count
+/// appended. Rows use the same transformation as [`build_cut_row_batch_into`].
 ///
-/// Iterates over all active cuts in `fcf.pools[stage]`, checks `row_map` to
-/// determine which are already present in the LP, builds a small [`RowBatch`]
-/// containing only the new cuts, and calls `solver.add_rows()`. Updates
-/// `row_map` with the new LP row indices.
+/// # Design invariant
 ///
-/// Returns the number of new cuts appended (0 if none).
-///
-/// The LP rows produced use the same coefficient transformation as
-/// [`build_cut_row_batch_into`]: negated state coefficients with column
-/// scaling and a positive theta column entry.
-///
-/// # Callers and design invariant
-///
-/// There are three production callers of [`SolverInterface::add_rows`]: this
-/// function (lower-bound LP), the backward pass delta-cut append in
-/// `cobre_sddp::backward::lp_setup::load_backward_lp`, and a test-only fallback path in
-/// `cobre_sddp::lower_bound`. The training-loop forward pass does not call
-/// `add_rows`; it uses pre-baked templates exclusively. The lower-bound LP
-/// grows monotonically across iterations (new cuts are appended; nothing is
-/// ever removed), and re-baking its template each iteration would increase
-/// cumulative setup cost from `O(n_iters)` to `O(n_iters^2)`. The
-/// append-only design is intentional.
+/// The lower-bound LP grows monotonically (cuts appended, never removed);
+/// re-baking its template each iteration would raise cumulative setup cost from
+/// `O(n_iters)` to `O(n_iters^2)`, so the append-only design is intentional.
 ///
 /// # Arguments
 ///
-/// - `solver`: the live LP solver instance with a loaded model.
-/// - `fcf`: the Future Cost Function containing all cut pools.
-/// - `stage`: 0-based stage index.
-/// - `state`: provides `n_state`, `theta`, and the state→column mapping.
 /// - `col_scale`: column scaling factors (empty slice if no scaling).
 /// - `row_map`: per-stage [`CutRowMap`] to update.
 /// - `batch_buf`: reusable [`RowBatch`] buffer for constructing the new cut rows.
@@ -291,16 +237,12 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
     batch_buf.clear();
 
     let n_state = state.n_state;
-    // The mask is always finalized (storage-only ⇒ [0, n_state) ascending;
-    // pure-thermal ⇒ empty with n_state == 0), so `mask.len() + 1` is the NNZ per
-    // cut in every case — no dense fallback.
     let nnz_per_cut = state.nonzero_state_indices.len() + 1;
 
     let mut new_count = 0usize;
     let mut nz_offset = 0usize;
 
     for (slot, intercept, coefficients) in fcf.active_cuts(stage) {
-        // Skip cuts already present in the LP.
         if row_map.lp_row_for_slot(slot).is_some() {
             continue;
         }
@@ -313,9 +255,6 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
             expected = n_state,
         );
 
-        // Build the row using the shared cut-row constructor (negated-scaled
-        // state coefficients + positive theta column + row bounds), the same
-        // transformation as build_cut_row_batch_into.
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         batch_buf.row_starts.push(nz_offset as i32);
 
@@ -342,26 +281,16 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
 
 /// Append an explicit set of cut slots from a [`CutPool`] to a live solver.
 ///
-/// The DCS analogue of [`append_new_cuts_to_lp`]: instead of "all active cuts
-/// not yet resident", it adds exactly the slots in `slots`, skipping any that
-/// are inactive or already resident in `row_map`. Each added row is built with
-/// the shared `push_cut_row` constructor (identical layout to
-/// [`append_new_cuts_to_lp`]) and recorded in `row_map`.
-///
-/// Returns the number of cut rows actually appended (`0` if none — `slots` was
-/// empty or every slot was inactive/already resident, in which case no
-/// `add_rows` call is made).
+/// The DCS analogue of [`append_new_cuts_to_lp`]: it adds exactly the active,
+/// not-yet-resident slots in `slots` (identical row layout), recording each in
+/// `row_map` and returning the count appended (`0` makes no `add_rows` call).
 ///
 /// # Parameters
 ///
-/// - `solver`: live LP solver with a loaded model.
-/// - `pool`: the cut pool to read intercepts/coefficients/active flags from.
-/// - `slots`: the slot ids to append, in caller order (the LP row order follows
-///   this order for the appended subset).
-/// - `state`: provides `n_state`, `theta`, and the state→column mapping.
+/// - `slots`: the slot ids to append, in caller order (the appended LP rows
+///   follow this order).
 /// - `col_scale`: column scaling factors (empty slice ⇒ no scaling).
 /// - `row_map`: per-(stage, solve) [`CutRowMap`](crate::cut::CutRowMap) to update.
-/// - `batch_buf`: reusable [`RowBatch`] buffer.
 ///
 /// # Panics
 ///
@@ -382,8 +311,6 @@ pub fn append_slots_to_lp<S: SolverInterface>(
     batch_buf.clear();
 
     let n_state = state.n_state;
-    // The mask is always finalized, so `mask.len() + 1` is the NNZ per cut in
-    // every case — no dense fallback.
     let nnz_per_cut = state.nonzero_state_indices.len() + 1;
 
     let mut new_count = 0usize;
@@ -392,7 +319,6 @@ pub fn append_slots_to_lp<S: SolverInterface>(
     for &slot in slots {
         let slot_usize = slot as usize;
 
-        // Skip inactive cuts and cuts already resident in the LP.
         if slot_usize >= pool.populated_count
             || !pool.active[slot_usize]
             || row_map.lp_row_for_slot(slot_usize).is_some()
@@ -607,7 +533,6 @@ mod tests {
         let mut batch_buf = empty_row_batch();
         let mut solver = RecordingMockSolver::new();
 
-        // No active cuts -> should return 0 and not call add_rows.
         let count = append_new_cuts_to_lp(
             &mut solver,
             &fcf,
@@ -694,11 +619,10 @@ mod tests {
 
         let state = state_layout(1, 0);
 
-        // Build via build_cut_row_batch_into.
         let mut expected_batch = empty_row_batch();
         build_cut_row_batch_into(&mut expected_batch, &fcf, 0, &state, &[]);
 
-        // Build via append_new_cuts_to_lp (empty row_map, so all cuts are new).
+        // Empty row_map, so append_new_cuts_to_lp treats all cuts as new.
         let mut row_map = CutRowMap::new(10, 5);
         let mut actual_batch = empty_row_batch();
         let mut solver = RecordingMockSolver::new();
@@ -712,7 +636,6 @@ mod tests {
             &mut actual_batch,
         );
 
-        // The batch passed to add_rows must match build_cut_row_batch_into.
         assert_eq!(actual_batch.num_rows, expected_batch.num_rows);
         assert_eq!(actual_batch.row_starts, expected_batch.row_starts);
         assert_eq!(actual_batch.col_indices, expected_batch.col_indices);
