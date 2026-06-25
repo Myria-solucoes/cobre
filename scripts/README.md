@@ -23,6 +23,7 @@ still carry the canonical boundary regex).
 | `check-doc-paths.sh`                 | Repo-relative paths and links in `book/` resolve against the tree.                                    |
 | `check_book_version.py`              | Version and MSRV references in `book/` match `Cargo.toml`.                                            |
 | `check_doc_voice.py`                 | No promotional voice or unpinned "typical" numbers in prose (doc-integrity §5/§2).                    |
+| `check_doc_counts.py`                | Pinned "N columns/fields" counts in `book/` match their adjacent table's row count.                   |
 | `check-doc-placeholders.sh`          | No placeholder text (TODO/TBD/…) in shipped docs.                                                     |
 | `check-docs-examples.sh`             | A fresh `init`→`run`→`report` matches the documented structure (needs the release binary; `--build`). |
 | `check-no-plan-leaks.sh`             | No plan-structure tokens (`Epic`/`ticket`/…) in shipped artifacts.                                    |

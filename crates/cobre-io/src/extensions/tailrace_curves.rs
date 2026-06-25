@@ -26,7 +26,7 @@
 //!
 //! Per-row constraints enforced by this parser:
 //!
-//! - All twelve columns must be present with the correct Arrow types
+//! - All eleven columns must be present with the correct Arrow types
 //!   (`downstream_reference_level_m` is nullable Float64; all other columns are non-nullable).
 //! - `outflow_min_m3s` and `outflow_max_m3s` must be non-negative and finite.
 //! - `outflow_max_m3s >= outflow_min_m3s` (a segment window is non-inverted).

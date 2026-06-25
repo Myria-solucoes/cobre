@@ -294,6 +294,8 @@ jobs:
         run: python3 scripts/ci/check_book_version.py
       - name: Check doc voice (no hype / unpinned numbers)
         run: python3 scripts/ci/check_doc_voice.py
+      - name: Check doc counts (pinned column/field counts match their tables)
+        run: python3 scripts/ci/check_doc_counts.py
       - name: Advisory — code-quality hotspot report
         # ADVISORY: always exits 0. Prints a ranked "where to act first" table
         # (churn x size x suppression density x in-body banners) to the job log.

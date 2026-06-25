@@ -667,7 +667,7 @@ pre-generated once before training and shared read-only across all iterations.
 ### Solver statistics instrumentation
 
 Per-call, per-phase timing and counting of all solver operations is tracked
-in `SolverStatistics` (18 fields) and written to `training/solver/iterations.parquet`
+in `SolverStatistics` and written to `training/solver/iterations.parquet`
 and `training/solver/retry_histogram.parquet`. In multi-threaded runs,
 per-worker statistics are aggregated via `aggregate_solver_statistics()` which
 sums all fields across workers.

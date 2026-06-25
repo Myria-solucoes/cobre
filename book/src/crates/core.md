@@ -284,7 +284,7 @@ assert!(system.bus(EntityId(1)).is_some());
 
 `SystemBuilder::build()` runs four validation phases in order:
 
-1. **Duplicate check.** Each of the 7 entity collections is scanned for
+1. **Duplicate check.** Each entity collection is scanned for
    duplicate `EntityId` values. All collections are checked before returning.
    If any duplicates are found, `build()` returns early with the error list.
 

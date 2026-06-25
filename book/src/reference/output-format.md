@@ -808,7 +808,7 @@ See the **`distribution` fields** table above.
 
 ### `simulation/costs/`
 
-Stage and block-level cost breakdown. One row per (stage, block) pair. 26 columns.
+Stage and block-level cost breakdown. One row per (stage, block) pair. 27 columns.
 
 | Column                         | Type    | Nullable | Description                                                                                                                  |
 | ------------------------------ | ------- | -------- | ---------------------------------------------------------------------------------------------------------------------------- |

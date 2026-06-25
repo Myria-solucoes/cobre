@@ -273,25 +273,30 @@ All four sections are required. Every scalar cost must be strictly positive (> 0
 Deficit segment costs must be monotonically increasing and the last segment must
 have `depth_mw: null` (unbounded).
 
-| Section                   | Field                             | Type           | Description                                                |
-| ------------------------- | --------------------------------- | -------------- | ---------------------------------------------------------- |
-| `bus`                     | `deficit_segments`                | array          | Piecewise-linear deficit cost tiers                        |
-| `bus`                     | `deficit_segments[].depth_mw`     | number or null | Segment depth (MW); `null` for the final unbounded segment |
-| `bus`                     | `deficit_segments[].cost`         | number         | Cost per MWh of deficit in this tier (USD/MWh)             |
-| `bus`                     | `excess_cost`                     | number         | Cost per MWh of excess injection (USD/MWh)                 |
-| `line`                    | `exchange_cost`                   | number         | Cost per MWh of inter-bus exchange flow (USD/MWh)          |
-| `hydro`                   | `spillage_cost`                   | number         | Spillage penalty                                           |
-| `hydro`                   | `turbined_cost`                   | number         | Turbined flow regularization cost (applied to every hydro) |
-| `hydro`                   | `diversion_cost`                  | number         | Diversion flow penalty                                     |
-| `hydro`                   | `storage_violation_below_cost`    | number         | Storage below-minimum violation penalty                    |
-| `hydro`                   | `filling_target_violation_cost`   | number         | Filling target violation penalty                           |
-| `hydro`                   | `turbined_violation_below_cost`   | number         | Turbined flow below-minimum violation penalty              |
-| `hydro`                   | `outflow_violation_below_cost`    | number         | Total outflow below-minimum violation penalty              |
-| `hydro`                   | `outflow_violation_above_cost`    | number         | Total outflow above-maximum violation penalty              |
-| `hydro`                   | `generation_violation_below_cost` | number         | Generation below-minimum violation penalty                 |
-| `hydro`                   | `evaporation_violation_cost`      | number         | Evaporation violation penalty                              |
-| `hydro`                   | `water_withdrawal_violation_cost` | number         | Water withdrawal violation penalty                         |
-| `non_controllable_source` | `curtailment_cost`                | number         | Curtailment penalty (USD/MWh)                              |
+| Section                   | Field                                 | Type           | Description                                                                                                                            |
+| ------------------------- | ------------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `bus`                     | `deficit_segments`                    | array          | Piecewise-linear deficit cost tiers                                                                                                    |
+| `bus`                     | `deficit_segments[].depth_mw`         | number or null | Segment depth (MW); `null` for the final unbounded segment                                                                             |
+| `bus`                     | `deficit_segments[].cost`             | number         | Cost per MWh of deficit in this tier (USD/MWh)                                                                                         |
+| `bus`                     | `excess_cost`                         | number         | Cost per MWh of excess injection (USD/MWh)                                                                                             |
+| `line`                    | `exchange_cost`                       | number         | Cost per MWh of inter-bus exchange flow (USD/MWh)                                                                                      |
+| `hydro`                   | `spillage_cost`                       | number         | Spillage penalty                                                                                                                       |
+| `hydro`                   | `turbined_cost`                       | number         | Turbined flow regularization cost (applied to every hydro)                                                                             |
+| `hydro`                   | `diversion_cost`                      | number         | Diversion flow penalty                                                                                                                 |
+| `hydro`                   | `storage_violation_below_cost`        | number         | Storage below-minimum violation penalty                                                                                                |
+| `hydro`                   | `filling_target_violation_cost`       | number         | Filling target violation penalty                                                                                                       |
+| `hydro`                   | `turbined_violation_below_cost`       | number         | Turbined flow below-minimum violation penalty                                                                                          |
+| `hydro`                   | `outflow_violation_below_cost`        | number         | Total outflow below-minimum violation penalty                                                                                          |
+| `hydro`                   | `outflow_violation_above_cost`        | number         | Total outflow above-maximum violation penalty                                                                                          |
+| `hydro`                   | `generation_violation_below_cost`     | number         | Generation below-minimum violation penalty                                                                                             |
+| `hydro`                   | `evaporation_violation_cost`          | number         | Symmetric evaporation violation penalty                                                                                                |
+| `hydro`                   | `evaporation_violation_pos_cost`      | number or null | Optional over-evaporation override; supersedes `evaporation_violation_cost` for the positive direction. Omitted = symmetric value      |
+| `hydro`                   | `evaporation_violation_neg_cost`      | number or null | Optional under-evaporation override; supersedes `evaporation_violation_cost` for the negative direction. Omitted = symmetric value     |
+| `hydro`                   | `water_withdrawal_violation_cost`     | number         | Symmetric water withdrawal violation penalty                                                                                           |
+| `hydro`                   | `water_withdrawal_violation_pos_cost` | number or null | Optional over-withdrawal override; supersedes `water_withdrawal_violation_cost` for the positive direction. Omitted = symmetric value  |
+| `hydro`                   | `water_withdrawal_violation_neg_cost` | number or null | Optional under-withdrawal override; supersedes `water_withdrawal_violation_cost` for the negative direction. Omitted = symmetric value |
+| `hydro`                   | `inflow_nonnegativity_cost`           | number or null | Optional inflow non-negativity penalty. Omitted = default `1000.0`                                                                     |
+| `non_controllable_source` | `curtailment_cost`                    | number         | Curtailment penalty (USD/MWh)                                                                                                          |
 
 **Example:**
 
@@ -1024,7 +1029,7 @@ The quartic is evaluated as `coefficient_0 + coefficient_1*x + coefficient_2*x²
 
 **Validation rules:**
 
-- All twelve columns must be present with the correct Arrow types.
+- All eleven columns must be present with the correct Arrow types.
 - `outflow_min_m3s` and `outflow_max_m3s` must be non-negative and finite.
 - `outflow_max_m3s >= outflow_min_m3s` (segments are non-inverted).
 - `coefficient_0` through `coefficient_4` must be finite.
