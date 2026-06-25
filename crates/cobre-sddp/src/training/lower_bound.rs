@@ -45,145 +45,94 @@ use crate::{
 };
 use cobre_solver::StageTemplate;
 
-/// Stage-0 inputs for lower bound evaluation, bundled to reduce parameter count.
+/// Stage-0 inputs for [`evaluate_lower_bound`], bundled to reduce parameter count.
 ///
-/// Passed to [`evaluate_lower_bound`] in place of four separate parameters.
+/// The lower bound evaluates stage 0 only, so every field is its stage-0 value;
+/// the slice/range fields come from the stage-0 `StageContext` (and its
+/// `StageGeometry`). NCS-related fields are empty — and NCS patching is skipped —
+/// when no stochastic NCS entities exist.
 pub struct LbEvalSpec<'a> {
-    /// Structural LP template for stage 0.
+    /// Stage-0 LP template.
     pub template: &'a StageTemplate,
-    /// AR-dynamics base row index for stage 0.
+    /// AR-dynamics base row.
     pub base_row: usize,
-    /// Pre-computed `ζ*σ` noise scale per hydro at stage 0.
+    /// ζ·σ inflow-noise scale per hydro.
     pub noise_scale: &'a [f64],
-    /// Number of hydro plants with inflow noise.
+    /// Hydros carrying inflow noise.
     pub n_hydros: usize,
-    /// Opening tree for stage-0 noise realizations.
+    /// Opening tree of noise realizations.
     pub opening_tree: &'a OpeningTree,
-    /// Risk measure for stage-0 objective aggregation.
+    /// Objective risk measure.
     pub risk_measure: &'a RiskMeasure,
-    /// Stochastic context for NCS availability patching.
-    ///
-    /// When `Some`, stochastic NCS column bounds are patched per opening using
-    /// `transform_ncs_noise`. When `None`, NCS patching is skipped (used in
-    /// tests or when no stochastic NCS entities are present).
+    /// `Some` patches stochastic NCS column bounds per opening via `transform_ncs_noise`; `None` skips.
     pub stochastic: Option<&'a StochasticContext>,
-    /// Number of buses with stochastic load noise (needed as offset into the
-    /// raw noise vector to locate the NCS noise dimensions).
+    /// Offset to the NCS noise dimensions in the raw noise vector.
     pub n_load_buses: usize,
-    /// Maximum generation (MW) per stochastic NCS entity, sorted by entity ID.
-    /// Length equals the number of stochastic NCS entities. Empty when none exist.
+    /// MW, id-sorted (the order `transform_ncs_noise` emits its bound buffers).
     pub ncs_max_gen: &'a [f64],
-    /// Per-stochastic-NCS curtailment policy, aligned 1:1 with
-    /// [`Self::ncs_max_gen`]. `false` pins the column to availability.
+    /// Aligned 1:1 with `ncs_max_gen`; `false` pins the column to availability.
     pub ncs_allow_curtailment: &'a [bool],
-    /// Stage-invariant stochastic-slot → dense NCS column index map.
-    ///
-    /// `ncs_stochastic_dense_col[slot]` is the slot's NCS system index (the dense
-    /// column position) of the stochastic NCS at `slot` (id-sorted order, the order
-    /// `transform_ncs_noise` emits its bound buffers), so its LP column block is
-    /// `ncs_generation.start + ncs_stochastic_dense_col[slot] * block_count + blk`.
-    /// Sourced from
-    /// [`crate::context::StageContext::ncs_stochastic_dense_col`]. Empty when
-    /// stage 0 has no NCS columns (patching is then skipped).
+    /// Dense NCS column index per stochastic slot; see
+    /// [`crate::context::StageContext::ncs_stochastic_dense_col`].
     pub ncs_stochastic_dense_col: &'a [usize],
-    /// Stage-invariant commissioning window per stochastic NCS slot.
-    ///
-    /// `ncs_stochastic_windows[slot] = (entry, exit)`; the gather computes dormancy
-    /// inline at `stage_id` via the shared
-    /// `commissioning_active` predicate
-    /// and forces `[0, 0]` for a dormant slot, exactly as the forward and backward
-    /// patch sites do — keeping the three identical is the "patch NCS identically"
-    /// contract (a divergence understates the bound, the D15 bug class). Sourced from
-    /// [`crate::context::StageContext::ncs_stochastic_windows`].
+    /// Keep the forward, backward, and lower-bound patch sites identical — the
+    /// "patch NCS identically" contract; a divergence understates the bound (D15).
     pub ncs_stochastic_windows: &'a [(Option<i32>, Option<i32>)],
-    /// Stage id of the lower-bound stage (the first study stage). The commissioning
-    /// key the dormancy predicate compares the windows against.
+    /// Commissioning key the dormancy predicate compares the windows against.
     pub stage_id: i32,
-    /// Number of blocks at stage 0.
+    /// Blocks at stage 0.
     pub block_count: usize,
-    /// Column range for NCS generation variables in the stage-0 LP.
-    ///
-    /// Sourced from the per-stage `StageContext::ncs_col_starts[0]`, the stage-0
-    /// NCS column base — never a single global indexer base, since the lower bound
-    /// evaluates stage 0 only. Empty when no NCS entities are present; NCS
-    /// patching is then skipped.
+    /// LP column range for NCS generation.
     pub ncs_generation: Range<usize>,
-    /// Row index of the first z-inflow definition constraint at stage 0.
-    ///
-    /// Always `0`: state pinning uses column bounds, so no rows precede the
-    /// z-inflow block. Sourced from the per-stage `StageContext::geometry_per_stage[0]`
-    /// (the stage-0 `StageGeometry`), the single owner of the row layout, since
-    /// the lower bound evaluates stage 0 only — mirroring how
-    /// `block_count`/`ncs_generation` are sourced from the stage-0 `StageContext`
-    /// slices.
+    /// Always `0`: column-bound state pinning leaves no rows before the z-inflow block.
     pub z_inflow_row_start: usize,
-    /// Inflow non-negativity treatment method.
-    ///
-    /// When `Truncation` or `TruncationWithPenalty`, the opening loop clamps
-    /// negative PAR(p) inflows to zero before patching the LP. When `None` or
-    /// `Penalty`, raw noise is used directly.
+    /// `Truncation`/`TruncationWithPenalty` clamp negative PAR(p) inflows to zero before patching.
     pub inflow_method: &'a InflowNonNegativityMethod,
 }
 
 /// Per-evaluation scratch buffers for [`evaluate_lower_bound`] on rank 0.
 ///
-/// Allocated once and stored on `IterationScratch`;
-/// reused across training iterations to eliminate per-iteration heap allocation.
-/// The first call to `evaluate_lower_bound` still allocates (grows Vec capacity);
-/// subsequent iterations reuse the existing capacity.
-///
-/// All fields are plain `f64` / `usize` working buffers — no LP-specific state.
-// All fields are scratch buffers; the shared `_buf` postfix is intentional.
+/// Allocated once on `IterationScratch` and reused across iterations: the first
+/// call grows the `Vec` capacities, later calls refill them in place. Never
+/// replace a reused buffer with a fresh `Vec` — that reintroduces the
+/// per-iteration allocation this struct exists to avoid.
+// `_buf` postfix is shared across fields by design.
 #[allow(clippy::struct_field_names)]
 pub struct LbEvalScratch {
     /// Per-opening noise realization (one entry per hydro).
     pub noise_buf: Vec<f64>,
-    /// Z-inflow RHS values per hydro for PAR(p) rows.
+    /// Z-inflow RHS per hydro for PAR(p) rows.
     pub z_inflow_rhs_buf: Vec<f64>,
-    /// NCS column upper bounds in full stochastic-slot order, written by
-    /// `transform_ncs_noise` per opening.
+    /// NCS column upper bounds in full stochastic-slot order (`transform_ncs_noise` per opening).
     pub ncs_col_upper_buf: Vec<f64>,
-    /// NCS column indices for the stage-0 **active** NCS columns (constant across
-    /// openings for a given stage; built once before the opening loop).
+    /// Stage-0 active NCS column indices (built once before the opening loop).
     pub ncs_col_indices_buf: Vec<usize>,
-    /// NCS column lower bounds in full stochastic-slot order, parallel to
-    /// `ncs_col_upper_buf`, written by `transform_ncs_noise` per opening.
+    /// NCS column lower bounds, parallel to `ncs_col_upper_buf`.
     pub ncs_col_lower_buf: Vec<f64>,
-    /// Active-subset gather target (lower) for the stage-0 NCS bound patch. The
-    /// per-opening `transform_ncs_noise` outputs in `ncs_col_{lower,upper}_buf`
-    /// run in full slot order (including slots inactive at stage 0); the patch
-    /// gathers only the active slots' bounds here so the set-bounds call receives
-    /// index/lower/upper buffers of equal length. Passing the slot-order buffers
-    /// verbatim would over-feed the call at a strict-subset stage-0.
+    /// Active-subset gather (lower): `ncs_col_{lower,upper}_buf` run in full slot
+    /// order, so gathering only the active slots here keeps the set-bounds
+    /// index/lower/upper buffers equal-length at a strict-subset stage 0.
     pub ncs_col_lower_active_buf: Vec<f64>,
-    /// Active-subset gather target (upper), parallel to `ncs_col_lower_active_buf`.
+    /// Active-subset gather (upper), parallel to `ncs_col_lower_active_buf`.
     pub ncs_col_upper_active_buf: Vec<f64>,
-    /// PAR lag matrix (constant across openings for a given call).
+    /// PAR lag matrix (constant across openings).
     pub lag_matrix_buf: Vec<f64>,
-    /// Per-hydro eta floor computed from lags (constant across openings).
+    /// Per-hydro eta floor from lags (constant across openings).
     pub eta_floor_buf: Vec<f64>,
-    /// Per-hydro PAR inflow evaluated per opening.
+    /// Per-hydro PAR inflow per opening.
     pub par_inflow_buf: Vec<f64>,
-    /// Per-hydro effective eta after clamping (recomputed per opening).
+    /// Per-hydro effective eta after clamping (per opening).
     pub effective_eta_buf: Vec<f64>,
     /// Per-hydro zero-target vector for truncation precompute.
     pub zero_targets_buf: Vec<f64>,
-    /// Uniform per-opening probabilities passed to the risk measure during
-    /// rank-0 aggregation. Resized and refilled per call to
-    /// `lb_aggregate_and_broadcast`; capacity is reused across iterations to
-    /// avoid the per-iteration allocation flagged by the architecture audit.
+    /// Uniform per-opening probabilities for risk-measure aggregation.
     pub uniform_prob_buf: Vec<f64>,
-    /// Per-opening objective values collected by `lb_evaluate_stage_0` and
-    /// consumed by `lb_aggregate_and_broadcast`. Cleared and refilled per call;
-    /// capacity is reused across iterations to avoid a per-iteration allocation.
+    /// Per-opening objective values from `lb_evaluate_stage_0`.
     pub objectives_buf: Vec<f64>,
 }
 
 impl LbEvalScratch {
-    /// Construct a new scratch with all buffers empty.
-    ///
-    /// No heap allocation occurs until `evaluate_lower_bound` populates the
-    /// buffers on the first call.
+    /// Empty buffers; no allocation until the first `evaluate_lower_bound` call.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -211,39 +160,24 @@ impl Default for LbEvalScratch {
     }
 }
 
-/// Bundle of mutable scratch references passed to [`evaluate_lower_bound`].
-///
-/// Groups `patch_buf`, `lb_cut_batch`, `lb_cut_row_map`, and `lb_scratch` so
-/// that the public signature of `evaluate_lower_bound` stays within the
-/// clippy `too-many-arguments-threshold = 9`.  Construct via
-/// [`LbEvalScratchBundle::from_scratch_fields`] when calling from a
-/// `TrainingSession` (disjoint-borrow factory pattern).
+/// Groups the mutable scratch refs for [`evaluate_lower_bound`] so its signature
+/// stays under clippy's `too-many-arguments-threshold`. Build via
+/// [`LbEvalScratchBundle::from_scratch_fields`] (disjoint-borrow factory).
 pub struct LbEvalScratchBundle<'a> {
-    /// Reusable patch buffer for LP row-bound patching.
+    /// Reusable LP row-bound patch buffer.
     pub patch_buf: &'a mut PatchBuffer,
-    /// Cut row batch for the lower-bound LP (stage 0).
+    /// Stage-0 cut row batch for the lower-bound LP.
     pub lb_cut_batch: &'a mut cobre_solver::RowBatch,
-    /// Optional cut row map for append-only lower-bound LP management.
+    /// Cut row map for append-only lower-bound LP management.
     pub lb_cut_row_map: Option<&'a mut crate::cut::CutRowMap>,
-    /// Per-evaluation scratch buffers (reused across training iterations).
+    /// Reusable per-evaluation scratch buffers.
     pub lb_scratch: &'a mut LbEvalScratch,
 }
 
 impl<'a> LbEvalScratchBundle<'a> {
-    /// Construct from disjoint fields of `IterationScratch`.
-    ///
-    /// Analogous to `BackwardPassInputs::from_session_fields`: the caller takes
-    /// the fields it needs separately so that the borrow checker can verify
-    /// non-aliasing, then passes them here.
-    ///
-    /// ```text
-    /// let bundle = LbEvalScratchBundle::from_scratch_fields(
-    ///     &mut self.scratch.patch_buf,
-    ///     &mut self.scratch.lb_cut_batch,
-    ///     Some(&mut self.scratch.lb_cut_row_map),
-    ///     &mut self.scratch.lb_scratch,
-    /// );
-    /// ```
+    /// Take the disjoint `IterationScratch` fields separately — so the borrow
+    /// checker can verify non-aliasing — then bundle them; the same disjoint-borrow
+    /// factory pattern as `BackwardPassInputs::from_session_fields`.
     pub fn from_scratch_fields(
         patch_buf: &'a mut PatchBuffer,
         lb_cut_batch: &'a mut cobre_solver::RowBatch,
@@ -259,14 +193,8 @@ impl<'a> LbEvalScratchBundle<'a> {
     }
 }
 
-/// Step 1 — rank-0 buffer pre-population and append-only LP management.
-///
-/// Pre-populates the constant NCS column-bound index/lower buffers (same across
-/// all openings at a given stage) in `scratch` and performs the append-only LP
-/// load. The caller-supplied `scratch` is populated in-place so that its
-/// capacity is reused across training iterations.
-///
-/// Only called on rank 0.
+/// Rank-0 setup: pre-populate the constant NCS column-index buffer and run the
+/// append-only LP load. Only called on rank 0.
 fn lb_init_rank0<S: SolverInterface>(
     solver: &mut S,
     fcf: &FutureCostFunction,
@@ -276,19 +204,12 @@ fn lb_init_rank0<S: SolverInterface>(
     lb_cut_row_map: Option<&mut crate::cut::CutRowMap>,
     scratch: &mut LbEvalScratch,
 ) {
-    // Clear the append-only buffers before repopulating (capacity is kept).
     scratch.ncs_col_upper_buf.clear();
     scratch.ncs_col_indices_buf.clear();
     scratch.ncs_col_lower_buf.clear();
 
-    // Pre-populate the indices buffer for the stage-0 **active** NCS columns.
-    // Indices are constant across openings (same stage, same dense columns, same
-    // block count) so we build them once here. They stride by
-    // `ncs_stochastic_dense_col[slot]` (the slot's NCS system index — the dense
-    // column position) for every slot. The per-opening bound buffers
-    // (`transform_ncs_noise` output) are gathered inside the opening loop with a
-    // `[0, 0]` cap for dormant slots, since both bounds scale with the
-    // per-scenario availability realization.
+    // Indices are constant across openings (same dense columns) — build once here;
+    // the per-opening bound buffers are gathered inside the loop.
     if let Some(stoch) = spec.stochastic {
         let n_stochastic_ncs = stoch.n_stochastic_ncs();
         if n_stochastic_ncs > 0 && !spec.ncs_generation.is_empty() {
@@ -301,20 +222,11 @@ fn lb_init_rank0<S: SolverInterface>(
         }
     }
 
-    // Resize par_inflow_buf to the current n_hydros (no-op when capacity
-    // is already sufficient, which is the common case from iteration 2 on).
     scratch.par_inflow_buf.resize(spec.n_hydros, 0.0);
 
-    // Append-only LP management for the lower bound solver.
-    //
-    // When a CutRowMap is provided, the solver persists across iterations:
-    //   - First call (row_map empty): load_model + append all active cuts.
-    //   - Subsequent calls: append only new cuts (row_map tracks existing).
-    // Cuts are never removed from the LB LP — this keeps the lower bound
-    // monotonically non-decreasing across iterations.
-    //
-    // When no CutRowMap is provided (test contexts with no persistent
-    // state), fall back to full rebuild each call.
+    // Append-only LP management: cuts are never removed, keeping the lower bound
+    // monotone across iterations. With a CutRowMap the solver persists (load once,
+    // then append only new cuts); without one (tests), rebuild each call.
     if let Some(row_map) = lb_cut_row_map {
         if row_map.total_cut_rows() == 0 {
             solver.load_model(spec.template);
@@ -329,7 +241,6 @@ fn lb_init_rank0<S: SolverInterface>(
             lb_cut_batch,
         );
     } else {
-        // Test-only path: full rebuild every call.
         build_cut_row_batch_into(lb_cut_batch, fcf, 0, state_layout, &spec.template.col_scale);
         solver.load_model(spec.template);
         if lb_cut_batch.num_rows > 0 {
@@ -338,22 +249,13 @@ fn lb_init_rank0<S: SolverInterface>(
     }
 }
 
-/// Step 2 — truncation precompute and per-opening LP evaluation.
-///
-/// Precomputes the PAR lag matrix and eta floor (constant across openings), then
-/// iterates over all stage-0 openings. For each opening: evaluates PAR inflows,
-/// computes effective eta, patches row bounds, patches NCS column bounds
-/// (correctness-critical per-opening step), solves, and records the objective.
-///
-/// Writes the per-opening objectives into `scratch.objectives_buf`.
+/// Truncation precompute (PAR lag matrix + eta floor, constant across openings),
+/// then a per-opening LP solve writing each objective into `scratch.objectives_buf`.
 ///
 /// # Errors
 ///
 /// Returns [`SddpError::Infeasible`] if any opening LP is infeasible, or
 /// [`SddpError::Solver`] for other LP solve failures.
-// The per-opening loop body (noise build + NCS patch + solve) accounts for the
-// length; it cannot be meaningfully split without fragmenting correctness-critical
-// sequential steps (especially the NCS column-bound patch inside the opening loop).
 fn lb_evaluate_stage_0<S: SolverInterface>(
     solver: &mut S,
     spec: &LbEvalSpec<'_>,
@@ -366,8 +268,7 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
     let n_hydros = spec.n_hydros;
     let base_row = spec.base_row;
 
-    // Truncation precomputation: lag matrix and eta floor are constant
-    // across openings (same initial_state, same stage 0).
+    // Truncation precompute: constant across openings, so done once before the loop.
     let needs_truncation = matches!(
         spec.inflow_method,
         InflowNonNegativityMethod::Truncation | InflowNonNegativityMethod::TruncationWithPenalty
@@ -392,11 +293,7 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             }
         }
 
-        // eta_floor is constant across openings: depends only on lags
-        // (initial_state) and stage (0), not on the opening noise.
         scratch.eta_floor_buf.resize(n_hydros, f64::NEG_INFINITY);
-        // zero_targets is constant (all zeros); reuse the scratch buffer to
-        // avoid a per-call allocation.
         scratch.zero_targets_buf.clear();
         scratch.zero_targets_buf.resize(n_hydros, 0.0);
         solve_par_noise_batch(
@@ -415,12 +312,9 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
         scratch.noise_buf.clear();
         scratch.z_inflow_rhs_buf.clear();
 
-        // Per-opening: evaluate PAR inflows (only when truncation active).
         if let Some(par_lp) = truncation_par {
-            // `evaluate_par_batch` operates on the n_hydros PAR series only;
-            // `raw_noise` carries the full noise dimension (hydros + load buses
-            // + NCS). Slice to the hydro prefix to match the contract, exactly
-            // as the sibling `compute_effective_eta` call below does.
+            // Slice raw_noise to its hydro prefix: it spans hydros + load buses + NCS,
+            // but evaluate_par_batch wants only the n_hydros PAR series.
             evaluate_par_batch(
                 par_lp,
                 0,
@@ -439,7 +333,6 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             &mut scratch.effective_eta_buf,
         );
 
-        // Build noise_buf and z_inflow_rhs_buf from effective eta.
         for (h, &eta_eff) in scratch.effective_eta_buf.iter().enumerate() {
             scratch
                 .noise_buf
@@ -455,9 +348,8 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             scratch.z_inflow_rhs_buf.push(z_rhs);
         }
 
-        // No shift_anticipated_state call here: the lower-bound evaluator
-        // solves each stage at a fixed trial point, never advancing the ring
-        // buffer.
+        // No shift_anticipated_state here: the lower bound solves at a fixed trial
+        // point, never advancing the ring buffer.
         patch_buf.fill_col_state_patches(state_layout, initial_state, &spec.template.col_scale);
         patch_buf.fill_forward_patches(
             state_layout,
@@ -484,11 +376,9 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             &patch_buf.upper[..n_patches],
         );
 
-        // Patch NCS column upper bounds with per-opening stochastic availability.
-        // CORRECTNESS: this patch MUST be inside the per-opening loop; each opening
-        // has a different noise realization that changes the available NCS generation.
-        // Moving this outside the loop would be a bug, pinned by the D15
-        // deterministic regression case (`d15_non_controllable_source`).
+        // The NCS bound patch MUST stay inside the per-opening loop — each opening's
+        // noise changes the available NCS generation; hoisting it understates the
+        // bound (D15, `d15_non_controllable_source`).
         if let Some(stoch) = spec.stochastic {
             let n_stochastic_ncs = stoch.n_stochastic_ncs();
             if n_stochastic_ncs > 0 && !spec.ncs_generation.is_empty() {
@@ -506,13 +396,9 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
                     &mut scratch.ncs_col_lower_buf,
                     &mut scratch.ncs_col_upper_buf,
                 );
-                // `ncs_col_indices_buf` was pre-populated in `lb_init_rank0`
-                // (constant across openings, dense stage-0 columns). The bounds
-                // above are in full stochastic-slot order; the gather copies every
-                // slot's bounds parallel to the dense index buffer, forcing
-                // `[0, 0]` for a slot whose window excludes the lower-bound stage
-                // id (dormancy computed inline) — the same zeroing the
-                // forward/backward patch sites apply.
+                // Gather the active slots' bounds, forcing `[0, 0]` for slots dormant
+                // at the lower-bound stage — the same zeroing the forward/backward
+                // patch sites apply.
                 crate::noise::gather_dense_ncs_bounds(
                     spec.ncs_stochastic_windows,
                     spec.stage_id,
@@ -544,15 +430,8 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
     Ok(())
 }
 
-/// Phase 3 — risk-measure aggregation and MPI broadcast.
-///
-/// Applies `risk_measure` to the per-opening objectives with uniform
-/// probabilities, scales by [`COST_SCALE_FACTOR`], then broadcasts the scalar
-/// lower bound from rank 0 to all other ranks.
-///
-/// `uniform_prob_buf` is resized and refilled in-place every call so the
-/// per-iteration allocation pattern (`vec![1/n; n]`) is amortized to a
-/// capacity-only growth on the first call.
+/// Apply `risk_measure` to the per-opening objectives (uniform probabilities),
+/// scale by [`COST_SCALE_FACTOR`], then broadcast the scalar from rank 0.
 ///
 /// # Errors
 ///
@@ -576,35 +455,21 @@ fn lb_aggregate_and_broadcast<C: Communicator>(
 
 /// Evaluate the global lower bound for the current FCF approximation.
 ///
-/// On rank 0 the function iterates over all stage-0 openings, solves the LP
-/// for each, and applies the risk measure to produce a risk-adjusted scalar
-/// lower bound. The scalar is then broadcast to all ranks.
+/// Only rank 0 runs the stage-0 opening loop and applies the risk measure; the
+/// resulting scalar is broadcast to all ranks. `initial_state` is the known `x_0`
+/// (length `state.n_state`). See [`LbEvalSpec`] and [`LbEvalScratchBundle`].
 ///
-/// ## Arguments
+/// # Errors
 ///
-/// - `solver` — Mutable LP solver instance. Only rank 0 calls `solve`; other
-///   ranks skip the opening loop entirely.
-/// - `fcf` — Future Cost Function with all accumulated cuts.
-/// - `initial_state` — Known initial state vector `x_0` (length `state.n_state`).
-/// - `scratch` — Bundled mutable scratch references (patch buffer, cut batch,
-///   cut row map, and per-evaluation buffers). See [`LbEvalScratchBundle`].
-/// - `spec` — Stage-0 data bundle: template, base row, noise scale, hydro count,
-///   opening tree, and risk measure. See [`LbEvalSpec`].
-/// - `comm` — Communicator for rank/size queries and broadcast.
+/// - [`SddpError::Infeasible`] — a stage-0 opening LP is infeasible (a modelling
+///   error; stage 0 should always be feasible via the penalty/recourse structure).
+/// - [`SddpError::Solver`] — LP solve failed for another reason.
+/// - [`SddpError::Communication`] — the broadcast to non-root ranks failed.
 ///
-/// ## Errors
+/// # Panics
 ///
-/// - [`SddpError::Infeasible`] — Stage-0 LP has no feasible solution for an
-///   opening. This indicates a modelling error; stage 0 should always be
-///   feasible due to the penalty/recourse structure.
-/// - [`SddpError::Solver`] — LP solve failed for a reason other than
-///   infeasibility (numerical difficulty, time limit, etc.).
-/// - [`SddpError::Communication`] — The broadcast to non-root ranks failed.
-///
-/// ## Panics
-///
-/// Panics if `spec.opening_tree.n_openings(0) == 0` on rank 0. Stage 0 must
-/// have at least one opening; this is a caller contract violation.
+/// Panics if `spec.opening_tree.n_openings(0) == 0` on rank 0 — stage 0 must have
+/// at least one opening (a caller contract).
 pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
     solver: &mut S,
     fcf: &FutureCostFunction,
@@ -622,7 +487,6 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
             "evaluate_lower_bound: stage 0 must have at least one opening"
         );
 
-        // Populate scratch buffers and perform append-only LP load.
         lb_init_rank0(
             solver,
             fcf,
@@ -633,7 +497,6 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
             scratch.lb_scratch,
         );
 
-        // Truncation precompute + per-opening loop.
         lb_evaluate_stage_0(
             solver,
             spec,
@@ -643,9 +506,6 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
             scratch.lb_scratch,
         )?;
 
-        // Phase 3: risk-measure aggregation + broadcast. `objectives_buf` and
-        // `uniform_prob_buf` are disjoint fields of `lb_scratch`, borrowed
-        // immutably and mutably respectively.
         return lb_aggregate_and_broadcast(
             &scratch.lb_scratch.objectives_buf,
             spec.risk_measure,
@@ -1895,12 +1755,9 @@ mod tests {
             inflow_method: &InflowNonNegativityMethod::None,
         };
 
-        // Pre-populate the stage-0 active NCS column indices, exactly the buffer
-        // `lb_init_rank0` builds before the opening loop (this test calls
-        // `lb_evaluate_stage_0` directly, so it must seed that buffer itself). The
-        // lower/upper bound buffers are NOT seeded here: `lb_evaluate_stage_0`
-        // clears and refills them every opening via `transform_ncs_noise`, so any
-        // value pushed now would be immediately overwritten.
+        // This test calls lb_evaluate_stage_0 directly, so it seeds the NCS index
+        // buffer that lb_init_rank0 would otherwise build; the lower/upper bound
+        // buffers are left empty — the loop refills them per opening.
         let mut lb_scratch = LbEvalScratch::new();
         for ncs_idx in 0..n_ncs {
             for blk in 0..block_count {
@@ -1926,8 +1783,6 @@ mod tests {
         )
         .unwrap();
 
-        // set_col_bounds is called twice per opening: once for state-fixing and
-        // once for NCS bounds.
         assert_eq!(
             solver.set_col_bounds_calls,
             2 * actual_n_openings,
@@ -1935,7 +1790,6 @@ mod tests {
              got {} calls — NCS bounds are not being patched per opening",
             solver.set_col_bounds_calls
         );
-        // Sanity: the opening count must be positive.
         assert!(
             actual_n_openings > 0,
             "opening tree must have at least one opening at stage 0"
@@ -1987,7 +1841,6 @@ mod tests {
         let mut row_batch = empty_row_batch();
         let mut lb_scratch = LbEvalScratch::new();
 
-        // First call — allocates scratch buffers for the first time.
         let mut solver1 = MockSolver::with_objectives(vec![10.0]);
         {
             let mut bundle = LbEvalScratchBundle::from_scratch_fields(
@@ -2008,14 +1861,12 @@ mod tests {
             .unwrap();
         }
 
-        // Capture capacity after the first call.
         let cap_after_first = lb_scratch.noise_buf.capacity();
         assert!(
             cap_after_first > 0,
             "noise_buf must have nonzero capacity after first call (n_hydros = 1)"
         );
 
-        // Second call — must reuse the existing capacity (no reallocation).
         let mut solver2 = MockSolver::with_objectives(vec![20.0]);
         {
             let mut bundle = LbEvalScratchBundle::from_scratch_fields(
@@ -2046,21 +1897,12 @@ mod tests {
 
     // ── Filling phase-gating inheritance (template-driven, no per-opening patch) ─
     //
-    // These three tests verify that `evaluate_lower_bound` applies the SAME phase
-    // gating as the forward/backward passes for a filling hydro. Unlike NCS — whose availability is a per-OPENING
-    // stochastic draw, so the lower bound must re-run `transform_ncs_noise` per
-    // opening (the `sddp.md` "Lower-bound evaluation must patch NCS" contract,
-    // pinned by `lb_evaluate_stage_0_patches_ncs_bounds_per_opening`) — filling
-    // gating is STAGE-DETERMINISTIC: it is a pure function of `stage.id` and the
-    // hydro's `FillingConfig`. So all of it is carried in the per-stage
-    // `StageTemplate` (the three filling row families) and in the `noise_scale`
-    // vector (zeroed for a PreFilling hydro by `compute_noise_scale`). The lower
-    // bound loads the SAME `templates[0]` and reads the SAME `noise_scale` the
-    // forward/backward passes use, so it inherits filling structure by
-    // construction — no per-opening filling patch exists or is needed. A future
-    // edit that hand-wires a filling patch into the lower bound would duplicate
-    // the template structure into the hot path and risk drift; the source-text
-    // guard below makes that fail.
+    // Filling gating is stage-deterministic (a function of `stage.id` + `FillingConfig`),
+    // so it lives entirely in the per-stage `StageTemplate` and `noise_scale` the lower
+    // bound already loads — it inherits filling structure by construction, with no
+    // per-opening patch (unlike NCS, whose per-opening stochastic draw forces a
+    // re-patch). Hand-wiring a filling patch here would duplicate template structure
+    // into the hot path; the source-text guard below fails that edit.
 
     /// Build the per-stage templates for a study whose hydros exercise filling at
     /// stage 0, via the SAME `build_stage_templates` (`geometry_per_stage`) path

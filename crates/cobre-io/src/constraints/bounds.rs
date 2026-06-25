@@ -636,14 +636,9 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
                 path,
             )?;
 
-            // Mirror the entity-reader check in `validate_filling_configs`: a
-            // per-stage `filling_min_rate_m3s` override is non-negative. The
-            // filling-target backward fold (`build_filling_v_target`:
-            // `running -= ζ·rate`) and the sufficiency check
-            // (`check_filling_sufficiency`: `capacity += ζ·rate`) both assume
-            // `rate ≥ 0`; a negative override otherwise reverses the V_target
-            // floor and the feasibility budget. The finiteness gate above would
-            // pass a negative value straight through to those consumers.
+            // build_filling_v_target and check_filling_sufficiency assume rate ≥ 0;
+            // a negative override silently inverts the V_target floor (validate_filling_configs
+            // enforces this for the entity; the finiteness gate above does not).
             if let Some(v) = filling_min_rate_m3s
                 && v < 0.0
             {
@@ -1504,10 +1499,6 @@ mod tests {
         }
     }
 
-    /// AC: negative per-stage `filling_min_rate_m3s` override -> `SchemaError`.
-    /// Mirrors the entity-level non-negative check in `validate_filling_configs`;
-    /// the V_target backward fold and the filling-sufficiency budget both assume
-    /// `rate >= 0`.
     #[test]
     fn test_hydro_negative_filling_min_rate() {
         let schema = Arc::new(Schema::new(vec![

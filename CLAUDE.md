@@ -41,7 +41,16 @@ These are non-negotiable. Violations must be fixed before committing.
   release consumers. Existing rustdoc/comment references predating this
   rule are tech debt; clean up opportunistically when touching the
   surrounding code.
-
+- **Comment discipline — default-off** — Code ships with **no comments** unless a
+  comment survives the Deletion Test (`.claude/rules/comments.md` §1): delete it;
+  if a competent reader of the code alone would then introduce a bug, "simplify"
+  something correct into something wrong, or lose a fact that lives outside the
+  file, keep the **single clause** that triggers it — otherwise leave it deleted.
+  Refactor (rename / extract / introduce a type) and relocate (commit message /
+  `rules/*.md` / a test name) **before** commenting. **Never delete or weaken a
+  load-bearing correctness contract** — those are pinned to a named regression
+  test and a `rules/*.md` entry (`.claude/rules/sddp.md`); tighten an inline copy
+  to a pointer, never lose the invariant.
 ---
 
 ## Architecture Guides (Read When Relevant)
@@ -53,7 +62,7 @@ factors) are codified in `.claude/rules/sddp.md`, which auto-loads when editing
 plausible deviation produces wrong bounds or rejected warm-starts that still
 compile.
 
-Comment & documentation rules for all `.rs` files are codified in `.claude/rules/comments.md`, which auto-loads when editing any `**/*.rs` file. It governs the Earned-Comment Test, the Four Voices, and directives D1–D5 / N1–N6.
+Comment & documentation rules for all `.rs` files are codified in `.claude/rules/comments.md`, which auto-loads when editing any `**/*.rs` file. It governs the default-off Deletion Test, the refactor/relocate/hoist gates, the Four Voices, and directives D1–D5 / N1–N6.
 
 Prose documentation integrity rules (scope matrix, the single adaptation, and the six prose-only failure modes) are codified in `.claude/rules/doc-integrity.md`, which auto-loads when editing Markdown files in `book/`, `CONTRIBUTING.md`, `CHANGELOG.md`, and root-level `*.md`.
 
