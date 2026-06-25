@@ -312,7 +312,7 @@ must also be written by the Python bindings (`run_via_study` / `run_training_pha
 When adding a new output:
 
 1. Add the `cobre_io::write_*` call in both the CLI and Python paths
-2. Run `python3 scripts/check_python_parity.py` to verify parity
+2. Run `python3 scripts/ci/check_python_parity.py` to verify parity
 3. The pre-commit hook runs this check automatically
 
 See `.claude/architecture-rules.md` for the full Python parity checklist.
@@ -410,8 +410,8 @@ Before tagging a new release:
    ```
 3. Run quality checks:
    ```bash
-   python3 scripts/check_book_version.py
-   python3 scripts/check_python_parity.py --max 0
+   python3 scripts/ci/check_book_version.py
+   python3 scripts/ci/check_python_parity.py --max 0
    ```
 4. Run `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings`,
    then repeat clippy for the CLP backend:

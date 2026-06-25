@@ -43,7 +43,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 COBRE_BIN="${REPO_ROOT}/target/release/cobre"
 COMPARATOR="${SCRIPT_DIR}/compare_per_opening_parity.py"

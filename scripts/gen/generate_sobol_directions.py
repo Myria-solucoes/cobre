@@ -40,7 +40,7 @@ from pathlib import Path
 PRIMARY_URL = "https://web.maths.unsw.edu.au/~fkuo/sobol/new-joe-kuo-6.21201"
 FALLBACK_URL = "https://web.maths.unsw.edu.au/~fkuo/sobol/joe-kuo-old.1111"
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 OUTPUT_PATH = (
     REPO_ROOT
     / "crates"

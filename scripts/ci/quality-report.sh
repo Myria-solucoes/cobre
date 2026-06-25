@@ -43,7 +43,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly REPO_ROOT
 
 readonly CHURN_SINCE="${CHURN_SINCE:-12 months ago}"
@@ -129,6 +129,6 @@ emit_rows | awk -F'\t' -v top="$TOP_N" -v since="$CHURN_SINCE" '
 
 # E8 comment-bloat advisory — ranked candidates for the comment-skeptic pass.
 echo ""
-bash "${REPO_ROOT}/scripts/check-comment-bloat.sh" "${REPO_ROOT}"
+bash "${REPO_ROOT}/scripts/ci/check-comment-bloat.sh" "${REPO_ROOT}"
 
 exit 0

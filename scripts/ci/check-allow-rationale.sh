@@ -13,7 +13,7 @@
 # them down is a separate remediation track. So this gate enforces only on
 # NEW or CHANGED `#[allow(...)]` attributes (diffed against the merge base),
 # with a tracked allowlist of the pre-existing un-rationaled sites
-# (scripts/allow-rationale-allowlist.txt). New code must justify its
+# (scripts/ci/allow-rationale-allowlist.txt). New code must justify its
 # suppressions; the legacy backlog is grandfathered until it is burned down.
 #
 # In-scope lints (the shape/dead-code lints D4 names):
@@ -47,7 +47,7 @@
 #   no `#[cfg(test)]` line. Such files are dropped from the scan (see
 #   TEST_ONLY_FILES below).
 #
-# Allowlist: scripts/allow-rationale-allowlist.txt, keyed by `path::symbol`
+# Allowlist: scripts/ci/allow-rationale-allowlist.txt, keyed by `path::symbol`
 #   (file path + the enclosing fn/impl/mod item name resolved as the next item
 #   below the attribute), NOT by path:line — line numbers drift, the symbol is
 #   stable. A site whose `path::symbol` key is in the allowlist is exempt even
@@ -102,10 +102,10 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly REPO_ROOT
 
-readonly ALLOWLIST_FILE="${REPO_ROOT}/scripts/allow-rationale-allowlist.txt"
+readonly ALLOWLIST_FILE="${REPO_ROOT}/scripts/ci/allow-rationale-allowlist.txt"
 
 # In-scope lint tokens (ERE alternation, used to test an extracted lint list).
 readonly IN_SCOPE_LINTS='too_many_lines|too_many_arguments|type_complexity|dead_code|unused_'

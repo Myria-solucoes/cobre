@@ -27,7 +27,7 @@
 #   scripts/check-docs-examples.sh --build   — builds the release binary first
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 # ── Single source of truth for the documented init file count ─────────────────

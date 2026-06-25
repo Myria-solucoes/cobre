@@ -1,7 +1,7 @@
 name: Links
 
 # External-URL link check for the user-facing docs. Repo-relative paths are
-# validated separately by scripts/check-doc-paths.sh; this job is http(s) only.
+# validated separately by scripts/ci/check-doc-paths.sh; this job is http(s) only.
 # Two triggers: every pull request (fast feedback, transient-tolerant) and a
 # weekly cron (the authoritative stale-link sweep).
 on:

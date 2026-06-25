@@ -31,7 +31,7 @@ fn repo_root() -> PathBuf {
 #[ignore = "requires mpirun and a release build with --features mpi"]
 fn per_opening_mpi_parity_d01() {
     let root = repo_root();
-    let script = root.join("scripts").join("test_per_opening_mpi_parity.sh");
+    let script = root.join("scripts").join("dev").join("test_per_opening_mpi_parity.sh");
     let case_dir = root
         .join("examples")
         .join("deterministic")

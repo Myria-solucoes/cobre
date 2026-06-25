@@ -8,9 +8,9 @@ echo "==> Running cargo fmt --check..."
 cargo fmt --all -- --check
 
 echo "==> Running plan-structure leak check..."
-bash scripts/check-no-plan-leaks.sh
+bash scripts/ci/check-no-plan-leaks.sh
 
 echo "==> Running Python parity check..."
-python3 scripts/check_python_parity.py --max 0
+python3 scripts/ci/check_python_parity.py --max 0
 
 echo "==> Pre-commit checks passed."

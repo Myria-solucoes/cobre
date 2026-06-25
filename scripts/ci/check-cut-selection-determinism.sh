@@ -50,7 +50,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # Parallel arrays of forbidden patterns (POSIX ERE) and human-readable
 # messages. Using parallel arrays (rather than a single grouped ERE) keeps

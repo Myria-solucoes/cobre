@@ -1,4 +1,4 @@
-//! Runs `scripts/check-infra-genericity.sh` and asserts it exits successfully.
+//! Runs `scripts/ci/check-infra-genericity.sh` and asserts it exits successfully.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -14,7 +14,7 @@ fn infra_genericity_gate() {
         .parent()
         .expect("crates/ has a parent directory");
 
-    let script = workspace_root.join("scripts/check-infra-genericity.sh");
+    let script = workspace_root.join("scripts/ci/check-infra-genericity.sh");
 
     assert!(
         script.exists(),

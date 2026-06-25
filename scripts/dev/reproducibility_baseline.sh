@@ -24,7 +24,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 COBRE_BIN="${REPO_ROOT}/target/release/cobre"
 CASE_DIR="${REPO_ROOT}/examples/4ree"

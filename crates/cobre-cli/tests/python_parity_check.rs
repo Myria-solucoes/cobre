@@ -1,6 +1,6 @@
 //! Integration test: Python parity check.
 //!
-//! `scripts/check_python_parity.py` parses both `cobre-cli/src/commands/run.rs`
+//! `scripts/ci/check_python_parity.py` parses both `cobre-cli/src/commands/run.rs`
 //! and `cobre-python/src/run.rs` for `cobre_io::write_*` calls and other output
 //! helpers and asserts the two sets are identical — the canonical source-level
 //! enforcement of the CLI↔Python output-parity hard rule.
@@ -34,10 +34,10 @@ fn python_parity_script_passes() {
     }
 
     let root = repo_root();
-    let script = root.join("scripts/check_python_parity.py");
+    let script = root.join("scripts/ci/check_python_parity.py");
     assert!(
         script.exists(),
-        "scripts/check_python_parity.py must exist at {}",
+        "scripts/ci/check_python_parity.py must exist at {}",
         script.display()
     );
 

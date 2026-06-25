@@ -34,10 +34,10 @@ cs_emit_comment_lines() {
 }
 
 # --- Boundary-drift guard --------------------------------------------------
-# When EXECUTED directly (`bash scripts/lib/comment_scan.sh`), assert that the
+# When EXECUTED directly (`bash scripts/ci/lib/comment_scan.sh`), assert that the
 # two holdout gates still carry the canonical cfg(test) boundary, so an edit
 # here cannot silently desync them. When SOURCED, this block is skipped, so the
-# gates pay no runtime cost. Wire `bash scripts/lib/comment_scan.sh` into CI to
+# gates pay no runtime cost. Wire `bash scripts/ci/lib/comment_scan.sh` into CI to
 # enforce the invariant.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     set -euo pipefail
@@ -57,7 +57,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         fi
     done
     if [[ "$_drift" -ne 0 ]]; then
-        echo "Re-sync the holdout gate(s) with scripts/lib/comment_scan.sh." >&2
+        echo "Re-sync the holdout gate(s) with scripts/ci/lib/comment_scan.sh." >&2
         exit 1
     fi
     echo "OK: cfg(test) boundary in sync across comment_scan.sh and holdout gates."

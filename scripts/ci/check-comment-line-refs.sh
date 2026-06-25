@@ -35,13 +35,13 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly REPO_ROOT
 
-# shellcheck source=scripts/lib/comment_scan.sh
-source "${REPO_ROOT}/scripts/lib/comment_scan.sh"
+# shellcheck source=scripts/ci/lib/comment_scan.sh
+source "${REPO_ROOT}/scripts/ci/lib/comment_scan.sh"
 command -v cs_emit_production_lines >/dev/null \
-    || { echo "FATAL: scripts/lib/comment_scan.sh did not load its helpers." >&2; exit 2; }
+    || { echo "FATAL: scripts/ci/lib/comment_scan.sh did not load its helpers." >&2; exit 2; }
 
 # Production .rs source directories, scanned per-file with the cfg(test)
 # tail-block exclusion. Mirrors check-comment-refs.sh SCAN_DIRS.
