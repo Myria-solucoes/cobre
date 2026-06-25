@@ -1,11 +1,8 @@
 //! Probe: HiGHS row-bound sentinel semantics for cut deactivation.
 //!
-//! Validates the hypothesis that setting a row's bounds to
-//! `[-f64::INFINITY, +f64::INFINITY]` makes the constraint trivially
-//! satisfied, and that this convention can be reversed without corrupting
-//! LP state.
-//!
-//! Run with: `cargo test -p cobre-solver --test sentinel_inf_row_probe -- --nocapture`
+//! Validates that setting a row's bounds to `[-f64::INFINITY, +f64::INFINITY]`
+//! makes the constraint trivially satisfied, and that this can be reversed
+//! without corrupting LP state.
 
 #![cfg_attr(
     test,
@@ -23,17 +20,9 @@
 
 use cobre_solver::{HighsSolver, RowBatch, SolverError, SolverInterface, StageTemplate};
 
-/// Build a 2-column, 2-row LP:
-///
-/// - Col 0 (theta): free in (-INF, +INF), objective coefficient 1.0
-/// - Col 1 (x):     bounded in [0, 10], objective coefficient 0.0
-/// - Row 0 (x_eq_5):  x == 5          → lower=5, upper=5
-/// - Row 1 (cut_row): theta - 2*x >= -3 → lower=-3, upper=+INF
-///
-/// CSC matrix:
-///   col_starts  = [0, 1, 3]
-///   row_indices = [1, 0, 1]          (col0 touches row1; col1 touches row0, row1)
-///   values      = [1.0, 1.0, -2.0]
+/// 2-column, 2-row LP:
+/// - Col 0 (theta): free, objective 1.0; Col 1 (x): [0, 10], objective 0.0
+/// - Row 0: x == 5; Row 1 (cut_row): theta - 2*x >= -3
 fn build_two_row_template() -> StageTemplate {
     StageTemplate {
         num_cols: 2,
@@ -57,18 +46,10 @@ fn build_two_row_template() -> StageTemplate {
     }
 }
 
-/// Build a 2-column, 3-row LP:
-///
-/// - Col 0 (theta): free in (-INF, +INF), objective coefficient 1.0
-/// - Col 1 (x):     bounded in [0, 10], objective coefficient 0.0
-/// - Row 0 (x_eq_5):    x == 5              → lower=5,     upper=5
-/// - Row 1 (cut_row_A): theta - 2*x >= -3   → lower=-3,    upper=+INF
-/// - Row 2 (cut_row_B): theta >= -1000       → lower=-1000, upper=+INF
-///
-/// CSC matrix:
-///   col_starts  = [0, 2, 4]
-///   row_indices = [1, 2, 0, 1]       (col0 touches rows 1,2; col1 touches rows 0,1)
-///   values      = [1.0, 1.0, 1.0, -2.0]
+/// 2-column, 3-row LP:
+/// - Col 0 (theta): free, objective 1.0; Col 1 (x): [0, 10], objective 0.0
+/// - Row 0: x == 5; Row 1 (cut_row_A): theta - 2*x >= -3;
+///   Row 2 (cut_row_B): theta >= -1000 (dominated by A)
 fn build_three_row_template() -> StageTemplate {
     StageTemplate {
         num_cols: 2,

@@ -29,13 +29,8 @@ mod tests {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /// Minimal 2-column LP fixture.
-    ///
-    /// Two columns, no constraints.  Enough for `HiGHS` to load so that
-    /// `num_cols = 2` is reflected in `set_iteration_limits` heuristics.
-    ///
-    ///   min  x0 + x1
-    ///   x0 ∈ [0, 10],  x1 ∈ [0, 10]
+    /// Minimal 2-column, no-constraint LP fixture. `num_cols = 2` feeds the
+    /// `set_iteration_limits` heuristic the AC-8 tests check.
     fn make_minimal_template() -> StageTemplate {
         StageTemplate {
             num_cols: 2,
@@ -59,7 +54,6 @@ mod tests {
         }
     }
 
-    /// Construct a fresh `HighsSolver` with the minimal 2-column LP loaded.
     fn make_solver() -> HighsSolver {
         let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
         solver.load_model(&make_minimal_template());
@@ -76,14 +70,11 @@ mod tests {
     #[test]
     fn sentinel_uses_heuristic() {
         let mut solver = make_solver();
-        // Default profile has sentinel (0) for simplex_iteration_limit.
-        // Confirm via apply_profile that the profile value is 0.
         solver.apply_profile(&HighsProfile {
             simplex_iteration_limit: 0,
             ..Default::default()
         });
 
-        // Level 0 calls set_iteration_limits() internally.
         solver.apply_retry_level_options_for_test(0);
 
         let cap = solver
@@ -107,7 +98,6 @@ mod tests {
             ..Default::default()
         });
 
-        // Level 0 calls set_iteration_limits() internally.
         solver.apply_retry_level_options_for_test(0);
 
         let cap = solver
@@ -131,7 +121,6 @@ mod tests {
             ..Default::default()
         });
 
-        // Level 0 calls set_iteration_limits() internally.
         solver.apply_retry_level_options_for_test(0);
 
         let cap = solver
@@ -411,7 +400,6 @@ mod tests {
             ..Default::default()
         });
 
-        // Simulate the finalization path: restore defaults then re-apply profile.
         solver.restore_defaults_then_apply_profile_for_test();
 
         let tol = solver
@@ -436,7 +424,6 @@ mod tests {
             ..Default::default()
         });
 
-        // Simulate the finalization path: restore defaults then re-apply profile.
         solver.restore_defaults_then_apply_profile_for_test();
 
         let tol = solver
@@ -469,7 +456,6 @@ mod tests {
             ..Default::default()
         });
 
-        // Level 0 calls set_iteration_limits() internally.
         solver.apply_retry_level_options_for_test(0);
 
         let cap = solver
@@ -485,13 +471,10 @@ mod tests {
 
     // ── Delta-only profile dispatch: solve() does not re-apply ───────────────
     //
-    // ProfiledSolver installs the active profile at phase boundaries via
-    // set_profile (delta-gated by PartialEq) and re-applies it on the retry
-    // path. solve() itself does NOT re-apply the profile: on the
-    // forward/backward/simulation hot path the inner solver's options already
-    // equal the active profile, so re-applying on every solve would issue
-    // redundant FFI option setters. This test verifies that solves with no
-    // intervening profile change dispatch zero additional apply_profile calls.
+    // ProfiledSolver installs the active profile at phase boundaries (delta-gated
+    // by PartialEq) and on the retry path, but solve() does NOT re-apply it: on
+    // the hot path the inner solver's options already equal the active profile, so
+    // re-applying every solve would issue redundant FFI option setters.
 
     /// Counts calls to `apply_profile`.
     struct SetterCountMock {
@@ -551,7 +534,6 @@ mod tests {
         let mock = SetterCountMock::new();
         let mut solver = ProfiledSolver::new(mock);
 
-        // Apply a non-default profile once at phase entry (simulates phase boundary).
         let non_default = HighsProfile {
             primal_feasibility_tolerance: 1e-7,
             dual_feasibility_tolerance: 1e-7,
@@ -563,23 +545,20 @@ mod tests {
         };
         solver.set_profile(&non_default);
 
-        // set_profile dispatched one apply_profile call for the non-default profile.
-        // Reset the counter so we only measure solve-triggered calls.
+        // Reset the counter `set_profile` just bumped, to measure only the
+        // solve-triggered calls below.
         solver.inner_mut().apply_profile_call_count.set(0);
 
         for _ in 0..3 {
             let _ = solver.solve(None);
         }
 
-        // solve() must NOT re-apply an unchanged profile: the inner solver's
-        // options already equal the active profile on the hot path.
         let solve_count = solver.inner().apply_profile_call_count.get();
         assert_eq!(
             solve_count, 0,
             "solve() must not re-apply an unchanged profile; expected 0, got {solve_count}"
         );
 
-        // Re-installing the identical profile is a delta-gated no-op.
         solver.set_profile(&non_default);
         let after_reset = solver.inner().apply_profile_call_count.get();
         assert_eq!(

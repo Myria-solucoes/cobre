@@ -1,14 +1,14 @@
 //! Smoke test for the warm-start basis path in `HighsSolver`.
 //!
-//! `cobre_highs_set_basis_non_alien` is the sole basis setter used at runtime.
-//! It rejects bases where `col_basic + row_basic != num_row` by returning
-//! `HIGHS_STATUS_ERROR`; `solve(Some(&basis))` maps that rejection to
-//! `SolverError::BasisInconsistent`. No alien fallback exists.
+//! `cobre_highs_set_basis_non_alien` is the sole basis setter used at runtime; it
+//! rejects bases where `col_basic + row_basic != num_row`, which
+//! `solve(Some(&basis))` maps to `SolverError::BasisInconsistent`. No alien
+//! fallback exists.
 //!
-//! This test exercises the warm-start loop on a well-formed fixture and asserts
-//! the self-extracted basis is accepted (near-zero `basis_consistency_failures`
-//! relative to `basis_offered`). Driving it through `HighsSolver` directly
-//! avoids a circular dev-dep on `cobre-sddp`.
+//! This exercises the warm-start loop on a well-formed fixture and asserts the
+//! self-extracted basis is accepted (near-zero `basis_consistency_failures`).
+//! Driving it through `HighsSolver` directly avoids a circular dev-dep on
+//! `cobre-sddp`.
 #![cfg_attr(
     test,
     allow(
@@ -23,15 +23,9 @@
 
 use cobre_solver::{Basis, HighsSolver, SolverInterface, StageTemplate};
 
-/// The SS1.1 fixture: 3 variables, 2 equality constraints.
-///
-/// Duplicated from `src/highs.rs` `#[cfg(test)] mod tests` because the private
-/// test module is not accessible from integration test files.
-///
-///   min  0*x0 + 1*x1 + 50*x2
-///   s.t. x0            = 6   (state-fixing)
-///        2*x0 + x2     = 14  (power balance)
-///   x0 in [0, 10], x1 in [0, +inf), x2 in [0, 8]
+/// The SS1.1 fixture: 3 variables, 2 equality constraints. Duplicated from the
+/// `src/highs.rs` `#[cfg(test)]` module, which is not accessible from integration
+/// test files.
 fn make_fixture_stage_template() -> StageTemplate {
     StageTemplate {
         num_cols: 3,
@@ -58,25 +52,15 @@ fn make_fixture_stage_template() -> StageTemplate {
 /// Simulated warm-start loop: verifies that `basis_consistency_failures` stays
 /// near zero across many warm-start solve calls with a self-consistent basis.
 ///
-/// Structure mirrors the baked-template backward pass:
-///   1. Cold-solve once to obtain an optimal basis.
-///   2. Loop N times: reload model → `solve(Some(&basis))` → `get_basis`.
-///
-/// The final `get_basis` in each iteration captures any updated basis for the
-/// next iteration, matching how the SDDP pipeline propagates bases forward.
-///
-/// Assertions:
-///   - `basis_offered > 0`
-///   - `basis_consistency_failures / basis_offered < 0.01`
+/// The reload → `solve(Some(&basis))` → `get_basis` loop mirrors how the pipeline
+/// propagates a basis forward across solves.
 #[test]
 fn non_alien_basis_loop_low_rejection_rate() {
     const ITERATIONS: usize = 60;
 
-    // Arrange
     let template = make_fixture_stage_template();
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
 
-    // Cold-solve to get a consistent basis.
     solver.load_model(&template);
     solver.solve(None).expect("cold-start solve must succeed");
 
@@ -85,18 +69,14 @@ fn non_alien_basis_loop_low_rejection_rate() {
 
     let stats_before = solver.statistics();
 
-    // Act — simulate the warm-start loop.
     for _ in 0..ITERATIONS {
         solver.load_model(&template);
         solver
             .solve(Some(&basis))
             .expect("warm-start solve must succeed");
-        // Capture the updated basis for the next iteration, matching the
-        // baked-template pipeline's basis propagation.
         solver.get_basis(&mut basis);
     }
 
-    // Assert
     let stats_after = solver.statistics();
     let offered = stats_after.basis_offered - stats_before.basis_offered;
     let failures = stats_after.basis_consistency_failures - stats_before.basis_consistency_failures;

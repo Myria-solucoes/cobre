@@ -1,31 +1,17 @@
 //! CLP determinism harness — declaration-order invariance and bit-for-bit
 //! re-solve reproducibility for the CLP backend.
 //!
-//! Determinism (not merely correctness) is the property under test, so every
-//! comparison here is **bit-for-bit** via [`f64::to_bits`], never a tolerance.
-//! Two solves are "the same" only if their objective, primal vector, reduced
-//! costs, and (inverse-permuted) row duals are identical down to the last
-//! mantissa bit. A tolerance comparison would mask exactly the drift this
-//! harness exists to catch.
+//! Determinism is the property under test, so every comparison is **bit-for-bit**
+//! via [`f64::to_bits`], never a tolerance — a tolerance would mask exactly the
+//! drift this harness exists to catch.
 //!
-//! The harness is reusable: it exposes a [`MutationStep`] vocabulary and a
-//! standalone [`assert_solve_sequence_deterministic`] helper that drives an
-//! arbitrary mutate-then-solve sequence through three runs — the same instance
-//! twice plus a fresh instance — and asserts all three agree bit-for-bit. New
-//! solve-capability sequences (incremental bound patches, hot-start re-solves)
-//! plug in by constructing a `&[MutationStep]` and calling that helper; the
-//! core comparison logic does not change.
+//! Two preconditions hold this together: the active solver disables perturbation
+//! (without which CLP injects pseudo-random bound perturbations and no re-solve is
+//! bit-reproducible), and it forwards row prices with no negation (so duals
+//! compare directly).
 //!
-//! Two facts hold this together and are preconditions for everything below:
-//!   - The active solver disables perturbation (the default profile sends the
-//!     perturbation-off mode), without which CLP injects pseudo-random bound
-//!     perturbations and no re-solve is bit-reproducible.
-//!   - The solver forwards row prices in the canonical sign convention with no
-//!     negation, so duals compare directly.
-//!
-//! The fixtures (`SS1.1`, a 3-column / 2-equality-row LP, and `SS1.2`, two
-//! appended `>=` rows over the same columns) are re-declared locally because an
-//! integration test cannot import the `#[cfg(test)]` builders from `src`.
+//! Fixtures are re-declared locally because an integration test cannot import the
+//! `#[cfg(test)]` builders from `src`.
 
 #![cfg(feature = "clp")]
 #![cfg_attr(
@@ -42,16 +28,8 @@ use cobre_solver::{ClpProfile, ClpSolver, RowBatch, SolverInterface, StageTempla
 
 // ─── Shared fixtures (re-declared locally; see module docs) ──────────────────
 
-/// `SS1.1`: 3 columns, 2 equality rows.
-///
-/// ```text
-/// minimize  0*x0 + 1*x1 + 50*x2
-/// s.t.  row0:  x0           = 6
-///       row1: 2*x0     + x2 = 14
-///       x0 in [0, 10], x1 in [0, +inf), x2 in [0, 8]
-/// ```
-///
-/// Optimal: objective `100`, primals `(6, 0, 2)`, row duals `[-100, 50]`.
+/// `SS1.1`: 3 columns, 2 equality rows. Optimal: objective `100`, primals
+/// `(6, 0, 2)`, row duals `[-100, 50]`.
 fn make_fixture_stage_template() -> StageTemplate {
     StageTemplate {
         num_cols: 3,
@@ -75,15 +53,8 @@ fn make_fixture_stage_template() -> StageTemplate {
     }
 }
 
-/// `SS1.2`: two appended `>=` rows over the `SS1.1` columns.
-///
-/// ```text
-/// row2: -5*x0 + x1 >= 20   (row_lower 20, row_upper +inf)
-/// row3:  3*x0 + x1 >= 80   (row_lower 80, row_upper +inf)
-/// ```
-///
-/// After `add_rows`, the merged LP solves to objective `162`, primals
-/// `(6, 62, 2)`.
+/// `SS1.2`: two appended `>=` rows over the `SS1.1` columns. After `add_rows`,
+/// the merged LP solves to objective `162`, primals `(6, 62, 2)`.
 fn make_fixture_row_batch() -> RowBatch {
     RowBatch {
         num_rows: 2,
@@ -99,11 +70,6 @@ fn make_fixture_row_batch() -> RowBatch {
 
 /// A single step in a mutate-then-solve sequence fed to
 /// [`assert_solve_sequence_deterministic`].
-///
-/// The variants cover the mutation surface the repeated-resolve hot path drives:
-/// appending rows, patching row/column bounds, and solving. New solve-capability
-/// work expresses its workload as a `&[MutationStep]` and reuses the helper —
-/// it never edits the comparison core.
 #[derive(Clone)]
 pub enum MutationStep {
     /// Append a batch of constraint rows (CSR form) via `add_rows`.
@@ -132,11 +98,6 @@ pub enum MutationStep {
 
 /// The bit-pattern fingerprint of one solve: objective + every solution buffer,
 /// stored as raw `u64` bit patterns so equality is exact.
-///
-/// Returned (in a `Vec`) from [`assert_solve_sequence_deterministic`] so callers
-/// can layer further cross-sequence assertions on top of the reproducibility
-/// guarantee. The fields are public for that read-back; the constructor is
-/// crate-internal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SolveBits {
     /// Raw bits of the objective value.
@@ -150,7 +111,6 @@ pub struct SolveBits {
 }
 
 impl SolveBits {
-    /// Captures the bit pattern of the solver's most recent solve result.
     fn capture(objective: f64, primal: &[f64], reduced_costs: &[f64], dual: &[f64]) -> Self {
         Self {
             objective: objective.to_bits(),
@@ -161,8 +121,6 @@ impl SolveBits {
     }
 }
 
-/// Runs a fresh solver over the step sequence, returning the bit fingerprint of
-/// every `Solve` step in order.
 fn run_sequence(
     mut solver: ClpSolver,
     base: &StageTemplate,
@@ -171,8 +129,6 @@ fn run_sequence(
     run_sequence_in_place(&mut solver, base, steps)
 }
 
-/// Asserts two captured-solve sequences are bit-for-bit identical, naming the
-/// solve ordinal and buffer that diverged.
 fn assert_bits_eq(label: &str, a: &[SolveBits], b: &[SolveBits]) {
     assert_eq!(
         a.len(),
@@ -204,17 +160,11 @@ fn assert_bits_eq(label: &str, a: &[SolveBits], b: &[SolveBits]) {
 /// Asserts that running `steps` over a CLP solver built by `build` is
 /// bit-for-bit reproducible: the same instance run twice and a fresh instance
 /// run once all yield identical objective / primal / reduced-cost / dual
-/// buffers at every `Solve` step.
+/// buffers at every `Solve` step. Returns the first run's fingerprints.
 ///
-/// This is the reusable acceptance criterion new solve-capability sequences
-/// (incremental bound patches, hot-start re-solves) call without touching the
-/// comparison core: hand it a factory and a step list.
-///
-/// Returns the captured bit fingerprints from the first run so callers can layer
-/// further assertions (e.g. anchoring the captured objectives to known fixture
-/// optima) on top of the reproducibility guarantee. The property under test is
-/// self-consistency — a path reproducing itself and staying order-invariant —
-/// never a cross-check that two different solve methods agree.
+/// The property under test is self-consistency — a path reproducing itself and
+/// staying order-invariant — never a cross-check that two different solve methods
+/// agree.
 ///
 /// # Panics
 ///
@@ -227,21 +177,18 @@ pub fn assert_solve_sequence_deterministic(
     base: &StageTemplate,
     steps: &[MutationStep],
 ) -> Vec<SolveBits> {
-    // Run 1: a fresh instance over the full sequence.
     let run1 = run_sequence(build(), base, steps);
     assert!(
         !run1.is_empty(),
         "step sequence must contain at least one Solve step"
     );
 
-    // Run 2: a second fresh instance over the identical sequence.
     let run2 = run_sequence(build(), base, steps);
     assert_bits_eq("fresh-instance re-run", &run1, &run2);
 
-    // Run 3: a single instance driven over the sequence twice back-to-back.
-    // CLP retains internal factorization/basis state across solves, so this
-    // exercises the "warm internal state must not perturb results" path that a
-    // two-instance comparison cannot reach.
+    // CLP retains internal factorization/basis state across solves, so reusing
+    // one instance exercises the "warm internal state must not perturb results"
+    // path that a two-instance comparison cannot reach.
     let mut solver = build();
     let pass_a = run_sequence_in_place(&mut solver, base, steps);
     let pass_b = run_sequence_in_place(&mut solver, base, steps);
@@ -251,8 +198,6 @@ pub fn assert_solve_sequence_deterministic(
     run1
 }
 
-/// Re-runs the full sequence on an existing solver instance (reloads the base
-/// model first, so the instance returns to a known state between passes).
 fn run_sequence_in_place(
     solver: &mut ClpSolver,
     base: &StageTemplate,
@@ -291,8 +236,7 @@ fn run_sequence_in_place(
 
 /// Reorders the rows of a `StageTemplate`'s CSC matrix and row bounds according
 /// to `perm`, where `perm[new_row] == old_row`. The column structure is
-/// unchanged; only each non-zero's row index is remapped and the row-bound
-/// vectors are gathered in the new order.
+/// unchanged; only each non-zero's row index is remapped.
 ///
 /// `perm` must be a permutation of `0..template.num_rows`.
 ///
@@ -310,18 +254,15 @@ pub fn permute_rows(template: &StageTemplate, perm: &[usize]) -> StageTemplate {
         template.num_rows
     );
 
-    // inverse[old_row] = new_row. Used to remap each non-zero's row index.
     let inverse = inverse_permutation(perm);
 
-    // Remap every non-zero's row index from old → new position. CSC column
-    // structure (col_starts) is untouched; only the stored row index changes.
+    // col_starts is untouched; only each stored row index moves old → new.
     let mut new_row_indices = template.row_indices.clone();
     for ri in &mut new_row_indices {
         let old = usize::try_from(*ri).expect("row index must be non-negative");
         *ri = i32::try_from(inverse[old]).expect("row index fits in i32");
     }
 
-    // Gather row bounds in the new order: new position `n` takes old row `perm[n]`.
     let mut new_row_lower = vec![0.0_f64; template.num_rows];
     let mut new_row_upper = vec![0.0_f64; template.num_rows];
     for (new_pos, &old_pos) in perm.iter().enumerate() {
@@ -345,10 +286,6 @@ pub fn permute_rows(template: &StageTemplate, perm: &[usize]) -> StageTemplate {
 }
 
 /// Computes the inverse of a permutation: `inverse[perm[i]] == i`.
-///
-/// For `permute_rows`, `perm[new] == old`, so `inverse[old] == new` — exactly
-/// the map needed to remap stored row indices and to invert duals back to the
-/// original row order for comparison.
 #[must_use]
 pub fn inverse_permutation(perm: &[usize]) -> Vec<usize> {
     let mut inverse = vec![0_usize; perm.len()];
@@ -358,7 +295,7 @@ pub fn inverse_permutation(perm: &[usize]) -> Vec<usize> {
     inverse
 }
 
-// ─── Kept tests ──────────────────────────────────────────────────────────────
+// ─── Declaration-order invariance ────────────────────────────────────────────
 
 /// Declaration-order invariance: solving an LP and a row-permuted copy yields
 /// bit-for-bit identical objective, primals, and reduced costs, and the
@@ -369,12 +306,8 @@ pub fn inverse_permutation(perm: &[usize]) -> Vec<usize> {
 /// permutation spans four rows of two distinct kinds (equality + inequality).
 #[test]
 fn declaration_order_invariance_ss1_2() {
-    // Build the merged SS1.2 LP as a single StageTemplate so the whole row set
-    // can be permuted in one shot. Start from SS1.1, then append SS1.2's two
-    // rows by hand into CSC form.
     let base = merged_ss1_2_template();
 
-    // Reference solve in declaration order.
     let mut solver = ClpSolver::new().expect("ClpSolver::new must succeed");
     solver.load_model(&base);
     let ref_view = solver.solve(None).expect("reference solve must succeed");
@@ -384,7 +317,6 @@ fn declaration_order_invariance_ss1_2() {
     let ref_dual: Vec<u64> = ref_view.dual.iter().map(|v| v.to_bits()).collect();
     drop(solver);
 
-    // A non-trivial permutation of the four rows: reverse order.
     // perm[new_row] = old_row.
     let perm = [3_usize, 2, 1, 0];
     let inverse = inverse_permutation(&perm);
@@ -452,8 +384,8 @@ fn cross_instance_resolve_reproducibility() {
         &steps,
     );
 
-    // Sanity-anchor the captured values to the known fixture optima so a future
-    // refactor that silently changes the solved model is caught here too.
+    // Anchor to the known optima so a refactor that silently changes the solved
+    // model is caught here, not only by the reproducibility helper.
     assert_eq!(captured.len(), 3, "expected three Solve captures");
     assert_eq!(
         f64::from_bits(captured[0].objective),
@@ -483,14 +415,10 @@ fn cross_instance_resolve_reproducibility() {
 /// The native-mutation path appends rows via `Clp_addRows` and patches bounds
 /// via `Clp_chgRowLower/Upper` / `Clp_chgColumnLower/Upper` in place — preserving
 /// CLP's factorization across each solve — so this is the determinism gate for
-/// that path. (Its bit-for-bit equality with the prior full-reload route was
-/// verified separately during development against a captured reload baseline.)
+/// that path.
 #[test]
 fn native_mutation_sequence_is_deterministic_and_order_invariant() {
     let base = make_fixture_stage_template();
-    // A sequence touching all three native-mutation variants between solves:
-    //   solve cold → add the two SS1.2 rows → solve → tighten a column bound →
-    //   solve → re-pin a row's equality bound → solve.
     let steps = vec![
         MutationStep::Solve,
         MutationStep::AddRows(make_fixture_row_batch()),
@@ -509,7 +437,6 @@ fn native_mutation_sequence_is_deterministic_and_order_invariant() {
         MutationStep::Solve,
     ];
 
-    // Reproducibility (run-to-run + cross-instance + same-instance-reused).
     let reference = assert_solve_sequence_deterministic(
         || ClpSolver::new().expect("ClpSolver::new must succeed"),
         &base,
@@ -527,19 +454,12 @@ fn native_mutation_sequence_is_deterministic_and_order_invariant() {
         "post-add_rows solve must hit the SS1.2 optimum"
     );
 
-    // Declaration-order invariance: run the SAME native-mutation sequence on a
-    // row-permuted SS1.1 base. The appended rows land at the same logical
-    // positions (`add_rows` appends after the existing rows regardless of how
-    // the existing rows are ordered), and the bound patches address rows by the
-    // permuted index, so we permute the SetRowBounds indices to track the base
-    // permutation. Objective / primals / reduced costs are row-order-independent
-    // and must match bit-for-bit; row duals must match after inverse-permuting
-    // the appended-aware index map back into declaration order.
-    let perm = [1_usize, 0]; // swap the two SS1.1 equality rows
+    // Replay on a row-permuted base. `add_rows` appends after the existing rows
+    // regardless of base order, so the SetRowBounds indices must be permuted to
+    // keep patching the same logical rows.
+    let perm = [1_usize, 0];
     let inverse = inverse_permutation(&perm);
     let permuted_base = permute_rows(&base, &perm);
-    // Row 0 in declaration order sits at position `inverse[0]` after permutation;
-    // retarget the SetRowBounds index so it patches the same logical row.
     let permuted_steps = vec![
         MutationStep::Solve,
         MutationStep::AddRows(make_fixture_row_batch()),
@@ -563,10 +483,8 @@ fn native_mutation_sequence_is_deterministic_and_order_invariant() {
         &permuted_steps,
     );
 
-    // The permutation only reorders the two base SS1.1 rows; the two appended
-    // SS1.2 rows keep positions 2 and 3 in both runs. Build the old→new row map
-    // over the full 4-row model: base rows follow `inverse`, appended rows are
-    // identity at 2 and 3.
+    // Old→new map over the full 4-row model: base rows follow `inverse`,
+    // appended rows keep positions 2 and 3.
     let full_inverse = [inverse[0], inverse[1], 2_usize, 3];
     for (i, (r, p)) in reference.iter().zip(&permuted).enumerate() {
         assert_eq!(
@@ -581,9 +499,8 @@ fn native_mutation_sequence_is_deterministic_and_order_invariant() {
             r.reduced_costs, p.reduced_costs,
             "reduced-cost bits diverged under row permutation at solve #{i}"
         );
-        // Inverse-permute the permuted run's row duals back into declaration
-        // order before comparing. Solve #0 sees only the 2 base rows; later
-        // solves see all 4. Map each declaration-order row to its permuted slot.
+        // Inverse-permute the row duals back into declaration order before
+        // comparing (solve #0 sees only the 2 base rows; later solves see all 4).
         let unpermuted: Vec<u64> = (0..r.dual.len())
             .map(|row| p.dual[full_inverse[row]])
             .collect();
@@ -598,22 +515,6 @@ fn native_mutation_sequence_is_deterministic_and_order_invariant() {
 /// Builds the SS1.2 LP (SS1.1 + the two appended `>=` rows) as one
 /// `StageTemplate`, so the full 4-row set can be permuted atomically.
 fn merged_ss1_2_template() -> StageTemplate {
-    // Drive the canonical add_rows merge through ClpSolver so the merged CSC is
-    // produced by the same code path the rest of the suite uses, then mirror the
-    // resulting dimensions/bounds into a StageTemplate. We reconstruct the merged
-    // CSC directly here (the merge is small and explicit) to keep the template
-    // self-contained.
-    //
-    // Columns: 3. Rows: 4.
-    //   row0:  x0           = 6
-    //   row1: 2*x0     + x2 = 14
-    //   row2: -5*x0 + x1     >= 20
-    //   row3:  3*x0 + x1     >= 80
-    //
-    // CSC (column-major), columns 0,1,2:
-    //   col0 nz: row0=1, row1=2, row2=-5, row3=3   (4 entries)
-    //   col1 nz: row2=1, row3=1                     (2 entries)
-    //   col2 nz: row1=1                             (1 entry)
     StageTemplate {
         num_cols: 3,
         num_rows: 4,
@@ -640,9 +541,7 @@ fn merged_ss1_2_template() -> StageTemplate {
 
 /// The mutate-then-solve sequence shared by the wired-knob determinism tests:
 /// solve `SS1.1` cold, append the two `SS1.2` rows, solve, tighten a column
-/// bound, solve. It touches every native-mutation entry point between solves so
-/// the knob under test is exercised across a real re-solve sequence, not a
-/// single solve.
+/// bound, solve — exercising the knob across a re-solve sequence, not one solve.
 fn knob_step_sequence() -> Vec<MutationStep> {
     vec![
         MutationStep::Solve,
@@ -658,13 +557,9 @@ fn knob_step_sequence() -> Vec<MutationStep> {
 }
 
 /// **Wired knob — dual-steepest-edge pricing.** A profile pinning full DSE
-/// (`dual_pricing_mode = 1`, the backward-pass tuned value) is driven through
-/// `apply_profile`, which now issues the shim pricing setter. The resulting
-/// solve sequence must be bit-for-bit reproducible (run-to-run + cross-instance
-/// + same-instance-reused) and declaration-order invariant.
-///
-/// This proves the corrected shim cast makes the pricing knob fault-free AND
-/// that pinning DSE does not break determinism — never a hot-vs-cold check.
+/// (`dual_pricing_mode = 1`, the backward-pass tuned value) driven through
+/// `apply_profile` must yield a bit-for-bit reproducible, declaration-order
+/// invariant solve sequence — never a hot-vs-cold check.
 #[test]
 fn dse_pricing_profile_is_deterministic_and_order_invariant() {
     let dse_profile = ClpProfile {
@@ -677,7 +572,6 @@ fn dse_pricing_profile_is_deterministic_and_order_invariant() {
         s
     };
 
-    // Reproducibility across three runs.
     let base = make_fixture_stage_template();
     let steps = knob_step_sequence();
     let reference = assert_solve_sequence_deterministic(build, &base, &steps);
@@ -693,8 +587,6 @@ fn dse_pricing_profile_is_deterministic_and_order_invariant() {
         "DSE post-add_rows solve must hit the SS1.2 optimum"
     );
 
-    // Declaration-order invariance: replay the same sequence on a row-permuted
-    // SS1.1 base; appended rows keep positions 2 and 3, base rows follow `perm`.
     assert_knob_sequence_order_invariant(&build, &reference, &steps);
 }
 
@@ -769,24 +661,22 @@ fn backward_tuned_profile_is_deterministic_and_order_invariant() {
 }
 
 /// Shared declaration-order-invariance check for the knob sequences: replays the
-/// identical `SS1.1 → add SS1.2 → patch col bound` sequence on a row-permuted
-/// `SS1.1` base and asserts objective / primals / reduced costs match
-/// bit-for-bit, and row duals match after inverse-permuting back into
-/// declaration order. The two appended `SS1.2` rows keep positions 2 and 3 in
-/// both runs (`add_rows` appends after the existing rows regardless of base
-/// order); the two base rows follow the permutation.
+/// sequence on a row-permuted `SS1.1` base and asserts objective / primals /
+/// reduced costs match bit-for-bit, and row duals match after inverse-permuting
+/// back into declaration order. The two appended `SS1.2` rows keep positions 2
+/// and 3 (`add_rows` appends after the existing rows regardless of base order);
+/// the two base rows follow the permutation.
 fn assert_knob_sequence_order_invariant(
     build: &impl Fn() -> ClpSolver,
     reference: &[SolveBits],
     steps: &[MutationStep],
 ) {
     let base = make_fixture_stage_template();
-    let perm = [1_usize, 0]; // swap the two SS1.1 equality rows
+    let perm = [1_usize, 0];
     let inverse = inverse_permutation(&perm);
     let permuted_base = permute_rows(&base, &perm);
     let permuted = assert_solve_sequence_deterministic(build, &permuted_base, steps);
 
-    // Old→new row map: base rows follow `inverse`, appended rows are identity.
     let full_inverse = [inverse[0], inverse[1], 2_usize, 3];
     for (i, (r, p)) in reference.iter().zip(&permuted).enumerate() {
         assert_eq!(
@@ -812,15 +702,11 @@ fn assert_knob_sequence_order_invariant(
     }
 }
 
-/// Drives the hot-start lifecycle over a base template and returns the bit
-/// fingerprints of every `solve_from_hot_start` re-solve, in order.
-///
-/// The lifecycle: load the base, solve cold once (leaving the simplex rim and
-/// factorization alive on the persistent instance), `mark_hot_start`, then for
-/// each patch in `col_patches` apply it via `set_col_bounds` and re-solve from
-/// the snapshot, capturing the result. Releases the snapshot at the end. This is
-/// the per-opening warm re-solve composition: snapshot once, re-solve each
-/// bound-patched model from the snapshot.
+/// Drives the hot-start lifecycle and returns the fingerprints of every
+/// `solve_from_hot_start` re-solve, in order: cold-solve once, `mark_hot_start`,
+/// then for each `col_patches` entry patch via `set_col_bounds` and re-solve from
+/// the snapshot. The per-opening composition: snapshot once, re-solve each
+/// bound-patched model from that snapshot.
 fn run_hot_start_sequence(
     mut solver: ClpSolver,
     base: &StageTemplate,
@@ -829,9 +715,8 @@ fn run_hot_start_sequence(
     run_hot_start_sequence_in_place(&mut solver, base, col_patches)
 }
 
-/// Re-runs the hot-start lifecycle on an existing solver instance (reloads the
-/// base and re-snapshots first, so the instance returns to a known state between
-/// passes).
+/// Re-runs the hot-start lifecycle on an existing instance, reloading and
+/// re-snapshotting first so it returns to a known state between passes.
 fn run_hot_start_sequence_in_place(
     solver: &mut ClpSolver,
     base: &StageTemplate,
@@ -876,11 +761,8 @@ fn run_hot_start_sequence_in_place(
 #[test]
 fn hot_start_sequence_is_deterministic_and_order_invariant() {
     let base = make_fixture_stage_template();
-    // Two bound patches re-solved from the same snapshot: tighten col 2, then
-    // relax it back. Each re-solve goes through solve_from_hot_start.
     let patches = [(2_usize, 0.0_f64, 8.0_f64), (2_usize, 0.0_f64, 6.0_f64)];
 
-    // Run 1 + Run 2: two fresh instances.
     let run1 = run_hot_start_sequence(
         ClpSolver::new().expect("ClpSolver::new must succeed"),
         &base,
@@ -894,20 +776,16 @@ fn hot_start_sequence_is_deterministic_and_order_invariant() {
     );
     assert_bits_eq("hot-start fresh-instance re-run", &run1, &run2);
 
-    // Run 3: a single reused instance driven over the lifecycle twice. Each call
-    // reloads the base and re-snapshots, so the persistent instance returns to a
-    // known state between passes — exercising the "warm internal state must not
-    // perturb the snapshot result" path a two-instance comparison cannot reach.
+    // Reusing one instance exercises the "warm internal state must not perturb
+    // the snapshot result" path a two-instance comparison cannot reach.
     let mut solver = ClpSolver::new().expect("ClpSolver::new must succeed");
     let pass_a = run_hot_start_sequence_in_place(&mut solver, &base, &patches);
     let pass_b = run_hot_start_sequence_in_place(&mut solver, &base, &patches);
     assert_bits_eq("hot-start same-instance pass A vs run1", &pass_a, &run1);
     assert_bits_eq("hot-start same-instance pass B vs pass A", &pass_b, &pass_a);
 
-    // Declaration-order invariance: replay the identical hot-start lifecycle on a
-    // row-permuted SS1.1 base. The bound patches address columns (order-stable),
-    // and only rows are permuted, so objective / primals / reduced costs must
-    // match bit-for-bit and row duals must match after inverse permutation.
+    // The bound patches address columns (order-stable) and only rows are
+    // permuted, so row duals need inverse permutation but the rest do not.
     let perm = [1_usize, 0];
     let inverse = inverse_permutation(&perm);
     let permuted_base = permute_rows(&base, &perm);
