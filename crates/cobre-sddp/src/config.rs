@@ -1,31 +1,10 @@
 //! Configuration types for the SDDP training loop.
 //!
-//! [`TrainingConfig`] bundles all algorithm parameters that control the
-//! training loop behaviour, grouped into three sub-structs:
-//!
-//! - [`LoopConfig`]: iteration loop control and convergence.
-//! - [`CutManagementConfig`]: two-stage cut management pipeline.
-//! - [`EventConfig`]: event infrastructure for monitoring and checkpointing.
-//!
-//! ## Construction
-//!
-//! `TrainingConfig` does not implement `Default` — every sub-struct group must
-//! be explicitly supplied by the caller to prevent silent misconfigurations.
-//! Each sub-struct implements `Default` with sensible test values, allowing
-//! tests to specify only the fields they care about via `..Default::default()`.
-//!
-//! ## Event channel
-//!
-//! The `event_sender` field in [`EventConfig`] carries an
-//! `Option<Sender<TrainingEvent>>`. When `None`, the training loop emits no
-//! events and incurs no channel overhead. When `Some(sender)`, typed
-//! [`cobre_core::TrainingEvent`] values are moved into the channel at each
-//! lifecycle step boundary.
-//!
-//! Because `Sender<T>` is not `Clone` in the general sense (it can be cloned,
-//! but ownership transfer is the primary pattern), `TrainingConfig` does not
-//! derive `Clone`. Callers that need to pass config to multiple locations
-//! should construct separate instances.
+//! [`TrainingConfig`] groups training parameters into [`LoopConfig`],
+//! [`CutManagementConfig`], and [`EventConfig`]. It does not implement `Default`
+//! — every sub-struct must be supplied explicitly to prevent silent
+//! misconfiguration; each sub-struct's `Default` carries test values for
+//! `..Default::default()` overrides.
 //!
 //! # Examples
 //!
@@ -64,20 +43,9 @@ use crate::stopping_rule::{StoppingMode, StoppingRule, StoppingRuleSet};
 
 /// Pure-data iteration parameters stored on [`crate::setup::StudySetup`].
 ///
-/// Projected subset of [`LoopConfig`] containing only the fields that are
-/// stable across training invocations. `n_fwd_threads` is excluded because
-/// it is derived at runtime from the `--threads` CLI flag and varies between
-/// invocations; it is supplied as a per-call argument to
-/// [`crate::setup::StudySetup::train`].
-///
-/// `max_blocks` is included here (not in `StageData`) because it is consumed
-/// by [`LoopConfig`] for LP buffer pre-sizing during training, making it
-/// semantically part of iteration configuration.
-///
-/// # Construction
-///
-/// Explicit construction only — no `Default` impl, to prevent silent
-/// misconfiguration.
+/// Projection of [`LoopConfig`] to the fields stable across training
+/// invocations. `n_fwd_threads` is excluded — it is derived per-call from the
+/// `--threads` CLI flag and passed to [`crate::setup::StudySetup::train`].
 #[derive(Debug)]
 pub struct LoopParams {
     /// Random seed for forward-pass stochastic trajectory generation.
@@ -97,9 +65,6 @@ pub struct LoopParams {
 
 /// Controls the iteration loop and convergence.
 ///
-/// Construct via [`Default::default()`] for tests, or explicitly set all fields
-/// for production configuration.
-///
 /// # Examples
 ///
 /// ```rust
@@ -110,44 +75,24 @@ pub struct LoopParams {
 /// ```
 #[derive(Debug)]
 pub struct LoopConfig {
-    /// Total number of forward scenarios evaluated per iteration across all ranks.
-    ///
-    /// The work is divided among MPI ranks: each rank evaluates
-    /// `forward_passes / num_ranks` scenarios (with remainder distributed to
-    /// the first ranks). Must be at least 1.
+    /// Total forward scenarios per iteration across all ranks. Must be `>= 1`.
     pub forward_passes: u32,
 
-    /// Maximum number of training iterations before forced termination.
-    ///
-    /// Also used for cut pool pre-sizing: the cut pool allocates capacity
-    /// for `max_iterations * forward_passes * num_stages` cuts at
-    /// initialisation to avoid reallocation during the training loop.
-    /// Must be at least 1.
+    /// Maximum training iterations before forced termination. Must be `>= 1`.
+    /// Also drives cut-pool capacity pre-sizing.
     pub max_iterations: u64,
 
-    /// Starting iteration for resumed training runs.
-    ///
-    /// When resuming from a checkpoint, this is set to the checkpoint's
-    /// `completed_iterations`. The training loop starts at
-    /// `start_iteration + 1` and runs up to `max_iterations`.
-    /// Default: `0` (fresh training).
+    /// Starting iteration for resumed runs (checkpoint `completed_iterations`);
+    /// the loop runs `start_iteration + 1` through `max_iterations`. Default `0`.
     pub start_iteration: u64,
 
-    /// Number of rayon threads for forward pass parallelism.
-    ///
-    /// Controls how many worker threads execute forward scenarios in parallel.
-    /// Set to `1` for single-threaded execution.
+    /// Number of rayon threads for forward-pass parallelism; `1` is single-threaded.
     pub n_fwd_threads: usize,
 
-    /// Maximum number of demand blocks across all stages.
-    ///
-    /// Used for pre-sizing buffers and determining the LP column layout.
+    /// Maximum demand blocks across all stages; pre-sizes buffers and the LP column layout.
     pub max_blocks: usize,
 
-    /// Stopping rules controlling convergence.
-    ///
-    /// The training loop evaluates these rules after each iteration's lower
-    /// bound update. Training terminates when the rule set triggers.
+    /// Stopping rules evaluated after each iteration's lower-bound update.
     pub stopping_rules: StoppingRuleSet,
 }
 
@@ -169,9 +114,6 @@ impl Default for LoopConfig {
 
 /// Two-stage cut management pipeline configuration.
 ///
-/// Construct via [`Default::default()`] for tests, or explicitly set all fields
-/// for production configuration.
-///
 /// # Examples
 ///
 /// ```rust
@@ -182,44 +124,20 @@ impl Default for LoopConfig {
 /// ```
 #[derive(Debug)]
 pub struct CutManagementConfig {
-    /// Optional cut selection strategy for deactivating dominated cuts.
-    ///
-    /// When `Some(strategy)`, the training loop applies cut selection after each
-    /// backward pass, deactivating cuts that do not meet the strategy's activity
-    /// criteria. When `None`, all generated cuts remain active.
+    /// Cut selection strategy for deactivating dominated cuts; `None` keeps all cuts active.
     pub cut_selection: Option<CutSelectionStrategy>,
 
-    /// Maximum number of active cuts per stage (stage 2 of the cut selection
-    /// pipeline — hard cap on LP size).
-    ///
-    /// When `Some(n)`, the training loop enforces a hard cap of `n` active cuts
-    /// per stage after strategy selection has completed. Cuts are evicted in
-    /// order of staleness (`last_active_iter` ascending), tie-broken by usage
-    /// frequency (`active_count` ascending). Cuts generated in the current
-    /// iteration are never evicted.
-    ///
-    /// When `None`, no hard cap is enforced.
+    /// Hard cap on active cuts per stage (cut-selection stage 2); `None` is uncapped.
+    /// Cuts from the current iteration are never evicted.
     pub budget: Option<u32>,
 
-    /// Activity tolerance for cut selection deactivation.
-    ///
-    /// Cuts with activity (dual value) below this threshold across all openings
-    /// in a backward pass are candidates for deactivation. Typical value: `1e-6`.
+    /// Activity (dual-value) threshold below which a cut is a deactivation candidate.
     pub cut_activity_tolerance: f64,
 
-    /// Number of pre-loaded cuts imported from a warm-start policy file.
-    ///
-    /// When non-zero, the cut pool is pre-populated from a serialised policy
-    /// before the first training iteration begins. The warm-start cut count
-    /// contributes to the cut pool capacity calculation alongside
-    /// `max_iterations`.
+    /// Cuts pre-loaded from a warm-start policy; contributes to cut-pool capacity.
     pub warm_start_cuts: u32,
 
-    /// Per-stage risk measures for the backward pass.
-    ///
-    /// Controls whether the Benders cut aggregation uses expected value,
-    /// `CVaR`, or a convex combination thereof. The length must equal
-    /// `num_stages`.
+    /// Per-stage backward-pass risk measures; length must equal `num_stages`.
     pub risk_measures: Vec<RiskMeasure>,
 }
 
@@ -237,9 +155,6 @@ impl Default for CutManagementConfig {
 
 /// Event infrastructure for monitoring and checkpointing.
 ///
-/// Construct via [`Default::default()`] for tests, or explicitly set all fields
-/// for production configuration.
-///
 /// # Examples
 ///
 /// ```rust
@@ -250,77 +165,37 @@ impl Default for CutManagementConfig {
 /// ```
 #[derive(Debug, Default)]
 pub struct EventConfig {
-    /// Optional channel sender for real-time training progress events.
-    ///
-    /// When `Some(sender)`, the training loop emits [`TrainingEvent`] values
-    /// at each lifecycle step boundary (forward pass, backward pass,
-    /// convergence update, etc.). When `None`, no events are emitted and no
-    /// channel allocation occurs on the hot path.
-    ///
-    /// The receiver end must be consumed on a separate thread or task to
-    /// prevent the channel from filling and blocking the training loop.
+    /// Channel sender for training progress events; `None` emits none.
+    /// The receiver must be drained on another thread or it blocks the loop.
     pub event_sender: Option<std::sync::mpsc::Sender<TrainingEvent>>,
 
-    /// Number of iterations between checkpoint writes.
-    ///
-    /// When `Some(n)`, the training loop writes a checkpoint after every `n`
-    /// completed iterations (i.e., when `iteration % n == 0`). When `None`,
-    /// no checkpoints are written during training (a final checkpoint may
-    /// still be written at convergence depending on caller configuration).
+    /// Iterations between checkpoint writes (`iteration % n == 0`); `None` writes none.
     pub checkpoint_interval: Option<u64>,
 
-    /// Optional shutdown signal for graceful early termination.
-    ///
-    /// When `Some(flag)`, the training loop checks `flag.load(Relaxed)` at each
-    /// iteration boundary. If the flag is `true`, the loop terminates early with
-    /// a "shutdown requested" reason. When `None`, the loop runs until
-    /// convergence or iteration limit.
+    /// Shutdown signal checked (`load(Relaxed)`) at each iteration boundary for early exit.
     pub shutdown_flag: Option<Arc<AtomicBool>>,
 
-    /// Whether to allocate the visited-states archive for state export.
-    ///
-    /// When `true`, the archive is allocated so forward-pass trial points are
-    /// recorded for checkpoint persistence. When `false`, the archive is
-    /// still allocated automatically if any
-    /// [`CutSelectionStrategy`] variant is
-    /// enabled, because the unified value-evaluation kernel evaluates every
-    /// populated cut at every state in this archive.
-    /// Default: `false`.
+    /// Allocate the visited-states archive for state export. Also forced on when any
+    /// [`CutSelectionStrategy`] is enabled — the value-evaluation kernel scores every
+    /// cut at every archived state. Default `false`.
     pub export_states: bool,
 }
 
 /// Pure-data event parameters stored on [`crate::setup::StudySetup`].
 ///
-/// Projected subset of [`EventConfig`] containing only the fields that are
-/// stable across training invocations and safe to persist on the setup struct.
-/// The following fields from [`EventConfig`] are deliberately excluded:
-///
-/// - `event_sender` — runtime handle; ownership transferred per training call.
-/// - `shutdown_flag` — runtime handle; varies per invocation.
-/// - `checkpoint_interval` — not yet wired into the setup layer; deferred.
+/// Projection of [`EventConfig`] to the fields stable across invocations and
+/// safe to persist; the runtime handles (`event_sender`, `shutdown_flag`) and
+/// `checkpoint_interval` are excluded.
 #[derive(Debug)]
 pub(crate) struct EventParams {
-    /// Whether to allocate the visited-states archive for state export.
-    ///
-    /// When `true`, the archive is allocated so forward-pass trial points are
-    /// recorded for checkpoint persistence. When `false`, the archive is
-    /// still allocated automatically if any
-    /// [`CutSelectionStrategy`] variant is
-    /// enabled, because the unified value-evaluation kernel evaluates every
-    /// populated cut at every state in this archive.
+    /// See [`EventConfig::export_states`].
     pub(crate) export_states: bool,
 }
 
 /// Parameters controlling the SDDP training loop.
 ///
-/// Composes three sub-structs, each covering a distinct concern:
-/// [`LoopConfig`] for iteration loop control, [`CutManagementConfig`] for the
-/// cut management pipeline, and [`EventConfig`] for monitoring infrastructure.
-///
-/// `TrainingConfig` does not implement `Default` — every sub-group must be
-/// explicitly supplied to prevent silent misconfiguration. Each sub-struct
-/// implements `Default` with sensible test values, allowing tests to override
-/// only the fields they care about via `..Default::default()`.
+/// Composes [`LoopConfig`], [`CutManagementConfig`], and [`EventConfig`]. No
+/// `Default` — every sub-group must be supplied explicitly.
 ///
 /// # Examples
 ///

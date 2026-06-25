@@ -21,11 +21,9 @@
 /// `v_block[k * m_len + col]` = inner product of row `k` of `coef` with
 /// row `col` of `state_block`.
 ///
-/// Returns immediately without calling `dgemm` if any of the three
-/// dimensions is zero; `matrixmultiply` is undefined for zero-sized
-/// arguments. The zero-dim early-return precedes the `debug_assert`
-/// dimension checks so callers may pass empty slices for the zero-sized
-/// inputs.
+/// Returns immediately (a no-op) if any dimension is zero — `matrixmultiply` is
+/// undefined for zero-sized arguments. This early-return precedes the
+/// `debug_assert` checks, so callers may pass empty slices for zero-sized inputs.
 ///
 /// # Determinism
 ///
@@ -36,13 +34,9 @@
 ///
 /// # Panics
 ///
-/// Panics in debug builds if any of the three slices does not match the
-/// dimensions implied by `(k_rows, d, m_len)` AND no dimension is zero.
-/// When any dimension is zero, the function returns immediately without
-/// inspecting slice lengths — empty slices are a valid caller convention
-/// for the zero-dim no-op contract. Release builds invoke UB if the
-/// slices are undersized for non-zero dimensions — the caller's contract
-/// is to size them correctly.
+/// Panics in debug builds if a slice mismatches `(k_rows, d, m_len)` and no
+/// dimension is zero. Release builds invoke UB on undersized slices for non-zero
+/// dimensions — the caller's contract is to size them correctly.
 #[inline]
 pub(crate) fn gemm_block(
     coef: &[f64],
@@ -53,10 +47,6 @@ pub(crate) fn gemm_block(
     v_block: &mut [f64],
 ) {
     if k_rows == 0 || d == 0 || m_len == 0 {
-        // Defensive: dgemm is undefined for zero dimensions. The
-        // early-return precedes the debug_asserts so callers may
-        // pass empty slices for the zero-sized inputs (the natural
-        // representation when one factor is zero).
         return;
     }
 

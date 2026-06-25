@@ -17,18 +17,10 @@
     )
 )]
 
-// Module visibility policy:
-//
-// - `pub mod` modules are accessed by name from outside the crate.
-//   `setup` and `policy_export` are reached by qualified path from
-//   `cobre-cli` / `cobre-python` / examples; the others are reached by
-//   qualified path from this crate's own integration tests in `tests/`
-//   (which compile as separate crates and so need pub visibility).
-//   Downstream crates SHOULD prefer the curated re-exports below; the
-//   `pub mod` namespaces are not a semver-stable API.
-// - `pub(crate)` modules are pure internals — never named from outside
-//   this crate (verified by grep against `tests/`, `examples/`, and the
-//   other workspace crates).
+// `pub mod` modules are reached by qualified path from downstream crates or
+// from integration tests in `tests/` (separate crates needing pub visibility);
+// the `pub mod` namespaces are not a semver-stable API — prefer the curated
+// re-exports below. `pub(crate)` modules are crate internals.
 pub mod config;
 pub mod convergence;
 pub mod cut;
@@ -48,167 +40,60 @@ pub mod training;
 pub mod validate_phases;
 pub mod workspace;
 
-// Crate-root submodule shim: re-exposes the inner `context` file module (now
-// `workspace::context` after the `workspace/` cluster move) at the pre-move
-// `cobre_sddp::context` path, so the in-crate `crate::context::{StageContext,
-// TrainingContext}` call sites resolve verbatim without per-site edits.
+// Re-export shim: exposes `workspace::context` at `cobre_sddp::context` for the
+// `crate::context::` call sites.
 pub use workspace::context;
 
-// Crate-root submodule shim: re-exposes the inner `solver_phase` / `stage_solve`
-// file modules (now `solve::solver_phase` / `solve::stage_solve` after the
-// `solve/` cluster move) at their pre-move crate-root paths, so the in-crate
-// `crate::solver_phase::Phase` use in `simulation/state.rs` and the
-// `crate::stage_solve::{fill_unscaled, fill_unscaled_dual, StageInputs,
-// run_stage_solve}` uses in `training/forward/`, `training/backward/`, and
-// `simulation/pipeline.rs` resolve verbatim without per-site edits.
-// `stage_solve` keeps `pub(crate)` visibility — it has no external raw-path
-// consumer.
+// Re-export shims for `solve::solver_phase` / `solve::stage_solve` at their
+// crate-root paths. `stage_solve` stays `pub(crate)` — no external consumer.
 pub use solve::solver_phase;
 pub(crate) use solve::stage_solve;
 
-// Crate-root submodule shim: preserves the pre-move
-// `cobre_sddp::risk_measure::` / `cobre_sddp::stopping_rule::` raw paths
-// verbatim for the integration tests in `tests/conformance.rs`, which import
-// these submodules by qualified path.
+// Re-export shim: exposes `risk_measure` / `stopping_rule` at their crate-root
+// paths for integration tests that import them by qualified path.
 pub use convergence::{risk_measure, stopping_rule};
 
-// Crate-root submodule shims for the `cut/` cluster move (`cut_selection`,
-// `cut_sync`, `dcs`, `basis_reconstruct` were flat at the crate root; they now
-// live under `cut/`). Each shim re-exposes a moved submodule at its pre-move
-// crate-root path so consumers resolve verbatim without per-site edits:
-//
-//   - `cut_selection` — `cobre_sddp::cut_selection::` in `benches/cut_selection_kernel.rs`
-//     and the integration tests `tests/{cut_selection_kernel_perf,cut_selection_determinism_realistic}.rs`,
-//     the internal `crate::cut_selection::` call sites across `training/backward/`,
-//     `training/backward_pass_state.rs`, `config.rs`, `cut/pool.rs`, `cut/dcs.rs`,
-//     `training/forward/`, `simulation/pipeline.rs`, `training/training.rs`, and
-//     `training/session/mod.rs`, plus the `crate::cut_selection::CutMetadata`
-//     intra-doc links in `cut/mod.rs`.
-//   - `cut_sync` — the internal `crate::cut_sync::CutSyncBuffers` references
-//     (reached via grouped `use crate::{ … }` imports) in `training/backward/`,
-//     `training/backward_pass_state.rs`, and `training/session/mod.rs`.
-//   - `dcs` — `cobre_sddp::dcs::` in `benches/dcs_batched_scoring.rs` plus the
-//     internal `crate::dcs::` call sites across `training/backward/`,
-//     `training/forward/`, `setup/{accessors,mod}.rs`, `simulation/pipeline.rs`,
-//     and `workspace/workspace.rs`.
-//   - `basis_reconstruct` — `cobre_sddp::basis_reconstruct::` in
-//     `tests/hybrid_reconstruction.rs` (plus the doc-comment intra-doc links in
-//     `tests/basis_reconstruct_churn.rs` and `cobre-python/src/run.rs`), and the
-//     internal `crate::basis_reconstruct::` call sites in `cut/dcs.rs`,
-//     `training/forward/`, and `workspace/workspace.rs`.
+// Re-export shims exposing the `cut/` cluster modules at their crate-root paths
+// for external (bench/test) and internal `crate::`-prefixed consumers.
 pub use cut::{basis_reconstruct, cut_selection, cut_sync, dcs};
 
-// Crate-root submodule shims for the `lp/` cluster move (`indexer` /
-// `generic_constraints` / `lp_builder` were flat at the crate root; they now
-// live under `lp/`). Each shim re-exposes a moved submodule at its pre-move
-// crate-root path so consumers resolve verbatim without per-site edits:
-//
-// - `indexer` — covers the external raw-path consumers (`cobre_sddp::indexer::`
-//   in 4 integration tests + 2 benches) AND the internal `crate::indexer::`
-//   call sites across 13 files (including `lp/generic_constraints.rs` itself).
-// - `lp_builder` (alias of `lp::builder`) — keeps the 27 internal
-//   `crate::lp_builder::Symbol` references across 11 files resolving to the
-//   moved subtree without editing those files.
-// - `generic_constraints` — keeps `pub(crate)` visibility; covers the internal
-//   `crate::generic_constraints::` references in `lp/builder/entries.rs` and
-//   `lp/builder/layout.rs`, which moved into the cluster and still reach the
-//   constraint-lowering module by its pre-move crate-root path.
+// Re-export shims exposing the `lp/` cluster at crate-root paths: `indexer` and
+// `lp_builder` (alias of `lp::builder`) for external and internal consumers;
+// `generic_constraints` stays `pub(crate)`.
 pub use lp::builder as lp_builder;
 pub(crate) use lp::generic_constraints;
 pub use lp::indexer;
 
-// Crate-root submodule shim: preserves the pre-`policy/`-relocation raw
-// `cobre_sddp::<module>::` / `crate::<module>::` paths verbatim so consumers
-// resolve without edits. Each re-exported module has raw-path callers that the
-// curated re-exports above do not cover:
-//   - `orchestration` — production callers `write_checkpoint`,
-//     `CheckpointParams`, `export_stochastic_artifacts` in
-//     `cobre-cli/src/commands/run/{outputs,setup}.rs` and
-//     `cobre-python/src/run.rs`.
-//   - `policy_export` — `tests/{boundary_cuts,decomp_integration,warm_start}.rs`
-//     plus the intra-crate `crate::policy_export::` use in `orchestration`.
-//   - `resolved_parameters` — `crate::resolved_parameters::` paths in
-//     `lp/builder/{layout,patch,columns,template,entries}.rs` and `setup`.
-//   - `scaling_report` — `crate::scaling_report::` paths in
-//     `setup/{template_postprocess,mod}.rs`.
+// Re-export shim exposing the `policy/` cluster modules at crate-root paths for
+// raw-path callers the curated re-exports below do not cover.
 pub use policy::{orchestration, policy_export, resolved_parameters, scaling_report};
 
-// Crate-root submodule shim: preserves the pre-`production/`-relocation raw
-// `cobre_sddp::<module>::` / `crate::<module>::` paths verbatim so consumers
-// resolve without edits. Each re-exported module has raw-path callers that the
-// curated re-exports above do not cover:
-//   - `energy_conversion` — `cobre_sddp::energy_conversion::` in the integration
-//     tests `tests/{scalar_parameters_declaration_order,simulation_pipeline_integration}.rs`,
-//     plus intra-crate `crate::energy_conversion::` uses.
-//   - `hydro_models` — `cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts`
-//     in `cobre-cli/src/commands/{run/setup,validate}.rs` and
-//     `cobre-python/src/{io,run}.rs` (this symbol is intentionally NOT in the
-//     curated re-export above; the shim is its sole resolution path), plus
-//     intra-crate `crate::hydro_models::` uses.
-//   - `fpha_fitting` — `crate::fpha_fitting::FphaFittingError` in the non-moved
-//     `error.rs` plus intra-cluster uses in `hydro_models` and
-//     `energy_conversion`; `pub(crate)` keeps its crate-private visibility.
+// Re-export shim exposing the `production/` cluster modules at crate-root paths
+// for raw-path callers the curated re-exports below do not cover.
+// `hydro_models::prepare_hydro_models_from_artifacts` is intentionally absent
+// from the curated re-export — this shim is its sole resolution path.
+// `fpha_fitting` stays `pub(crate)`.
 pub(crate) use production::fpha_fitting;
 pub use production::{energy_conversion, hydro_models};
 
-// Crate-root submodule shim: preserves the pre-`stochastic/`-relocation raw
-// `cobre_sddp::<module>::` / `crate::<module>::` paths verbatim so consumers
-// resolve without edits. Every one of the six modules has raw-path callers in
-// non-moved files that the curated re-exports below do not cover:
-//   - `estimation` — `crate::estimation::` in `error.rs`,
-//     `policy/{orchestration,provenance}.rs`, and
-//     `setup/stochastic_pipeline.rs`.
-//   - `inflow_method` — `crate::inflow_method::` in `indexer.rs`, `training/forward/`,
-//     and `lp/builder/{template,entries}.rs`, `simulation/pipeline.rs`.
-//   - `lag_transition` — `cobre_sddp::lag_transition::precompute_stage_lag_transitions`
-//     in `cobre-cli/src/commands/run/setup.rs` (this symbol is intentionally NOT
-//     in the curated re-export; the shim is its sole resolution path), plus
-//     `crate::lag_transition::` uses in `workspace/context.rs` and
-//     `setup/{stochastic_pipeline,stage_data,mod}.rs`.
-//   - `noise_key_diag` — `crate::noise_key_diag::` in `setup/mod.rs`.
-//   - `noise` — `crate::noise::` in `workspace/context.rs`, `training/forward/`, and
-//     `simulation/pipeline.rs`; `pub(crate)` keeps its crate-private visibility.
-//   - `stochastic_summary` — `crate::stochastic_summary::` in
-//     `policy/orchestration.rs`; `pub(crate)` keeps its crate-private visibility.
+// Re-export shim exposing the `stochastic/` cluster modules at crate-root paths
+// for raw-path callers the curated re-exports below do not cover.
+// `lag_transition::precompute_stage_lag_transitions` is intentionally absent
+// from the curated re-export — this shim is its sole resolution path. `noise`
+// and `stochastic_summary` stay `pub(crate)`.
 pub use stochastic::{estimation, inflow_method, lag_transition, noise_key_diag};
 pub(crate) use stochastic::{noise, stochastic_summary};
 
-// Crate-root submodule shim: preserves the pre-`training/`-relocation raw
-// `crate::<module>::` paths verbatim for the internal references that the
-// curated re-exports below do not cover, so the consumer files resolve without
-// per-site edits. The pass files moved into `training/`; their pre-move
-// crate-root paths are re-exposed here:
-//   - `forward` — `crate::forward::{ForwardResult, SyncResult}` in
-//     `training/session/mod.rs`, the `crate::forward::sync_forward` use there and
-//     its intra-doc links in `convergence/convergence.rs`, and the
-//     `crate::forward::build_delta_cut_row_batch_into` intra-doc link in
-//     `cut/row.rs`. Keeps `pub` to match its pre-move visibility.
-//   - `backward` — `crate::backward::StagedCut` in `workspace/workspace.rs`,
-//     `crate::backward::BackwardResult` in `training/session/mod.rs`, and the
-//     `crate::backward::duals_extraction::extract_duals_from_view` intra-doc link
-//     in `cut/row.rs`.
-//   - `backward_pass_state` — `crate::backward_pass_state::BackwardPass{State,Inputs}`
-//     in `training/backward/` and the doc reference in `cut/cut_selection.rs`.
-//   - `forward_pass_state` — `crate::forward_pass_state::{ForwardPassInputs,
-//     ForwardPassState}` in `training/forward/`.
-//   - `lower_bound` — `crate::lower_bound::evaluate_lower_bound` intra-doc links
-//     in `convergence/convergence.rs`. Keeps `pub` to match its pre-move visibility.
-//   - `state_exchange` — `crate::state_exchange::ExchangeBuffers` in
-//     `training/backward_pass_state.rs`, `training/backward/trial_point.rs`, and
-//     `training/session/mod.rs` (load-bearing; do not remove).
-//   - `trajectory` — `crate::trajectory::TrajectoryRecord` in `training/forward/`
-//     and `training/state_exchange.rs`.
-//   - `visited_states` — `crate::visited_states::VisitedStatesArchive` in
-//     `training/training.rs`, `training/session/mod.rs`, and `policy/policy_export.rs`.
+// Re-export shim exposing the `training/` pass modules at crate-root paths for
+// the internal `crate::`-prefixed references the curated re-exports below do not
+// cover. `forward` and `lower_bound` stay `pub`; the rest are `pub(crate)`.
 pub(crate) use training::{
     backward, backward_pass_state, forward_pass_state, state_exchange, trajectory, visited_states,
 };
 pub use training::{forward, lower_bound};
 
-// Crate-root submodule shim: aliases the nested `training/session/` subtree at
-// the pre-move `crate::training_session::` path so the
-// `crate::training_session::{iteration_scratch, rank_distribution, runtime}`
-// references in `training/forward_pass_state.rs` resolve verbatim.
+// Re-export shim: aliases `training::session` at `crate::training_session` for
+// the `crate::training_session::` references in `training/forward_pass_state.rs`.
 pub(crate) use training::session as training_session;
 
 // ── config ────────────────────────────────────────────────────────────────────
