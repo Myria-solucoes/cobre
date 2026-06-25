@@ -104,18 +104,8 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
 // ── validate_semantic_stages_penalties_scenarios ──────────────────────────────
 
 /// Performs Layer 5b semantic validation: stage structure, penalty ordering,
-/// and scenario model rules.
-///
-/// All rules are checked regardless of failures in earlier rules — every
-/// violation is collected before returning.  This function is infallible; it
-/// never returns a `Result`.  Errors are pushed to `ctx` as
-/// [`ErrorKind::InvalidValue`] or [`ErrorKind::BusinessRuleViolation`] entries;
-/// penalty ordering warnings use [`ErrorKind::ModelQuality`].
-///
-/// # Arguments
-///
-/// * `data` — fully parsed case data produced by [`super::schema::validate_schema`].
-/// * `ctx`  — mutable validation context that accumulates diagnostics.
+/// and scenario model rules. Every violation is collected into `ctx` before
+/// returning — no rule short-circuits another.
 ///
 /// # Conditional checks
 ///

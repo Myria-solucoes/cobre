@@ -1,9 +1,9 @@
 //! Layer 3 — Referential integrity validation.
 //!
 //! Verifies that every cross-entity reference in `ParsedData` resolves to an
-//! existing entity in the corresponding registry.  All 32 rules are checked
-//! regardless of errors found in earlier rules — every dangling reference is
-//! collected before returning.
+//! existing entity in the corresponding registry. Every check runs regardless of
+//! errors found in earlier checks — every dangling reference is collected before
+//! returning.
 //!
 //! The primary entry point is `validate_referential_integrity`.
 
@@ -15,22 +15,16 @@ use super::{ErrorKind, ValidationContext, schema::ParsedData};
 
 /// Performs Layer 3 referential integrity validation on the parsed data.
 ///
-/// For each of the 32 cross-reference rules, checks that the referenced entity
-/// ID exists in the target registry.  Any dangling reference adds one
-/// [`ErrorKind::InvalidReference`] entry to `ctx` with the message:
+/// Checks that every referenced entity ID exists in its target registry. Any
+/// dangling reference adds one [`ErrorKind::InvalidReference`] entry to `ctx`
+/// with the message:
 ///
 /// ```text
 /// "<source_type> <source_id> references non-existent <target_type> <target_id> via field '<field_name>'"
 /// ```
 ///
-/// This function is infallible — it never returns a `Result`.  All errors are
-/// collected in `ctx`.  Optional data collections (empty `Vec` or `None`) are
-/// silently skipped.
-///
-/// # Arguments
-///
-/// * `data` — fully parsed case data produced by [`super::schema::validate_schema`].
-/// * `ctx`  — mutable validation context that accumulates diagnostics.
+/// Infallible — all errors are collected in `ctx`; optional data collections
+/// (empty `Vec` or `None`) are silently skipped.
 pub(crate) fn validate_referential_integrity(data: &ParsedData, ctx: &mut ValidationContext) {
     let ids = LookupSets {
         bus: data.buses.iter().map(|b| b.id.0).collect(),
@@ -77,7 +71,7 @@ struct LookupSets {
 
 // ── Per-entity-group helper functions ─────────────────────────────────────────
 
-/// Rules 1-2: Line -> bus references (`source_bus_id`, `target_bus_id`).
+/// Line -> bus references (`source_bus_id`, `target_bus_id`).
 fn check_line_references(data: &ParsedData, ctx: &mut ValidationContext, bus_ids: &HashSet<i32>) {
     for line in &data.lines {
         let entity_str = format!("Line {}", line.id.0);
@@ -108,7 +102,7 @@ fn check_line_references(data: &ParsedData, ctx: &mut ValidationContext, bus_ids
     }
 }
 
-/// Rules 3, 7-8: Hydro -> bus, downstream hydro, and diversion references.
+/// Hydro -> bus, downstream hydro, and diversion references.
 fn check_hydro_references(
     data: &ParsedData,
     ctx: &mut ValidationContext,
@@ -118,7 +112,6 @@ fn check_hydro_references(
     for hydro in &data.hydros {
         let entity_str = format!("Hydro {}", hydro.id.0);
 
-        // Rule 3: bus reference.
         if !bus_ids.contains(&hydro.bus_id.0) {
             ctx.add_error(
                 ErrorKind::InvalidReference,
@@ -131,7 +124,6 @@ fn check_hydro_references(
             );
         }
 
-        // Rule 7: downstream hydro reference (optional).
         if let Some(downstream_id) = hydro.downstream_id
             && !hydro_ids.contains(&downstream_id.0)
         {
@@ -146,7 +138,6 @@ fn check_hydro_references(
             );
         }
 
-        // Rule 8: diversion downstream hydro reference.
         if let Some(ref diversion) = hydro.diversion
             && !hydro_ids.contains(&diversion.downstream_id.0)
         {
@@ -163,7 +154,7 @@ fn check_hydro_references(
     }
 }
 
-/// Rule 4: Thermal -> bus reference.
+/// Thermal -> bus reference.
 fn check_thermal_references(
     data: &ParsedData,
     ctx: &mut ValidationContext,
@@ -186,7 +177,7 @@ fn check_thermal_references(
     }
 }
 
-/// Rules 5, 19b: NCS -> bus reference and NCS model references.
+/// NCS -> bus reference and NCS model references.
 fn check_ncs_references(
     data: &ParsedData,
     ctx: &mut ValidationContext,
@@ -224,7 +215,7 @@ fn check_ncs_references(
     }
 }
 
-/// Rules 6, 9-10: `PumpingStation` -> bus and hydro references.
+/// `PumpingStation` -> bus and hydro references.
 fn check_pumping_references(
     data: &ParsedData,
     ctx: &mut ValidationContext,
@@ -272,7 +263,7 @@ fn check_pumping_references(
     }
 }
 
-/// Rule 11: `EnergyContract` -> bus reference.
+/// `EnergyContract` -> bus reference.
 fn check_contract_references(
     data: &ParsedData,
     ctx: &mut ValidationContext,
@@ -295,7 +286,7 @@ fn check_contract_references(
     }
 }
 
-/// Rules 12-14: Extension data -> hydro references (geometry, production models, FPHA).
+/// Extension data -> hydro references (geometry, production models, FPHA).
 fn check_extension_references(
     data: &ParsedData,
     ctx: &mut ValidationContext,
@@ -344,11 +335,10 @@ fn check_extension_references(
     }
 }
 
-/// Rules 15-20: Scenario data references.
-// Rationale: the function validates six independent scenario data sources against their
-// respective entity registries in a single error-accumulating pass; splitting would require
-// either multiple passes over `ParsedData` or passing a growing set of sub-results between
-// helpers, obscuring that all six checks share one accumulator and one return point.
+/// Scenario data references.
+// Rationale: the six scenario data sources are checked in one error-accumulating pass;
+// splitting would force multiple passes over `ParsedData` or thread sub-results between
+// helpers, obscuring that all checks share one accumulator and one return point.
 #[allow(clippy::too_many_lines)]
 fn check_scenario_references(
     data: &ParsedData,
@@ -512,7 +502,7 @@ fn check_scenario_references(
     }
 }
 
-/// Rules 21-26: Bounds rows -> entity references.
+/// Bounds rows -> entity references.
 fn check_bounds_references(data: &ParsedData, ctx: &mut ValidationContext, ids: &LookupSets) {
     for (i, row) in data.thermal_bounds.iter().enumerate() {
         if !ids.thermal.contains(&row.thermal_id.0) {
@@ -599,7 +589,7 @@ fn check_bounds_references(data: &ParsedData, ctx: &mut ValidationContext, ids: 
     }
 }
 
-/// Rules 27-30: Penalty override rows -> entity references.
+/// Penalty override rows -> entity references.
 fn check_penalty_override_references(
     data: &ParsedData,
     ctx: &mut ValidationContext,
@@ -665,7 +655,7 @@ fn check_penalty_override_references(
     }
 }
 
-/// Rules 31-32: `LoadFactorEntry` -> bus and stage references.
+/// `LoadFactorEntry` -> bus and stage references.
 fn check_load_factor_references(
     data: &ParsedData,
     ctx: &mut ValidationContext,
@@ -706,7 +696,7 @@ fn check_load_factor_references(
     }
 }
 
-/// Rule 33: `GenericConstraint` expression entity ID existence.
+/// `GenericConstraint` expression entity ID existence.
 fn check_generic_constraint_expression_references(
     data: &ParsedData,
     ctx: &mut ValidationContext,
@@ -730,7 +720,7 @@ fn check_generic_constraint_expression_references(
     }
 }
 
-/// Rules 34-35: `GenericConstraintBoundsRow` `block_id` validity and duplicate key detection.
+/// `GenericConstraintBoundsRow` `block_id` validity and duplicate key detection.
 fn check_generic_constraint_bounds_validity(data: &ParsedData, ctx: &mut ValidationContext) {
     let stage_block_counts: std::collections::HashMap<i32, usize> = data
         .stages
@@ -779,7 +769,7 @@ fn check_generic_constraint_bounds_validity(data: &ParsedData, ctx: &mut Validat
     }
 }
 
-/// Rules 36-41: NCS bounds and NCS factor entry checks.
+/// NCS bounds and NCS factor entry checks.
 fn check_ncs_bounds_and_factors(
     data: &ParsedData,
     ctx: &mut ValidationContext,
@@ -868,7 +858,7 @@ fn check_ncs_bounds_and_factors(
     }
 }
 
-/// Entity ID sets used by Rule 33 to check [`cobre_core::VariableRef`] existence.
+/// Entity ID sets used to check [`cobre_core::VariableRef`] existence.
 struct EntityIdSets<'a> {
     hydro: &'a HashSet<i32>,
     thermal: &'a HashSet<i32>,
@@ -879,13 +869,12 @@ struct EntityIdSets<'a> {
     ncs: &'a HashSet<i32>,
 }
 
-/// Helper for Rule 33: validate that a [`VariableRef`] references an existing entity.
+/// Validate that a [`VariableRef`] references an existing entity.
 ///
-/// A reference to a non-existent entity is an [`ErrorKind::InvalidReference`] error
-/// for every modeled entity type. The `Contract` type is the sole remaining stub
-/// (data-complete but contributing no LP variables), so a dangling `Contract`
-/// reference is downgraded to an [`ErrorKind::UnusedEntity`] warning rather than an
-/// error.
+/// A dangling reference is an [`ErrorKind::InvalidReference`] error for every
+/// modeled entity type. `Contract` is the sole remaining stub (data-complete but
+/// contributing no LP variables), so a dangling `Contract` reference is downgraded
+/// to an [`ErrorKind::UnusedEntity`] warning, not an error.
 fn validate_variable_ref_entity(
     var: &cobre_core::VariableRef,
     label: &str,

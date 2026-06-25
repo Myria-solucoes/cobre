@@ -1,8 +1,4 @@
 //! Layer 5b — correlation-domain semantic validation.
-//!
-//! Correlation matrix symmetry, diagonal entries equal to 1.0,
-//! off-diagonal values within [-1.0, 1.0], and inflow-vs-load
-//! same-type matrix-shape compatibility.
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 use super::CORR_TOLERANCE;
@@ -36,7 +32,6 @@ pub(super) fn check_correlation_matrices(data: &ParsedData, ctx: &mut Validation
                 for j in 0..n {
                     let val = group.matrix[i][j];
 
-                    // Rule 15: Diagonal entries must be 1.0 (±CORR_TOLERANCE).
                     if i == j && (val - 1.0).abs() > CORR_TOLERANCE {
                         ctx.add_error(
                             ErrorKind::BusinessRuleViolation,
@@ -50,7 +45,6 @@ pub(super) fn check_correlation_matrices(data: &ParsedData, ctx: &mut Validation
                         );
                     }
 
-                    // Rule 16: Off-diagonal entries must be in [-1.0, 1.0].
                     if i != j && !((-1.0_f64)..=1.0).contains(&val) {
                         ctx.add_error(
                             ErrorKind::BusinessRuleViolation,
@@ -64,7 +58,7 @@ pub(super) fn check_correlation_matrices(data: &ParsedData, ctx: &mut Validation
                         );
                     }
 
-                    // Rule 14: Symmetry check (only check upper triangle to avoid duplicates).
+                    // Upper triangle only — avoids reporting each asymmetry twice.
                     if i < j {
                         let symmetric = group.matrix[j][i];
                         if (val - symmetric).abs() > CORR_TOLERANCE {

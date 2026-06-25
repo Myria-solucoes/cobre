@@ -1,9 +1,4 @@
 //! Layer 5b — stage-structure semantic validation.
-//!
-//! Validates policy-graph transitions (`source_id`/`target_id`
-//! existence), outgoing-transition probability-sum invariant,
-//! cyclic-graph discount rate, block durations, and `CVaR`
-//! parameters.
 
 use std::collections::{HashMap, HashSet};
 
@@ -17,10 +12,9 @@ pub(super) fn check_stage_structure(data: &ParsedData, ctx: &mut ValidationConte
     let graph = &data.stages.policy_graph;
     let stages = &data.stages.stages;
 
-    // Build a set of all valid stage IDs for fast membership tests.
     let stage_ids: HashSet<i32> = stages.iter().map(|s| s.id).collect();
 
-    // Rule 1: Every source_id and target_id in transitions must be a valid stage ID.
+    // Rule 1.
     for transition in &graph.transitions {
         if !stage_ids.contains(&transition.source_id) {
             ctx.add_error(
@@ -46,8 +40,7 @@ pub(super) fn check_stage_structure(data: &ParsedData, ctx: &mut ValidationConte
         }
     }
 
-    // Rule 2: For each unique source_id, outgoing probability sum must be ≈ 1.0.
-    // Group transitions by source_id and sum probabilities.
+    // Rule 2.
     let mut prob_sums: HashMap<i32, f64> = HashMap::new();
     for transition in &graph.transitions {
         *prob_sums.entry(transition.source_id).or_insert(0.0) += transition.probability;
@@ -69,7 +62,7 @@ pub(super) fn check_stage_structure(data: &ParsedData, ctx: &mut ValidationConte
         }
     }
 
-    // Rule 3: Cyclic graphs require annual_discount_rate > 0.0.
+    // Rule 3.
     if graph.graph_type == PolicyGraphType::Cyclic && graph.annual_discount_rate <= 0.0 {
         ctx.add_error(
             ErrorKind::InvalidValue,
@@ -83,7 +76,7 @@ pub(super) fn check_stage_structure(data: &ParsedData, ctx: &mut ValidationConte
         );
     }
 
-    // Rule 4: Every Block.duration_hours must be > 0.0.
+    // Rule 4.
     for stage in stages {
         for block in &stage.blocks {
             if block.duration_hours <= 0.0 {
@@ -101,7 +94,7 @@ pub(super) fn check_stage_structure(data: &ParsedData, ctx: &mut ValidationConte
         }
     }
 
-    // Rule 5: CVaR alpha must be in (0, 1] and lambda must be in [0, 1].
+    // Rule 5.
     for stage in stages {
         if let StageRiskConfig::CVaR { alpha, lambda } = stage.risk_config {
             if alpha <= 0.0 || alpha > 1.0 {

@@ -1,8 +1,4 @@
 //! Layer 5a — hydro-domain semantic validation.
-//!
-//! Cascade acyclicity, hydro bounds, lifecycle consistency,
-//! filling config, geometry monotonicity, evaporation geometry
-//! coverage, FPHA constraint shape.
 
 use std::collections::{HashMap, HashSet};
 
@@ -183,13 +179,8 @@ pub(super) fn check_lifecycle_consistency(data: &ParsedData, ctx: &mut Validatio
 
 /// Extends the `entry < exit` ordering check in [`check_lifecycle_consistency`]
 /// to the entity types it does not cover: pumping stations, non-controllable
-/// sources, and energy contracts. Each carries the same
-/// `entry_stage_id`/`exit_stage_id` pair, so an unchecked entity with
-/// `entry >= exit` would pass validation while the other three types reject it —
-/// the parity this function closes.
-///
-/// Infallible — every violation accumulates into `ctx`; the loops run over all
-/// entities regardless of earlier failures.
+/// sources, and energy contracts. An unchecked window-bearing entity would pass
+/// validation while the others reject `entry >= exit` — the parity this closes.
 pub(super) fn check_lifecycle_consistency_remaining(
     data: &ParsedData,
     ctx: &mut ValidationContext,
@@ -244,26 +235,14 @@ pub(super) fn check_lifecycle_consistency_remaining(
 }
 
 /// Warns when a non-filling hydro or an energy contract sets
-/// `entry_stage_id`/`exit_stage_id`.
+/// `entry_stage_id`/`exit_stage_id` — the only windows still not honored by the
+/// LP, which models them active at every stage.
 ///
-/// These are the windows still not honored by the LP: a non-filling hydro
-/// window (one without a `FillingConfig`) and an energy contract (a stub) are
-/// modeled fully active at every stage, so each such entity earns one
-/// `ModelQuality` warning to signal the gap. The all-`None` case is the correct
-/// inert default and stays silent — emitting there would warn every shipped
-/// case.
-///
-/// A filling hydro (`hydro.filling.is_some()`) is excluded: its window IS
-/// applied — the `FillingConfig` carries the reservoir through its
-/// pre-filling/filling/operating lifecycle, so warning for it would be a false
-/// signal.
-///
-/// The other four window-bearing entity types — thermals, lines, NCS, and
-/// pumping stations — APPLY their windows at the LP fill site (a dormant
-/// entity's operational column bounds are pinned to `[0, 0]`), so warning for
-/// them would be a false signal and they are deliberately excluded here.
-///
-/// Infallible — every warning accumulates into `ctx`.
+/// Deliberately excluded (warning for them would be a false signal): filling
+/// hydros (the `FillingConfig` drives the reservoir's lifecycle), and thermals,
+/// lines, NCS, and pumping stations (their windows ARE applied at the LP fill
+/// site, pinning a dormant entity's columns to `[0, 0]`). The all-`None` case is
+/// the correct inert default and stays silent.
 pub(super) fn warn_commissioning_parsed_not_applied(
     data: &ParsedData,
     ctx: &mut ValidationContext,
@@ -288,9 +267,6 @@ pub(super) fn warn_commissioning_parsed_not_applied(
     }
 
     for hydro in &data.hydros {
-        // A filling hydro's window IS applied: the FillingConfig carries the
-        // reservoir through its pre-filling/filling/operating lifecycle, so it
-        // is not an unapplied window and warning for it would be a false signal.
         if hydro.filling.is_some() {
             continue;
         }
@@ -341,36 +317,25 @@ pub(super) fn check_filling_config(data: &ParsedData, ctx: &mut ValidationContex
 }
 
 /// Enforces the structural guards a filling hydro must satisfy beyond the
-/// start-stage-validity check in [`check_filling_config`].
+/// start-stage-validity check in [`check_filling_config`]. Each rejects an
+/// ill-formed combination that would otherwise yield a meaningless or infeasible
+/// `PreFilling`/`Filling`/`Operating` lifecycle:
 ///
-/// A filling hydro is one carrying a `FillingConfig` (`hydro.filling.is_some()`)
-/// and an `entry_stage_id`; it passes through a `PreFilling`/`Filling`/`Operating`
-/// lifecycle keyed on stage id. These guards reject the ill-formed combinations
-/// that would otherwise produce a meaningless or infeasible lifecycle:
-///
-/// 1. `entry_stage_id.is_some()` ⟺ `filling.is_some()` — entry and filling are a
-///    pair; one without the other has no meaning (a filling reservoir that never
-///    becomes a plant, or an entry stage with no filling physics behind it).
-/// 2. `start_stage_id < entry_stage_id` — filling must begin strictly before the
-///    plant enters operation, otherwise the `Filling` phase is empty.
-/// 3. `entry_stage_id < horizon` — the reservoir must operate at least one stage;
-///    an entry at or past the last stage means it never generates. `horizon` is
-///    the study stage count, consistent with the thermal-horizon checks.
-/// 4. the seed in `filling_storage` lies in `[0, min_storage_hm3)` — strictly
-///    below the dead volume. Equality with `min_storage_hm3` belongs to neither
-///    the filling range nor the operating `.storage` range (validated
-///    `[min_storage, max_storage]`), so it is rejected.
-/// 5. a filling hydro carries no `exit_stage_id` — hydro is entry-only; an exit
-///    is physically ill-posed for a state-carrying reservoir.
-/// 6. when `start_stage_id > 0` (a `PreFilling` phase exists), the
-///    `filling_storage` seed is `0` (empty pit). A `PreFilling` phase freezes
-///    storage at the seed before the dam exists, so a nonzero seed would assert
-///    impounded water in a reservoir that has not yet been built. A nonzero
-///    seed is only valid when `start_stage_id == 0` (the study starts
-///    mid-filling, guard 4's open range).
-///
-/// Infallible — every violation accumulates into `ctx`; the loop runs over all
-/// hydros regardless of earlier failures.
+/// 1. `entry_stage_id.is_some()` ⟺ `filling.is_some()` — one without the other
+///    has no meaning.
+/// 2. `start_stage_id < entry_stage_id` — else the `Filling` phase is empty.
+/// 3. `entry_stage_id < horizon` (study stage count) — else the reservoir never
+///    operates.
+/// 4. the `filling_storage` seed lies in `[0, min_storage_hm3)` — strictly below
+///    the dead volume. Equality with `min_storage_hm3` belongs to neither the
+///    filling range nor the operating `.storage` range `[min_storage,
+///    max_storage]`, so it is rejected.
+/// 5. no `exit_stage_id` — a filling hydro is entry-only; an exit is ill-posed
+///    for a state-carrying reservoir.
+/// 6. `start_stage_id > 0` (a `PreFilling` phase exists) requires the seed `== 0`
+///    (empty pit): `PreFilling` freezes storage at the seed before the dam
+///    exists, so a nonzero seed asserts impounded water in a reservoir not yet
+///    built. A nonzero seed is valid only mid-filling (`start_stage_id == 0`).
 pub(super) fn check_filling_guards(data: &ParsedData, ctx: &mut ValidationContext) {
     let horizon =
         i32::try_from(data.stages.stages.iter().filter(|s| s.id >= 0).count()).unwrap_or(i32::MAX);
@@ -378,7 +343,6 @@ pub(super) fn check_filling_guards(data: &ParsedData, ctx: &mut ValidationContex
     for hydro in &data.hydros {
         let entity_str = format!("Hydro {}", hydro.id.0);
 
-        // Guard 1: entry_stage_id and filling are a matched pair.
         if hydro.entry_stage_id.is_some() != hydro.filling.is_some() {
             ctx.add_error(
                 ErrorKind::InvalidValue,
@@ -398,7 +362,6 @@ pub(super) fn check_filling_guards(data: &ParsedData, ctx: &mut ValidationContex
         }
 
         if let Some(filling) = &hydro.filling {
-            // Guard 2: filling must begin strictly before operation.
             if let Some(entry) = hydro.entry_stage_id
                 && filling.start_stage_id >= entry
             {
@@ -414,7 +377,6 @@ pub(super) fn check_filling_guards(data: &ParsedData, ctx: &mut ValidationContex
                 );
             }
 
-            // Guard 3: the hydro must operate at least one stage.
             if let Some(entry) = hydro.entry_stage_id
                 && entry >= horizon
             {
@@ -429,7 +391,6 @@ pub(super) fn check_filling_guards(data: &ParsedData, ctx: &mut ValidationContex
                 );
             }
 
-            // Guard 4: the filling seed must lie strictly below the dead volume.
             if let Some(seed) = data
                 .initial_conditions
                 .filling_storage
@@ -450,7 +411,6 @@ pub(super) fn check_filling_guards(data: &ParsedData, ctx: &mut ValidationContex
                 );
             }
 
-            // Guard 5: a filling hydro is entry-only; exit is rejected.
             if let Some(exit) = hydro.exit_stage_id {
                 ctx.add_error(
                     ErrorKind::InvalidValue,
@@ -464,11 +424,6 @@ pub(super) fn check_filling_guards(data: &ParsedData, ctx: &mut ValidationContex
                 );
             }
 
-            // Guard 6: when a PreFilling phase exists (start_stage_id > 0), the
-            // seed must be 0 (empty pit). PreFilling freezes storage at the seed
-            // before the dam is built, so a nonzero seed asserts impounded water
-            // in a reservoir that does not yet exist. A nonzero seed is only
-            // valid mid-filling (start_stage_id == 0).
             if filling.start_stage_id > 0
                 && let Some(seed) = data
                     .initial_conditions
@@ -505,7 +460,7 @@ pub(super) fn check_geometry_monotonicity(data: &ParsedData, ctx: &mut Validatio
         let current_hydro_id = rows[i].hydro_id.0;
         let group_start = i;
 
-        // Find end of this hydro's group (rows are sorted by hydro_id then volume_hm3).
+        // Rows are sorted by hydro_id then volume_hm3 — group detection relies on it.
         while i < rows.len() && rows[i].hydro_id.0 == current_hydro_id {
             i += 1;
         }
@@ -875,7 +830,7 @@ mod tests {
     /// An entity with only `entry_stage_id` set (no exit) produces no lifecycle
     /// ordering error. A line carries the generic `entry/exit` ordering check
     /// without the hydro-specific filling guards, so it is the carrier for the
-    /// ordering-only assertion (a hydro entry now requires a filling config).
+    /// ordering-only assertion (a hydro entry requires a filling config).
     #[test]
     fn test_lifecycle_only_entry_no_error() {
         let line = make_windowed_line(8, Some(5), None);
@@ -899,7 +854,7 @@ mod tests {
     /// An entity with valid `entry < exit` produces no lifecycle ordering error.
     /// A line is the carrier (see [`test_lifecycle_only_entry_no_error`]): the
     /// generic ordering check accepts a window with `entry < exit`, while a hydro
-    /// with both fields would now be rejected as entry-only.
+    /// with both fields would be rejected as entry-only.
     #[test]
     fn test_lifecycle_valid() {
         let line = make_windowed_line(9, Some(0), Some(10));
@@ -1061,8 +1016,8 @@ mod tests {
     /// A filling hydro's window IS applied (the `FillingConfig` drives its
     /// lifecycle), so it emits NO parsed-not-applied `ModelQuality` warning, and
     /// the case still loads (`has_errors()` is false). The filling pairing keeps
-    /// the hydro guard-clean (a bare entry without filling would now be
-    /// rejected), isolating the commissioning behavior under test.
+    /// the hydro guard-clean (a bare entry without filling would be rejected),
+    /// isolating the commissioning behavior under test.
     #[test]
     fn test_filling_hydro_emits_no_warning() {
         // start (1) < entry (2) < horizon (3); no exit; seed left empty (no
@@ -1220,8 +1175,8 @@ mod tests {
     }
 
     /// A windowed energy contract still emits the parsed-not-applied warning:
-    /// contract windows remain unapplied (contracts are a stub), so the warning
-    /// is correct for them even after thermal/line/NCS/pumping were removed.
+    /// contract windows remain unapplied (contracts are a stub), so the warning is
+    /// correct for them (unlike thermal/line/NCS/pumping, whose windows ARE applied).
     #[test]
     fn test_windowed_contract_still_warns() {
         let mut data = make_data(
@@ -1658,12 +1613,8 @@ mod tests {
     /// Non-monotonic volume produces BusinessRuleViolation with "Hydro 3" and "volume".
     #[test]
     fn test_geometry_non_monotonic_volume() {
-        // Volume sequence [10.0, 20.0, 15.0] has a decrease at index 2.
-        // Note: rows pre-sorted by (hydro_id, volume_hm3), but we construct
-        // the violation by using the same volume values — the parser would have
-        // sorted them, so [10, 15, 20] after sort. To test the actual validation,
-        // we craft a case where sorted order still violates (equal volumes).
-        // Use equal volumes to trigger the "not strictly increasing" check.
+        // Equal (not decreasing) volumes: the parser pre-sorts by volume, so only
+        // a duplicate survives sorting to trigger the strict-increase check.
         let geometry = vec![
             make_geom_row(3, 10.0, 100.0, 1.0),
             make_geom_row(3, 20.0, 110.0, 1.5),

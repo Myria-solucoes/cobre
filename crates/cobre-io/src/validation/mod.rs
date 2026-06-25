@@ -52,10 +52,6 @@ pub enum Severity {
 // ── ErrorKind ────────────────────────────────────────────────────────────────
 
 /// Categorises the kind of validation problem found.
-///
-/// The 15 variants correspond to the error type catalog in SS4 of the
-/// validation-architecture spec, plus the `SemanticAmbiguity` extension
-/// added for anticipated-thermal DSL warnings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     /// Required file is missing from the case directory.
@@ -87,17 +83,14 @@ pub enum ErrorKind {
     UnusedEntity,
     /// A statistical quality concern in the input model (warning only).
     ModelQuality,
-    /// A valid construct whose semantics are ambiguous or stage-dependent in a
-    /// way that is likely to surprise the user (warning only). Used to surface
-    /// the `thermal_generation` / `anticipated_decision` stage-drift footgun.
+    /// A valid construct whose semantics are ambiguous or stage-dependent
+    /// (warning only); surfaces the `thermal_generation` / `anticipated_decision`
+    /// stage-drift case.
     SemanticAmbiguity,
 }
 
 impl ErrorKind {
     /// Returns the default severity associated with this error kind.
-    ///
-    /// Most kinds default to [`Severity::Error`]; `UnusedEntity`, `ModelQuality`,
-    /// and `SemanticAmbiguity` default to [`Severity::Warning`].
     #[must_use]
     pub fn default_severity(self) -> Severity {
         match self {
@@ -161,10 +154,6 @@ impl ValidationContext {
     }
 
     /// Adds an error diagnostic to the context.
-    ///
-    /// `file` is the path of the file where the problem was found.
-    /// `entity` is an optional string identifier for the affected entity.
-    /// `message` is a human-readable description.
     pub fn add_error(
         &mut self,
         kind: ErrorKind,
@@ -182,10 +171,6 @@ impl ValidationContext {
     }
 
     /// Adds a warning diagnostic to the context.
-    ///
-    /// `file` is the path of the file where the concern was noted.
-    /// `entity` is an optional string identifier for the affected entity.
-    /// `message` is a human-readable description.
     pub fn add_warning(
         &mut self,
         kind: ErrorKind,
@@ -203,8 +188,6 @@ impl ValidationContext {
     }
 
     /// Returns `true` if any error-severity diagnostics have been collected.
-    ///
-    /// Warnings do not count as errors.
     #[must_use]
     pub fn has_errors(&self) -> bool {
         self.entries.iter().any(|e| e.severity == Severity::Error)
@@ -239,9 +222,8 @@ impl ValidationContext {
 
     /// Converts the collected diagnostics into a `Result`.
     ///
-    /// Returns `Ok(())` if no error-severity diagnostics were collected.
-    /// Warnings are not surfaced by this method — callers that want to report
-    /// warnings should inspect [`warnings()`] before calling `into_result()`.
+    /// Warnings are not surfaced by this method — inspect [`warnings()`] before
+    /// calling `into_result()`.
     ///
     /// [`warnings()`]: ValidationContext::warnings
     ///

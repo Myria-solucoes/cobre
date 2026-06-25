@@ -30,22 +30,13 @@ use crate::extensions::{ProductionModelConfig, SelectionMode};
 
 /// Performs Layer 4 dimensional consistency validation on the parsed data.
 ///
-/// Checks all 7 coverage rules. When a rule's optional data is absent (empty
-/// `Vec` or `None`), that rule is silently skipped. All 7 rules are always
-/// checked — earlier failures do not short-circuit later rules.
-///
-/// Any coverage failure adds one [`ErrorKind::DimensionMismatch`] entry to
-/// `ctx`. This function is infallible — it never returns a `Result`.
-///
-/// # Arguments
-///
-/// * `data` — fully parsed case data produced by [`super::schema::validate_schema`].
-/// * `ctx`  — mutable validation context that accumulates diagnostics.
-// Rationale: all 7 coverage rules share a single pass over the same parsed data, and
-// all rules must run unconditionally so the caller receives a complete diagnostic set
-// regardless of which rules fire; splitting into one function per rule would require
-// seven separate traversals over the same entity collections or an intermediary
-// structure, with no benefit.
+/// Every coverage rule runs unconditionally — earlier failures do not
+/// short-circuit later rules. A rule whose optional data is absent (empty `Vec`
+/// or `None`) is silently skipped. Each failure adds one
+/// [`ErrorKind::DimensionMismatch`] entry to `ctx`; the function is infallible.
+// Rationale: all rules share one pass over the same parsed data and must run
+// unconditionally so the caller receives a complete diagnostic set; one function per
+// rule would force separate traversals or an intermediary structure with no benefit.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn validate_dimensional_consistency(data: &ParsedData, ctx: &mut ValidationContext) {
     let study_stage_ids: Vec<i32> = data
@@ -121,7 +112,6 @@ pub(crate) fn validate_dimensional_consistency(data: &ParsedData, ctx: &mut Vali
                 let n_entities = group.entities.len();
                 let n_rows = group.matrix.len();
 
-                // Rule 4: row count must equal entity count.
                 if n_rows != n_entities {
                     ctx.add_error(
                         ErrorKind::DimensionMismatch,
@@ -203,11 +193,9 @@ pub(crate) fn validate_dimensional_consistency(data: &ParsedData, ctx: &mut Vali
 
         for &hydro_id in &head_hydro_ids {
             let count = geometry_row_counts.get(&hydro_id).copied().unwrap_or(0);
-            // FPHA accepts a SINGLE geometry row: a run-of-river plant has one
-            // operating volume (v_min == v_max) → a constant forebay → a valid
-            // single-volume FPHA fit (γ_V = 0). `linearized_head` still needs at
-            // least 2 rows because it fits a head SLOPE in volume, which a single
-            // point cannot define. Only an empty geometry fails for FPHA.
+            // FPHA accepts a single geometry row (constant run-of-river forebay,
+            // γ_V = 0); `linearized_head` needs ≥ 2 because it fits a head slope in
+            // volume, which one point cannot define.
             let min_required = if fpha_hydro_ids.contains(&hydro_id) {
                 1
             } else {
@@ -803,11 +791,7 @@ mod tests {
         let mut data = base_parsed_data();
         data.hydros = vec![make_hydro(1, HydroGenerationModel::Fpha, None, None)];
         data.buses = vec![make_bus(1)];
-        // All optional data is empty — no rules 1, 2, 3, 7, 8 should fire.
-        // data.inflow_seasonal_stats == vec![] → skip rule 1
-        // data.load_seasonal_stats == vec![] → skip rule 2
-        // data.fpha_hyperplanes == vec![] → skip rule 7
-        // data.hydro_geometry == vec![] → skip rule 8
+        // All optional data is empty — every data-gated rule is skipped.
 
         let mut ctx = ValidationContext::new();
         validate_dimensional_consistency(&data, &mut ctx);

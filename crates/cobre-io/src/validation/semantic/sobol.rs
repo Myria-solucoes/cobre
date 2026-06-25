@@ -21,8 +21,8 @@ pub(super) fn check_sobol_power_of_2(data: &ParsedData, ctx: &mut ValidationCont
         }
         let bf = stage.scenario_config.branching_factor;
         if stage.scenario_config.noise_method == NoiseMethod::QmcSobol && !bf.is_power_of_two() {
-            // bf == 0 is unreachable after parsing validation, but guard
-            // defensively to prevent overflow in leading_zeros arithmetic.
+            // bf == 0 (unreachable post-parse) would overflow the leading_zeros
+            // arithmetic below — guard it.
             let suggestion = if bf > 0 {
                 let lower = 1usize << (usize::BITS - bf.leading_zeros() - 1);
                 let upper = lower << 1;

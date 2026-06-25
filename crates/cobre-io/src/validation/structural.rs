@@ -30,11 +30,8 @@ use super::{ErrorKind, ValidationContext};
 
 /// Records whether each of the 43 input files is present in the case directory.
 ///
-/// All fields default to `false`.  After calling [`validate_structure`], each field
-/// is `true` if the corresponding file was found on disk.
-///
-/// The 43 files are organised by subdirectory following the input directory structure spec.
-/// Each bool is an independent "present/absent" flag for a distinct file.
+/// Fields default to `false`; [`validate_structure`] sets each to `true` if the
+/// corresponding file was found on disk.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default)]
 pub struct FileManifest {
@@ -133,9 +130,8 @@ pub struct FileManifest {
 
 /// Describes a single file entry for the structural check.
 struct FileEntry {
-    /// Relative path from the case root.
+    /// Path relative to the case root.
     relative: &'static str,
-    /// `true` if this file must be present.
     required: bool,
 }
 
@@ -320,26 +316,13 @@ const FILE_ENTRIES: &[FileEntry] = &[
     },
 ];
 
-/// Performs Layer 1 structural validation on the case directory at `case_root`.
+/// Performs Layer 1 structural validation on the case directory at `case_root`,
+/// returning a [`FileManifest`] of which files are present.
 ///
-/// For each of the 43 known input files:
-///
-/// - If the file is present, the corresponding [`FileManifest`] field is set to `true`.
-/// - If the file is absent **and required**, an [`ErrorKind::FileNotFound`] error is
-///   added to `ctx`.
-/// - If the file is absent **and optional**, the manifest field remains `false` and no
-///   error is added.
-///
-/// This function does **not** read or parse any file content.
-///
-/// # Arguments
-///
-/// * `case_root` — path to the case directory root.
-/// * `ctx`       — mutable validation context that accumulates diagnostics.
-///
-/// # Returns
-///
-/// A [`FileManifest`] recording presence/absence of all 43 files.
+/// A present file sets its manifest field to `true`. An absent **required** file
+/// adds an [`ErrorKind::FileNotFound`] error; an absent **optional** file leaves
+/// its field `false` with no error. This function does **not** read or parse any
+/// file content.
 #[must_use]
 pub fn validate_structure(case_root: &Path, ctx: &mut ValidationContext) -> FileManifest {
     let mut manifest = FileManifest::default();
@@ -364,24 +347,22 @@ pub fn validate_structure(case_root: &Path, ctx: &mut ValidationContext) -> File
     manifest
 }
 
-/// Returns mutable references to every `bool` field of [`FileManifest`] in the same
-/// order as [`FILE_ENTRIES`].
-///
-/// This keeps the mapping between entries and manifest fields explicit and avoids
-/// fragile positional indexing elsewhere.
+/// Returns mutable references to every `bool` field of [`FileManifest`] in the
+/// same order as [`FILE_ENTRIES`] — `validate_structure` zips the two positionally,
+/// so a divergence here silently misassigns presence flags.
 fn manifest_fields_mut(m: &mut FileManifest) -> [&mut bool; 43] {
     [
-        // Root (4)
+        // Root
         &mut m.config_json,
         &mut m.penalties_json,
         &mut m.stages_json,
         &mut m.initial_conditions_json,
-        // system/ required (4)
+        // system/ required
         &mut m.system_buses_json,
         &mut m.system_lines_json,
         &mut m.system_hydros_json,
         &mut m.system_thermals_json,
-        // system/ optional (9)
+        // system/ optional
         &mut m.system_non_controllable_sources_json,
         &mut m.system_pumping_stations_json,
         &mut m.system_energy_contracts_json,
@@ -391,7 +372,7 @@ fn manifest_fields_mut(m: &mut FileManifest) -> [&mut bool; 43] {
         &mut m.system_scalar_parameters_json,
         &mut m.system_hydro_energy_productivity_parquet,
         &mut m.system_tailrace_curves_parquet,
-        // scenarios/ (9)
+        // scenarios/
         &mut m.scenarios_inflow_history_parquet,
         &mut m.scenarios_inflow_seasonal_stats_parquet,
         &mut m.scenarios_inflow_ar_coefficients_parquet,
@@ -405,7 +386,7 @@ fn manifest_fields_mut(m: &mut FileManifest) -> [&mut bool; 43] {
         &mut m.scenarios_noise_openings_parquet,
         &mut m.scenarios_non_controllable_factors_json,
         &mut m.scenarios_non_controllable_stats_parquet,
-        // constraints/ (13)
+        // constraints/
         &mut m.constraints_thermal_bounds_parquet,
         &mut m.constraints_hydro_bounds_parquet,
         &mut m.constraints_line_bounds_parquet,

@@ -28,50 +28,19 @@ pub(super) fn check_thermal_generation_bounds(data: &ParsedData, ctx: &mut Valid
 
 /// Checks cross-field invariants for anticipated thermal plants.
 ///
-/// Enforces:
-///
-/// 1. **Per-plant lead-stage horizon** — for each thermal with
-///    `anticipated_config: Some(AnticipatedConfig { lead_stages: K })`:
-///    - `K == 0` is rejected (defence in depth; parse-time also rejects this).
-///    - `K > n_stages` — the plant can never deliver within the study horizon.
-///
-///    A commissioning window (`entry_stage_id` / `exit_stage_id`) IS supported on
-///    an anticipated thermal: a decision priced at `t` matures at `t + K`, and the
-///    decision gate is active only when the DELIVERY stage `t + K` falls inside
-///    both the horizon and the plant's `[entry, exit)` operation window (the
-///    `StateLayout::is_anticipated_decision_active` predicate). Generation outside
-///    the window is zeroed by the operation-window gate on the generation column,
-///    so the K-stage lookahead and the window compose without a separate design.
-///    The `K == 0` / `K > n_stages` checks validate the LEAD itself (independent of
-///    any window) and stay.
-///
-/// 2. **Past-commitments registry correspondence** — validates the bijection
-///    between anticipated thermals and `ic.past_anticipated_commitments`:
-///    - Every anticipated thermal must have exactly one matching history entry.
-///    - Every history entry must reference a thermal whose `anticipated_config`
-///      is `Some`.
-///    - Each matched `(thermal, history)` pair must satisfy
-///      `history.values_mw.len() == lead_stages as usize` exactly.
-///
-/// 3. **Committed-value generation bounds** — for each matched
-///    `(thermal, history)` pair whose length is correct, every
-///    `history.values_mw[j]` must lie within
-///    `[thermal.min_generation_mw, thermal.max_generation_mw]`.
-///    A value outside this range seeds the ring buffer with a commitment that
-///    cannot be satisfied by the per-block generation bounds in the LP,
-///    causing an infeasible problem at the delivery stage.
-///
-/// 4. **Seed-vs-window consistency** — for a windowed anticipated thermal, every
-///    NONZERO `past_anticipated_commitments.values_mw[k]` (the seed delivering at
-///    study stage `k`) must satisfy `commissioning_active(entry, exit, id(k))`. A
-///    seed maturing outside the operation window would force the always-active
-///    fishing equality to read `0 == seed` at that stage (the matured generation
-///    column is pinned to `[0, 0]` outside the window) — an infeasible LP. This
-///    rule converts that into a clean validation error covering both `k < entry`
-///    and `k >= exit`.
+/// 1. **Per-plant lead-stage horizon** — `K == 0` is rejected (defence in depth;
+///    parse-time also rejects it) and `K > n_stages` is rejected (the plant can
+///    never deliver within the horizon). A commissioning window IS supported and
+///    composes with the K-stage lookahead via the shifted decision gate; these
+///    two checks validate the LEAD itself, independent of any window.
+/// 2. **Past-commitments registry bijection** with
+///    `ic.past_anticipated_commitments`: each anticipated thermal has exactly one
+///    history entry, each history entry references an anticipated thermal, and
+///    `history.values_mw.len() == lead_stages` exactly.
+/// 3. **Committed-value generation bounds** — see `check_committed_value_bounds`.
+/// 4. **Seed-vs-window consistency** — see `check_seed_within_window`.
 pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut ValidationContext) {
-    // Study stages only: pre-study stages have negative IDs and are never
-    // delivery targets for anticipated commitments.
+    // Pre-study stages (negative IDs) are never delivery targets for commitments.
     let study_stage_ids: Vec<i32> = data
         .stages
         .stages
@@ -81,8 +50,6 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
         .collect();
     let n_stages = study_stage_ids.len();
 
-    // ── 1. Per-plant lead-stage horizon ───────────────────────────────────────
-
     for thermal in &data.thermals {
         let Some(ref cfg) = thermal.anticipated_config else {
             continue;
@@ -91,7 +58,6 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
         let thermal_id = thermal.id.0;
         let entity_str = format!("thermals[id={thermal_id}].anticipated_config.lead_stages");
 
-        // K == 0: defence in depth (parse-time should also reject)
         if k == 0 {
             ctx.add_error(
                 ErrorKind::BusinessRuleViolation,
@@ -104,10 +70,6 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
 
         let k_u = k as usize;
 
-        // K > n_stages: plant can never deliver within the study horizon. This
-        // validates the LEAD itself, independent of any commissioning window: a
-        // plant whose first possible delivery (`stage 0 + K`) already exceeds the
-        // horizon can never make an active decision regardless of its window.
         if k_u > n_stages {
             ctx.add_error(
                 ErrorKind::BusinessRuleViolation,
@@ -122,16 +84,12 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
         }
     }
 
-    // ── 2. Past-commitments registry correspondence ───────────────────────────
-
-    // Build a map from thermal_id -> history entry for the IC entries.
     let ic = &data.initial_conditions;
     let mut history_by_id: HashMap<EntityId, &AnticipatedCommitmentHistory> = HashMap::new();
     for history in &ic.past_anticipated_commitments {
         history_by_id.insert(history.thermal_id, history);
     }
 
-    // Build a set of thermal IDs that have anticipated_config.
     let mut anticipated_thermal_ids: std::collections::HashSet<EntityId> =
         std::collections::HashSet::new();
     for thermal in &data.thermals {
@@ -140,7 +98,6 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
         }
     }
 
-    // Check: every anticipated thermal must have exactly one matching history entry.
     for thermal in &data.thermals {
         let Some(ref cfg) = thermal.anticipated_config else {
             continue;
@@ -150,7 +107,6 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
 
         match history_by_id.get(&thermal_id) {
             None => {
-                // Missing entry
                 ctx.add_error(
                     ErrorKind::BusinessRuleViolation,
                     "initial_conditions.json",
@@ -194,7 +150,6 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
         }
     }
 
-    // Check: every history entry must reference an anticipated thermal.
     for history in &ic.past_anticipated_commitments {
         if !anticipated_thermal_ids.contains(&history.thermal_id) {
             ctx.add_error(
@@ -214,14 +169,8 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
     }
 }
 
-/// For an anticipated thermal whose history has the correct length, check each
-/// `values_mw[j]` for LP feasibility.
-///
-/// **Generation bounds check** — every `values_mw[j]` must lie within
-/// `[thermal.min_generation_mw, thermal.max_generation_mw]`.
-///
-/// Out-of-bounds entries would make the LP infeasible at the corresponding
-/// stage's fishing equality.
+/// Every `values_mw[j]` must lie within `[min_generation_mw, max_generation_mw]`;
+/// an out-of-bounds seed makes the LP infeasible at that stage's fishing equality.
 fn check_committed_value_bounds(
     thermal: &cobre_core::entities::Thermal,
     thermal_id: EntityId,
@@ -249,22 +198,15 @@ fn check_committed_value_bounds(
     }
 }
 
-/// For a windowed anticipated thermal, reject any nonzero seed that matures
-/// outside the operation window.
+/// For a windowed anticipated thermal, reject any nonzero `values_mw[k]` that
+/// matures (at study stage `id(k)`) outside the operation window: the matured
+/// generation column is pinned to `[0, 0]` there, so the always-active fishing
+/// equality reads `0 == seed` — an infeasible LP. A zero seed is consistent at
+/// any stage and allowed.
 ///
-/// `values_mw[k]` is the seed delivered at study stage index `k` (the always-active
-/// fishing equality at stage `k` reads the matured slot-0 commitment). When the
-/// thermal has a commissioning window and the delivery stage `id(k)` is outside
-/// `[entry, exit)`, the matured generation column is pinned to `[0, 0]`, so a
-/// nonzero seed forces the fishing equality to read `0 == seed` — an infeasible LP.
-/// A zero seed at a dormant stage is consistent (`0 == 0`) and is allowed.
-///
-/// The window predicate is the half-open `entry <= id < exit` shared
-/// commissioning rule. The solver crate owns the authoritative predicate and the
-/// dispatch crate cannot be a dependency of this validation layer, so the
-/// half-open contract is mirrored here — a drift would let an infeasible seed
-/// past validation. No-op for a windowless plant (`entry`/`exit` both `None`),
-/// where every stage is in-window.
+/// The half-open `entry <= id < exit` predicate mirrors the LP builder's
+/// `commissioning_active` (the solver crate cannot be a dependency here); a drift
+/// would let an infeasible seed past validation.
 fn check_seed_within_window(
     thermal: &cobre_core::entities::Thermal,
     thermal_id: EntityId,
@@ -279,18 +221,14 @@ fn check_seed_within_window(
     }
     let entity_str = format!("thermals[id={}].anticipated_config", thermal_id.0);
     for (k, &v) in values_mw.iter().enumerate() {
-        // A zero seed at a dormant stage is consistent with the `[0, 0]` pin.
         if v == 0.0 {
             continue;
         }
         let Some(&stage_id) = study_stage_ids.get(k) else {
-            // The seed length matches `lead_stages <= n_stages` (length checked by
-            // the caller), so every `k` indexes a study stage; this guard is
-            // defence in depth and never fires for a valid history.
+            // Length is caller-checked (lead_stages <= n_stages), so every k
+            // indexes a study stage; defence in depth, never fires for valid input.
             continue;
         };
-        // Half-open operation window `[entry, exit)` keyed on `stage.id`, mirroring
-        // the LP builder's `commissioning_active`.
         let in_window = entry.is_none_or(|e| e <= stage_id) && exit.is_none_or(|e| stage_id < e);
         if !in_window {
             ctx.add_error(
@@ -323,7 +261,6 @@ pub(super) fn check_anticipated_decision_target_is_anticipated(
     data: &ParsedData,
     ctx: &mut ValidationContext,
 ) {
-    // Build the set of thermal IDs that are anticipated.
     let anticipated_ids: HashSet<EntityId> = data
         .thermals
         .iter()
@@ -358,19 +295,13 @@ pub(super) fn check_anticipated_decision_target_is_anticipated(
 /// constraint and thermal `N` is anticipated.
 ///
 /// `thermal_generation` for an anticipated thermal references the per-block
-/// generation at the *delivery* stage (the stage when the commitment matures),
-/// not the commitment made at the current stage. This is valid but frequently
-/// surprising: users who want to constrain the *commitment* should use
-/// `anticipated_decision(N)` instead. The stage at which the commitment is
-/// expressed differs from the stage at which generation is observed.
-///
-/// This validator emits a `SemanticAmbiguity` warning so the model author
-/// can confirm the intent.
+/// generation at the *delivery* stage, not the *commitment* made at the current
+/// stage. This is valid but surprising; to constrain the commitment use
+/// `anticipated_decision(N)` instead. Emits a `SemanticAmbiguity` warning.
 pub(super) fn warn_thermal_generation_on_anticipated_thermal(
     data: &ParsedData,
     ctx: &mut ValidationContext,
 ) {
-    // Build the set of thermal IDs that are anticipated.
     let anticipated_ids: HashSet<EntityId> = data
         .thermals
         .iter()
@@ -419,10 +350,8 @@ pub(super) fn check_thermal_bounds_override_stage_range(
     data: &ParsedData,
     ctx: &mut ValidationContext,
 ) {
-    // `filter(id >= 0)` counts study stages only, matching the resolver's
-    // `stage_index` (cobre-io/src/pipeline.rs builds it from study stages
-    // only). Pre-study stages with negative IDs are excluded from the
-    // override-table horizon.
+    // Study stages only (id >= 0), matching the resolver's `stage_index`; a
+    // mismatch here would reject overrides the resolver actually applies.
     let n_stages = data.stages.stages.iter().filter(|s| s.id >= 0).count();
     let n_stages_i = i64::try_from(n_stages).unwrap_or(i64::MAX);
     for row in &data.thermal_bounds {
@@ -705,11 +634,10 @@ mod tests {
 
     // ── AC-7: entry_stage_id window on an anticipated thermal is ACCEPTED ─────
 
-    /// An anticipated thermal that sets `entry_stage_id` is now ACCEPTED: a
-    /// commissioning window composes with the K-stage delivery lookahead via the
-    /// shifted decision gate. The blanket "not supported on anticipated thermals"
-    /// rejection is removed. With all-zero seeds the seed-vs-window rule does not
-    /// fire (a zero seed is consistent with the `[0, 0]` pin at a dormant stage).
+    /// An anticipated thermal that sets `entry_stage_id` is accepted: the window
+    /// composes with the K-stage delivery lookahead via the shifted decision gate.
+    /// With all-zero seeds the seed-vs-window rule does not fire (a zero seed is
+    /// consistent with the `[0, 0]` pin at a dormant stage).
     #[test]
     fn test_entry_window_on_anticipated_thermal_accepted() {
         let thermal = make_anticipated_thermal(1, 3, Some(4), None);
@@ -725,7 +653,6 @@ mod tests {
             "an entry window on an anticipated thermal must be accepted, got: {:?}",
             ctx.errors()
         );
-        // The removed blanket rejection must not fire.
         assert!(
             !ctx.errors()
                 .iter()
@@ -736,8 +663,8 @@ mod tests {
 
     // ── AC-8: exit_stage_id window on an anticipated thermal is ACCEPTED ──────
 
-    /// An anticipated thermal that sets `exit_stage_id` is now ACCEPTED. With
-    /// all-zero seeds the seed-vs-window rule does not fire.
+    /// An anticipated thermal that sets `exit_stage_id` is accepted. With all-zero
+    /// seeds the seed-vs-window rule does not fire.
     #[test]
     fn test_exit_window_on_anticipated_thermal_accepted() {
         let thermal = make_anticipated_thermal(1, 3, None, Some(2));
@@ -826,7 +753,7 @@ mod tests {
     // ── Commissioning window on a PLAIN thermal is accepted (applied, not warned) ─
 
     /// A non-anticipated thermal that sets a commissioning window is accepted:
-    /// the window is now applied at the LP fill site (dormant column pinned to
+    /// the window is applied at the LP fill site (dormant column pinned to
     /// `[0, 0]`), so the anticipated-only rejection must NOT fire and no error
     /// is emitted.
     #[test]
@@ -1142,11 +1069,8 @@ mod tests {
     }
 
     /// Regression lock: `check_committed_value_bounds` must not emit any
-    /// `SemanticAmbiguity` warning for an in-bounds non-zero seed.
-    ///
-    /// Verifies that the obsolete "non-zero seeds will load but produce the same
-    /// dispatch as all-zero seeds" warning has been permanently removed and cannot
-    /// be reintroduced silently.
+    /// `SemanticAmbiguity` warning for an in-bounds non-zero seed — guards against
+    /// reintroducing a same-dispatch-as-zero-seed warning.
     #[test]
     fn test_nonzero_in_bounds_seed_emits_no_semantic_ambiguity_warning() {
         let thermal = cobre_core::entities::Thermal {
@@ -1214,7 +1138,7 @@ mod tests {
         );
     }
 
-    // ── Existing bounds test (unchanged) ─────────────────────────────────────
+    // ── Bounds test ───────────────────────────────────────────────────────────
 
     /// min_generation_mw > max_generation_mw produces InvalidValue with "Thermal <id>".
     #[test]
@@ -1353,10 +1277,6 @@ mod tests {
         );
     }
 
-    // Acceptance-boundary case is covered by
-    // `test_thermal_bounds_override_stage_within_horizon_accepted` above and
-    // by `boundary_tests::override_at_t_minus_1_acceptance_boundary` below.
-
     /// `stage_id = -1` (pre-study stage) — rejected.
     #[test]
     fn test_thermal_bounds_override_stage_negative_rejected() {
@@ -1435,21 +1355,9 @@ mod tests {
 
     // ── boundary_tests sub-module ─────────────────────────────────────────────
     //
-    // Re-organizes the strict-inequality boundary tests into a discoverable
-    // named sub-module using the
-    // `..._acceptance_boundary` / `..._rejection_boundary` suffix convention.
-    // Each test below mirrors a corresponding strict-inequality boundary test
-    // (the originals are preserved above to keep the existing test surface
-    // stable — DO NOT delete the strict-inequality boundary tests above).
-    //
-    // The predicate under test is the strict-inequality guard `stage_id < 0
-    // || stage_id >= n_stages` in `validate_semantic_hydro_thermal`. The
-    // boundaries are:
-    //
-    //   * acceptance at `stage_id == n_stages - 1` (the last in-horizon row)
-    //   * rejection  at `stage_id == n_stages`     (first out-of-horizon row)
-    //   * rejection  at `stage_id == n_stages + 1` (interior rejection)
-    //   * rejection  at `stage_id < 0`             (negative pre-study)
+    // These mirror the strict-inequality boundary tests above for the guard
+    // `stage_id < 0 || stage_id >= n_stages`; the originals above are intentional
+    // duplicate coverage — do not delete them.
     mod boundary_tests {
         use super::*;
 

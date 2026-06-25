@@ -24,42 +24,18 @@ use super::{ErrorKind, ValidationContext};
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Cross-validates a parameter list against the parsed hydros and stage count.
+/// Cross-validates a parameter list against the parsed hydros and stage count
+/// (Checks A/B/C, above).
 ///
-/// Appends one [`super::ValidationEntry`] to `ctx` per violation found.  The
-/// function is infallible — all results flow through `ctx`.
-///
-/// # Checks performed
-///
-/// 1. **Computed hydro reference** — every `Computed(c)` parameter must
-///    reference a `hydro_id` that exists in `hydros`.  A missing id
-///    produces an [`ErrorKind::InvalidReference`] entry tagged to
-///    `"system/scalar_parameters.json"`.
-///
-/// 2. **`PerStage` length** — every `PerStage(v)` parameter must satisfy
-///    `v.len() == n_stages`.  A length mismatch produces an
-///    [`ErrorKind::SchemaViolation`] entry tagged to
-///    `"system/scalar_parameters.json"`.
-///
-/// 3. **Global uniqueness** — parameter `id`s and `name`s must each be unique
-///    across the full list.  A duplicate produces an
-///    [`ErrorKind::SchemaViolation`] entry tagged to
-///    `"system/scalar_parameters.json"`.
-///
-/// # Arguments
-///
-/// - `parameters` — output of the scalar-parameter assembler.
-/// - `hydros` — authoritative hydro slice (typically `ParsedData.hydros` or
-///   `system.hydros()` post-build).
-/// - `n_stages` — number of study stages (`stage.id >= 0`).
-/// - `ctx` — mutable validation context that accumulates diagnostics.
+/// Appends one [`super::ValidationEntry`] to `ctx` per violation found; the
+/// function is infallible — all results flow through `ctx`. `n_stages` counts
+/// study stages (`stage.id >= 0`).
 pub fn validate_scalar_parameters(
     parameters: &[ScalarParameter],
     hydros: &[Hydro],
     n_stages: usize,
     ctx: &mut ValidationContext,
 ) {
-    // Build the hydro-id lookup set once (O(H)) before the per-parameter loops.
     let hydro_ids: HashSet<EntityId> = hydros.iter().map(|h| h.id).collect();
 
     check_computed_hydro_references(parameters, &hydro_ids, ctx);
@@ -69,7 +45,6 @@ pub fn validate_scalar_parameters(
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-/// Check A: every `Computed` parameter must reference an existing hydro id.
 fn check_computed_hydro_references(
     parameters: &[ScalarParameter],
     hydro_ids: &HashSet<EntityId>,
@@ -93,7 +68,6 @@ fn check_computed_hydro_references(
     }
 }
 
-/// Check B: every `PerStage` parameter must have exactly `n_stages` values.
 fn check_per_stage_lengths(
     parameters: &[ScalarParameter],
     n_stages: usize,
@@ -117,7 +91,6 @@ fn check_per_stage_lengths(
     }
 }
 
-/// Check C: parameter ids and names must each be globally unique.
 fn check_global_uniqueness(parameters: &[ScalarParameter], ctx: &mut ValidationContext) {
     let mut seen_ids: HashSet<EntityId> = HashSet::with_capacity(parameters.len());
     let mut seen_names: HashSet<&str> = HashSet::with_capacity(parameters.len());
@@ -148,9 +121,8 @@ fn check_global_uniqueness(parameters: &[ScalarParameter], ctx: &mut ValidationC
 
 /// Extracts the `hydro_id` from any [`ComputedParameter`] variant.
 ///
-/// The match is exhaustive with no `_` arm.  If a new variant is added to
-/// [`ComputedParameter`], this function will fail to compile, surfacing the
-/// gap to the implementer immediately.
+/// Keep the match exhaustive with no `_` arm — a new variant must then fail to
+/// compile here rather than silently skip its hydro-id check.
 fn hydro_id_of(c: ComputedParameter) -> EntityId {
     match c {
         ComputedParameter::EquivalentProductivity { hydro_id }

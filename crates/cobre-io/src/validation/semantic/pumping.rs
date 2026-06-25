@@ -1,26 +1,18 @@
 //! Layer 5a — pumping-station-domain semantic validation.
 //!
-//! Referential integrity (`bus_id` / `source_hydro_id` / `destination_hydro_id`
-//! all resolve) is discharged in Layer 3 (`check_pumping_references`). This
-//! module covers the remaining semantic invariant: a station must move water
-//! between two *distinct* reservoirs.
+//! Referential integrity is discharged in Layer 3 (`check_pumping_references`);
+//! this module covers the remaining invariant: a station must move water between
+//! two *distinct* reservoirs.
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
 /// Rejects pumping stations whose source and destination hydros are identical.
 ///
-/// A station with `source_hydro_id == destination_hydro_id` passes referential
-/// validation (the ID resolves) yet models a degenerate "transfer to itself":
-/// it posts a self-cancelling `+τ`/`−τ` pair on a single water-balance row while
-/// still drawing power, a silent modeling error rather than a dangling
-/// reference. The IDs are valid, so the kind is [`ErrorKind::InvalidValue`], not
-/// `InvalidReference`.
-///
-/// Run-of-river endpoints are *not* rejected here: a station referencing a
-/// run-of-river hydro has a resolving ID and distinct endpoints, so it is valid.
-///
-/// Infallible — every violation is accumulated into `ctx`; the loop runs over
-/// all stations regardless of earlier failures.
+/// A `source_hydro_id == destination_hydro_id` station passes referential
+/// validation (the ID resolves) yet models a degenerate self-transfer: a
+/// self-cancelling `+τ`/`−τ` pair on one water-balance row while still drawing
+/// power — a silent modeling error, not a dangling reference. The IDs are valid,
+/// so the kind is [`ErrorKind::InvalidValue`], not `InvalidReference`.
 pub(super) fn check_pumping_semantics(data: &ParsedData, ctx: &mut ValidationContext) {
     for station in &data.pumping_stations {
         if station.source_hydro_id == station.destination_hydro_id {

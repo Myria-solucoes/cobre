@@ -1,11 +1,6 @@
-//! Shared test helpers for semantic-validation unit tests.
-//!
-//! This module is compiled only under `#[cfg(test)]` and is visible to all
-//! sibling modules (`hydro`, `thermal`, `stages`, `sobol`, `scenarios`,
-//! `correlation`, `season`) via `pub(super)`.
-//!
-//! Helpers that are only used by a single sibling module live inside that
-//! module's own `mod tests` block to keep the blast radius small.
+//! Shared test helpers for semantic-validation unit tests, `pub(super)` to all
+//! sibling modules. Single-use helpers stay in their own module's `mod tests`
+//! block to keep the blast radius small.
 
 #![allow(
     clippy::unwrap_used,
@@ -447,7 +442,6 @@ pub(super) fn make_correlation(
 
 /// Minimal `Config` required to fill `ParsedData`.
 pub(super) fn minimal_config() -> Config {
-    // Use the same JSON fragment that schema.rs tests use for config.json.
     let json = r#"{
         "training": {
             "forward_passes": 10,
@@ -808,7 +802,7 @@ pub(super) fn make_data_past_inflows_with_season_map(
     data
 }
 
-// Suppress dead_code warnings: helpers may not be used by all sibling modules
-// simultaneously but are kept together here for discoverability.
+// dead_code: a helper may be unused by some sibling modules but is kept here for
+// discoverability rather than scattered per-module.
 #[allow(dead_code)]
 pub(super) fn _assert_helpers_present(_ctx: &mut ValidationContext) {}
