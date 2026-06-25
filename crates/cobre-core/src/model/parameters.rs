@@ -78,37 +78,37 @@ pub enum CoefficientRef {
 pub enum ComputedParameter {
     /// Equivalent productivity coefficient (`ρ_eq`).
     EquivalentProductivity {
-        /// Target hydro.
+        /// Hydro plant identifier.
         hydro_id: EntityId,
     },
     /// Accumulated productivity coefficient (`ρ_acum`).
     AccumulatedProductivity {
-        /// Target hydro.
+        /// Hydro plant identifier.
         hydro_id: EntityId,
     },
     /// Reference reservoir volume (`V_ref`).
     ReferenceVolume {
-        /// Target hydro.
+        /// Hydro plant identifier.
         hydro_id: EntityId,
     },
     /// Reference turbine flow (`q_ref`).
     ReferenceTurbine {
-        /// Target hydro.
+        /// Hydro plant identifier.
         hydro_id: EntityId,
     },
     /// Minimum operational storage (`V_min`).
     MinStorage {
-        /// Target hydro.
+        /// Hydro plant identifier.
         hydro_id: EntityId,
     },
     /// Maximum operational storage (`V_max`).
     MaxStorage {
-        /// Target hydro.
+        /// Hydro plant identifier.
         hydro_id: EntityId,
     },
     /// Specific productivity (`ρ_esp`).
     SpecificProductivity {
-        /// Target hydro.
+        /// Hydro plant identifier.
         hydro_id: EntityId,
     },
 }
