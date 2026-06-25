@@ -1,7 +1,6 @@
 //! Entity type definitions for all power system elements.
 //!
-//! Each sub-module defines one entity type (Bus, Line, Hydro, Thermal, etc.).
-//! All entity structs use [`crate::EntityId`] for identification and cross-references.
+//! Each entity struct uses [`crate::EntityId`] for identification and cross-references.
 
 pub mod bus;
 pub mod energy_contract;

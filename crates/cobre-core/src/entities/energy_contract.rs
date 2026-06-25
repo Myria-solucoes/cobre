@@ -1,15 +1,8 @@
 //! Energy contract entity — import/export agreements with external systems.
-//!
-//! An `EnergyContract` represents a bilateral energy agreement with an entity
-//! outside the modeled system. This entity is a NO-OP stub:
-//! the type exists in the registry but contributes zero LP variables or constraints.
 
 use crate::EntityId;
 
 /// Direction of energy flow for a bilateral contract.
-///
-/// `Import` means external energy enters the modeled system at the contract bus.
-/// `Export` means system energy exits at the contract bus to the external entity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ContractType {
@@ -21,13 +14,9 @@ pub enum ContractType {
 
 /// Bilateral energy contract with an external system.
 ///
-/// An `EnergyContract` models fixed or bounded energy exchanges with entities
-/// outside the transmission network (e.g., neighboring utilities, industrial
-/// consumers). `price_per_mwh` may be negative for export contracts where the
-/// system receives revenue. In the minimal viable solver this entity is
-/// data-complete but contributes no LP variables or constraints.
+/// Data-complete stub: contributes zero LP variables or constraints.
 ///
-/// Source: `system/energy_contracts.json`. See Input System Entities SS1.9.7.
+/// See Input System Entities SS1.9.7.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EnergyContract {

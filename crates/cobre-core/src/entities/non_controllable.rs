@@ -1,28 +1,15 @@
 //! Non-controllable generation source entity — intermittent wind/solar.
-//!
-//! A [`NonControllableSource`] represents intermittent generation (wind, solar,
-//! run-of-river) that cannot be dispatched. Generation is injected into the
-//! network at stochastic availability levels, with optional curtailment.
-//! LP variables, forward/backward patching, and simulation extraction are
-//! fully integrated.
 
 use crate::EntityId;
 
 /// Intermittent generation source that cannot be dispatched.
 ///
-/// A `NonControllableSource` injects generation into the network up to
-/// `max_generation_mw × α × factor`, where `α` is the per-(stage, scenario)
-/// availability ratio (drawn from the stochastic model) and `factor` is the
-/// per-(stage, block) shape factor.
+/// Available generation is `max_generation_mw × α × factor`, where `α` is the
+/// per-(stage, scenario) availability ratio and `factor` the per-(stage, block)
+/// shape factor. `allow_curtailment` selects between the curtailable and must-run
+/// dispatch regimes.
 ///
-/// When `allow_curtailment == true` (the default) the LP may dispatch
-/// anywhere in `[0, max × α × factor]` at the cost of `curtailment_cost`
-/// per curtailed `MWh`. When `allow_curtailment == false` the LP pins
-/// dispatch to the realized availability (`col_lower = col_upper = max × α
-/// × factor`) — the **must-run** regime for non-simulated aggregate
-/// generation pre-netted from load before the dispatch LP runs.
-///
-/// Source: `system/non_controllable.json`. See Input System Entities SS1.9.8.
+/// See Input System Entities SS1.9.8.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NonControllableSource {
@@ -38,23 +25,13 @@ pub struct NonControllableSource {
     pub exit_stage_id: Option<i32>,
     /// Maximum generation (installed capacity) \[MW\].
     pub max_generation_mw: f64,
-    /// Whether the LP is allowed to curtail this source.
+    /// Whether the LP may curtail this source.
     ///
-    /// `true` (default) — fully curtailable: `col_lower = 0`,
-    /// `col_upper = max × α × factor`; the LP pays
-    /// `curtailment_cost × (col_upper − dispatch) × hours` per block.
-    ///
-    /// `false` — must-run: `col_lower = col_upper = max × α × factor`,
-    /// dispatch is pinned to the realized availability for every scenario.
-    /// Models non-simulated aggregate generation (small hydro, biomass,
-    /// wind, solar, distributed generation) pre-netted from load before the
-    /// dispatch LP runs.
+    /// `false` is the **must-run** regime: dispatch is pinned to realized
+    /// availability (`col_lower = col_upper`), not merely bounded above by it.
     pub allow_curtailment: bool,
-    /// Resolved cost per `MWh` of curtailed generation \[$/`MWh`\].
-    ///
-    /// This is a resolved field — defaults are applied during loading so this
-    /// value is always ready for LP construction without further lookup.
-    /// Unused when `allow_curtailment == false` (no curtailment slack).
+    /// Resolved cost per `MWh` of curtailed generation \[$/`MWh`\]. Unused when
+    /// `allow_curtailment == false`.
     pub curtailment_cost: f64,
 }
 
@@ -103,7 +80,6 @@ mod tests {
 
     #[test]
     fn test_non_controllable_must_run() {
-        // allow_curtailment == false models must-run (non-curtailable) aggregates.
         let source = NonControllableSource {
             id: EntityId::from(3),
             name: "PCH Aggregate NE".to_string(),

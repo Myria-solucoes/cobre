@@ -1,24 +1,14 @@
 //! Thermal plant entity — generation with MW bounds and cost.
-//!
-//! A `Thermal` represents a thermal (combustion, nuclear, etc.) power plant.
-//! Thermal plants have MW generation bounds and a scalar marginal cost used to
-//! compute the objective contribution in each stage LP.
 
 use crate::EntityId;
 
 /// Anticipated dispatch configuration for thermal plants requiring advance commitment.
 ///
-/// Plants with `lead_stages >= 1` commit `lead_stages` stages before generation.
-/// The field is `u32` so that negative JSON literals are rejected at serde
-/// deserialise time with a `ParseError`; zero is rejected by the semantic
-/// validator with a `SchemaError`.
-///
-/// `deny_unknown_fields` matches the IO-layer `RawAnticipatedConfig` (see
-/// `crates/cobre-io/src/system/thermals.rs`) so that any deserialisation path
-/// that bypasses the IO raw parser (programmatic JSON loads, future internal
-/// state-snapshot tooling) still rejects unknown keys consistently. Postcard
-/// is positional and ignores this attribute on the wire — broadcast
-/// compatibility is unaffected.
+/// `lead_stages` is `u32` so negative JSON literals are rejected at deserialise
+/// time (zero is rejected by the semantic validator). `deny_unknown_fields`
+/// mirrors the IO-layer `RawAnticipatedConfig` so deserialisation paths that
+/// bypass the IO raw parser still reject unknown keys; postcard is positional and
+/// ignores the attribute on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
@@ -29,12 +19,7 @@ pub struct AnticipatedConfig {
 
 /// Thermal power plant with a scalar marginal cost.
 ///
-/// A `Thermal` contributes generation variables and cost objective terms to each
-/// stage LP. Generation is bounded between `min_generation_mw` and
-/// `max_generation_mw`. The cost is `cost_per_mwh` multiplied by the block
-/// duration in hours.
-///
-/// Source: system/thermals.json. See Input System Entities SS1.9.5.
+/// See Input System Entities SS1.9.5.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Thermal {
