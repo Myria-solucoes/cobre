@@ -137,13 +137,8 @@ impl StudyParams {
 
         let budget = config.training.cut_selection.max_active_per_stage;
 
-        // Warn when the budget is so tight that every iteration will immediately
-        // evict all cuts older than the current one.  This is not an error —
-        // the solver remains correct — but it usually indicates a misconfiguration.
         if let Some(b) = budget {
-            // world_size is not available here; use 1 as a conservative estimate.
-            // The CLI/Python layer may emit a more precise warning with the real
-            // world_size after broadcast.
+            // warn when the budget cannot hold even one cut per forward pass
             if u64::from(b) < u64::from(forward_passes) {
                 tracing::warn!(
                     "max_active_per_stage ({b}) is less than forward_passes \

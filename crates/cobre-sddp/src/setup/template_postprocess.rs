@@ -14,8 +14,6 @@ use crate::{lp_builder, lp_builder::StageTemplates};
 /// discount rate for the transition departing stage `t` (global or per-transition
 /// override) and `Dt` is the stage duration in days. When `rate == 0.0`, the factor
 /// is `1.0` (no discounting).
-///
-/// Returns a vec of length `study_stages.len()`.
 pub(crate) fn compute_per_stage_discount_factors(
     study_stages: &[&Stage],
     pg: &PolicyGraph,
@@ -44,12 +42,9 @@ pub(crate) fn compute_per_stage_discount_factors(
 
 /// Compute cumulative discount factors from per-stage one-step factors.
 ///
-/// `cumulative[0] = 1.0`, `cumulative[t] = cumulative[t-1] * per_stage[t-1]` for `t >= 1`.
-///
-/// The returned vec has length `per_stage.len()` (one entry per study stage).
-/// The anticipated-decision predicate is strict (`stage_idx + K_i < n_stages`),
-/// so every delivery lookup index falls within `[0, n_stages)` and no
-/// boundary-stage entry is needed.
+/// Length is `per_stage.len()` exactly: the strict anticipated-decision predicate
+/// (`stage_idx + K_i < n_stages`) keeps every delivery lookup within
+/// `[0, n_stages)`, so no boundary-stage entry is needed.
 pub(crate) fn compute_cumulative_discount_factors(per_stage: &[f64]) -> Vec<f64> {
     let n = per_stage.len();
     let mut cumulative = vec![1.0; n];
@@ -66,15 +61,9 @@ pub(crate) fn postprocess_templates(
     stage_templates: &mut StageTemplates,
     system: &System,
 ) -> crate::scaling_report::ScalingReport {
-    // Compute per-stage one-step discount factors from the PolicyGraph and
-    // install them via the setter, which derives the cumulative factors
-    // (D_0 = 1.0, D_t = D_{t-1} * d_{t-1}) in the same call so the two slices
-    // cannot drift. This is done here (not inside build_stage_templates) to
-    // avoid threading PolicyGraph through the template builder's signature.
-    //
-    // Cumulative length is n_stages exactly: the strict anticipated-decision
-    // predicate (`stage_idx + K_i < n_stages`) guarantees every delivery lookup
-    // falls within `[0, n_stages)`.
+    // Install via the setter (which derives cumulative factors in the same call,
+    // so the two slices cannot drift); done here, not inside
+    // build_stage_templates, to avoid threading PolicyGraph through its signature.
     {
         let pg = system.policy_graph();
         let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
@@ -87,13 +76,9 @@ pub(crate) fn postprocess_templates(
         "cumulative_discount_factors must have length n_stages after postprocess"
     );
 
-    // Apply discount factors to theta objective coefficients before
-    // column/row scaling. The discount factor d_t converts
-    // `1.0 * theta` to `d_t * theta` in the objective, correctly
-    // valuing discounted future cost. This is orthogonal to cost
-    // scaling (which divides c_i by K but leaves theta untouched);
-    // the discount factor multiplies that untouched 1.0 to d_t.
-    // When annual_discount_rate == 0.0, d_t == 1.0 and this is a no-op.
+    // Discount theta before column/row scaling: discounting is orthogonal to cost
+    // scaling (which divides c_i by K but leaves theta untouched), so the two must
+    // not be folded together.
     if let Some(first) = stage_templates.templates.first() {
         // Theta sits 2*N columns past `n_state` in the LP layout
         // (z_inflow occupies N cols then storage_in occupies N cols
@@ -101,27 +86,22 @@ pub(crate) fn postprocess_templates(
         // for both the base and the augmented (anticipated-state-extended)
         // indexer because `n_state` already absorbs `A*K_max`.
         let theta_col = first.n_state + 2 * stage_templates.n_hydros;
-        // Snapshot the per-stage factors so the discount read does not alias the
-        // `templates.iter_mut()` borrow below (the accessor borrows all of
-        // `stage_templates`). One small allocation on this once-per-run cold path.
+        // Snapshot so the discount read does not alias the `templates.iter_mut()`
+        // borrow below (the accessor borrows all of `stage_templates`).
         let discount_factors = stage_templates.discount_factors().to_vec();
         for (s_idx, tmpl) in stage_templates.templates.iter_mut().enumerate() {
             tmpl.objective[theta_col] *= discount_factors[s_idx];
         }
     }
 
-    // Compute and apply column scaling, then row scaling for numerical
-    // conditioning (D_r * A * D_c form). Scale factors are stored in the
-    // template for unscaling primal/dual solutions in the forward and
-    // backward passes.
-    //
-    // Scaling report: capture pre/post coefficient ranges for diagnostics.
-
+    // Column scaling then row scaling for numerical conditioning (D_r * A * D_c
+    // form). Scale factors are stored in the template for unscaling primal/dual
+    // solutions in the forward and backward passes.
     let mut stage_scaling_reports = Vec::with_capacity(stage_templates.templates.len());
 
     for (stage_id, tmpl) in stage_templates.templates.iter_mut().enumerate() {
-        // Pre-scaling snapshot (before col/row scaling; cost scaling is
-        // already baked into the objective during template construction).
+        // Cost scaling is already baked into the objective during template
+        // construction; this snapshot precedes only col/row scaling.
         let pre_scaling = compute_coefficient_range(tmpl);
 
         let col_scale =
@@ -139,7 +119,6 @@ pub(crate) fn postprocess_templates(
         lp_builder::apply_row_scale(tmpl, &row_scale);
         tmpl.row_scale.clone_from(&row_scale);
 
-        // Post-scaling snapshot (after col + row scaling).
         let post_scaling = compute_coefficient_range(tmpl);
 
         stage_scaling_reports.push(StageScalingReport {

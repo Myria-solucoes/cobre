@@ -16,8 +16,6 @@ use crate::{EstimationPath, EstimationReport, SddpError};
 // ---------------------------------------------------------------------------
 
 /// Result of the stochastic preprocessing pipeline.
-///
-/// Bundles outputs from [`prepare_stochastic`].
 #[derive(Debug)]
 pub struct PrepareStochasticResult {
     /// Updated system with estimated PAR models (if estimation ran).
@@ -208,13 +206,11 @@ fn build_opening_tree_library(
         max_order,
         window_years.clone(),
     );
-    // Compute stage_lag_transitions so the η-inversion rolling chain matches
-    // the forward-pass lag accumulator. `downstream_par_order = max_order`
-    // ensures the chain is wide enough for all AR lags.
+    // η-inversion rolling chain must match the forward-pass lag accumulator;
+    // `max_order` width covers all AR lags.
     let season_map_ref = system.policy_graph().season_map.as_ref();
-    // `precompute_stage_lag_transitions` requires a non-optional &SeasonMap.
-    // When the system has no season_map, supply an empty noop map (same
-    // pattern used in `StudySetup::new`).
+    // `precompute_stage_lag_transitions` requires a non-optional &SeasonMap;
+    // supply an empty noop map when the system has none.
     let noop_season_map;
     let effective_season_map: &cobre_core::temporal::SeasonMap = if let Some(sm) = season_map_ref {
         sm
@@ -373,7 +369,6 @@ pub fn prepare_stochastic(
 
     let user_opening_tree = load_user_opening_tree_inner(case_dir, &system)?;
 
-    // Load block-level load factors (optional).
     let load_factor_entries = load_load_factors_for_stochastic(case_dir)?;
     let block_pairs: Vec<Vec<cobre_stochastic::normal::precompute::BlockFactorPair>> =
         load_factor_entries
@@ -403,12 +398,9 @@ pub fn prepare_stochastic(
     let opening_tree_library = build_opening_tree_library(&system, training_source)?;
     let external_scenario_counts = compute_external_scenario_counts(&system, training_source);
 
-    // Compute noise group IDs for noise-group sharing.
-    // Groups stages with the same (season_id, year) so weekly stages within
-    // the same monthly bucket share noise draws in the opening tree.
-    // For uniform monthly studies each stage has a unique group ID, so no
-    // sharing is triggered and the opening tree is identical to the pre-noise-
-    // sharing baseline.
+    // Stages sharing a `(season_id, year)` share opening-tree noise draws (weekly
+    // stages within one monthly bucket). Uniform monthly studies get unique group
+    // IDs, so no sharing is triggered.
     let opening_tree_noise_group_ids: Vec<u32> = {
         let study_stages: Vec<_> = system
             .stages()

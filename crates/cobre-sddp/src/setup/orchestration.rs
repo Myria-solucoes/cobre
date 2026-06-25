@@ -24,10 +24,7 @@ use crate::{
 use super::StudySetup;
 
 impl StudySetup {
-    /// Execute the training loop.
-    ///
-    /// Constructs [`TrainingConfig`] and [`TrainingContext`], then delegates to
-    /// [`crate::train`]. Mutates `self.fcf` to store generated cuts.
+    /// Execute the training loop. Mutates `self.fcf` to store generated cuts.
     ///
     /// # Errors
     ///
@@ -115,22 +112,16 @@ impl StudySetup {
             external_ncs_library: tr.external_ncs.as_ref(),
             recent_accum_seed: &self.recent_observation_seed.accum_seed,
             recent_weight_seed: self.recent_observation_seed.weight_seed,
-            // DCS params reach the backward hot path via this context field.
-            // `Some` only for the dynamic cut-selection method; `None` otherwise.
             dcs: self
                 .cut_management
                 .cut_selection
                 .as_ref()
                 .and_then(DcsParams::from_strategy),
-            // Throwaway backward diagnostic; `Some` only when `COBRE_W1_DIAG`
-            // was set at setup, else `None` (byte-identical default path).
+            // `Some` only when `COBRE_W1_DIAG` was set at setup; `None` keeps the
+            // byte-identical default path.
             noise_key_diag: self.noise_key_diag.as_ref(),
         };
 
-        // Hand the warm-start basis cache (if any) to the training session so
-        // iteration 1's cut-loaded LPs warm-start from the checkpoint's stored
-        // bases. `take` leaves `None` behind — fresh starts pass `None` and are
-        // untouched.
         let warm_start_basis_cache = self.warm_start_basis_cache.take();
 
         crate::train(
@@ -211,8 +202,6 @@ impl StudySetup {
     }
 
     /// Convert [`TrainingResult`] and events into training output.
-    ///
-    /// Delegates to [`crate::build_training_output`] with cut statistics from `self.fcf`.
     #[must_use]
     pub fn build_training_output(
         &self,
@@ -222,11 +211,7 @@ impl StudySetup {
         crate::build_training_output(result, events, &self.fcf)
     }
 
-    /// Create a [`WorkspacePool`] sized for this study.
-    ///
-    /// Pool size equals `n_threads`. Each workspace gets a fresh solver instance.
-    /// `comm` is used to read the MPI rank that is stamped into each workspace's
-    /// `rank` field for downstream per-worker observability.
+    /// Create a [`WorkspacePool`] of `n_threads` workspaces sized for this study.
     ///
     /// # Errors
     ///

@@ -1,8 +1,7 @@
 //! Study setup struct that owns all precomputed state for a solve run.
 //!
-//! [`StudySetup`] centralises orchestration from CLI/Python entry points.
-//! It builds LP templates, indexer, initial state, FCF, horizon mode, risk measures,
-//! and entity counts from a validated [`System`] and [`cobre_io::Config`].
+//! [`StudySetup`] centralises orchestration from CLI/Python entry points, built
+//! from a validated [`System`] and [`cobre_io::Config`].
 //!
 //! **Ownership**: `StudySetup` owns all data; callers borrow for `TrainingContext`
 //! and `StageContext` construction. The [`StochasticContext`] lifetime matches setup.
@@ -85,6 +84,11 @@ use crate::{
 ///
 /// Callers build `TrainingContext` and `StageContext` by borrowing
 /// from `StudySetup`.
+///
+/// Commissioning windows (NCS, anticipated) are carried as per-slot
+/// `(entry, exit)` pairs rather than per-stage activity masks, so the per-stage
+/// patch sites compute dormancy inline and activity stays out of per-stage
+/// storage.
 #[derive(Debug)]
 pub struct StudySetup {
     /// Stage-indexed data: LP templates, indexer, stages, entity counts, blocks,
@@ -99,74 +103,54 @@ pub struct StudySetup {
 
     /// Pre-computed hydro production models (FPHA, turbine curves, etc.).
     pub hydro_models: PrepareHydroModelsResult,
-
     pub(crate) ncs_entity_ids_per_stage: Vec<Vec<i32>>,
-    /// Stage-invariant stochastic-slot → dense NCS column index map.
+    /// Stage-invariant stochastic-slot → dense NCS column index map (slot in
+    /// `StochasticContext::ncs_entity_ids` id-sorted order).
     ///
-    /// `ncs_stochastic_dense_col[slot]` is the system NCS index (the dense column
-    /// position) of stochastic slot `slot` (in `StochasticContext::ncs_entity_ids`
-    /// id-sorted order). Under the dense layout every NCS keeps a column at every
-    /// stage, so this map is the same at every stage — there is no per-stage
-    /// active-local remap. The NCS bound patch sites stride the per-opening cap
-    /// onto `ncs_col_starts[s] + ncs_stochastic_dense_col[slot] * n_blks_s + blk`.
+    /// The NCS bound patch sites stride the per-opening cap onto
+    /// `ncs_col_starts[s] + ncs_stochastic_dense_col[slot] * n_blks_s + blk`.
     /// Length equals `n_stochastic_ncs`; empty when the study has no stochastic NCS.
     pub(crate) ncs_stochastic_dense_col: Vec<usize>,
-    /// Stage-invariant commissioning window per stochastic NCS slot.
+    /// Stage-invariant `(entry_stage_id, exit_stage_id)` per stochastic NCS slot
+    /// (id-sorted to match `ncs_stochastic_dense_col` and the `transform_ncs_noise`
+    /// buffer order).
     ///
-    /// `ncs_stochastic_windows[slot] = (entry_stage_id, exit_stage_id)` for the
-    /// stochastic NCS at `slot` (id-sorted to match `ncs_stochastic_dense_col` and
-    /// the `transform_ncs_noise` buffer order). The NCS bound patch sites compute
-    /// dormancy inline at each stage via the shared
-    /// `commissioning_active` predicate
-    /// (`entry <= stage_id < exit`) and force a `[0, 0]` cap for a dormant slot —
-    /// the zero-influence convention the column fill applies, kept identical across
-    /// the forward, backward, and lower-bound patch sites (the
-    /// `evaluate_lower_bound` "patch NCS per opening" contract; a divergence
-    /// understates the bound, the D15 bug class). Storing the windows,
-    /// not a per-stage dormancy mask, keeps activity out of per-stage storage.
+    /// The dormant-slot `[0, 0]` cap MUST stay identical across the forward,
+    /// backward, and lower-bound patch sites — the `evaluate_lower_bound`
+    /// "patch NCS per opening" contract; a divergence understates the bound (D15).
     /// Length equals `n_stochastic_ncs`; empty when no stochastic NCS.
     pub(crate) ncs_stochastic_windows: Vec<(Option<i32>, Option<i32>)>,
     /// Max generation \[MW\] per stochastic NCS entity, sorted by entity ID.
     pub(crate) ncs_max_gen: Vec<f64>,
-    /// Whether each stochastic NCS entity may be curtailed, sorted by entity
-    /// ID. Aligned 1:1 with [`Self::ncs_max_gen`]. `true` (default) =
-    /// curtailable (LP can dispatch in `[0, max × α × factor]`); `false` =
-    /// must-run (`col_lower = col_upper = max × α × factor` for every
-    /// scenario; non-simulated aggregate generation pre-netted from load).
+    /// Whether each stochastic NCS entity may be curtailed, aligned 1:1 with
+    /// [`Self::ncs_max_gen`]. `false` = must-run: the patch sites pin
+    /// `col_lower = col_upper` (not `[0, cap]`), and non-simulated must-run
+    /// generation is pre-netted from load.
     pub(crate) ncs_allow_curtailment: Vec<bool>,
 
-    /// Stage-invariant commissioning window per anticipated thermal.
+    /// Stage-invariant `(entry_stage_id, exit_stage_id)` per anticipated thermal,
+    /// in anticipated-local order matching
+    /// `stage_data.study_dims.anticipated_thermal_indices`.
     ///
-    /// `anticipated_windows[i] = (entry_stage_id, exit_stage_id)` for the i-th
-    /// anticipated thermal, in anticipated-local order matching
-    /// `stage_data.study_dims.anticipated_thermal_indices`. Threaded into the
-    /// simulation [`StageExtractionSpec`](crate::simulation::extraction::StageExtractionSpec)
-    /// so the anticipated-decision read gates on the same horizon-∧-operation-window
-    /// predicate the LP builder used (`StateLayout::is_anticipated_decision_active`),
-    /// keying its operation-window clause on the DELIVERY stage's `stage.id`.
-    /// Carrying the windows, not a per-stage activity mask, keeps activity out of
-    /// per-stage storage — the same convention as `ncs_stochastic_windows`. Empty
+    /// Threaded into the simulation
+    /// [`StageExtractionSpec`](crate::simulation::extraction::StageExtractionSpec)
+    /// so the anticipated-decision read gates on the same
+    /// `StateLayout::is_anticipated_decision_active` predicate the LP builder used,
+    /// keying its operation-window clause on the DELIVERY stage's `stage.id`. Empty
     /// when there are no anticipated thermals.
     pub(crate) anticipated_windows: Vec<(Option<i32>, Option<i32>)>,
 
-    /// Study-stage commissioning id for each study stage index
-    /// (`study_stage_ids[t] = stage.id`). Length equals the number of study
-    /// stages. The anticipated-decision gate keys its operation-window clause on
-    /// the DELIVERY stage's `stage.id`, so the simulation context borrows this
-    /// slice to map a delivery stage index to its commissioning id. Built once at
-    /// setup from the study stages.
+    /// `study_stage_ids[t] = stage.id` per study stage index; the simulation
+    /// context borrows it to map a delivery stage index to its commissioning id
+    /// for the `anticipated_windows` gate.
     pub(crate) study_stage_ids: Vec<i32>,
 
     /// Sampling schemes and pre-built libraries for training and simulation phases.
-    ///
-    /// Access via `scenario_libraries.training.<field>` or
-    /// `scenario_libraries.simulation.<field>`.
     pub scenario_libraries: ScenarioLibraries,
     /// Iteration-loop parameters projected from [`crate::config::LoopConfig`].
     ///
-    /// Holds the five pure-data fields of [`crate::config::LoopConfig`] that are stable
-    /// across training invocations. `n_fwd_threads` is excluded (derived
-    /// at runtime) and supplied as a per-call argument to [`StudySetup::train`].
+    /// `n_fwd_threads` is excluded (derived at runtime) and supplied as a per-call
+    /// argument to [`StudySetup::train`].
     pub loop_params: crate::config::LoopParams,
 
     /// Simulation pipeline parameters, stored directly as [`crate::simulation::SimulationConfig`].
@@ -176,88 +160,58 @@ pub struct StudySetup {
     pub policy_path: String,
 
     /// Two-stage cut management pipeline configuration.
-    ///
-    /// Holds cut selection, budget cap, activity tolerance, and per-stage risk
-    /// measures.
     pub(crate) cut_management: CutManagementConfig,
 
-    /// Pure-data event parameters (output-side flags).
+    /// Pure-data event flags (output-side).
     ///
-    /// Holds only the stable, serialisable event flags. Runtime handles
-    /// (`event_sender`, `shutdown_flag`) and deferred fields
+    /// Runtime handles (`event_sender`, `shutdown_flag`) and deferred fields
     /// (`checkpoint_interval`) are excluded and supplied per-call in
     /// [`StudySetup::train`].
     pub(crate) events: EventParams,
 
-    /// Stochastic numerical methodology parameters.
-    ///
-    /// Groups `horizon` and `inflow_method`, which govern study horizon
-    /// treatment and inflow non-negativity enforcement respectively.
+    /// Stochastic numerical methodology parameters (`horizon`, `inflow_method`).
     pub(crate) methodology: methodology_config::MethodologyConfig,
 
-    /// Pre-computed lag accumulator seed from `initial_conditions.recent_observations`.
-    ///
-    /// Computed once at setup time by
-    /// [`crate::lag_transition::compute_recent_observation_seed`] from the parsed
-    /// `RecentObservation` entries. Applied at every trajectory start in the forward
-    /// pass and simulation pipeline instead of zero-filling the accumulator.
-    ///
-    /// When `recent_observations` is empty, this is an all-zero seed and the
-    /// trajectory start is a plain zero reset.
+    /// Lag accumulator seed from `initial_conditions.recent_observations`, applied
+    /// at every trajectory start in the forward pass and simulation pipeline instead
+    /// of zero-filling. All-zero (a plain zero reset) when `recent_observations` is
+    /// empty.
     pub(crate) recent_observation_seed: crate::lag_transition::RecentObservationSeed,
 
-    /// PAR order of the downstream (coarser) resolution model.
-    ///
-    /// Non-zero only when the study includes stages with `season_id >= 12` (quarterly
-    /// range), indicating a monthly-to-quarterly resolution transition. Set at setup
-    /// time and passed to `WorkspaceSizing` so that downstream scratch buffers are
-    /// allocated at the correct capacity. Zero for uniform-resolution studies.
+    /// PAR order of the downstream (coarser) resolution model. Non-zero only when
+    /// the study includes stages with `season_id >= 12` (a monthly-to-quarterly
+    /// transition); zero for uniform-resolution studies. Sizes the downstream
+    /// scratch buffers via `WorkspaceSizing`.
     pub(crate) downstream_par_order: usize,
 
-    /// Pre-computed energy-conversion scalars for every `(hydro, stage)` pair.
-    ///
-    /// Holds `ρ_eq` (equivalent productivity), `V_ref`, `Q_ref`, and `ρ_acum`
-    /// (accumulated cascade productivity). Built once at setup time from the
-    /// system's hydros, cascade topology, and reference-volume resolver.
-    /// Consumed by the energy-balance LP constraints and inflow-energy / stored-energy extraction.
+    /// Energy-conversion scalars (`ρ_eq`, `V_ref`, `Q_ref`, `ρ_acum`) per
+    /// `(hydro, stage)`, consumed by the energy-balance LP constraints and
+    /// inflow-/stored-energy extraction.
     pub(crate) energy_conversion: EnergyConversionSet,
 
-    /// `V_min` (`min_storage_hm3`) per hydro, in declaration order.
-    ///
-    /// Pre-computed once at setup time and threaded into the simulation
-    /// pipeline for stored-energy calculations.
+    /// `V_min` (`min_storage_hm3`) per hydro, in declaration order; threaded into
+    /// the simulation pipeline for stored-energy calculations.
     pub(crate) hydro_min_storage_hm3: Vec<f64>,
 
     /// Per-stage warm-start basis cache for warm-start / resume training.
     ///
-    /// Populated by the CLI / Python warm-start and resume paths via
+    /// Populated by the CLI / Python paths via
     /// [`StudySetup::set_warm_start_basis_cache`] from the checkpoint's stored
-    /// solver bases (see
-    /// [`build_basis_cache_from_checkpoint`](crate::build_basis_cache_from_checkpoint)).
-    /// [`StudySetup::train`] takes this out of `self` and seeds the
-    /// [`TrainingSession`](crate::training::session::TrainingSession)'s
-    /// [`BasisStore`](crate::workspace::BasisStore) so iteration 1's
-    /// (cut-loaded) LPs warm-start instead of cold-start.
-    ///
+    /// solver bases; [`StudySetup::train`] seeds it into the session's
+    /// [`BasisStore`](crate::workspace::BasisStore) so iteration 1's LPs warm-start.
     /// `None` for a fresh start, leaving fresh-mode behavior untouched.
     pub(crate) warm_start_basis_cache: Option<Vec<Option<CapturedBasis>>>,
 
     /// Throwaway, env-gated backward `noise_key` diagnostic table.
     ///
-    /// `Some` only when `COBRE_W1_DIAG` was set at setup; `None` otherwise (the
-    /// default), in which case nothing is allocated or computed and the backward
-    /// solve path is byte-identical. Borrowed read-only into the training
-    /// [`TrainingContext`](crate::context::TrainingContext). See
+    /// `Some` only when `COBRE_W1_DIAG` was set at setup; `None` otherwise, in which
+    /// case nothing is allocated and the backward solve path is byte-identical. See
     /// [`crate::noise_key_diag`].
     pub(crate) noise_key_diag: Option<crate::noise_key_diag::NoiseKeyDiag>,
 }
 
 impl StudySetup {
     /// Build all precomputed study state from a validated system and config.
-    ///
-    /// The constructor performs:
-    /// 1. Config field extraction (seed, forward passes, stopping rules, etc.)
-    /// 2. Delegates to [`StudySetup::from_broadcast_params`] with the extracted values.
     ///
     /// # Errors
     ///
@@ -274,9 +228,9 @@ impl StudySetup {
         hydro_models: PrepareHydroModelsResult,
     ) -> Result<Self, SddpError> {
         let params = StudyParams::from_config(config)?;
-        // Use a sentinel path; training_scenario_source / simulation_scenario_source
-        // only use the path for error messages and the historical-years look-up,
-        // which is not exercised when the caller provides a validated Config.
+        // Sentinel: the scenario-source resolvers use the path only for error
+        // messages and the historical-years look-up, neither exercised here with a
+        // validated Config.
         let sentinel_path = Path::new("config.json");
         let training_source = config
             .training_scenario_source(sentinel_path)
@@ -299,19 +253,7 @@ impl StudySetup {
     ///
     /// This constructor accepts the scalar fields already extracted from either a
     /// [`cobre_io::Config`] (on rank 0) or a broadcast config struct (on non-root
-    /// ranks). It performs the expensive computation steps that cannot be serialised:
-    ///
-    /// 1. `build_stage_templates` — constructs LP skeletons for each stage
-    /// 2. `StateLayout::new` — computes the role-(a) state column/cache layout
-    ///    (the role-(b) equipment column/row offsets live per stage on
-    ///    `StageLayout`/`StageGeometry`)
-    /// 3. `build_initial_state` — extracts initial storage and past inflows from system IC
-    /// 4. `max_iterations_from_rules` — sizes the FCF cut pool
-    /// 5. `FutureCostFunction::new` — pre-allocates cut storage
-    /// 6. `HorizonMode::Finite` — wraps stage count
-    /// 7. Risk measures from stage configs
-    /// 8. `build_entity_counts` — entity ID and productivity vectors
-    /// 9. Block layout derivation (`block_counts_per_stage`, `max_blocks`)
+    /// ranks), performing the expensive computation steps that cannot be serialised.
     ///
     /// # Errors
     ///
@@ -319,10 +261,6 @@ impl StudySetup {
     ///   the template list is empty ("system has no study stages").
     /// - [`SddpError::Solver`] — propagated from `build_stage_templates` on LP
     ///   construction failure.
-    // Cohesive sub-phases that draw on disjoint inputs are extracted into
-    // `build_wired_indexer`, `precompute_lag_data`, and
-    // `build_scenario_libraries`; the remaining body wires the `StudySetup`
-    // fields together in initialization order.
     pub fn from_broadcast_params(
         system: &System,
         mut stochastic: StochasticContext,
@@ -346,18 +284,12 @@ impl StudySetup {
             scalar_parameters,
         } = config;
 
-        // Install the per-stage backward opening solve order once, here, where the
-        // inflow models (σ = std_m3s) and the synced opening tree (raw_noise) are
-        // both in scope. The keys are the SAME σ-weighted noise keys the throwaway
-        // `noise_key` diagnostic records (shared via `build_noise_key_table`), so
-        // the solve order and the diagnostic that validates it cannot drift. The
-        // order is run-constant and rank-invariant (a pure function of the synced
-        // tree + fixed σ), so every rank computes the identical permutation. The
-        // backward pass always solves in this order (descending: largest-noise-key
-        // opening first) for warm-start friendliness; the canonical-ω cut
-        // aggregation is unaffected, so cuts stay bit-identical across thread/rank
-        // counts. The σ-vs-noise-dim length mismatch is a hard error (raised inside
-        // `build_noise_key_table` via `noise_key`).
+        // The backward solve order shares the SAME `build_noise_key_table` keys the
+        // `noise_key` diagnostic records, so the order and the diagnostic that
+        // validates it cannot drift. The keys are a pure function of the synced tree
+        // + fixed σ, so every rank computes the identical permutation and cuts stay
+        // bit-identical across thread/rank counts (canonical-ω aggregation is
+        // order-independent).
         let solve_order_keys = crate::noise_key_diag::build_noise_key_table(system, &stochastic)?;
         stochastic
             .set_solve_order(&solve_order_keys, SweepDirection::Descending)
@@ -394,12 +326,9 @@ impl StudySetup {
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        // Defense-in-depth: enforce the horizon's structural invariants at
-        // construction. For finite horizon this rejects a degenerate
-        // single-stage problem (`num_stages < 2`), which has no predecessor to
-        // generate cuts for. Reachable because `n_stages` is the post-filter
-        // template count, which may be 1 even though the empty case is already
-        // rejected above.
+        // Rejects a degenerate single-stage problem (`num_stages < 2`, no
+        // predecessor to generate cuts for); reachable since the empty case rejected
+        // above still leaves `n_stages == 1` possible.
         horizon.validate()?;
 
         let risk_measures = build_risk_measures(system);
@@ -453,11 +382,8 @@ impl StudySetup {
         let hydro_min_storage_hm3: Vec<f64> =
             system.hydros().iter().map(|h| h.min_storage_hm3).collect();
 
-        // Throwaway, env-gated backward diagnostic: built only when
-        // `COBRE_W1_DIAG` is set, reusing the `solve_order_keys` table already
-        // computed above (so the diagnostic and the solve order cannot drift and
-        // the table is not recomputed). `None` otherwise — zero allocation,
-        // byte-identical default path.
+        // Reuses the `solve_order_keys` table computed above, not a fresh build, so
+        // the diagnostic and the solve order cannot drift.
         let noise_key_diag =
             crate::noise_key_diag::NoiseKeyDiag::from_keys_if_enabled(&solve_order_keys);
 
@@ -537,16 +463,10 @@ struct NcsEntityData {
 
 /// Build entity counts and the dense NCS column/window maps from the system.
 ///
-/// Under the dense layout every NCS keeps a column at every stage, so
-/// `ncs_entity_ids_per_stage` is the full id-sorted NCS id list repeated once per
-/// study stage (extraction reads the per-stage slice by dense system index).
-/// `ncs_max_gen`, `ncs_allow_curtailment`, and `ncs_stochastic_windows` are
-/// aligned 1:1 in stochastic NCS-entity (slot) order. `ncs_stochastic_dense_col`
-/// is the stage-invariant slot → dense-column map; `ncs_stochastic_windows`
-/// carries each slot's `(entry, exit)` commissioning window so the patch sites
-/// compute dormancy inline per stage — see
-/// [`StudySetup::ncs_stochastic_dense_col`] and
-/// [`StudySetup::ncs_stochastic_windows`].
+/// `ncs_stochastic_dense_col`, `ncs_stochastic_windows`, `ncs_max_gen`, and
+/// `ncs_allow_curtailment` are aligned 1:1 in stochastic NCS-entity (slot) order;
+/// see [`StudySetup::ncs_stochastic_dense_col`] and
+/// [`StudySetup::ncs_stochastic_windows`] for what each carries.
 ///
 /// # Errors
 ///
@@ -561,23 +481,16 @@ fn build_ncs_entity_data(
 
     let n_study = stage_templates.templates.len();
 
-    // Dense: every stage lists all NCS system ids, in canonical id-sorted system
-    // order. The list is stage-invariant; extraction reads the per-stage slice by
-    // dense system index, so a dormant NCS still occupies its slot and reports a
-    // zero row rather than being absent.
+    // Every stage repeats the full id-sorted NCS list, so a dormant NCS still
+    // occupies its slot and reports a zero row rather than being absent.
     let ncs_entity_ids_per_stage: Vec<Vec<i32>> =
         vec![entity_counts.non_controllable_ids.clone(); n_study];
 
     let stoch_ncs_ids = stochastic.ncs_entity_ids();
 
-    // One pass over the id-sorted stochastic slots resolves, per slot: the dense
-    // column index (its position in the full id-sorted NCS system list — the dense
-    // column position, identical at every stage; bridging via entity id keeps the
-    // map correct when only a subset of NCS are stochastic or the orders diverge),
-    // the stage-invariant commissioning window (the patch sites apply the predicate
-    // inline per stage), the max generation, and the curtailment policy. All four
-    // outputs are slot-aligned. Declaration-order invariant: keyed on the id-sorted
-    // slot order, not entity declaration order.
+    // Bridge each slot to its dense column via entity id (not a direct index) so the
+    // map stays correct when only a subset of NCS are stochastic or the orders
+    // diverge. Keyed on the id-sorted slot order, not entity declaration order.
     let mut ncs_stochastic_dense_col: Vec<usize> = Vec::with_capacity(stoch_ncs_ids.len());
     let mut ncs_stochastic_windows: Vec<(Option<i32>, Option<i32>)> =
         Vec::with_capacity(stoch_ncs_ids.len());
@@ -654,11 +567,8 @@ fn build_energy_and_templates(
         .filter(|s| s.id >= 0)
         .map(|s| i32::try_from(s.season_id.unwrap_or(0)).unwrap_or(0))
         .collect();
-    // The JSON-sourced reference operating volume, resolved to absolute hm³ per
-    // `(plant, study-stage)` against each plant's band by the hydro-model
-    // preprocessing pipeline. The energy-conversion build reads it as the single
-    // source of truth for `reference_volume_hm3`, identical to the source the FPHA
-    // backwater path uses, so the productivity reference and the backwater level
+    // Single source of truth for `reference_volume_hm3`, identical to the source the
+    // FPHA backwater path uses, so the productivity reference and the backwater level
     // never drift.
     let reference_volume_fractions =
         build_hydro_reference_volumes_resolved(&hydro_models.reference_volumes_hm3, 0.0);
@@ -667,10 +577,9 @@ fn build_energy_and_templates(
         n_stages_pre,
         system.cascade(),
         &reference_volume_fractions,
-        // VHA geometry feeds the FPHA ρ_eq derivation (VHA + ρ_esp) for plants with
-        // no parquet override; the override still wins when present. Carried on the
-        // per-rank `PrepareHydroModelsResult` (never broadcast), so every rank sees
-        // the same map.
+        // Feeds the FPHA ρ_eq derivation only for plants with no parquet override
+        // (the override still wins when present). Per-rank, never broadcast, so every
+        // rank sees the same map.
         &hydro_models.vha_geometry_by_hydro,
         Some(&hydro_models.productivity_override),
         Some(&hydro_models.production),
@@ -712,14 +621,7 @@ fn build_energy_and_templates(
 }
 
 /// Build the canonical [`StateLayout`] and the [`StudyDimensions`] from the
-/// stage-0 LP layout.
-///
-/// Derives the state-vector dimensions, the non-state study shape (entity counts,
-/// presence flags, anticipated-thermal identity list), and the cut sparse-mask
-/// non-zero pattern from the system, the (representative) stage-0 template, and
-/// the PAR effective lag counts. The returned [`StateLayout`] is built from the
-/// state dimensions and effective lag counts and finalizes both role-(a) caches.
-/// All inputs are read-only.
+/// (representative) stage-0 LP layout and the PAR effective lag counts.
 fn build_wired_indexer(
     system: &System,
     stage_templates: &crate::lp_builder::StageTemplates,
@@ -750,14 +652,10 @@ fn build_wired_indexer(
     let hydro_count = stage_templates_ref[0].n_hydro;
     let max_par_order = stage_templates_ref[0].max_par_order;
 
-    // Single owner of the study-invariant, non-state LP shape. The presence flags
-    // use the same `hydro_count`/`ncs_col_starts` predicates the per-stage geometry
-    // applies (`has_withdrawal == hydro_count > 0`,
-    // `has_operational_violations == hydro_count != 0`); `has_ncs` reads the NCS
-    // column presence — the per-(ncs, block) column base is read per stage from
-    // `StageContext::ncs_col_starts`, never from a global handle. `n_blks` is
-    // deliberately absent: it is per-stage and owned by the per-stage geometry,
-    // never study-global.
+    // Single owner of the study-invariant, non-state LP shape. `has_ncs` only flags
+    // presence; the per-(ncs, block) column base is read per stage from
+    // `StageContext::ncs_col_starts`, never a global handle. `n_blks` is deliberately
+    // absent — it is per-stage, owned by the per-stage geometry, never study-global.
     let study_dims = crate::indexer::StudyDimensions {
         n_thermals: system.thermals().len(),
         n_lines: system.lines().len(),
@@ -771,15 +669,10 @@ fn build_wired_indexer(
         n_pumping: system.n_pumping_stations(),
     };
 
-    // z-inflow lives at the fixed offset N*(1+L): the column range is owned by
-    // `StateLayout` (role a), the row range by the per-stage geometry (role b);
-    // no per-stage wiring needed here.
-
-    // Per-hydro lag-state-slot count for the cut sparse mask. When PAR(p)-A annual
-    // is active on a hydro this is `max_par_order` (the widened psi stride);
-    // otherwise it is the classical AR order. Using `par.order(h)` here would
-    // silently truncate the cut row's state coefficients on lag slots that carry
-    // the annual `ψ̂/12` term and produce over-estimating cuts.
+    // Per-hydro lag-state-slot count for the cut sparse mask: `max_par_order` (the
+    // widened psi stride) when PAR(p)-A annual is active, else the classical AR
+    // order. `par.order(h)` here would silently truncate the cut row's coefficients
+    // on the annual-`ψ̂/12` lag slots and produce over-estimating cuts.
     let effective_lag_counts: Vec<usize> = if max_par_order > 0 {
         let par = stochastic.par();
         (0..par.n_hydros())
@@ -789,14 +682,9 @@ fn build_wired_indexer(
         vec![0; hydro_count]
     };
 
-    // Build the single canonical `StateLayout` (role (a)) from the state
-    // dimensions and per-hydro effective lag counts. `StateLayout::new` finalizes
-    // both layout-derived caches (`set_nonzero_mask` → `finalize_state_column_map`)
-    // in its constructor — populating the mask unconditionally so every production
-    // study (storage-only ⇒ [0, n_state) ascending; pure-thermal ⇒ empty) has a
-    // finalized mask for the single-path mask-driven cut-row loop. `StateLayout`
-    // is the sole role-(a) owner; the per-stage geometry carries no state-vector
-    // caches.
+    // `StateLayout` is the sole role-(a) owner; its constructor finalizes the
+    // nonzero mask unconditionally, so every study (storage-only or pure-thermal)
+    // has a finalized mask for the single-path mask-driven cut-row loop.
     let state = StateLayout::new(
         hydro_count,
         max_par_order,
@@ -819,12 +707,6 @@ struct LagData {
 
 /// Precompute per-stage lag accumulation weights, noise-group ids, the
 /// recent-observation seed, and the downstream PAR order.
-///
-/// All four outputs derive from the study stages, the policy-graph season map,
-/// and the stochastic context's PAR model. When the system has no season map,
-/// a zero-weight no-op season map is used so every stage produces no-op
-/// transitions. When there are no recent observations the seed is all-zero
-/// (backward-compatible with a plain zero reset).
 fn precompute_lag_data(
     system: &System,
     stages: &[Stage],
@@ -841,10 +723,8 @@ fn precompute_lag_data(
         };
         &noop_season_map
     };
-    // Compute downstream PAR order: non-zero when any stage has season_id >= 12
-    // (quarterly range), indicating a monthly-to-quarterly resolution transition.
-    // Use the global max_par_order from the stochastic context as a proxy for the
-    // quarterly PAR order until a separate quarterly stochastic context is available.
+    // Proxy: the global `max_par_order` stands in for the quarterly PAR order until a
+    // separate quarterly stochastic context exists.
     let has_quarterly_stages = stages
         .iter()
         .any(|s| s.season_id.is_some_and(|id| id >= 12));
@@ -860,9 +740,6 @@ fn precompute_lag_data(
     );
     let noise_group_ids = crate::lag_transition::precompute_noise_groups(stages);
 
-    // Compute lag accumulator seed from recent_observations (if any).
-    // Uses the first study stage and the resolved season_map_ref. When there are
-    // no recent observations the result is an all-zero seed (backward-compatible).
     let recent_observation_seed = if stages.is_empty() {
         crate::lag_transition::RecentObservationSeed::zero(system.hydros().len())
     } else {
@@ -915,7 +792,6 @@ fn build_scenario_libraries(
     let sim_load_scheme = simulation_source.load_scheme;
     let sim_ncs_scheme = simulation_source.ncs_scheme;
 
-    // Build training phase libraries.
     let training_historical: Option<HistoricalScenarioLibrary> =
         if inflow_scheme == SamplingScheme::Historical {
             Some(scenario_libraries::build_historical_inflow_library(
@@ -971,11 +847,6 @@ fn build_scenario_libraries(
         } else {
             None
         };
-
-    // Build simulation-specific libraries when simulation schemes differ from
-    // training schemes. When they are identical, simulation borrows from the
-    // training libraries (represented as `None` in the simulation phase, with
-    // `simulation_ctx()` falling back to the training library references).
 
     let simulation_historical: Option<HistoricalScenarioLibrary> =
         if sim_inflow_scheme == SamplingScheme::Historical && sim_inflow_scheme != inflow_scheme {
@@ -1089,9 +960,6 @@ fn build_risk_measures(system: &System) -> Vec<RiskMeasure> {
 }
 
 /// Build [`EntityCounts`] from the loaded system.
-///
-/// Entity IDs are extracted from [`cobre_core::EntityId`], which stores
-/// an `i32` in its inner field.
 fn build_entity_counts(system: &System) -> EntityCounts {
     EntityCounts {
         hydro_ids: system.hydros().iter().map(|h| h.id.0).collect(),
@@ -1111,11 +979,9 @@ fn build_entity_counts(system: &System) -> EntityCounts {
 
 /// Build the per-station pumping power-consumption rates \[MW/(m³/s)\].
 ///
-/// ID-sorted parallel to `EntityCounts::pumping_station_ids`: both derive from
-/// the canonical ID-ordered `system.pumping_stations()` slice, so a row's
-/// position in this slice matches its station ID's position in
-/// `pumping_station_ids`. Read by the simulation extraction pipeline to compute
-/// `power_consumption_mw = pumped_flow_m3s * consumption`.
+/// ID-sorted parallel to `EntityCounts::pumping_station_ids` (both derive from the
+/// canonical ID-ordered `system.pumping_stations()` slice), so a row's position
+/// matches its station ID's position in `pumping_station_ids`.
 fn build_pumping_consumption(system: &System) -> Vec<f64> {
     system
         .pumping_stations()
@@ -1126,11 +992,10 @@ fn build_pumping_consumption(system: &System) -> Vec<f64> {
 
 /// Build the per-plant commissioning windows for the anticipated thermals.
 ///
-/// One `(entry_stage_id, exit_stage_id)` per anticipated thermal, in
-/// anticipated-local declaration order — the same order
+/// In anticipated-local declaration order — the same order
 /// `anticipated_thermal_indices` and the LP-builder `anticipated_windows` use, so
-/// the simulation decision gate reads the matching window per anticipated-local
-/// index. Empty when there are no anticipated thermals.
+/// the simulation decision gate reads the matching window per index. Empty when
+/// there are no anticipated thermals.
 fn build_anticipated_windows(system: &System) -> Vec<(Option<i32>, Option<i32>)> {
     system
         .thermals()
@@ -1142,25 +1007,10 @@ fn build_anticipated_windows(system: &System) -> Vec<(Option<i32>, Option<i32>)>
 
 /// Build the initial state vector from the system's initial conditions.
 ///
-/// The state vector layout is `[storage(0..N), lags(N..N*(1+L))]` where N is
-/// the number of hydros and L is the maximum PAR order. Storage positions
-/// correspond to hydros in canonical ID order.
-///
-/// Lag slots are populated from `initial_conditions.past_inflows`. For each
-/// hydro at positional index `idx` with a `past_inflows` entry, lag slot `l`
-/// (0-based) is set to `entry.values_m3s[l]` where index 0 corresponds to
-/// lag 1 (most recent) and index L-1 to lag L (oldest). Hydros without a
-/// `past_inflows` entry have their lag slots left at `0.0`.
-///
-/// When `max_par_order == 0`, no lag slots exist and the state is storage-only.
-///
-/// Each `HydroStorage` entry in `initial_conditions.storage` is matched to
-/// its positional index among the system's hydros (both sorted by `hydro_id`).
-///
-/// Filling hydros are seeded the same way from `initial_conditions.filling_storage`:
-/// each entry is matched to its hydro's positional index and written to the same
-/// dense storage coordinate, a value-only write distinct from the `storage` source
-/// collection.
+/// Layout `[storage(0..N), lags(N..N*(1+L))]` (N hydros, L = max PAR order),
+/// storage in canonical ID order. Lag slots come from
+/// `initial_conditions.past_inflows`: `values_m3s[l]` with index 0 = lag 1 (most
+/// recent), index L-1 = lag L (oldest). Storage-only when `max_par_order == 0`.
 fn build_initial_state(
     system: &System,
     study_dims: &StudyDimensions,
@@ -1178,16 +1028,11 @@ fn build_initial_state(
     }
 
     for hs in &ic.filling_storage {
-        // Both hydros() and ic.filling_storage are sorted by hydro_id (the
-        // binary_search_by_key below requires it, mirroring the ic.storage loop).
-        // Filling hydros carry their stage-0 seed here, never in `ic.storage`
-        // (a validated invariant: a hydro appears in exactly one of the two
-        // collections). The storage column is dense at the hydro's system index
-        // in every phase, so the storage state index equals the hydro's position
-        // in `hydros()` and the seed is a value-only write to the same coordinate
-        // the PreFilling pin (`fill_prefilling_shortcircuit`) freezes to
-        // `[seed, seed]`. Do not merge the two collections or re-index the column:
-        // a separate index would silently desync from that pin.
+        // ic.filling_storage is sorted by hydro_id (binary_search requires it). The
+        // seed writes the same coordinate the PreFilling pin
+        // (`fill_prefilling_shortcircuit`) freezes to `[seed, seed]`; do not merge
+        // the two collections or re-index the column — a separate index would
+        // silently desync from that pin.
         if let Ok(idx) = hydros.binary_search_by_key(&hs.hydro_id.0, |h| h.id.0) {
             state[idx] = hs.value_hm3;
         }
@@ -1206,14 +1051,10 @@ fn build_initial_state(
         }
     }
 
-    // Seed anticipated-state ring buffer from `past_anticipated_commitments`.
-    // Each entry carries K_i values decided before study start, delivered at
-    // stages 1..=K_i. Layout: state[anticipated_state.start + slot * n_anticipated + local_idx].
-    //
-    // Pre-horizon seeding is enabled: slot 0 may hold a non-zero seed at stage 0.
-    // Padding slots [K_i, k_max) must stay zero (enforced by clamping to K_i
-    // and debug_assert). The ring-buffer logic in noise.rs and indexer.rs
-    // assumes padding slots are zero.
+    // Anticipated-state ring buffer, slot-major:
+    // `state[anticipated_state.start + slot * n_anticipated + local_idx]`. Padding
+    // slots `[K_i, k_max)` must stay zero — the ring-buffer logic in `noise.rs` and
+    // `indexer.rs` assumes it.
     if layout.n_anticipated > 0 && layout.k_max > 0 {
         debug_assert_eq!(
             study_dims.anticipated_thermal_indices.len(),
@@ -1224,38 +1065,33 @@ fn build_initial_state(
         let n_ant = layout.n_anticipated;
         let ant_start = layout.anticipated_state.start;
         for history in &ic.past_anticipated_commitments {
-            // Resolve global thermal index via binary search on EntityId.
-            // Both system.thermals() and past_anticipated_commitments are
-            // sorted by thermal_id ascending (sorted during system construction).
+            // thermals() and past_anticipated_commitments are both sorted by
+            // thermal_id (binary_search requires it).
             let Ok(global_idx) = thermals.binary_search_by_key(&history.thermal_id.0, |t| t.id.0)
             else {
-                // Unknown thermal ID — silently skip.  The cobre-io validator
-                // rejects this in production, but defense-in-depth matches the
-                // existing `past_inflows` behavior.
+                // Defense-in-depth — the cobre-io validator rejects an unknown ID in
+                // production; matches the existing `past_inflows` skip behavior.
                 continue;
             };
-            // Find the anticipated-local index by linear search.
-            // n_anticipated is small (typical range 1–50), so O(n) is fine.
+            // O(n) over the small `n_anticipated` list, not a map.
             let Some(local_idx) = study_dims
                 .anticipated_thermal_indices
                 .iter()
                 .position(|&g| g == global_idx)
             else {
-                // Thermal exists in the system but has anticipated_config: None.
-                // Silently skip — not an anticipated plant.
+                // Not an anticipated plant (`anticipated_config: None`) — skip.
                 continue;
             };
-            // K_i is the per-plant lead time; clamp to K_i (not k_max) to
-            // prevent over-long input from corrupting padding slots.
-            // cobre-io validator enforces values_mw.len() == K_i in production.
+            // Clamp to K_i, not k_max: over-long input would otherwise corrupt the
+            // padding slots.
             let k_i = layout.anticipated_lead_stages[local_idx];
             let n_slots = history.values_mw.len().min(k_i);
             for slot in 0..n_slots {
                 let off = ant_start + slot * n_ant + local_idx;
                 state[off] = history.values_mw[slot];
             }
-            // Padding-slot invariant: [K_i, k_max) must remain 0.0 to prevent
-            // ring-buffer corruption and LP infeasibility.
+            // Padding slots `[K_i, k_max)` must stay 0.0 — a non-zero value corrupts
+            // the ring buffer and causes LP infeasibility.
             #[allow(clippy::float_cmp)]
             for slot in k_i..layout.k_max {
                 let off = ant_start + slot * n_ant + local_idx;
@@ -1918,31 +1754,24 @@ mod tests {
         )
         .expect("setup");
 
-        // Stage templates
         assert_eq!(setup.stage_data.stage_templates.templates.len(), n_stages);
         assert_eq!(setup.stage_data.stage_templates.base_rows.len(), n_stages);
 
-        // Config-derived scalars
         assert_eq!(setup.loop_params.seed, 42);
         assert_eq!(setup.loop_params.forward_passes, 2);
         assert_eq!(setup.loop_params.max_iterations, 50);
         assert_eq!(setup.simulation_config.n_scenarios, 0); // simulation disabled by default
         assert_eq!(setup.policy_path, "./policy");
 
-        // Derived layout
         assert_eq!(setup.stage_data.block_counts_per_stage.len(), n_stages);
         assert!(setup.loop_params.max_blocks > 0);
 
-        // Horizon
         assert_eq!(setup.methodology.horizon.num_stages(), n_stages);
 
-        // Risk measures: one per study stage
         assert_eq!(setup.cut_management.risk_measures.len(), n_stages);
 
-        // FCF: pools match stage count
         assert_eq!(setup.fcf.pools.len(), n_stages);
 
-        // Entity counts: 1 hydro, 1 thermal
         assert_eq!(setup.stage_data.entity_counts.hydro_ids.len(), 1);
         assert_eq!(setup.stage_data.entity_counts.thermal_ids.len(), 1);
     }
@@ -2011,7 +1840,6 @@ mod tests {
         )
         .expect("setup");
 
-        // The minimal_config uses "penalty" — should not be None.
         assert!(
             !matches!(
                 setup.methodology.inflow_method,
@@ -2161,8 +1989,7 @@ mod tests {
         let n_stages = 3;
         let system = minimal_system(n_stages);
         let mut config = minimal_config(2, 10);
-        // Configure the dynamic cut-selection method so `parse_cut_selection_config`
-        // yields a `Dynamic` strategy and `simulation_ctx()` populates `dcs`.
+        // A Dynamic strategy here is what makes `simulation_ctx()` populate `dcs`.
         config.training.cut_selection = RowSelectionConfig {
             selection: Some(cobre_io::config::SelectionMethod::Dynamic {
                 start_iteration: 2,
@@ -2316,7 +2143,6 @@ mod tests {
     fn simulation_config_reflects_setup_fields() {
         use cobre_io::config::SimulationConfig as IoSimulationConfig;
 
-        // Build a config with simulation enabled so n_scenarios is non-zero.
         let mut config = minimal_config(1, 5);
         config.simulation = IoSimulationConfig {
             enabled: true,
@@ -2432,7 +2258,6 @@ mod tests {
         let comm = LocalBackend;
         let mut solver = ActiveSolver::new().expect("solver");
 
-        // Collect events from training so we have at least one IterationSummary.
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let result = setup
             .train(
@@ -2461,7 +2286,6 @@ mod tests {
         use cobre_comm::LocalBackend;
         use cobre_solver::ActiveSolver;
 
-        // Enable simulation with 3 scenarios.
         let mut config = minimal_config(1, 3);
         config.simulation = cobre_io::config::SimulationConfig {
             enabled: true,
@@ -2501,12 +2325,10 @@ mod tests {
             .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
             .expect("train");
 
-        // Build simulation pool.
         let mut pool = setup
             .create_workspace_pool(&comm, 1, ActiveSolver::new)
             .expect("sim pool");
 
-        // Create the result channel and drain thread.
         let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
         let (result_tx, result_rx) = std::sync::mpsc::sync_channel(io_capacity);
         let drain_handle = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
@@ -2577,7 +2399,6 @@ mod tests {
             params.forward_passes, DEFAULT_FORWARD_PASSES,
             "forward_passes should default to DEFAULT_FORWARD_PASSES"
         );
-        // When no stopping rules are specified, a single IterationLimit rule is inserted.
         assert_eq!(
             params.stopping_rule_set.rules.len(),
             1,
@@ -2594,7 +2415,6 @@ mod tests {
             matches!(params.stopping_rule_set.mode, StoppingMode::Any),
             "default stopping mode should be Any"
         );
-        // Simulation is disabled by default.
         assert_eq!(
             params.n_scenarios, 0,
             "n_scenarios should be 0 when simulation disabled"
@@ -2657,7 +2477,6 @@ mod tests {
         // Seed: i64::unsigned_abs(1234) == 1234
         assert_eq!(params.seed, 1234, "seed mismatch");
         assert_eq!(params.forward_passes, 5, "forward_passes mismatch");
-        // Two stopping rules must be preserved.
         assert_eq!(
             params.stopping_rule_set.rules.len(),
             2,
@@ -2789,11 +2608,9 @@ mod tests {
         let root = dir.path();
         write_minimal_case_dir(root);
 
-        // Place the stats files so that the "explicit stats present" branch is taken
-        // and estimation is skipped. No `inflow_history.parquet` is written here;
-        // its presence is not required for the estimation-skip path and the test
-        // intentionally keeps the history file absent to avoid parse errors.
-        // (`validate_structure` only checks existence, not content.)
+        // No `inflow_history.parquet`: the estimation-skip path does not need it, and
+        // its absence avoids parse errors (`validate_structure` checks existence,
+        // not content).
         fs::create_dir_all(root.join("scenarios")).unwrap();
         fs::write(root.join("scenarios/inflow_seasonal_stats.parquet"), b"").unwrap();
         fs::write(root.join("scenarios/inflow_ar_coefficients.parquet"), b"").unwrap();
@@ -2873,9 +2690,6 @@ mod tests {
         };
         use tempfile::TempDir;
 
-        // Build a system with HistoricalResiduals noise method on all stages.
-        // Reuses the same structure as system_with_historical_inflow but sets
-        // noise_method to HistoricalResiduals instead of the default Saa.
         let n_stages = 2usize;
 
         let bus = Bus {
@@ -3150,14 +2964,12 @@ mod tests {
             "default result must have no evaporation"
         );
 
-        // Verify the production model for the one hydro at stage 0 is ConstantProductivity.
         let model = result.production.model(0, 0);
         assert!(
             matches!(model, ResolvedProductionModel::ConstantProductivity { .. }),
             "default production model must be ConstantProductivity"
         );
 
-        // Verify the evaporation model for the one hydro is None.
         let evap = result.evaporation.model(0);
         assert!(
             matches!(evap, EvaporationModel::None),
@@ -3652,15 +3464,9 @@ mod tests {
     fn build_initial_state_unknown_hydro_in_past_inflows_stays_zero() {
         use super::build_initial_state;
 
-        // minimal_system has 1 hydro id=3; build a system with past_inflows
-        // for hydro id=99 (not in registry).
-        let system = {
-            // Reuse minimal_system(2) but add past_inflows for a non-existent hydro.
-            // Since minimal_system doesn't support overriding IC, we use
-            // build_initial_state directly on the base system — its IC has
-            // no past_inflows, so both lag slots are 0.0.
-            minimal_system(2)
-        };
+        // minimal_system cannot override IC, so its past_inflows is empty and both
+        // lag slots stay 0.0 — the same outcome as past_inflows for an unknown hydro.
+        let system = { minimal_system(2) };
         let layout = layout_for_lag_test(1, 2);
 
         let state = build_initial_state(
@@ -5157,8 +4963,7 @@ mod tests {
         use cobre_core::scenario::ExternalScenarioRow;
         use cobre_core::{scenario::InflowModel as CoreInflowModel, system::SystemBuilder};
 
-        // Build external inflow rows: 3 scenarios × 1 hydro × 2 stages.
-        // Hydro ID = 3 (from minimal_system). Stage IDs 0, 1. Scenario IDs 0, 1, 2.
+        // 3 scenarios × 1 hydro (ID 3, from minimal_system) × 2 stages.
         let hydro_id = EntityId(3);
         let mut external_rows: Vec<ExternalScenarioRow> = Vec::new();
         for stage_id in 0i32..2 {
@@ -5172,10 +4977,8 @@ mod tests {
             }
         }
 
-        // We need to rebuild the system with external scenario source and rows.
-        // Use SystemBuilder to produce a system that carries external rows.
-        // minimal_system builds with its own SystemBuilder call, so we rebuild.
-
+        // minimal_system has no seam to inject external rows, so rebuild the system
+        // directly to carry them.
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
@@ -5770,7 +5573,6 @@ mod tests {
             },
         };
 
-        // NCS entity: wind plant with EntityId(4).
         let ncs_id = EntityId(4);
         let ncs_source = NonControllableSource {
             id: ncs_id,
@@ -5829,7 +5631,6 @@ mod tests {
             })
             .collect();
 
-        // NCS models: mean=0.8, std=0.1 for both stages.
         let ncs_models: Vec<NcsModel> = (0..2usize)
             .map(|i| NcsModel {
                 ncs_id,
@@ -5997,13 +5798,9 @@ mod tests {
         clippy::cast_lossless
     )]
     fn historical_library_fails_when_no_valid_windows() {
-        // system_with_historical_inflow has data for years 1990-1991.
-        // We use HistoricalYears::List with year 2050 (no data) to force
-        // zero valid windows after filtering.
         use cobre_core::system::SystemBuilder;
 
-        // Instead, let's build a system with Historical scheme and empty
-        // inflow_history (no rows at all). This guarantees zero candidate
+        // Historical scheme with empty inflow_history guarantees zero candidate
         // years in discovery.
         use chrono::NaiveDate;
         use cobre_core::scenario::InflowModel;
@@ -6747,14 +6544,11 @@ mod tests {
         )
         .expect("setup");
 
-        // The production stage-0 geometry, built per stage by `from_layout`.
         let geometry = &setup.stage_data.stage_templates.geometry_per_stage[0];
         let study_dims = &setup.stage_data.study_dims;
-        // Rebuild an independent reference geometry from the same equipment
-        // dimensions: the non-state scalars / flags / anticipated identity list
-        // from `study_dims` (the single owner); the surviving stride scalar
-        // `n_blks`, the hydro count (`water_balance.len()`), and the per-stage
-        // FPHA / evaporation identity lists from the built geometry's own fields.
+        // Rebuild the reference geometry independently from the single-owner
+        // `study_dims`, so a divergence between it and the production geometry fails
+        // the test.
         let dims = crate::indexer::test_fixtures::GeometryDims {
             hydro_count: geometry.water_balance.len(),
             max_par_order: 0, // role-(b) ranges do not depend on L
@@ -6891,7 +6685,6 @@ mod tests {
         let n_state = state.n_state;
         assert!(n_state > 0, "fixture must have a non-empty state vector");
 
-        // One stage, one cut with a fixed, non-trivial coefficient vector.
         // `u32::try_from` + `f64::from` keeps the indices lossless without a
         // cast-precision lint relaxation.
         let mut fcf = FutureCostFunction::new(2, n_state, 1, 4, &[0; 2]);
@@ -6900,14 +6693,11 @@ mod tests {
             .collect();
         fcf.add_cut(0, 0, 0, 7.5, &coefficients);
 
-        // Production batch: reads role (a) from the `StateLayout`.
         let from_production = build_cut_row_batch(&fcf, 0, state, &[]);
 
-        // Reference batch: an independent loop driven by the same canonical
-        // `StateLayout` role-(a) reads (`theta`, `nonzero_state_indices`,
-        // `lp_column_for_state`). Mirrors `cut::row::build_cut_row_batch_into`'s
-        // mask-driven body; if production and this mirror disagree, the cut-path
-        // repoint changed the emitted row.
+        // Independent mirror of `build_cut_row_batch_into`'s mask-driven body over the
+        // same `StateLayout` role-(a) reads; a disagreement means the cut-path repoint
+        // changed the emitted row.
         let mut from_state = cobre_solver::RowBatch {
             num_rows: 0,
             row_starts: Vec::new(),
