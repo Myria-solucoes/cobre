@@ -40,22 +40,9 @@
 //! }
 //! ```
 //!
-//! ## Validation
-//!
-//! After deserializing, the following invariants are checked before conversion:
-//!
-//! 1. No duplicate stage `id` values.
-//! 2. No duplicate pre-study stage `id` values.
-//! 3. No stage `id` collision between study and pre-study sets.
-//! 4. `num_scenarios > 0` for each study stage.
-//! 5. `annual_discount_rate >= 0.0`.
-//! 6. Each block has `hours > 0.0`.
-//! 7. Block IDs within each stage are contiguous (0, 1, ..., n-1).
-//! 8. `CVaR` `alpha` in (0, 1] and `lambda` in [0, 1].
-//! 9. `start_date` and `end_date` parse as ISO 8601 dates with `start_date < end_date`.
-//!
+//! [`parse_stages`] validates the per-file invariants (see its `# Errors`).
 //! Cross-file validation (season-stage containment, transition probability sums,
-//! block hours sum equals stage duration) is deferred (Layer 5).
+//! block hours sum equals stage duration) is deferred to the semantic layer.
 
 use chrono::NaiveDate;
 use cobre_core::temporal::{
@@ -305,11 +292,9 @@ fn default_true() -> bool {
 
 // ── Output type ───────────────────────────────────────────────────────────────
 
-/// Parsed output from `stages.json`.
-///
-/// Contains all stages (study + pre-study) sorted by `id` ascending and the
-/// policy graph. Scenario source configuration is no longer stored here; it
-/// lives in `config.json` and is parsed by `parse_config`.
+/// Parsed output from `stages.json`: all stages (study + pre-study) sorted by
+/// `id` ascending, plus the policy graph. Scenario source configuration lives in
+/// `config.json` (`parse_config`), not here.
 ///
 /// # Examples
 ///
@@ -331,11 +316,10 @@ pub struct StagesData {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Parse `stages.json` from `path` and return the fully-validated temporal structure.
+/// Parse and validate `stages.json` from `path` into [`StagesData`].
 ///
-/// Reads the JSON file, deserializes through intermediate serde types, validates
-/// all invariants, then converts to [`StagesData`]. The stages vector is sorted by
-/// `id` ascending to satisfy declaration-order invariance.
+/// The stages vector is sorted by `id` ascending to satisfy declaration-order
+/// invariance.
 ///
 /// # Errors
 ///
@@ -370,9 +354,6 @@ pub fn parse_stages(path: &Path) -> Result<StagesData, LoadError> {
     let raw: RawStagesFile =
         serde_json::from_str(&raw_text).map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-    // Reject stages.json files that still contain the old `scenario_source` key.
-    // The field has moved to config.json (training.scenario_source /
-    // simulation.scenario_source).
     if raw.scenario_source.is_some() {
         return Err(LoadError::SchemaError {
             path: path.to_path_buf(),
@@ -389,13 +370,7 @@ pub fn parse_stages(path: &Path) -> Result<StagesData, LoadError> {
     convert_stages(raw, path)
 }
 
-/// Build a lookup map from stage ID to season ID.
-///
-/// Iterates `stages` and inserts `(stage.id, season_id)` for every stage that
-/// has `season_id = Some(sid)`. Stages with `season_id = None` are skipped.
-///
-/// The returned map is used by time series estimation code to quickly resolve
-/// which season a given stage belongs to without traversing the full stage list.
+/// Build a `stage id -> season id` lookup, skipping stages without a `season_id`.
 ///
 /// # Examples
 ///
@@ -417,7 +392,6 @@ pub fn build_season_stage_map(stages: &[Stage]) -> HashMap<i32, usize> {
 
 // ── Validation ────────────────────────────────────────────────────────────────
 
-/// Validate all invariants on the raw deserialized stages data.
 fn validate_raw_stages(raw: &RawStagesFile, path: &Path) -> Result<(), LoadError> {
     validate_annual_discount_rate(raw.policy_graph.annual_discount_rate, path)?;
     validate_no_duplicate_stage_ids(&raw.stages, path)?;
@@ -434,7 +408,6 @@ fn validate_raw_stages(raw: &RawStagesFile, path: &Path) -> Result<(), LoadError
     Ok(())
 }
 
-/// Check that `annual_discount_rate >= 0.0`.
 fn validate_annual_discount_rate(rate: f64, path: &Path) -> Result<(), LoadError> {
     if rate < 0.0 {
         return Err(LoadError::SchemaError {
@@ -446,7 +419,6 @@ fn validate_annual_discount_rate(rate: f64, path: &Path) -> Result<(), LoadError
     Ok(())
 }
 
-/// Check that no two study stages share the same `id`.
 fn validate_no_duplicate_stage_ids(stages: &[RawStage], path: &Path) -> Result<(), LoadError> {
     let mut seen: HashSet<i32> = HashSet::new();
     for (i, stage) in stages.iter().enumerate() {
@@ -461,7 +433,6 @@ fn validate_no_duplicate_stage_ids(stages: &[RawStage], path: &Path) -> Result<(
     Ok(())
 }
 
-/// Check that no two pre-study stages share the same `id`.
 fn validate_no_duplicate_pre_study_stage_ids(
     stages: &[RawPreStudyStage],
     path: &Path,
@@ -479,7 +450,6 @@ fn validate_no_duplicate_pre_study_stage_ids(
     Ok(())
 }
 
-/// Check that no pre-study stage `id` collides with a study stage `id`.
 fn validate_no_id_collision_between_sets(
     stages: &[RawStage],
     pre_study_stages: &[RawPreStudyStage],
@@ -501,7 +471,6 @@ fn validate_no_id_collision_between_sets(
     Ok(())
 }
 
-/// Check that `num_scenarios > 0` for a study stage.
 fn validate_num_scenarios(num: u32, stage_index: usize, path: &Path) -> Result<(), LoadError> {
     if num == 0 {
         return Err(LoadError::SchemaError {
@@ -513,7 +482,6 @@ fn validate_num_scenarios(num: u32, stage_index: usize, path: &Path) -> Result<(
     Ok(())
 }
 
-/// Check that block `hours > 0.0`.
 fn validate_block_hours(
     hours: f64,
     stage_index: usize,
@@ -530,13 +498,11 @@ fn validate_block_hours(
     Ok(())
 }
 
-/// Check that block IDs within a stage are contiguous (0, 1, ..., n-1).
 fn validate_block_ids_contiguous(
     blocks: &[RawBlock],
     stage_index: usize,
     path: &Path,
 ) -> Result<(), LoadError> {
-    // Collect all IDs and check they form exactly the set {0, 1, ..., n-1}.
     let n = blocks.len();
     let mut ids: Vec<usize> = blocks.iter().map(|b| b.id).collect();
     ids.sort_unstable();
@@ -554,7 +520,6 @@ fn validate_block_ids_contiguous(
     Ok(())
 }
 
-/// Check `CVaR` alpha and lambda range constraints.
 fn validate_risk_measure(
     risk: &RawRiskMeasure,
     stage_index: usize,
@@ -592,17 +557,13 @@ fn validate_risk_measure(
 
 // ── Conversion ────────────────────────────────────────────────────────────────
 
-/// Convert validated raw stages data into [`StagesData`].
-///
-/// Parses dates, constructs [`Stage`] and [`Block`] instances, builds the
-/// [`PolicyGraph`], then sorts all stages by `id` ascending and assigns
-/// `index` after sort.
+/// Convert validated raw stages data into [`StagesData`], sorting all stages by
+/// `id` ascending and assigning `index` after the sort.
 fn convert_stages(raw: RawStagesFile, path: &Path) -> Result<StagesData, LoadError> {
     let season_map = convert_season_definitions(raw.season_definitions, path)?;
     let mut policy_graph = convert_policy_graph(raw.policy_graph, path)?;
     policy_graph.season_map = season_map;
 
-    // Convert study stages.
     let mut all_stages: Vec<Stage> =
         Vec::with_capacity(raw.stages.len() + raw.pre_study_stages.len());
 
@@ -654,7 +615,6 @@ fn convert_stages(raw: RawStagesFile, path: &Path) -> Result<StagesData, LoadErr
         });
     }
 
-    // Convert pre-study stages with minimal defaults.
     for (i, raw_pss) in raw.pre_study_stages.into_iter().enumerate() {
         let start_date = parse_date(
             &raw_pss.start_date,
@@ -695,10 +655,9 @@ fn convert_stages(raw: RawStagesFile, path: &Path) -> Result<StagesData, LoadErr
         });
     }
 
-    // Sort by id ascending (declaration-order invariance).
+    // Sort by id ascending (declaration-order invariance), then assign index.
     all_stages.sort_by_key(|s| s.id);
 
-    // Assign index after sort.
     for (idx, stage) in all_stages.iter_mut().enumerate() {
         stage.index = idx;
     }
@@ -709,7 +668,6 @@ fn convert_stages(raw: RawStagesFile, path: &Path) -> Result<StagesData, LoadErr
     })
 }
 
-/// Convert the raw `policy_graph` object into a [`PolicyGraph`].
 fn convert_policy_graph(raw: RawPolicyGraph, path: &Path) -> Result<PolicyGraph, LoadError> {
     let graph_type = convert_policy_graph_type(&raw.graph_type, path)?;
 
@@ -733,7 +691,6 @@ fn convert_policy_graph(raw: RawPolicyGraph, path: &Path) -> Result<PolicyGraph,
     })
 }
 
-/// Convert raw blocks into sorted `Vec<Block>` (sorted by index ascending).
 fn convert_blocks(raw_blocks: &[RawBlock]) -> Vec<Block> {
     let mut blocks: Vec<Block> = raw_blocks
         .iter()
@@ -747,7 +704,6 @@ fn convert_blocks(raw_blocks: &[RawBlock]) -> Vec<Block> {
     blocks
 }
 
-/// Convert `state_variables` raw type to [`StageStateConfig`].
 fn convert_state_config(raw: Option<RawStateVariables>) -> StageStateConfig {
     match raw {
         None => StageStateConfig {
@@ -761,7 +717,6 @@ fn convert_state_config(raw: Option<RawStateVariables>) -> StageStateConfig {
     }
 }
 
-/// Convert `risk_measure` raw type to [`StageRiskConfig`].
 fn convert_risk_measure(raw: RawRiskMeasure) -> StageRiskConfig {
     match raw {
         RawRiskMeasure::Expectation(_) => StageRiskConfig::Expectation,
@@ -774,7 +729,6 @@ fn convert_risk_measure(raw: RawRiskMeasure) -> StageRiskConfig {
 
 // ── String-to-enum converters ─────────────────────────────────────────────────
 
-/// Convert a `block_mode` string to [`BlockMode`].
 fn convert_block_mode(s: &str, field: &str, path: &Path) -> Result<BlockMode, LoadError> {
     match s {
         "parallel" => Ok(BlockMode::Parallel),
@@ -789,7 +743,6 @@ fn convert_block_mode(s: &str, field: &str, path: &Path) -> Result<BlockMode, Lo
     }
 }
 
-/// Convert a `sampling_method` string to [`NoiseMethod`].
 fn convert_noise_method(s: &str, field: &str, path: &Path) -> Result<NoiseMethod, LoadError> {
     match s {
         "saa" => Ok(NoiseMethod::Saa),
@@ -808,7 +761,6 @@ fn convert_noise_method(s: &str, field: &str, path: &Path) -> Result<NoiseMethod
     }
 }
 
-/// Convert a `policy_graph.type` string to [`PolicyGraphType`].
 fn convert_policy_graph_type(s: &str, path: &Path) -> Result<PolicyGraphType, LoadError> {
     match s {
         "finite_horizon" => Ok(PolicyGraphType::FiniteHorizon),
@@ -823,7 +775,6 @@ fn convert_policy_graph_type(s: &str, path: &Path) -> Result<PolicyGraphType, Lo
     }
 }
 
-/// Convert a `cycle_type` string to [`SeasonCycleType`].
 fn convert_cycle_type(s: &str, path: &Path) -> Result<SeasonCycleType, LoadError> {
     match s {
         "monthly" => Ok(SeasonCycleType::Monthly),
@@ -839,7 +790,6 @@ fn convert_cycle_type(s: &str, path: &Path) -> Result<SeasonCycleType, LoadError
     }
 }
 
-/// Parse an ISO 8601 date string (`YYYY-MM-DD`) into a [`NaiveDate`].
 fn parse_date(s: &str, field: &str, path: &Path) -> Result<NaiveDate, LoadError> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| LoadError::SchemaError {
         path: path.to_path_buf(),
@@ -848,7 +798,6 @@ fn parse_date(s: &str, field: &str, path: &Path) -> Result<NaiveDate, LoadError>
     })
 }
 
-/// Convert optional season definitions into an optional [`SeasonMap`].
 fn convert_season_definitions(
     raw: Option<RawSeasonDefinitions>,
     path: &Path,
@@ -1617,7 +1566,6 @@ mod tests {
     /// AC-035-4: 3 stages with season IDs → map entries {0 => 0, 1 => 0, 2 => 1}.
     #[test]
     fn test_build_season_stage_map_basic() {
-        // Parse a small fixture with season_definitions and season_id per stage.
         let json = r#"{
           "season_definitions": {
             "cycle_type": "monthly",
@@ -1665,7 +1613,6 @@ mod tests {
     /// AC-035-6: stages without season_id → empty map.
     #[test]
     fn test_build_season_stage_map_none_season_ids() {
-        // Stages without season_definitions have season_id = None.
         let json = r#"{
           "policy_graph": {
             "type": "finite_horizon",

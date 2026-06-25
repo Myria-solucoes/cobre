@@ -469,8 +469,6 @@ fn validate_recent_observations_no_overlap(
     entries: &[RawRecentObservation],
     path: &Path,
 ) -> Result<(), LoadError> {
-    // Group entry indices by hydro_id, then sort each group by start_date and
-    // check consecutive pairs.
     use std::collections::HashMap;
 
     let mut by_hydro: HashMap<i32, Vec<usize>> = HashMap::new();
@@ -479,7 +477,6 @@ fn validate_recent_observations_no_overlap(
     }
 
     for (hydro_id, mut indices) in by_hydro {
-        // Sort indices by start_date (dates already validated as parseable).
         indices.sort_by_key(|&i| {
             NaiveDate::parse_from_str(&entries[i].start_date, "%Y-%m-%d")
                 .unwrap_or_else(|_| unreachable!("start_date already validated"))
@@ -610,7 +607,6 @@ fn convert(raw: RawInitialConditions) -> InitialConditions {
         .into_iter()
         .map(|e| RecentObservation {
             hydro_id: EntityId(e.hydro_id),
-            // SAFETY: dates already validated by validate_recent_observations_dates
             start_date: NaiveDate::parse_from_str(&e.start_date, "%Y-%m-%d")
                 .unwrap_or_else(|_| unreachable!("start_date already validated")),
             end_date: NaiveDate::parse_from_str(&e.end_date, "%Y-%m-%d")
@@ -684,7 +680,6 @@ mod tests {
             "past_inflows absent defaults to empty"
         );
 
-        // Both storage entries present with correct IDs and values
         assert_eq!(ic.storage[0].hydro_id, EntityId(0));
         assert!(
             (ic.storage[0].value_hm3 - 15_000.0).abs() < f64::EPSILON,
@@ -698,7 +693,6 @@ mod tests {
             ic.storage[1].value_hm3
         );
 
-        // Filling storage entry present
         assert_eq!(ic.filling_storage[0].hydro_id, EntityId(10));
         assert!(
             (ic.filling_storage[0].value_hm3 - 200.0).abs() < f64::EPSILON,

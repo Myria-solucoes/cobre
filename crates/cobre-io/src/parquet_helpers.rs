@@ -1,7 +1,5 @@
-//! Shared Parquet column extraction helpers.
-//!
-//! These helpers centralise the typed-downcast logic used by every Parquet parser
-//! in `cobre-io`. They are `pub(crate)` — not part of the public API.
+//! Shared Parquet column extraction helpers centralising the typed-downcast
+//! logic used by every Parquet parser in `cobre-io`.
 
 use arrow::array::{Array, Date32Array, Float64Array, Int32Array, UInt32Array};
 use std::path::Path;

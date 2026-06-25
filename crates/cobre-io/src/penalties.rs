@@ -1,24 +1,10 @@
 //! Parsing for `penalties.json` — global penalty defaults.
 //!
-//! [`parse_penalties`] reads `penalties.json` from the case directory root and
-//! returns a fully-validated [`GlobalPenaltyDefaults`].
-//!
-//! ## JSON structure
-//!
-//! The file has four top-level penalty sections (`bus`, `line`, `hydro`,
-//! `non_controllable_source`) that map to flat fields on
-//! [`GlobalPenaltyDefaults`]. Intermediate serde types bridge the nested JSON
-//! schema to the flat Rust representation.
-//!
-//! ## Validation
-//!
-//! After deserializing, three invariants are checked before conversion:
-//!
-//! 1. Every scalar penalty value is strictly positive (> 0.0), except
-//!    `hydro.turbined_cost` which may be zero (valid for constant-head plants
-//!    where `gamma_v = 0` and there is no volume-dependent regularization needed).
-//! 2. The last deficit segment has `depth_mw: null` (unbounded final segment).
-//! 3. Deficit segment costs are monotonically increasing.
+//! [`parse_penalties`] reads `penalties.json`, bridges the four nested JSON
+//! sections (`bus`, `line`, `hydro`, `non_controllable_source`) through
+//! intermediate serde types to the flat [`GlobalPenaltyDefaults`], and validates
+//! it. Every penalty is strictly positive except `hydro.turbined_cost`, which may
+//! be zero (constant-head plants have `gamma_v = 0`).
 //!
 //! See the penalty system spec §3 for the full requirements.
 
@@ -128,11 +114,7 @@ pub(crate) struct RawNcsPenalties {
     curtailment_cost: f64,
 }
 
-/// Load and validate `penalties.json` from `path`.
-///
-/// Reads the JSON file, deserializes it through intermediate serde types, then
-/// performs post-deserialization validation before converting to
-/// [`GlobalPenaltyDefaults`].
+/// Load and validate `penalties.json` from `path` into [`GlobalPenaltyDefaults`].
 ///
 /// # Errors
 ///
@@ -164,10 +146,8 @@ pub fn parse_penalties(path: &Path) -> Result<GlobalPenaltyDefaults, LoadError> 
     Ok(convert(raw))
 }
 
-/// Validate all invariants on the raw deserialized data.
-///
-/// Called before conversion so that error messages can reference JSON field
-/// paths rather than Rust field names.
+/// Validate on the raw deserialized data, before conversion, so error messages
+/// can name JSON field paths rather than Rust field names.
 fn validate_raw(raw: &RawPenalties, path: &Path) -> Result<(), LoadError> {
     validate_bus(raw, path)?;
     validate_line(raw, path)?;
@@ -176,7 +156,6 @@ fn validate_raw(raw: &RawPenalties, path: &Path) -> Result<(), LoadError> {
     Ok(())
 }
 
-/// Check all bus penalty values and deficit segment invariants.
 fn validate_bus(raw: &RawPenalties, path: &Path) -> Result<(), LoadError> {
     let bus = &raw.bus;
 
@@ -239,7 +218,6 @@ fn validate_bus(raw: &RawPenalties, path: &Path) -> Result<(), LoadError> {
     Ok(())
 }
 
-/// Check all line penalty values.
 fn validate_line(raw: &RawPenalties, path: &Path) -> Result<(), LoadError> {
     if raw.line.exchange_cost <= 0.0 {
         return Err(LoadError::SchemaError {
@@ -254,12 +232,10 @@ fn validate_line(raw: &RawPenalties, path: &Path) -> Result<(), LoadError> {
     Ok(())
 }
 
-/// Check all hydro penalty values.
 fn validate_hydro(raw: &RawPenalties, path: &Path) -> Result<(), LoadError> {
     let h = &raw.hydro;
 
-    // turbined_cost is non-negative (>= 0): zero is valid for constant-head
-    // plants where there is no volume-dependent production term (gamma_v = 0).
+    // turbined_cost >= 0: zero is valid for constant-head plants (gamma_v = 0).
     if h.turbined_cost < 0.0 {
         return Err(LoadError::SchemaError {
             path: path.to_path_buf(),
@@ -268,7 +244,6 @@ fn validate_hydro(raw: &RawPenalties, path: &Path) -> Result<(), LoadError> {
         });
     }
 
-    // All other hydro penalties must be strictly positive (> 0.0).
     let fields: &[(&str, f64)] = &[
         ("hydro.spillage_cost", h.spillage_cost),
         ("hydro.diversion_cost", h.diversion_cost),
@@ -319,7 +294,6 @@ fn validate_hydro(raw: &RawPenalties, path: &Path) -> Result<(), LoadError> {
     Ok(())
 }
 
-/// Check all non-controllable source penalty values.
 fn validate_ncs(raw: &RawPenalties, path: &Path) -> Result<(), LoadError> {
     if raw.non_controllable_source.curtailment_cost <= 0.0 {
         return Err(LoadError::SchemaError {
@@ -334,9 +308,7 @@ fn validate_ncs(raw: &RawPenalties, path: &Path) -> Result<(), LoadError> {
     Ok(())
 }
 
-/// Convert validated raw data into [`GlobalPenaltyDefaults`].
-///
-/// Precondition: [`validate_raw`] has returned `Ok(())` for this data.
+/// Convert into [`GlobalPenaltyDefaults`]; assumes [`validate_raw`] returned `Ok`.
 fn convert(raw: RawPenalties) -> GlobalPenaltyDefaults {
     let bus_deficit_segments = raw
         .bus
@@ -866,9 +838,8 @@ mod tests {
 
     // ── AC: unknown fields → ParseError ──────────────────────────────────────
 
-    /// The dead `version` field (removed in schema-hardening) must now be
-    /// rejected by `deny_unknown_fields`; old case dirs that still contain it
-    /// will fail to parse, which is the desired behaviour.
+    /// An unknown top-level field (e.g. `version`) is rejected by
+    /// `deny_unknown_fields`.
     #[test]
     fn test_parse_penalties_unknown_field_rejected() {
         let json = r#"{
