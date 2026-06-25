@@ -1,18 +1,6 @@
-//! Golden-value regression test for SAA opening tree generation.
-//!
-//! Future regression guard for the SAA tree generation path. Golden values
-//! were captured from the pre-refactor (opening-major loop order)
-//! implementation. Any change to the seed
-//! derivation, RNG, or loop structure that alters the output for SAA stages
-//! must be caught here before merging.
-//!
-//! The test exercises `generate_opening_tree` with a fixed configuration:
-//! - `base_seed = 42`
-//! - 3 stages, all `NoiseMethod::Saa`, branching factor 3
-//! - `dim = 2` (2 hydro entities: `EntityId(1)`, `EntityId(2)`)
-//! - Identity correlation (spectral transform is a no-op)
-//!
-//! The 6 pinned constants cover stage 0, all 3 openings, both dimensions.
+//! Golden-value regression guard for SAA opening tree generation: any change to
+//! seed derivation, RNG, or loop order that alters the SAA output for the pinned
+//! `base_seed = 42` configuration breaks the constants below.
 
 #![allow(
     clippy::unwrap_used,
@@ -34,27 +22,12 @@ use cobre_stochastic::{
     ClassDimensions, correlation::resolve::DecomposedCorrelation, generate_opening_tree,
 };
 
-// ---------------------------------------------------------------------------
-// Golden values — stage 0, openings 0-2, dimensions 0-1
-// Captured from the pre-refactor opening-major implementation.
-// ---------------------------------------------------------------------------
-
-/// Stage 0, opening 0, entity 0.
 const GOLDEN_S0_O0_D0: f64 = 4.009_893_649_649_564_6e-1;
-/// Stage 0, opening 0, entity 1.
 const GOLDEN_S0_O0_D1: f64 = 2.279_255_881_585_980_4e-1;
-/// Stage 0, opening 1, entity 0.
 const GOLDEN_S0_O1_D0: f64 = -1.395_412_177_608_524_4;
-/// Stage 0, opening 1, entity 1.
 const GOLDEN_S0_O1_D1: f64 = -2.693_936_692_173_674_6e-1;
-/// Stage 0, opening 2, entity 0.
 const GOLDEN_S0_O2_D0: f64 = 8.337_031_709_056_368e-1;
-/// Stage 0, opening 2, entity 1.
 const GOLDEN_S0_O2_D1: f64 = -1.619_991_803_182_488_7;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 fn make_stage(index: usize, id: i32, branching_factor: usize) -> Stage {
     Stage {
@@ -111,12 +84,6 @@ fn identity_correlation(entity_ids: &[i32]) -> DecomposedCorrelation {
 // Test
 // ---------------------------------------------------------------------------
 
-/// SAA golden-value regression guard.
-///
-/// Asserts bitwise equality between the generated opening tree and the
-/// 6 values captured from the pre-refactor implementation.
-/// This test fails immediately if any change to seed derivation, RNG
-/// selection, or loop order alters the SAA output.
 #[test]
 fn saa_golden_value_regression() {
     let stages = vec![

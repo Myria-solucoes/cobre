@@ -1,9 +1,5 @@
-//! Integration tests validating Sobol QMC statistical properties and correctness.
-//!
-//! Exercises `NoiseMethod::QmcSobol` through the full `generate_opening_tree`
-//! pipeline and verifies five properties that cannot be tested in unit tests:
-//! star discrepancy bounds, normal marginal statistics, correlation application,
-//! declaration-order invariance, and point-wise cross-path consistency.
+//! Integration tests validating Sobol QMC statistical properties through the
+//! full `generate_opening_tree` pipeline (`NoiseMethod::QmcSobol`).
 
 #![allow(
     clippy::unwrap_used,
@@ -54,13 +50,11 @@ fn approx_erf(x: f64) -> f64 {
     sign * (1.0 - poly * (-x * x).exp())
 }
 
-/// Standard normal CDF approximation: `Φ(z) = 0.5 * (1 + erf(z / √2))`.
 fn norm_cdf(z: f64) -> f64 {
     0.5 * (1.0 + approx_erf(z / std::f64::consts::SQRT_2))
 }
 
-/// Build a `Stage` with `NoiseMethod::QmcSobol` and no blocks, suitable for
-/// direct use with `generate_opening_tree`.
+/// No blocks — for direct use with `generate_opening_tree`.
 fn make_stage_sobol(index: usize, id: i32, branching_factor: usize) -> Stage {
     Stage {
         index,
@@ -82,8 +76,7 @@ fn make_stage_sobol(index: usize, id: i32, branching_factor: usize) -> Stage {
     }
 }
 
-/// Build a `Stage` with `NoiseMethod::QmcSobol` with one block, suitable for
-/// use with `build_stochastic_context`.
+/// One block — for use with `build_stochastic_context`.
 fn make_stage_sobol_with_block(index: usize, id: i32, branching_factor: usize) -> Stage {
     Stage {
         index,
@@ -268,7 +261,6 @@ fn make_inflow_model(hydro_id: i32, stage_id: i32) -> InflowModel {
     }
 }
 
-/// Build a `StochasticContext` with `QmcSobol` stages and the given hydro list.
 fn build_sobol_context(
     hydros: Vec<Hydro>,
     n_openings: usize,
@@ -322,18 +314,6 @@ fn build_sobol_context(
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Verify the 2D star discrepancy of N=64 unscrambled Sobol points is below 0.1.
-///
-/// The star discrepancy D* measures the maximum deviation between the empirical
-/// distribution of the point set and the uniform distribution over all
-/// axis-aligned rectangles anchored at the origin. For 64 Sobol points in 2D
-/// this bound is generously set at 0.1; the actual discrepancy is typically
-/// much lower, confirming the low-discrepancy property of the sequence.
-///
-/// To test unscrambled points, the N(0,1) output from `generate_opening_tree`
-/// is mapped back to uniform [0,1) via the normal CDF `Φ`. Because scrambled
-/// Sobol is still a valid low-discrepancy sequence modulo the CDF transform,
-/// this verifies the end-to-end discrepancy bound.
 #[test]
 fn sobol_2d_star_discrepancy() {
     let n = 64_usize;
@@ -360,7 +340,6 @@ fn sobol_2d_star_discrepancy() {
     assert_eq!(tree.n_stages(), 1);
     assert_eq!(tree.n_openings(0), n);
 
-    // Map N(0,1) values back to uniform [0,1) via the normal CDF.
     let points: Vec<(f64, f64)> = (0..n)
         .map(|k| {
             let s = tree.opening(0, k);
@@ -368,10 +347,8 @@ fn sobol_2d_star_discrepancy() {
         })
         .collect();
 
-    // Compute 2D star discrepancy via O(N^2) brute force.
-    // D* = max over all axis-aligned rectangles [0,u) x [0,v) of
-    //      |#{points in [0,u) x [0,v)} / N - u*v|
-    // We evaluate at each point (x_i, y_i) as the upper corner.
+    // D* = max over axis-aligned rectangles [0,u) x [0,v), evaluated at each point
+    //      as the upper corner, of |#{points in [0,u) x [0,v)} / N - u*v|.
     let n_f = n as f64;
     let mut d_star = 0.0_f64;
 
@@ -392,12 +369,6 @@ fn sobol_2d_star_discrepancy() {
     );
 }
 
-/// Verify that Sobol QMC produces standard-normal marginal statistics for N=256.
-///
-/// For N=256 openings and dim=1, the sample mean must be within 0.15 of 0.0
-/// and the sample standard deviation within 0.15 of 1.0. Scrambled Sobol
-/// improves on pure Monte Carlo by ensuring better coverage of the probability
-/// space, typically tightening convergence to the target distribution.
 #[test]
 fn sobol_normal_statistics() {
     let n = 256_usize;
@@ -441,12 +412,6 @@ fn sobol_normal_statistics() {
     );
 }
 
-/// Verify that spatial correlation is correctly applied to Sobol QMC noise.
-///
-/// With a 2×2 correlation matrix with off-diagonal rho=0.8 and N=256 openings,
-/// the sample Pearson correlation between the two dimensions must be within 0.15
-/// of the target 0.8. This exercises the spectral correlation transform applied
-/// after Sobol sampling inside `generate_opening_tree`.
 #[test]
 fn sobol_correlation_applied() {
     let n = 256_usize;
@@ -499,21 +464,13 @@ fn sobol_correlation_applied() {
     );
 }
 
-/// Verify declaration-order invariance: reversing the entity insertion order
-/// in the system produces a bitwise identical opening tree.
-///
-/// The pipeline (`build_stochastic_context`) sorts entities by `EntityId`
-/// internally, so the order in which hydros are supplied to `SystemBuilder`
-/// must not affect the generated opening tree. This guarantees that
-/// case results are reproducible regardless of the order entities appear in
-/// input files.
+/// `build_stochastic_context` sorts entities by `EntityId` internally, so the
+/// order hydros are supplied to `SystemBuilder` must not change the opening tree.
 #[test]
 fn sobol_declaration_order_invariant() {
     let n_openings = 30_usize;
 
-    // Forward order: EntityId(1) before EntityId(2).
     let hydros_fwd = vec![make_hydro(1), make_hydro(2)];
-    // Reversed order: EntityId(2) before EntityId(1).
     let hydros_rev = vec![make_hydro(2), make_hydro(1)];
 
     let ctx_fwd = build_sobol_context(hydros_fwd, n_openings, 42);
@@ -545,13 +502,6 @@ fn sobol_declaration_order_invariant() {
     }
 }
 
-/// Verify point-wise consistency of the Sobol forward-pass path.
-///
-/// For all scenarios 0..N, `scrambled_sobol_point` must produce finite N(0,1)
-/// values and different scenarios must produce different noise vectors. This
-/// confirms that the communication-free point-wise path (used during the
-/// forward pass) is self-consistent: each scenario generates a valid,
-/// distinct, and finite noise vector without any inter-worker coordination.
 #[test]
 fn sobol_point_wise_consistency() {
     let n = 64_usize;
@@ -571,7 +521,6 @@ fn sobol_point_wise_consistency() {
         let mut output = vec![0.0_f64; dim];
         scrambled_sobol_point(&spec, &mut output);
 
-        // All values must be finite N(0,1).
         for (d, &v) in output.iter().enumerate() {
             assert!(
                 v.is_finite(),
@@ -582,9 +531,6 @@ fn sobol_point_wise_consistency() {
         outputs.push(output);
     }
 
-    // Different scenarios must produce different noise vectors.
-    // Check that no two scenarios share an identical output (highly improbable
-    // for any reasonable RNG, but required for correctness).
     for i in 0..n {
         for j in (i + 1)..n {
             assert_ne!(
