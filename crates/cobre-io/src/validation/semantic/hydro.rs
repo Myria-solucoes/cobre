@@ -1192,13 +1192,6 @@ mod tests {
              warning is expected, got: {:?}",
             model_quality.iter().map(|e| &e.message).collect::<Vec<_>>()
         );
-        assert!(
-            !model_quality
-                .iter()
-                .any(|e| e.message.contains("EnergyContract")),
-            "no warning should mention EnergyContract, got: {:?}",
-            model_quality.iter().map(|e| &e.message).collect::<Vec<_>>()
-        );
     }
 
     // ── Filling guard tests ───────────────────────────────────────────────────

@@ -5446,9 +5446,12 @@ mod tests {
 
     /// `contract_cost` for an active import contract equals `price * power * hours`.
     /// The scaled LP objective coeff is `price * hours / COST_SCALE_FACTOR`; the
-    /// extractor recovers the original-unit cost.
+    /// extractor recovers the original-unit cost. Exercises the geometry-range
+    /// cost path in `compute_cost_result` (`contract_ids: vec![]`), NOT the
+    /// `extract_contracts` primal read — `d41_energy_contracts_simulation` covers
+    /// that end to end.
     #[test]
-    fn contract_cost_active_import_equals_price_power_hours() {
+    fn contract_cost_active_import_equals_price_power_hours_via_cost_result() {
         let indexer = make_indexer_2h_1fpha_1blk();
         let study_dims = crate::indexer::test_fixtures::study_dims_for(&counts_2h_1fpha_1blk());
         let state = crate::indexer::test_fixtures::state_layout(2, 0);
@@ -5538,8 +5541,11 @@ mod tests {
     /// Σ(macro categories) == `immediate_cost` when a contract is active — the
     /// load-bearing invariant. An export contract (negative price) nets negative
     /// `contract_cost` (revenue), so the sum still matches `immediate_cost`.
+    /// Exercises the geometry-range cost path in `compute_cost_result`
+    /// (`contract_ids: vec![]`), NOT the `extract_contracts` primal read —
+    /// `d41_energy_contracts_simulation` covers that end to end.
     #[test]
-    fn cost_breakdown_sums_to_immediate_with_active_export_contract() {
+    fn cost_breakdown_sums_to_immediate_with_active_export_contract_via_cost_result() {
         let indexer = make_indexer_2h_1fpha_1blk();
         let study_dims = crate::indexer::test_fixtures::study_dims_for(&counts_2h_1fpha_1blk());
         let state = crate::indexer::test_fixtures::state_layout(2, 0);
