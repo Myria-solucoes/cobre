@@ -11,57 +11,28 @@ use crate::{EntityId, Hydro};
 
 /// Resolved hydro cascade graph for water balance traversal.
 ///
-/// The cascade is a directed forest (collection of trees) where each hydro has
-/// at most one downstream plant. Terminal nodes have no downstream plant.
-/// The topology is built from hydro `downstream_id` fields during System
-/// construction and is immutable thereafter.
-///
-/// The topological order enables single-pass water balance computation:
-/// processing hydros in topological order guarantees that upstream inflows
-/// are computed before the downstream plant that receives them.
-///
-/// # Examples
-///
-/// ```no_run
-/// use cobre_core::{CascadeTopology, EntityId};
-///
-/// // Assume `hydros` is a slice of Hydro entities in canonical ID order.
-/// // Build a simple linear cascade: A(0) -> B(1) -> C(2, terminal).
-/// // let topo = CascadeTopology::build(&hydros);
-/// // assert_eq!(topo.downstream(EntityId::from(0)), Some(EntityId::from(1)));
-/// // assert_eq!(topo.topological_order().last(), Some(&EntityId::from(2)));
-/// ```
+/// A directed forest where each hydro has at most one downstream plant; built
+/// from hydro `downstream_id` fields during System construction and immutable
+/// thereafter. Traversing in topological order guarantees every upstream
+/// inflow is computed before the downstream plant that receives it.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CascadeTopology {
-    /// Downstream adjacency: `hydro_id` -> downstream `hydro_id`.
-    /// Terminal nodes are not present in the map.
+    /// Terminal nodes (no downstream) are absent from the map.
     downstream: HashMap<EntityId, EntityId>,
 
-    /// Upstream adjacency: `hydro_id` -> list of upstream `hydro_ids`.
-    /// Hydros with no upstream plants are not present in the map.
+    /// Headwaters (no upstream) are absent from the map.
     upstream: HashMap<EntityId, Vec<EntityId>>,
 
-    /// Topological ordering of all hydro IDs.
-    /// Every upstream plant appears before its downstream plant.
-    /// Within the same topological level, order is by `EntityId`'s inner i32
-    /// to ensure determinism.
+    /// Upstream before downstream; ties broken by `EntityId`'s inner i32 for determinism.
     topological_order: Vec<EntityId>,
 }
 
 impl CascadeTopology {
-    /// Build cascade topology from hydro entities.
+    /// Build cascade topology from hydro entities, assumed to be in canonical ID order.
     ///
-    /// Constructs the downstream adjacency map, derives upstream adjacency,
-    /// and computes topological order using Kahn's algorithm. Does not validate
-    /// (no cycle detection) -- validation is separate.
-    ///
-    /// If a `downstream_id` references a non-existent hydro, the downstream
-    /// entry is stored as-is; the validation layer catches dangling references.
-    ///
-    /// # Arguments
-    ///
-    /// * `hydros` - Slice of hydro entities, assumed to be in canonical ID order.
+    /// Does not validate: cycles and `downstream_id`s referencing a non-existent
+    /// hydro are stored as-is for the separate validation layer to catch.
     #[must_use]
     pub fn build(hydros: &[Hydro]) -> Self {
         let mut downstream: HashMap<EntityId, EntityId> = HashMap::new();
@@ -118,26 +89,19 @@ impl CascadeTopology {
         }
     }
 
-    /// Returns the downstream hydro for the given hydro, if any.
-    ///
-    /// Returns `None` if the hydro is a terminal node (no downstream plant).
+    /// Returns the downstream hydro, or `None` for a terminal node.
     #[must_use]
     pub fn downstream(&self, hydro_id: EntityId) -> Option<EntityId> {
         self.downstream.get(&hydro_id).copied()
     }
 
-    /// Returns the upstream hydros for the given hydro.
-    ///
-    /// Returns an empty slice if the hydro has no upstream plants (is a headwater).
+    /// Returns the upstream hydros, or an empty slice for a headwater.
     #[must_use]
     pub fn upstream(&self, hydro_id: EntityId) -> &[EntityId] {
         self.upstream.get(&hydro_id).map_or(&[], Vec::as_slice)
     }
 
-    /// Returns the topological ordering of all hydro IDs.
-    ///
-    /// Every upstream plant appears before its downstream plant. Within the same
-    /// topological level, hydros are ordered by their inner `i32` value for determinism.
+    /// Returns the topological ordering of all hydro IDs (upstream before downstream).
     #[must_use]
     pub fn topological_order(&self) -> &[EntityId] {
         &self.topological_order
@@ -255,17 +219,14 @@ mod tests {
         let topo = CascadeTopology::build(&hydros);
         assert_eq!(topo.len(), 3);
 
-        // Downstream
         assert_eq!(topo.downstream(EntityId(0)), Some(EntityId(1)));
         assert_eq!(topo.downstream(EntityId(1)), Some(EntityId(2)));
         assert_eq!(topo.downstream(EntityId(2)), None);
 
-        // Upstream
         assert_eq!(topo.upstream(EntityId(0)), &[]);
         assert_eq!(topo.upstream(EntityId(1)), &[EntityId(0)]);
         assert_eq!(topo.upstream(EntityId(2)), &[EntityId(1)]);
 
-        // Topological order: A before B before C
         let order = topo.topological_order();
         let pos_a = order.iter().position(|&id| id == EntityId(0)).unwrap();
         let pos_b = order.iter().position(|&id| id == EntityId(1)).unwrap();
@@ -285,12 +246,10 @@ mod tests {
         let topo = CascadeTopology::build(&hydros);
         assert_eq!(topo.len(), 3);
 
-        // Downstream
         assert_eq!(topo.downstream(EntityId(0)), Some(EntityId(2)));
         assert_eq!(topo.downstream(EntityId(1)), Some(EntityId(2)));
         assert_eq!(topo.downstream(EntityId(2)), None);
 
-        // Upstream of C contains both A and B
         let upstream_c = topo.upstream(EntityId(2));
         assert_eq!(upstream_c.len(), 2);
         assert!(upstream_c.contains(&EntityId(0)));
