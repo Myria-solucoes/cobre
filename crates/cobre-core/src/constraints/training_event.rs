@@ -37,120 +37,73 @@
 use std::borrow::Cow;
 
 /// Phase discriminant for [`TrainingEvent::WorkerTiming`].
-///
-/// Distinguishes whether timing was captured during forward or backward pass.
 #[derive(Clone, Debug)]
 pub enum WorkerTimingPhase {
-    /// Timing captured from the forward-pass parallel region.
+    /// Forward-pass parallel region.
     Forward,
-    /// Timing captured from the backward-pass parallel region.
+    /// Backward-pass parallel region.
     Backward,
 }
 
-/// Number of timing slots in the 16-wide `[u64; 16]` writer record
-/// (`cobre_io::WorkerTimingRecord`).
+/// Slot count of the `cobre_io::WorkerTimingRecord` `[u64; 16]` writer record.
 ///
-/// The `WORKER_TIMING_SLOT_*` constants below are the canonical bridge between
-/// the named [`WorkerPhaseTimings`] fields and the writer-record slot positions.
+/// The `WORKER_TIMING_SLOT_*` constants are the canonical bridge between the
+/// named [`WorkerPhaseTimings`] fields and the writer-record slot positions.
 pub const WORKER_TIMING_SLOT_COUNT: usize = 16;
 
 /// Writer-record slot index for `forward_wall_ms`.
-///
-/// Used in `training_output.rs` to map [`WorkerPhaseTimings::forward_wall_ms`]
-/// into slot 0 of `cobre_io::WorkerTimingRecord`.
 pub const WORKER_TIMING_SLOT_FWD_WALL: usize = 0;
 
 /// Writer-record slot index for `backward_wall_ms`.
-///
-/// Used in `training_output.rs` to map [`WorkerPhaseTimings::backward_wall_ms`]
-/// into slot 1 of `cobre_io::WorkerTimingRecord`.
 pub const WORKER_TIMING_SLOT_BWD_WALL: usize = 1;
 
 /// Writer-record slot index for `bwd_setup_ms`.
-///
-/// Used in `training_output.rs` to map [`WorkerPhaseTimings::bwd_setup_ms`]
-/// into slot 8 of `cobre_io::WorkerTimingRecord`.
 pub const WORKER_TIMING_SLOT_BWD_SETUP: usize = 8;
 
 /// Writer-record slot index for `fwd_setup_ms`.
-///
-/// Used in `training_output.rs` to map [`WorkerPhaseTimings::fwd_setup_ms`]
-/// into slot 11 of `cobre_io::WorkerTimingRecord`.
 pub const WORKER_TIMING_SLOT_FWD_SETUP: usize = 11;
 
 /// Writer-record slot index for `scoring_ms`.
-///
-/// Used in `training_output.rs` to map [`WorkerPhaseTimings::scoring_ms`]
-/// into slot 15 of `cobre_io::WorkerTimingRecord`.
 pub const WORKER_TIMING_SLOT_SCORING: usize = 15;
 
 /// Per-worker timing payload for [`TrainingEvent::WorkerTiming`].
 ///
-/// Names the populated values explicitly.
-///
-/// On `Forward`-phase events, `forward_wall_ms` and `fwd_setup_ms` are
-/// populated; the backward fields are 0. On `Backward`-phase events,
-/// `backward_wall_ms` and `bwd_setup_ms` are populated; the forward fields
-/// are 0. `scoring_ms` is populated on whichever phase performed lazy
-/// candidate scoring (the forward emission carries the forward-region delta,
-/// the backward emission the backward-region delta); it is 0 on phases and
-/// runs that did no lazy scoring.
-///
-/// The writer adapter in `training_output.rs` maps these fields into the
-/// 16-wide `cobre_io::WorkerTimingRecord` via the `WORKER_TIMING_SLOT_*`
-/// constants. The record stays `[u64; 16]`; `scoring_ms` occupies slot 15.
+/// Each field is populated only on the phase it belongs to and is 0 on the
+/// other; `scoring_ms` is populated on whichever phase performed lazy candidate
+/// scoring and 0 when no scoring ran.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WorkerPhaseTimings {
-    /// Forward-pass wall time in ms (populated on Forward; 0 on Backward).
+    /// Forward-pass wall time, ms.
     pub forward_wall_ms: f64,
-    /// Backward-pass wall time in ms (populated on Backward; 0 on Forward).
+    /// Backward-pass wall time, ms.
     pub backward_wall_ms: f64,
-    /// Forward setup time in ms (populated on Forward; 0 on Backward).
+    /// Forward setup time, ms.
     pub fwd_setup_ms: f64,
-    /// Backward setup time in ms (populated on Backward; 0 on Forward).
+    /// Backward setup time, ms.
     pub bwd_setup_ms: f64,
-    /// Lazy candidate-scoring time in ms for this worker and phase.
-    ///
-    /// Populated on whichever phase performed lazy scoring (forward emission
-    /// carries the forward-region delta; backward emission the backward-region
-    /// delta); 0 when no lazy scoring ran. Pure measurement.
+    /// Lazy candidate-scoring time, ms.
     pub scoring_ms: f64,
 }
 
 /// Result of evaluating a single stopping rule at a given iteration.
 ///
-/// The [`TrainingEvent::ConvergenceUpdate`] variant carries a [`Vec`] of these,
-/// one per configured stopping rule. Each element reports the rule's identifier,
-/// whether its condition is satisfied, and a human-readable description of the
-/// current state (e.g., `"gap 0.42% <= 1.00%"`).
+/// [`TrainingEvent::ConvergenceUpdate`] carries one per configured rule.
 #[derive(Clone, Debug)]
 pub struct StoppingRuleResult {
     /// Rule identifier matching the variant name in the stopping rules config
-    /// (e.g., `"gap_tolerance"`, `"bound_stalling"`, `"iteration_limit"`,
-    /// `"time_limit"`, `"simulation"`).
-    ///
-    /// Always a compile-time `&'static str` constant. No heap allocation
-    /// occurs on the hot path.
+    /// (e.g. `"gap_tolerance"`, `"iteration_limit"`). `&'static` to avoid a
+    /// hot-path allocation.
     pub rule_name: &'static str,
     /// Whether this rule's condition is satisfied at the current iteration.
     pub triggered: bool,
     /// Human-readable description of the rule's current state
-    /// (e.g., `"gap 0.42% <= 1.00%"`, `"LB stable for 12/10 iterations"`).
-    ///
-    /// Use [`Cow::Borrowed`] for compile-time string literals and
-    /// [`Cow::Owned`] for runtime `format!(...)` results.
+    /// (e.g. `"gap 0.42% <= 1.00%"`).
     pub detail: Cow<'static, str>,
 }
 
 /// Per-stage row-selection statistics for one iteration.
 ///
-/// Each instance describes the row-selection lifecycle at a single stage after a
-/// selection step: how many rows existed, how many were active before
-/// selection, how many were deactivated, and how many remain active.
-///
-/// The two optional fields capture the budget-enforcement pipeline state:
-/// `budget_evicted` and `active_after_budget` are set after Step 4b (budget
-/// enforcement). Both are `None` when budget enforcement is disabled.
+/// The two `Option` fields are `None` when budget enforcement is disabled.
 #[derive(Debug, Clone)]
 pub struct StageRowSelectionRecord {
     /// 0-based stage index.
@@ -167,13 +120,9 @@ pub struct StageRowSelectionRecord {
     pub rows_active_after: u32,
     /// Wall-clock time for selection at this stage, in milliseconds.
     pub selection_time_ms: f64,
-    /// Rows evicted by budget enforcement (Step 4b) at this stage.
-    ///
-    /// `None` when budget enforcement is disabled.
+    /// Rows evicted by budget enforcement at this stage.
     pub budget_evicted: Option<u32>,
-    /// Active cuts after budget enforcement (Step 4b).
-    ///
-    /// `None` when budget enforcement is disabled.
+    /// Active cuts after budget enforcement.
     pub active_after_budget: Option<u32>,
     /// Total rows in the LP at this stage at the end of the iteration.
     pub rows_in_lp: u32,
@@ -213,7 +162,7 @@ pub struct StageRowSelectionRecord {
 #[derive(Clone, Debug)]
 pub enum TrainingEvent {
     // ── Per-iteration events ─────────────────────────────────────────────────
-    /// Step 1: Forward pass completed for this iteration on the local rank.
+    /// Forward pass completed for this iteration on the local rank.
     ForwardPassComplete {
         /// Iteration number (1-based).
         iteration: u64,
@@ -227,10 +176,8 @@ pub enum TrainingEvent {
         elapsed_ms: u64,
     },
 
-    /// Step 2: Forward synchronization (allreduce) completed.
-    ///
-    /// Emitted after the global reduction of local bound estimates across all
-    /// participating ranks.
+    /// Forward synchronization (allreduce) completed: the global reduction of
+    /// local bound estimates across all participating ranks.
     ForwardSyncComplete {
         /// Iteration number (1-based).
         iteration: u64,
@@ -242,10 +189,8 @@ pub enum TrainingEvent {
         sync_time_ms: u64,
     },
 
-    /// Step 3: Backward pass completed for this iteration.
-    ///
-    /// Emitted after the full backward sweep that generates new rows for each
-    /// stage.
+    /// Backward pass completed: the full backward sweep that generates new rows
+    /// for each stage.
     BackwardPassComplete {
         /// Iteration number (1-based).
         iteration: u64,
@@ -261,14 +206,9 @@ pub enum TrainingEvent {
         /// Wall-clock time for row-batch assembly (`build_row_batch_into`)
         /// across all stages, in milliseconds.
         row_batch_build_time_ms: u64,
-        /// Aggregate non-solve work inside the parallel region accumulated across
-        /// all stages and all workers, in milliseconds.
-        ///
-        /// Computed per stage as the sum over all workers of
-        /// `load_model + add_rows + set_bounds + basis_set` times. Because it
-        /// sums across workers, this value can exceed `parallel_wall_ms` when
-        /// there are multiple workers. It is an aggregate cost metric, not a
-        /// wall-time slice.
+        /// Aggregate non-solve work inside the parallel region, summed across all
+        /// stages and workers, in milliseconds. Summing across workers means it
+        /// can exceed wall time — an aggregate cost metric, not a wall-time slice.
         setup_time_ms: u64,
         /// Estimated load imbalance across worker threads (wall minus ideal
         /// parallel work), in milliseconds.
@@ -278,10 +218,8 @@ pub enum TrainingEvent {
         scheduling_overhead_ms: u64,
     },
 
-    /// Step 4: Policy row synchronization (allgatherv) completed.
-    ///
-    /// Emitted after new rows from all ranks have been gathered and distributed
-    /// to every rank via allgatherv.
+    /// Policy row synchronization (allgatherv) completed: new rows from all ranks
+    /// gathered and distributed to every rank.
     PolicySyncComplete {
         /// Iteration number (1-based).
         iteration: u64,
@@ -295,11 +233,10 @@ pub enum TrainingEvent {
         sync_time_ms: u64,
     },
 
-    /// Step 4a: Policy row selection completed.
+    /// Policy row selection completed.
     ///
-    /// Only emitted on iterations where row selection runs (i.e., when
-    /// `should_run(iteration)` returns `true`). On non-selection iterations
-    /// this variant is skipped entirely.
+    /// Only emitted when `should_run(iteration)` is `true`; skipped entirely on
+    /// non-selection iterations.
     PolicySelectionComplete {
         /// Iteration number (1-based).
         iteration: u64,
@@ -316,12 +253,11 @@ pub enum TrainingEvent {
         per_stage: Vec<StageRowSelectionRecord>,
     },
 
-    /// Step 4b: Active-row budget enforcement completed.
+    /// Active-row budget enforcement completed.
     ///
-    /// Emitted every iteration when `budget` is set in `TrainingConfig`.
-    /// When `budget` is `None`, this variant is never emitted. Unlike Step
-    /// 4a, budget enforcement is not gated by `check_frequency` because the
-    /// budget is a hard cap that must be maintained at all times.
+    /// Emitted every iteration when `budget` is set in `TrainingConfig`, never
+    /// when it is `None`. Not gated by `check_frequency` — the budget is a hard
+    /// cap maintained at all times.
     PolicyBudgetEnforcementComplete {
         /// Iteration number (1-based).
         iteration: u64,
@@ -333,29 +269,21 @@ pub enum TrainingEvent {
         enforcement_time_ms: u64,
     },
 
-    /// Step 4c: Template baking completed.
-    ///
-    /// Emitted every iteration after all per-stage baked templates have been
-    /// rebuilt from the current active row set (after Steps 4a and 4b). Baking
-    /// runs sequentially over stages and is outside the forward/backward hot
-    /// paths. The baked templates are consumed by the forward and backward
-    /// passes in the *next* iteration.
+    /// Template baking completed: per-stage baked templates rebuilt from the
+    /// current active row set, consumed by the *next* iteration's passes.
     PolicyTemplateBakeComplete {
         /// Iteration number (1-based).
         iteration: u64,
         /// Number of stages for which baked templates were rebuilt.
         stages_processed: u32,
-        /// Total number of rows baked across all stages
-        /// (sum of `active_count()` over all stage pools at the emit instant).
+        /// Total number of rows baked, summed across all stages.
         total_rows_baked: u64,
         /// Wall-clock time for the baking pass across all stages, in milliseconds.
         bake_time_ms: u64,
     },
 
-    /// Step 5: Convergence check completed.
-    ///
-    /// Emitted after all configured stopping rules have been evaluated for the
-    /// current iteration. Contains the current bounds, gap, and per-rule results.
+    /// Convergence check completed: all configured stopping rules evaluated for
+    /// the current iteration.
     ConvergenceUpdate {
         /// Iteration number (1-based).
         iteration: u64,
@@ -371,10 +299,9 @@ pub enum TrainingEvent {
         rules_evaluated: Vec<StoppingRuleResult>,
     },
 
-    /// Step 6: Checkpoint written.
+    /// Checkpoint written.
     ///
-    /// Only emitted when the checkpoint interval triggers (i.e., when
-    /// `iteration % checkpoint_interval == 0`). Not emitted on every iteration.
+    /// Only emitted when `iteration % checkpoint_interval == 0`.
     CheckpointComplete {
         /// Iteration number (1-based).
         iteration: u64,
@@ -384,10 +311,8 @@ pub enum TrainingEvent {
         elapsed_ms: u64,
     },
 
-    /// Step 7: Full iteration summary with aggregated timings.
-    ///
-    /// Emitted at the end of every iteration as the final per-iteration event.
-    /// Contains all timing breakdowns for the completed iteration.
+    /// Full iteration summary with aggregated timings, emitted as the final
+    /// per-iteration event.
     IterationSummary {
         /// Iteration number (1-based).
         iteration: u64,
@@ -411,14 +336,9 @@ pub enum TrainingEvent {
         solve_time_ms: f64,
         /// Wall-clock time for lower bound evaluation, in milliseconds.
         lower_bound_eval_ms: u64,
-        /// Aggregate non-solve work inside the forward pass parallel region
-        /// accumulated across all workers, in milliseconds.
-        ///
-        /// Computed as the sum over all workers of
-        /// `load_model + add_rows + set_bounds + basis_set` times. Because it
-        /// sums across workers, this value can exceed `forward_ms` when there
-        /// are multiple workers. It is an aggregate cost metric, not a
-        /// wall-time slice.
+        /// Aggregate non-solve work inside the forward-pass parallel region,
+        /// summed across all workers, in milliseconds. Summing across workers
+        /// means it can exceed `forward_ms` — a cost metric, not a wall-time slice.
         fwd_setup_time_ms: u64,
         /// Estimated load imbalance across worker threads in the forward pass,
         /// in milliseconds.
@@ -426,31 +346,22 @@ pub enum TrainingEvent {
         /// Scheduling and synchronisation overhead in the forward pass not
         /// attributable to solve work or load imbalance, in milliseconds.
         fwd_scheduling_overhead_ms: u64,
-        /// Sum, over every lazy-selection LP solve in this iteration (across all
-        /// ranks), of the resident row count loaded into that solve. Zero when
-        /// no lazy selection ran. With [`Self::IterationSummary::rows_in_lp_count`]
-        /// this gives the mean rows-in-LP per solve for the iteration.
+        /// Sum, over every lazy-selection LP solve this iteration (all ranks), of
+        /// the resident row count loaded into that solve. `sum / count` is the
+        /// per-iteration mean. Zero when no lazy selection ran.
         rows_in_lp_sum: u64,
-        /// Number of lazy-selection LP solves in this iteration (across all
-        /// ranks); the denominator for the per-iteration mean. Zero when no lazy
-        /// selection ran.
+        /// Number of lazy-selection LP solves this iteration (all ranks); the
+        /// mean denominator. Zero when no lazy selection ran.
         rows_in_lp_count: u64,
-        /// Largest resident row count loaded into any lazy-selection LP solve up
-        /// to and including this iteration (across all ranks). This is a
-        /// *running* peak (cumulative, not per-iteration), so a `max`-fold over
-        /// iterations recovers the run-level peak without a separate finalize
-        /// reduce. Zero when no lazy selection ran. Unlike
-        /// [`Self::IterationSummary::rows_in_lp_sum`]/`rows_in_lp_count`, this is
-        /// not written to the per-iteration convergence log — it feeds only the
-        /// run-level aggregate.
+        /// Largest resident row count over any lazy-selection LP solve up to and
+        /// including this iteration (all ranks). A *running* (cumulative) peak, so
+        /// a `max`-fold over iterations recovers the run-level peak with no
+        /// finalize reduce. Zero when no lazy selection ran.
         rows_in_lp_max: u64,
     },
 
     // ── Lifecycle events ─────────────────────────────────────────────────────
     /// Emitted once when the training loop begins.
-    ///
-    /// Carries run-level metadata describing the problem size and parallelism
-    /// configuration for this training run.
     TrainingStarted {
         /// Case study name from the input data directory.
         case_name: String,
@@ -487,9 +398,7 @@ pub enum TrainingEvent {
     },
 
     /// Emitted once per rank when the simulation loop begins, before any
-    /// scenario runs. Mirrors [`Self::TrainingStarted`] for the simulation
-    /// phase. Progress consumers use this to display a "starting..." banner
-    /// and capture run-level metadata (scenario count, parallelism layout).
+    /// scenario runs.
     SimulationStarted {
         /// Case study name from the input data directory.
         case_name: String,
@@ -506,22 +415,14 @@ pub enum TrainingEvent {
         timestamp: String,
     },
 
-    /// Emitted periodically during policy simulation (not during training).
-    ///
-    /// Consumers can use this to display a progress indicator during the
-    /// simulation phase. Each event carries the cost of the most recently
-    /// completed scenario; the progress thread accumulates statistics across
-    /// events.
+    /// Emitted periodically during policy simulation (not during training);
+    /// each event carries the most recently completed scenario's cost.
     SimulationProgress {
-        /// Number of simulation scenarios completed so far, as a global
-        /// estimate.
+        /// Scenarios completed so far, as a global estimate.
         ///
-        /// Only rank 0 emits displayable progress events (non-root ranks are
-        /// `--quiet`). Rank 0 knows only its own local completion count, so
-        /// the global estimate is computed as `local_completed × ranks`,
-        /// clamped to `scenarios_total`. The estimate is exact when work is
-        /// evenly distributed and ranks finish at similar rates; it assumes
-        /// the balanced-workload invariant of the simulation scheduler.
+        /// Only rank 0 emits; it knows only its local count, so this is
+        /// `local_completed × ranks` clamped to `scenarios_total` — exact only
+        /// under the scheduler's balanced-workload invariant, an estimate otherwise.
         scenarios_complete: u32,
         /// Total number of simulation scenarios to run across all ranks.
         scenarios_total: u32,
@@ -548,36 +449,15 @@ pub enum TrainingEvent {
 
     /// Per-worker timing for one phase of one iteration.
     ///
-    /// Emitted `n_workers_local` times per `(iteration, phase)` pair — once
-    /// for every rayon worker in the local pool — after the parallel region
-    /// completes. For a 10-worker / 50-iteration run this produces
-    /// `2 × 10 × 50 = 1 000` extra events; the [`WorkerPhaseTimings`]
-    /// payload is moved by value so no heap allocation occurs per event.
-    ///
-    /// ## Payload fields
-    ///
-    /// | Field              | Phase     | Per-worker?                              |
-    /// |--------------------|-----------|------------------------------------------|
-    /// | `forward_wall_ms`  | Forward   | yes — populated on Forward; 0 on Backward |
-    /// | `backward_wall_ms` | Backward  | yes — populated on Backward; 0 on Forward |
-    /// | `fwd_setup_ms`     | Forward   | yes — populated on Forward; 0 on Backward |
-    /// | `bwd_setup_ms`     | Backward  | yes — populated on Backward; 0 on Forward |
-    /// | `scoring_ms`       | either    | yes — populated on whichever phase scored |
-    ///
-    /// The writer adapter (`training_output.rs`) maps these fields into
-    /// the 16-wide `cobre_io::WorkerTimingRecord` via [`WORKER_TIMING_SLOT_FWD_WALL`],
-    /// [`WORKER_TIMING_SLOT_BWD_WALL`], [`WORKER_TIMING_SLOT_BWD_SETUP`],
-    /// [`WORKER_TIMING_SLOT_FWD_SETUP`], and [`WORKER_TIMING_SLOT_SCORING`]
-    /// (slot 15). The remaining rank-only slots
-    /// (2–7, 9–10, 12–14) are populated by the rank-aggregated
-    /// `IterationSummary` rows rather than per-worker events.
+    /// Emitted `n_workers_local` times per `(iteration, phase)` pair after the
+    /// parallel region completes; the [`WorkerPhaseTimings`] payload is moved by
+    /// value, so no heap allocation occurs per event.
     ///
     /// ## Recovery invariant
     ///
     /// `SUM(field) GROUP BY (iteration)` over the per-worker `WorkerTiming`
     /// events equals the corresponding field on the rank-level
-    /// `BackwardPassComplete` / `IterationSummary` event for the same
-    /// iteration.
+    /// `BackwardPassComplete` / `IterationSummary` event for the same iteration.
     WorkerTiming {
         /// MPI rank that owns this worker.
         rank: i32,
@@ -585,9 +465,9 @@ pub enum TrainingEvent {
         worker_id: i32,
         /// Training iteration (1-based), matching the rank-level events.
         iteration: u64,
-        /// Forward or Backward, distinguishing the two per-iteration emissions.
+        /// Which of the two per-iteration emissions this is.
         phase: WorkerTimingPhase,
-        /// Per-worker timing payload. See [`WorkerPhaseTimings`].
+        /// Per-worker timing payload.
         timings: WorkerPhaseTimings,
     },
 }
@@ -601,7 +481,6 @@ mod tests {
         WorkerTimingPhase,
     };
 
-    // Helper: build one of each variant with representative values.
     fn make_all_variants() -> Vec<TrainingEvent> {
         vec![
             TrainingEvent::ForwardPassComplete {
@@ -753,7 +632,6 @@ mod tests {
     fn all_variants_clone() {
         for variant in make_all_variants() {
             let cloned = variant.clone();
-            // Verify the clone produces a non-empty debug string (proxy for equality).
             assert!(!format!("{cloned:?}").is_empty());
         }
     }
@@ -926,7 +804,6 @@ mod tests {
 
     #[test]
     fn simulation_progress_first_scenario_cost_carried() {
-        // The first scenario's cost is emitted directly — no aggregation needed.
         let event = TrainingEvent::SimulationProgress {
             scenarios_complete: 1,
             scenarios_total: 200,
@@ -1002,7 +879,6 @@ mod tests {
         assert!((t.scoring_ms - 1.25).abs() < f64::EPSILON);
         assert_eq!(t.backward_wall_ms, 0.0);
         assert_eq!(t.bwd_setup_ms, 0.0);
-        // Verify Backward variant debug is also non-empty.
         let bwd = WorkerTimingPhase::Backward;
         assert!(
             !format!("{bwd:?}").is_empty(),

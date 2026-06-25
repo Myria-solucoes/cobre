@@ -10,16 +10,13 @@
 //!
 //! # Variable Reference Catalog
 //!
-//! [`VariableRef`] covers all 22 LP variable types defined in the spec (SS15).
+//! [`VariableRef`] covers all 22 LP variable types defined in the spec (§15).
 //! Each variant carries the entity ID and, for block-capable variables, an
-//! optional block ID. `Some(i)` references block `i`. `None` leaves block
-//! selection to the constraint's row materialization, and its meaning is **not**
-//! uniform across variants: for a block-independent expression (every term is
-//! stage-level) the LP builder collapses the bound to a single stage-level row
-//! priced by the stage's total hours; for a block-dependent expression (any
-//! block-level term, e.g. [`VariableRef::HydroInflow`]) the builder emits one row
-//! per block. `None` therefore never means "sum over blocks" — it selects between
-//! a single collapsed row and per-block replication.
+//! optional block ID. `Some(i)` references block `i`. `None` selects between a
+//! single collapsed stage-level row (block-independent expression: every term is
+//! stage-level) and one row per block (block-dependent expression: any
+//! block-level term, e.g. [`VariableRef::HydroInflow`]) — it **never** means
+//! "sum over blocks".
 //!
 //! # Examples
 //!
@@ -62,17 +59,9 @@ use crate::EntityId;
 
 /// Reference to a single LP variable in a generic constraint expression.
 ///
-/// Each variant names the variable type and carries the entity ID. For
-/// block-capable variables, `block_id = Some(i)` references block `i`
-/// specifically. `block_id = None` defers block selection to row
-/// materialization rather than summing: a constraint whose every term is
-/// block-independent collapses to one stage-level row, while a constraint with
-/// any block-dependent term (e.g. [`VariableRef::HydroInflow`]) expands to one
-/// row per block. See the per-variant docs and the module header for the
-/// block-independent vs block-dependent distinction.
-///
 /// The 22 variants cover the full variable catalog defined in
-/// `internal-structures.md §15` (table in the "Variable References" section).
+/// `internal-structures.md §15`. See the module header for the `block_id = None`
+/// block-independent vs block-dependent row-materialization contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum VariableRef {
@@ -85,38 +74,36 @@ pub enum VariableRef {
     HydroTurbined {
         /// Hydro plant identifier.
         hydro_id: EntityId,
-        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
+        /// Block selector; see the module header for `None` semantics.
         block_id: Option<usize>,
     },
     /// Spillage flow for a hydro plant (m³/s).
     HydroSpillage {
         /// Hydro plant identifier.
         hydro_id: EntityId,
-        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
+        /// Block selector; see the module header for `None` semantics.
         block_id: Option<usize>,
     },
     /// Diversion flow for a hydro plant (m³/s). Only valid for hydros with diversion.
     HydroDiversion {
         /// Hydro plant identifier.
         hydro_id: EntityId,
-        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
+        /// Block selector; see the module header for `None` semantics.
         block_id: Option<usize>,
     },
-    /// Total outflow (turbined + spillage) for a hydro plant (m³/s).
-    ///
-    /// Currently an alias for turbined + spillage. A future formulation
-    /// may turn this into an independent variable.
+    /// Total outflow for a hydro plant (m³/s): a derived alias for
+    /// turbined + spillage, not an independent LP column.
     HydroOutflow {
         /// Hydro plant identifier.
         hydro_id: EntityId,
-        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
+        /// Block selector; see the module header for `None` semantics.
         block_id: Option<usize>,
     },
     /// Electrical generation from a hydro plant (MW).
     HydroGeneration {
         /// Hydro plant identifier.
         hydro_id: EntityId,
-        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
+        /// Block selector; see the module header for `None` semantics.
         block_id: Option<usize>,
     },
     /// Signed evaporation flow from a hydro reservoir (m³/s). Stage-level, not
@@ -135,165 +122,143 @@ pub enum VariableRef {
     ThermalGeneration {
         /// Thermal unit identifier.
         thermal_id: EntityId,
-        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
+        /// Block selector; see the module header for `None` semantics.
         block_id: Option<usize>,
     },
     /// Direct (forward) power flow on a transmission line (MW).
     LineDirect {
         /// Transmission line identifier.
         line_id: EntityId,
-        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
+        /// Block selector; see the module header for `None` semantics.
         block_id: Option<usize>,
     },
     /// Reverse power flow on a transmission line (MW).
     LineReverse {
         /// Transmission line identifier.
         line_id: EntityId,
-        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
+        /// Block selector; see the module header for `None` semantics.
         block_id: Option<usize>,
     },
     /// Net exchange flow on a transmission line (direct - reverse) (MW).
     ///
-    /// This is a derived variable: the resolver maps it to two LP columns
-    /// (forward flow with +1.0 and reverse flow with -1.0), representing
-    /// net flow in the source-to-target direction.
+    /// Derived: maps to two LP columns (forward `+1.0`, reverse `-1.0`),
+    /// net flow source-to-target.
     LineExchange {
         /// Transmission line identifier.
         line_id: EntityId,
-        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
+        /// Block selector; see the module header for `None` semantics.
         block_id: Option<usize>,
     },
     /// Load deficit (unserved energy) at a bus (MW).
     BusDeficit {
         /// Bus identifier.
         bus_id: EntityId,
-        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
+        /// Block selector; see the module header for `None` semantics.
         block_id: Option<usize>,
     },
     /// Load excess (over-generation) at a bus (MW).
     BusExcess {
         /// Bus identifier.
         bus_id: EntityId,
-        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
+        /// Block selector; see the module header for `None` semantics.
         block_id: Option<usize>,
     },
     /// Pumped water flow at a pumping station (m³/s).
     PumpingFlow {
         /// Pumping station identifier.
         station_id: EntityId,
-        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
+        /// Block selector; see the module header for `None` semantics.
         block_id: Option<usize>,
     },
     /// Electrical power consumed by a pumping station (MW).
     PumpingPower {
         /// Pumping station identifier.
         station_id: EntityId,
-        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
+        /// Block selector; see the module header for `None` semantics.
         block_id: Option<usize>,
     },
     /// Energy imported via a contract (MW).
     ContractImport {
         /// Energy contract identifier.
         contract_id: EntityId,
-        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
+        /// Block selector; see the module header for `None` semantics.
         block_id: Option<usize>,
     },
     /// Energy exported via a contract (MW).
     ContractExport {
         /// Energy contract identifier.
         contract_id: EntityId,
-        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
+        /// Block selector; see the module header for `None` semantics.
         block_id: Option<usize>,
     },
     /// Generation from a non-controllable source (wind, solar, etc.) (MW).
     NonControllableGeneration {
         /// Non-controllable source identifier.
         source_id: EntityId,
-        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
+        /// Block selector; see the module header for `None` semantics.
         block_id: Option<usize>,
     },
     /// Curtailment of a non-controllable source (MW).
     NonControllableCurtailment {
         /// Non-controllable source identifier.
         source_id: EntityId,
-        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
+        /// Block selector; see the module header for `None` semantics.
         block_id: Option<usize>,
     },
-    /// Forward-commitment decision MW for an anticipated thermal unit (MW).
+    /// Forward-commitment decision for an anticipated thermal unit (MW).
     ///
-    /// References the commitment placed at the current stage `t` for delivery
-    /// at stage `t + lead_stages`. This is a per-plant per-stage scalar — it has
-    /// **no `block_id`** because the commitment is uniform across blocks.
+    /// The commitment placed at stage `t` for delivery at `t + lead_stages`. A
+    /// per-plant per-stage scalar — **no `block_id`**, the commitment is uniform
+    /// across blocks. The column exists only for plants with
+    /// `anticipated_config: Some(_)`; referencing a non-anticipated thermal is a
+    /// referential-validation error. At boundary stages (`t + K_i >= n_stages`)
+    /// the column has `[0.0, 0.0]` bounds, so a constraint there is a no-op.
     ///
-    /// The column exists in the LP only for plants whose `anticipated_config`
-    /// is `Some(_)`. Referencing this variant for a non-anticipated thermal is
-    /// a referential-validation error (see
-    /// `cobre-io::validation::referential::validate_variable_ref_entity`).
-    ///
-    /// The column also has `[0.0, 0.0]` bounds at boundary stages where
-    /// `t + K_i >= n_stages` (the strict predicate); a constraint
-    /// referencing the column at the boundary is structurally a no-op.
-    ///
-    /// **Postcard wire-format note**: this variant is appended at the END of
-    /// the enum to preserve the discriminant indices of all existing variants.
-    /// Postcard encodes enum variants by declaration order; inserting in the
-    /// middle would break existing serialized policies.
+    /// Appended at the END of the enum to preserve every existing variant's
+    /// postcard discriminant (postcard encodes variants by declaration order; a
+    /// mid-enum insertion breaks serialized policies — pinned by
+    /// `test_variable_ref_postcard_discriminant_pin`).
     AnticipatedDecision {
         /// Thermal unit identifier. Must satisfy `anticipated_config: Some(_)`.
         thermal_id: EntityId,
     },
     /// Total realized inflow into a hydro reservoir (m³/s). Block-capable.
     ///
-    /// The value is the incremental (local) natural inflow `z_h = base + AR-lag
-    /// ψ + σ·η noise` PLUS the immediately-upstream cascade releases (turbined +
-    /// spilled + diverted) routed down to this reservoir — the inflow side of
-    /// the water balance, not the `z_inflow` column alone. Coefficients are unit
-    /// `+1.0` on every rate column (rate identity in m³/s, NOT the `−τ` volume
-    /// weighting of the storage-balance row).
+    /// Local natural inflow PLUS the immediately-upstream cascade releases
+    /// (turbined + spilled + diverted) routed down — the inflow side of the water
+    /// balance, not the `z_inflow` column alone. Coefficients are unit `+1.0` on
+    /// every rate column (rate identity in m³/s, NOT the `−τ` volume weighting of
+    /// the storage-balance row). Block-dependent (upstream releases are per-block
+    /// LP columns), so `None` always expands to one row per block, never a
+    /// collapsed stage-level row.
     ///
-    /// `block_id`: `None` = the LP builder expands one row per block; `Some(k)`
-    /// = block `k`. Block-dependent because the upstream releases are per-block
-    /// LP columns — a single block-dependent term makes the whole expression
-    /// block-dependent.
-    ///
-    /// **Postcard wire-format note**: appended at the END of the enum to
-    /// preserve the discriminant indices of all existing variants.
+    /// Appended at the END of the enum to preserve every existing variant's
+    /// postcard discriminant.
     HydroInflow {
         /// Hydro plant identifier.
         hydro_id: EntityId,
-        /// Block index. `Some(i)` = block `i`. `None` = one row per block, because
-        /// `HydroInflow` is block-dependent (its upstream-release columns are
-        /// per-block); it is never collapsed to a single stage-level row.
+        /// Block selector; `None` expands to one row per block.
         block_id: Option<usize>,
     },
 }
 
 /// One term in a linear constraint expression: `coefficient * scale * variable`.
 ///
-/// The LP coefficient is `resolve(coefficient, stage) * scale`, where `resolve`
-/// returns the parameter's stage-resolved scalar for
-/// `CoefficientRef::Parameter(id)` or the literal value for
-/// `CoefficientRef::Literal(v)`. Resolution for `Parameter` variants is
-/// implemented by the resolver layer; until then only `Literal` is produced by
-/// the parser.
+/// The LP coefficient is `resolve(coefficient, stage) * scale`, the
+/// stage-resolved scalar for a `Parameter` or the literal value for a `Literal`.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LinearTerm {
-    /// Coefficient reference. `Literal(f64)` carries an inline constant;
-    /// `Parameter(EntityId)` references a `ScalarParameter` resolved per
-    /// stage at LP build time.
+    /// Coefficient reference, resolved to a scalar per stage at LP build time.
     pub coefficient: CoefficientRef,
     /// Multiplicative scale applied after the coefficient is resolved.
-    /// Defaults to `1.0` via `LinearTerm::literal(_, _)` and is set
-    /// explicitly when constructing `LinearTerm` literals directly.
     pub scale: f64,
     /// The LP variable being referenced.
     pub variable: VariableRef,
 }
 
 impl LinearTerm {
-    /// Construct a `LinearTerm` whose coefficient is the literal `coef`,
-    /// with `scale = 1.0`. The common case during expression parsing.
+    /// Construct a literal-coefficient `LinearTerm` with `scale = 1.0`.
     #[must_use]
     pub fn literal(coef: f64, variable: VariableRef) -> Self {
         Self {
@@ -303,12 +268,10 @@ impl LinearTerm {
         }
     }
 
-    /// Construct a `LinearTerm` whose coefficient is a named parameter reference.
+    /// Construct a named-parameter-coefficient `LinearTerm`.
     ///
-    /// The `scale` argument carries the literal multiplier from the expression
-    /// (e.g. `2.5` for `"2.5 * @rho_eq * x"`, or `sign` for `"@rho_eq * x"`).
-    /// Resolution of the parameter to a concrete `f64` per stage happens at
-    /// LP-build time.
+    /// `scale` carries the literal multiplier from the expression (e.g. `2.5`
+    /// for `"2.5 * @rho_eq * x"`, or `sign` for `"@rho_eq * x"`).
     #[must_use]
     pub fn parameter(id: crate::EntityId, scale: f64, variable: VariableRef) -> Self {
         Self {
@@ -319,13 +282,9 @@ impl LinearTerm {
     }
 }
 
-/// Parsed linear constraint expression.
-///
-/// Represents the left-hand side of a generic constraint as a list of weighted
-/// variable references. An empty `terms` vector is valid (constant-only
-/// expression, unusual but not rejected at this layer).
-///
-/// The expression parser (string → `ConstraintExpression`) lives in `cobre-io`.
+/// Parsed left-hand side of a generic constraint as weighted variable
+/// references. An empty `terms` vector is valid (constant-only expression, not
+/// rejected at this layer).
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConstraintExpression {
@@ -347,31 +306,22 @@ pub enum ConstraintSense {
 
 /// Slack variable configuration for a generic constraint.
 ///
-/// When `enabled` is `true`, a slack variable is added to the LP so that the
-/// constraint can be violated at a cost. This prevents infeasibility when
-/// bounds are tight or conflicting. The penalty cost enters the LP objective
-/// function.
-///
-/// `penalty` must be `Some(value)` with a positive value when `enabled` is
-/// `true`, and `None` when `enabled` is `false`.
+/// An enabled slack lets the constraint be violated at a cost (entering the LP
+/// objective), preventing infeasibility under tight or conflicting bounds.
+/// `penalty` must be `Some(positive)` when `enabled`, `None` otherwise.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SlackConfig {
     /// Whether a slack variable is added to allow soft violation of the constraint.
     pub enabled: bool,
-    /// Penalty cost per unit of constraint violation. `None` when `enabled` is `false`.
+    /// Penalty cost per unit of constraint violation.
     pub penalty: Option<f64>,
 }
 
 /// A user-defined generic linear constraint.
 ///
-/// Stored in [`crate::System::generic_constraints`] after loading and
-/// validation. Constraints are sorted by `id` after loading to satisfy the
-/// declaration-order invariance requirement.
-///
-/// The expression parser, referential validation (entity IDs exist), and
-/// bounds loading (from `generic_constraint_bounds.parquet`) are all
-/// performed by `cobre-io`, not here.
+/// Sorted by `id` after loading to satisfy declaration-order invariance.
+/// Parsing, referential validation, and bounds loading happen in `cobre-io`.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GenericConstraint {
@@ -717,9 +667,6 @@ mod tests {
         assert_ne!(all_blocks, specific_block);
     }
 
-    // ── AC-1: AnticipatedDecision construction ────────────────────────────────
-
-    /// AC-1: `VariableRef::AnticipatedDecision` constructs successfully.
     #[test]
     fn anticipated_decision_constructs() {
         let v = VariableRef::AnticipatedDecision {
@@ -736,7 +683,6 @@ mod tests {
         );
     }
 
-    /// AC-1 (structural): `AnticipatedDecision` is `Copy` and `PartialEq`.
     #[test]
     fn anticipated_decision_copy_and_eq() {
         let v1 = VariableRef::AnticipatedDecision {
@@ -751,13 +697,9 @@ mod tests {
         assert_ne!(v1, v3);
     }
 
-    // ── AC-2: Postcard round-trip ─────────────────────────────────────────────
-
-    /// AC-2: Postcard round-trip preserves `AnticipatedDecision` and its `thermal_id`.
-    ///
-    /// Also pins the discriminant byte so that future variants cannot be
-    /// inserted before `AnticipatedDecision` without breaking this assertion
-    /// (postcard encodes enum variants by declaration order).
+    /// Postcard round-trip preserves `AnticipatedDecision`, and pins its
+    /// discriminant byte so no variant can be inserted before it without
+    /// breaking this assertion (postcard encodes variants by declaration order).
     #[cfg(feature = "serde")]
     #[test]
     fn anticipated_decision_postcard_roundtrip() {
@@ -771,8 +713,6 @@ mod tests {
             "postcard round-trip must preserve the variant"
         );
 
-        // Pin the discriminant: AnticipatedDecision is variant 20 (0-indexed).
-        // Postcard encodes enum variants as a varint; for index 20 that is 0x14.
         assert_eq!(
             bytes[0], 20,
             "AnticipatedDecision must be discriminant 20 (end-of-enum); \
@@ -781,10 +721,8 @@ mod tests {
         );
     }
 
-    /// AC-2 (regression): existing variants retain their expected discriminants.
-    ///
-    /// Smoke-tests that no insertion before `NonControllableCurtailment` shifted
-    /// the discriminant of the 20th variant (index 19).
+    /// Regression: no insertion before `NonControllableCurtailment` shifted its
+    /// discriminant (index 19).
     #[cfg(feature = "serde")]
     #[test]
     fn non_controllable_curtailment_discriminant_is_19() {
