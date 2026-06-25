@@ -209,35 +209,19 @@ impl HistoricalYears {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AnnualComponent {
     /// Standardized annual coefficient ψ (dimensionless, direct Yule-Walker output).
-    /// Relates the current-season inflow to the rolling 12-month average.
     pub coefficient: f64,
 
     /// Sample mean μ^A of the rolling 12-month average for the season, in m³/s.
-    /// Used to de-standardize the annual term at runtime.
     pub mean_m3s: f64,
 
-    /// Sample std σ^A of the rolling 12-month average for the season, in m³/s.
-    /// Must be positive. Used together with `coefficient` and the seasonal std
-    /// to form the runtime annual coefficient: `ψ̂ = ψ · σ_m / σ^A_m`.
+    /// Sample std σ^A of the rolling 12-month average for the season, in m³/s. Must be positive.
     pub std_m3s: f64,
 }
 
 /// Raw PAR(p) model parameters for a single (hydro, stage) pair.
 ///
-/// Stores the seasonal mean, standard deviation, and standardized AR lag
-/// coefficients loaded from `inflow_seasonal_stats.parquet` and
-/// `inflow_ar_coefficients.parquet`. These are the raw input-facing values.
-///
-/// AR coefficients are stored **standardized by seasonal std** (dimensionless ψ\*,
-/// direct Yule-Walker output). The `residual_std_ratio` field carries the ratio
-/// `σ_m` / `s_m` so that downstream crates can recover the runtime residual std as
-/// `std_m3s * residual_std_ratio` without re-deriving it from the coefficients.
-///
-/// The optional `annual` field activates the PAR(p)-A extension; when `None`,
-/// the classical PAR(p) model is in effect.
-///
-/// The performance-adapted view (`PrecomputedPar`) is built from these
-/// parameters once at solver initialisation and belongs to downstream solver crates.
+/// Raw input-facing values loaded from `inflow_seasonal_stats.parquet` and
+/// `inflow_ar_coefficients.parquet`; see each field for units and standardization.
 ///
 /// ## Declaration-order invariance
 ///
@@ -317,13 +301,8 @@ pub struct InflowModel {
     /// (white noise), this is 1.0 (the AR model explains nothing).
     pub residual_std_ratio: f64,
 
-    /// Optional annual component for the PAR(p)-A extension.
-    ///
-    /// `None` — classical PAR(p) model; no annual term is applied.
-    /// `Some(AnnualComponent { ... })` — the PAR(p)-A extension is active for
-    /// this (hydro, stage); all three sub-fields (`coefficient`, `mean_m3s`,
-    /// `std_m3s`) are guaranteed to be present. See [`AnnualComponent`] for
-    /// field details and the mathematical role of each value.
+    /// Optional annual component; `None` selects the classical PAR(p) model.
+    /// See [`AnnualComponent`].
     pub annual: Option<AnnualComponent>,
 }
 
@@ -571,7 +550,7 @@ pub struct ExternalNcsRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CorrelationEntity {
-    /// Entity type tag: `"inflow"`, `"load"`, or `"ncs"`.
+    /// Entity type tag; valid values are listed on the type doc.
     pub entity_type: String,
 
     /// Entity identifier matching the corresponding entity's `id` field.
@@ -580,13 +559,7 @@ pub struct CorrelationEntity {
 
 /// A named group of correlated entities and their correlation matrix.
 ///
-/// `matrix` is a symmetric positive-semi-definite matrix stored in
-/// row-major order as `Vec<Vec<f64>>`. `matrix[i][j]` is the correlation
-/// coefficient between `entities[i]` and `entities[j]`.
-/// `matrix.len()` must equal `entities.len()`.
-///
-/// Spectral decomposition of the matrix is NOT performed here; that
-/// belongs to `cobre-stochastic`.
+/// Decomposition is NOT performed here; that belongs to `cobre-stochastic`.
 ///
 /// See [Input Scenarios §5](input-scenarios.md).
 ///
@@ -689,10 +662,6 @@ pub struct CorrelationScheduleEntry {
 /// deterministic iteration order, satisfying the declaration-order
 /// invariance requirement (design-principles.md §3).
 ///
-/// `method` defaults to `"spectral"`. The value `"cholesky"` is accepted for
-/// backward compatibility with existing case files. Stored as a `String` for
-/// forward compatibility with future decomposition methods.
-///
 /// Source: `correlation.json`.
 /// See [Input Scenarios §5](input-scenarios.md) and
 /// [internal-structures.md §14](../specs/data-model/internal-structures.md).
@@ -727,13 +696,11 @@ pub struct CorrelationScheduleEntry {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CorrelationModel {
-    /// Decomposition method. Defaults to `"spectral"`. `"cholesky"` is also
-    /// accepted for backward compatibility with existing case files.
-    /// Stored as `String` for forward compatibility with future methods.
+    /// Decomposition method (`"spectral"` default, `"cholesky"` accepted).
+    /// `String`, not an enum, to keep old case files forward-compatible.
     pub method: String,
 
     /// Named correlation profiles keyed by profile name.
-    /// `BTreeMap` for deterministic ordering (declaration-order invariance).
     pub profiles: BTreeMap<String, CorrelationProfile>,
 
     /// Stage-to-profile schedule. Empty when a single profile applies to
@@ -797,7 +764,6 @@ mod tests {
 
     #[test]
     fn test_inflow_model_ar_order_method() {
-        // Empty coefficients: ar_order() == 0 (white noise)
         let white_noise = InflowModel {
             hydro_id: EntityId(1),
             stage_id: 0,
@@ -809,7 +775,6 @@ mod tests {
         };
         assert_eq!(white_noise.ar_order(), 0);
 
-        // Two coefficients: ar_order() == 2
         let par2 = InflowModel {
             hydro_id: EntityId(2),
             stage_id: 1,
@@ -864,26 +829,22 @@ mod tests {
             ],
         };
 
-        // Two profiles present
         assert_eq!(model.profiles.len(), 2);
 
-        // BTreeMap ordering is alphabetical: "dry" before "wet"
+        // BTreeMap ordering is alphabetical: "dry" before "wet", not insertion order.
         let mut profile_iter = model.profiles.keys();
         assert_eq!(profile_iter.next().unwrap(), "dry");
         assert_eq!(profile_iter.next().unwrap(), "wet");
 
-        // Profile lookup by name
         assert!(model.profiles.contains_key("wet"));
         assert!(model.profiles.contains_key("dry"));
 
-        // Matrix dimensions match entity count
         let wet = &model.profiles["wet"];
         assert_eq!(wet.groups[0].matrix.len(), 3);
 
         let dry = &model.profiles["dry"];
         assert_eq!(dry.groups[0].matrix.len(), 2);
 
-        // Schedule entries
         assert_eq!(model.schedule.len(), 2);
         assert_eq!(model.schedule[0].profile_name, "wet");
         assert_eq!(model.schedule[1].profile_name, "dry");
@@ -913,7 +874,6 @@ mod tests {
     fn test_scenario_source_serde_roundtrip() {
         use super::HistoricalYears;
 
-        // All three schemes set to different values with seed and no historical_years
         let source = ScenarioSource {
             inflow_scheme: SamplingScheme::InSample,
             load_scheme: SamplingScheme::OutOfSample,
@@ -925,7 +885,6 @@ mod tests {
         let deserialized: ScenarioSource = serde_json::from_str(&json).unwrap();
         assert_eq!(source, deserialized);
 
-        // Historical inflow with historical_years list
         let source_hist = ScenarioSource {
             inflow_scheme: SamplingScheme::Historical,
             load_scheme: SamplingScheme::InSample,
@@ -937,7 +896,6 @@ mod tests {
         let deserialized_hist: ScenarioSource = serde_json::from_str(&json_hist).unwrap();
         assert_eq!(source_hist, deserialized_hist);
 
-        // Historical inflow with historical_years range and no seed
         let source_range = ScenarioSource {
             inflow_scheme: SamplingScheme::Historical,
             load_scheme: SamplingScheme::InSample,
@@ -952,7 +910,6 @@ mod tests {
         let deserialized_range: ScenarioSource = serde_json::from_str(&json_range).unwrap();
         assert_eq!(source_range, deserialized_range);
 
-        // All InSample, no seed, no historical_years (default-like)
         let source_default = ScenarioSource {
             inflow_scheme: SamplingScheme::InSample,
             load_scheme: SamplingScheme::InSample,
@@ -1113,7 +1070,6 @@ mod tests {
             schedule: vec![],
         };
 
-        // AC: model.profiles["default"].groups[0].matrix.len() == 3
         assert_eq!(model.profiles["default"].groups[0].matrix.len(), 3);
     }
 

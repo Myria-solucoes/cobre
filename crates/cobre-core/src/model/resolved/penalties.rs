@@ -1,18 +1,10 @@
 //! Pre-resolved per-(entity, stage) penalty containers for O(1) solver lookup.
 //!
-//! Holds the stage-resolved penalty structs (`HydroStagePenalties`,
-//! `BusStagePenalties`, `LineStagePenalties`, `NcsStagePenalties`) and the
-//! `ResolvedPenalties` table that stores them in a flat `Vec<T>` indexed
-//! `data[entity_idx * n_stages + stage_idx]` for cache-friendly per-entity stage
-//! iteration. Populated by `cobre-io` after the three-tier penalty cascade is
-//! applied; never modified after construction.
+//! Tables store their per-stage structs in a flat `Vec<T>` indexed
+//! `data[entity_idx * n_stages + stage_idx]`. Populated by `cobre-io` after the
+//! three-tier penalty cascade is applied; never modified after construction.
 
-// ─── Per-(entity, stage) penalty structs ─────────────────────────────────────
-
-/// All 16 hydro penalty values for a given (hydro, stage) pair.
-///
-/// This is the stage-resolved form of [`crate::HydroPenalties`]. All fields hold
-/// the final effective penalty after the full three-tier cascade has been applied.
+/// Stage-resolved form of [`crate::HydroPenalties`] for a given (hydro, stage) pair.
 ///
 /// # Examples
 ///
@@ -37,56 +29,51 @@
 ///     evaporation_violation_neg_cost: 500.0,
 ///     inflow_nonnegativity_cost: 1000.0,
 /// };
-/// // Copy-semantics: can be passed by value
 /// let q = p;
 /// assert!((q.spillage_cost - 0.01).abs() < f64::EPSILON);
 /// ```
-// Field count is 16 — update the doc line above when adding/removing fields.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HydroStagePenalties {
-    /// Spillage regularization cost \[$/m³/s\]. Prefer turbining over spilling.
+    /// Spillage regularization cost \[$/m³/s\].
     pub spillage_cost: f64,
-    /// Diversion regularization cost \[$/m³/s\]. Prefer main-channel flow.
+    /// Diversion regularization cost \[$/m³/s\].
     pub diversion_cost: f64,
-    /// Turbined regularization cost \[$/`MWh`\]. Applied to every hydro's
-    /// turbine column in the LP objective regardless of production model.
-    /// For FPHA hydros must be `> spillage_cost` to prevent interior solutions.
+    /// Turbined regularization cost \[$/`MWh`\], applied to every hydro's turbine
+    /// column. For FPHA hydros must be `> spillage_cost` to prevent interior solutions.
     pub turbined_cost: f64,
-    /// Constraint-violation cost for storage below dead volume \[$/hm³\].
+    /// Storage below dead volume \[$/hm³\].
     pub storage_violation_below_cost: f64,
-    /// Constraint-violation cost for missing the dead-volume filling target \[$/hm³\].
-    /// Must be the highest penalty in the system.
+    /// Missed dead-volume filling target \[$/hm³\]. Must be the highest penalty in the system.
     pub filling_target_violation_cost: f64,
-    /// Constraint-violation cost for turbined flow below minimum \[$/m³/s\].
+    /// Turbined flow below minimum \[$/m³/s\].
     pub turbined_violation_below_cost: f64,
-    /// Constraint-violation cost for outflow below environmental minimum \[$/m³/s\].
+    /// Outflow below environmental minimum \[$/m³/s\].
     pub outflow_violation_below_cost: f64,
-    /// Constraint-violation cost for outflow above flood-control limit \[$/m³/s\].
+    /// Outflow above flood-control limit \[$/m³/s\].
     pub outflow_violation_above_cost: f64,
-    /// Constraint-violation cost for generation below contractual minimum \[$/MW\].
+    /// Generation below contractual minimum \[$/MW\].
     pub generation_violation_below_cost: f64,
-    /// Constraint-violation cost for evaporation constraint violation \[$/mm\].
+    /// Evaporation constraint violation \[$/mm\].
     pub evaporation_violation_cost: f64,
-    /// Constraint-violation cost for unmet water withdrawal \[$/m³/s\].
+    /// Unmet water withdrawal \[$/m³/s\].
     pub water_withdrawal_violation_cost: f64,
-    /// Constraint-violation cost for over-withdrawal (withdrew more than target) \[$/m³/s\].
+    /// Over-withdrawal \[$/m³/s\].
     pub water_withdrawal_violation_pos_cost: f64,
-    /// Constraint-violation cost for under-withdrawal (withdrew less than target) \[$/m³/s\].
+    /// Under-withdrawal \[$/m³/s\].
     pub water_withdrawal_violation_neg_cost: f64,
-    /// Constraint-violation cost for over-evaporation \[$/mm\].
+    /// Over-evaporation \[$/mm\].
     pub evaporation_violation_pos_cost: f64,
-    /// Constraint-violation cost for under-evaporation \[$/mm\].
+    /// Under-evaporation \[$/mm\].
     pub evaporation_violation_neg_cost: f64,
-    /// Constraint-violation cost for inflow non-negativity slack \[$/m³/s\].
+    /// Inflow non-negativity slack \[$/m³/s\].
     pub inflow_nonnegativity_cost: f64,
 }
 
 /// Bus penalty values for a given (bus, stage) pair.
 ///
-/// Contains only `excess_cost` because deficit segments are **not** stage-varying
-/// (Penalty System spec SS3). The piecewise-linear deficit structure is fixed at
-/// the entity or global level and applies uniformly across all stages.
+/// Only `excess_cost`: deficit segments are **not** stage-varying (Penalty System
+/// spec SS3), so the piecewise deficit structure is not duplicated per stage.
 ///
 /// # Examples
 ///
@@ -118,7 +105,7 @@ pub struct BusStagePenalties {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LineStagePenalties {
-    /// Flow regularization cost \[$/`MWh`\]. Discourages unnecessary exchange.
+    /// Flow regularization cost \[$/`MWh`\].
     pub exchange_cost: f64,
 }
 
@@ -136,25 +123,13 @@ pub struct LineStagePenalties {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NcsStagePenalties {
-    /// Curtailment regularization cost \[$/`MWh`\]. Penalizes curtailing available generation.
+    /// Curtailment regularization cost \[$/`MWh`\].
     pub curtailment_cost: f64,
 }
 
 // ─── Pre-resolved containers ──────────────────────────────────────────────────
 
 /// Pre-resolved penalty table for all entities across all stages.
-///
-/// Populated by `cobre-io` after the three-tier penalty cascade is applied.
-/// Provides O(1) lookup via direct array indexing.
-///
-/// Internal layout: `data[entity_idx * n_stages + stage_idx]` — iterating
-/// stages for a fixed entity accesses a contiguous memory region.
-///
-/// # Construction
-///
-/// Use [`ResolvedPenalties::new`] to allocate the table with a given default
-/// value, then populate by writing into the flat slice returned by the internal
-/// accessors. `cobre-io` is responsible for filling the data.
 ///
 /// # Examples
 ///
@@ -198,15 +173,11 @@ pub struct NcsStagePenalties {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ResolvedPenalties {
-    /// Total number of stages. Used to compute flat indices.
+    /// Stride for every entity table below: `data[entity_idx * n_stages + stage_idx]`.
     n_stages: usize,
-    /// Flat `n_hydros * n_stages` array indexed `[hydro_idx * n_stages + stage_idx]`.
     hydro: Vec<HydroStagePenalties>,
-    /// Flat `n_buses * n_stages` array indexed `[bus_idx * n_stages + stage_idx]`.
     bus: Vec<BusStagePenalties>,
-    /// Flat `n_lines * n_stages` array indexed `[line_idx * n_stages + stage_idx]`.
     line: Vec<LineStagePenalties>,
-    /// Flat `n_ncs * n_stages` array indexed `[ncs_idx * n_stages + stage_idx]`.
     ncs: Vec<NcsStagePenalties>,
 }
 
@@ -241,9 +212,7 @@ pub struct PenaltiesDefaults {
 impl ResolvedPenalties {
     /// Return an empty penalty table with zero entities and zero stages.
     ///
-    /// Used as the default value in [`System`](crate::System) when no penalty
-    /// resolution has been performed yet (e.g., when building a `System` from
-    /// raw entity collections without `cobre-io`).
+    /// The default value in [`System`](crate::System) before penalty resolution.
     ///
     /// # Examples
     ///
@@ -266,12 +235,7 @@ impl ResolvedPenalties {
 
     /// Allocate a new resolved-penalties table filled with the given defaults.
     ///
-    /// `counts.n_stages` must be `> 0`. Entity counts may be `0` (empty vectors are valid).
-    ///
-    /// # Arguments
-    ///
-    /// * `counts` — entity counts grouped into [`PenaltiesCountsSpec`]
-    /// * `defaults` — default per-stage penalty values grouped into [`PenaltiesDefaults`]
+    /// `counts.n_stages` must be `> 0`. Entity counts may be `0`.
     #[must_use]
     pub fn new(counts: &PenaltiesCountsSpec, defaults: &PenaltiesDefaults) -> Self {
         Self {
@@ -284,10 +248,6 @@ impl ResolvedPenalties {
     }
 
     /// Return the resolved penalties for a hydro plant at a specific stage.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `hydro_index >= n_hydros` or `stage_index >= n_stages`.
     #[inline]
     #[must_use]
     pub fn hydro_penalties(&self, hydro_index: usize, stage_index: usize) -> HydroStagePenalties {
@@ -295,10 +255,6 @@ impl ResolvedPenalties {
     }
 
     /// Return the resolved penalties for a bus at a specific stage.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `bus_index >= n_buses` or `stage_index >= n_stages`.
     #[inline]
     #[must_use]
     pub fn bus_penalties(&self, bus_index: usize, stage_index: usize) -> BusStagePenalties {
@@ -306,10 +262,6 @@ impl ResolvedPenalties {
     }
 
     /// Return the resolved penalties for a line at a specific stage.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `line_index >= n_lines` or `stage_index >= n_stages`.
     #[inline]
     #[must_use]
     pub fn line_penalties(&self, line_index: usize, stage_index: usize) -> LineStagePenalties {
@@ -317,10 +269,6 @@ impl ResolvedPenalties {
     }
 
     /// Return the resolved penalties for a non-controllable source at a specific stage.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `ncs_index >= n_ncs` or `stage_index >= n_stages`.
     #[inline]
     #[must_use]
     pub fn ncs_penalties(&self, ncs_index: usize, stage_index: usize) -> NcsStagePenalties {
@@ -328,12 +276,6 @@ impl ResolvedPenalties {
     }
 
     /// Return a mutable reference to the hydro penalty cell for in-place update.
-    ///
-    /// Used by `cobre-io` during penalty cascade resolution to set resolved values.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `hydro_index >= n_hydros` or `stage_index >= n_stages`.
     #[inline]
     pub fn hydro_penalties_mut(
         &mut self,
@@ -344,10 +286,6 @@ impl ResolvedPenalties {
     }
 
     /// Return a mutable reference to the bus penalty cell for in-place update.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `bus_index >= n_buses` or `stage_index >= n_stages`.
     #[inline]
     pub fn bus_penalties_mut(
         &mut self,
@@ -358,10 +296,6 @@ impl ResolvedPenalties {
     }
 
     /// Return a mutable reference to the line penalty cell for in-place update.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `line_index >= n_lines` or `stage_index >= n_stages`.
     #[inline]
     pub fn line_penalties_mut(
         &mut self,
@@ -372,10 +306,6 @@ impl ResolvedPenalties {
     }
 
     /// Return a mutable reference to the NCS penalty cell for in-place update.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `ncs_index >= n_ncs` or `stage_index >= n_stages`.
     #[inline]
     pub fn ncs_penalties_mut(
         &mut self,
@@ -450,7 +380,6 @@ mod tests {
 
     #[test]
     fn test_resolved_penalties_construction() {
-        // 2 hydros, 1 bus, 1 line, 1 ncs, 3 stages
         let hp = make_hydro_penalties();
         let bp = BusStagePenalties { excess_cost: 100.0 };
         let lp = LineStagePenalties { exchange_cost: 5.0 };

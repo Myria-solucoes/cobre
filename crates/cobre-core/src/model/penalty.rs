@@ -12,73 +12,66 @@ use crate::entities::{DeficitSegment, HydroPenalties};
 
 /// Global default penalty values for all entity types.
 ///
-/// Mirrors the structure of `penalties.json`. These values are used as
-/// fallbacks when entity-level overrides are not specified.
-/// See Penalty System spec section 3.
+/// Mirrors the structure of `penalties.json`; the fallback when entity-level
+/// overrides are absent.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GlobalPenaltyDefaults {
-    // Bus defaults
-    /// Default piecewise-linear deficit cost segments for buses.
+    /// Piecewise-linear bus deficit cost segments.
     pub bus_deficit_segments: Vec<DeficitSegment>,
-    /// Default excess cost for buses \[$/`MWh`\].
+    /// Bus excess cost \[$/`MWh`\].
     pub bus_excess_cost: f64,
-
-    // Line defaults
-    /// Default exchange cost for lines \[$/`MWh`\].
+    /// Line exchange cost \[$/`MWh`\].
     pub line_exchange_cost: f64,
-
-    // Hydro defaults
-    /// Default hydro penalty values. Applied to any hydro field not
-    /// overridden at the entity level.
+    /// Hydro penalty defaults for any field not overridden per entity.
     pub hydro: HydroPenalties,
-
-    // Non-controllable source defaults
-    /// Default curtailment cost for non-controllable sources \[$/`MWh`\].
+    /// Non-controllable source curtailment cost \[$/`MWh`\].
     pub ncs_curtailment_cost: f64,
 }
 
 /// Optional entity-level hydro penalty overrides.
 ///
-/// Each field corresponds to a field in [`HydroPenalties`]. A value of `None`
-/// means "use global default". A value of `Some(x)` means "override with x".
+/// Each field mirrors a [`HydroPenalties`] field. `None` falls back to the global
+/// default; `Some(x)` overrides. The four directional `*_pos_cost` / `*_neg_cost`
+/// fields instead fall back to their resolved symmetric cost (see
+/// [`resolve_hydro_penalties`]). Field docs carry only the unit.
 ///
 /// This is an intermediate type used during System construction; the resolved
 /// [`HydroPenalties`] (with no `Option`s) is stored on the `Hydro` entity.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HydroPenaltyOverrides {
-    /// Override for spillage cost [$/m³/s]. `None` = use global default.
+    /// Spillage cost [$/m³/s].
     pub spillage_cost: Option<f64>,
-    /// Override for diversion cost [$/m³/s]. `None` = use global default.
+    /// Diversion cost [$/m³/s].
     pub diversion_cost: Option<f64>,
-    /// Override for turbined cost \[$/`MWh`\]. `None` = use global default.
+    /// Turbined cost \[$/`MWh`\].
     pub turbined_cost: Option<f64>,
-    /// Override for storage violation below cost [$/hm³]. `None` = use global default.
+    /// Storage violation below cost [$/hm³].
     pub storage_violation_below_cost: Option<f64>,
-    /// Override for filling target violation cost [$/hm³]. `None` = use global default.
+    /// Filling target violation cost [$/hm³].
     pub filling_target_violation_cost: Option<f64>,
-    /// Override for turbined violation below cost [$/m³/s]. `None` = use global default.
+    /// Turbined violation below cost [$/m³/s].
     pub turbined_violation_below_cost: Option<f64>,
-    /// Override for outflow violation below cost [$/m³/s]. `None` = use global default.
+    /// Outflow violation below cost [$/m³/s].
     pub outflow_violation_below_cost: Option<f64>,
-    /// Override for outflow violation above cost [$/m³/s]. `None` = use global default.
+    /// Outflow violation above cost [$/m³/s].
     pub outflow_violation_above_cost: Option<f64>,
-    /// Override for generation violation below cost [$/MW]. `None` = use global default.
+    /// Generation violation below cost [$/MW].
     pub generation_violation_below_cost: Option<f64>,
-    /// Override for evaporation violation cost [$/mm]. `None` = use global default.
+    /// Evaporation violation cost [$/mm].
     pub evaporation_violation_cost: Option<f64>,
-    /// Override for water withdrawal violation cost [$/m³/s]. `None` = use global default.
+    /// Water withdrawal violation cost [$/m³/s].
     pub water_withdrawal_violation_cost: Option<f64>,
-    /// Override for over-withdrawal violation cost [$/m³/s]. `None` = use symmetric.
+    /// Over-withdrawal violation cost [$/m³/s]. `None` = use symmetric.
     pub water_withdrawal_violation_pos_cost: Option<f64>,
-    /// Override for under-withdrawal violation cost [$/m³/s]. `None` = use symmetric.
+    /// Under-withdrawal violation cost [$/m³/s]. `None` = use symmetric.
     pub water_withdrawal_violation_neg_cost: Option<f64>,
-    /// Override for over-evaporation violation cost [$/mm]. `None` = use symmetric.
+    /// Over-evaporation violation cost [$/mm]. `None` = use symmetric.
     pub evaporation_violation_pos_cost: Option<f64>,
-    /// Override for under-evaporation violation cost [$/mm]. `None` = use symmetric.
+    /// Under-evaporation violation cost [$/mm]. `None` = use symmetric.
     pub evaporation_violation_neg_cost: Option<f64>,
-    /// Override for inflow non-negativity cost [$/m³/s]. `None` = use global default.
+    /// Inflow non-negativity cost [$/m³/s].
     pub inflow_nonnegativity_cost: Option<f64>,
 }
 
@@ -198,10 +191,9 @@ pub fn resolve_line_exchange_cost(
 
 /// Resolve a hydro plant's penalty values.
 ///
-/// For each of the 11 penalty fields, uses the entity override if `Some`, or the
-/// global default from `global.hydro` if `None`. When `entity_overrides` is `None`
-/// (no entity-level penalty block was specified at all), all 11 fields fall back to
-/// the global defaults, and the result equals `global.hydro` exactly.
+/// Each field uses the entity override if `Some`, else the `global.hydro` default;
+/// the four directional `*_pos_cost` / `*_neg_cost` fields fall back to their
+/// resolved symmetric cost. A `None` `entity_overrides` yields `global.hydro` exactly.
 ///
 /// # Examples
 ///
@@ -282,13 +274,8 @@ pub fn resolve_hydro_penalties(
                     .unwrap_or(g.generation_violation_below_cost),
                 evaporation_violation_cost: evap_cost,
                 water_withdrawal_violation_cost: withdrawal_cost,
-                // Directional cost fallback: entity directional override, else the
-                // resolved symmetric cost — per the `*_pos_cost` / `*_neg_cost`
-                // field docs on `HydroPenaltyOverrides` ("`None` = use symmetric").
-                // Falling back to the GLOBAL directional default (`g.*_pos_cost`)
-                // instead would make an entity's symmetric override unreachable for
-                // the directional fields (an entity setting only
-                // `water_withdrawal_violation_cost` would be silently ignored here).
+                // Fall back to the resolved symmetric cost, NOT g.*_pos_cost: the
+                // latter would make an entity's symmetric-only override unreachable.
                 water_withdrawal_violation_pos_cost: ov
                     .water_withdrawal_violation_pos_cost
                     .unwrap_or(withdrawal_cost),
@@ -463,8 +450,7 @@ mod tests {
         assert!((result.generation_violation_below_cost - 6.0).abs() < f64::EPSILON);
         assert!((result.evaporation_violation_cost - 7.0).abs() < f64::EPSILON);
         assert!((result.water_withdrawal_violation_cost - 8.0).abs() < f64::EPSILON);
-        // Directional costs default to the resolved symmetric cost (`None` override
-        // -> symmetric); here the symmetric cost equals the global default (8.0 / 7.0).
+        // Directional `None` -> resolved symmetric, here the global 8.0 / 7.0.
         assert!((result.water_withdrawal_violation_pos_cost - 8.0).abs() < f64::EPSILON);
         assert!((result.water_withdrawal_violation_neg_cost - 8.0).abs() < f64::EPSILON);
         assert!((result.evaporation_violation_pos_cost - 7.0).abs() < f64::EPSILON);
@@ -541,14 +527,11 @@ mod tests {
             ..Default::default()
         };
         let result = resolve_hydro_penalties(&Some(overrides), &global);
-        // Pos overridden; neg (`None`) falls back to the resolved symmetric cost,
-        // which here equals the global symmetric default of 8.0.
         assert!((result.water_withdrawal_violation_pos_cost - 9999.0).abs() < f64::EPSILON);
         assert!(
             (result.water_withdrawal_violation_neg_cost - 8.0).abs() < f64::EPSILON,
             "neg should fall back to the resolved symmetric cost"
         );
-        // Symmetric unchanged
         assert!((result.water_withdrawal_violation_cost - 8.0).abs() < f64::EPSILON);
     }
 
@@ -563,7 +546,6 @@ mod tests {
         let result = resolve_hydro_penalties(&Some(overrides), &global);
         assert!((result.evaporation_violation_pos_cost - 111.0).abs() < f64::EPSILON);
         assert!((result.evaporation_violation_neg_cost - 222.0).abs() < f64::EPSILON);
-        // Symmetric unchanged
         assert!((result.evaporation_violation_cost - 7.0).abs() < f64::EPSILON);
     }
 
@@ -595,10 +577,7 @@ mod tests {
     fn test_resolve_hydro_directional_inherits_entity_symmetric_override() {
         let global = make_global();
 
-        // Entity overrides ONLY the symmetric withdrawal cost (global directional
-        // default is 8.0). Per the `*_pos_cost` / `*_neg_cost` field contract
-        // ("`None` = use symmetric"), the directional fields must inherit the
-        // entity's 999.0 — not the global directional default of 8.0.
+        // Symmetric-only override must reach the directional fields, not g.*_pos_cost (8.0).
         let overrides = HydroPenaltyOverrides {
             water_withdrawal_violation_cost: Some(999.0),
             ..Default::default()
@@ -614,7 +593,6 @@ mod tests {
             "neg must inherit the entity symmetric override, not global directional 8.0"
         );
 
-        // Same contract for evaporation (global directional default is 7.0).
         let overrides = HydroPenaltyOverrides {
             evaporation_violation_cost: Some(555.0),
             ..Default::default()
@@ -630,9 +608,7 @@ mod tests {
             "evap neg must inherit the entity symmetric override, not global directional 7.0"
         );
 
-        // A directional override still wins over the symmetric tier: setting both
-        // symmetric (999.0) and pos (7777.0) leaves pos at 7777.0 while neg (`None`)
-        // inherits the symmetric 999.0.
+        // A directional override wins over the symmetric tier; neg (`None`) still inherits it.
         let overrides = HydroPenaltyOverrides {
             water_withdrawal_violation_cost: Some(999.0),
             water_withdrawal_violation_pos_cost: Some(7777.0),
