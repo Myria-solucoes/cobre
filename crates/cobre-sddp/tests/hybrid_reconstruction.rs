@@ -1,10 +1,4 @@
 //! Integration smoke for the slot-identity basis-reconstruction path.
-//!
-//! Verifies that
-//! [`cobre_sddp::basis_reconstruct::reconstruct_basis`](cobre_sddp::basis_reconstruct::reconstruct_basis)
-//! produces the expected statistics and output statuses on a mixed
-//! preserved-plus-new-slot fixture. Exercises the public reconstruction
-//! function directly without invoking the full SDDP training loop.
 
 #![allow(
     clippy::unwrap_used,
@@ -20,9 +14,7 @@ use cobre_sddp::basis_reconstruct::{
 use cobre_sddp::workspace::CapturedBasis;
 use cobre_solver::Basis;
 
-/// Build a `CapturedBasis` populated with the requested slot list and
-/// cut-row status sequence.  Template rows are all `BASIC`; columns are
-/// all `BASIC` so the column block does not perturb the test focus.
+/// All columns are `BASIC` so the column block does not perturb the test focus.
 fn make_stored(
     base_rows: usize,
     num_cols: usize,
@@ -49,11 +41,6 @@ fn make_stored(
     cb
 }
 
-/// 5-row mixed-case acceptance fixture: stored preserves slots
-/// `{10, 20, 30, 40}` with statuses `[L, B, L, B]`; the target LP has
-/// 5 cut rows for slots `{10, 25, 30, 45, 50}`.  The reconstruction must
-/// copy stored statuses for the preserved slots and assign `BASIC`
-/// to the three new slots.
 #[test]
 fn mixed_case_5_rows() {
     let stored = make_stored(2, 3, &[10, 20, 30, 40], &[L, B, L, B], &[1.0, 2.0]);
@@ -89,10 +76,7 @@ fn mixed_case_5_rows() {
         "preserved={{10, 30}} (2), new_slack={{25, 45, 50}} (3)",
     );
     assert_eq!(out.row_status.len(), 7, "2 template + 5 cut rows");
-    // Template block first (both BASIC from the stored basis).
     assert_eq!(&out.row_status[..2], &[B, B], "template rows preserved");
-    // Cut block: stored slot-10 = L, new slot 25 = B,
-    // stored slot-30 = L, new slot 45 = B, new slot 50 = B.
     assert_eq!(out.row_status[2], L, "slot 10 → stored LOWER");
     assert_eq!(out.row_status[3], B, "slot 25 → new → BASIC");
     assert_eq!(out.row_status[4], L, "slot 30 → stored LOWER");
@@ -100,9 +84,6 @@ fn mixed_case_5_rows() {
     assert_eq!(out.row_status[6], B, "slot 50 → new → BASIC");
 }
 
-/// All slots preserved: every cut row in the target LP has a matching
-/// stored slot, so the output row statuses are an exact copy of the
-/// stored cut-row block and `new_slack == 0`.
 #[test]
 fn all_preserved() {
     let stored = make_stored(1, 2, &[10, 20, 30], &[L, B, L], &[1.0]);
@@ -137,8 +118,6 @@ fn all_preserved() {
     assert_eq!(&out.row_status[1..], &[L, B, L]);
 }
 
-/// All slots new: stored is empty, every cut row gets `BASIC` and the
-/// `new_slack` counter equals the cut-row count.
 #[test]
 fn all_new() {
     let stored = make_stored(1, 2, &[], &[], &[1.0]);

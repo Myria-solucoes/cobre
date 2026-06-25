@@ -1,16 +1,6 @@
-//! End-to-end integration tests for the stochastic load pipeline.
-//!
-//! Exercises the full stochastic load path from [`System`] construction with
-//! [`LoadModel`] entries through [`build_stochastic_context`] verification
-//! and a mock-solver training run, confirming that load noise is wired into
-//! the context and that training completes without errors.
-//!
-//! ## Design constraints
-//!
-//! - Only the public `cobre_sddp::` and `cobre_stochastic::` APIs are used.
-//! - All test helpers are defined locally in this file.
-//! - Each test is self-contained with no cross-test shared state.
-//! - `MockSolver` is used throughout — no real solver (`HiGHS`) dependency.
+//! End-to-end integration tests for the stochastic load pipeline: [`System`]
+//! construction with [`LoadModel`] entries through [`build_stochastic_context`]
+//! and a mock-solver training run.
 
 #![allow(
     clippy::unwrap_used,
@@ -59,13 +49,9 @@ use cobre_stochastic::{
 // Shared helpers
 // ===========================================================================
 
-/// Build the role-(a) [`StateLayout`] whose `storage_in` / `inflow_lags` /
-/// `anticipated_state` column starts match `indexer`'s identical fields.
-///
-/// Mirrors the gated `indexer::test_fixtures::state_layout_for` body via the
-/// public [`StateLayout::new`] constructor, so this external test crate (which
-/// does not see the parent crate's `#[cfg(test)]` surface) resolves byte-identical
-/// patch columns on the default feature set.
+/// Mirror the gated `indexer::test_fixtures::state_layout_for` via the public
+/// [`StateLayout::new`], so this external test crate (which cannot see the parent
+/// crate's `#[cfg(test)]` surface) resolves byte-identical patch columns.
 fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     StateLayout::new(
         hydro_count,
@@ -77,15 +63,12 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     )
 }
 
-/// Build the default all-zero `StudyDimensions` (every count `0`, every flag
-/// `false`), matching the empty non-state shape these toy fixtures imply.
 fn study_dims() -> cobre_sddp::indexer::StudyDimensions {
     cobre_sddp::indexer::StudyDimensions::default()
 }
 
-/// Single-rank communicator that correctly copies data through `allgatherv`
-/// and `allreduce`. Required by the exchange and forward-sync steps so that
-/// state is available to the backward pass.
+/// Single-rank communicator that copies data through `allgatherv` / `allreduce`
+/// (not a no-op): the backward pass needs forward-sync state to be propagated.
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -189,16 +172,10 @@ impl SolverInterface for MockSolver {
 }
 
 /// Build a `System` with 1 bus, 1 hydro, `n_stages` stages, and optionally
-/// stochastic load data for the single bus.
-///
-/// - `load_mean_mw` / `load_std_mw`: parameters for [`LoadModel`] entries.
-///   When `load_std_mw == 0.0` the load is deterministic and the returned
-///   context will report `n_load_buses() == 0`.
-/// - `n_openings`: branching factor for the opening tree.
-///
-/// The correlation model is intentionally left empty (no profiles), which
-/// `build_stochastic_context` treats as independent (identity) correlation.
-/// This is consistent with the unit-test fixture in `forward.rs`.
+/// stochastic load. `load_std_mw == 0.0` yields deterministic load, so the
+/// returned context reports `n_load_buses() == 0`. The correlation model is left
+/// empty on purpose: `build_stochastic_context` treats that as independent
+/// (identity) correlation.
 fn build_system_with_load(
     n_stages: usize,
     n_openings: usize,
@@ -305,8 +282,6 @@ fn build_system_with_load(
         })
         .collect();
 
-    // Empty correlation profiles: `build_stochastic_context` treats this as
-    // independent (identity) correlation for all noise entities.
     let correlation = cobre_core::scenario::CorrelationModel {
         method: "spectral".to_string(),
         profiles: BTreeMap::new(),
@@ -348,9 +323,6 @@ fn build_context_with_load(
 }
 
 /// Minimal stage template for N=1 hydro, L=0 PAR.
-///
-/// Load rows are patched via `set_row_bounds` at runtime; they do not change
-/// the primal structure seen by the mock solver (3 columns, 1 state row).
 fn minimal_template() -> StageTemplate {
     // N=1, L=0 → cols: storage(0), z_inflow(1), storage_in(2), theta(3)
     //             rows: storage_fixing(0), z_inflow(1)
@@ -377,7 +349,6 @@ fn minimal_template() -> StageTemplate {
 }
 
 fn make_fcf(n_stages: usize) -> FutureCostFunction {
-    // capacity=50 iterations, state_dimension=1, 1 stage cut pool
     FutureCostFunction::new(n_stages, 1, 1, 50, &vec![0; n_stages])
 }
 
@@ -397,7 +368,6 @@ fn iteration_limit(limit: u64) -> StoppingRuleSet {
 /// when `std_mw == 0.0` (deterministic load).
 #[test]
 fn test_stochastic_load_context_construction() {
-    // Stochastic case: std_mw=50.0 means the bus qualifies as stochastic.
     let stochastic_ctx = build_context_with_load(2, 500.0, 50.0);
     assert_eq!(
         stochastic_ctx.n_load_buses(),
@@ -405,7 +375,6 @@ fn test_stochastic_load_context_construction() {
         "n_load_buses must be 1 when std_mw=50.0 > 0"
     );
 
-    // Deterministic case: std_mw=0.0 means the bus is excluded from noise dim.
     let deterministic_ctx = build_context_with_load(2, 500.0, 0.0);
     assert_eq!(
         deterministic_ctx.n_load_buses(),
@@ -441,7 +410,6 @@ fn test_stochastic_load_training_completes() {
     let mut solver = MockSolver::with_fixed(100.0);
     let comm = StubComm;
 
-    // Collect convergence events to verify we get one LB per iteration.
     let (tx, rx) = mpsc::channel::<TrainingEvent>();
     let config = TrainingConfig {
         loop_config: LoopConfig {
@@ -467,11 +435,9 @@ fn test_stochastic_load_training_completes() {
         },
     };
 
-    // load_balance_row_starts: one per stage, pointing past the base rows.
-    // The mock solver ignores set_row_bounds so the exact value doesn't matter
-    // as long as the slice length matches n_stages.
+    // The mock solver ignores set_row_bounds, so only the slice length (n_stages)
+    // matters here, not the row-start value.
     let load_balance_row_starts = vec![1usize; n_stages];
-    // load_bus_indices: the LP column index of the load bus (index 0 among buses).
     let load_bus_indices = vec![0usize];
     let block_counts_per_stage = vec![1usize; n_stages];
 
@@ -536,7 +502,6 @@ fn test_stochastic_load_training_completes() {
         result.result.iterations
     );
 
-    // Collect ConvergenceUpdate events to confirm one LB per iteration.
     let events: Vec<TrainingEvent> = rx.try_iter().collect();
     let lower_bounds: Vec<f64> = events
         .iter()

@@ -1,18 +1,12 @@
-//! Guard test: verify that no parity baseline file was silently modified.
+//! Fast guard: the committed parity baselines match the digests pinned in
+//! [`EXPECTED_HASHES`], so a baseline cannot change silently.
 //!
-//! Reads each baseline file in a fixed hard-coded order, trims its hex
-//! digest, and compares it byte-for-byte against the expected value pinned
-//! in [`EXPECTED_HASHES`]. Any change to a baseline file will cause this
-//! test to fail with a message pointing at the offending case.
-//!
-//! The per-file table uses plain string equality (not a single meta-hash of
-//! all baselines) so a mismatch names the offending case directly instead of
-//! reporting that *something* changed. The `sha2` dev-dependency is unused
-//! here but kept because `parity_hash_d01_d15.rs` uses it to compute the
-//! baselines themselves from training output.
-//!
-//! This test is NOT slow-gated: each baseline is one 64-byte digest and the
-//! test runs in milliseconds.
+//! This is the third pin of every HiGHS baseline (the other two are the
+//! checked-in `parity_baselines/<case>.sha256` file and the slow-gated
+//! `parity_hash_*` end-to-end run); a re-baseline must update all three together
+//! or this guard rots silently. Per-file string equality (not a meta-hash) names
+//! the offending case directly. NOT slow-gated — each baseline is one 64-byte
+//! digest.
 
 #![allow(
     clippy::unwrap_used,
@@ -25,12 +19,13 @@
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
-// Expected hex digests — one entry per baseline file
+// Expected hex digests — one entry per HiGHS baseline file
 // ---------------------------------------------------------------------------
 //
-// Updating this table: re-run the relevant deterministic case end-to-end
-// (e.g., `just regression-baseline D06`) and paste the new hash here, in the
-// commit that intentionally changes the baseline.
+// Each entry pins only the HiGHS `<case>.sha256`; the CLP baseline is verified
+// by the slow-gated CLP `parity_hash_<case>`. To intentionally change a
+// baseline, re-run the case end-to-end (e.g. `just regression-baseline D06`) and
+// paste the new hash here in the same commit.
 
 const EXPECTED_HASHES: &[(&str, &str)] = &[
     (
@@ -93,105 +88,34 @@ const EXPECTED_HASHES: &[(&str, &str)] = &[
         "D17",
         "c23607d2088fd6901d92c7688a6a28233f598082ac632586bc8c6125396f598a",
     ),
-    // Cascade case whose downstream plant declares a `reference_volume`. The
-    // reference-volume *default* (0.65) path is covered by the unchanged
-    // D05/D06/D07 baselines (none declare a `reference_volume`); D31 exercises the
-    // *declared* path. This fast guard only pins the checked-in `D31.sha256`
-    // against EXPECTED_HASHES; the full train+sim parity hash for D31 is verified
-    // by the slow-gated `parity_hash_d31` (HiGHS and CLP).
     (
         "D31",
         "08bd760f3718196fa9324a56dc08cab8f725365a28267c0218a37ac884ab94b3",
     ),
-    // Reversible plant: one pumping station lifts water from the downstream
-    // reservoir back up to the upstream one every block, with `flow.min_m3s > 0`
-    // forcing a non-degenerate transfer (and matching power draw) on every solve.
-    // The pumping column is the first deterministic case to actually participate
-    // in the LP, so this hash captures the transfer's effect on both reservoirs'
-    // storage trajectories and water values. This guard pins only the HiGHS
-    // `D32.sha256`; the CLP `D32.sha256` is verified by the slow-gated CLP
-    // `parity_hash_d32`.
     (
         "D32",
         "be72c5faf5881687792dcd4939750906f61b984dc3209c7f8da97269d13a9e29",
     ),
-    // Pumping commissioning gating: the D32 reversible plant with an
-    // `entry_stage_id`/`exit_stage_id` window so it is active only at stage 1.
-    // Under the dense (zero-influence) layout the dormant stages (0 and 2) keep
-    // the pumping column pinned to `[0, 0]` and emit a zero output row, shedding
-    // the forced `flow.min_m3s` transfer, so their storage trajectories diverge
-    // from the always-active D32 baseline. This guard pins only the HiGHS
-    // `D35.sha256`; the CLP `D35.sha256` is verified by the slow-gated CLP
-    // `parity_hash_d35`.
     (
         "D35",
         "ebd271e4504810723f9a380130d5ca20662ddfd88194c5418555b26d3a80d977",
     ),
-    // Thermal + line commissioning gating: a plain (non-anticipated) thermal
-    // with a must-run floor (`min_mw > 0`) is active only at stage 1, and a line
-    // is dormant at stage 0 and active at stages 1 and 2. Under the dense
-    // (zero-influence) layout a dormant thermal pins BOTH bounds to `[0, 0]` (the
-    // must-run floor zeroes too, so the windowed-out plant stays feasible) and a
-    // dormant line pins `col_upper` to 0 both directions. With T0 off and the
-    // inter-bus line cut at stage 0, B1's load leans on H1 + deficit instead of
-    // imported B0 power, shifting both reservoirs' trajectories. This guard pins
-    // only the HiGHS `D36.sha256`; the CLP `D36.sha256` is verified by the
-    // slow-gated CLP `parity_hash_d36`.
     (
         "D36",
         "ea73313186c94b872aa8a755c1c00d9537688be74971dd1bebb6bb0d35376e62",
     ),
-    // Anticipated thermal under a commissioning window AND a per-stage-varying
-    // block schedule: a K=2 anticipated thermal with window `[entry=2, exit=4)`
-    // over a 6-stage horizon. The decision gate (`is_anticipated_decision_active`)
-    // is active only when the DELIVERY stage `t + 2` lands in `[2, 4)`, so the
-    // pre-entry decision at stage 0 delivers at the first operating stage 2 and the
-    // ring buffer drains to 0 within K stages after exit. This is the only case
-    // combining an anticipated thermal with a commissioning window. This guard pins
-    // only the HiGHS `D37.sha256`; the CLP `D37.sha256` is verified by the
-    // slow-gated CLP `parity_hash_d37`.
     (
         "D37",
         "c709a7433e5a2f1ceac3bb0030806ccdd85ee3ecbc2578e66a156dd3bfce7bd0",
     ),
-    // Mid-cascade dead-volume filling: a cascade
-    // `H1 → H2 (filling) → H3 (real fed downstream)` plus an off-cascade control
-    // H4. H2 carries `entry_stage_id = 4` with `filling { start_stage_id = 2 }`,
-    // so it is PreFilling at stages 0–1, Filling at 2–3, and Operating at 4–5.
-    // During PreFilling the dam is absent from the LP, so its inflow short-circuits
-    // onto its real downstream H3's water-balance row instead of into a sink. Block
-    // counts change at BOTH phase boundaries (schedule 1/1/3/2/3/1). The parity hash
-    // reflects the short-circuit and the phase transitions through the cascade
-    // coupling on storage/water/cuts; the filling soft-penalty slacks are checked by
-    // the focused simulation test, not by this baseline. This guard pins only the
-    // HiGHS `D38.sha256`; the CLP `D38.sha256` is verified by the slow-gated CLP
-    // `parity_hash_d38`.
     (
         "D38",
         "7e02e0cfd3d7cbf27ec4d1939a9e6957e52eecaa3e20ccdb2ef2be03426de352",
     ),
-    // PreFilling hydro directly upstream of a Filling hydro: cascade
-    // `U (filling) → D (filling) → H3 (real sink)` plus an off-cascade control.
-    // U commissions after D (`start_U = 3 > start_D = 1`), so at stages 1–2 D is
-    // Filling while U is PreFilling; U's PreFilling inflow short-circuits onto D's
-    // water-balance row only (the cap row is removed), and D treats it as ordinary
-    // cascade inflow. This guard pins only the HiGHS `D39.sha256`; the CLP
-    // `D39.sha256` is verified by the slow-gated CLP `parity_hash_d39`.
     (
         "D39",
         "7a29931dcd7e678c3e0ce83820508c97c9419e620669f98ae25b17292c8ad7e8",
     ),
-    // Filling cascade: `H_up (filling) → H_down (filling) → H_sink (real)` plus
-    // an off-cascade control. H_up and H_down share the same commissioning and
-    // filling-start stages, so BOTH are Filling at the interior stages
-    // simultaneously, coupled ONLY through the cascade release — H_up's outflow
-    // routes onto H_down's water-balance row. The volume-target model is
-    // water-balance-row-only: there is no impound / retention cap row, so the
-    // downstream filling dam absorbs the upstream filling dam's release as
-    // ordinary cascade inflow. A single-filling-dam case (D38/D39) cannot
-    // exercise two adjacent dams in Filling at once. This guard pins only the
-    // HiGHS `D40.sha256`; the CLP `D40.sha256` is verified by the slow-gated CLP
-    // `parity_hash_d40`.
     (
         "D40",
         "e9e2508363c3d2cd6524fc822849f8d35ca76a3909f51f48fd7325d53c6d1968",

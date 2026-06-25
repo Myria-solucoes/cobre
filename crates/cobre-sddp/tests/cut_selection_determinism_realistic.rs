@@ -1,18 +1,7 @@
-//! Realistic-scale determinism tests for the cut-selection kernel.
-//!
-//! Verifies that `CutSelectionStrategy::select` (which forwards to
-//! the GEMM-based kernel) produces bit-identical `CutActivityUpdates`
-//! across thread counts {1, 16, 96} at:
-//! - Aggregated sizing (K=945, M=384, D=155) — convertido iter-4 scale.
-//! - Disaggregated sizing (K=1000, M=384, D=2080) — production
-//!   target. Gated behind `slow-tests` feature.
-//!
-//! Note on host capacity: the disaggregated test requests rayon pools
-//! of size {1, 16, 96}. On hosts with fewer than 96 logical CPUs (e.g.
-//! GitHub `ubuntu-latest` runners with 2–4 cores) rayon's worker count
-//! is capped by the OS, which is acceptable here — the assertions
-//! compare byte-identical bitmaps across whatever thread counts rayon
-//! actually instantiates.
+//! `CutSelectionStrategy::select` produces bit-identical `CutActivityUpdates`
+//! across thread counts. On hosts with fewer logical CPUs than a requested pool
+//! size, rayon caps the worker count; this is acceptable — the assertions
+//! compare bitmaps across whatever thread counts rayon actually instantiates.
 
 #![cfg_attr(
     test,
@@ -31,10 +20,7 @@
 use cobre_sddp::cut::CutPool;
 use cobre_sddp::cut_selection::{CutActivityUpdates, CutSelectionStrategy};
 
-/// Splitmix64 PRNG — same algorithm used in
-/// `crates/cobre-solver/examples/audit_mm_dispatch.rs` and
-/// `crates/cobre-sddp/examples/probe_k_disaggregated.rs`. Inline so
-/// no external crate is needed.
+/// Splitmix64 PRNG, inlined so no external crate is needed.
 fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut z = *state;
@@ -63,8 +49,8 @@ fn make_pool(k: usize, d: usize, seed: u64) -> CutPool {
         fill_f64(&mut coeffs, state.wrapping_add(slot as u64));
         pool.add_cut(0, slot as u32, intercept, &coeffs);
     }
-    // Force all cuts eligible: iteration_generated < current_iteration
-    // (current_iteration in the tests below is 5).
+    // Force all cuts eligible: iteration_generated < the current_iteration (5)
+    // the tests below pass to select.
     for slot in 0..k {
         pool.metadata[slot].iteration_generated = 1;
     }
@@ -124,9 +110,8 @@ fn select_for_stage_deterministic_aggregated_scale() {
     );
 }
 
-/// Smaller medium-scale fixture exercising Level1 and Dominated to
-/// confirm determinism is not Lml1-specific. K=200, D=155, M=64 —
-/// runs in <100 ms total so it stays in the default suite.
+/// Exercises Level1 and Dominated to confirm determinism is not Lml1-specific;
+/// sized to run in <100 ms so it stays in the default (non-slow) suite.
 #[test]
 fn select_for_stage_deterministic_level1_and_dominated_medium() {
     const K: usize = 200;
@@ -159,20 +144,13 @@ fn select_for_stage_deterministic_level1_and_dominated_medium() {
     }
 }
 
-/// Disaggregated-scale test: K=1000 (placeholder until
-/// the measured-K probe lands), M=384, D=2080.
-/// ~1.2 billion FMA per call × 3 pools = ~6 seconds in release on
-/// modern `x86_64` (per design §6 sizing model). Gated behind
-/// `slow-tests` per project rule.
 #[test]
 #[cfg_attr(
     not(feature = "slow-tests"),
     ignore = "slow: run with --features slow-tests"
 )]
 fn select_for_stage_deterministic_disaggregated_scale() {
-    // TODO(measured-K-probe): replace K=1000 with the measured
-    // disaggregated K value once the probe report lands in
-    // docs/design/dynamic-cut-selection-design.md.
+    // TODO(measured-K-probe): replace K=1000 with the measured disaggregated K.
     const K: usize = 1000;
     const D: usize = 2080;
     const M: usize = 384;

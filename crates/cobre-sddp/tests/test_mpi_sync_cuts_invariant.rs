@@ -1,8 +1,5 @@
-//! Integration test: `sync_cuts` invariant rejects mismatched local cut counts.
-//!
-//! `CutSyncBuffers::sync_cuts` must return `SddpError::Validation` when
-//! `local_cuts.len()` does not equal `per_rank_cuts[my_rank]`, with an error
-//! message containing both the invariant violation and the specific mismatch.
+//! `CutSyncBuffers::sync_cuts` returns `SddpError::Validation` when
+//! `local_cuts.len()` differs from `per_rank_cuts[my_rank]`.
 
 #![allow(
     clippy::unwrap_used,
@@ -14,15 +11,9 @@
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_sddp::{FutureCostFunction, SddpError, cut_sync::CutSyncBuffers};
 
-// ---------------------------------------------------------------------------
-// Stub communicator: 2-rank, rank=0 perspective.
-// ---------------------------------------------------------------------------
-
-/// Stub communicator that simulates a 2-rank cluster from rank 0's perspective.
-///
-/// `allgatherv` fills each rank slot in recv from the send buffer.
-/// `allreduce` copies send to recv (no aggregation needed for this test
-/// since `sync_cuts` validates before calling `allgatherv`).
+/// Stub 2-rank cluster from rank 0's perspective. `allreduce` copies send to
+/// recv — no aggregation is needed because `sync_cuts` validates the cut count
+/// before reaching `allgatherv`.
 struct StubComm2Rank;
 
 impl Communicator for StubComm2Rank {
@@ -71,16 +62,6 @@ impl Communicator for StubComm2Rank {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Test
-// ---------------------------------------------------------------------------
-
-/// Verify that `sync_cuts` returns `SddpError::Validation` when rank 0
-/// provides 2 local cuts but `per_rank_cuts[0] == 3`.
-///
-/// The error message must contain both:
-/// - `"sync_cuts invariant violated"` (exact prefix from the implementation)
-/// - `"rank 0 produced 2 cuts, expected 3"` (the specific mismatch)
 #[test]
 fn sync_cuts_invariant_rejected_when_cut_count_mismatches() {
     let n_state = 2;
@@ -88,8 +69,6 @@ fn sync_cuts_invariant_rejected_when_cut_count_mismatches() {
     let max_cuts_per_rank = 3;
     let total_forward_passes = 6;
 
-    // with_distribution: base = 6/2 = 3, remainder = 0
-    // per_rank_cuts = [3, 3]
     let mut bufs = CutSyncBuffers::with_distribution(
         n_state,
         max_cuts_per_rank,
@@ -97,12 +76,11 @@ fn sync_cuts_invariant_rejected_when_cut_count_mismatches() {
         total_forward_passes,
     );
 
-    // FCF sized for 1 stage, n_state=2, 3 cuts per rank.
     let forward_passes = u32::try_from(max_cuts_per_rank).expect("max_cuts_per_rank fits in u32");
     let mut fcf = FutureCostFunction::new(1, n_state, forward_passes, 10, &[0; 1]);
     let comm = StubComm2Rank;
 
-    // Provide only 2 local cuts — one fewer than per_rank_cuts[0] == 3.
+    // 2 cuts vs the expected per_rank_cuts[0] == 3 — the mismatch under test.
     let coeffs_a = [1.0_f64, 2.0_f64];
     let coeffs_b = [3.0_f64, 4.0_f64];
     let local_cuts: &[(u32, u32, u32, f64, &[f64])] =

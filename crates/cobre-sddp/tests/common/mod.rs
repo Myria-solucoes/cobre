@@ -1,12 +1,7 @@
 //! Shared test utilities for `cobre-sddp` integration tests.
 //!
-//! Provides [`build_setup_for_case`], a drop-in replacement for
-//! `StudySetup::new` that drives the same construction pipeline as the CLI.
-//! The parquet override flows through `hydro_models.productivity_override`,
-//! which `prepare_hydro_models` populates from disk.
-//!
-//! Also exports [`StubComm`], a single-rank communicator stub used in
-//! non-MPI integration tests.
+//! [`build_setup_for_case`] is a drop-in replacement for `StudySetup::new` that
+//! drives the same construction pipeline as the CLI.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, dead_code)]
 
@@ -18,11 +13,8 @@ use cobre_sddp::{StudySetup, setup::StudyParams};
 pub mod anticipated_structural_assertions;
 pub mod parity_hash;
 
-/// Single-rank communicator stub for testing.
-///
-/// Implements `Communicator` for single-process test scenarios where no
-/// inter-rank communication is needed. All collective operations are no-ops;
-/// broadcasts and reductions copy data locally without communication.
+/// Single-rank `Communicator` stub: broadcasts/reductions copy data locally;
+/// other collectives are no-ops.
 pub struct StubComm;
 
 impl Communicator for StubComm {
@@ -70,11 +62,8 @@ impl Communicator for StubComm {
 
 /// Build a [`StudySetup`] for a case directory.
 ///
-/// Reads scenario sources from `config`, derives `StudyParams`, and constructs
-/// the setup via `StudySetup::from_broadcast_params`. The
-/// `hydro_energy_productivity.parquet` override is already folded into
-/// `hydro_models.productivity_override` by the caller's
-/// `prepare_hydro_models` invocation, so this helper does no parquet I/O.
+/// The caller's `prepare_hydro_models` has already folded the productivity
+/// override into `hydro_models`; this helper does no parquet I/O.
 pub fn build_setup_for_case(
     _case_dir: &Path,
     config: &cobre_io::Config,

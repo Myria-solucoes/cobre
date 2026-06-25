@@ -1,14 +1,8 @@
 //! Numerical reconciliation test: LP total cost must match the analytical optimum
 //! for a K=2, 6-stage fixture with zero discount rate.
 //!
-//! ## Bug being guarded against
-//!
-//! In a 6-stage K=2 study with a 500x cost asymmetry (anticipated thermal at
-//! $10/MWh vs backup at $5000/MWh), the LP's total immediate cost should equal
-//! the analytical optimum derived below. Before the layout fix, intermediate-stage
-//! anticipated dispatch is silently zeroed, forcing the backup thermal to carry
-//! all load at those stages. The result is an LP total that is hundreds of times
-//! larger than optimal.
+//! A regression that silently zeroes intermediate-stage anticipated dispatch
+//! forces backup to carry that load, inflating the LP total by hundreds of times.
 //!
 //! ## Analytical optimum (discount rate = 0, all discount factors = 1.0)
 //!
@@ -50,21 +44,8 @@
 //!
 //! **Total analytical optimum = $4,464,000 + $1,116,000,000 = $1,120,464,000**
 //!
-//! ## What this test asserts
-//!
-//! After training for 10 iterations and running one deterministic simulation,
-//! the sum of per-stage `immediate_cost` values (LP objective minus theta at
-//! each stage) must equal $1,120,464,000 within $1,000 absolute tolerance.
-//!
-//! ## Entity IDs
-//!
-//! IDs 5 (anticipated), 6 (backup), and 7 (hydro) are chosen to be distinct from
-//! both the K=2 saturation test (IDs 2, 4, 3) and the K=3 saturation test
-//! (IDs 3, 4, 5) so that combined nextest runs produce unambiguous per-entity
-//! attribution in failure messages.
-//!
-//! This test asserts the post-always-active-fishing regime introduced when the
-//! fishing and cost-zeroing predicates were unified under a single source of truth.
+//! The 5/6/7 entity IDs are distinct from the K=2 and K=3 saturation tests so
+//! combined nextest runs give unambiguous per-entity failure attribution.
 
 #![allow(
     clippy::unwrap_used,
@@ -115,20 +96,14 @@ use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context
 // Analytical optimum constants (documented in module-level doc comment above)
 // ---------------------------------------------------------------------------
 
-/// Active decision cost: 4 stages × 150 MW × 744 h × $10/MWh = $4,464,000.
-/// Each stage's d_t commits to load level (not max_gen) because the LP has
-/// no incentive to over-commit when bus excess is free.
+/// Active decision cost: 4 stages × 150 MW (load, not max_gen — over-committing
+/// is wasted when excess is free) × 744 h × $10/MWh = $4,464,000.
 const EXPECTED_DECISION_COST_USD: f64 = 4.0 * 150.0 * 744.0 * 10.0;
 
 /// Pre-horizon backup cost: 2 stages × 150 MW × 744 h × $5000/MWh = $1,116,000,000.
-/// At pre-horizon stages (t=0, t=1), the always-active fishing equality
-/// pins the anticipated thermal to slot 0 of the seed ring buffer. With
-/// past_anticipated_commitments.values_mw = [0.0, 0.0], slot 0 carries 0 MW
-/// at both pre-horizon stages, so the LP must dispatch backup (the only
-/// remaining thermal with a free column) at $5000/MWh to meet the 150 MW
-/// load. The cost-zeroing predicate is also always-active, so the
-/// anticipated thermal column has objective 0 — but its column upper bound
-/// is fishing-pinned to 0, leaving backup as the sole feasible source.
+/// At t∈{0,1} the always-active fishing equality pins the anticipated thermal to
+/// the zero seed (slot 0 = 0 MW), leaving backup as the sole feasible source for
+/// the 150 MW load. See module doc Zone C.
 const EXPECTED_PRE_HORIZON_BACKUP_COST_USD: f64 = 2.0 * 150.0 * 744.0 * 5000.0;
 
 /// Total = active decision cost (stages 2..=5) + pre-horizon backup cost
@@ -139,7 +114,6 @@ const EXPECTED_TOTAL_USD: f64 = EXPECTED_DECISION_COST_USD + EXPECTED_PRE_HORIZO
 // StubComm — single-rank communicator for testing
 // ---------------------------------------------------------------------------
 
-/// Single-rank communicator stub for testing.
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -189,23 +163,12 @@ impl Communicator for StubComm {
 // System builder
 // ---------------------------------------------------------------------------
 
-/// Build a 6-stage K=2 system with:
-/// - 1 bus (deficit cost $5000/MWh, excess cost $0)
-/// - 1 trivial hydro (1 hm³ max storage, zero inflow, max_gen 1 MW) — keeps
-///   the model in the thermal regime without adding a hydro state variable
-///   that complicates interpretation.
-/// - 1 anticipated thermal (K=2, cost $10/MWh, max 200 MW) — id=5
-/// - 1 backup thermal (cost $5000/MWh, max 500 MW) — id=6
-/// - Load 150 MW constant across all stages
-/// - `past_anticipated_commitments = [(id=5, [0.0, 0.0])]` — zero seeds so the
-///   pre-horizon fishing predicate is inactive, allowing anticipated dispatch
-///   directly at $10/MWh at stages 0 and 1.
-/// - `annual_discount_rate = 0.0` set explicitly on `PolicyGraph` — all
-///   discount factors collapse to 1.0, making the analytical cost summation
-///   straightforward.
+/// Build the 6-stage K=2 reconciliation fixture.
 ///
-/// Entity IDs 5 and 6 are distinct from both the K=2 saturation test (2, 4)
-/// and the K=3 saturation test (3, 4) to avoid cross-test confusion in nextest.
+/// The trivial hydro keeps the model in the thermal regime; it exists only so
+/// `n_hydros = 1` is satisfied without adding a hydro state variable that
+/// complicates interpretation. `annual_discount_rate = 0.0` collapses all
+/// discount factors to 1.0, making the analytical cost summation exact.
 fn build_system_reconciliation_k2() -> cobre_core::System {
     use chrono::NaiveDate;
 
@@ -222,9 +185,6 @@ fn build_system_reconciliation_k2() -> cobre_core::System {
         excess_cost: 0.0,
     };
 
-    // Anticipated thermal: K=2 lead stages, cheap at $10/MWh.
-    // The 500x cost ratio vs the backup ensures d_t = 150 MW (load) at every
-    // active stage — over-committing to 200 MW costs extra with no benefit.
     let anticipated_id = EntityId(5);
     let thermal_ant = Thermal {
         id: anticipated_id,
@@ -240,8 +200,6 @@ fn build_system_reconciliation_k2() -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // Backup thermal: very expensive at $5000/MWh.
-    // The LP must avoid it wherever anticipated dispatch is available.
     let thermal_backup = Thermal {
         id: EntityId(6),
         name: "T_backup_reconcil".to_string(),
@@ -254,9 +212,6 @@ fn build_system_reconciliation_k2() -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // Trivial hydro: 1 hm³ cap, zero inflow, max_gen 1 MW.
-    // Present to satisfy `n_hydros = 1` requirements of `ResolvedBounds`
-    // while keeping the system firmly in the thermal regime.
     let hydro = Hydro {
         id: EntityId(7),
         name: "H1".to_string(),
@@ -326,7 +281,6 @@ fn build_system_reconciliation_k2() -> cobre_core::System {
         })
         .collect();
 
-    // Zero inflow — keeps the model deterministic and purely thermal.
     let inflow_models: Vec<InflowModel> = (0..n_stages)
         .map(|i| InflowModel {
             hydro_id: EntityId(7),
@@ -422,11 +376,11 @@ fn build_system_reconciliation_k2() -> cobre_core::System {
             },
         },
     );
+    // SystemBuilder sorts by EntityId: index 0 = anticipated (id=5), index 1 =
+    // backup (id=6).
     for s in 0..thermal_axis {
-        // Thermal index 0 = anticipated (id=5): cheap at $10/MWh, max 200 MW
         bounds.thermal_bounds_mut(0, s).cost_per_mwh = 10.0;
         bounds.thermal_bounds_mut(0, s).max_generation_mw = 200.0;
-        // Thermal index 1 = backup (id=6): expensive at $5000/MWh, max 500 MW
         bounds.thermal_bounds_mut(1, s).cost_per_mwh = 5000.0;
         bounds.thermal_bounds_mut(1, s).max_generation_mw = 500.0;
     }
@@ -449,11 +403,7 @@ fn build_system_reconciliation_k2() -> cobre_core::System {
         },
     );
 
-    // Zero seeds: the past_anticipated_commitments for the anticipated thermal
-    // are [0.0, 0.0]. At pre-horizon stages (t=0, t=1) the fishing predicate
-    // is inactive (K_i > stage_idx is false for K_i=2, stage_idx∈{0,1}), so
-    // the anticipated thermal dispatches directly at $10/MWh — not pinned to
-    // the zero seed. Backup carries 0 MW at all stages.
+    // Zero seeds: slot 0 carries 0 MW at both pre-horizon stages (Zone C).
     let initial_conditions = InitialConditions {
         storage: vec![HydroStorage {
             hydro_id: EntityId(7),
@@ -468,14 +418,9 @@ fn build_system_reconciliation_k2() -> cobre_core::System {
         recent_observations: vec![],
     };
 
-    // `annual_discount_rate = 0.0` is set explicitly on the PolicyGraph so
-    // that all per-transition discount factors collapse to 1.0. With d_t = 1
-    // for all t, the analytical optimum derivation is exact: there is no NPV
-    // scaling between decision cost and delivery/backup cost.
-    //
-    // Note: `PolicyGraph::default()` already has `annual_discount_rate: 0.0`
-    // and `transitions: vec![]`. Setting it explicitly here documents the
-    // intent and guards against future default changes.
+    // Set explicitly (not relying on `PolicyGraph::default()`) so a future
+    // default change cannot silently introduce NPV scaling into the analytical
+    // derivation.
     let policy_graph = PolicyGraph {
         graph_type: PolicyGraphType::FiniteHorizon,
         annual_discount_rate: 0.0,
@@ -502,13 +447,8 @@ fn build_system_reconciliation_k2() -> cobre_core::System {
 // Config builder
 // ---------------------------------------------------------------------------
 
-/// Build a [`Config`] for 10-iteration training and 1-scenario deterministic
-/// simulation.
-///
-/// Ten iterations is sufficient for the 500x cost asymmetry to produce cuts
-/// that signal the value of anticipated dispatch. If the layout fix is present,
-/// the observed cost will match the analytical optimum. If not, the cost will
-/// be approximately orders of magnitude larger.
+/// Ten training iterations let the 500x cost asymmetry produce cuts that signal
+/// the value of anticipated dispatch, driving the observed cost to the optimum.
 fn build_config() -> Config {
     Config {
         schema: None,
@@ -570,49 +510,17 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 // Test
 // ---------------------------------------------------------------------------
 
-/// Assert that the LP total cost equals the hand-derived analytical optimum for
-/// a K=2, 6-stage fixture with zero discount rate.
-///
-/// ## Analytical optimum (derivation in module doc)
-///
-/// - Zone A (active decision stages t∈{0,1,2,3}): LP picks d_t = load = 150 MW
-///   (NOT max_gen=200). Decision cost = 4 × 150 × 744 × $10 = **$4,464,000**.
-/// - Zone B (delivery stages t∈{2,3,4,5}): anticipated thermal pinned to
-///   matured d_{t-K}=150 MW; per-block cost skipped in `fill_thermal_columns`
-///   (never written); backup not needed → **$0**.
-/// - Zone C (pre-horizon stages t∈{0,1}): always-active fishing predicate pins
-///   the anticipated thermal to seed slot 0 = 0 MW. Backup dispatches 150 MW at
-///   $5000/MWh. Pre-horizon backup cost = 2 × 150 × 744 × $5000 = **$1,116,000,000**.
-/// - **Total = $4,464,000 + $1,116,000,000 = $1,120,464,000**
-///
-/// ## Cost field used
-///
-/// The test sums `stage.costs[block].immediate_cost` across all stages and
-/// blocks. `immediate_cost = LP_objective - theta_variable`, i.e. the stage's
-/// realized cost excluding the future-cost approximation. This matches the
-/// definition of "total system cost" in the analytical derivation.
-///
-/// `SimulationCostResult::total_cost` is NOT used because it includes the
-/// theta (future cost function) value, which is an approximation artefact of
-/// the SDDP algorithm and should not appear in the realized cost total.
-///
-/// ## Expected failure on pre-fix code
-///
-/// Before the layout fix, `d_1 = d_2 = d_3 ≈ 0` due to cut-coefficient
-/// corruption. The backup thermal carries 150 MW at intermediate stages,
-/// producing a cost gap of approximately $370M relative to the optimum.
+/// Assert that the LP total cost equals the hand-derived analytical optimum
+/// ($1,120,464,000; derivation in module doc) for a K=2, 6-stage fixture with
+/// zero discount rate.
 #[test]
 fn lp_total_cost_matches_analytical_optimum_k2_discount_zero() {
-    // Step 1: build and train the study.
-    // (Constants EXPECTED_DECISION_COST_USD, EXPECTED_PRE_HORIZON_BACKUP_COST_USD,
-    // and EXPECTED_TOTAL_USD are defined and documented at the module level.)
     let system = build_system_reconciliation_k2();
     let config = build_config();
     let mut setup = build_setup(system, &config);
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new: must succeed");
 
-    // Train the policy for 10 iterations.
     let outcome = setup
         .train(&mut solver, &comm, 10, ActiveSolver::new, None, None)
         .expect("training error: train() must not return Err");
@@ -622,7 +530,6 @@ fn lp_total_cost_matches_analytical_optimum_k2_discount_zero() {
         outcome.error,
     );
 
-    // Step 2: run a single deterministic simulation.
     let mut pool = setup
         .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("workspace pool error: create_workspace_pool must succeed");
@@ -655,16 +562,8 @@ fn lp_total_cost_matches_analytical_optimum_k2_discount_zero() {
         "scenario must contain one stage record per study stage (n_stages=6)",
     );
 
-    // Step 3: sum per-stage immediate costs.
-    //
-    // `immediate_cost = LP_objective - theta`, i.e. the stage's realized
-    // resource + deficit cost, excluding the future-cost approximation.
-    // With discount_rate = 0.0, the cumulative discount factor is 1.0 at
-    // every stage, so immediate_cost equals the undiscounted stage cost.
-    //
-    // Each stage has exactly one block (block_id = None for the stage-level
-    // aggregate entry). The `costs` vec has one entry per stage in this
-    // single-block fixture.
+    // Sum `immediate_cost` (LP objective minus theta), excluding the future-cost
+    // approximation — the realized cost the analytical optimum is derived for.
     let observed_total: f64 = scenario
         .stages
         .iter()
@@ -672,12 +571,8 @@ fn lp_total_cost_matches_analytical_optimum_k2_discount_zero() {
         .map(|cost| cost.immediate_cost)
         .sum();
 
-    // Step 4: assert within $1000 absolute tolerance.
-    //
-    // $1000 on a ~$6.7M cost is a relative tolerance of ~1.5e-4, comfortably
-    // above HiGHS's documented 1e-9 precision tolerance while removing any
-    // solver-tolerance fragility. The pre-fix error is ~$370M, so $1000 keeps
-    // 5+ orders of magnitude of detection headroom.
+    // $1000 sits comfortably above HiGHS's 1e-9 precision yet far below the
+    // ~$370M pre-fix error, giving 5+ orders of magnitude of detection headroom.
     const COST_TOLERANCE_USD: f64 = 1_000.0;
     assert!(
         (observed_total - EXPECTED_TOTAL_USD).abs() < COST_TOLERANCE_USD,
@@ -692,18 +587,11 @@ fn lp_total_cost_matches_analytical_optimum_k2_discount_zero() {
         COST_TOLERANCE_USD,
     );
 
-    // Step 5: cost-breakdown reconciliation (Finding 4).
-    //
-    // The anticipated (GNL) commitment fuel is charged on the decision column at
-    // the decision stage and is now reported as `anticipated_thermal_cost`. With
-    // it included, the named cost categories must sum to `immediate_cost` at every
-    // stage (`immediate_cost = Σ objective·primal − θ`, and each category is its
-    // own objective·primal contribution).
-    //
-    // `hydro_violation_cost` already aggregates its six sub-components (outflow
-    // below/above, turbined, generation, evaporation, withdrawal), so the sum
-    // uses the aggregate, not the parts. `spillage_cost` already includes
-    // diversion. Tolerance is generous relative to the ~$1.1e9 stage costs.
+    // The named cost categories must sum to `immediate_cost` at every stage,
+    // including the anticipated commitment fuel as `anticipated_thermal_cost`.
+    // `hydro_violation_cost` already aggregates its six sub-components and
+    // `spillage_cost` already includes diversion — sum the aggregates, not the
+    // parts, or the total double-counts.
     const RECONCILE_TOLERANCE_USD: f64 = 1.0;
     let mut saw_nonzero_anticipated = false;
     for stage in &scenario.stages {

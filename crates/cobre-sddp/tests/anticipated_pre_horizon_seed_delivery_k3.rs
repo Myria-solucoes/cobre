@@ -13,7 +13,7 @@
 //!    accepts the delivery at zero additional cost.
 //!
 //! 2. Deliver `committed_at(1) == 30.0 MW` — `shift_anticipated_state`
-//!    (`noise.rs:253`) moves slot 1 (`values_mw[1] = 30.0`) into slot 0 at
+//!    moves slot 1 (`values_mw[1] = 30.0`) into slot 0 at
 //!    the start of stage 1. Stage 1's always-active fishing equality then
 //!    reads slot 0 = 30.0 MW. This is one of the two K=3-specific assertions
 //!    that the K=1 and K=2 delivery tests cannot reach: K=3 has three
@@ -50,26 +50,11 @@
 //!    - Tolerance: $1,000.
 //!    - Total upper bound: $1,343,665,000.
 //!
-//! ## Legacy behaviour
-//!
-//! The old predicate `K_i > stage_idx` had fishing active at stages 0, 1, and 2.
-//! However, the ring-buffer shifts between three pre-horizon stages were not
-//! explicitly exercised. This test closes that gap for the K=3 case, including
-//! both shifts: stages 0→1 and 1→2.
-//!
 //! ## Entity IDs
 //!
-//! IDs 51 (hydro), 52 (anticipated thermal), 53 (backup thermal) are chosen
-//! to be distinct from all existing anticipated tests:
-//! - `anticipated_simulation_ring_buffer.rs` uses IDs 2/3/4
-//! - `anticipated_numerical_reconciliation_k2.rs` uses IDs 5/6/7
-//! - `anticipated_d_t_saturation_k2.rs` uses IDs 2/3/4
-//! - `anticipated_d_t_saturation_k3.rs` uses IDs 3/4/5
-//! - `anticipated_pre_horizon_seed_delivery_k1.rs` uses IDs 30/31/32
-//! - `anticipated_pre_horizon_seed_delivery_k2.rs` uses IDs 41/42/43
-//! - `anticipated_backward_cut_k3.rs` uses IDs 2/5
-//!
-//! The 50-series ensures no cross-test entity confusion in nextest.
+//! IDs 51 (hydro), 52 (anticipated thermal), 53 (backup thermal) are in the
+//! 50-series to stay distinct from the sibling anticipated tests, so combined
+//! nextest runs attribute failures unambiguously per entity.
 
 #![allow(
     clippy::unwrap_used,
@@ -219,8 +204,8 @@ fn build_system() -> cobre_core::System {
         excess_cost: 0.0,
     };
 
-    // Anticipated thermal: K=3 lead stages, very cheap so the LP saturates
-    // commitment at max_gen = 200 MW at every active decision stage.
+    // Cheap ($10/MWh) so the LP saturates commitment at max_gen at every active
+    // decision stage.
     let anticipated_id = EntityId(52);
     let thermal_ant = Thermal {
         id: anticipated_id,
@@ -234,10 +219,8 @@ fn build_system() -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // Backup thermal: expensive so the LP uses it only when anticipated
-    // capacity is unavailable (stage 0: 50 MW seed → backup 100 MW;
-    // stage 1: 30 MW shifted seed → backup 120 MW;
-    // stage 2: 10 MW doubly-shifted seed → backup 140 MW).
+    // Expensive ($5000/MWh) so the LP uses it only for the load the seeds do not
+    // cover (per-stage backup MW derived in the cost-bound consts above).
     let thermal_backup = Thermal {
         id: EntityId(53),
         name: "T_backup_seed_k3".to_string(),
@@ -250,9 +233,8 @@ fn build_system() -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // Trivial hydro: present to satisfy `n_hydros = 1` in ResolvedBounds;
-    // zero inflow and 1 MW max_gen keep the system firmly in the thermal
-    // regime.
+    // Trivial hydro satisfies `n_hydros = 1` in ResolvedBounds while keeping the
+    // system firmly in the thermal regime.
     let hydro = Hydro {
         id: EntityId(51),
         name: "H1_seed_k3".to_string(),
@@ -419,14 +401,9 @@ fn build_system() -> cobre_core::System {
             },
         },
     );
-    // Thermal index 0 = anticipated (id=52): cheap at $10/MWh, max 200 MW.
-    // Thermal index 1 = backup (id=53): expensive at $5000/MWh, max 500 MW.
-    // These per-thermal overrides ensure the LP distinguishes them. Without
-    // the override the LP has no cost incentive to commit anticipated capacity
-    // and decision_at(t) collapses to zero, masking the regression assertion.
-    // The thermal_axis range [0, n_stages + k) = [0, 9) covers the delivery-stage
-    // padding; omitting the padding causes the decision cost coefficient to
-    // default to 0 and the LP commits everywhere, hiding the AC5 regression.
+    // Index 0 = anticipated (id=52); index 1 = backup (id=53). The per-thermal
+    // overrides give the LP a cost incentive to commit anticipated capacity;
+    // without them decision_at(t) collapses to zero, masking the regression.
     for s in 0..thermal_axis {
         bounds.thermal_bounds_mut(0, s).cost_per_mwh = 10.0;
         bounds.thermal_bounds_mut(0, s).max_generation_mw = 200.0;
@@ -452,19 +429,10 @@ fn build_system() -> cobre_core::System {
         },
     );
 
-    // Seed the anticipated ring buffer with [50.0, 30.0, 10.0] MW.
-    //
-    // With the always-active fishing predicate, stage 0 reads slot 0 (= 50.0 MW)
-    // via the fishing equality and delivers it at zero LP cost (cost-zeroing
-    // predicate). Stage 1 reads slot 0 after the first ring-buffer shift
-    // (`noise.rs:253 shift_anticipated_state`) moves slot 1 (= 30.0 MW) into
-    // slot 0; stage 1's fishing equality delivers 30.0 MW at zero cost.
-    // Stage 2 reads slot 0 after the second ring-buffer shift moves slot 1
-    // (now holding 10.0 MW, having been shifted from slot 2) into slot 0;
-    // stage 2's fishing equality delivers 10.0 MW at zero cost.
-    //
-    // Distinct values (50.0 vs 30.0 vs 10.0) catch slot-swap bugs that
-    // identical values would silently mask across two pre-horizon shifts.
+    // Ring-buffer seeds [50.0, 30.0, 10.0] MW; the per-stage delivery via
+    // `shift_anticipated_state` is derived in the module doc. Distinct values
+    // catch slot-swap bugs that identical values would mask across the two
+    // pre-horizon shifts.
     let initial_conditions = InitialConditions {
         storage: vec![HydroStorage {
             hydro_id: EntityId(51),
@@ -564,8 +532,8 @@ fn pre_horizon_seed_delivers_three_pre_horizon_stages_k3() {
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
 
-    // Step 1: train for 5 iterations so cuts sharpen and stage-2 decisions reach max_gen.
-    // (This covers stage-5 delivery at zero backup cost, satisfying AC6 bound.)
+    // Five iterations let cuts sharpen so stage-2 decisions reach max_gen,
+    // covering stage-5 delivery at zero backup cost (the AC6 bound).
     let outcome = setup
         .train(&mut solver, &comm, 5, ActiveSolver::new, None, None)
         .expect("train: must not return Err");
@@ -575,7 +543,6 @@ fn pre_horizon_seed_delivers_three_pre_horizon_stages_k3() {
         outcome.error
     );
 
-    // Step 2: run a single deterministic simulation.
     let mut pool = setup
         .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("create_workspace_pool: must succeed");
@@ -610,7 +577,6 @@ fn pre_horizon_seed_delivers_three_pre_horizon_stages_k3() {
         "scenario must contain one record per study stage (n_stages=6)",
     );
 
-    // Step 3: define accessors for the anticipated thermal (id=52).
     let anticipated_thermal_id: i32 = 52;
     let decision_at = |t: usize| -> Option<f64> {
         scenario.stages[t]
@@ -642,7 +608,6 @@ fn pre_horizon_seed_delivers_three_pre_horizon_stages_k3() {
     );
 
     // ── AC2: committed_at(1) == Some(30.0) within 1e-6 MW ──────────────────
-    // (First ring-buffer shift: slot 1 → slot 0 between pre-horizon stages 0→1)
     let c1 = committed_at(1).expect(
         "AC2 FAIL: committed_at(1) is None. \
          The fishing constraint is always active for every anticipated plant, so it must be active at stage 1. \
@@ -658,8 +623,6 @@ fn pre_horizon_seed_delivers_three_pre_horizon_stages_k3() {
     );
 
     // ── AC3: committed_at(2) == Some(10.0) within 1e-6 MW ──────────────────
-    // (Deepest pre-horizon delivery: second ring-buffer shift between stages 1→2.
-    //  Slot 1 (now 10.0 MW) → slot 0)
     let c2 = committed_at(2).expect(
         "AC3 FAIL: committed_at(2) is None. \
          The fishing constraint is always active for every anticipated plant, so it must be active at stage 2. \
@@ -675,7 +638,6 @@ fn pre_horizon_seed_delivers_three_pre_horizon_stages_k3() {
     );
 
     // ── AC4: committed_at(t) ≈ decision_at(t-3) for t ∈ {3,4,5} ───────────
-    // (K=3 ring-buffer: decisions mature 3 stages after being made)
     for t in 3..6_usize {
         let ct = committed_at(t).unwrap_or_else(|| {
             panic!(
@@ -703,7 +665,6 @@ fn pre_horizon_seed_delivers_three_pre_horizon_stages_k3() {
     }
 
     // ── AC5: decision_at(t) non-zero and bounded for t ∈ {0,1,2} ───────────
-    // (Active-decision stages: t + 3 < 6; LP saturates on cost ratio)
     for t in 0..3_usize {
         let dt = decision_at(t).unwrap_or_else(|| {
             panic!(
@@ -727,8 +688,8 @@ fn pre_horizon_seed_delivers_three_pre_horizon_stages_k3() {
     }
 
     // ── AC6: observed_total ≤ EXPECTED_TOTAL_UPPER_BOUND_USD ────────────────
-    // (Use immediate_cost, not total_cost which includes theta approximation artefact.
-    //  If no seeds delivered: 3 × 150 MW × 744 h × $5000 = $1.674B >> bound → fails)
+    // Sum immediate_cost, NOT total_cost — total_cost includes the theta
+    // approximation artefact that would break this bound.
     let observed_total: f64 = scenario
         .stages
         .iter()

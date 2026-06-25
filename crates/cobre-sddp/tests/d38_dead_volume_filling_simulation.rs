@@ -204,7 +204,7 @@ fn dead_volume_filling_binds_and_routes_in_simulation() {
         .unwrap()
         .join("examples/deterministic/d38-dead-volume-filling");
 
-    // §7.1 (criterion 1): load + parse succeed and the filling config round-trips.
+    // §7.1: load + parse succeed and the filling config round-trips.
     let config_path = case_dir.join("config.json");
     let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
     let system_for_check = cobre_io::load_case(&case_dir).expect("load_case must succeed");
@@ -268,8 +268,7 @@ fn dead_volume_filling_binds_and_routes_in_simulation() {
         outcome.error
     );
 
-    // §7.6: monotone lower bound within absolute-relative FP tolerance. Collect
-    // ConvergenceUpdate bounds across iterations.
+    // §7.6: monotone lower bound within absolute-relative FP tolerance.
     let lower_bounds: Vec<f64> = event_rx
         .try_iter()
         .filter_map(|e| {
@@ -319,7 +318,6 @@ fn dead_volume_filling_binds_and_routes_in_simulation() {
          across the phase change, breaking reconstruct_basis slot-identity matching)"
     );
 
-    // Drain the simulation result channel.
     let mut pool = setup
         .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("workspace pool must build");
@@ -396,7 +394,6 @@ fn dead_volume_filling_binds_and_routes_in_simulation() {
 
     let h2_s2 = stage_hydro(scenario, H2_ID, 2);
     let h2_s3 = stage_hydro(scenario, H2_ID, 3);
-    // Non-decreasing across Filling and a net rise from the frozen PreFilling level.
     assert!(
         h2_s2.storage_final_hm3 >= h2_s1.storage_final_hm3 - 1e-6,
         "H2 storage must not decrease entering Filling: {} -> {}",

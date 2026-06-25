@@ -1,31 +1,13 @@
 //! Pumping-station commissioning gating must reach the simulation output.
 //!
-//! ## What the parity hash cannot see
-//!
-//! The declaration-order parity baseline hashes hydro storage / water values
-//! and cuts; it does NOT hash pumping-output columns. The dense per-station
-//! extraction `extract_pumping_stations` applies — and the zero-influence
-//! convention that a commissioning-dormant station emits a ZERO row rather than
-//! being absent — is therefore invisible to the hash. A gating bug that let a
-//! dormant station pump, or stamped the wrong station id, would still hash-match.
-//! This test exercises that path directly through the full train+simulate
+//! The parity hash does NOT hash pumping-output columns, so a gating bug that let
+//! a commissioning-dormant station pump, or stamped the wrong station id, would
+//! still hash-match. This test exercises that path through the full train+simulate
 //! pipeline.
 //!
-//! ## Fixture (`d35-pumping-commissioning`)
-//!
-//! One station (id 0, source H1 → destination H0) with
-//! `entry_stage_id = 1`, `exit_stage_id = 2` over a 3-stage horizon (0, 1, 2),
-//! single block each. The commissioning gate
-//! (`entry <= stage.id && stage.id < exit`) makes the station ACTIVE only at
-//! stage 1 and DORMANT at stages 0 and 2. Because `flow.min_m3s = 2.0` forces a
-//! transfer on every active solve, stage 1 must pump at least 2.0 m³/s; under the
-//! dense layout the dormant stages keep the column but pin it to `[0, 0]`.
-//!
-//! ## Assertions
-//!
-//! - Stage 1 emits exactly one pumping row: `station_id` 0, `pumped_flow_m3s >= 2.0`.
-//! - Stages 0 and 2 emit a ZERO pumping row (`pumped_flow_m3s == 0`): the dormant
-//!   station keeps its dense column but is pinned to `[0, 0]`.
+//! The commissioning gate is `entry <= stage.id && stage.id < exit`. Under the
+//! dense layout a dormant station keeps its column but is pinned to `[0, 0]`,
+//! emitting a ZERO row rather than being absent.
 
 #![allow(
     clippy::unwrap_used,
@@ -42,8 +24,6 @@ use cobre_core::scenario::ScenarioSource;
 use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
 use cobre_solver::ActiveSolver;
 
-/// Single-rank communicator stub that faithfully copies data through the
-/// collectives, so the pipeline runs without MPI.
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -89,8 +69,6 @@ impl Communicator for StubComm {
     }
 }
 
-/// Train the commissioning-gated pumping case, simulate one deterministic
-/// scenario, and assert the pumping output is present only at the active stage.
 #[test]
 fn pumping_commissioning_window_gates_simulation_output() {
     let case_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -102,9 +80,8 @@ fn pumping_commissioning_window_gates_simulation_output() {
 
     let config_path = case_dir.join("config.json");
     let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
-    // The shipped case disables simulation (the parity harness trains only).
-    // Enable one deterministic simulation scenario so the pumping extraction
-    // path runs; `StudySetup::new` reads `n_scenarios` from this config.
+    // The shipped case disables simulation (the parity harness trains only);
+    // enable one scenario so the pumping extraction path runs.
     config.simulation = cobre_io::config::SimulationConfig {
         enabled: true,
         num_scenarios: 1,
@@ -170,8 +147,6 @@ fn pumping_commissioning_window_gates_simulation_output() {
         "one stage record per study stage (horizon 0, 1, 2)",
     );
 
-    // Stage 0: dormant (stage.id 0 < entry 1) — the dense column is kept but
-    // pinned to [0, 0], so the station emits exactly one ZERO row.
     let stage0 = &scenario.stages[0].pumping_stations;
     assert_eq!(
         stage0.len(),
@@ -188,8 +163,6 @@ fn pumping_commissioning_window_gates_simulation_output() {
         stage0[0].pumped_flow_m3s,
     );
 
-    // Stage 2: dormant (stage.id 2 == exit 2, gate is `stage.id < exit`) — the
-    // dense column is kept but pinned to [0, 0], so the station emits a ZERO row.
     let stage2 = &scenario.stages[2].pumping_stations;
     assert_eq!(
         stage2.len(),
@@ -206,8 +179,6 @@ fn pumping_commissioning_window_gates_simulation_output() {
         stage2[0].pumped_flow_m3s,
     );
 
-    // Stage 1: active — exactly one (station, block) row mapped to station id 0,
-    // pumping at least the forced minimum of 2.0 m³/s.
     let stage1 = &scenario.stages[1].pumping_stations;
     assert_eq!(
         stage1.len(),
@@ -225,9 +196,8 @@ fn pumping_commissioning_window_gates_simulation_output() {
         "the forced minimum flow (2.0 m³/s) must bind at the active stage; got {}",
         row.pumped_flow_m3s,
     );
-    // Power consumption is the pumped flow scaled by the station's
-    // consumption rate (0.5 MW per m³/s); the negative-injection sign lives in
-    // the LP coupling, the output reports the positive magnitude.
+    // The negative-injection sign lives in the LP coupling; the output reports
+    // the positive magnitude (pumped flow × the 0.5 MW per m³/s rate).
     assert!(
         (row.power_consumption_mw - row.pumped_flow_m3s * 0.5).abs() < 1e-6,
         "power consumption must equal pumped_flow * 0.5; got {} for flow {}",

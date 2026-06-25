@@ -1,38 +1,12 @@
 //! Thermal and line commissioning gating must reach the simulation output.
 //!
-//! ## What the parity hash cannot see
-//!
-//! The declaration-order parity baseline hashes hydro storage / water values
-//! and cuts; it does NOT hash thermal-generation or line-flow columns. The
-//! zero-influence convention — a commissioning-dormant thermal pins BOTH bounds
-//! to `[0, 0]` (so its `min_generation_mw` must-run floor is zeroed too) and a
-//! dormant line pins `col_upper` to 0 on both directions — is therefore
-//! invisible to the hash except through dispatch coupling. A gating bug that let
-//! a windowed-out thermal run (or made the LP infeasible by zeroing only the
-//! cap), or let a dormant line carry flow, could still hash-match. This test
-//! exercises those paths directly through the full train+simulate pipeline.
-//!
-//! ## Fixture (`d36-thermal-line-commissioning`)
-//!
-//! Two buses (B0, B1), two hydros (H0 on B0, H1 on B1), one thermal (T0 on B0,
-//! `min_mw = 10` must-run, `entry_stage_id = 1`, `exit_stage_id = 2`), and one
-//! line (`B0_B1`, `entry_stage_id = 1`, no exit) over a 3-stage horizon (0, 1, 2),
-//! single block each. The commissioning gate (`entry <= stage.id && stage.id <
-//! exit`) makes:
-//!
-//! - T0 ACTIVE only at stage 1, DORMANT at stages 0 and 2.
-//! - the line DORMANT at stage 0, ACTIVE at stages 1 and 2.
-//!
-//! ## Assertions
-//!
-//! - Stage 0: T0 emits a thermal row with `generation_mw == 0` (dormant: BOTH
-//!   bounds pinned to `[0, 0]`, so the 10 MW must-run floor is dropped and the
-//!   LP stays feasible). The line emits an exchange row with both flows `== 0`
-//!   (dormant: caps pinned to 0).
-//! - Stage 1: T0's must-run floor binds — `generation_mw >= 10`. The line is
-//!   active (caps restored to 15 MW), so it may carry flow.
-//! - Stage 2: T0 emits `generation_mw == 0` again (decommissioned at the exit
-//!   boundary `stage.id == exit`). The line is still active (no exit).
+//! The parity hash covers hydro/water values and cuts but NOT thermal-generation
+//! or line-flow columns, so the zero-influence gating convention is invisible to
+//! it: a commissioning-dormant thermal pins BOTH bounds to `[0, 0]` (zeroing its
+//! `min_generation_mw` must-run floor too, so the LP stays feasible), and a dormant
+//! line pins both directional caps to 0. The commissioning gate is
+//! `entry <= stage.id && stage.id < exit`. This test exercises those paths
+//! directly through the full train+simulate pipeline.
 
 #![allow(
     clippy::unwrap_used,
@@ -49,8 +23,6 @@ use cobre_core::scenario::ScenarioSource;
 use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
 use cobre_solver::ActiveSolver;
 
-/// Single-rank communicator stub that faithfully copies data through the
-/// collectives, so the pipeline runs without MPI.
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -96,8 +68,6 @@ impl Communicator for StubComm {
     }
 }
 
-/// Train the commissioning-gated thermal+line case, simulate one deterministic
-/// scenario, and assert the thermal/line output is gated by the windows.
 #[test]
 fn thermal_line_commissioning_window_gates_simulation_output() {
     let case_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -109,9 +79,8 @@ fn thermal_line_commissioning_window_gates_simulation_output() {
 
     let config_path = case_dir.join("config.json");
     let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
-    // The shipped case disables simulation (the parity harness trains only).
-    // Enable one deterministic simulation scenario so the thermal/line
-    // extraction paths run; `StudySetup::new` reads `n_scenarios` from this.
+    // The shipped case disables simulation; enable one scenario so the thermal/line
+    // extraction paths run (`StudySetup::new` reads `n_scenarios` from this).
     config.simulation = cobre_io::config::SimulationConfig {
         enabled: true,
         num_scenarios: 1,
@@ -181,9 +150,6 @@ fn thermal_line_commissioning_window_gates_simulation_output() {
 
     // ── Thermal gating ────────────────────────────────────────────────────────
 
-    // Stage 0: T0 dormant (stage.id 0 < entry 1). BOTH bounds pinned to [0, 0],
-    // so the 10 MW must-run floor is dropped and generation is exactly 0 — the
-    // LP stays feasible despite the declared floor.
     let t_stage0 = &scenario.stages[0].thermals;
     assert_eq!(
         t_stage0.len(),
@@ -200,7 +166,6 @@ fn thermal_line_commissioning_window_gates_simulation_output() {
         t_stage0[0].generation_mw,
     );
 
-    // Stage 2: T0 dormant (stage.id 2 == exit 2, gate is `stage.id < exit`).
     let t_stage2 = &scenario.stages[2].thermals;
     assert_eq!(
         t_stage2.len(),
@@ -213,7 +178,6 @@ fn thermal_line_commissioning_window_gates_simulation_output() {
         t_stage2[0].generation_mw,
     );
 
-    // Stage 1: T0 active — the 10 MW must-run floor binds.
     let t_stage1 = &scenario.stages[1].thermals;
     assert_eq!(t_stage1.len(), 1, "stage 1 is active: one thermal row");
     assert_eq!(
@@ -229,8 +193,6 @@ fn thermal_line_commissioning_window_gates_simulation_output() {
 
     // ── Line gating ─────────────────────────────────────────────────────────────
 
-    // Stage 0: line dormant (stage.id 0 < entry 1). Both directional caps pinned
-    // to 0, so flow is exactly 0 in both directions.
     let l_stage0 = &scenario.stages[0].exchanges;
     assert_eq!(
         l_stage0.len(),
@@ -249,9 +211,8 @@ fn thermal_line_commissioning_window_gates_simulation_output() {
         l_stage0[0].reverse_flow_mw,
     );
 
-    // Stage 1: line active (entry 1 <= stage.id 1, no exit). Caps restored to
-    // 15 MW; B1's 40 MW load exceeds H1's 20 MW cap, so B0 exports across the
-    // line — direct flow is positive (and within the restored cap).
+    // B1's 40 MW load exceeds H1's 20 MW cap, so B0 must export across the line —
+    // direct flow is positive and within the restored 15 MW cap.
     let l_stage1 = &scenario.stages[1].exchanges;
     assert_eq!(l_stage1.len(), 1, "stage 1 line active: one exchange row");
     assert_eq!(l_stage1[0].line_id, 0, "active row maps to system line 0");
@@ -266,7 +227,6 @@ fn thermal_line_commissioning_window_gates_simulation_output() {
         l_stage1[0].direct_flow_mw,
     );
 
-    // Stage 2: line still active (no exit), so its caps remain restored.
     let l_stage2 = &scenario.stages[2].exchanges;
     assert_eq!(l_stage2.len(), 1, "stage 2 line active: one exchange row");
     assert!(

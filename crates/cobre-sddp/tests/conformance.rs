@@ -21,9 +21,6 @@
     clippy::cast_possible_truncation
 )]
 
-// Shared helpers (reimplemented here because integration tests cannot access
-// #[cfg(test)] items from the main crate)
-
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_sddp::SyncResult;
 use cobre_solver::{
@@ -269,17 +266,6 @@ mod risk_measure_conformance {
         }
     }
 
-    // Original test names consolidated into this sweep:
-    //   risk_measure_expectation_aggregate_cut_sums_to_weighted_mean
-    //   risk_measure_cvar_alpha_one_equals_expectation
-    //   risk_measure_cvar_alpha_half_concentrates_on_worst
-    //   risk_measure_cvar_weights_sum_to_one
-    //
-    // Cases (alpha, lambda, description):
-    //   0: Expectation weighted mean with non-uniform probs
-    //   1: CVaR(alpha=1.0, lambda=1.0) equals Expectation
-    //   2: CVaR(alpha=0.5, lambda=1.0) concentrates weight on worst 50%
-    //   3: CVaR(alpha=0.3, lambda=0.8) weights sum to 1.0
     const RISK_MEASURE_CASES: &[(&str, f64, f64)] = &[
         ("expectation_weighted_mean", 0.0, 0.0), // alpha=0 signals Expectation variant
         ("cvar_alpha_one_equals_expectation", 1.0, 1.0),
@@ -292,8 +278,6 @@ mod risk_measure_conformance {
     fn risk_measure_parameter_sweep() {
         for (idx, &(desc, alpha, lambda)) in RISK_MEASURE_CASES.iter().enumerate() {
             match idx {
-                // case_index = 0: Expectation.aggregate_cut computes probability-weighted mean
-                // with 4 outcomes and non-uniform probabilities.
                 0 => {
                     let outcomes = vec![
                         outcome(10.0, 10.0, vec![1.0]),
@@ -304,7 +288,6 @@ mod risk_measure_conformance {
                     let probs = vec![0.1, 0.2, 0.3, 0.4];
                     let (intercept, coeffs) =
                         RiskMeasure::Expectation.aggregate_cut(&outcomes, &probs);
-                    // Expected: 0.1*10 + 0.2*20 + 0.3*30 + 0.4*40 = 30.0
                     let expected_intercept = 0.1 * 10.0 + 0.2 * 20.0 + 0.3 * 30.0 + 0.4 * 40.0;
                     assert!(
                         (intercept - expected_intercept).abs() < 1e-10,
@@ -324,7 +307,6 @@ mod risk_measure_conformance {
                         coeffs[0]
                     );
                 }
-                // case_index = 1: CVaR(alpha=1.0, lambda=1.0) must equal Expectation.
                 1 => {
                     let outcomes = vec![
                         outcome(10.0, 10.0, vec![1.0]),
@@ -360,7 +342,6 @@ mod risk_measure_conformance {
                          equal Expectation={risk_exp}"
                     );
                 }
-                // case_index = 2: CVaR(alpha=0.5, lambda=1.0) concentrates weight on worst 50%.
                 2 => {
                     let outcomes = vec![
                         outcome(10.0, 10.0, vec![]),
@@ -380,7 +361,6 @@ mod risk_measure_conformance {
                          must concentrate on worst 50%: expected {expected}, got {intercept}"
                     );
                 }
-                // case_index = 3: CVaR(alpha=0.3, lambda=0.8) weights sum to 1.0.
                 3 => {
                     let obj_values = [15.0_f64, 5.0, 25.0, 35.0];
                     let probs = vec![0.3, 0.2, 0.3, 0.2];
@@ -429,15 +409,6 @@ mod stopping_rule_conformance {
         }
     }
 
-    // Original test names consolidated into this sweep:
-    //   stopping_rule_bound_stalling_uses_max_guard
-    //   stopping_rule_set_all_mode_requires_simultaneous
-    //   stopping_rule_graceful_shutdown_bypasses_all_mode
-    //
-    // Cases (desc, tolerance, iterations, iter_limit, history_len, shutdown_requested):
-    //   0: BoundStalling uses max(1.0,|lb|) denominator
-    //   1: StoppingMode::All requires ALL non-shutdown rules simultaneously
-    //   2: GracefulShutdown bypasses StoppingMode::All
     const STOPPING_RULE_CASES: &[(&str, f64, u64, u64, usize, bool)] = &[
         ("bound_stalling_max_guard", 0.01, 3, 0, 4, false),
         ("all_mode_requires_simultaneous", 0.001, 5, 10, 2, false),
@@ -450,10 +421,8 @@ mod stopping_rule_conformance {
             STOPPING_RULE_CASES.iter().enumerate()
         {
             match idx {
-                // case_index = 0: BoundStalling uses max(1.0, |lb|) as denominator.
-                // History: [0.0, 0.0, 0.0, 0.001]. Window of 3 → lb_window_start = 0.0.
-                // lb_current = 0.001, denominator = max(1.0, 0.001) = 1.0
-                // delta = 0.001 / 1.0 = 0.001 < tolerance=0.01 → triggers.
+                // History [0.0, 0.0, 0.0, 0.001], window 3 → lb_window_start = 0.0;
+                // delta = 0.001 / max(1.0, 0.001) = 0.001 < tolerance 0.01 → triggers.
                 0 => {
                     let rule = StoppingRule::BoundStalling {
                         tolerance,
@@ -476,8 +445,6 @@ mod stopping_rule_conformance {
                         "case_index = {idx}, desc = {desc}: rule_name must be bound_stalling"
                     );
                 }
-                // case_index = 1: StoppingMode::All requires ALL non-shutdown rules
-                // to trigger simultaneously. Only 2 of 3 trigger here → must NOT stop.
                 1 => {
                     let rule_set = StoppingRuleSet {
                         rules: vec![
@@ -529,7 +496,6 @@ mod stopping_rule_conformance {
                          only {history_len} history entries"
                     );
                 }
-                // case_index = 2: GracefulShutdown bypasses StoppingMode::All.
                 // shutdown_requested=true forces should_stop=true even though
                 // IterationLimit(100) has not triggered at iteration 1.
                 2 => {
@@ -563,16 +529,12 @@ mod cut_conformance {
     };
 
     /// Verify `CutWireHeader` serialize/deserialize round-trip with `n_state=3`.
-    ///
-    /// Creates a buffer, serializes a cut with `intercept=42.5` and
-    /// `coefficients=[1.0, 2.0, 3.0]`, then deserializes and checks all fields.
     #[test]
     fn cut_wire_record_serialize_deserialize_round_trip() {
         let n_state = 3;
         let intercept = 42.5_f64;
         let coefficients = [1.0_f64, 2.0, 3.0];
 
-        // Slot/iteration/forward_pass_index values chosen to be non-zero and distinct.
         let slot_index = 7_u32;
         let iteration = 2_u32;
         let forward_pass_index = 1_u32;
@@ -589,7 +551,6 @@ mod cut_conformance {
 
         let (header, recovered_coeffs) = deserialize_cut(&buf, n_state).unwrap();
 
-        // All header fields must match exactly.
         assert_eq!(
             header,
             CutWireHeader {
@@ -620,10 +581,8 @@ mod cut_conformance {
     /// intercepts and coefficients.
     #[test]
     fn cut_pool_add_then_active_cuts_returns_correct_data() {
-        // 1-dimensional state, 1 forward pass per iteration, no warm-start.
         let mut pool = CutPool::new(10, 1, 1, 0);
 
-        // Add 3 cuts at deterministic slots 0, 1, 2.
         pool.add_cut(0, 0, 10.0, &[1.0]);
         pool.add_cut(1, 0, 20.0, &[2.0]);
         pool.add_cut(2, 0, 30.0, &[3.0]);
@@ -631,7 +590,6 @@ mod cut_conformance {
         let active: Vec<(usize, f64, &[f64])> = pool.active_cuts().collect();
         assert_eq!(active.len(), 3, "must return all 3 active cuts");
 
-        // Collect intercepts and coefficients by slot index for deterministic check.
         let mut slot_to_intercept = std::collections::HashMap::new();
         let mut slot_to_coeff = std::collections::HashMap::new();
         for (slot, intercept, coeffs) in &active {
@@ -689,16 +647,6 @@ mod convergence_conformance {
         ConvergenceMonitor::new(rule_set)
     }
 
-    // Original test names consolidated into this sweep:
-    //   convergence_monitor_gap_formula_matches_spec
-    //   convergence_monitor_lb_history_grows_monotonically_when_lb_increases
-    //   convergence_monitor_iteration_limit_triggers_at_exact_count
-    //
-    // Cases (desc, lb, ub, expected_gap):
-    //   0: gap formula — UB=110, LB=100, denominator=110, gap=10/110
-    //   1: gap formula — UB=0.5, LB=0.3, denominator=max(1.0,0.5)=1.0, gap=0.2
-    //   2: LB history grows monotonically over 5 updates
-    //   3: IterationLimit(10) triggers at exactly iteration 10
     const CONVERGENCE_CASES: &[(&str, f64, f64, f64)] = &[
         ("gap_formula_large_ub", 100.0, 110.0, 10.0 / 110.0),
         ("gap_formula_small_ub_max_guard", 0.3, 0.5, 0.2),
@@ -710,7 +658,7 @@ mod convergence_conformance {
     fn convergence_monitor_parameter_sweep() {
         for (idx, &(desc, lb, ub, expected_gap)) in CONVERGENCE_CASES.iter().enumerate() {
             match idx {
-                // case_index = 0 and 1: gap formula (UB - LB) / max(1, |UB|).
+                // gap = (UB - LB) / max(1, |UB|).
                 0 | 1 => {
                     let mut monitor = make_monitor(100);
                     monitor.update(lb, &make_sync_result(ub));
@@ -721,7 +669,6 @@ mod convergence_conformance {
                          {expected_gap}, got {got}"
                     );
                 }
-                // case_index = 2: LB history grows monotonically when LB increases over 5 calls.
                 2 => {
                     let lb_values = [10.0_f64, 20.0, 30.0, 40.0, 50.0];
                     let sync = make_sync_result(110.0);
@@ -764,7 +711,6 @@ mod convergence_conformance {
                          have sufficient history"
                     );
                 }
-                // case_index = 3: IterationLimit(10) triggers at exactly iteration 10.
                 3 => {
                     let rule_set = StoppingRuleSet {
                         rules: vec![StoppingRule::IterationLimit { limit: 10 }],
@@ -821,9 +767,6 @@ mod lb_conformance {
 
     use super::{LocalComm, MockSolver, make_fcf, minimal_template, simple_opening_tree};
 
-    /// Build the role-(a) [`StateLayout`] whose `storage_in` / `inflow_lags` /
-    /// `anticipated_state` column starts match `indexer`'s identical fields.
-    ///
     /// Mirrors the gated `indexer::test_fixtures::state_layout_for` body via the
     /// public [`StateLayout::new`] constructor, so this external test crate (which
     /// does not see the parent crate's `#[cfg(test)]` surface) resolves
@@ -942,7 +885,6 @@ mod lb_conformance {
             "lb2 must equal 100_000_000.0, got {lb2}"
         );
 
-        // Monotonicity: lb2 >= lb1
         assert!(
             lb2 >= lb1,
             "lb2 ({lb2}) must be >= lb1 ({lb1}) when cuts are tighter"
@@ -954,17 +896,13 @@ mod lb_conformance {
 // Constraint inventory conformance
 // ---------------------------------------------------------------------------
 
-/// Build a [`StageGeometry`](cobre_sddp::lp_builder::StageGeometry) for one stage
-/// from explicit equipment dimensions, reproducing the production stage-0
-/// column/row arithmetic via the public `StageGeometry` literal.
-///
 /// Mirrors the gated `indexer::test_fixtures::geometry` body through the public
-/// API, so this external test crate (which does not see the parent crate's
-/// `#[cfg(test)]` surface) resolves byte-identical column ranges on the default
-/// feature set. The operational-violation constraint *row* ranges are NOT
-/// reproduced here — they are owned internally by `StageLayout` and pinned by a
-/// crate-internal test; this helper covers only the column families
-/// `StageGeometry` exposes.
+/// [`StageGeometry`](cobre_sddp::lp_builder::StageGeometry) literal, so this
+/// external test crate (which does not see the parent crate's `#[cfg(test)]`
+/// surface) resolves byte-identical column ranges on the default feature set. The
+/// operational-violation constraint *row* ranges are NOT reproduced here — they
+/// are owned internally by `StageLayout` and pinned by a crate-internal test;
+/// this helper covers only the column families `StageGeometry` exposes.
 #[allow(clippy::too_many_arguments)]
 fn build_geometry(
     hydro_count: usize,
@@ -1085,7 +1023,6 @@ fn indexer_constraint_inventory() {
     // N=3, L=1, T=2, Ln=1, B=2, K=2, penalty on, S=2; FPHA hydro 0 with 3 planes.
     let geometry = build_geometry(3, 1, 2, 1, 2, 2, true, 2, vec![0], &[3]);
 
-    // Operational violation slack columns must all be non-empty.
     assert!(
         !geometry.outflow_below_slack.is_empty(),
         "outflow_below_slack must be non-empty"
@@ -1103,13 +1040,11 @@ fn indexer_constraint_inventory() {
         "generation_below_slack must be non-empty"
     );
 
-    // Inflow non-negativity slack.
     assert!(
         !geometry.inflow_slack.is_empty(),
         "inflow_slack must be non-empty when has_inflow_penalty=true"
     );
 
-    // Water withdrawal slacks (bidirectional).
     assert!(
         !geometry.withdrawal_slack_neg.is_empty(),
         "withdrawal_slack_neg must be non-empty when hydro_count > 0"
@@ -1119,8 +1054,6 @@ fn indexer_constraint_inventory() {
         "withdrawal_slack_pos must be non-empty when hydro_count > 0"
     );
 
-    // Operational violation slack columns must be contiguous: each range
-    // starts where the previous ends.
     assert_eq!(
         geometry.outflow_above_slack.start, geometry.outflow_below_slack.end,
         "outflow_above must start where outflow_below ends"
@@ -1134,7 +1067,6 @@ fn indexer_constraint_inventory() {
         "generation_below must start where turbine_below ends"
     );
 
-    // Each operational violation slack range must span hydro_count * n_blks columns.
     let hydro_count = 3;
     let n_blks = 2;
     let n_op = hydro_count * n_blks;
@@ -1155,9 +1087,6 @@ fn indexer_constraint_inventory() {
 /// 2. Add extraction logic in `accumulate_category_costs`.
 /// 3. Add a new field to `SimulationCostResult`.
 /// 4. Update this guard count.
-///
-/// If the count changes without updating this test, the failure message
-/// explains what needs to be done.
 #[test]
 fn constraint_extraction_regression_guard() {
     use std::ops::Range;
@@ -1165,9 +1094,8 @@ fn constraint_extraction_regression_guard() {
     // N=2, L=1, T=1, Ln=1, B=1, K=1, penalty on, S=1; FPHA hydro 0 with 2 planes.
     let geometry = build_geometry(2, 1, 1, 1, 1, 1, true, 1, vec![0], &[2]);
 
-    // Collect all hydro-related slack column families.
-    // These are the families that contribute to the hydro violation cost
-    // decomposition in accumulate_category_costs().
+    // The families that feed the hydro violation cost decomposition in
+    // accumulate_category_costs().
     let slack_families: Vec<(&str, &Range<usize>)> = vec![
         ("outflow_below_slack", &geometry.outflow_below_slack),
         ("outflow_above_slack", &geometry.outflow_above_slack),
@@ -1178,13 +1106,6 @@ fn constraint_extraction_regression_guard() {
         ("inflow_slack", &geometry.inflow_slack),
     ];
 
-    // Guard: exactly 7 hydro-related slack column families.
-    // If you are adding a new constraint type, update:
-    //   1. StageGeometry/StageLayout — add the new Range<usize> field
-    //   2. accumulate_category_costs() — extract the new cost component
-    //   3. SimulationCostResult — add the new f64 cost field
-    //   4. CostWriteRecord + costs_schema() — add the Parquet output column
-    //   5. This test — add the new family to `slack_families` and bump the count
     assert_eq!(
         slack_families.len(),
         7,
@@ -1194,7 +1115,6 @@ fn constraint_extraction_regression_guard() {
          (d) this regression guard."
     );
 
-    // Verify no range overlaps between any two families.
     for i in 0..slack_families.len() {
         let (name_a, range_a) = &slack_families[i];
         if range_a.is_empty() {

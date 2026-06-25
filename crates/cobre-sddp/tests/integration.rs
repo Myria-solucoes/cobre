@@ -1,15 +1,7 @@
 //! End-to-end integration tests for the SDDP training loop.
 //!
 //! Exercises the full [`cobre_sddp::train`] function with a small toy system
-//! (1 hydro, 0 PAR order, 2 stages), verifying convergence behaviour,
-//! determinism, lower-bound monotonicity, event emission order, stopping rule
-//! termination, and error propagation.
-//!
-//! ## Design constraints
-//!
-//! - Only the public `cobre_sddp::` API is used (no `#[cfg(test)]` items).
-//! - All test helpers are defined locally in this file.
-//! - Each test is self-contained with no cross-test shared state.
+//! (1 hydro, 0 PAR order, 2 stages).
 
 #![allow(
     clippy::unwrap_used,
@@ -20,8 +12,6 @@
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap
 )]
-
-// External crate imports
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -63,13 +53,9 @@ use cobre_sddp::{
 // Shared helpers
 // ===========================================================================
 
-/// Build the role-(a) [`StateLayout`] whose `storage_in` / `inflow_lags` /
-/// `anticipated_state` column starts match `indexer`'s identical fields.
-///
-/// Mirrors the gated `indexer::test_fixtures::state_layout_for` body via the
-/// public [`StateLayout::new`] constructor, so this external test crate (which
-/// does not see the parent crate's `#[cfg(test)]` surface) resolves byte-identical
-/// patch columns on the default feature set.
+/// Mirrors the gated `indexer::test_fixtures::state_layout_for` via the public
+/// [`StateLayout::new`], so this external test crate (which cannot see the parent
+/// crate's `#[cfg(test)]` surface) resolves byte-identical patch columns.
 fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     StateLayout::new(
         hydro_count,
@@ -81,15 +67,12 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     )
 }
 
-/// Build the default all-zero `StudyDimensions` (every count `0`, every flag
-/// `false`), matching the empty non-state shape these toy fixtures imply.
 fn study_dims() -> cobre_sddp::indexer::StudyDimensions {
     cobre_sddp::indexer::StudyDimensions::default()
 }
 
-/// Single-rank communicator that correctly copies data through `allgatherv`
-/// and `allreduce`. Required by the exchange and forward-sync steps so that
-/// state is available to the backward pass.
+/// Single-rank communicator that copies data through `allgatherv` and
+/// `allreduce` (not a no-op), so the backward pass sees forward-pass state.
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -136,15 +119,10 @@ impl Communicator for StubComm {
 }
 
 /// Communicator wrapper that sets `flag` to `true` on the first `allgatherv`
-/// call, simulating a shutdown signal arriving mid-iteration-1. On
-/// subsequent calls it behaves identically to [`StubComm`].
-///
-/// The `allgatherv` is called during `sync_forward` (step 2), so by the time
-/// iteration 2's convergence check runs the shutdown flag is already set.
+/// call, simulating a shutdown signal arriving mid-iteration-1. On subsequent
+/// calls it behaves identically to [`StubComm`].
 struct ShutdownComm {
     flag: Arc<AtomicBool>,
-    /// Count of allgatherv calls; the shutdown flag is flipped on the first
-    /// call that corresponds to `sync_forward` (forward sync in iteration 1).
     allgatherv_calls: AtomicUsize,
 }
 
@@ -166,7 +144,6 @@ impl Communicator for ShutdownComm {
         _displs: &[usize],
     ) -> Result<(), CommError> {
         recv[..send.len()].clone_from_slice(send);
-        // Set flag on first call so iteration 2's convergence check triggers shutdown.
         if self.allgatherv_calls.fetch_add(1, Ordering::Relaxed) == 0 {
             self.flag.store(true, Ordering::Relaxed);
         }
@@ -204,11 +181,8 @@ impl Communicator for ShutdownComm {
     }
 }
 
-/// Mock solver that returns objectives from a repeating sequence.
-///
-/// - `objectives` cycles with `call_count % len` on each `solve` call.
-/// - `infeasible_on_call` triggers `SolverError::Infeasible` at that call index.
-/// - `reset()` resets `call_count` to 0 for determinism tests.
+/// Mock solver that returns objectives from a repeating sequence, cycling
+/// `objectives[call_count % len]` per `solve`.
 struct MockSolver {
     objectives: Vec<f64>,
     call_count: usize,
@@ -284,11 +258,11 @@ impl SolverInterface for MockSolver {
     }
 }
 
-/// Mock solver that returns a zero-filled dual slice matching the current row count.
+/// Mock solver returning a zero-filled dual slice sized to the current row count.
 ///
-/// Unlike `MockSolver` (which has a hardcoded two-element dual), this expands
-/// the dual buffer as cuts accumulate, so it can back tests where the backward
-/// pass solves at interior stages with active cut rows present.
+/// Unlike `MockSolver`'s hardcoded two-element dual, this grows the dual buffer
+/// as cuts accumulate, so the backward pass can solve interior stages that carry
+/// active cut rows without an out-of-bounds dual access.
 struct ExpandingMockSolver {
     objectives: Vec<f64>,
     call_count: usize,
@@ -586,9 +560,6 @@ impl Fixture {
 }
 
 /// Run a single training pass with a given stochastic context.
-///
-/// Returns the `TrainingOutcome`. Used to de-duplicate the two identical
-/// train calls in `train_deterministic_with_same_seed`.
 fn run_one_deterministic_pass(
     fx: &Fixture,
     stochastic: &StochasticContext,
@@ -674,9 +645,6 @@ fn run_one_deterministic_pass(
     .unwrap()
 }
 
-// Tests
-
-/// Verify the full training loop runs to completion under `IterationLimit`.
 #[test]
 fn train_converges_with_mock_solver() {
     let fx = Fixture::new(2);
@@ -770,8 +738,6 @@ fn train_converges_with_mock_solver() {
     assert!(!result.result.reason.is_empty());
 }
 
-/// Run `train` twice with identical configuration and verify bit-for-bit
-/// identical bounds and identical iteration counts.
 #[test]
 fn train_deterministic_with_same_seed() {
     let fx = Fixture::new(2);
@@ -792,14 +758,12 @@ fn train_deterministic_with_same_seed() {
     assert_eq!(result1.result.iterations, result2.result.iterations);
 }
 
-/// Verify `lb[k] >= lb[k-1]` for all consecutive iterations from
-/// `ConvergenceUpdate` events.
 #[test]
 fn train_lb_monotonically_nondecreasing() {
     let fx = Fixture::new(2);
     let mut fcf = make_fcf(fx.n_stages);
-    // Solver returns a fixed objective so LB stays constant (non-decreasing
-    // trivially). The key property is that it never decreases.
+    // Fixed objective keeps LB constant; the property under test is that it never
+    // decreases.
     let mut solver = MockSolver::with_fixed(80.0);
     let comm = StubComm;
 
@@ -883,7 +847,6 @@ fn train_lb_monotonically_nondecreasing() {
     )
     .unwrap();
 
-    // Collect all ConvergenceUpdate events and extract lower bounds.
     let events: Vec<TrainingEvent> = rx.try_iter().collect();
     let lower_bounds: Vec<f64> = events
         .iter()
@@ -902,10 +865,6 @@ fn train_lb_monotonically_nondecreasing() {
     }
 }
 
-/// Verify the exact event sequence emitted by `train` for 3 iterations:
-/// 1 `TrainingStarted` + 3 * 7 per-iteration events + 1 `TrainingFinished` = 23 total.
-/// Per-iteration events: `ForwardPassComplete`, `ForwardSyncComplete`, `BackwardPassComplete`,
-/// `PolicySyncComplete`, `TemplateBakeComplete`, `ConvergenceUpdate`, `IterationSummary`.
 #[test]
 fn train_emits_correct_event_sequence() {
     let fx = Fixture::new(2);
@@ -921,7 +880,6 @@ fn train_emits_correct_event_sequence() {
             start_iteration: 0,
             n_fwd_threads: 1,
             max_blocks: 1,
-            // Limit to exactly 3 iterations.
             stopping_rules: iteration_limit(3),
         },
         cut_management: CutManagementConfig {
@@ -997,9 +955,6 @@ fn train_emits_correct_event_sequence() {
     let events: Vec<TrainingEvent> = rx.try_iter().collect();
 
     // 1 TrainingStarted + 3*(9 per-iteration) + 1 TrainingFinished = 29
-    // Per-iteration: WorkerTiming(Forward), ForwardPassComplete,
-    //   ForwardSyncComplete, WorkerTiming(Backward), BackwardPassComplete,
-    //   PolicySyncComplete, TemplateBakeComplete, ConvergenceUpdate, IterationSummary
     assert_eq!(events.len(), 29);
     assert!(matches!(events[0], TrainingEvent::TrainingStarted { .. }));
     assert!(matches!(events[28], TrainingEvent::TrainingFinished { .. }));
@@ -1024,8 +979,6 @@ fn train_emits_correct_event_sequence() {
     }
 }
 
-/// Verify `train` terminates at `IterationLimit { limit: 3 }` and reports
-/// `reason == "iteration_limit"`.
 #[test]
 fn train_stops_at_iteration_limit() {
     let fx = Fixture::new(2);
@@ -1114,8 +1067,6 @@ fn train_stops_at_iteration_limit() {
     assert_eq!(result.result.reason, "iteration_limit");
 }
 
-/// Verify `train` terminates with `reason == "graceful_shutdown"` when an
-/// external shutdown flag is set.
 #[test]
 fn train_stops_on_graceful_shutdown() {
     let fx = Fixture::new(2);
@@ -1214,8 +1165,6 @@ fn train_stops_on_graceful_shutdown() {
     assert!(result.result.iterations <= 2);
 }
 
-/// Verify `train` propagates `SddpError::Infeasible` when the solver returns
-/// `SolverError::Infeasible` on the first forward-pass solve.
 #[test]
 fn train_propagates_infeasible_error() {
     let fx = Fixture::new(2);
@@ -1313,17 +1262,9 @@ fn train_propagates_infeasible_error() {
     assert_eq!(outcome.result.reason, "error");
 }
 
-/// D17: Level1 cut selection produces convergent results with bounded pool.
-///
-/// Verifies that enabling `CutSelectionStrategy::Level1 { check_frequency: 2,
-/// tie_tolerance: 1e-10 }` does not break convergence. With the stub kernel,
+/// D17: Level1 cut selection produces convergent results. With the stub kernel,
 /// no cuts are deactivated by Level1 selection (the value-based kernel that
 /// drives deactivation lives elsewhere).
-///
-/// Checks:
-/// - Lower bound is monotone non-decreasing.
-/// - At least one `PolicySelectionComplete` event with `rows_deactivated > 0`.
-/// - `active_count() < populated_count` for the stage-0 FCF pool.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn d17_level1_cut_selection_convergence() {
@@ -1422,7 +1363,6 @@ fn d17_level1_cut_selection_convergence() {
         "training must complete within limit"
     );
 
-    // AC2: Lower bound is monotone non-decreasing.
     let events: Vec<TrainingEvent> = rx.try_iter().collect();
     let lower_bounds: Vec<f64> = events
         .iter()
@@ -1448,7 +1388,6 @@ fn d17_level1_cut_selection_convergence() {
         );
     }
 
-    // AC3: At least one PolicySelectionComplete event was emitted.
     let sel_events: Vec<&TrainingEvent> = events
         .iter()
         .filter(|e| matches!(e, TrainingEvent::PolicySelectionComplete { .. }))
@@ -1459,10 +1398,8 @@ fn d17_level1_cut_selection_convergence() {
         "must have at least one PolicySelectionComplete event"
     );
 
-    // AC4: Stage 0 is exempt from cut selection (no activity tracking).
-    // All stage-0 cuts generated during training should remain active.
-    // The populated count may include a warm-start slot, so we check
-    // that active is at least (iterations * forward_passes).
+    // Stage 0 is exempt from cut selection. The populated count may include a
+    // warm-start slot, so the check is `>=` (iterations * forward_passes), not `==`.
     assert!(
         fcf.pools[0].active_count() >= result.result.iterations as usize,
         "stage 0 must be exempt: expected at least {} active cuts, got {} \
@@ -1472,12 +1409,8 @@ fn d17_level1_cut_selection_convergence() {
         fcf.pools[0].populated_count,
     );
 
-    // Diagnostic: basis rejection rate after cut selection.
-    // With the mock solver, basis_consistency_failures is always 0 since the mock
-    // does not track basis operations. This check is informational — it
-    // would detect degradation if the mock were upgraded to track basis
-    // rejections, or when running with a real solver.
-    // See BasisStore doc comment for the design decision (option 1 vs 3).
+    // Informational only: the mock never tracks basis ops, so this never fires.
+    // It would flag warm-start degradation under a real solver (see BasisStore).
     let stats = solver.statistics();
     if stats.basis_offered > 0 && stats.basis_consistency_failures > stats.basis_offered / 2 {
         eprintln!(
@@ -1488,13 +1421,9 @@ fn d17_level1_cut_selection_convergence() {
     }
 }
 
-/// D17 with basis reconstruction always active: truncation guard does not
-/// corrupt convergence.
-///
-/// Basis reconstruction is now unconditional.
-/// Verifies:
-/// - Lower bound matches the D17 baseline.
-/// - Zero basis rejections (reconstruction produces valid warm-start bases).
+/// D17 with basis reconstruction always active: the truncation guard does not
+/// corrupt convergence, and reconstruction produces accepted warm-start bases
+/// (zero rejections).
 #[test]
 fn d17_level1_cut_selection_reconstruction() {
     use cobre_sddp::CutSelectionStrategy;
@@ -1585,14 +1514,12 @@ fn d17_level1_cut_selection_reconstruction() {
     )
     .unwrap();
 
-    // Reconstruction must not affect the optimal solution.
     assert!(
         result.result.final_lb.is_finite(),
         "D17+reconstruction: lower bound must be finite, got {}",
         result.result.final_lb,
     );
 
-    // Zero basis rejections — reconstruction produces valid warm-start bases.
     let stats = solver.statistics();
     assert_eq!(
         stats.basis_consistency_failures, 0,
@@ -1601,17 +1528,9 @@ fn d17_level1_cut_selection_reconstruction() {
     );
 }
 
-/// D18: Lml1 cut selection produces convergent results with bounded pool.
-///
-/// Verifies that enabling `CutSelectionStrategy::Lml1 { check_frequency: 2,
-/// tie_tolerance: 1e-10 }` does not break convergence. With the stub kernel,
-/// no cuts are deactivated by Lml1 selection (the value-based kernel that
-/// drives deactivation lives elsewhere).
-///
-/// Checks:
-/// - Lower bound is monotone non-decreasing.
-/// - At least one `PolicySelectionComplete` event with `rows_deactivated > 0`.
-/// - `active_count() < populated_count` for the stage-0 FCF pool.
+/// D18: Lml1 cut selection produces convergent results. With the stub kernel,
+/// no cuts are deactivated by Lml1 selection (the value-based kernel that drives
+/// deactivation lives elsewhere).
 #[test]
 #[allow(clippy::too_many_lines)]
 fn d18_lml1_cut_selection_convergence() {
@@ -1710,7 +1629,6 @@ fn d18_lml1_cut_selection_convergence() {
         "training must complete within limit"
     );
 
-    // AC2: Lower bound is monotone non-decreasing.
     let events: Vec<TrainingEvent> = rx.try_iter().collect();
     let lower_bounds: Vec<f64> = events
         .iter()
@@ -1736,7 +1654,6 @@ fn d18_lml1_cut_selection_convergence() {
         );
     }
 
-    // AC3: At least one PolicySelectionComplete event was emitted.
     let sel_events: Vec<&TrainingEvent> = events
         .iter()
         .filter(|e| matches!(e, TrainingEvent::PolicySelectionComplete { .. }))
@@ -1747,10 +1664,8 @@ fn d18_lml1_cut_selection_convergence() {
         "must have at least one PolicySelectionComplete event"
     );
 
-    // AC4: Stage 0 is exempt from cut selection (no activity tracking).
-    // All stage-0 cuts generated during training should remain active.
-    // The populated count may include a warm-start slot, so we check
-    // that active is at least (iterations * forward_passes).
+    // Stage 0 is exempt from cut selection. The populated count may include a
+    // warm-start slot, so the check is `>=` (iterations * forward_passes), not `==`.
     assert!(
         fcf.pools[0].active_count() >= result.result.iterations as usize,
         "stage 0 must be exempt: expected at least {} active cuts, got {} \
@@ -1761,13 +1676,9 @@ fn d18_lml1_cut_selection_convergence() {
     );
 }
 
-/// D01 must produce a bit-identical lower bound after the
-/// forward path is rewired through `reconstruct_basis`.
-///
-/// `reconstruct_basis` is a warm-start heuristic — it must not change the
-/// optimal LP solution.  This test runs D01 with the default configuration
-/// and asserts the lower bound matches the reference value of 182,500 $ to
-/// within float tolerance.
+/// D01 must produce a bit-identical lower bound (reference 182,500 $) when the
+/// forward path runs through `reconstruct_basis` — a warm-start heuristic that
+/// must not change the optimal LP solution.
 #[test]
 fn test_forward_basis_reconstruct_bit_identical_d01() {
     use std::path::Path;
@@ -1842,7 +1753,6 @@ fn test_forward_basis_reconstruct_bit_identical_d01() {
         .expect("train must return Ok");
     assert!(outcome.error.is_none(), "expected no training error");
 
-    // Reconstruct path must yield the bit-identical reference lower bound.
     let diff = (outcome.result.final_lb - 182_500.0_f64).abs();
     assert!(
         diff <= 1e-6,
@@ -1851,7 +1761,6 @@ fn test_forward_basis_reconstruct_bit_identical_d01() {
         diff
     );
 
-    // Sanity: zero basis rejections — reconstructed bases must be accepted.
     let stats = solver.statistics();
     assert_eq!(
         stats.basis_consistency_failures, 0,
@@ -1860,20 +1769,15 @@ fn test_forward_basis_reconstruct_bit_identical_d01() {
     );
 }
 
-/// smoke test that the baked-template backward pass does not
-/// diverge or panic over multiple iterations.
-///
-/// Smoke test: baking activates on iteration 2 and completes 5 iterations.
-/// Verifies training completes, lower bound is non-negative, and iteration count matches.
+/// Smoke test: the baked-template backward pass (baking activates on iteration 2)
+/// runs to the iteration limit without diverging or panicking.
 #[test]
 fn baked_backward_pass_smoke_test() {
     let n_iter = 5_u64;
     let fx = Fixture::new(3);
     let mut fcf = make_fcf(fx.n_stages);
-    // ExpandingMockSolver tracks current_num_rows (updated on load_model/add_rows)
-    // and returns a dual slice of that length, which is required once cuts are
-    // added on iteration 2+ (baked path). MockSolver has a hardcoded 2-element
-    // dual and would panic with an out-of-bounds slice access.
+    // The baked path adds cut rows on iteration 2+; ExpandingMockSolver grows its
+    // dual slice to match, where MockSolver's fixed 2-element dual would panic.
     let mut solver = ExpandingMockSolver::with_objectives(vec![50.0]);
     let stage_ctx = StageContext {
         geometry_per_stage: &[],
@@ -1953,14 +1857,12 @@ fn baked_backward_pass_smoke_test() {
     )
     .expect("baked backward pass smoke: train must not error");
 
-    // Training ran to the requested iteration limit.
     assert_eq!(
         outcome.result.iterations, n_iter,
         "expected {n_iter} iterations, got {}",
         outcome.result.iterations
     );
 
-    // Lower bound from MockSolver (fixed obj=50) must be non-negative.
     assert!(
         outcome.result.final_lb >= 0.0,
         "final lower bound must be non-negative; got {}",

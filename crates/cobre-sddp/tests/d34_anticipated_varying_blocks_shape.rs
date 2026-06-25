@@ -23,7 +23,6 @@
 
 use std::path::Path;
 
-/// Resolve the D34 fixture directory relative to the crate root.
 fn d34_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/deterministic")
@@ -34,7 +33,6 @@ fn d34_dir() -> std::path::PathBuf {
 fn d34_combines_anticipated_thermal_with_non_uniform_block_schedule() {
     let system = cobre_io::load_case(&d34_dir()).expect("D34 case must load");
 
-    // ── Block schedule is non-uniform across stages ───────────────────────────
     let block_counts: Vec<usize> = system.stages().iter().map(|s| s.blocks.len()).collect();
     assert_eq!(
         block_counts,
@@ -51,7 +49,6 @@ fn d34_combines_anticipated_thermal_with_non_uniform_block_schedule() {
 
     let n_stages = system.stages().len();
 
-    // ── At least one anticipated thermal that matures strictly inside the horizon
     let anticipated: Vec<_> = system
         .thermals()
         .iter()
@@ -62,15 +59,11 @@ fn d34_combines_anticipated_thermal_with_non_uniform_block_schedule() {
         "D34 must declare at least one anticipated thermal"
     );
 
-    // A commitment placed at decision stage `s` matures at `s + K_i`. It is
-    // active (a delivery LP is built) iff `s + K_i < n_stages` (strict). For the
-    // case to exercise the off-stage-0 maturation, at least one such delivery
-    // stage must land on an interior stage whose block count differs from stage
-    // 0's.
+    // A commitment at decision stage `s` matures at `s + K_i` and is active iff
+    // `s + K_i < n_stages` (strict). The off-stage-0 maturation requires such a
+    // delivery stage to land on an interior block count differing from stage 0's.
     let exercises_off_stage0_maturation = anticipated.iter().any(|&(_, k_i)| {
         let k = k_i as usize;
-        // Earliest decision is stage 0; sweep every decision stage and keep the
-        // ones whose maturation falls strictly inside the horizon.
         (0..n_stages).any(|decision_stage| {
             let delivery_stage = decision_stage + k;
             delivery_stage < n_stages && block_counts[delivery_stage] != stage0_blocks
@@ -85,10 +78,9 @@ fn d34_combines_anticipated_thermal_with_non_uniform_block_schedule() {
          anticipated_state_out column"
     );
 
-    // Spell out the concrete maturation for the K=1 fixture so a reader sees the
-    // exact bug-exposing coordinate: decision at stage 0 (1 block) delivers at
-    // stage 1 (3 blocks), and decision at stage 1 (3 blocks) delivers at stage 2
-    // (2 blocks). Both deliveries land off stage 0's single-block stride.
+    // Pin the K=1 maturation coordinates: decision at stage 0 delivers at stage 1
+    // (3 blocks), decision at stage 1 delivers at stage 2 (2 blocks) — both off
+    // stage 0's single-block stride.
     let (_, k1) = anticipated
         .iter()
         .find(|&&(_, k)| k == 1)

@@ -1,13 +1,10 @@
 //! End-to-end integration test verifying the anticipated-state ring-buffer
 //! evolution across the full forward pass for a 5-stage K=2 system.
 //!
-//! The ring-buffer shift semantics: at the end of stage `t`,
-//! `shift_anticipated_state` (`crates/cobre-sddp/src/noise.rs`) shifts each
-//! plant's slots down (`slot[s] <- incoming[s+1]`) and writes the new
-//! decision into the highest slot (`slot[K-1] <- decision_primal`). Slot 0
-//! at stage `t+1` therefore equals slot 1 at stage `t`. The basis-cache
-//! capture sequence across forward + backward passes is described inline
-//! in the per-stage assertions below.
+//! Ring-buffer shift semantics: at the end of stage `t`, `shift_anticipated_state`
+//! shifts each plant's slots down (`slot[s] <- incoming[s+1]`) and writes the new
+//! decision into the highest slot (`slot[K-1] <- decision_primal`), so slot 0 at
+//! stage `t+1` equals slot 1 at stage `t`.
 
 #![allow(
     clippy::unwrap_used,
@@ -55,7 +52,6 @@ use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context
 // StubComm — single-rank communicator for testing
 // ---------------------------------------------------------------------------
 
-/// Single-rank communicator stub for testing.
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -105,15 +101,9 @@ impl Communicator for StubComm {
 // System builder
 // ---------------------------------------------------------------------------
 
-/// Build a 5-stage system with:
-/// - 1 bus (deficit cost 500 $/MWh)
-/// - 1 hydro (storage 200 hm³, max_gen 250 MW, inflow mean 80 m³/s)
-/// - 1 anticipated thermal (K=2, cost 50 $/MWh, max_gen 100 MW) — id=2
-/// - 1 backup standard thermal (cost 500 $/MWh, max_gen 200 MW) — id=4
-/// - Load 150 MW constant across all stages
-/// - `past_anticipated_commitments = [(id=2, [100.0, 50.0])]`
-///
-/// The LP is always feasible: backup thermal alone covers 150 MW.
+/// Build a 5-stage system with one anticipated thermal (K=2, seeded
+/// `[100.0, 50.0]`) and one backup thermal that alone covers the 150 MW load, so
+/// the LP is always feasible.
 fn build_system() -> cobre_core::System {
     use chrono::NaiveDate;
 
@@ -127,7 +117,6 @@ fn build_system() -> cobre_core::System {
         excess_cost: 0.0,
     };
 
-    // Anticipated thermal: K=2 lead stages, cost 50 $/MWh, max 100 MW.
     let anticipated_id = EntityId(2);
     let thermal_ant = Thermal {
         id: anticipated_id,
@@ -141,7 +130,6 @@ fn build_system() -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // Backup standard thermal: cost 500 $/MWh (high, always feasible).
     let thermal_backup = Thermal {
         id: EntityId(4),
         name: "T_backup".to_string(),
@@ -154,7 +142,6 @@ fn build_system() -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // Hydro: constant-productivity, large storage so spill is unlikely.
     let hydro = Hydro {
         id: EntityId(3),
         name: "H1".to_string(),
@@ -246,7 +233,6 @@ fn build_system() -> cobre_core::System {
         })
         .collect();
 
-    // k_max=2 for the anticipated thermal bounds layout.
     let k_max: usize = 2;
     let n_st = n_stages;
 
@@ -287,7 +273,6 @@ fn build_system() -> cobre_core::System {
         }
     }
 
-    // 2 thermals (anticipated + backup), k_max=2.
     let bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
             n_hydros: 1,
@@ -339,7 +324,6 @@ fn build_system() -> cobre_core::System {
         },
     );
 
-    // Seed the anticipated ring buffer: slot 0 = 100.0 MW, slot 1 = 50.0 MW.
     let initial_conditions = InitialConditions {
         storage: vec![HydroStorage {
             hydro_id: EntityId(3),
@@ -372,7 +356,6 @@ fn build_system() -> cobre_core::System {
 // Config builder
 // ---------------------------------------------------------------------------
 
-/// Build a minimal [`Config`] for 1 forward pass and 1 iteration.
 fn build_config() -> Config {
     Config {
         schema: None,
@@ -403,10 +386,8 @@ fn build_config() -> Config {
 // Setup builder
 // ---------------------------------------------------------------------------
 
-/// Construct a [`StudySetup`] in-process from the given system and config.
-///
-/// Uses [`build_stochastic_context`] directly (no external scenario files),
-/// which keeps the test hermetic.
+/// Construct a [`StudySetup`] in-process, building the stochastic context
+/// directly so the test stays hermetic (no external scenario files).
 fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
     let stochastic = build_stochastic_context(
         &system,
@@ -435,43 +416,14 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 /// Verify that the anticipated-state ring buffer evolves correctly across all
 /// 5 stages of the forward pass.
 ///
-/// ## Ring-buffer layout and capture semantics
+/// The block layout is slot-major, plant-minor; with `n_anticipated=1`,
+/// `k_max=2` it is `[slot0_plant0, slot1_plant0]`. `state_at_capture` is filled
+/// by two paths, which is why slots 0 and 1 carry the same values:
 ///
-/// The layout is slot-major, plant-minor.  With `n_anticipated=1` and `k_max=2`
-/// the anticipated block is `[slot0_plant0, slot1_plant0]`.
-///
-/// `CapturedBasis::state_at_capture` is populated by two separate code paths:
-///
-/// - **Stage 0**: the forward pass writes the post-shift outgoing state of
-///   stage 0.  With initial seed `[100.0, 50.0]` and decision `d_0`, the
-///   outgoing state is `[50.0, d_0]`.
-///
-/// - **Stages 1..=4**: the backward pass overwrites each slot.  For stage `s`,
-///   the backward pass exchanges the forward outgoing state from stage `s-1`
-///   (used as the linearisation trial point `x_hat`) and stores that state
-///   in `basis_store[(m, s)]`.  Concretely:
-///
-///   | basis_cache slot | stored by        | value equals              |
-///   |-----------------|------------------|---------------------------|
-///   | 0               | forward pass     | forward outgoing of t=0   |
-///   | 1               | backward pass    | forward outgoing of t=0   |
-///   | 2               | backward pass    | forward outgoing of t=1   |
-///   | t (≥1)          | backward pass    | forward outgoing of t-1   |
-///
-///   This means `basis_cache[1]` and `basis_cache[0]` carry the same
-///   anticipated-state values (both equal the post-shift state of stage 0).
-///
-/// ## Invariants tested
-///
-/// - **AC-2**: `basis_cache[0][ant_start] == 50.0` — seed slot 1 shifted into
-///   slot 0 of the outgoing state.
-/// - **AC-3**: `basis_cache[1][ant_start..ant_start+2]` equals
-///   `basis_cache[0][ant_start..ant_start+2]` — the backward pass for stage 1
-///   stores the same trial point as the forward outgoing of stage 0.
-/// - **AC-4**: for `t` in `2..5`, `basis_cache[t][ant_start]` equals
-///   `basis_cache[t-1][ant_start+1]` — the backward-to-backward shift
-///   invariant: each slot 0 comes from the previous capture's slot 1.
-/// - **AC-5**: every `basis_cache[t][ant_start+1]` lies in `[0.0, 100.0]`.
+/// - **Stage 0**: forward pass writes the post-shift outgoing state of stage 0.
+/// - **Stages 1..=4**: backward pass stores the forward outgoing of stage `t-1`
+///   as its trial point `x_hat` — so `basis_cache[1]` (trial point of stage 1)
+///   equals `basis_cache[0]` (forward outgoing of stage 0).
 #[test]
 fn five_stage_k2_anticipated_state_ring_buffer_evolution() {
     let system = build_system();
@@ -480,14 +432,11 @@ fn five_stage_k2_anticipated_state_ring_buffer_evolution() {
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
 
-    // Run 1 training iteration — enough to populate basis_cache for all stages.
+    // One iteration populates basis_cache for every stage.
     let outcome = setup
         .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must not return Err");
 
-    // -----------------------------------------------------------------------
-    // AC-1: training completes without error and runs at least 1 iteration.
-    // -----------------------------------------------------------------------
     assert!(
         outcome.error.is_none(),
         "AC-1: training error must be None; got {:?}",
@@ -499,7 +448,6 @@ fn five_stage_k2_anticipated_state_ring_buffer_evolution() {
         outcome.result.iterations
     );
 
-    // Retrieve the stage indexer to locate the anticipated_state slice.
     let state = setup.stage_state();
     let n_ant = state.n_anticipated;
     let k_max = state.k_max;
@@ -515,17 +463,9 @@ fn five_stage_k2_anticipated_state_ring_buffer_evolution() {
         "basis_cache must have one entry per study stage"
     );
 
-    // -----------------------------------------------------------------------
-    // AC-2: stage 0 state_at_capture reflects the seeded past_anticipated_commitments.
-    //
-    // The forward pass stores the POST-SHIFT outgoing state at stage 0.
-    // Incoming seed is [100.0, 50.0]; after the ring-buffer shift:
-    //   slot 0 = seeded slot 1 = 50.0   (shifts down by one)
-    //   slot 1 = LP decision d_0 ∈ [0, 100]
-    //
-    // The 50.0 in slot 0 is direct evidence that the seed was consumed:
-    // no other code path produces this exact value in the anticipated block.
-    // -----------------------------------------------------------------------
+    // AC-2: forward pass stores the post-shift outgoing state. Seed [100.0, 50.0]
+    // shifts to slot 0 = 50.0 (no other code path produces this exact value),
+    // slot 1 = LP decision d_0 ∈ [0, 100].
     let s0 = basis_cache[0]
         .as_ref()
         .expect("AC-2: stage 0 basis must be captured")
@@ -542,16 +482,8 @@ fn five_stage_k2_anticipated_state_ring_buffer_evolution() {
         s0[ant_start + 1]
     );
 
-    // -----------------------------------------------------------------------
-    // AC-3: stage 1 state_at_capture equals stage 0 state_at_capture.
-    //
-    // The backward pass for stage 1 uses the forward outgoing state of stage 0
-    // as its trial-point x_hat and writes it into basis_cache[1].  This is
-    // identical to basis_cache[0] (both hold the post-shift state of stage 0).
-    //
-    // Invariant: basis_cache[1][ant_start..ant_start+2]
-    //            == basis_cache[0][ant_start..ant_start+2]
-    // -----------------------------------------------------------------------
+    // AC-3: backward pass for stage 1 stores the forward outgoing of stage 0 as
+    // its trial point x_hat, so basis_cache[1] equals basis_cache[0].
     let s1 = basis_cache[1]
         .as_ref()
         .expect("AC-3: stage 1 basis must be captured")
@@ -572,16 +504,8 @@ fn five_stage_k2_anticipated_state_ring_buffer_evolution() {
         s0[ant_start + 1],
     );
 
-    // -----------------------------------------------------------------------
-    // AC-4: for t in 2..=4, slot 0 at stage t equals slot 1 at stage t-1
-    //        (the backward-pass shift invariant across consecutive stages).
-    //
-    // basis_cache[t] for t≥2 stores the forward outgoing state of stage t-1.
-    // basis_cache[t-1] stores the forward outgoing state of stage t-2.
-    // The forward shift produces:
-    //   outgoing_of(t-1)[slot0] = outgoing_of(t-2)[slot1]
-    // which is exactly s_curr[ant_start] == s_prev[ant_start+1].
-    // -----------------------------------------------------------------------
+    // AC-4: for t≥2, basis_cache[t] holds the forward outgoing of stage t-1, so
+    // the forward shift gives s_curr slot 0 == s_prev slot 1.
     for t in 2..5_usize {
         let s_curr = basis_cache[t]
             .as_ref()
@@ -603,10 +527,8 @@ fn five_stage_k2_anticipated_state_ring_buffer_evolution() {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // AC-5: every captured slot 1 (the anticipated decision field) lies
-    //        within the anticipated thermal's dispatch bounds [0.0, 100.0].
-    // -----------------------------------------------------------------------
+    // AC-5: every captured slot 1 (the anticipated decision) stays within the
+    // thermal's dispatch bounds [0.0, 100.0].
     for t in 0..5_usize {
         let s_t = basis_cache[t]
             .as_ref()

@@ -1,8 +1,7 @@
-//! Integration test: MPI wire-format version guards reject stale payloads.
-//!
-//! `CapturedBasis::try_from_broadcast_payload` and `deserialize_cut` must both
-//! return `SddpError::Validation` when the wire-format version byte/field is
-//! corrupted. These tests exercise the public API surface without spawning MPI processes.
+//! MPI wire-format version guards: `CapturedBasis::try_from_broadcast_payload`
+//! and `deserialize_cut` must return `SddpError::Validation` on a corrupted
+//! version byte/field — a stale version must be rejected, never silently
+//! decoded as corrupt data. Exercised through the public API, no MPI spawn.
 
 #![allow(
     clippy::unwrap_used,
@@ -21,10 +20,6 @@ use cobre_sddp::{
 // basis wire-format version guard
 // ---------------------------------------------------------------------------
 
-/// Construct a valid `CapturedBasis`, serialize it via `to_broadcast_payload`,
-/// corrupt the version field (`i32_buf[1]`), then verify that
-/// `try_from_broadcast_payload` returns `SddpError::Validation` containing
-/// `"unsupported wire version 2"`.
 #[test]
 fn basis_try_from_broadcast_payload_rejects_wrong_version() {
     let num_cols = 2;
@@ -40,7 +35,7 @@ fn basis_try_from_broadcast_payload_rejects_wrong_version() {
         cut_slot_capacity,
         n_state,
     );
-    // Populate with minimal valid data so the Some-path sentinel is written.
+    // Minimal valid data so the Some-path sentinel (i32_buf[0] == 1) is written.
     original.basis.col_status.extend_from_slice(&[0_i32, 1_i32]);
     original
         .basis
@@ -54,17 +49,14 @@ fn basis_try_from_broadcast_payload_rejects_wrong_version() {
     let mut f64_buf: Vec<f64> = Vec::new();
     original.to_broadcast_payload(&mut i32_buf, &mut f64_buf);
 
-    // Layout: [sentinel=1, version=BASIS_BROADCAST_WIRE_VERSION, col_len, row_len,
-    //          base_row_count, cut_slot_count, state_len, col_status..., row_status...,
-    //          cut_row_slots...]
-    // The version is at index 1.
+    // i32_buf layout (owned by to_broadcast_payload): [sentinel, version, ...] —
+    // the version field is at index 1, which this test corrupts below.
     assert_eq!(i32_buf[0], 1, "sentinel must be 1 (Some path)");
     assert_eq!(
         i32_buf[1], BASIS_BROADCAST_WIRE_VERSION,
         "version field must equal BASIS_BROADCAST_WIRE_VERSION before corruption"
     );
 
-    // Corrupt the version field to 2.
     i32_buf[1] = 2;
 
     let mut i32_cursor = 0_usize;
@@ -95,9 +87,6 @@ fn basis_try_from_broadcast_payload_rejects_wrong_version() {
 // Cut wire-format version guard
 // ---------------------------------------------------------------------------
 
-/// Serialize a single cut via `serialize_cut`, corrupt the version byte at
-/// offset 0 to an unknown value, then verify that `deserialize_cut` returns
-/// `SddpError::Validation` referencing the unsupported version.
 #[test]
 fn deserialize_cut_rejects_wrong_version() {
     let n_state = 2;

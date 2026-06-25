@@ -1,25 +1,10 @@
 //! Integration tests for inflow non-negativity enforcement via the penalty method.
 //!
-//! Verifies end-to-end behaviour for `InflowNonNegativityMethod::Penalty`:
-//!
-//! 1. Training completes without `SddpError::Infeasible` when PAR(p) noise
-//!    produces negative effective inflows.
-//! 2. The inflow non-negativity slack absorbs negative inflow (slack > 0 in
-//!    the LP solution at any stage where inflow is negative).
-//! 3. `SimulationHydroResult.inflow_nonnegativity_slack_m3s` is populated
-//!    (non-zero) in at least one scenario / stage when the system produces
-//!    negative inflows.
-//!
-//! ## System design
-//!
-//! All three tests use a 2-hydro, 1-bus, 3-stage system. The PAR(0) inflow
-//! model has `mean_m3s = 0.0` and `std_m3s = 30.0`, so approximately half of
-//! all sampled noise values produce negative effective inflows. The opening
-//! tree is generated with 10 openings per stage from seed 42, guaranteeing
-//! that multiple openings carry negative noise realisations.
-//!
-//! `ActiveSolver` is used throughout so the LP is actually solved and slack
-//! columns receive non-trivial primal values when inflow is negative.
+//! All tests share a 2-hydro, 1-bus, 3-stage fixture whose PAR(0) inflow model
+//! (`mean_m3s = 0.0`, `std_m3s = 30.0`, 10 openings/stage from seed 42) makes
+//! roughly half of sampled noise values produce negative effective inflows —
+//! the precondition the slack-value assertions rely on. `ActiveSolver` is used
+//! throughout so the LP is solved and slack columns receive real primal values.
 
 #![allow(
     clippy::unwrap_used,
@@ -76,11 +61,10 @@ use cobre_stochastic::{
 // Communicator stub
 // ===========================================================================
 
-/// Build the role-(a) [`StateLayout`] for a non-anticipated storage+lag study via
-/// the public [`StateLayout::new`] constructor (full `max_par_order` lag stride per
-/// hydro, the dense coverage production finalizes). This external test crate does
-/// not see the parent crate's `#[cfg(test)]`/`test-support` surface, so it builds
-/// the layout from explicit dimensions through the public API.
+/// Build the role-(a) [`StateLayout`] via the public [`StateLayout::new`] (full
+/// `max_par_order` lag stride per hydro). This external test crate cannot see the
+/// parent's `#[cfg(test)]`/`test-support` surface, so it constructs from explicit
+/// dimensions rather than a test helper.
 fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     StateLayout::new(
         hydro_count,
@@ -92,13 +76,10 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     )
 }
 
-/// Build the `StudyDimensions` (non-state study shape) from explicit entity
-/// counts via the public `StudyDimensions` fields.
-///
-/// This external test crate does not see the parent crate's
-/// `#[cfg(test)]`/`test-support` surface, so it carries the non-state facts
-/// directly. `max_deficit_segments` is `1` and `n_pumping`/`has_ncs`/anticipated
-/// are empty for these single-bus, no-pumping, no-NCS fixtures.
+/// Build `StudyDimensions` from explicit entity counts. This external test crate
+/// cannot see the parent's `#[cfg(test)]`/`test-support` surface, so it sets the
+/// fields directly; `n_pumping`/`has_ncs`/anticipated are empty for these
+/// single-bus, no-pumping, no-NCS fixtures.
 fn study_dims_for(
     n_thermals: usize,
     n_lines: usize,
@@ -120,7 +101,6 @@ fn study_dims_for(
     }
 }
 
-/// Single-rank communicator that performs identity operations.
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -173,18 +153,9 @@ impl Communicator for StubComm {
 const N_STAGES: usize = 3;
 const N_HYDROS: usize = 2;
 
-/// Build a 2-hydro, 1-bus, 3-stage system designed to produce negative inflows.
-///
-/// - `mean_m3s = 0.0` and `std_m3s = 30.0` means roughly half of all sampled
-///   noise values are negative, giving effective inflows < 0 m³/s.
-/// - The opening tree uses 10 openings per stage, guaranteeing multiple
-///   openings carry negative noise realisations for the test to be meaningful.
-/// - 2 hydros ensure the fixture exercises the multi-hydro code path.
-/// - 1 block per stage for simplicity.
-///
-/// `ResolvedBounds` and `ResolvedPenalties` are built manually from the hydro
-/// entity values so that `build_stage_templates` can read them without
-/// `cobre-io` case loading.
+/// Build the 2-hydro, 1-bus, 3-stage negative-inflow fixture. `ResolvedBounds`
+/// and `ResolvedPenalties` are built manually from the hydro entity values so
+/// `build_stage_templates` can read them without `cobre-io` case loading.
 fn build_system() -> cobre_core::System {
     use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::InflowModel;
@@ -305,7 +276,6 @@ fn build_system() -> cobre_core::System {
                         id: EntityId(2),
                     },
                 ],
-                // 2×2 identity: uncorrelated inflows.
                 matrix: vec![vec![1.0, 0.0], vec![0.0, 1.0]],
             }],
         },
@@ -316,8 +286,6 @@ fn build_system() -> cobre_core::System {
         schedule: vec![],
     };
 
-    // Build ResolvedBounds manually from entity field values.
-    // build_stage_templates requires this table to be populated (not empty).
     let hydro_bounds_default = HydroStageBounds {
         min_storage_hm3: 0.0,
         max_storage_hm3: 50.0,
@@ -335,14 +303,10 @@ fn build_system() -> cobre_core::System {
         &BoundsCountsSpec {
             n_hydros: N_HYDROS,
             n_thermals: 0,
-            n_lines: // n_thermals
-        0,
-            n_pumping: // n_lines
-        0,
-            n_contracts: // n_pumping
-        0,
-            n_stages: // n_contracts
-        N_STAGES,
+            n_lines: 0,
+            n_pumping: 0,
+            n_contracts: 0,
+            n_stages: N_STAGES,
             k_max: 0,
         },
         &BoundsDefaults {
@@ -368,7 +332,6 @@ fn build_system() -> cobre_core::System {
         },
     );
 
-    // Build ResolvedPenalties manually.
     let hydro_penalties_default = HydroStagePenalties {
         spillage_cost: 0.0,
         diversion_cost: 0.0,
@@ -391,12 +354,9 @@ fn build_system() -> cobre_core::System {
         &PenaltiesCountsSpec {
             n_hydros: N_HYDROS,
             n_buses: 1,
-            n_lines: // n_buses
-        0,
-            n_ncs: // n_lines
-        0,
-            n_stages: // n_ncs
-        N_STAGES,
+            n_lines: 0,
+            n_ncs: 0,
+            n_stages: N_STAGES,
         },
         &PenaltiesDefaults {
             hydro: hydro_penalties_default,
@@ -504,9 +464,6 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
         first_tmpl.n_hydro,
         has_inflow_penalty,
     );
-    // The role-(b) equipment/slack column ranges come from the production
-    // stage-0 geometry the template build already computed; no separate
-    // hand-built descriptor is needed.
     let geometry = stage_templates
         .geometry_per_stage
         .first()
@@ -782,11 +739,8 @@ fn simulate_fixture(
 // Test 1: Penalty method prevents LP infeasibility
 // ===========================================================================
 
-/// Verify that training with `InflowNonNegativityMethod::Penalty` completes
-/// without `SddpError::Infeasible` when PAR(0) noise produces negative
-/// effective inflows. With `mean_m3s = 0.0` and `std_m3s = 30.0`, approximately
-/// half of sampled openings carry negative inflow values. The penalty slack
-/// columns keep the LP feasible at every stage.
+/// Training with `Penalty` completes without `SddpError::Infeasible` despite the
+/// fixture's negative effective inflows; the slack columns keep the LP feasible.
 #[test]
 fn test_penalty_method_prevents_infeasibility() {
     let fx = build_fixture();
@@ -801,10 +755,8 @@ fn test_penalty_method_prevents_infeasibility() {
 // Test 2: Penalty slack absorbs negative inflow in simulation
 // ===========================================================================
 
-/// Verify that when the penalty method is active, simulation produces at least one
-/// `SimulationHydroResult` with `inflow_nonnegativity_slack_m3s > 0.0` when negative
-/// inflows occur. With `mean_m3s = 0.0`, `std_m3s = 30.0`, and 20 scenarios,
-/// approximately half of noise draws are negative.
+/// With the penalty method active, simulation produces at least one
+/// `SimulationHydroResult` with `inflow_nonnegativity_slack_m3s > 0.0`.
 #[test]
 fn test_penalty_slack_value_matches_negative_inflow() {
     let fx = build_fixture();
@@ -834,10 +786,8 @@ fn test_penalty_slack_value_matches_negative_inflow() {
 // Test 3: Simulation slack output field is populated
 // ===========================================================================
 
-/// Verify that `SimulationHydroResult.inflow_nonnegativity_slack_m3s` is
-/// correctly populated in simulation output when the penalty method is active.
-/// The field is wired through the extraction pipeline and produces non-zero
-/// values when inflow is negative.
+/// `SimulationHydroResult.inflow_nonnegativity_slack_m3s` is populated in
+/// simulation output (non-zero in at least one hydro stage) under the penalty method.
 #[test]
 fn test_simulation_slack_output_populated() {
     let fx = build_fixture();
@@ -869,30 +819,22 @@ fn test_simulation_slack_output_populated() {
     );
 }
 
-/// T-015: `TruncationWithPenalty` mode -- training completes and inflow slack columns
-/// are present.
-///
-/// Verifies that the hybrid mode (clamping + penalty slack) works end-to-end:
-/// 1. Training completes without errors (LP is feasible).
-/// 2. The LP template has inflow slack columns (`has_slack_columns() == true`).
-/// 3. Noise is clamped (same as Truncation mode).
+/// `TruncationWithPenalty` (clamping + penalty slack) trains end-to-end and the
+/// LP template carries inflow slack columns.
 #[test]
 fn truncation_with_penalty_training_completes() {
     let fx = build_fixture_with_method(InflowNonNegativityMethod::TruncationWithPenalty);
 
-    // Verify the method has slack columns.
     assert!(
         fx.inflow_method.has_slack_columns(),
         "TruncationWithPenalty must have slack columns"
     );
 
-    // Verify the LP template has inflow slack columns in the indexer.
     assert!(
         !fx.geometry.inflow_slack.is_empty(),
         "geometry.inflow_slack must be non-empty for TruncationWithPenalty"
     );
 
-    // Train and verify convergence.
     let outcome = train_fixture(&fx, 5).expect("training must succeed");
     assert!(
         outcome.error.is_none(),
@@ -906,21 +848,15 @@ fn truncation_with_penalty_training_completes() {
     );
 }
 
-/// T-012: Per-plant inflow penalty differentiation.
-///
-/// Two hydros with different `inflow_nonnegativity_cost` values produce different
-/// objective coefficients on their inflow slack columns in the LP template.
-/// H1 gets 100 R$/MWh, H2 gets 5000 R$/MWh.
-///
-/// Verified at the LP template level: the objective coefficient for H1's inflow
-/// slack column equals `100 * block_hours`, while H2's equals `5000 * block_hours`.
+/// Per-plant `inflow_nonnegativity_cost` (H1 = 100, H2 = 5000 R$/MWh) produces
+/// distinct inflow-slack objective coefficients in the LP template: H1's equals
+/// `100 * block_hours`, H2's `5000 * block_hours` (justifies the magic asserts).
 #[test]
 fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
     use cobre_core::resolved::{
         HydroStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, ResolvedPenalties,
     };
 
-    // Build modified penalties: H1 (index 0) gets 100, H2 (index 1) gets 5000.
     let hydro_penalties_default = HydroStagePenalties {
         spillage_cost: 0.0,
         diversion_cost: 0.0,
@@ -956,14 +892,12 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
             },
         },
     );
-    // H2 (index 1) gets expensive cost.
     for stage_idx in 0..N_STAGES {
         resolved_penalties
             .hydro_penalties_mut(1, stage_idx)
             .inflow_nonnegativity_cost = 5000.0;
     }
 
-    // Rebuild the system with patched penalties using the base system's data.
     let base_system = build_system();
     let system = cobre_core::SystemBuilder::new()
         .buses(base_system.buses().to_vec())
@@ -976,7 +910,6 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
         .build()
         .unwrap();
 
-    // Build templates.
     let inflow_method = InflowNonNegativityMethod::Penalty;
     let par_lp = PrecomputedPar::build(
         system.inflow_models(),
@@ -1002,16 +935,11 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
     )
     .expect("build_stage_templates must succeed");
 
-    // Verify: the objective coefficients for the inflow slack columns differ.
     let tmpl0 = &templates.templates[0];
     let block_hours = 744.0_f64;
 
-    // The inflow slack columns are read from the production stage-0 geometry.
-    // With 2 hydros, PAR(0), and has_penalty=true, the layout allocates 2 inflow
-    // slack columns.
     let geometry = &templates.geometry_per_stage[0];
 
-    // Inflow slack columns: geometry.inflow_slack.start .. geometry.inflow_slack.end
     assert_eq!(geometry.inflow_slack.len(), N_HYDROS);
     let h1_col = geometry.inflow_slack.start; // H1 (index 0)
     let h2_col = geometry.inflow_slack.start + 1; // H2 (index 1)
@@ -1019,7 +947,7 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
     let h1_obj = tmpl0.objective[h1_col];
     let h2_obj = tmpl0.objective[h2_col];
 
-    // LP builder divides by COST_SCALE_FACTOR (1_000_000.0) for conditioning.
+    // LP builder divides by COST_SCALE_FACTOR for conditioning.
     let cost_scale = 1_000_000.0_f64;
     let expected_h1 = 100.0 * block_hours / cost_scale;
     let expected_h2 = 5000.0 * block_hours / cost_scale;

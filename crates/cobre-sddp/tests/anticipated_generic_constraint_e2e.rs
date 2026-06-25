@@ -75,7 +75,6 @@ use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context
 // StubComm — single-rank communicator for testing
 // ---------------------------------------------------------------------------
 
-/// Single-rank communicator stub for testing.
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -147,7 +146,7 @@ const DEFICIT_COST: f64 = 1000.0;
 /// so the unconstrained optimum (d_ant = LOAD_MW) is infeasible under the constraint.
 const CONSTRAINT_BOUND_MW: f64 = 20.0;
 
-/// EntityId of the anticipated thermal (K=2, ANT_MAX_MW, ANT_COST $/MWh).
+/// EntityId of the anticipated thermal.
 const ANT_THERMAL_ID: EntityId = EntityId(2);
 /// EntityId of the backup thermal. Non-anticipated.
 const BACKUP_THERMAL_ID: EntityId = EntityId(3);
@@ -158,15 +157,9 @@ const BUS_ID: EntityId = EntityId(1);
 // System builder
 // ---------------------------------------------------------------------------
 
-/// Build a `N_STAGES`-stage no-hydro system with:
-/// - 1 bus (deficit cost `DEFICIT_COST` $/MWh)
-/// - 1 anticipated thermal (K=2, `ANT_MAX_MW`, `ANT_COST` $/MWh) — id=2
-/// - 1 backup thermal (`BACKUP_MAX_MW`, `BACKUP_COST` $/MWh) — id=3
-/// - Deterministic load `LOAD_MW` MW at every stage (`std_mw=0`)
-/// - `past_anticipated_commitments = [(id=2, [0.0, 0.0])]` (zero pre-study)
-/// - Optional: generic constraints + their resolved stage bounds
-///
-/// The LP is always feasible: backup thermal alone covers `LOAD_MW` MW.
+/// Build the `N_STAGES`-stage no-hydro system (1 bus, 1 anticipated thermal, 1
+/// backup thermal) with optional generic constraints + resolved stage bounds.
+/// Always feasible: the backup thermal alone covers `LOAD_MW`.
 fn build_system(
     generic_constraints: Vec<GenericConstraint>,
     generic_bounds: ResolvedGenericConstraintBounds,
@@ -181,7 +174,6 @@ fn build_system(
         excess_cost: 0.0,
     };
 
-    // Anticipated thermal: K=2 lead stages.
     let thermal_ant = Thermal {
         id: ANT_THERMAL_ID,
         name: "T_ant".to_string(),
@@ -194,7 +186,6 @@ fn build_system(
         exit_stage_id: None,
     };
 
-    // Backup standard thermal (not anticipated).
     let thermal_backup = Thermal {
         id: BACKUP_THERMAL_ID,
         name: "T_backup".to_string(),
@@ -232,7 +223,6 @@ fn build_system(
         })
         .collect();
 
-    // Deterministic load (std_mw=0 → no noise, no stochastic uncertainty).
     let load_models: Vec<LoadModel> = (0..N_STAGES)
         .map(|i| LoadModel {
             bus_id: BUS_ID,
@@ -242,9 +232,6 @@ fn build_system(
         })
         .collect();
 
-    // No hydro in this fixture.
-    // Thermal bounds default to zero capacity and zero cost; we override
-    // per-thermal per-stage below (same pattern as the K=1 canary test).
     let mut bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
             n_hydros: 0,
@@ -290,14 +277,10 @@ fn build_system(
         },
     );
 
-    // SystemBuilder sorts thermals by EntityId ascending:
-    //   index 0 → id=2 (anticipated, ANT_THERMAL_ID)
-    //   index 1 → id=3 (backup, BACKUP_THERMAL_ID)
-    //
-    // The thermal stage axis has length N_STAGES + K_MAX (= 6 here) to support
-    // delivery-stage lookups in fill_anticipated_columns. We set
-    // bounds for all stages in that axis so the LP reads correct costs at
-    // both regular and anticipated delivery stages.
+    // SystemBuilder sorts thermals by EntityId ascending, so thermal_idx 0 = id=2
+    // (anticipated) and thermal_idx 1 = id=3 (backup); these indices feed
+    // thermal_bounds_mut below. The thermal stage axis runs N_STAGES + K_MAX to
+    // cover delivery-stage lookups in fill_anticipated_columns.
     let thermal_axis = N_STAGES + K_MAX;
     for s in 0..thermal_axis {
         *bounds.thermal_bounds_mut(0, s) = ThermalStageBounds {
@@ -347,7 +330,6 @@ fn build_system(
         },
     );
 
-    // Zero past commitments — no pre-study deliveries.
     let initial_conditions = InitialConditions {
         storage: vec![],
         filling_storage: vec![],
@@ -381,7 +363,7 @@ fn build_system(
 // Config builder
 // ---------------------------------------------------------------------------
 
-/// Build a minimal [`Config`] for 1 forward pass and 10 iterations.
+/// Build a minimal [`Config`] for this fixture.
 fn build_config() -> Config {
     Config {
         schema: None,
@@ -454,14 +436,8 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 /// With constraint (`d0, d1 <= 20 MW`): only 20 MW of cheap anticipated
 /// dispatch is available at stages 2 and 3; the remaining 30 MW at each
 /// delivery stage must use the backup at BACKUP_COST (100 $/MWh), raising LB.
-///
-/// Assertions:
-/// - Both constrained and baseline runs complete without error.
-/// - Constrained LB is strictly greater than baseline LB.
-/// - The LB delta is at least 1.0 USD (economically meaningful).
 #[test]
 fn anticipated_decision_constraint_raises_lb() {
-    // Generic constraint: anticipated_decision(2) <= CONSTRAINT_BOUND_MW.
     let constraint = GenericConstraint {
         id: EntityId(1),
         name: "cap_ant_decision".to_string(),
@@ -486,18 +462,15 @@ fn anticipated_decision_constraint_raises_lb() {
     let config = build_config();
     let comm = StubComm;
 
-    // Build resolved bounds: constraint id=1 is active at all study stages (0..N_STAGES).
-    // The `anticipated_decision` column is stage-level; the constraint row is added per
-    // stage where the bound entry exists. At stages 2 and 3 the d_ant column has bounds
-    // [0,0] (inactive), so the constraint row has no LP effect — but it is structurally
-    // harmless and keeps the setup simple.
+    // Constraint id=1 carries a bound at every study stage. At stages 2 and 3 the
+    // d_ant column is inactive ([0,0]) so its row has no LP effect, but applying it
+    // uniformly is harmless and keeps the setup simple.
     let id_map: std::collections::HashMap<i32, usize> = [(1_i32, 0_usize)].into_iter().collect();
     let raw_bounds: Vec<(i32, i32, Option<i32>, f64)> = (0..N_STAGES as i32)
         .map(|stage_id| (1_i32, stage_id, None::<i32>, CONSTRAINT_BOUND_MW))
         .collect();
     let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, raw_bounds.into_iter());
 
-    // Constrained run.
     let constrained_system = build_system(vec![constraint], generic_bounds);
     let mut constrained_setup = build_setup(constrained_system, &config);
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
@@ -513,7 +486,6 @@ fn anticipated_decision_constraint_raises_lb() {
     );
     let constrained_lb = constrained_outcome.result.final_lb;
 
-    // Baseline run (no constraint).
     let baseline_system = build_system(vec![], ResolvedGenericConstraintBounds::empty());
     let mut baseline_setup = build_setup(baseline_system, &config);
     let mut baseline_solver = ActiveSolver::new().expect("ActiveSolver::new baseline");
@@ -583,9 +555,6 @@ fn anticipated_decision_on_non_anticipated_thermal_rejected_by_validator() {
 
     fs::write(system_dir.join("lines.json"), r#"{"lines":[]}"#).expect("write lines.json");
 
-    // Two thermals:
-    //   id=2 — anticipated (lead_stages=2)
-    //   id=3 — NOT anticipated (no anticipated_config)
     fs::write(
         system_dir.join("thermals.json"),
         r#"{
@@ -736,7 +705,6 @@ fn anticipated_decision_on_non_anticipated_thermal_rejected_by_validator() {
     )
     .expect("write config.json");
 
-    // Run the full validation pipeline. Must fail at the semantic layer.
     let result = cobre_io::validate_case(case_dir);
 
     assert!(
@@ -744,7 +712,6 @@ fn anticipated_decision_on_non_anticipated_thermal_rejected_by_validator() {
         "validate_case should fail when anticipated_decision references a non-anticipated thermal"
     );
 
-    // The error must contain the AC-8 message substring.
     let err_msg = format!("{:?}", result.unwrap_err());
     assert!(
         err_msg.contains("not an anticipated thermal"),
@@ -756,8 +723,7 @@ fn anticipated_decision_on_non_anticipated_thermal_rejected_by_validator() {
 // Helper: write a minimal `generic_constraint_bounds.parquet`
 // ---------------------------------------------------------------------------
 
-/// Write a single-row parquet with the given constraint_id, stage_id, and bound.
-/// `block_id` is left null (applies to all blocks).
+/// Write a single-row constraint-bounds parquet; `block_id` is null (all blocks).
 fn write_constraint_bounds_parquet(
     path: &Path,
     constraint_id: i32,

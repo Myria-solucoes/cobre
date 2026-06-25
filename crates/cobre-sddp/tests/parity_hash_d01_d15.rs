@@ -1,48 +1,10 @@
-//! Parity hash harness for the deterministic cases enumerated in `case_dir`
-//! (the D01–D17 core plus the D31 backwater reference-volume case; gaps in the
-//! index reflect retired/absent cases).
+//! HiGHS parity-hash harness for the deterministic cases enumerated in `case_dir`.
 //!
-//! Computes a SHA-256 digest over a whitelist of semantic fields from each
-//! case's training + simulation output. On first run with `COBRE_PARITY_REGEN=1`
-//! the test **writes** the baseline files; on subsequent runs it **verifies**
-//! against the committed baselines.
-//!
-//! ## Hash whitelist (in fixed order)
-//!
-//! 1. Per-iteration convergence data: `iteration_u64_le || lower_bound_f64_le
-//!    || upper_bound_f64_le || upper_bound_std_f64_le || gap_f64_le`
-//!    Captured from [`TrainingEvent::ConvergenceUpdate`] events (one per
-//!    completed iteration, ordered 1..=N).
-//!
-//! 2. Per-stage, per-cut: `stage_u32_le || intercept_f64_le ||
-//!    coefficient_count_u32_le || coefficient_f64_le[]`
-//!    Iterated over stages 0..num_stages, then active cuts within each stage
-//!    in the slot order reported by [`FutureCostFunction::active_cuts`].
-//!
-//! 3. Simulation primal trajectory per scenario per stage:
-//!    `stage_u32_le || num_primals_u32_le || primal_f64_le[]`
-//!    Scenarios sorted ascending by `scenario_id`; stages by `stage_id`.
-//!    Primals = `storage_final_hm3` for each hydro at each stage, sorted by
-//!    `(block_id, hydro_id)`.  For pure-thermal cases the primal vector is
-//!    empty (`num_primals = 0`).
-//!
-//! 4. Simulation dual trajectory per scenario per stage:
-//!    `stage_u32_le || num_duals_u32_le || dual_f64_le[]`
-//!    Same ordering.  Duals = `water_value_per_hm3` for each hydro record,
-//!    sorted by `(block_id, hydro_id)`.
-//!
-//! ## Field-name translation from the schema spec
-//!
-//! The output-schema spec references generic "primal trajectory" and "dual
-//! trajectory" fields.  The actual structs use:
-//! - `SimulationHydroResult::storage_final_hm3`  → primal state variable
-//! - `SimulationHydroResult::water_value_per_hm3` → dual of storage balance
-//! - `TrainingEvent::ConvergenceUpdate::upper_bound_std` → `upper_bound_std_f64_le`
-//!
-//! ## Timing exclusion
-//!
-//! No field ending in `_ms`, containing `elapsed`, or containing `wall` is
-//! included in the hash. Timing fields are allowed to drift between runs.
+//! Each case's train + simulate output is digested over the semantic-field
+//! whitelist owned by [`compute_parity_hash`]; the hash pins bit-for-bit
+//! determinism and declaration-order invariance, so a changed hash means a real
+//! output change. With `COBRE_PARITY_REGEN=1` the test **writes** the baseline;
+//! otherwise it **verifies** against the committed baseline.
 
 #![allow(
     clippy::unwrap_used,
@@ -72,7 +34,7 @@ mod common;
 use crate::common::parity_hash::compute_parity_hash;
 
 // ---------------------------------------------------------------------------
-// Stub communicator (single-rank, copied from deterministic.rs)
+// Stub communicator (single-rank)
 // ---------------------------------------------------------------------------
 
 struct StubComm;
@@ -201,134 +163,19 @@ fn case_dir(label: &str) -> std::path::PathBuf {
         "D14" => "d14-block-factors",
         "D15" => "d15-non-controllable-source",
         "D17" => "d17-evaporation-mixed-sign",
-        // NCS commissioning window: NCS0 enters service at stage 1
-        // (`entry_stage_id`) and NCS1 leaves at stage 2 (`exit_stage_id`), so the
-        // active NCS set — and therefore the per-stage NCS column base — differs
-        // across stages 0/1/2 instead of collapsing to a uniform set. Exercises
-        // the per-stage `identify_active_ncs` path that a uniform-NCS case cannot.
         "D18" => "d18-ncs-commissioning-window",
-        // Cascade case whose downstream plant declares a `reference_volume`,
-        // shifting the upstream computed-FPHA plant's backwater family. The
-        // reference-volume *default* (0.65) path is covered by the unchanged
-        // D05/D06/D07 baselines (no `reference_volume` declared there); D31
-        // exercises the *declared* path end-to-end.
         "D31" => "d31-backwater-reference-volume",
-        // Reversible plant: a single pumping station lifts water from the
-        // downstream reservoir (H1) back up to the upstream one (H0) every
-        // block. The `flow.min_m3s > 0` lower bound forces a non-degenerate
-        // transfer (and the matching power draw) on every solve, so the pumping
-        // column actually participates in the LP — the storage trajectories and
-        // water values of both reservoirs absorb the coupling.
         "D32" => "d32-reversible-plant",
-        // Per-stage varying block counts: stages declare `blocks` arrays of
-        // different length (1 / 3 / 2), so each stage's per-block equipment
-        // column stride (turbine/spillage/thermal/bus) diverges from stage 0's.
-        // A uniform-block case (every stage shares one block count, as in D14)
-        // cannot detect equipment columns read off the wrong stage's block
-        // width, because all stages share the same stride. The `load_factors`
-        // block-factor array is sized to each stage's own count, exercising the
-        // per-stage block-indexed input path.
         "D33" => "d33-per-stage-block-counts",
-        // Anticipated thermals under a per-stage-varying block schedule
-        // (1 / 3 / 2). The cheap anticipated thermal (K=1) commits at stage 0
-        // and stage 1, maturing at the interior delivery stages 1 (3 blocks)
-        // and 2 (2 blocks) — both with block counts differing from stage 0's
-        // single block. The matured-anticipated cut coefficient is therefore
-        // harvested at an off-stage-0 block count, which is exactly the
-        // condition that distinguishes the `anticipated_state_out` column
-        // resolved through the stage-invariant state region (correct) from one
-        // resolved through an `n_blks`-dependent control-region offset (the
-        // class of bug a uniform-block anticipated case cannot detect, because
-        // every stage shares the same per-block stride). Pairs anticipated
-        // thermals (absent from D33) with the non-uniform block schedule
-        // (absent from every anticipated test).
         "D34" => "d34-anticipated-varying-blocks",
-        // Pumping commissioning gating: the reversible plant of D32 carries an
-        // `entry_stage_id`/`exit_stage_id` window so it is active only at the
-        // interior stage 1 (dormant at stages 0 and 2). Because `flow.min_m3s > 0`
-        // forces a transfer on every active solve, gating removes that forced
-        // transfer at the two dormant stages — a station active at every stage
-        // (as in D32) cannot detect a window that is parsed but never applied to
-        // the LP. Under the dense (zero-influence) layout the dormant stages keep
-        // the pumping column pinned to `[0, 0]` and emit a zero output row, so
-        // their storage trajectories and water values diverge from the
-        // always-active D32 baseline.
         "D35" => "d35-pumping-commissioning",
-        // Thermal + line commissioning gating: a plain (non-anticipated) thermal
-        // with a must-run floor (`min_mw > 0`) carries an
-        // `entry_stage_id`/`exit_stage_id` window so it is active only at stage 1
-        // (dormant at 0 and 2), and a line carries an `entry_stage_id` so it is
-        // dormant at stage 0 and active at stages 1 and 2. Under the dense
-        // (zero-influence) layout a dormant thermal pins BOTH bounds to `[0, 0]`
-        // (the must-run floor zeroes too, so the windowed-out plant cannot make
-        // the LP infeasible) and a dormant line pins `col_upper` to 0 on both
-        // directions. The parity hash covers hydro storage/water/cuts/convergence,
-        // not thermal/line output directly, so it reflects the gating only through
-        // the dispatch coupling: with T0 off and the inter-bus line cut at stage 0,
-        // B1's load must lean on H1 + deficit instead of imported B0 power,
-        // shifting both reservoirs' trajectories relative to an always-active case.
         "D36" => "d36-thermal-line-commissioning",
-        // Anticipated thermal under a commissioning window AND a per-stage-varying
-        // block schedule. The cheap anticipated thermal (K=2) carries a window
-        // `[entry=2, exit=4)` over a 6-stage horizon: its decision gate is active
-        // only when the DELIVERY stage `t + 2` lands in `[2, 4)`, so a pre-entry
-        // decision at stage 0 delivers at the first operating stage 2, decisions at
-        // stages 2+ are post-exit-dormant, and the ring buffer drains to 0 within K
-        // stages after exit. This is the only case that combines an anticipated
-        // thermal with a commissioning window: it exercises the SHIFTED decision
-        // gate (operation-window clause keyed on the delivery stage) on top of the
-        // n_blks-dependent decision base against the stage-invariant state_out
-        // column (the D34 prior-bug surface), which a windowless anticipated case
-        // (D34) and a windowed plain-thermal case (D36) each cover only half of.
         "D37" => "d37-anticipated-commissioning",
-        // Mid-cascade dead-volume filling: a cascade
-        // `H1 → H2 (filling) → H3 (real fed downstream)` plus an off-cascade
-        // control H4. H2 carries `entry_stage_id = 4` with
-        // `filling { start_stage_id = 2 }`, so over the 6-stage horizon it is
-        // PreFilling at stages 0–1, Filling at 2–3, and Operating at 4–5. During
-        // PreFilling the dam is absent from the LP, so its inflow short-circuits
-        // onto its real downstream H3's water-balance row instead of into a sink —
-        // a routing the always-present cascade cases (D03) cannot exercise. Block
-        // counts change at BOTH phase boundaries (schedule 1/1/3/2/3/1: 1→3 at the
-        // PreFilling→Filling boundary, 2→3 at the Filling→Operating boundary), so
-        // the per-stage geometry and per-stage `τ` are read across phase
-        // transitions that also straddle block-count changes. The parity hash
-        // covers hydro storage/water/cuts/convergence, so it reflects the
-        // short-circuit and the phase transitions through the cascade coupling; the
-        // filling soft-penalty slacks are checked by the focused simulation test,
-        // not by this baseline.
         "D38" => "d38-dead-volume-filling",
-        // PreFilling hydro directly upstream of a Filling hydro: cascade
-        // `U (id 1, filling) → D (id 0, filling) → H3 (id 2, real sink)` plus an
-        // off-cascade control H4. U commissions LATER than D
-        // (`start_U = 3 > start_D = 1`), so at stages 1–2 D is Filling while U is
-        // still PreFilling. U's absent dam routes its (large) realized inflow onto
-        // D's water-balance row only (the cap row is removed), so D treats it as
-        // ordinary cascade inflow. D03/D38 cannot exercise a
-        // PreFilling-upstream-of-Filling adjacency; the parity hash covers
-        // storage/water/cuts/convergence, so it reflects the short-circuit routing
-        // through the cascade coupling.
         "D39" => "d39-prefilling-upstream-of-filling",
-        // Filling cascade: a cascade `H_up (id 0, filling) → H_down (id 1,
-        // filling) → H_sink (id 2, real) ` plus an off-cascade control H_ctrl
-        // (id 3). H_up and H_down share `entry_stage_id = 4` with
-        // `filling { start_stage_id = 1 }`, so over the 6-stage horizon BOTH are
-        // PreFilling at stage 0, Filling at stages 1–3, and Operating at stages
-        // 4–5 — two reservoirs in Filling SIMULTANEOUSLY. They are coupled only
-        // through the cascade release (`H_up.downstream_id = 1`): H_up's outflow
-        // routes onto H_down's water-balance row while both are Filling. The
-        // volume-target model is water-balance-row-only — there is no impound /
-        // retention cap row — so a downstream filling dam absorbs an upstream
-        // filling dam's release as ordinary cascade inflow. Block counts change
-        // across the horizon (schedule 1/1/3/2/3/1). A single-filling-dam case
-        // (D38/D39) cannot exercise two adjacent dams in Filling at once; the
-        // parity hash covers hydro storage/water/cuts/convergence, so it reflects
-        // the dual-filling cascade coupling and the per-stage filling floors.
         "D40" => "d40-filling-cascade",
         other => panic!("unknown case label: {other}"),
     };
-    // Integration tests run from the crate root; fixtures live at
-    // ../../examples/deterministic/<suffix> relative to the crate.
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/deterministic")
         .join(suffix)
@@ -351,15 +198,9 @@ fn run_case(label: &str) {
     let hydro_models =
         prepare_hydro_models(&system, &dir, false).expect("prepare_hydro_models must succeed");
 
-    // Enable simulation so we get per-scenario stage results.
     let mut config_with_sim = config.clone();
     config_with_sim.simulation.enabled = true;
-    // Use a small fixed scenario count for determinism and speed.
     config_with_sim.simulation.num_scenarios = 1;
-
-    // The `hydro_energy_productivity.parquet` override is already folded into
-    // `hydro_models.productivity_override` by the caller's
-    // `prepare_hydro_models` invocation, so this helper does no parquet I/O.
 
     let sentinel = Path::new("config.json");
     let training_source = config_with_sim

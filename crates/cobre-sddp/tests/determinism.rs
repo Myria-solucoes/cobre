@@ -4,7 +4,7 @@
 //! simulation produce bit-identical results regardless of thread count.
 //! This property is guaranteed by:
 //!
-//! 1. Deterministic SipHash-1-3 seed derivation per scenario (deterministic SipHash-1-3 seed derivation).
+//! 1. Deterministic SipHash-1-3 seed derivation per scenario.
 //! 2. Declaration-order invariance in entity processing.
 //! 3. Static work partitioning (not rayon default chunking).
 //! 4. Deterministic cut merging order (sorted by trial point index).
@@ -66,13 +66,10 @@ use cobre_stochastic::{
 // Shared communicator stub
 // ===========================================================================
 
-/// Build the role-(a) [`StateLayout`] whose `storage_in` / `inflow_lags` /
-/// `anticipated_state` column starts match `indexer`'s identical fields.
-///
-/// Mirrors the gated `indexer::test_fixtures::state_layout_for` body via the
-/// public [`StateLayout::new`] constructor, so this external test crate (which
-/// does not see the parent crate's `#[cfg(test)]` surface) resolves byte-identical
-/// patch columns on the default feature set.
+/// Mirrors the gated `indexer::test_fixtures::state_layout_for` via the public
+/// [`StateLayout::new`] constructor: this external test crate cannot see the
+/// parent crate's `#[cfg(test)]` surface, so it rebuilds byte-identical patch
+/// columns on the default feature set.
 fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     StateLayout::new(
         hydro_count,
@@ -84,8 +81,6 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     )
 }
 
-/// Build the default all-zero `StudyDimensions` (every count `0`, every flag
-/// `false`), matching the empty non-state shape these toy fixtures imply.
 fn study_dims() -> cobre_sddp::indexer::StudyDimensions {
     cobre_sddp::indexer::StudyDimensions::default()
 }
@@ -157,11 +152,8 @@ const PRIMAL_3H: &[f64] = &[0.0; 10];
 const DUAL_3H: &[f64] = &[0.0; 64];
 const REDUCED_COSTS_3H: &[f64] = &[0.0; 10];
 
-/// Mock solver for a 3-hydro, PAR(0) stage LP.
-///
-/// Returns a fixed objective on every solve. Thread counts and parallel
-/// scheduling do not affect the solver result — this is the baseline for
-/// verifying that the orchestration layer is itself deterministic.
+/// Mock solver returning a fixed objective on every solve, so any output
+/// variation across thread counts comes from the orchestration layer alone.
 struct MockSolver3H {
     objective: f64,
 }
@@ -217,10 +209,8 @@ impl SolverInterface for MockSolver3H {
 // Fixture construction
 // ===========================================================================
 
-/// Build a `StochasticContext` for a 3-hydro, 5-stage system with seed 42.
-///
-/// Uses PAR(0) (no AR lags) and a single opening per stage so the fixture
-/// remains small while still exercising more code paths than a 1-hydro system.
+/// 3-hydro `StochasticContext` (seed 42, PAR(0)) — small but exercising more
+/// paths than a 1-hydro fixture.
 fn make_stochastic_context_3h_branching(
     n_stages: usize,
     branching_factor: usize,
@@ -316,7 +306,6 @@ fn make_stochastic_context_3h_branching(
 
     let stages: Vec<Stage> = (0..n_stages).map(make_stage).collect();
 
-    // One InflowModel per (hydro, stage) pair.
     let mut inflow_models: Vec<InflowModel> = Vec::new();
     for stage_idx in 0..n_stages {
         for hydro_id in [1i32, 2, 3] {
@@ -410,12 +399,7 @@ fn make_stochastic_context_3h_branching(
 /// The matrix has one nonzero per storage-fixing row (column = `storage_in[h]`,
 /// coefficient = 1.0) so the patch buffer has something to patch.
 fn template_3h() -> StageTemplate {
-    // 3 storage-fixing rows, one NZ each → 3 NZ total.
-    // col_starts: CSC format. 10 columns + 1 sentinel = 11 entries.
-    // Columns 0..3 (storage_out): no NZ
-    // Columns 3..6 (z_inflow):    no NZ
-    // Columns 6..9 (storage_in):  one NZ each (rows 0, 1, 2 respectively)
-    // Column  9    (theta):       no NZ
+    // CSC col_starts: 10 columns + 1 sentinel; only storage_in cols carry an NZ.
     let col_starts = vec![
         0_i32, // col 0 (storage_out[0])
         0,     // col 1 (storage_out[1])
@@ -491,10 +475,9 @@ impl Fixture3H {
     /// test so the per-trial-point solve loop visits multiple openings.
     fn with_branching(branching_factor: usize) -> Self {
         let n_stages = 5;
-        // N=3 hydros, L=0 PAR order
         let state = state_layout_for(3, 0);
         let templates = vec![template_3h(); n_stages];
-        // base_row: water-balance rows start at row_water_balance_start = n_state + n_hydros = 3 + 3 = 6.
+        // base_row = n_state + n_hydros = 3 + 3 = 6 (first water-balance row).
         let base_rows = vec![6usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context_3h_branching(n_stages, branching_factor);
@@ -520,26 +503,20 @@ impl Fixture3H {
 // Helper: run training with a given number of forward-pass workspaces
 // ===========================================================================
 
-/// Run `train()` on the 3-hydro fixture with `n_workspaces` forward-pass threads
-/// and return the `(TrainingResult, FutureCostFunction)` pair.
+/// Run `train()` on the 3-hydro fixture with `n_workspaces` forward-pass threads,
+/// returning `(TrainingResult, FutureCostFunction)`. Uses an isolated rayon pool
+/// to avoid interaction with the global pool or other parallel tests.
 ///
-/// An isolated rayon thread pool with exactly `n_workspaces` threads is used
-/// to prevent interaction with the global pool or other parallel tests.
-///
-/// The backward pass always solves each trial point's openings in the opening
-/// tree's precomputed solve order. With the default fixture this is the identity
-/// permutation; tests that install a non-identity order via
-/// [`StochasticContext::set_solve_order`] exercise the reordered solve path.
-/// Cuts must be bit-identical across thread counts in either case because the
-/// solve order is run-constant and the per-ω outcomes are aggregated by
+/// Cuts must be bit-identical across thread counts: the backward pass solves each
+/// trial point's openings in the run-constant precomputed solve order (identity by
+/// default; a non-identity order can be installed via
+/// [`StochasticContext::set_solve_order`]), and per-ω outcomes are aggregated by
 /// canonical ω.
 fn run_training(
     n_workspaces: usize,
     fx: &Fixture3H,
     n_iterations: u64,
 ) -> (cobre_sddp::TrainingResult, FutureCostFunction) {
-    // Each run gets a fresh FCF and a fresh primary solver.
-    // train() now returns TrainingOutcome; unwrap the result field.
     let mut fcf = make_fcf_3h(fx.n_stages);
     let mut primary_solver = MockSolver3H::new(100.0);
     let comm = StubComm;
@@ -568,8 +545,6 @@ fn run_training(
         },
     };
 
-    // Use an isolated thread pool so that tests with different workspace counts
-    // do not share the global rayon pool and do not interfere with each other.
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(n_workspaces)
         .build()
@@ -676,7 +651,6 @@ fn run_simulation(
         fx.n_stages,
     );
 
-    // Build a workspace pool of `n_workspaces` independently allocated workspaces.
     let mut workspaces: Vec<SolverWorkspace<MockSolver3H>> = (0..n_workspaces)
         .map(|idx| {
             SolverWorkspace::new(
@@ -863,10 +837,8 @@ fn test_training_determinism_across_thread_counts_with_reorder() {
     // Multi-opening fixture so the per-trial-point solve loop visits >1 opening.
     let mut fx = Fixture3H::with_branching(BRANCHING);
 
-    // Install a NON-IDENTITY solve order on every stage. The keys are arbitrary
-    // (the determinism property does not depend on them being noise-derived,
-    // only on the order being run-constant). Keys [3, 1, 4, 2] sorted descending
-    // give the permutation [2, 0, 3, 1] for each stage.
+    // Keys are arbitrary: the determinism property needs the order to be
+    // run-constant, not noise-derived.
     let n_openings_per_stage: Vec<usize> = (0..fx.n_stages)
         .map(|s| fx.stochastic.tree_view().n_openings(s))
         .collect();
@@ -883,8 +855,6 @@ fn test_training_determinism_across_thread_counts_with_reorder() {
     fx.stochastic
         .set_solve_order(&keys, SweepDirection::Descending)
         .expect("solve-order key dims match the tree");
-    // Sanity: the installed order is genuinely non-identity (else the test would
-    // not exercise the reorder path).
     assert_eq!(
         fx.stochastic.tree_view().solve_order(0),
         &[2u32, 0, 3, 1],
@@ -931,57 +901,33 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::sync::Arc;
 
-/// Type-erased wrapper that lets `allgatherv<T>` retrieve a `Vec<T>` stored
-/// under the mock's thread-local gather buffer.
-///
-/// The thread-local holds `Box<dyn Any + Send>`. Before each `sync_forward`
-/// call the test stores `GatherBuffer(pre_assembled_vec_f64)`. Inside
-/// `allgatherv<T>` we call `downcast_ref::<GatherBuffer<T>>()`: when
-/// `T = f64` the downcast succeeds and we get a `&Vec<f64>` that can be
-/// `clone_from_slice`d directly into `recv: &mut [f64]` — no unsafe, no
-/// transmutation.
+/// Type-erased carrier for the pre-assembled gather buffer: stored as
+/// `Arc<dyn Any>`, recovered in `allgatherv<T>` via `downcast_ref` so the test
+/// simulates multi-rank gather with no unsafe transmutation.
 struct GatherBuffer<T>(Vec<T>);
 
 thread_local! {
-    /// Stores the pre-assembled flat gather buffer as a type-erased `Any`.
-    ///
-    /// Set by [`MultiRankMockComm::set_gather_buffer`] before each call to
-    /// `sync_forward`. Read by `allgatherv<T>` via `downcast_ref::<GatherBuffer<T>>`.
     static MOCK_GATHER_BUFFER: RefCell<Arc<dyn Any + Send + Sync>> =
         RefCell::new(Arc::new(GatherBuffer::<f64>(Vec::new())));
 }
 
-/// Multi-rank mock communicator for testing canonical summation.
-///
-/// Simulates a single rank within a multi-rank group. `allgatherv` fills the
-/// entire `recv` buffer from a pre-loaded gather buffer set via
-/// [`MultiRankMockComm::set_gather_buffer`], faithfully reproducing what real
-/// MPI `allgatherv` delivers to every rank — all ranks receive all data.
-///
-/// The test orchestrator stores the full flat cost vector before each
-/// `sync_forward` call. When `allgatherv<f64>` runs inside `sync_forward`,
-/// the type-erased buffer is downcast back to `GatherBuffer<f64>` via
-/// `Any::downcast_ref` (a safe operation), and its contents are
-/// `clone_from_slice`d into `recv: &mut [f64]` (also safe). This pattern
-/// avoids unsafe transmutations while correctly simulating multi-rank gather.
+/// Mock communicator simulating a single rank within a multi-rank group.
+/// `allgatherv` fills the entire `recv` from the buffer pre-loaded via
+/// [`MultiRankMockComm::set_gather_buffer`], reproducing real MPI `allgatherv`
+/// where every rank receives all data.
 struct MultiRankMockComm {
     rank: usize,
     total_size: usize,
 }
 
 impl MultiRankMockComm {
-    /// Create a mock for virtual `rank` within a group of `total_size` ranks.
     fn new(rank: usize, total_size: usize) -> Self {
         Self { rank, total_size }
     }
 
-    /// Pre-load the full flat gathered cost buffer used by `allgatherv`.
-    ///
-    /// `global_costs` must contain all ranks' scenario costs in rank order:
-    /// rank 0's costs first, then rank 1's, etc. This mirrors what real MPI
-    /// `allgatherv` places in `recv` on every participating rank.
-    ///
-    /// Must be called on the same thread that will call `sync_forward`.
+    /// Pre-load `allgatherv`'s gather buffer. `global_costs` must hold every
+    /// rank's scenario costs in rank order (rank 0 first), as real MPI delivers.
+    /// Must run on the thread that will call `sync_forward` (thread-local).
     fn set_gather_buffer(global_costs: Vec<f64>) {
         MOCK_GATHER_BUFFER.with(|cell| {
             *cell.borrow_mut() = Arc::new(GatherBuffer(global_costs));
@@ -990,18 +936,9 @@ impl MultiRankMockComm {
 }
 
 impl Communicator for MultiRankMockComm {
-    /// Simulate `allgatherv` by filling `recv` from the pre-loaded buffer.
-    ///
-    /// The pre-loaded buffer is type-erased as `Box<dyn Any>`. This method
-    /// attempts `downcast_ref::<GatherBuffer<T>>()` to retrieve a `&Vec<T>`.
-    /// When `T = f64` (which is always the case when called from
-    /// `sync_forward`), the downcast succeeds and the buffer contents are
-    /// copied into `recv` via `clone_from_slice` — a fully safe operation.
-    ///
-    /// If the downcast fails (e.g., some other `T` is used), the method falls
-    /// back to filling only the local rank's slot from `_send` and leaving
-    /// other slots at `T::default()`. This fallback is unreachable in the
-    /// tests in this file.
+    /// Fills `recv` from the pre-loaded `GatherBuffer<T>` (`T = f64` in these
+    /// tests). The downcast-failure branch fills only the local rank's slot and
+    /// is unreachable here.
     fn allgatherv<T: CommData>(
         &self,
         send: &[T],
@@ -1012,16 +949,12 @@ impl Communicator for MultiRankMockComm {
         MOCK_GATHER_BUFFER.with(|cell| {
             let arc = cell.borrow();
             if let Some(buf) = arc.downcast_ref::<GatherBuffer<T>>() {
-                // Happy path: T = f64 (always true in sync_forward calls).
-                // Fill recv from the pre-assembled flat buffer in rank order.
                 for rank in 0..self.total_size {
                     let start = displs[rank];
                     let count = counts[rank];
                     recv[start..start + count].clone_from_slice(&buf.0[start..start + count]);
                 }
             } else {
-                // Fallback: only fill this rank's local slot.
-                // Unreachable in the determinism tests (T is always f64).
                 let local_start = displs[self.rank];
                 let local_count = counts[self.rank];
                 recv[local_start..local_start + local_count].clone_from_slice(send);
@@ -1065,27 +998,16 @@ impl Communicator for MultiRankMockComm {
 // Test: canonical upper bound determinism across rank counts
 // ===========================================================================
 
-/// Verify that `sync_forward` produces bit-identical `SyncResult` statistics
-/// when the same 8 scenario costs are partitioned across 1, 2, and 4 virtual
-/// ranks.
-///
-/// This is the CI-compatible regression gate for the canonical upper bound
-/// summation fix. After that fix, `sync_forward` uses `allgatherv`
-/// to assemble a flat global cost vector in rank order, then sums it
-/// sequentially. The sequential summation order is identical regardless of how
-/// many ranks contribute (because the costs always appear in global scenario
-/// index order: rank 0's costs first, rank 1's next, etc.).
-///
-/// The test uses [`MultiRankMockComm`] to simulate 2-rank and 4-rank
-/// `allgatherv` without requiring an MPI installation. The mock pre-loads the
-/// full flat gather buffer via [`MultiRankMockComm::set_gather_buffer`] and
-/// correctly fills the entire `recv` slice using a type-erased `Any`-based
-/// downcast — no unsafe code required.
+/// `sync_forward` produces bit-identical `SyncResult` statistics when the same 8
+/// scenario costs are partitioned across 1, 2, and 4 virtual ranks: it
+/// `allgatherv`s a flat cost vector in global scenario-index order (rank 0's
+/// costs first) and sums it sequentially, so the summation order is independent
+/// of rank count. Uses [`MultiRankMockComm`] to simulate multi-rank gather
+/// without an MPI installation.
 #[test]
 fn test_canonical_ub_determinism_across_rank_counts() {
-    // Known cost vector with distinct non-trivial values.
-    // Chosen so that partial sums group differently across partition boundaries,
-    // exercising the canonical summation property.
+    // Values chosen so partial sums group differently across partition
+    // boundaries, exercising the canonical summation property.
     const ALL_COSTS: &[f64] = &[100.0, 200.0, 150.0, 175.0, 125.0, 190.0, 160.0, 180.0];
     const N: usize = 8;
     const TOTAL_FWD_PASSES: usize = N;

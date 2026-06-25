@@ -14,10 +14,7 @@
 use cobre_comm::CommError;
 use cobre_sddp::SddpError;
 
-/// Verify `CommError::InvalidBufferSize` round-trips correctly through
-/// `SddpError::Communication`, carrying the actual oversized length.
-///
-/// This mirrors the error that `checked_broadcast_len` would produce for
+/// Mirrors the error `checked_broadcast_len` produces for
 /// `len = (i32::MAX as usize) + 1` — the smallest value that cannot be
 /// represented as an MPI count.
 #[test]
@@ -26,7 +23,6 @@ fn comm_error_invalid_buffer_size_roundtrip() {
     let expected = i32::MAX as usize;
     let operation = "broadcast_basis_cache_i32";
 
-    // Construct the same error that checked_broadcast_len would return.
     let comm_err = CommError::InvalidBufferSize {
         operation,
         expected,
@@ -62,9 +58,6 @@ fn comm_error_invalid_buffer_size_roundtrip() {
     }
 }
 
-/// Verify the `Display` output of `CommError::InvalidBufferSize` contains the
-/// two key quantities (actual and expected count), so diagnostic messages are
-/// actionable.
 #[test]
 fn comm_error_invalid_buffer_size_display_contains_counts() {
     let actual = (i32::MAX as usize) + 1;

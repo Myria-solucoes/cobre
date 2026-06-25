@@ -16,17 +16,6 @@
 //! 2-stage K=1 fixture whose lower bound is hand-derivable in five minutes.
 //! That canary defends the LP/cut math; this smoke test defends multi-stage
 //! state propagation, the K=2 ring-buffer shift, and basis-cache capture.
-//!
-//! ## Fixture description
-//!
-//! - 5 stages, each 744 hours (one calendar month).
-//! - 1 bus (deficit cost 500 $/MWh).
-//! - 1 hydro (storage cap 200 hm³, initial 100 hm³, max_gen 250 MW,
-//!   inflow mean 80 m³/s, spillage cost 0.01 $/hm³).
-//! - 1 anticipated thermal (K=2, cost 50 $/MWh, max 100 MW, id=2).
-//! - 1 backup thermal (cost 500 $/MWh, max 200 MW, id=4).
-//! - Load 150 MW constant across all stages.
-//! - `past_anticipated_commitments = [(id=2, [100.0, 50.0])]`.
 
 #![allow(
     clippy::unwrap_used,
@@ -80,7 +69,6 @@ use common::anticipated_structural_assertions::{
 // StubComm — single-rank communicator for testing
 // ---------------------------------------------------------------------------
 
-/// Single-rank communicator stub for testing.
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -130,15 +118,7 @@ impl Communicator for StubComm {
 // System builder
 // ---------------------------------------------------------------------------
 
-/// Build a 5-stage system with:
-/// - 1 bus (deficit cost 500 $/MWh)
-/// - 1 hydro (storage 200 hm³, max_gen 250 MW, inflow mean 80 m³/s)
-/// - 1 anticipated thermal (K=2, cost 50 $/MWh, max_gen 100 MW) — id=2
-/// - 1 backup standard thermal (cost 500 $/MWh, max_gen 200 MW) — id=4
-/// - Load 150 MW constant across all stages
-/// - `past_anticipated_commitments = [(id=2, [100.0, 50.0])]`
-///
-/// The LP is always feasible: backup thermal alone covers 150 MW.
+/// The LP is always feasible: the backup thermal alone covers the load.
 fn build_system() -> cobre_core::System {
     use chrono::NaiveDate;
 
@@ -152,7 +132,6 @@ fn build_system() -> cobre_core::System {
         excess_cost: 0.0,
     };
 
-    // Anticipated thermal: K=2 lead stages, cost 50 $/MWh, max 100 MW.
     let anticipated_id = EntityId(2);
     let thermal_ant = Thermal {
         id: anticipated_id,
@@ -166,7 +145,6 @@ fn build_system() -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // Backup standard thermal: cost 500 $/MWh (high, always feasible).
     let thermal_backup = Thermal {
         id: EntityId(4),
         name: "T_backup".to_string(),
@@ -179,7 +157,6 @@ fn build_system() -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // Hydro: constant-productivity, large storage so spill is unlikely.
     let hydro = Hydro {
         id: EntityId(3),
         name: "H1".to_string(),
@@ -271,7 +248,6 @@ fn build_system() -> cobre_core::System {
         })
         .collect();
 
-    // k_max=2 for the anticipated thermal bounds layout.
     let k_max: usize = 2;
     let n_st = n_stages;
 
@@ -312,7 +288,6 @@ fn build_system() -> cobre_core::System {
         }
     }
 
-    // 2 thermals (anticipated + backup), k_max=2.
     let bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
             n_hydros: 1,
@@ -364,7 +339,6 @@ fn build_system() -> cobre_core::System {
         },
     );
 
-    // Seed the anticipated ring buffer: slot 0 = 100.0 MW, slot 1 = 50.0 MW.
     let initial_conditions = InitialConditions {
         storage: vec![HydroStorage {
             hydro_id: EntityId(3),
@@ -397,7 +371,6 @@ fn build_system() -> cobre_core::System {
 // Config builder
 // ---------------------------------------------------------------------------
 
-/// Build a minimal [`Config`] for 1 forward pass and 8 iterations.
 fn build_config() -> Config {
     Config {
         schema: None,
@@ -428,10 +401,6 @@ fn build_config() -> Config {
 // Setup builder
 // ---------------------------------------------------------------------------
 
-/// Construct a [`StudySetup`] in-process from the given system and config.
-///
-/// Uses [`build_stochastic_context`] directly (no external scenario files),
-/// which keeps the test hermetic.
 fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
     let stochastic = build_stochastic_context(
         &system,
@@ -480,13 +449,10 @@ fn test_anticipated_5stage_k2_analytical_lb() {
     let anticipated_state_start = state.anticipated_state.start;
     let n_anticipated = state.n_anticipated;
 
-    // Structural assertions — no EXPECTED_LB. Value-correctness coverage
-    // lives in anticipated_closed_form_lb_k1_single_thermal.rs (closed-form
-    // canary).
     assert_training_converged_structurally(result, &[], 8);
     assert_basis_cache_fully_populated(result, 5);
-    // Delivery stages for K=2 with strict predicate: t + K < n_stages
-    // means decisions at t in {0,1,2}, deliveries at t+K in {2,3,4}.
+    // K=2 strict predicate (t + K < n_stages): decisions at t in {0,1,2} deliver
+    // at t+K in {2,3,4}.
     assert_anticipated_delivery_slots_populated(
         result,
         anticipated_state_start,
@@ -509,12 +475,6 @@ fn test_anticipated_5stage_k2_analytical_lb() {
 /// `SolverStatistics` counter incremented whenever the solver rejects an offered
 /// warm-start basis (`isBasisConsistent` returns false): every reconstructed
 /// basis must be accepted by the solver.
-///
-/// Aggregated across all training-phase log entries (forward and backward) so a
-/// rejection on either pass surfaces. Iteration 1's forward pass captures the
-/// first basis; iterations 2..8 warm-start from the stored basis through
-/// `reconstruct_basis`, which is precisely the path the relocation could have
-/// broken.
 #[test]
 fn test_anticipated_5stage_k2_warm_start_zero_basis_rejections() {
     let system = build_system();

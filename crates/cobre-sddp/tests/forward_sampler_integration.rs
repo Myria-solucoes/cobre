@@ -1,8 +1,8 @@
 //! Integration tests for `ForwardSampler` dispatch.
 //!
 //! Covers three scenarios:
-//! 1. `InSample` bitwise equivalence: the refactored path produces identical
-//!    lower bounds and iteration counts to the pre-refactor D01 baseline.
+//! 1. `InSample` bitwise equivalence: the `InSample` path matches the D01
+//!    deterministic lower bound and iteration count.
 //! 2. `OutOfSample` convergence: training with fresh noise converges to a lower
 //!    bound within 5% of the `InSample` lower bound.
 //! 3. Declaration-order invariance for `OutOfSample`: entity ordering does not
@@ -421,14 +421,12 @@ fn build_two_hydro_system(
         excess_cost: 0.0,
     };
 
-    // Declare hydros in the specified order (exercises entity_order path)
     let hydros = vec![make_hydro(hydro_id_order[0]), make_hydro(hydro_id_order[1])];
 
     let stages: Vec<Stage> = (0..n_stages)
         .map(|i| make_stage(i, branching_factor))
         .collect();
 
-    // Build inflow models for both hydros across all stages
     let mut inflow_models = Vec::new();
     for &raw_id in hydro_id_order {
         for stage_idx in 0..n_stages {
@@ -444,8 +442,7 @@ fn build_two_hydro_system(
         }
     }
 
-    // Build correlation model with entities in declaration order.
-    // The entity list order in the CorrelationGroup drives `entity_order` in
+    // The CorrelationGroup entity-list order drives `entity_order` in
     // `build_stochastic_context` — this is the invariance path under test.
     let entity_ids: Vec<EntityId> = hydro_id_order.iter().map(|&id| EntityId(id)).collect();
     let correlation = make_correlation(&entity_ids);
@@ -508,7 +505,7 @@ fn run_programmatic(
     };
 
     let config = ConstructionConfig {
-        seed: 42, // tree seed
+        seed: 42,
         forward_passes,
         stopping_rule_set,
         n_scenarios: 0, // simulation disabled
@@ -539,16 +536,15 @@ fn run_programmatic(
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Verify that the refactored `ForwardSampler::InSample` path produces the
-/// same lower bound and iteration count as the pre-refactor D01 baseline.
+/// Verify that the `ForwardSampler::InSample` path produces the D01 lower bound
+/// and iteration count.
 ///
 /// D01 is a 2-stage, 2-thermal deterministic dispatch case. Expected cost is
 /// 182,500 $ (hand-derivable: see `tests/deterministic.rs::d01_thermal_dispatch`).
 ///
-/// This test uses the full IO path (`load_case` + `prepare_stochastic` +
-/// `StudySetup::new`) — the same path exercised by the D01 deterministic
-/// regression suite — so it confirms the refactored `ForwardSampler` dispatch
-/// is transparent in the complete pipeline.
+/// Uses the full IO path (`load_case` + `prepare_stochastic` + `StudySetup::new`),
+/// the same path the D01 regression suite exercises, so `ForwardSampler` dispatch
+/// is confirmed transparent in the complete pipeline.
 #[test]
 fn insample_equivalence_d01() {
     let case_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -560,8 +556,7 @@ fn insample_equivalence_d01() {
 
     let result = run_case_from_dir(&case_dir);
 
-    // D01 expected lower bound: 182,500 $ (deterministic, hand-derivable).
-    // Tolerance matches the existing `d01_thermal_dispatch` regression test.
+    // Tolerance matches the `d01_thermal_dispatch` regression test.
     let expected_lb = 182_500.0_f64;
     let diff = (result.final_lb - expected_lb).abs();
     assert!(
@@ -593,7 +588,7 @@ fn insample_equivalence_d01() {
 fn out_of_sample_convergence() {
     const FORWARD_PASSES: u32 = 20;
     const MAX_ITERATIONS: u64 = 50;
-    const RELATIVE_TOLERANCE: f64 = 0.05; // 5%
+    const RELATIVE_TOLERANCE: f64 = 0.05;
 
     let (system_insample, source_insample) = build_single_hydro_system(
         1, // hydro_id
@@ -611,11 +606,9 @@ fn out_of_sample_convergence() {
         Some(42), // forward_seed required for OutOfSample
     );
 
-    // Use Truncation to prevent LP infeasibility from large negative noise draws.
-    // The seed domain changed intentionally (derive_forward_seed_grouped vs
-    // derive_forward_seed) so the noise trajectory differs from the baseline;
-    // Truncation makes the test robust to any seed without affecting the
-    // convergence comparison between InSample and OutOfSample.
+    // Truncation prevents LP infeasibility from large negative noise draws and
+    // makes the test robust to any seed without affecting the InSample-vs-
+    // OutOfSample convergence comparison.
     let lb_insample = run_programmatic(
         &system_insample,
         &source_insample,
@@ -660,11 +653,9 @@ fn out_of_sample_declaration_order_invariance() {
     const FORWARD_PASSES: u32 = 5;
     const MAX_ITERATIONS: u64 = 20;
 
-    // System A: declare hydros in order [H1, H2]
     let (system_a, source_a) =
         build_two_hydro_system(&[1, 2], 3, 3, SamplingScheme::OutOfSample, Some(99));
 
-    // System B: declare hydros in order [H2, H1] (reversed declaration order)
     let (system_b, source_b) =
         build_two_hydro_system(&[2, 1], 3, 3, SamplingScheme::OutOfSample, Some(99));
 
@@ -1063,17 +1054,6 @@ fn build_mixed_system(
 
 // --- Convergence sweep (Historical, External inflow, Mixed schemes) ---
 
-// Original test names consolidated into this sweep:
-//   historical_convergence
-//   external_inflow_convergence
-//   mixed_scheme_convergence
-//   mixed_scheme_convergence
-//
-// Cases (idx, desc):
-//   0: Historical inflow scheme — historical_library must be Some
-//   1: External inflow scheme   — external_inflow_library must be Some + reproducibility
-//   2: Mixed combo 1 — inflow InSample, load OutOfSample, ncs InSample
-//   3: Mixed combo 2 — inflow OutOfSample, load InSample, ncs InSample
 const CONVERGENCE_CASES: &[&str] = &[
     "historical_convergence",
     "external_inflow_convergence",
@@ -1093,7 +1073,6 @@ fn forward_sampler_convergence_sweep() {
 
     for (idx, &desc) in CONVERGENCE_CASES.iter().enumerate() {
         match idx {
-            // case_index = 0: Historical inflow scheme convergence.
             0 => {
                 let (system, source) = build_historical_system(1, 5, 10, Some(42));
                 let (setup, result) =
@@ -1109,7 +1088,6 @@ fn forward_sampler_convergence_sweep() {
                     result.final_lb
                 );
             }
-            // case_index = 1: External inflow scheme convergence + reproducibility.
             1 => {
                 let (system, source) = build_external_system(1, 5, N_SCENARIOS, Some(42));
                 let (setup, result) =
@@ -1134,7 +1112,6 @@ fn forward_sampler_convergence_sweep() {
                     result.final_lb, result2.final_lb
                 );
             }
-            // case_index = 2: Mixed combo 1 — inflow InSample, load OutOfSample, ncs InSample.
             2 => {
                 let (system, source) = build_mixed_system(
                     SamplingScheme::InSample,
@@ -1149,7 +1126,6 @@ fn forward_sampler_convergence_sweep() {
                     "case_index = {idx}, desc = {desc}: final_lb must be finite"
                 );
             }
-            // case_index = 3: Mixed combo 2 — inflow OutOfSample, load InSample, ncs InSample.
             3 => {
                 let (system, source) = build_mixed_system(
                     SamplingScheme::OutOfSample,
@@ -1358,13 +1334,6 @@ fn build_external_ncs_system(
     (system, source)
 }
 
-// Original test names consolidated into this sweep:
-//   external_load_library_populated
-//   external_ncs_library_populated
-//
-// Cases (idx, desc, entity_class):
-//   0: External load scheme — external_load_library must be Some
-//   1: External NCS scheme  — external_ncs_library must be Some
 const EXTERNAL_LIBRARY_CASES: &[(&str, &str)] = &[
     ("external_load_library_populated", "load"),
     ("external_ncs_library_populated", "ncs"),
@@ -1380,8 +1349,6 @@ fn external_library_population_sweep() {
 
     for (idx, &(desc, entity_class)) in EXTERNAL_LIBRARY_CASES.iter().enumerate() {
         match idx {
-            // case_index = 0: External load scheme.
-            // external_load_library must be Some; inflow and ncs libraries must be None.
             0 => {
                 let (system, source) = build_external_load_system(N_SCENARIOS, Some(42));
                 let (setup, result) =
@@ -1408,8 +1375,6 @@ fn external_library_population_sweep() {
                     result.final_lb
                 );
             }
-            // case_index = 1: External NCS scheme.
-            // external_ncs_library must be Some; inflow and load libraries must be None.
             1 => {
                 let (system, source) = build_external_ncs_system(N_SCENARIOS, Some(42));
                 let (setup, result) =
@@ -1468,8 +1433,6 @@ fn build_monthly_unique_groups_system(
 
     let hydro = make_hydro(1);
 
-    // Each stage uses a different calendar month so (season_id, year) is unique
-    // for every stage. season_id = index % 12 gives each month a distinct id.
     let stages: Vec<Stage> = (0..n_stages)
         .map(|i| {
             let month = (i % 12) as u32 + 1;
@@ -1481,9 +1444,8 @@ fn build_monthly_unique_groups_system(
                 id: i as i32,
                 start_date: NaiveDate::from_ymd_opt(year, month, 1).unwrap(),
                 end_date: NaiveDate::from_ymd_opt(next_year, next_month, 1).unwrap(),
-                // Use the calendar month (0-based) as season_id so every stage
-                // within a calendar year has a different season. Combined with
-                // the distinct year, every (season_id, year) pair is unique.
+                // season_id = i % 12 combined with the distinct year makes every
+                // (season_id, year) pair unique.
                 season_id: Some(i % 12),
                 blocks: vec![Block {
                     index: 0,
@@ -1565,10 +1527,9 @@ fn monthly_noise_sharing_regression() {
 
     let (system, source) = build_monthly_unique_groups_system(
         12, // 12 monthly stages (1 year)
-        3,  // branching_factor=3
+        3,
     );
 
-    // Run once.
     let result_a = run_programmatic(
         &system,
         &source,
@@ -1577,7 +1538,6 @@ fn monthly_noise_sharing_regression() {
         InflowNonNegativityMethod::None,
     );
 
-    // Run again with the same system and source — must be bit-identical.
     let result_b = run_programmatic(
         &system,
         &source,

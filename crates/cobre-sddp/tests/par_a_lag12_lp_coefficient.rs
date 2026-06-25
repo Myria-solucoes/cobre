@@ -94,9 +94,6 @@ const PHI_2: f64 = 0.2;
 fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
     let hydro_ids = [EntityId(1), EntityId(2)];
 
-    // -----------------------------------------------------------------------
-    // Hydro entities
-    // -----------------------------------------------------------------------
     let zero_penalties = HydroPenalties {
         spillage_cost: 0.01,
         diversion_cost: 0.0,
@@ -147,9 +144,6 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
         })
         .collect();
 
-    // -----------------------------------------------------------------------
-    // Bus entity
-    // -----------------------------------------------------------------------
     let bus = Bus {
         id: EntityId(0),
         name: "B0".to_string(),
@@ -160,9 +154,7 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
         excess_cost: 0.0,
     };
 
-    // -----------------------------------------------------------------------
-    // Study stages: ids 0..23, season_id = stage_idx % 12
-    // -----------------------------------------------------------------------
+    // season_id = stage_idx % 12
     let study_stages: Vec<Stage> = (0..N_STUDY)
         .map(|i| Stage {
             index: i,
@@ -188,9 +180,6 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
         })
         .collect();
 
-    // -----------------------------------------------------------------------
-    // Load models: one deterministic entry per stage per bus
-    // -----------------------------------------------------------------------
     let load_models: Vec<LoadModel> = (0..N_STUDY)
         .map(|i| LoadModel {
             bus_id: EntityId(0),
@@ -200,19 +189,14 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
         })
         .collect();
 
-    // -----------------------------------------------------------------------
-    // Inflow models: pre-study seeds + study stages, all with annual: Some(_)
-    // -----------------------------------------------------------------------
     let annual_component = AnnualComponent {
         coefficient: PSI,
         mean_m3s: 1000.0,
         std_m3s: SIGMA_A,
     };
 
-    // Pre-study entries at stage ids -1 and -2 (required for lag resolution).
-    // Season ids must also be set so `PrecomputedPar` can resolve coefficients
-    // for the AR order at stage 0. We assign season 11 and 10 respectively
-    // (the months just before month 0), which is the standard wrap-around.
+    // Pre-study entries at stage ids -1 and -2 let PrecomputedPar resolve the AR
+    // lag statistics for stage 0.
     let mut all_inflow_models: Vec<InflowModel> = Vec::new();
 
     for pre_id in [-2_i32, -1_i32] {
@@ -229,7 +213,6 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
         }
     }
 
-    // Study stage models
     for i in 0..N_STUDY {
         for &h_id in &hydro_ids {
             all_inflow_models.push(InflowModel {
@@ -244,15 +227,9 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Build PrecomputedPar
-    // -----------------------------------------------------------------------
     let par_lp = PrecomputedPar::build(&all_inflow_models, &study_stages, &hydro_ids, None)
         .expect("PrecomputedPar::build must succeed for a valid PAR(2)-A fixture");
 
-    // -----------------------------------------------------------------------
-    // ResolvedBounds and ResolvedPenalties (required by build_stage_templates)
-    // -----------------------------------------------------------------------
     let hydro_bounds_default = HydroStageBounds {
         min_storage_hm3: 0.0,
         max_storage_hm3: 500.0,
@@ -335,9 +312,6 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
         },
     );
 
-    // -----------------------------------------------------------------------
-    // Build System
-    // -----------------------------------------------------------------------
     let system = SystemBuilder::new()
         .buses(vec![bus])
         .hydros(hydros)
@@ -452,7 +426,6 @@ fn build_classical_fixture() -> (cobre_core::System, PrecomputedPar) {
         })
         .collect();
 
-    // Pre-study seeds: stage ids -1 and -2, annual: None.
     let mut all_inflow_models: Vec<InflowModel> = Vec::new();
     for pre_id in [-2_i32, -1_i32] {
         for &h_id in &hydro_ids {
@@ -467,7 +440,6 @@ fn build_classical_fixture() -> (cobre_core::System, PrecomputedPar) {
             });
         }
     }
-    // Study stage models: classical PAR(2), annual: None.
     for i in 0..N_STUDY {
         for &h_id in &hydro_ids {
             all_inflow_models.push(InflowModel {
@@ -614,20 +586,10 @@ fn find_csc_entry(
 
 /// Verify that the lag-11 LP matrix coefficient for hydro 0 at stage 0 equals
 /// `−ψ̂/12` where `ψ̂ = ψ · σ_m / σ^A`.
-///
-/// Column layout (N=2, L=12):
-///   `inflow_lags.start = N = 2`
-///   lag-l column for hydro h = `2 + l * 2 + h`
-///   lag-11, hydro 0 → column 24
-///
-/// Row layout:
-///   `z_inflow_row_start = N * (1 + L) = 2 * 13 = 26`
-///   z-inflow row for hydro 0 → row 26
 #[test]
 fn lag_11_lp_coefficient_equals_psi_hat_over_twelve() {
     let (system, par_lp) = build_par_a_fixture();
 
-    // AC#1: max_order must be 12.
     assert_eq!(
         par_lp.max_order(),
         12,
@@ -647,7 +609,6 @@ fn lag_11_lp_coefficient_equals_psi_hat_over_twelve() {
     )
     .expect("build_stage_templates must succeed for the PAR(2)-A fixture");
 
-    // AC#1: templates[0].max_par_order == 12.
     let tmpl = &templates.templates[0];
     assert_eq!(
         tmpl.max_par_order, 12,
@@ -664,7 +625,6 @@ fn lag_11_lp_coefficient_equals_psi_hat_over_twelve() {
     //   z-inflow row for hydro 0 → 0
     let row_z_h0: usize = 0;
 
-    // AC#2: the CSC entry at (lag-11 col, z-inflow row) must equal −ψ̂/12.
     let psi_hat = PSI * SIGMA_M / SIGMA_A; // 0.1 * 200 / 250 = 0.08
     let expected = -(psi_hat / 12.0);
 
@@ -687,15 +647,8 @@ fn lag_11_lp_coefficient_equals_psi_hat_over_twelve() {
 // ---------------------------------------------------------------------------
 
 /// Verify that the lag-0 LP matrix coefficient for hydro 0 at stage 0 equals
-/// `−(φ̂_1 + ψ̂/12)`.
-///
-/// With uniform σ_m across stages, φ̂_1 = φ_1 · (σ_m / σ_{m-1}) = 0.5 · 1.0 = 0.5.
-///
-/// Column indices (N=2, L=12):
-///   lag-0, hydro 0 → `2 + 0 * 2 + 0 = 2`
-///
-/// Row index (Phase 1): z_inflow rows start at row 0.
-///   z-inflow row for hydro 0 → `0`
+/// `−(φ̂_1 + ψ̂/12)`. With uniform σ_m across stages,
+/// φ̂_1 = φ_1 · (σ_m / σ_{m-1}) = 0.5 · 1.0 = 0.5.
 #[test]
 fn lag_0_lp_coefficient_combines_ar_and_annual() {
     let (system, par_lp) = build_par_a_fixture();
@@ -744,18 +697,10 @@ fn lag_0_lp_coefficient_combines_ar_and_annual() {
 
 /// Verify that a classical PAR(2) fixture (annual: None) keeps `max_par_order == 2`
 /// and that the lag-11 column index would fall outside the inflow-lags range.
-///
-/// For classical PAR(2) with N=2, L=2:
-///   `inflow_lags = N .. N*(1+L) = 2..6`
-///
-/// The lag-11 column that PAR-A would place at index `2 + 11*2 + 0 = 24` lies
-/// beyond `inflow_lags.end = 6`, proving that the column is absent from the
-/// classical LP structure.
 #[test]
 fn classical_par_has_no_lag_11_column() {
     let (system, par_lp) = build_classical_fixture();
 
-    // Classical max_order must be AR_ORDER = 2, not 12.
     assert_eq!(
         par_lp.max_order(),
         AR_ORDER,

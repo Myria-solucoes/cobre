@@ -1,7 +1,5 @@
-//! Integration test: `prepare_hydro_models` returns FPHA export rows in memory.
-//!
-//! When `source: "computed"` hydros are present, `prepare_hydro_models`
-//! populates `fpha_export_rows` and does not write any file to disk.
+//! Integration test: for `source: "computed"` hydros, `prepare_hydro_models`
+//! populates `fpha_export_rows` in memory and writes no file to disk.
 
 #![allow(
     clippy::unwrap_used,
@@ -23,8 +21,6 @@ fn d07_case_dir() -> std::path::PathBuf {
         .join("examples/deterministic/d07-fpha-computed")
 }
 
-/// Verify that `prepare_hydro_models` populates `fpha_export_rows` for a
-/// computed-source FPHA case and does not write any output files.
 #[test]
 fn prepare_hydro_models_returns_fpha_rows_without_writing_files() {
     let case_dir = d07_case_dir();
@@ -38,7 +34,6 @@ fn prepare_hydro_models_returns_fpha_rows_without_writing_files() {
     let result =
         prepare_hydro_models(&system, &case_dir, false).expect("prepare_hydro_models must succeed");
 
-    // AC: fpha_export_rows is non-empty for a computed-source case.
     assert!(
         !result.fpha_export_rows.is_empty(),
         "fpha_export_rows must be non-empty for a computed-source FPHA case; \
@@ -46,16 +41,9 @@ fn prepare_hydro_models_returns_fpha_rows_without_writing_files() {
         result.fpha_export_rows.len()
     );
 
-    // AC: no file is written under case_dir/output/hydro_models/.
     let output_dir = case_dir.join("output").join("hydro_models");
     if output_dir.exists() {
-        // The committed example may have a pre-existing output directory;
-        // verify no NEW file was written by checking the directory is empty
-        // or not created by this test run.  Since prepare_hydro_models is
-        // pure (it never writes files), this directory will not be modified.
-        // The simplest assertion: the function succeeded without writing.
-        // (The write site is the CLI/Python entry point, not this function.)
+        // No-op: prepare_hydro_models never writes files (the write site is the
+        // CLI/Python entry point), so a pre-existing output dir is left untouched.
     }
-    // If output_dir does not exist, the test passes unconditionally — the
-    // function made no attempt to create it.
 }

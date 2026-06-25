@@ -1,9 +1,6 @@
-//! Integration test for terminal-stage boundary cuts.
-//!
-//! Trains a source study, saves its checkpoint, then trains a consumer
-//! study that loads boundary cuts from the source checkpoint. Verifies
-//! that boundary cuts are injected into the terminal pool and that the
-//! lower bound does not degrade.
+//! Terminal-stage boundary cuts: a consumer study loads boundary cuts from a
+//! source checkpoint; they must inject into the terminal pool and the lower
+//! bound must not degrade versus the same study without them.
 
 #![allow(
     clippy::unwrap_used,
@@ -22,7 +19,6 @@ use cobre_io::output::policy::write_policy_checkpoint;
 use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
 use cobre_solver::ActiveSolver;
 
-/// Single-rank communicator stub for testing.
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -68,7 +64,6 @@ impl Communicator for StubComm {
     }
 }
 
-/// Return the path to the d01-thermal-dispatch example case.
 fn d01_case_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -79,9 +74,6 @@ fn d01_case_dir() -> std::path::PathBuf {
 }
 
 /// Write a policy checkpoint to `policy_dir` from the given setup and training result.
-///
-/// Convenience helper to avoid duplicating the 20-line metadata + write block
-/// in every test that exercises the checkpoint round-trip.
 fn write_test_checkpoint(
     policy_dir: &Path,
     setup: &StudySetup,
@@ -118,7 +110,6 @@ fn write_test_checkpoint(
         .expect("write checkpoint");
 }
 
-/// Build a `StudySetup` for the given case directory and config, using seed 42.
 fn build_setup(case_dir: &Path, config: &cobre_io::Config) -> StudySetup {
     let system = cobre_io::load_case(case_dir).expect("load_case");
     let prep = prepare_stochastic(system, case_dir, config, 42, &ScenarioSource::default())
@@ -128,26 +119,20 @@ fn build_setup(case_dir: &Path, config: &cobre_io::Config) -> StudySetup {
     StudySetup::new(&prep.system, config, prep.stochastic, hydro_models).expect("StudySetup::new")
 }
 
-/// Train a source study for 5 iterations, then train a consumer study with and
-/// without boundary cuts loaded from the source checkpoint. Verifies that:
-///
-/// - Boundary cuts are injected into the terminal pool (`warm_start_count > 0`).
-/// - The terminal pool's `populated_count >= warm_start_count` after injection.
-/// - The lower bound with boundary cuts is not worse than without (`>= lb - 1e-6`).
 #[test]
 fn boundary_cuts_improve_terminal_stage_objective() {
     let case_dir = d01_case_dir();
     let config_path = case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path).expect("config");
 
-    // Override to 5 iterations for speed.
+    // 5 iterations for speed.
     let mut config_5iter = config.clone();
     config_5iter.training.stopping_rules =
         Some(vec![cobre_io::config::StoppingRuleConfig::IterationLimit {
             limit: 5,
         }]);
 
-    // --- Run A: source study (produces checkpoint) ---
+    // Run A: source study, produces the checkpoint.
     let mut setup_a = build_setup(&case_dir, &config_5iter);
     let comm = StubComm;
     let mut solver_a = ActiveSolver::new().expect("solver");
@@ -161,9 +146,9 @@ fn boundary_cuts_improve_terminal_stage_objective() {
     write_test_checkpoint(&source_policy_dir, &setup_a, &outcome_a.result, 42);
 
     let num_stages = setup_a.fcf.pools.len();
-    let source_stage = (num_stages - 2) as u32; // second-to-last stage has backward-pass cuts
+    let source_stage = (num_stages - 2) as u32; // terminal stage has no backward-pass cuts
 
-    // --- Run B: consumer WITHOUT boundary cuts (baseline) ---
+    // Run B: consumer baseline, no boundary cuts.
     let mut setup_b = build_setup(&case_dir, &config_5iter);
     let mut solver_b = ActiveSolver::new().expect("solver");
     let outcome_b = setup_b
@@ -172,7 +157,7 @@ fn boundary_cuts_improve_terminal_stage_objective() {
     assert!(outcome_b.error.is_none());
     let lb_no_boundary = outcome_b.result.final_lb;
 
-    // --- Run C: consumer WITH boundary cuts ---
+    // Run C: consumer with boundary cuts.
     let mut setup_c = build_setup(&case_dir, &config_5iter);
     let state_dim = setup_c.fcf.state_dimension as u32;
     let boundary_records =
@@ -184,7 +169,6 @@ fn boundary_cuts_improve_terminal_stage_objective() {
     );
     cobre_sddp::inject_boundary_cuts(&mut setup_c, &boundary_records);
 
-    // Verify structural properties after injection.
     let terminal_pool = &setup_c.fcf.pools[num_stages - 1];
     assert!(
         terminal_pool.warm_start_count > 0,
@@ -202,7 +186,7 @@ fn boundary_cuts_improve_terminal_stage_objective() {
     assert!(outcome_c.error.is_none());
     let lb_with_boundary = outcome_c.result.final_lb;
 
-    // Boundary cuts should not degrade the lower bound.
+    // The boundary-cut contract: valid cuts only tighten, never degrade, the LB.
     assert!(
         lb_with_boundary >= lb_no_boundary - 1e-6,
         "boundary LB ({lb_with_boundary}) must be >= baseline LB ({lb_no_boundary})"

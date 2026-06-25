@@ -307,8 +307,6 @@ fn filling_cascade_floors_are_independent_and_couple_release_only() {
         outcome.error
     );
 
-    // Lower bound monotone within absolute-relative FP tolerance, capturing at
-    // least one ConvergenceUpdate to confirm the iteration loop ran.
     let lower_bounds: Vec<f64> = event_rx
         .try_iter()
         .filter_map(|e| {
@@ -333,7 +331,6 @@ fn filling_cascade_floors_are_independent_and_couple_release_only() {
         );
     }
 
-    // Drain the simulation result channel.
     let mut pool = setup
         .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("workspace pool must build");
@@ -487,8 +484,6 @@ fn filling_cascade_floors_are_independent_and_couple_release_only() {
     }
 
     // ── Continuous handoff for BOTH filling hydros ────────────────────────────
-    // End-of-Filling storage at id 3 equals incoming storage at id 4 (the pin
-    // chain), asserted for each filling reservoir independently.
     for id in [H_UP_ID, H_DOWN_ID] {
         let s3_final = stage_hydro(scenario, id, 3).storage_final_hm3;
         let s4_initial = stage_hydro(scenario, id, 4).storage_initial_hm3;
@@ -500,8 +495,6 @@ fn filling_cascade_floors_are_independent_and_couple_release_only() {
     }
 
     // ── Off-cascade control dispatches as a normal Operating plant ────────────
-    // Every H_ctrl storage value within [min, max] and at least one value off the
-    // seed (it is not frozen like a PreFilling hydro).
     let mut h_ctrl_moved = false;
     for stage in 0..6 {
         let h_ctrl_s = stage_hydro(scenario, H_CTRL_ID, stage);
@@ -522,8 +515,8 @@ fn filling_cascade_floors_are_independent_and_couple_release_only() {
          stay frozen like a PreFilling hydro"
     );
 
-    // Sanity: before entry both filling hydros neither generate nor turbine (the
-    // turbine/generation columns are pinned [0, 0] until Operating).
+    // Before entry both filling hydros neither generate nor turbine: the
+    // turbine/generation columns are pinned [0, 0] until Operating.
     for id in [H_UP_ID, H_DOWN_ID] {
         for stage in 0..(ENTRY_STAGE_ID as usize) {
             let s = stage_hydro(scenario, id, stage);

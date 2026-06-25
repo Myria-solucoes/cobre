@@ -17,11 +17,7 @@ use cobre_core::{EntityId, ParameterKind, ScalarParameter};
 use cobre_sddp::build_resolved_parameters;
 use cobre_sddp::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
 
-/// Return three [`ScalarParameter`] entries in the order specified by `order`.
-///
-/// - slot 0 → `id=10`, `name="alpha"`, `Constant { value: 3.6 }`
-/// - slot 1 → `id=20`, `name="beta"`,  `PerStage { values: [1.0, 1.5, 2.0, 2.5] }`
-/// - slot 2 → `id=30`, `name="gamma"`, `Seasonal { values: [(0, 0.9), (1, 1.1)] }`
+/// Return the three fixed [`ScalarParameter`] entries permuted by `order`.
 fn make_params(order: &[usize]) -> Vec<ScalarParameter> {
     let alpha = ScalarParameter {
         id: EntityId(10),
@@ -54,8 +50,8 @@ fn scalar_parameters_resolution_is_declaration_order_invariant() {
     let overrides = HydroEnergyProductivityOverride::default();
     let hydros: Vec<cobre_core::Hydro> = Vec::new();
 
-    let order_a = make_params(&[0, 1, 2]); // alpha, beta, gamma
-    let order_b = make_params(&[2, 0, 1]); // gamma, alpha, beta
+    let order_a = make_params(&[0, 1, 2]);
+    let order_b = make_params(&[2, 0, 1]);
 
     let resolved_a = build_resolved_parameters(
         &order_a,
@@ -76,7 +72,6 @@ fn scalar_parameters_resolution_is_declaration_order_invariant() {
     )
     .expect("ResolvedParameters builds for order_b");
 
-    // Bit-exact value equality for every (id, stage) pair.
     for id_raw in [10_i32, 20, 30] {
         for stage_idx in 0..n_stages {
             let va = resolved_a.get(EntityId(id_raw), stage_idx);
@@ -89,8 +84,6 @@ fn scalar_parameters_resolution_is_declaration_order_invariant() {
         }
     }
 
-    // The sorted key sequence must be canonicalized to [10, 20, 30]
-    // regardless of authored order.
     assert_eq!(resolved_a.id_to_slot.len(), 3);
     assert_eq!(resolved_b.id_to_slot.len(), 3);
 

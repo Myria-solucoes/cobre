@@ -9,11 +9,11 @@
 //! - `max_par_order = 0`, so `n_state = K_max = 1` and the anticipated-state
 //!   index inside the state vector equals `state.anticipated_state.start = 0`.
 //!
-//! The LP-builder divides every non-theta objective coefficient by
-//! `COST_SCALE_FACTOR = K = 1_000` (the `lp::builder` `COST_SCALE_FACTOR`
-//! constant). Duals therefore live in scaled units, and the cut
-//! storage at `backward.rs::accumulate_opening_outcome` preserves that scaling
-//! end-to-end (forward.rs consumes the coefficients unrescaled).
+//! The LP-builder divides every non-theta objective coefficient by the
+//! `COST_SCALE_FACTOR` constant (call it `K` in this derivation). Duals therefore
+//! live in scaled units, and the cut storage at
+//! `backward.rs::accumulate_opening_outcome` preserves that scaling end-to-end
+//! (forward.rs consumes the coefficients unrescaled).
 //!
 //! Stage-1 LP (delivery stage; the per-block anticipated-thermal generation
 //! column's cost is skipped in `fill_thermal_columns` — never written, so it
@@ -36,14 +36,12 @@
 //! bounds, giving `Q_scaled(x_hat) = (c_reg/K)(D_1 − x_hat)` and
 //! `π = dQ_scaled/dx_hat = −c_reg/K`.
 //!
-//! Cut convention `coefficients = dual` (no sign flip — see
-//! `crates/cobre-sddp/src/backward.rs` module-level documentation on cut
-//! sign convention and anticipated-state cut gradient flow). The intercept is
+//! Cut convention `coefficients = dual` (no sign flip — see the `backward.rs`
+//! module documentation on cut sign convention and anticipated-state cut
+//! gradient flow). The intercept is
 //! `α = Q_scaled(x_hat) − π · x_hat = (c_reg/K) D_1`, independent of the trial
-//! point.
-//!
-//! For the chosen numerics (`c_reg = 100`, `D_1 = 20`, `K = 1_000`) the expected
-//! scaled-unit values are `coefficient = −0.1` and `intercept = 2.0`.
+//! point. `EXPECTED_COEFFICIENT` and `EXPECTED_INTERCEPT` evaluate these from the
+//! fixture constants.
 
 #![allow(
     clippy::unwrap_used,
@@ -101,30 +99,24 @@ const MAX_GEN_REG: f64 = 50.0;
 const MAX_GEN_ANT: f64 = 30.0;
 const X0_SEED: f64 = 10.0;
 
-// Cuts are stored in scaled cost units; the LP-builder divides every non-theta
-// objective coefficient by `COST_SCALE_FACTOR` (the `lp::builder`
-// `COST_SCALE_FACTOR` constant). Duals therefore live in scaled units too, and
-// the cut storage at backward.rs preserves that scaling end-to-end (forward.rs
-// consumes them unrescaled).
+// Duals live in scaled cost units: the LP-builder divides every non-theta
+// objective coefficient by COST_SCALE_FACTOR, and cut storage preserves that
+// scaling end-to-end (forward.rs consumes them unrescaled).
 const COST_SCALE_FACTOR: f64 = 1_000_000.0;
 
-// Closed-form expected values for stage-0 FCF cut at the anticipated_state
-// index, in the LP's scaled cost units.
-const EXPECTED_COEFFICIENT: f64 = -C_REG / COST_SCALE_FACTOR; // = -0.0001
-const EXPECTED_INTERCEPT: f64 = C_REG * D_1 / COST_SCALE_FACTOR; // = 2.0
+const EXPECTED_COEFFICIENT: f64 = -C_REG / COST_SCALE_FACTOR;
+const EXPECTED_INTERCEPT: f64 = C_REG * D_1 / COST_SCALE_FACTOR;
 const TOL: f64 = 1e-6;
 
-// Thermal column ordering inside the built `System`. `System::build()` sorts
-// thermals by `EntityId::0` ascending, so `THERMAL_IDX_REG = 0` requires
-// `T_reg.id < T_ant.id`. Keep the regular thermal at id 2 (sorts first) and the
-// anticipated thermal at id 4 (sorts second).
+// `System::build()` sorts thermals by `EntityId::0` ascending, so
+// `THERMAL_IDX_REG = 0` requires `T_reg.id < T_ant.id`.
 const THERMAL_IDX_REG: usize = 0;
 const THERMAL_IDX_ANT: usize = 1;
 const ANTICIPATED_ID: EntityId = EntityId(4);
 
 // ---------------------------------------------------------------------------
-// StubComm — single-rank communicator (copied from anticipated_forward_pass.rs
-// per ticket Patterns guidance: test independence over shared modules).
+// StubComm — single-rank communicator (per-file copy: test independence over a
+// shared module).
 // ---------------------------------------------------------------------------
 
 struct StubComm;
@@ -176,7 +168,6 @@ impl Communicator for StubComm {
 // System builder
 // ---------------------------------------------------------------------------
 
-/// Build the 2-stage analytical system described at the top of the module.
 fn build_system() -> cobre_core::System {
     use chrono::NaiveDate;
 
@@ -191,7 +182,6 @@ fn build_system() -> cobre_core::System {
         excess_cost: 0.0,
     };
 
-    // thermal_idx 0 — regular thermal (marginal at stage 1).
     let thermal_reg = Thermal {
         id: EntityId(3),
         name: "T_reg".to_string(),
@@ -204,7 +194,6 @@ fn build_system() -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // thermal_idx 1 — anticipated thermal, K=1.
     let thermal_ant = Thermal {
         id: ANTICIPATED_ID,
         name: "T_ant".to_string(),
@@ -251,7 +240,6 @@ fn build_system() -> cobre_core::System {
         })
         .collect();
 
-    // No hydros — anticipated/regular thermals only. n_anticipated=1, k_max=1.
     let mut bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
             n_hydros: 0,
@@ -297,11 +285,8 @@ fn build_system() -> cobre_core::System {
         },
     );
 
-    // Per-thermal per-stage overrides across the full thermal stage axis
-    // (length = n_stages + k_max = 3). Index 2 (the K-padded delivery cell)
-    // matters only for plants with K_i > 0; we seed it from the anticipated
-    // delivery bounds so `fill_anticipated_columns` reads a
-    // well-defined cost at stage_idx + K_i = 0 + 1 = 1, which is in range.
+    // K-padded axis: `fill_anticipated_columns` reads delivery cells at
+    // stage_idx + K_i, so overrides must cover the n_stages + k_max range.
     let thermal_axis = N_STAGES + K_MAX;
     for s in 0..thermal_axis {
         *bounds.thermal_bounds_mut(THERMAL_IDX_REG, s) = ThermalStageBounds {
@@ -351,9 +336,8 @@ fn build_system() -> cobre_core::System {
         },
     );
 
-    // Seed the anticipated ring buffer slot 0 with X0_SEED = 10.0.
-    // With K=1 the ring has K_MAX = 1 slot; this is the matured commitment
-    // delivered at stage 0 (fishing inactive at stage 0 because K=1 > 0).
+    // Slot 0 is the matured commitment delivered at stage 0; fishing is inactive
+    // there because K > 0.
     let initial_conditions = InitialConditions {
         storage: vec![],
         filling_storage: vec![],
@@ -444,8 +428,6 @@ fn two_stage_k1_anticipated_cut_coefficient_matches_analytical() {
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
 
-    // Run one training iteration — generates exactly one cut at stage 0
-    // for the single forward trajectory / opening.
     let outcome = setup
         .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must not return Err");
@@ -455,7 +437,6 @@ fn two_stage_k1_anticipated_cut_coefficient_matches_analytical() {
         outcome.error
     );
 
-    // ── AC-2: exactly one cut at stage 0 FCF ──────────────────────────
     let pool0 = &setup.fcf.pools[0];
     let active_count = pool0.active_count();
     assert_eq!(
@@ -463,8 +444,6 @@ fn two_stage_k1_anticipated_cut_coefficient_matches_analytical() {
         "AC-2: stage 0 FCF must contain exactly one active cut; got {active_count}",
     );
 
-    // Locate the anticipated_state index inside the state vector.
-    // For n_hydros = 0 and max_par_order = 0 this is `0` by construction.
     let state = setup.stage_state();
     let ant_state_idx = state.anticipated_state.start;
     assert_eq!(
@@ -477,7 +456,6 @@ fn two_stage_k1_anticipated_cut_coefficient_matches_analytical() {
         "with n_hydros=0 and max_par_order=0, anticipated_state.start must be 0; got {ant_state_idx}",
     );
 
-    // ── AC-3 / AC-4: cut coefficient and intercept match closed form ──
     let (slot, intercept, coefficients) = setup
         .fcf
         .active_cuts(0)

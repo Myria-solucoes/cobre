@@ -1,7 +1,4 @@
-//! End-to-end integration test for the Phase 7 train + simulate + write cycle.
-//!
-//! Exercises the full pipeline: training loop → `build_training_output` →
-//! `write_policy_checkpoint` → `simulate` → `write_results`.
+//! End-to-end integration test for the train + simulate + write cycle.
 
 #![allow(
     clippy::unwrap_used,
@@ -57,13 +54,9 @@ use cobre_sddp::{
     workspace::{SolverWorkspace, WorkspaceSizing},
 };
 
-/// Build the role-(a) [`StateLayout`] whose `storage_in` / `inflow_lags` /
-/// `anticipated_state` column starts match `indexer`'s identical fields.
-///
-/// Mirrors the gated `indexer::test_fixtures::state_layout_for` body via the
-/// public [`StateLayout::new`] constructor, so this external test crate (which
-/// does not see the parent crate's `#[cfg(test)]` surface) resolves byte-identical
-/// patch columns on the default feature set.
+/// Mirrors the gated `indexer::test_fixtures::state_layout_for` via the public
+/// [`StateLayout::new`] constructor: this external test crate cannot see the parent
+/// crate's `#[cfg(test)]` surface, so it rebuilds byte-identical patch columns here.
 fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     StateLayout::new(
         hydro_count,
@@ -75,13 +68,9 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     )
 }
 
-/// Build the `StudyDimensions` (non-state study shape) from explicit entity
-/// counts via the public `StudyDimensions` fields.
-///
-/// This external test crate does not see the parent crate's
-/// `#[cfg(test)]`/`test-support` surface, so it carries the non-state facts
-/// directly. `max_deficit_segments` is `1` and `n_pumping`/`has_ncs`/anticipated
-/// are empty for these fixtures.
+/// Carries the non-state study shape directly: this external test crate cannot see
+/// the parent crate's `#[cfg(test)]`/`test-support` surface. `max_deficit_segments`
+/// is `1`; `n_pumping`/`has_ncs`/anticipated are empty for these fixtures.
 fn study_dims_for(
     n_thermals: usize,
     n_lines: usize,
@@ -103,7 +92,6 @@ fn study_dims_for(
     }
 }
 
-/// Single-rank communicator for testing.
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -149,7 +137,6 @@ impl Communicator for StubComm {
     }
 }
 
-/// Mock solver that cycles through objectives on each `solve` call.
 struct MockSolver {
     objectives: Vec<f64>,
     call_count: usize,
@@ -523,7 +510,6 @@ fn make_system() -> cobre_core::System {
         },
     };
 
-    // Two stages are needed for the 2-stage fixture system.
     let make_stage = |idx: usize| {
         use cobre_core::temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
@@ -1309,14 +1295,9 @@ fn make_min_outflow_system() -> cobre_core::System {
         .unwrap()
 }
 
-/// Integration test: simulation with `min_outflow_m3s` > 0 produces non-zero
-/// `outflow_slack_below_m3s` when the primal vector has non-zero slack values.
-///
-/// This test uses the real LP template builder (`build_stage_templates`) to
-/// construct correctly-sized templates, then a `SizedMockSolver` whose primal
-/// vector has sentinel non-zero values at the `outflow_below_slack` column.
-/// The simulation extracts results from the primal, and we verify that the
-/// operational violation slack propagates correctly to the output.
+/// A sentinel value injected at the `outflow_below_slack` primal column (via a
+/// `SizedMockSolver` over a real `build_stage_templates` template) must propagate
+/// to `outflow_slack_below_m3s` in the simulation output.
 #[test]
 fn simulation_min_outflow_slack_extracted_from_primal() {
     use cobre_sddp::build_stage_templates;
@@ -1341,14 +1322,10 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
 
     let t0 = &templates_result.templates[0];
 
-    // Non-state study shape for this 1-hydro / 1-bus fixture.
     let study_dims = study_dims_for(0, 0, 1, 1, false);
-    // The role-(b) equipment/slack column ranges come from the production stage-0
-    // geometry the template build computed. The operational-violation constraint
-    // *row* range (`min_outflow_rows`) is owned internally by `StageLayout` and is
-    // pinned by the crate-internal
-    // `stage_layout_operational_violation_rows_are_contiguous_blocks` test; this
-    // end-to-end test verifies the slack-column extraction path.
+    // The operational-violation constraint *row* range is owned by `StageLayout` and
+    // pinned by `stage_layout_operational_violation_rows_are_contiguous_blocks`; this
+    // end-to-end test covers only the slack-*column* extraction path.
     let geometry = &templates_result.geometry_per_stage[0];
     let state = state_layout_for(1, 0);
 
@@ -1368,13 +1345,11 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         "outflow_below_slack col_upper must be +inf when min_outflow > 0"
     );
 
-    // Volume-conversion factor threaded into the per-stage simulation context.
     let total_hours = 744.0_f64;
     let m3s_to_hm3 = 3_600.0 / 1_000_000.0;
     let zeta = total_hours * m3s_to_hm3;
 
-    // Inject a sentinel non-zero value at the slack column in the primal.
-    // Per-block: the slack column value IS in m3/s, no conversion needed.
+    // The slack column value is in m3/s, so no zeta conversion is applied.
     let sentinel_m3s = 5.0;
     let expected_slack_m3s = sentinel_m3s;
     let mut solver = SizedMockSolver::new(t0.num_cols, t0.num_rows);
@@ -1382,9 +1357,8 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
 
     let templates = vec![t0.clone(); n_stages];
     let base_rows = vec![templates_result.base_rows[0]; n_stages];
-    // Every stage clones `t0`, so every stage shares stage 0's equipment
-    // geometry; replicate the build's stage-0 geometry across all stages so
-    // extraction reads the stage-correct slack columns.
+    // Every stage clones `t0`, so stage-0 geometry must be replicated across all
+    // stages for extraction to read the stage-correct slack columns.
     let equipment_geometry = vec![templates_result.geometry_per_stage[0].clone(); n_stages];
     let initial_state = vec![100.0_f64; state.n_state];
     let horizon = HorizonMode::Finite {

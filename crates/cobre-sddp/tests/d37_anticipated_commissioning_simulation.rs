@@ -107,9 +107,8 @@ fn case_dir() -> std::path::PathBuf {
 fn build_setup(case_dir: &Path) -> (StudySetup, cobre_io::config::Config) {
     let config_path = case_dir.join("config.json");
     let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
-    // The shipped case disables simulation (the parity harness trains only).
-    // Enable one deterministic simulation scenario so the thermal extraction
-    // paths run.
+    // The shipped case disables simulation (parity trains only); enable one
+    // deterministic scenario so the thermal extraction paths run.
     config.simulation = cobre_io::config::SimulationConfig {
         enabled: true,
         num_scenarios: 1,
@@ -170,7 +169,6 @@ fn anticipated_commissioning_window_gates_simulation_output() {
         "training error: {:?}",
         outcome.error
     );
-    // (iv) feasible + converges: gap closes for this deterministic case.
     assert!(
         outcome.result.iterations >= 1,
         "training must run at least one iteration",
@@ -234,7 +232,7 @@ fn anticipated_commissioning_window_gates_simulation_output() {
     // in-window delivery (stage EXIT-1 = 3) no new in-window decision is made, so
     // by stage EXIT + K - 1 = 5 the buffer has shifted all residual commitments
     // out and reads 0.
-    let drain_stage = EXIT + K - 1; // = 5, the last stage
+    let drain_stage = EXIT + K - 1;
     let committed_drain = t1_at(scenario, drain_stage)
         .anticipated_committed_mw
         .expect("anticipated thermal must report committed MW");

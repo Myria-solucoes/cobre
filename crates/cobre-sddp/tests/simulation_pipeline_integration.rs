@@ -41,13 +41,10 @@ use cobre_sddp::{
 
 // ── Stub communicator ────────────────────────────────────────────────────────
 
-/// Build the role-(a) [`StateLayout`] whose `storage_in` / `inflow_lags` /
-/// `anticipated_state` column starts match `indexer`'s identical fields.
-///
-/// Mirrors the gated `indexer::test_fixtures::state_layout_for` body via the
-/// public [`StateLayout::new`] constructor, so this external test crate (which
-/// does not see the parent crate's `#[cfg(test)]` surface) resolves byte-identical
-/// patch columns on the default feature set.
+/// Mirrors the gated `indexer::test_fixtures::state_layout_for` via the public
+/// [`StateLayout::new`] constructor: this external test crate cannot see the
+/// parent crate's `#[cfg(test)]` surface, so it rebuilds byte-identical patch
+/// columns on the default feature set.
 fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     StateLayout::new(
         hydro_count,
@@ -59,8 +56,6 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     )
 }
 
-/// Build the default all-zero `StudyDimensions` (every count `0`, every flag
-/// `false`), matching the empty non-state shape these toy fixtures imply.
 fn study_dims() -> cobre_sddp::indexer::StudyDimensions {
     cobre_sddp::indexer::StudyDimensions::default()
 }
@@ -114,24 +109,10 @@ impl Communicator for StubComm {
 
 // ── Mock solver ──────────────────────────────────────────────────────────
 
-/// Mock solver that returns a configurable fixed `LpSolution` on every solve.
-///
-/// Optionally returns `SolverError::Infeasible` at a specific (0-based) solve
-/// call index (counting across both cold-start and warm-start calls).
-///
-/// `load_count` and `add_rows_count` track how many times `load_model` and
-/// `add_rows` were called, used by the baked-path acceptance tests.
-///
-/// `solve_count` counts calls to the cold-start `solve(None)` path only.
-/// `solve_with_basis_count` counts calls to the warm-start `solve(Some(&basis))`
-/// path only.  `call_count` tracks the combined total across both paths and
-/// is used by the infeasibility injection logic.
-///
-/// `recorded_basis` captures the last `Basis` passed to `solve(Some(&basis))`,
-/// used by the warm-start reconstruction acceptance tests.
-///
-/// `reconstruction_counter` counts `record_reconstruction_stats` invocations
-/// (one per warm-start solve that applied a stored basis via slot reconciliation).
+/// Mock solver returning a configurable fixed `LpSolution` on every solve, with
+/// optional `SolverError::Infeasible` at a given solve index. The injection
+/// index counts `call_count` (cold-start + warm-start combined, 0-based); the
+/// split `solve_count` / `solve_with_basis_count` distinguish the two paths.
 struct MockSolver {
     solution: LpSolution,
     infeasible_at: Option<usize>,
@@ -139,17 +120,11 @@ struct MockSolver {
     buf_primal: Vec<f64>,
     buf_dual: Vec<f64>,
     buf_reduced_costs: Vec<f64>,
-    /// Number of `load_model` calls since construction.
     load_count: usize,
-    /// Number of `add_rows` calls since construction.
     add_rows_count: usize,
-    /// Number of cold-start `solve(None)` calls.
     solve_count: usize,
-    /// Number of warm-start `solve(Some(&basis))` calls.
     solve_with_basis_count: usize,
-    /// Last `Basis` passed to `solve(Some(&basis))`, if any.
     recorded_basis: Option<Basis>,
-    /// Cumulative `preserved` argument from `record_reconstruction_stats`.
     reconstruction_counter: u32,
 }
 
@@ -277,11 +252,7 @@ fn minimal_template_1_0() -> StageTemplate {
         num_cols: 4,
         num_rows: 2,
         num_nz: 1,
-        // CSC col_starts: 4 cols + 1 sentinel = 5 entries.
-        // col 0 (storage_out): 0 NZ
-        // col 1 (z_inflow):    0 NZ
-        // col 2 (storage_in):  1 NZ at row 0
-        // col 3 (theta):       0 NZ
+        // CSC col_starts: 4 cols + sentinel; the single NZ sits on storage_in (col 2).
         col_starts: vec![0_i32, 0, 0, 1, 1],
         row_indices: vec![0_i32],
         values: vec![1.0],
@@ -300,14 +271,11 @@ fn minimal_template_1_0() -> StageTemplate {
     }
 }
 
-/// Build a fixed `LpSolution` for the minimal N=1 L=0 template.
-///
-/// N=1 L=0 column layout: `storage`(0), `z_inflow`(1), `storage_in`(2), `theta`(3).
-/// `primal[3] = theta_val`, `objective = objective`.
+/// Fixed `LpSolution` for the minimal N=1 L=0 template (theta at col 3).
 fn fixed_solution(objective: f64, theta_val: f64) -> LpSolution {
-    let num_cols = 4; // storage(0), z_inflow(1), storage_in(2), theta(3)
+    let num_cols = 4;
     let mut primal = vec![0.0_f64; num_cols];
-    primal[3] = theta_val; // theta at col 3 (N=1, L=0 → theta = N*(3+L) = 3)
+    primal[3] = theta_val; // theta at col N*(3+L) = 3
     LpSolution {
         objective,
         primal,
@@ -482,10 +450,7 @@ fn make_stochastic_context(n_stages: usize) -> StochasticContext {
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-/// Build per-stage hydro productivities for 1 hydro with productivity 1.0.
-///
-/// Returns `n_stages` inner vecs each containing a single `1.0` entry,
-/// matching `entity_counts_1_hydro().hydro_productivities`.
+/// Per-stage hydro productivities matching `entity_counts_1_hydro` (one hydro, 1.0).
 fn hydro_productivities_1hydro(n_stages: usize) -> Vec<Vec<f64>> {
     vec![vec![1.0]; n_stages]
 }
@@ -548,9 +513,9 @@ fn simulate_single_rank_4_scenarios_produces_4_results() {
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
     };
-    let initial_state = vec![50.0_f64]; // n_state=1
+    let initial_state = vec![50.0_f64];
 
-    let solution = fixed_solution(100.0, 30.0); // objective=100, theta=30
+    let solution = fixed_solution(100.0, 30.0);
     let solver = MockSolver::always_ok(solution);
     let comm = StubComm { rank: 0, size: 1 };
     let entity_counts = entity_counts_1_hydro();
@@ -640,7 +605,6 @@ fn simulate_single_rank_4_scenarios_produces_4_results() {
         "cost buffer should have 4 entries"
     );
 
-    // Drain the channel and count results.
     let mut received = 0;
     while rx.try_recv().is_ok() {
         received += 1;
@@ -1379,7 +1343,6 @@ fn test_simulation_parallel_cost_determinism() {
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
 
-    // Run with 1 workspace.
     let (tx1, _rx1) = mpsc::sync_channel(64);
     let mut workspaces_1 = single_workspace(MockSolver::always_ok(solution.clone()));
     let result_1 = cobre_sddp::simulate(
@@ -1455,7 +1418,6 @@ fn test_simulation_parallel_cost_determinism() {
     )
     .unwrap();
 
-    // Run with 4 workspaces.
     let (tx4, _rx4) = mpsc::sync_channel(64);
     let mut workspaces_4: Vec<SolverWorkspace<MockSolver>> = (0..4_i32)
         .map(|idx| {
@@ -1548,7 +1510,6 @@ fn test_simulation_parallel_cost_determinism() {
     let costs_1 = &result_1.costs;
     let costs_4 = &result_4.costs;
 
-    // Both cost buffers must have exactly 20 entries sorted by scenario_id.
     assert_eq!(
         costs_1.len(),
         n_scenarios as usize,
@@ -1566,7 +1527,6 @@ fn test_simulation_parallel_cost_determinism() {
     assert_eq!(ids_1, expected_ids, "1-workspace: sorted scenario IDs");
     assert_eq!(ids_4, expected_ids, "4-workspace: sorted scenario IDs");
 
-    // Cost values must be identical.
     for i in 0..n_scenarios as usize {
         let (id1, cost1, _) = &costs_1[i];
         let (id4, cost4, _) = &costs_4[i];
@@ -1944,8 +1904,8 @@ fn simulate_progress_events_received_before_return() {
     )
     .unwrap();
 
-    // Because the sender was moved into simulate() and dropped when it
-    // returns, the channel is now closed. Collect all events.
+    // simulate() moved and dropped the sender, so the channel is closed and
+    // event_rx.iter() terminates.
     let events: Vec<TrainingEvent> = event_rx.iter().collect();
     let progress_count = events
         .iter()
@@ -2088,7 +2048,6 @@ fn simulate_progress_scenario_cost_equals_total_cost() {
         "expected {n_scenarios} progress events"
     );
 
-    // Every progress event must carry the raw scenario cost.
     for event in &progress_events {
         let TrainingEvent::SimulationProgress { scenario_cost, .. } = event else {
             continue;
@@ -2209,7 +2168,6 @@ fn simulate_emits_simulation_finished_as_last_event() {
 
     let events: Vec<TrainingEvent> = event_rx.iter().collect();
 
-    // Must have at least n_scenarios progress events + 1 finished event.
     assert!(
         events.len() > n_scenarios as usize,
         "expected at least {} events, got {}",
@@ -2217,14 +2175,12 @@ fn simulate_emits_simulation_finished_as_last_event() {
         events.len()
     );
 
-    // The last event must be SimulationFinished.
     let last = events.last().unwrap();
     assert!(
         matches!(last, TrainingEvent::SimulationFinished { .. }),
         "last event must be SimulationFinished, got {last:?}"
     );
 
-    // SimulationFinished must carry the correct scenario count.
     let TrainingEvent::SimulationFinished { scenarios, .. } = last else {
         panic!("last event is not SimulationFinished");
     };
@@ -2233,7 +2189,6 @@ fn simulate_emits_simulation_finished_as_last_event() {
         "SimulationFinished.scenarios must equal n_scenarios={n_scenarios}, got {scenarios}"
     );
 
-    // All events before the last must be SimulationProgress.
     let progress_count = events
         .iter()
         .filter(|e| matches!(e, TrainingEvent::SimulationProgress { .. }))
@@ -2359,7 +2314,6 @@ fn simulate_progress_scenario_cost_is_finite() {
         .filter(|e| matches!(e, TrainingEvent::SimulationProgress { .. }))
         .collect();
 
-    // Every scenario_cost must be finite and non-NaN.
     for event in &progress_events {
         let TrainingEvent::SimulationProgress { scenario_cost, .. } = event else {
             continue;
@@ -2381,8 +2335,7 @@ fn simulate_baked_path_issues_zero_add_rows() {
     let n_stages = 2;
     let n_scenarios = 3u32;
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
-    // Baked templates: for MockSolver the content does not matter; use the
-    // same minimal template as a stand-in for a baked (pre-merged) template.
+    // For MockSolver the baked content is irrelevant; reuse the minimal template.
     let baked: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
@@ -2494,21 +2447,9 @@ fn simulate_baked_path_issues_zero_add_rows() {
     );
 }
 
-/// When `baked_templates` is `None`
-/// (fallback path), `add_rows` is called only when cuts exist.
-///
-/// The FCF has 0 active cuts, so `cut_batch.num_rows == 0` for every stage,
-/// meaning `add_rows` is gated by `if cut_batch.num_rows > 0`. This test
-/// verifies the structural contract: with no cuts `add_rows_count == 0` on
-/// the fallback path. When `baked_templates` is provided, `load_model` is
-/// called against the baked template; when `None`, it is called against
-/// `ctx.templates[t]`. The absence of `add_rows` when `num_rows == 0` holds
-/// in both cases.
-///
-/// To test the fallback counter path, we verify that `add_rows_count`
-/// remains 0 on a zero-cut fallback run and that `load_count` equals
-/// `n_scenarios * n_stages`, confirming the fallback path calls `load_model`
-/// the same number of times as the baked path.
+/// Fallback path (`baked_templates: None`): `add_rows` is gated by
+/// `if cut_batch.num_rows > 0`, so with a 0-cut FCF `add_rows_count == 0` while
+/// `load_count == n_scenarios * n_stages` (same `load_model` count as the baked path).
 #[test]
 fn simulate_fallback_path_issues_expected_add_rows() {
     let n_stages = 2;
@@ -2517,7 +2458,6 @@ fn simulate_fallback_path_issues_expected_add_rows() {
     let base_rows: Vec<usize> = vec![0; n_stages];
 
     let state = state_layout_for(1, 0);
-    // FCF with 0 cuts — cut_batch.num_rows will be 0 for every stage.
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let stochastic = make_stochastic_context(n_stages);
     let config = SimulationConfig {
@@ -2614,8 +2554,6 @@ fn simulate_fallback_path_issues_expected_add_rows() {
     assert!(result.is_ok(), "fallback path must succeed: {result:?}");
     let expected_load_count = n_scenarios as usize * n_stages;
     let solver = workspaces[0].solver.inner();
-    // With zero cuts, `cut_batch.num_rows == 0` so the guard
-    // `if cut_batch.num_rows > 0` prevents any `add_rows` call.
     assert_eq!(
         solver.add_rows_count, 0,
         "fallback path with zero cuts must call add_rows 0 times; got {}",
@@ -2657,7 +2595,6 @@ fn simulate_baked_length_mismatch_returns_error() {
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
 
-    // Baked templates with wrong length (2 instead of 3).
     let wrong_baked: Vec<StageTemplate> =
         (0..n_stages - 1).map(|_| minimal_template_1_0()).collect();
 
@@ -2747,26 +2684,13 @@ fn simulate_baked_length_mismatch_returns_error() {
 
 // ── Warm-start CapturedBasis acceptance tests ─────────────────
 
-/// When `stage_bases` contains a
-/// `CapturedBasis` with known slots, the basis passed to `solve(Some(&basis))`
-/// has `row_status.len() == base_row_count + active_cuts_count` and the tail
-/// entries match the stored cut statuses verbatim (preservation path).
-///
-/// Setup:
-/// - `CapturedBasis` at stage 0: `base_row_count=2`, `cut_row_slots=[10,11,12]`,
-///   `state_at_capture=[1.0]`, `row_status` length 5 with distinct sentinel values.
-/// - FCF pool at stage 0 has exactly those 3 slots active (slots 10, 11, 12).
-/// - `MockSolver::recorded_basis` captures the last basis received by
-///   `solve(Some(&basis))`.
-///
-/// The reconstruction maps all 3 stored cut rows (slots 10, 11, 12) into
-/// the output basis — the preservation path.  The tail of the output
-/// `row_status` must equal the tail of the stored `row_status`.
+/// Slot-identity preservation: with a `CapturedBasis` whose cut rows match the
+/// FCF pool's active slots (10, 11, 12), the basis handed to `solve(Some(&basis))`
+/// has `row_status.len() == base_row_count + active_cuts_count` and its tail
+/// reproduces the stored cut statuses verbatim.
 #[test]
 fn simulate_with_captured_basis_preserves_row_statuses() {
-    // Sentinel status values for the stored cut rows so we can verify exact
-    // preservation.  These are arbitrary non-zero i32 values; the test only
-    // checks that they are passed through unchanged.
+    // Arbitrary non-zero sentinels; the test only checks they pass through unchanged.
     const CUT_STATUS_0: i32 = 7;
     const CUT_STATUS_1: i32 = 11;
     const CUT_STATUS_2: i32 = 13;
@@ -2799,9 +2723,7 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         "populated_count must be 13 (slot 12 + 1)"
     );
 
-    // Build the CapturedBasis with matching slot metadata.
     let mut cb = CapturedBasis::new(4, 5, 2, 3, 1);
-    // row_status: 2 base rows + 3 cut rows with sentinel values.
     cb.basis.row_status = vec![
         BASE_STATUS,
         BASE_STATUS,
@@ -2912,7 +2834,6 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         "simulate must succeed with CapturedBasis warm-start: {result:?}"
     );
 
-    // Verify that solve(Some(&basis)) was called (warm-start path taken).
     let solver = workspaces[0].solver.inner();
     assert_eq!(
         solver.solve_with_basis_count, 1,
@@ -2923,16 +2844,14 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         "cold-start solve must not be called when a CapturedBasis is provided"
     );
 
-    // Verify the basis passed to solve(Some(&basis)) has the correct structure.
     let recorded = solver
         .recorded_basis
         .as_ref()
         .expect("recorded_basis must be Some after a warm-start solve");
 
-    // Row count: base_row_count=2 + active_count=3 = 5. Under the
-    // active-only bake model the LP carries one row per active cut only;
-    // inactive populated slots are not present in the baked template.
-    // updated after active-only bake landed
+    // Under the active-only bake model the LP carries one row per active cut;
+    // inactive populated slots are absent, so the basis length is base_rows +
+    // active_count.
     let active_count = fcf.pools[0].active_count();
     assert_eq!(
         recorded.row_status.len(),
@@ -2943,11 +2862,10 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         recorded.row_status.len()
     );
 
-    // The three slot identities recorded in the stored basis (10, 11, 12) are
-    // preserved verbatim at their respective LP row positions.  Under the
-    // active-only bake model the active cuts are iterated in slot order
-    // (10, 11, 12) so slot 10 lands at target position 0, i.e. LP row 2.
-    let preserved_offset = 2; // base rows + position of slot 10 in active-cuts order (position 0)
+    // Active cuts are iterated in slot order (10, 11, 12), so slot 10 lands at
+    // active-cuts position 0 — LP row 2 (after the 2 base rows) — and the stored
+    // statuses must reappear there verbatim.
+    let preserved_offset = 2;
     assert_eq!(
         recorded.row_status[preserved_offset], CUT_STATUS_0,
         "slot 10 must preserve its stored cut status"

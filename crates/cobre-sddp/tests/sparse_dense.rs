@@ -1,10 +1,7 @@
-//! Sparse cut-row correctness test.
-//!
 //! `build_cut_row_batch_into` emits one `(lp_column, coefficient)` pair per
-//! entry of the indexer's nonzero-state mask (in ascending order), followed by
-//! the theta column. This test verifies that, for a proper-subset mask (mixed
-//! AR orders, so some lag slots are excluded), the emitted columns and values
-//! match the remapped LP columns and negated coefficients exactly.
+//! nonzero-state-mask entry in ascending order, then the theta column. For a
+//! proper-subset mask (mixed AR orders), the emitted columns and values must
+//! equal the remapped LP columns and the negated coefficients.
 
 #![allow(
     clippy::unwrap_used,
@@ -21,22 +18,16 @@ use cobre_sddp::build_cut_row_batch_into;
 use cobre_sddp::indexer::StateLayout;
 use cobre_solver::RowBatch;
 
-/// When the sparse mask is a proper subset (mixed AR orders), the output
-/// contains fewer nonzeros per row than the full state dimension. This test
-/// verifies the cut-row builder produces correct output for a mixed-order case.
 #[test]
 fn sparse_partial_mask_produces_correct_subset() {
-    // 3 hydros, max_par_order = 2 → n_state = 3 * (1 + 2) = 9
     let n_hydro = 3;
     let max_par_order = 2;
-    let n_state = n_hydro * (1 + max_par_order); // 9
+    let n_state = n_hydro * (1 + max_par_order);
 
-    // Mixed AR orders: effective_lag_count = [0, 1, 2] → some lag slots are zero.
-    // `StateLayout::new` finalizes the nonzero-state mask and the
-    // state→LP-column precompute map in its constructor, as production setup does.
+    // The [0, 1, 2] arg is per-hydro effective_lag_count; mixed orders zero out
+    // some lag slots. StateLayout::new finalizes the mask as production setup does.
     let state = StateLayout::new(n_hydro, max_par_order, 0, 0, vec![], &[0, 1, 2]);
-    // Expected mask: storage [0,1,2] + lag0 for h1,h2 [4,5] + lag1 for h2 [8]
-    // = [0, 1, 2, 4, 5, 8]
+    // Expected mask = storage [0,1,2] + lag0 of h1,h2 [4,5] + lag1 of h2 [8].
     let mask = &state.nonzero_state_indices;
     assert_eq!(
         mask.len(),
@@ -44,7 +35,6 @@ fn sparse_partial_mask_produces_correct_subset() {
         "mixed-order mask has 3 + 0 + 1 + 2 = 6 entries"
     );
 
-    // Create FCF: new(num_stages, state_dim, fwd_passes, max_iter, warm_start).
     let mut fcf = FutureCostFunction::new(2, n_state, 1, 1, &[0; 2]);
     let coeffs = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
     fcf.add_cut(0, 0, 0, 50.0, &coeffs);
@@ -61,12 +51,7 @@ fn sparse_partial_mask_produces_correct_subset() {
     };
     build_cut_row_batch_into(&mut batch, &fcf, 0, &state, &col_scale);
 
-    // The sparse path should only emit entries for mask indices + theta.
-    // NNZ per cut = mask.len() + 1 (theta) = 7
     assert_eq!(batch.num_rows, 1);
-    // col_indices should contain the remapped LP columns plus theta_col.
-    // state_to_lp_column maps outgoing-state indices to LP columns:
-    // storage → identity; lag 0 → z_inflow; lag l≥1 → incoming lag l−1.
     let theta_col = state.theta;
     let expected_cols: Vec<i32> = mask
         .iter()
@@ -78,7 +63,6 @@ fn sparse_partial_mask_produces_correct_subset() {
         "sparse col_indices mismatch"
     );
 
-    // Values should be -coefficients[j] for each mask index, plus +1.0 for theta.
     let expected_values: Vec<f64> = mask
         .iter()
         .map(|&j| -coeffs[j])

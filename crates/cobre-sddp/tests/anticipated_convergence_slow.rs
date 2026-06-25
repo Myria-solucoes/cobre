@@ -1,22 +1,11 @@
-//! Slow-gated convergence test for a medium anticipated-thermal case.
+//! Slow-gated convergence test for a medium anticipated-thermal case (fixture
+//! built by `build_system`).
 //!
 //! Verifies that `SamplingScheme::OutOfSample` converges to a lower bound
 //! within 10% relative tolerance of the `SamplingScheme::InSample` lower
-//! bound when anticipated thermals are present.
-//!
-//! The fixture is a 4-stage system with:
-//! - 1 bus (deficit cost 500 $/MWh)
-//! - 1 hydro (storage 200 hm³, initial 100 hm³, max_gen 250 MW,
-//!   inflow mean 80 m³/s, std 20 m³/s)
-//! - 1 anticipated thermal (K=2, cost 50 $/MWh, max 100 MW) — id=2
-//! - 1 backup standard thermal (cost 500 $/MWh, max 200 MW) — id=4
-//! - Load 220 MW constant across all stages
-//! - `branching_factor=5`, `NoiseMethod::Saa`
-//! - `past_anticipated_commitments = [(id=2, [40.0, 20.0])]`
-//!
-//! Both runs use `forward_passes=10` and `iteration_limit=30`.
-//! The 10% tolerance (relaxed from 5%) accommodates the anticipated ring-buffer
-//! variance source that is absent in the pure-hydro convergence test.
+//! bound when anticipated thermals are present. The 10% tolerance (relaxed from
+//! 5%) accommodates the anticipated ring-buffer variance source that is absent
+//! in the pure-hydro convergence test.
 
 #![allow(
     clippy::unwrap_used,
@@ -57,11 +46,6 @@ use cobre_sddp::{
 use cobre_solver::ActiveSolver;
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
-// ---------------------------------------------------------------------------
-// StubComm — single-rank communicator for testing
-// ---------------------------------------------------------------------------
-
-/// Single-rank communicator stub for testing.
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -133,7 +117,6 @@ fn build_system(branching_factor: usize) -> cobre_core::System {
         excess_cost: 0.0,
     };
 
-    // Anticipated thermal: K=2 lead stages, cost 50 $/MWh, max 100 MW.
     let anticipated_id = EntityId(2);
     let thermal_ant = Thermal {
         id: anticipated_id,
@@ -147,7 +130,6 @@ fn build_system(branching_factor: usize) -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // Backup standard thermal: cost 500 $/MWh (high cost, always feasible).
     let thermal_backup = Thermal {
         id: EntityId(4),
         name: "T_backup".to_string(),
@@ -160,7 +142,6 @@ fn build_system(branching_factor: usize) -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // Hydro: constant-productivity, large storage so spill is unlikely.
     let hydro = Hydro {
         id: EntityId(3),
         name: "H1".to_string(),
@@ -252,7 +233,6 @@ fn build_system(branching_factor: usize) -> cobre_core::System {
         })
         .collect();
 
-    // k_max=2 for the anticipated thermal bounds layout.
     let k_max: usize = 2;
     let n_st = n_stages;
 
@@ -293,7 +273,6 @@ fn build_system(branching_factor: usize) -> cobre_core::System {
         }
     }
 
-    // 2 thermals (anticipated + backup), k_max=2.
     let bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
             n_hydros: 1,
@@ -345,7 +324,6 @@ fn build_system(branching_factor: usize) -> cobre_core::System {
         },
     );
 
-    // Seed the anticipated ring buffer with non-zero past commitments.
     let initial_conditions = InitialConditions {
         storage: vec![HydroStorage {
             hydro_id: EntityId(3),
@@ -482,9 +460,8 @@ fn run_training(
 #[test]
 fn anticipated_k2_insample_vs_out_of_sample_convergence() {
     const BRANCHING_FACTOR: usize = 5;
-    const RELATIVE_TOLERANCE: f64 = 0.10; // 10%
+    const RELATIVE_TOLERANCE: f64 = 0.10;
 
-    // Build identical systems for both runs.
     let system_insample = build_system(BRANCHING_FACTOR);
     let system_oos = build_system(BRANCHING_FACTOR);
 

@@ -14,7 +14,6 @@
 
 use std::path::{Path, PathBuf};
 
-/// Recursively collect every `.rs` file under `dir`.
 fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).expect("read_dir src") {
         let entry = entry.expect("dir entry");

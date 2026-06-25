@@ -88,15 +88,12 @@ impl Communicator for StubComm {
     }
 }
 
-/// Resolve a deterministic fixture directory by suffix.
 fn case_dir(suffix: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/deterministic")
         .join(suffix)
 }
 
-/// Train one iteration and run a single simulation scenario for a case,
-/// returning the per-scenario stage results.
 fn train_and_simulate(suffix: &str) -> Vec<SimulationScenarioResult> {
     let dir = case_dir(suffix);
     let config_path = dir.join("config.json");
@@ -184,8 +181,8 @@ fn train_and_simulate(suffix: &str) -> Vec<SimulationScenarioResult> {
     scenario_results
 }
 
-/// The non-uniform block schedule shared by D33 and D34: stage 1 (3 blocks) and
-/// stage 2 (2 blocks) both differ from stage 0's single block.
+/// The non-uniform block schedule shared by D33 and D34: the interior stages
+/// differ from stage 0's single block, which is the bug trigger.
 const BLOCK_COUNTS: [usize; 3] = [1, 3, 2];
 
 /// Assert one hydro record per (block, hydro) pair at every stage: a wrong

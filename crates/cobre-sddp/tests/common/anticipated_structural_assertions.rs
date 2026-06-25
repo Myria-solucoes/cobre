@@ -28,14 +28,10 @@ use cobre_sddp::TrainingResult;
 ///
 /// # Arguments
 ///
-/// - `result` — completed [`TrainingResult`].
-/// - `events` — full event log received from `setup.train(.., Some(sender), ..)`.
-///   When the calling test doesn't wire up an event channel, pass an empty
-///   slice and the per-iteration history check is skipped (only the
-///   `result`-level invariants are checked).
-/// - `expected_iterations` — exact iteration count the training loop must
-///   report. Use the configured `IterationLimit` value; matching this
-///   pins the iteration counter without claiming the LP value is correct.
+/// - `events` — full event log; an empty slice skips the per-iteration history
+///   check (only the `result`-level invariants run).
+/// - `expected_iterations` — exact iteration count; use the configured
+///   `IterationLimit`. Pins the counter without claiming the LP value is correct.
 ///
 /// # Panics
 ///
@@ -64,9 +60,6 @@ pub fn assert_training_converged_structurally(
         "structural: final_gap must be finite; got {final_gap}",
     );
 
-    // Per-iteration LB history from the event log. If the caller didn't
-    // attach an event channel, skip — `result.final_lb` is the only signal
-    // available.
     let mut history: Vec<(u64, f64)> = events
         .iter()
         .filter_map(|event| match event {
@@ -91,9 +84,8 @@ pub fn assert_training_converged_structurally(
         );
     }
 
-    // Non-decreasing across iterations. Tolerance covers LP-solver noise at
-    // the magnitude of the bound: `1e-9 · max(1, |lb|)` is conservative for
-    // double-precision LP solves.
+    // Tolerance is scaled by the bound magnitude to cover double-precision
+    // LP-solver noise.
     for window in history.windows(2) {
         let (prev_iter, prev_lb) = window[0];
         let (next_iter, next_lb) = window[1];
@@ -148,13 +140,11 @@ pub fn assert_basis_cache_fully_populated(result: &TrainingResult, expected_stag
 ///
 /// # Arguments
 ///
-/// - `result` — completed training result.
 /// - `anticipated_state_start` — `indexer.anticipated_state.start`, the
-///   column / state-index offset of the anticipated-state ring buffer.
+///   state-index offset of the anticipated-state ring buffer.
 /// - `n_anticipated` — `indexer.n_anticipated`.
-/// - `delivery_stages` — stages at which the delivery slot (slot 0 in the
-///   slot-major layout) should be populated with a non-negative value.
-///   Pass the indices of stages where `K_i ≤ stage_idx` for some plant.
+/// - `delivery_stages` — pass the indices of stages where `K_i ≤ stage_idx` for
+///   some plant; slot 0 (slot-major layout) must be populated and non-negative.
 ///
 /// # Panics
 ///
@@ -172,7 +162,7 @@ pub fn assert_anticipated_delivery_slots_populated(
         // Slot 0 holds the matured commitment about to be dispatched at
         // `stage_idx`. Layout is slot-major, plant-minor.
         for plant in 0..n_anticipated {
-            let idx = anticipated_state_start + plant; // slot 0
+            let idx = anticipated_state_start + plant;
             let value = captured.state_at_capture[idx];
             assert!(
                 value.is_finite(),

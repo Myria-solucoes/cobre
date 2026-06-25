@@ -69,18 +69,15 @@ fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/b6a_hydro_inflow_cascade")
 }
 
-/// Pin the fixture's intent at the parser boundary: the loaded system carries
-/// exactly one `>=` generic constraint whose single term is
-/// `+1.0 * hydro_inflow(1)` with no explicit block (`block_id = None`, so the
-/// builder expands it per block).
+/// Pin the fixture's intent at the parser boundary.
 ///
 /// The cascade target is H1 (`EntityId(1)`), the downstream plant whose upstream
 /// is H0 — so the resolved row references the total-inflow column set (z_inflow
 /// plus H0's turbine+spillage), not the headwater z_inflow-only case. The
 /// exhaustive `(col, +1.0)` resolver-level check is the crate-internal
 /// responsibility of `lp::generic_constraints`'s unit tests (see this file's
-/// module docs); this assertion guards that the fixture references the cascade
-/// target so the end-to-end solve genuinely exercises B6a.
+/// module docs); this assertion only guards that the fixture references the
+/// cascade target so the end-to-end solve genuinely exercises B6a.
 fn assert_cascade_inflow_constraint(system: &cobre_core::System) {
     let constraints = system.generic_constraints();
     assert_eq!(
@@ -203,7 +200,7 @@ where
         .expect("aggregate_simulation must succeed");
 }
 
-/// AC: the cascade `hydro_inflow(1) >= 12.0` constraint solves end-to-end on the
+/// The cascade `hydro_inflow(1) >= 12.0` constraint solves end-to-end on the
 /// default HiGHS backend.
 #[test]
 #[cfg(feature = "highs")]
@@ -215,7 +212,7 @@ fn b6a_hydro_inflow_cascade_solves_highs() {
     run_cascade_inflow_case(cobre_solver::highs::HighsSolver::new);
 }
 
-/// AC: the same cascade `hydro_inflow(1) >= 12.0` constraint solves end-to-end
+/// The same cascade `hydro_inflow(1) >= 12.0` constraint solves end-to-end
 /// on the CLP backend (`--no-default-features --features "clp slow-tests"`).
 #[test]
 #[cfg(feature = "clp")]
