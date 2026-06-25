@@ -31,8 +31,6 @@ pub mod scenario_source;
 pub mod simulation;
 pub mod training;
 
-// Re-export all public types so downstream callers continue to use
-// `cobre_io::config::Foo` without knowing which submodule owns `Foo`.
 pub use estimation::{EstimationConfig, OrderSelectionMethod};
 pub use exports::ExportsConfig;
 pub use modeling::{InflowNonNegativityConfig, InflowNonNegativityMethod, ModelingConfig};
@@ -119,10 +117,6 @@ pub fn parse_config(path: &Path) -> Result<Config, LoadError> {
     let raw = std::fs::read_to_string(path).map_err(|e| LoadError::io(path, e))?;
 
     let config: Config = serde_json::from_str(&raw).map_err(|e| {
-        // serde_json errors carry a message that describes the field or syntax problem.
-        // Unknown enum variants in a tagged enum produce a deserialization error whose
-        // message contains the unknown variant name — surfaced to the caller as
-        // SchemaError when the field is identifiable, otherwise as ParseError.
         let msg = e.to_string();
         if msg.contains("unknown variant") || msg.contains("missing field") {
             LoadError::SchemaError {
@@ -140,10 +134,8 @@ pub fn parse_config(path: &Path) -> Result<Config, LoadError> {
     Ok(config)
 }
 
-/// Extract a field name hint from a `serde_json` error message.
-///
-/// Extracts the identifier between backticks, returning a best-effort field name
-/// or `"<unknown>"` when no match is found.
+/// Extract a field-name hint (the first backtick-quoted identifier) from a
+/// `serde_json` error message, or `"<unknown>"` when none is present.
 fn extract_field_from_serde_msg(msg: &str) -> String {
     if let Some(start) = msg.find('`')
         && let Some(end) = msg[start + 1..].find('`')
@@ -153,9 +145,8 @@ fn extract_field_from_serde_msg(msg: &str) -> String {
     "<unknown>".to_string()
 }
 
-/// Post-deserialization validation for mandatory fields.
-///
-/// Checks that `forward_passes` and `stopping_rules` are present in the config.
+/// Post-deserialization validation that the mandatory `forward_passes` and
+/// `stopping_rules` fields are present.
 pub(crate) fn validate_config(config: &Config, path: &Path) -> Result<(), LoadError> {
     if config.training.forward_passes.is_none() {
         return Err(LoadError::SchemaError {
@@ -258,13 +249,6 @@ fn convert_scenario_source_config(
 }
 
 /// Tier-1 structural validation of a parsed [`ScenarioSource`] from `config.json`.
-///
-/// ## Checks performed
-///
-/// - `historical_years` must not be specified if no class uses `Historical`.
-/// - `seed` is required when any class uses `OutOfSample`, `Historical`, or `External`.
-/// - `Historical` scheme is only valid for the `inflow` class.
-/// - If `historical_years` is a `Range`, `from` must be `<= to`.
 fn validate_scenario_source_cfg(
     source: &ScenarioSource,
     section: &str,
@@ -283,7 +267,6 @@ fn validate_scenario_source_cfg(
         });
     }
 
-    // Historical scheme is only valid for inflow class
     if source.load_scheme == SamplingScheme::Historical {
         return Err(LoadError::SchemaError {
             path: path.to_path_buf(),
@@ -300,7 +283,6 @@ fn validate_scenario_source_cfg(
         });
     }
 
-    // Seed is required unless all classes are InSample
     let all_in_sample = source.inflow_scheme == SamplingScheme::InSample
         && source.load_scheme == SamplingScheme::InSample
         && source.ncs_scheme == SamplingScheme::InSample;
@@ -388,11 +370,9 @@ impl Config {
     ///
     /// `base` is the parsed-but-not-typed `config.json` (a [`serde_json::Value::Object`]).
     /// `overrides` is a flat map whose keys are dotted paths into the config schema
-    /// (e.g. `"training.tree_seed"`, `"policy.checkpointing.compress"`). For each
-    /// `(dotted_key, value)` entry the value is inserted into a clone of `base` at the
-    /// dotted path, creating intermediate objects as needed. Intermediate objects are
-    /// reused rather than replaced, so setting `policy.checkpointing.compress` does not
-    /// clobber sibling keys under `policy` or `policy.checkpointing`.
+    /// (e.g. `"training.tree_seed"`, `"policy.checkpointing.compress"`). Intermediate
+    /// objects are reused rather than replaced, so setting `policy.checkpointing.compress`
+    /// does not clobber sibling keys under `policy` or `policy.checkpointing`.
     ///
     /// After merging, the value is re-deserialized into [`Config`]. Because `Config`
     /// is `#[serde(deny_unknown_fields)]`, an override key that does not exist in the
@@ -438,12 +418,8 @@ impl Config {
         validate_config(&config, Path::new("<config_overrides>")).map(|()| config)
     }
 
-    /// Deep-merge `value` into `target` at the dotted path `dotted_key`.
-    ///
-    /// Splits `dotted_key` on `'.'`, walking `target` one segment at a time. Missing
-    /// intermediate objects are created in place; existing ones are reused so that
-    /// sibling keys are preserved. The final segment is inserted (overwriting any
-    /// prior value at that exact key).
+    /// Deep-merge `value` into `target` at the dotted path `dotted_key`, reusing
+    /// existing intermediate objects so sibling keys survive.
     ///
     /// # Errors
     ///
@@ -466,9 +442,8 @@ impl Config {
 
         let mut current = target;
         for segment in &segments[..segments.len() - 1] {
-            // Coerce non-object nodes to an empty object so the walk can descend,
-            // then reuse the existing object — preserving siblings (the deep-merge
-            // requirement). `as_object_mut` is `Some` because we just coerced.
+            // Reuse the existing intermediate object rather than replacing it; a
+            // replace clobbers sibling keys, breaking the deep-merge contract.
             if !current.is_object() {
                 *current = serde_json::Value::Object(serde_json::Map::new());
             }
@@ -480,8 +455,8 @@ impl Config {
                 .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
         }
 
-        // `segments` is non-empty (an empty `dotted_key` yields one empty segment,
-        // already rejected above), so the last index is valid.
+        // The empty-segment guard above rejects the only `dotted_key` that could
+        // make `segments` empty, so this last index never panics.
         let last = segments[segments.len() - 1];
         if !current.is_object() {
             *current = serde_json::Value::Object(serde_json::Map::new());
@@ -525,13 +500,8 @@ mod tests {
         );
         let cfg = parse_config(f.path()).unwrap();
 
-        // Mandatory field present and correct
         assert_eq!(cfg.training.forward_passes, Some(192));
-
-        // tree_seed is optional
         assert_eq!(cfg.training.tree_seed, Some(42));
-
-        // Defaults applied to optional sections
         assert_eq!(cfg.training.stopping_mode, "any");
         assert!(cfg.training.enabled);
         assert_eq!(
@@ -647,13 +617,11 @@ mod tests {
         let f = write_config(json);
         let cfg = parse_config(f.path()).unwrap();
 
-        // Modeling
         assert_eq!(
             cfg.modeling.inflow_non_negativity.method,
             InflowNonNegativityMethod::Penalty
         );
 
-        // Training
         assert_eq!(cfg.training.forward_passes, Some(192));
         assert_eq!(cfg.training.stopping_mode, "any");
         let rules = cfg.training.stopping_rules.as_ref().unwrap();
@@ -670,20 +638,16 @@ mod tests {
             other => panic!("expected Domination, got {other:?}"),
         }
 
-        // Upper bound
         assert_eq!(cfg.upper_bound_evaluation.enabled, Some(true));
         assert_eq!(cfg.upper_bound_evaluation.initial_iteration, Some(10));
 
-        // Policy
         assert_eq!(cfg.policy.mode, PolicyMode::Fresh);
         assert!(cfg.policy.validate_compatibility);
         assert_eq!(cfg.policy.checkpointing.enabled, Some(true));
 
-        // Simulation
         assert!(cfg.simulation.enabled);
         assert_eq!(cfg.simulation.num_scenarios, 2000);
 
-        // Exports
         assert!(cfg.exports.states);
         assert!(cfg.exports.stochastic);
     }
@@ -771,8 +735,6 @@ mod tests {
             r#"{"training": {"forward_passes": 1, "stopping_rules": [{"type": "iteration_limit", "limit": 10}]}}"#,
         );
         let cfg = parse_config(f.path()).unwrap();
-        // The struct must not have a `version` field — verified by compilation.
-        // We also check that the $schema field is None when absent from JSON.
         assert!(cfg.schema.is_none(), "schema should be None when absent");
     }
 
@@ -959,9 +921,6 @@ mod tests {
     }
 
     /// `exports.stochastic: true` deserializes correctly.
-    ///
-    /// Verifies that a `config.json` with `"exports": {"stochastic": true}` round-trips
-    /// the field as `true` in `ExportsConfig`.
     #[test]
     fn test_exports_stochastic_explicit_true() {
         let f = write_config(
@@ -978,9 +937,6 @@ mod tests {
     }
 
     /// `exports.stochastic` defaults to `false` when the field is absent.
-    ///
-    /// Verifies that a `config.json` without the `stochastic` field in the
-    /// `exports` section resolves to `false` via `#[serde(default)]`.
     #[test]
     fn test_exports_stochastic_defaults_to_false() {
         let f = write_config(
@@ -996,10 +952,6 @@ mod tests {
     }
 
     /// `exports.fpha_deviation_points: true` deserializes correctly.
-    ///
-    /// Verifies that a `config.json` with
-    /// `"exports": {"fpha_deviation_points": true}` round-trips the field as
-    /// `true` in `ExportsConfig`.
     #[test]
     fn test_exports_fpha_deviation_points_explicit_true() {
         let f = write_config(
@@ -1015,12 +967,8 @@ mod tests {
         );
     }
 
-    /// `exports.fpha_deviation_points` defaults to `false` when the field is absent.
-    ///
-    /// Verifies that a `config.json` without the `fpha_deviation_points` field in
-    /// the `exports` section resolves to `false` via `#[serde(default)]`, so a
-    /// run with the flag absent produces no deviation-points file and leaves the
-    /// rest of the run's outputs unchanged from the flag-off default.
+    /// `exports.fpha_deviation_points` defaults to `false` when absent, so the
+    /// flag-off run emits no deviation-points file and is byte-identical.
     #[test]
     fn test_exports_fpha_deviation_points_defaults_to_false() {
         let f = write_config(
