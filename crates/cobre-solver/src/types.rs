@@ -5,17 +5,12 @@
 
 use core::fmt;
 
-/// Simplex basis storing solver-native `i32` status codes for zero-copy round-trip
-/// basis management.
-///
-/// `Basis` stores the raw solver `i32` status codes directly, enabling zero-copy
-/// round-trip warm-starting via `copy_from_slice` (memcpy). This avoids per-element
-/// translation overhead when the caller only needs to save and restore the basis
-/// without inspecting individual statuses.
+/// Simplex basis storing raw solver-native `i32` status codes, enabling zero-copy
+/// round-trip warm-starting via `copy_from_slice` without per-element translation.
 ///
 /// `HiGHS` uses `HighsInt` (4 bytes) for status codes; CLP uses `unsigned char`
-/// (1 byte, widened to `i32` in this representation). The caller is responsible
-/// for matching the buffer dimensions to the LP model before use.
+/// (1 byte, widened to `i32` here). The caller must match the buffer dimensions to
+/// the LP model before use.
 ///
 /// See Solver Abstraction SS9.
 #[derive(Debug, Clone)]
@@ -28,11 +23,8 @@ pub struct Basis {
 }
 
 impl Basis {
-    /// Creates a new `Basis` with pre-allocated, zero-filled status code buffers.
-    ///
-    /// Both `col_status` and `row_status` are allocated to the requested lengths
-    /// and filled with `0_i32`. The caller reuses this buffer across solves by
-    /// passing it to [`crate::SolverInterface::get_basis`] on each iteration.
+    /// Creates a `Basis` with zero-filled status buffers of the requested lengths,
+    /// for reuse across solves via [`crate::SolverInterface::get_basis`].
     #[must_use]
     pub fn new(num_cols: usize, num_rows: usize) -> Self {
         Self {
@@ -157,9 +149,7 @@ pub struct SolverStatistics {
 
     /// Number of warm-start `solve(Some(&basis))` calls in which
     /// `cobre_highs_set_basis_non_alien` rejected the offered basis because
-    /// `isBasisConsistent` returned false.
-    /// Incremented once per rejected offer. Replaces two counters removed in v0.5.0
-    /// (see CHANGELOG).
+    /// `isBasisConsistent` returned false (incremented once per rejected offer).
     pub basis_consistency_failures: u64,
 
     /// Number of solves that returned optimal on the first attempt (before any retry).
@@ -203,13 +193,8 @@ pub struct SolverStatistics {
 
 impl SolverStatistics {
     /// Overwrite `self` from `src` in place, reusing `self.retry_level_histogram`'s
-    /// allocation (resize + `copy_from_slice`; no allocation when capacity suffices).
-    ///
-    /// All scalar fields are overwritten by value. The histogram `Vec<u64>` is
-    /// `resize`d to `src`'s length, then overwritten with `copy_from_slice`. When
-    /// `self` already holds a histogram of the same length (the steady-state case),
-    /// no heap allocation occurs. After this call `*self` equals `src.clone()`
-    /// field-for-field.
+    /// allocation so no heap allocation occurs when its capacity suffices. After
+    /// this call `*self` equals `src.clone()` field-for-field.
     pub fn copy_from(&mut self, src: &SolverStatistics) {
         self.solve_count = src.solve_count;
         self.success_count = src.success_count;
@@ -380,20 +365,13 @@ pub struct RowBatch {
 }
 
 impl StageTemplate {
-    /// Creates an empty [`StageTemplate`] with zero-sized fields and empty `Vec`s.
+    /// Creates an empty [`StageTemplate`], a reusable output buffer for
+    /// [`crate::baking::bake_rows_into_template`].
     ///
-    /// Intended for use as a reusable output buffer passed to
-    /// [`crate::baking::bake_rows_into_template`]. The caller constructs one
-    /// `StageTemplate::empty()` and passes it on every baking call; the function
-    /// clears and refills the buffer without calling `shrink_to_fit`, so the
-    /// allocated capacity grows to its steady-state peak and then stabilises.
-    ///
-    /// An empty template is **not** a valid model for `load_model` (it has
-    /// `num_cols == 0` and `num_rows == 0`). Only pass it to `load_model` after
-    /// a successful `bake_rows_into_template` call has populated it.
-    ///
-    /// A `Default` impl is intentionally omitted: an empty template is a
-    /// surprising default and invites misuse. Use this constructor explicitly.
+    /// An empty template is **not** a valid model for `load_model` (`num_cols == 0`,
+    /// `num_rows == 0`); only pass it there after a `bake_rows_into_template` call
+    /// has populated it. A `Default` impl is intentionally omitted: an empty
+    /// template is a surprising default that invites misuse.
     #[must_use]
     pub fn empty() -> Self {
         Self {
@@ -436,14 +414,10 @@ impl RowBatch {
 
 /// Terminal LP solve error returned after all retry attempts are exhausted.
 ///
-/// The calling algorithm uses the variant to determine its response:
-/// hard stop (`Infeasible`, `Unbounded`, `InternalError`) or terminate
-/// with a diagnostic error (`NumericalDifficulty`, `TimeLimitExceeded`,
-/// `IterationLimit`).
-///
-/// The six variants correspond to the error categories defined in
-/// Solver Abstraction SS6. Solver-internal errors (e.g., factorization
-/// failures) are resolved by retry logic before reaching this level.
+/// The calling algorithm uses the variant to determine its response: a hard stop
+/// or termination with a diagnostic. Solver-internal errors (e.g., factorization
+/// failures) are resolved by retry logic before reaching this level. See the error
+/// categories in Solver Abstraction SS6.
 #[derive(Debug)]
 pub enum SolverError {
     /// The LP has no feasible solution.

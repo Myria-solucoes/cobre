@@ -1,30 +1,12 @@
 //! CSR-to-CSC template baking for reusable LP stage templates.
 //!
 //! Provides [`bake_rows_into_template`], which merges a CSC base template with a
-//! CSR row batch into a larger CSC template. The result can be loaded directly via
+//! CSR row batch into a larger CSC template loadable directly via
 //! [`crate::SolverInterface::load_model`] without a subsequent `add_rows` call.
 //!
-//! # Algorithm
-//!
-//! The merge runs in two sequential passes over columns:
-//!
-//! 1. **Count pass**: for each CSR row `r`, for each non-zero `k`, increment a
-//!    per-column scratch counter `cut_nz_per_col[col_indices[k]]`.
-//! 2. **Emit pass**: walk columns `0..num_cols`; for each column `j`, emit the
-//!    original base entries from `base.col_starts[j]..base.col_starts[j+1]` followed
-//!    by all CSR entries whose column index equals `j`, in ascending CSR row order.
-//!
-//! The five intermediate buffers used by these passes are caller-owned and
-//! reused via [`BakingScratch`]: the caller constructs one `BakingScratch` and
-//! passes `&mut` to every call, so a steady-state bake performs no temporary
-//! heap allocation once the scratch capacities stabilize.
-//!
-//! # CSC Ordering Convention
-//!
-//! Within each column the original base rows appear first (in their original CSC
-//! order), followed by the appended rows in ascending CSR row order. `HiGHS` does not
-//! require sorted per-column row indices, but this convention is maintained for
-//! reproducibility and ease of debugging.
+//! Within each column the base rows appear first (original CSC order), then the
+//! appended rows in ascending CSR row order — a reproducibility convention;
+//! `HiGHS` does not require sorted per-column row indices.
 //!
 //! See [Solver Abstraction SS11.1](../../../cobre-docs/src/specs/architecture/solver-abstraction.md).
 
@@ -32,42 +14,20 @@ use crate::types::{RowBatch, StageTemplate};
 
 /// Caller-owned reusable scratch buffers for [`bake_rows_into_template`].
 ///
-/// The merge needs five intermediate buffers, all sized from the inputs of the
-/// current call. Constructing one `BakingScratch` and passing `&mut` to every
-/// bake reuses these allocations: each buffer is `clear()`-ed and re-grown at
-/// the start of a call without ever calling `shrink_to_fit`, so at steady state
-/// (once the largest seen template/batch has been processed) a bake allocates
-/// no temporaries.
-///
-/// The fields are private; the struct is an opaque buffer bag. The buffers are,
-/// in element type and per-call length:
-///
-/// - `cut_nz_per_col: Vec<u32>` — length `num_cols`; per-column count of CSR
-///   contributions (count pass).
-/// - `col_list_start: Vec<u32>` — length `num_cols + 1`; prefix-sum column-offset
-///   table into the flat CSR-grouped buffers.
-/// - `col_list_row: Vec<i32>` — length `rows_nnz`; flat row-index buffer grouped
-///   by column.
-/// - `col_list_val: Vec<f64>` — length `rows_nnz`; flat value buffer grouped by
-///   column.
-/// - `write_cursor: Vec<u32>` — length `num_cols`; per-column write offset within
-///   the flat buffers.
+/// Each buffer is `clear()`-ed and re-grown per call without `shrink_to_fit`, so
+/// passing one `BakingScratch` across bakes allocates no temporaries at steady
+/// state (once the largest seen template/batch has been processed).
 #[derive(Debug, Default)]
 pub struct BakingScratch {
-    /// Per-column count of appended CSR-row contributions (count pass).
     cut_nz_per_col: Vec<u32>,
-    /// Prefix-sum column-offset table into the flat CSR-grouped buffers.
     col_list_start: Vec<u32>,
-    /// Flat row-index buffer grouped by column.
     col_list_row: Vec<i32>,
-    /// Flat value buffer grouped by column.
     col_list_val: Vec<f64>,
-    /// Per-column write offset within the flat buffers.
     write_cursor: Vec<u32>,
 }
 
 impl BakingScratch {
-    /// Construct an empty scratch. All buffers grow lazily on first bake.
+    /// Construct an empty scratch; buffers grow on first bake.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -77,17 +37,9 @@ impl BakingScratch {
 /// Merge a CSC base template with a CSR row batch into an output CSC template.
 ///
 /// After return, `out` is a valid [`StageTemplate`] in CSC form with
-/// `out.num_rows == base.num_rows + rows.num_rows`.
-///
-/// # Buffer Reuse
-///
-/// `out` is cleared and refilled on every call without calling `shrink_to_fit`.
-/// Passing the same buffer on every iteration reuses allocations with zero
-/// additional allocation at steady state once capacity stabilizes.
-///
-/// The five intermediate buffers are owned by the caller-supplied `scratch`
-/// (see [`BakingScratch`]) and follow the identical `clear()`-then-regrow
-/// discipline: pass the same `BakingScratch` across calls to reuse them.
+/// `out.num_rows == base.num_rows + rows.num_rows`. Both `out` and `scratch`
+/// are cleared and refilled per call without `shrink_to_fit`; reuse them across
+/// calls for zero allocation at steady state (see [`BakingScratch`]).
 ///
 /// # Preconditions
 ///
@@ -108,7 +60,6 @@ pub fn bake_rows_into_template(
     out: &mut StageTemplate,
     scratch: &mut BakingScratch,
 ) {
-    // Precondition guards (debug builds only).
     #[allow(clippy::cast_sign_loss)]
     {
         debug_assert_eq!(
@@ -169,7 +120,6 @@ pub fn bake_rows_into_template(
         }
     }
 
-    // Compute total nnz and validate it fits in i32.
     #[allow(clippy::cast_sign_loss)]
     let rows_nnz = if rows.num_rows > 0 {
         rows.row_starts[rows.num_rows] as usize
@@ -184,9 +134,6 @@ pub fn bake_rows_into_template(
     let num_cols = base.num_cols;
     let num_rows = base.num_rows + rows.num_rows;
 
-    // Pass 1: count CSR row contributions per column.
-    // clear() then resize(..., 0) guarantees all num_cols entries start at 0,
-    // identical to the old `vec![0u32; num_cols]`.
     scratch.cut_nz_per_col.clear();
     scratch.cut_nz_per_col.resize(num_cols, 0u32);
     #[allow(clippy::cast_sign_loss)]
@@ -194,7 +141,6 @@ pub fn bake_rows_into_template(
         scratch.cut_nz_per_col[col as usize] += 1;
     }
 
-    // Clear buffers (no shrink_to_fit — preserve capacity).
     out.col_starts.clear();
     out.row_indices.clear();
     out.values.clear();
@@ -206,7 +152,6 @@ pub fn bake_rows_into_template(
     out.row_upper.clear();
     out.row_scale.clear();
 
-    // Write scalar fields.
     out.num_cols = num_cols;
     out.num_rows = num_rows;
     out.num_nz = total_nnz;
@@ -216,23 +161,19 @@ pub fn bake_rows_into_template(
     out.n_hydro = base.n_hydro;
     out.max_par_order = base.max_par_order;
 
-    // Copy column-bound and objective arrays from base.
     out.col_lower.extend_from_slice(&base.col_lower);
     out.col_upper.extend_from_slice(&base.col_upper);
     out.objective.extend_from_slice(&base.objective);
     out.col_scale.extend_from_slice(&base.col_scale);
 
-    // Populate row_lower and row_upper.
     out.row_lower.extend_from_slice(&base.row_lower);
     out.row_lower.extend_from_slice(&rows.row_lower);
     out.row_upper.extend_from_slice(&base.row_upper);
     out.row_upper.extend_from_slice(&rows.row_upper);
 
-    // Populate row_scale: copy base (if non-empty) and append 1.0 for new rows.
-    // StageTemplate invariant (types.rs): when non-empty, row_scale.len() must
-    // equal num_rows. When the base has scaling and cuts are appended, extend
-    // to base+rows; when the base has none but rows are appended, materialise
-    // the full scale vector as 1.0 (base rows inherit the "no-op" scale).
+    // StageTemplate invariant: a non-empty row_scale has len == num_rows. When the
+    // base has none but rows are appended, materialise the full vector as 1.0 — not
+    // empty — so the appended rows do not leave it length-mismatched.
     if !base.row_scale.is_empty() {
         out.row_scale.extend_from_slice(&base.row_scale);
         out.row_scale
@@ -241,8 +182,6 @@ pub fn bake_rows_into_template(
         out.row_scale.resize(base.num_rows + rows.num_rows, 1.0_f64);
     }
 
-    // Pass 2: build col_starts, row_indices, values in column order.
-    // Compute column start offsets (prefix sum of cut_nz_per_col).
     scratch.col_list_start.clear();
     scratch.col_list_start.reserve(num_cols + 1);
     let mut running = 0u32;
@@ -252,9 +191,6 @@ pub fn bake_rows_into_template(
     }
     scratch.col_list_start.push(running);
 
-    // Flat scratch buffers for (row_index, value) pairs grouped by column.
-    // clear() then resize matches the old `vec![0; rows_nnz]` / `vec![0; num_cols]`
-    // exactly; cut_nz_per_col entries above are fully overwritten before read.
     scratch.col_list_row.clear();
     scratch.col_list_row.resize(rows_nnz, 0i32);
     scratch.col_list_val.clear();
@@ -262,7 +198,6 @@ pub fn bake_rows_into_template(
     scratch.write_cursor.clear();
     scratch.write_cursor.resize(num_cols, 0u32);
 
-    // Fill scratch buffers by scanning CSR rows in ascending order.
     #[allow(clippy::cast_sign_loss)]
     for r in 0..rows.num_rows {
         let start = rows.row_starts[r] as usize;
@@ -278,7 +213,6 @@ pub fn bake_rows_into_template(
         }
     }
 
-    // Emit col_starts, row_indices, values in column order.
     let mut nz_cursor: i32 = 0;
     #[allow(clippy::cast_sign_loss)]
     for j in 0..num_cols {
@@ -785,12 +719,6 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // Test: i32::MAX overflow panics
-    //
-    // Reaching the `i32::try_from` check without OOM requires lying about
-    // `num_nz` while keeping the backing Vecs empty. In debug builds,
-    // `debug_assert!(base.row_indices.len() == base.num_nz)` fires before the
-    // overflow check, so the test is restricted to `#[cfg(not(debug_assertions))]`
-    // (i.e., `cargo test --release`).
     // -----------------------------------------------------------------------
 
     /// Verifies that `bake_rows_into_template` panics with the expected message
