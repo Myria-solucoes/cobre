@@ -135,7 +135,6 @@ pub fn parse_pumping_stations(path: &Path) -> Result<Vec<PumpingStation>, LoadEr
     Ok(convert_pumping(raw))
 }
 
-/// Validate all invariants on the raw deserialized pumping station data.
 fn validate_raw_pumping(raw: &RawPumpingFile, path: &Path) -> Result<(), LoadError> {
     validate_no_duplicate_pumping_ids(&raw.pumping_stations, path)?;
     for (i, station) in raw.pumping_stations.iter().enumerate() {
@@ -145,7 +144,6 @@ fn validate_raw_pumping(raw: &RawPumpingFile, path: &Path) -> Result<(), LoadErr
     Ok(())
 }
 
-/// Check that no two stations share the same `id`.
 fn validate_no_duplicate_pumping_ids(
     stations: &[RawPumpingStation],
     path: &Path,
@@ -163,9 +161,6 @@ fn validate_no_duplicate_pumping_ids(
     Ok(())
 }
 
-/// Validate `consumption_mw_per_m3s` for station at `station_index`.
-///
-/// Checks: `consumption_mw_per_m3s >= 0.0`.
 fn validate_consumption(
     consumption_mw_per_m3s: f64,
     station_index: usize,
@@ -181,9 +176,6 @@ fn validate_consumption(
     Ok(())
 }
 
-/// Validate flow bounds for station at `station_index`.
-///
-/// Checks: `min_m3s >= 0.0`, `max_m3s >= 0.0`, `max_m3s >= min_m3s`.
 fn validate_flow_bounds(
     flow: &RawPumpingFlow,
     station_index: usize,
@@ -216,8 +208,6 @@ fn validate_flow_bounds(
     Ok(())
 }
 
-/// Convert validated raw pumping station data into `Vec<PumpingStation>`, sorted
-/// by `id` ascending.
 fn convert_pumping(raw: RawPumpingFile) -> Vec<PumpingStation> {
     let mut stations: Vec<PumpingStation> = raw
         .pumping_stations
@@ -231,7 +221,6 @@ fn convert_pumping(raw: RawPumpingFile) -> Vec<PumpingStation> {
             entry_stage_id: raw_station.entry_stage_id,
             exit_stage_id: raw_station.exit_stage_id,
             consumption_mw_per_m3s: raw_station.consumption_mw_per_m3s,
-            // Flatten nested flow object into flat fields.
             min_flow_m3s: raw_station.flow.min_m3s,
             max_flow_m3s: raw_station.flow.max_m3s,
         })
@@ -294,7 +283,6 @@ mod tests {
 
         assert_eq!(stations.len(), 2);
 
-        // Station 0
         assert_eq!(stations[0].id, EntityId(0));
         assert_eq!(stations[0].name, "Bombeamento Serra da Mesa");
         assert_eq!(stations[0].bus_id, EntityId(10));
@@ -306,7 +294,6 @@ mod tests {
         assert!((stations[0].min_flow_m3s - 0.0).abs() < f64::EPSILON);
         assert!((stations[0].max_flow_m3s - 150.0).abs() < f64::EPSILON);
 
-        // Station 1: has stage bounds
         assert_eq!(stations[1].id, EntityId(1));
         assert_eq!(stations[1].entry_stage_id, Some(6));
         assert_eq!(stations[1].exit_stage_id, Some(120));

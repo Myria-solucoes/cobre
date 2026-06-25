@@ -52,9 +52,8 @@ use std::path::Path;
 
 use crate::LoadError;
 
-/// Default value for [`RawNcs::allow_curtailment`] when the field is omitted
-/// from the JSON entry. Matches the historical Cobre behaviour where every NCS
-/// source is curtailable unless the operator opts out.
+/// Default for [`RawNcs::allow_curtailment`] when omitted: sources are
+/// curtailable unless the operator opts out.
 fn default_allow_curtailment() -> bool {
     true
 }
@@ -153,7 +152,6 @@ pub fn parse_non_controllable_sources(
     Ok(convert_ncs(raw, global_penalties))
 }
 
-/// Validate all invariants on the raw deserialized NCS data.
 fn validate_raw_ncs(raw: &RawNcsFile, path: &Path) -> Result<(), LoadError> {
     validate_no_duplicate_ncs_ids(&raw.non_controllable_sources, path)?;
     for (i, ncs) in raw.non_controllable_sources.iter().enumerate() {
@@ -162,7 +160,6 @@ fn validate_raw_ncs(raw: &RawNcsFile, path: &Path) -> Result<(), LoadError> {
     Ok(())
 }
 
-/// Check that no two sources share the same `id`.
 fn validate_no_duplicate_ncs_ids(sources: &[RawNcs], path: &Path) -> Result<(), LoadError> {
     let mut seen: HashSet<i32> = HashSet::new();
     for (i, ncs) in sources.iter().enumerate() {
@@ -177,9 +174,6 @@ fn validate_no_duplicate_ncs_ids(sources: &[RawNcs], path: &Path) -> Result<(), 
     Ok(())
 }
 
-/// Validate `max_generation_mw` for source at `ncs_index`.
-///
-/// Checks: `max_generation_mw >= 0.0`.
 fn validate_ncs_generation(
     max_generation_mw: f64,
     ncs_index: usize,
@@ -195,14 +189,11 @@ fn validate_ncs_generation(
     Ok(())
 }
 
-/// Convert validated raw NCS data into `Vec<NonControllableSource>`, sorted by
-/// `id` ascending.
 fn convert_ncs(raw: RawNcsFile, global: &GlobalPenaltyDefaults) -> Vec<NonControllableSource> {
     let mut sources: Vec<NonControllableSource> = raw
         .non_controllable_sources
         .into_iter()
         .map(|raw_ncs| {
-            // Two-tier penalty resolution: entity override wins, else global default.
             let curtailment_cost = resolve_ncs_curtailment_cost(raw_ncs.curtailment_cost, global);
 
             NonControllableSource {
@@ -309,7 +300,6 @@ mod tests {
 
         assert_eq!(sources.len(), 2);
 
-        // Source 0: has entity-level curtailment_cost override
         assert_eq!(sources[0].id, EntityId(0));
         assert_eq!(sources[0].name, "Eólica Caetité");
         assert_eq!(sources[0].bus_id, EntityId(2));
@@ -322,7 +312,6 @@ mod tests {
             sources[0].curtailment_cost
         );
 
-        // Source 1: no entity-level override -> uses global default (0.005)
         assert_eq!(sources[1].id, EntityId(1));
         assert_eq!(sources[1].name, "Solar Pirapora");
         assert_eq!(sources[1].entry_stage_id, Some(12));
@@ -333,7 +322,6 @@ mod tests {
             sources[1].curtailment_cost
         );
 
-        // Neither source supplied allow_curtailment → both default to true.
         assert!(sources[0].allow_curtailment);
         assert!(sources[1].allow_curtailment);
     }

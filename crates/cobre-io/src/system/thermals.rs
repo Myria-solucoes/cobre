@@ -160,7 +160,6 @@ pub fn parse_thermals(path: &Path) -> Result<Vec<Thermal>, LoadError> {
     Ok(convert_thermals(raw))
 }
 
-/// Validate all invariants on the raw deserialized thermal data.
 fn validate_raw_thermals(raw: &RawThermalFile, path: &Path) -> Result<(), LoadError> {
     validate_no_duplicate_thermal_ids(&raw.thermals, path)?;
     for (i, thermal) in raw.thermals.iter().enumerate() {
@@ -171,7 +170,6 @@ fn validate_raw_thermals(raw: &RawThermalFile, path: &Path) -> Result<(), LoadEr
     Ok(())
 }
 
-/// Check that no two thermals share the same `id`.
 fn validate_no_duplicate_thermal_ids(
     thermals: &[RawThermal],
     path: &Path,
@@ -189,9 +187,6 @@ fn validate_no_duplicate_thermal_ids(
     Ok(())
 }
 
-/// Validate `cost_per_mwh` for thermal at `thermal_index`.
-///
-/// Checks: `cost_per_mwh >= 0.0`.
 fn validate_cost_per_mwh(
     cost_per_mwh: f64,
     thermal_index: usize,
@@ -207,9 +202,6 @@ fn validate_cost_per_mwh(
     Ok(())
 }
 
-/// Validate `anticipated_config` for thermal at `thermal_index`.
-///
-/// Checks: `lead_stages >= 1` when `anticipated_config` is present.
 /// Negative values are rejected earlier by serde (the field is `u32`), so
 /// the only remaining failure mode here is `lead_stages == 0`.
 fn validate_anticipated_config(
@@ -229,9 +221,6 @@ fn validate_anticipated_config(
     Ok(())
 }
 
-/// Validate generation bounds for thermal at `thermal_index`.
-///
-/// Checks: `min_mw >= 0.0`, `max_mw >= 0.0`, `max_mw >= min_mw`.
 fn validate_generation_bounds(
     bounds: &RawThermalGeneration,
     thermal_index: usize,
@@ -264,7 +253,6 @@ fn validate_generation_bounds(
     Ok(())
 }
 
-/// Convert validated raw thermal data into `Vec<Thermal>`, sorted by `id` ascending.
 fn convert_thermals(raw: RawThermalFile) -> Vec<Thermal> {
     let mut thermals: Vec<Thermal> = raw
         .thermals
@@ -346,7 +334,6 @@ mod tests {
 
         assert_eq!(thermals.len(), 2);
 
-        // Thermal 0: no anticipated config, no stage bounds
         assert_eq!(thermals[0].id, EntityId(0));
         assert_eq!(thermals[0].name, "Angra 1");
         assert_eq!(thermals[0].bus_id, EntityId(2));
@@ -361,7 +348,6 @@ mod tests {
         assert!((thermals[0].max_generation_mw - 600.0).abs() < f64::EPSILON);
         assert_eq!(thermals[0].anticipated_config, None);
 
-        // Thermal 1: has anticipated config and stage bounds
         assert_eq!(thermals[1].id, EntityId(1));
         assert_eq!(thermals[1].name, "Pecém I");
         assert_eq!(thermals[1].bus_id, EntityId(3));
@@ -637,7 +623,6 @@ mod tests {
     fn test_anticipated_thermal_not_rejected() {
         let f = write_json(VALID_JSON);
         let thermals = parse_thermals(f.path()).unwrap();
-        // Thermal 1 has anticipated config: lead_stages = 2
         let anticipated_thermal = thermals.iter().find(|t| t.id == EntityId(1)).unwrap();
         assert_eq!(
             anticipated_thermal.anticipated_config,
