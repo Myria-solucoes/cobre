@@ -1,11 +1,4 @@
 //! Provenance metadata for stochastic pipeline components.
-//!
-//! [`ComponentProvenance`] records whether a component of a [`StochasticContext`](crate::StochasticContext)
-//! was computed internally from system data, provided by the caller as an
-//! external override, or is absent because the system has no relevant entities.
-//!
-//! [`StochasticProvenance`] groups per-component provenance into a single value
-//! stored on [`StochasticContext`](crate::StochasticContext) and returned by its `provenance()` accessor.
 
 use cobre_core::scenario::SamplingScheme;
 
@@ -22,7 +15,7 @@ pub enum ComponentProvenance {
 
 /// Provenance records for all components of a [`StochasticContext`](crate::StochasticContext).
 ///
-/// Set once during construction; never mutated.
+/// Each `*_scheme` field is `None` when its class's per-class config is not yet applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StochasticProvenance {
     /// Origin of the opening scenario tree.
@@ -31,14 +24,11 @@ pub struct StochasticProvenance {
     pub correlation: ComponentProvenance,
     /// Origin of inflow PAR models (`Generated` when hydros present; `NotApplicable` otherwise).
     pub inflow_model: ComponentProvenance,
-    /// Sampling scheme configured for the inflow entity class.
-    /// `None` when per-class config is not yet applied.
+    /// Inflow entity class.
     pub inflow_scheme: Option<SamplingScheme>,
-    /// Sampling scheme configured for the load entity class.
-    /// `None` when per-class config is not yet applied.
+    /// Load entity class.
     pub load_scheme: Option<SamplingScheme>,
-    /// Sampling scheme configured for the NCS entity class.
-    /// `None` when per-class config is not yet applied.
+    /// NCS entity class.
     pub ncs_scheme: Option<SamplingScheme>,
 }
 

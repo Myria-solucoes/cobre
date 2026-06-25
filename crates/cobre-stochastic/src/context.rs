@@ -1,72 +1,43 @@
 //! Top-level stochastic pipeline initialization.
 //!
-//! [`StochasticContext`] owns the four independently-built stochastic
-//! infrastructure components: the PAR coefficient cache, the pre-decomposed
-//! spatial correlation, the pre-generated opening scenario tree, and the
-//! normal noise LP parameter cache.
-//!
-//! [`build_stochastic_context`] wires these components together from a
-//! [`System`] reference, running the full preprocessing pipeline in a
-//! well-defined order:
-//!
-//! 1. Validate PAR model parameters (fatal errors stop the pipeline).
-//! 2. Build the [`PrecomputedPar`] coefficient cache.
-//! 3. Decompose the spatial correlation matrix via spectral factorisation.
-//! 4. Generate the opening scenario tree.
-//! 5. Build the [`PrecomputedNormal`] cache for stochastic load buses.
-//!
-//! The caller is responsible for providing the `base_seed` as an explicit
-//! `u64`. Seed extraction from external configuration — including handling
-//! the `None` case with OS entropy — is an application-level concern that
-//! belongs in the calling crate.
+//! [`StochasticContext`] owns the precomputed stochastic infrastructure;
+//! [`build_stochastic_context`] assembles it from a [`System`] reference.
 
 use cobre_core::{EntityId, LoadModel, System, scenario::SamplingScheme};
 
-/// Per-class sampling scheme selections passed to [`build_stochastic_context`]
-/// for provenance tracking.
+/// Per-class sampling scheme selections for provenance tracking; each field is
+/// `None` when its class is not configured.
 #[derive(Debug, Clone, Copy)]
 pub struct ClassSchemes {
-    /// Inflow class sampling scheme, or `None` if not configured.
+    /// Inflow class.
     pub inflow: Option<SamplingScheme>,
-    /// Load class sampling scheme, or `None` if not configured.
+    /// Load class.
     pub load: Option<SamplingScheme>,
-    /// NCS class sampling scheme, or `None` if not configured.
+    /// NCS class.
     pub ncs: Option<SamplingScheme>,
 }
 
-/// Opening-tree inputs passed to [`build_stochastic_context`].
-///
-/// Groups the optional caller-provided overrides for the opening scenario
-/// tree: a pre-built `OpeningTree` that bypasses generation entirely, a
-/// `HistoricalScenarioLibrary` used when any stage is configured with
-/// [`NoiseMethod::HistoricalResiduals`](cobre_core::temporal::NoiseMethod::HistoricalResiduals),
-/// a pre-padding external scenario count per stage used to clamp openings
-/// for stages whose external library was padded from fewer raw scenarios,
-/// and per-stage noise group IDs for the noise-group sharing feature.
-///
-/// When all optional fields are `None` the opening tree is generated from SAA/LHS/QMC
-/// noise depending on each stage's `scenario_config.noise_method`.
+/// Optional caller overrides for the opening scenario tree. When every field is
+/// `None` the tree is generated from SAA/LHS/QMC noise per each stage's
+/// `scenario_config.noise_method`.
 #[derive(Debug, Default)]
 pub struct OpeningTreeInputs<'a> {
     /// A pre-built opening tree that bypasses generation. When `Some`, the
     /// `historical_library` and `external_scenario_counts` fields are ignored.
     pub user_tree: Option<OpeningTree>,
-    /// Historical scenario library used for [`NoiseMethod::HistoricalResiduals`](cobre_core::temporal::NoiseMethod::HistoricalResiduals)
-    /// stages. Required when any study stage uses that noise method and
-    /// `user_tree` is `None`.
+    /// Historical library, required when any study stage uses
+    /// [`NoiseMethod::HistoricalResiduals`](cobre_core::temporal::NoiseMethod::HistoricalResiduals)
+    /// and `user_tree` is `None`.
     pub historical_library: Option<&'a HistoricalScenarioLibrary>,
-    /// Pre-padding external scenario count per stage. Used to clamp opening
-    /// tree openings for stages with fewer external scenarios than the
-    /// configured branching factor. `None` when no entity class uses External
-    /// sampling. When `Some`, length must equal the number of study stages.
+    /// Pre-padding external scenario count per stage, clamping openings for
+    /// stages with fewer external scenarios than the branching factor. `None`
+    /// when no class uses External sampling; when `Some`, length must equal the
+    /// number of study stages.
     pub external_scenario_counts: Option<Vec<usize>>,
-    /// Noise group IDs for noise-group sharing, indexed by stage array index.
-    ///
-    /// Stages with the same group ID share the same noise draw in the opening
-    /// tree, enabling weekly stages within the same monthly bucket to receive
-    /// identical noise. `None` generates independent noise for every stage
-    /// (the original behaviour). When `Some`, length must equal the number of
-    /// study stages.
+    /// Per-stage noise-group IDs (indexed by stage array index): stages sharing
+    /// a group ID share one noise draw, so weekly stages in a monthly bucket
+    /// receive identical noise. `None` draws independent noise per stage; when
+    /// `Some`, length must equal the number of study stages.
     pub noise_group_ids: Option<Vec<u32>>,
 }
 
@@ -86,10 +57,6 @@ use crate::{
 pub use crate::tree::opening_tree::OpeningTree;
 
 /// Fully-initialized stochastic pipeline components, owned in one place.
-///
-/// Built once during initialization from a [`System`] reference and a base
-/// seed. After construction all fields are immutable; the context is consumed
-/// read-only by iterative optimization algorithms.
 ///
 /// # Examples
 ///
@@ -226,10 +193,9 @@ pub struct StochasticContext {
     ncs_entity_ids: Vec<EntityId>,
     entity_order: Box<[EntityId]>,
     base_seed: u64,
-    /// Seed for `OutOfSample` forward-pass noise generation, independent from
-    /// the tree seed (`base_seed`). `None` means the field was not configured
-    /// in `stages.json`; the `ForwardSampler` factory validates presence when
-    /// constructing an `OutOfSample` sampler.
+    /// Seed for `OutOfSample` forward-pass noise, independent of `base_seed`.
+    /// `None` means unconfigured; the `ForwardSampler` factory validates
+    /// presence before constructing an `OutOfSample` sampler.
     forward_seed: Option<u64>,
     dim: usize,
     n_load_buses: usize,
@@ -267,13 +233,10 @@ impl StochasticContext {
         self.opening_tree.view()
     }
 
-    /// Install a per-stage opening solve order on the owned opening tree.
-    ///
-    /// Forwards to [`OpeningTree::set_solve_order`]: `keys[s]` holds one scalar key
-    /// per canonical opening ω of stage `s`, and each stage's openings are sorted
-    /// by that key in `direction` (ties broken by ascending canonical ω). The keys
-    /// are caller-computed from setup-constant data, so the resulting order is
-    /// run-constant and identical across processes handed the same keys.
+    /// Install a per-stage opening solve order, sorting each stage's openings by
+    /// `keys[s]` in `direction` (see [`OpeningTree::set_solve_order`]). Keys are
+    /// caller-computed from setup-constant data, so the order is run-constant and
+    /// identical across processes handed the same keys.
     ///
     /// # Errors
     ///
@@ -294,8 +257,7 @@ impl StochasticContext {
         self.base_seed
     }
 
-    /// Returns the seed for `OutOfSample` forward-pass noise generation, independent
-    /// from the tree seed. `None` when not specified in `stages.json`.
+    /// Returns the `OutOfSample` forward-pass noise seed (see `forward_seed`).
     #[must_use]
     pub fn forward_seed(&self) -> Option<u64> {
         self.forward_seed
@@ -342,10 +304,7 @@ impl StochasticContext {
         self.n_stochastic_ncs
     }
 
-    /// Returns the number of hydro entities in the stochastic model.
-    ///
-    /// Equal to `dim() - n_load_buses() - n_stochastic_ncs()`. Exposed here
-    /// to avoid repeating the three-term subtraction at every call site.
+    /// Returns the number of hydro entities in the noise dimension.
     #[must_use]
     pub fn n_hydros(&self) -> usize {
         self.dim - self.n_load_buses - self.n_stochastic_ncs
@@ -366,25 +325,13 @@ impl StochasticContext {
 
 /// Initialize the full stochastic pipeline from a [`System`] reference.
 ///
-/// Runs these steps in order:
+/// Stage filtering keeps only study stages (non-negative `stage.id`). Load-bus
+/// and NCS IDs are sorted by [`EntityId`] for declaration-order invariance, and
+/// the noise dimension is laid out as `hydro_ids ++ load_bus_ids ++ ncs_ids`.
 ///
-/// 1. Validate PAR model parameters — fatal errors propagated immediately.
-/// 2. Extract study stages (non-negative `stage.id`).
-/// 3. Extract canonical hydro entity IDs.
-/// 4. Collect stochastic load bus IDs (buses with at least one [`LoadModel`]
-///    entry where `std_mw > 0`), sorted by [`EntityId`] for declaration-order
-///    invariance.
-/// 5. Build [`PrecomputedPar`] from PAR model parameters and study stages.
-/// 6. Build [`DecomposedCorrelation`] from the system correlation model.
-/// 7. Generate the opening scenario tree from the expanded entity order
-///    (`hydro_ids` followed by `load_bus_ids` followed by `ncs_ids`) with
-///    `dim = n_hydros + n_load_buses + n_stochastic_ncs`.
-/// 8. Build [`PrecomputedNormal`] for the stochastic load buses.
-///
-/// The `base_seed` parameter must be supplied explicitly by the caller.
-/// Converting `ScenarioSource.seed: Option<i64>` to a `u64` — including
-/// the `None` case with OS entropy — is an application-level concern that
-/// belongs in the calling crate, not in this infrastructure crate.
+/// `base_seed` is supplied explicitly: converting `ScenarioSource.seed:
+/// Option<i64>` to `u64` (including the `None`-means-OS-entropy case) is an
+/// application-level concern, not this infrastructure crate's.
 ///
 /// The `load_factors` parameter provides per-`(entity_id, stage_id, block_factors)`
 /// scaling entries consumed by [`PrecomputedNormal`]. Pass an empty slice when
@@ -406,13 +353,9 @@ impl StochasticContext {
 ///   is not positive-definite.
 ///
 /// [`LoadModel`]: cobre_core::scenario::LoadModel
-// Rationale: this function assembles all stochastic sub-contexts (inflow, load,
-// NCS availability, opening-tree) in a single ordered pass over validated system
-// inputs. The sequencing — PAR validation, stage filtering, entity-ID collection,
-// per-class scenario-count reconciliation, noise-group wiring, and correlation
-// matrix decomposition — is itself the observable contract; extracting sub-steps
-// into helpers would require passing the same partially-built context state through
-// every call, obscuring the dependency order without reducing real complexity.
+// Rationale: extracting sub-steps would thread the same partially-built context
+// state through every helper, obscuring the build dependency order without
+// reducing real complexity.
 #[allow(clippy::too_many_lines)]
 pub fn build_stochastic_context(
     system: &System,
@@ -453,9 +396,9 @@ pub fn build_stochastic_context(
     };
     let n_load_buses = load_bus_ids.len();
 
-    // Collect NCS entity IDs that have model entries. Entities with `std = 0`
-    // produce deterministic availability at `mean * max_gen`; the noise dimension
-    // still exists but contributes zero noise after the transform.
+    // An NCS with `std = 0` still occupies a noise dimension (contributing zero
+    // noise after the transform), not excluded — excluding it would shift the
+    // canonical entity-order layout.
     let ncs_entity_ids: Vec<EntityId> = {
         let mut ids: Vec<EntityId> = system.ncs_models().iter().map(|m| m.ncs_id).collect();
         ids.sort_unstable_by_key(|id| id.0);
@@ -466,7 +409,6 @@ pub fn build_stochastic_context(
 
     let dim = hydro_ids.len() + n_load_buses + n_stochastic_ncs;
 
-    // Compute provenance BEFORE consuming `user_opening_tree` by pattern match.
     let provenance = {
         let opening_tree_prov = if user_opening_tree.is_some() {
             ComponentProvenance::UserSupplied
@@ -555,10 +497,8 @@ pub fn build_stochastic_context(
         max_blocks,
     )?;
 
-    // Build NCS PrecomputedNormal by mapping NcsModel -> LoadModel.
-    // The dimensionless availability factors (mean, std) are stored in the
-    // LoadModel's mean_mw/std_mw fields; the noise transform in noise.rs
-    // applies the max_gen scaling: A_r = max_gen * clamp(mean + std * eta, 0, 1).
+    // The `mean_mw`/`std_mw` carried here are dimensionless availability factors,
+    // not MW; the NCS noise transform applies the `max_gen` scaling.
     let ncs_normal = if ncs_entity_ids.is_empty() {
         PrecomputedNormal::default()
     } else {
