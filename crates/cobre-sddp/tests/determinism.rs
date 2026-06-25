@@ -750,6 +750,8 @@ fn run_simulation(
                     n_pumping: 0,
                     geometry_per_stage: &[],
                     pumping_consumption_mw_per_m3s: &[],
+                    contract_prices_per_stage: &[],
+                    contract_is_import: &[],
                     ncs_entity_ids_per_stage: &[],
                     diversion_upstream: &HashMap::new(),
                     hydro_productivities_per_stage: &vec![vec![1.0, 1.0, 1.0]; fx.n_stages],

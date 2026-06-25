@@ -103,6 +103,16 @@ pub struct SimulationOutputSpec<'a> {
     /// station index — which, under the dense layout, IS the column-block position.
     pub pumping_consumption_mw_per_m3s: &'a [f64],
 
+    /// Per-stage RESOLVED contract price \[$/`MWh`\]: one inner `Vec` per study
+    /// stage, ID-sorted parallel to `entity_counts.contract_ids`. The resolved,
+    /// possibly stage-overridden `contract_bounds(c, t).price_per_mwh` — never the
+    /// `col_scale`-scaled LP objective.
+    pub contract_prices_per_stage: &'a [Vec<f64>],
+
+    /// Direction per contract, ID-sorted parallel to `entity_counts.contract_ids`
+    /// (`true` = import). Stage-invariant.
+    pub contract_is_import: &'a [bool],
+
     /// Per-stage NCS entity IDs, in ID-sorted system order (dense — all NCS).
     pub ncs_entity_ids_per_stage: &'a [Vec<i32>],
 
@@ -630,7 +640,10 @@ fn solve_simulation_stage<S: SolverInterface>(
 /// than `&mut ScratchBuffers` so `unscaled_primal`/`unscaled_dual` can be passed as
 /// `&[f64]` while `inflow_m3s_buf`/`row_lower_buf` are `&mut`; a single
 /// `&mut ScratchBuffers` would block that disjoint split.
-#[allow(clippy::too_many_arguments)]
+// Rationale (too_many_lines): a single linear per-stage assembly culminating in one
+// `StageExtractionSpec` literal; splitting it would only relocate the ~25 borrowed
+// inputs into a parameter list, scattering the assembly the literal reads.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn extract_sim_stage_result(
     inflow_m3s_buf: &mut Vec<f64>,
     row_lower_buf: &mut Vec<f64>,
@@ -787,6 +800,11 @@ fn extract_sim_stage_result(
             pumping_col_start,
             n_pumping,
             pumping_consumption_mw_per_m3s: output.pumping_consumption_mw_per_m3s,
+            contract_prices: output
+                .contract_prices_per_stage
+                .get(t)
+                .map_or(&[], Vec::as_slice),
+            contract_is_import: output.contract_is_import,
             diversion_upstream: output.diversion_upstream,
             hydro_productivities: output
                 .hydro_productivities_per_stage
@@ -1917,6 +1935,8 @@ mod tests {
                 n_pumping: 0,
                 geometry_per_stage: &[],
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices_per_stage: &[],
+                contract_is_import: &[],
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
@@ -2082,6 +2102,8 @@ mod tests {
                 n_pumping: 0,
                 geometry_per_stage: &[],
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices_per_stage: &[],
+                contract_is_import: &[],
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
@@ -2272,6 +2294,8 @@ mod tests {
                 n_pumping: 0,
                 geometry_per_stage: &[],
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices_per_stage: &[],
+                contract_is_import: &[],
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
@@ -2646,6 +2670,8 @@ mod tests {
                 n_pumping: 0,
                 geometry_per_stage: &[],
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices_per_stage: &[],
+                contract_is_import: &[],
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
@@ -2776,6 +2802,8 @@ mod tests {
                 n_pumping: 0,
                 geometry_per_stage: &[],
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices_per_stage: &[],
+                contract_is_import: &[],
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
@@ -3070,6 +3098,8 @@ mod tests {
                 n_pumping: 0,
                 geometry_per_stage: &[],
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices_per_stage: &[],
+                contract_is_import: &[],
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &diversion,
                 hydro_productivities_per_stage: &hprod,

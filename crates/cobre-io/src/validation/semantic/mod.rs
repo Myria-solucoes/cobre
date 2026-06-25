@@ -28,7 +28,7 @@
 //! |17 | `anticipated_decision(N)` in generic constraint targets an anticipated thermal | `constraints/generic_constraints.json` | `BusinessRuleViolation` |
 //! |18 | `thermal_generation(N)` in generic constraint when `N` is anticipated (warn) | `constraints/generic_constraints.json` | `SemanticAmbiguity` (warning) |
 //! |19 | Pumping `source_hydro_id != destination_hydro_id`  | `system/pumping_stations.json`        | `InvalidValue`         |
-//! |20 | Non-filling hydro or contract sets `entry_stage_id`/`exit_stage_id` (parsed, not applied; filling hydros, thermal/line/NCS/pumping windows ARE applied) | `system/hydros.json`, `system/energy_contracts.json` | `ModelQuality` (warning) |
+//! |20 | Non-filling hydro sets `entry_stage_id`/`exit_stage_id` (parsed, not applied; filling hydros, thermal/line/NCS/pumping/contract windows ARE applied) | `system/hydros.json` | `ModelQuality` (warning) |
 //!
 //! ## Layer 5b rules (stages, penalties, and scenario domain) — `validate_semantic_stages_penalties_scenarios`
 //!

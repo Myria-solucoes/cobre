@@ -350,6 +350,15 @@ pub struct StageExtractionSpec<'a> {
     /// by SYSTEM station index — which under the dense layout IS the column-block
     /// position, so extraction reads it at the enumeration index.
     pub pumping_consumption_mw_per_m3s: &'a [f64],
+    /// RESOLVED per-contract price \[$/`MWh`\] for THIS stage, ID-sorted parallel to
+    /// `entity_counts.contract_ids`. The unscaled `contract_bounds(c, t).price_per_mwh`,
+    /// NOT the `col_scale`-scaled LP objective; `total_cost = price * power * hours`.
+    pub contract_prices: &'a [f64],
+    /// Direction per contract, ID-sorted parallel to `entity_counts.contract_ids`:
+    /// `true` = import (base `geometry.contract_import.start`), `false` = export
+    /// (base `geometry.contract_export.start`). The running same-direction count
+    /// gives the per-family slot — `c_sys` is the wrong grid stride.
+    pub contract_is_import: &'a [bool],
     /// Map from target hydro ID to source hydro indices that divert to it.
     pub diversion_upstream: &'a HashMap<EntityId, Vec<usize>>,
     /// Per-hydro productivity at this stage. `0.0` for FPHA hydros (generation is
@@ -1209,6 +1218,22 @@ fn compute_cost_result(
     } else {
         range_sum(equipment.anticipated_decision.clone()) * COST_SCALE_FACTOR
     };
+    // Contract objective coeff is `price_per_mwh * block_hours`, so `col_cost`
+    // sums `power * price * hours` with the stored sign (export price < 0 nets
+    // negative). The objective term is in `immediate_cost`; booking it here keeps
+    // `Σ(macro categories) == immediate_cost` when contracts are active.
+    let contract_cost =
+        if equipment.contract_import.is_empty() && equipment.contract_export.is_empty() {
+            0.0
+        } else {
+            equipment
+                .contract_import
+                .clone()
+                .chain(equipment.contract_export.clone())
+                .map(col_cost)
+                .sum::<f64>()
+                * COST_SCALE_FACTOR
+        };
     let spillage_cost = if equipment.spillage.is_empty() {
         0.0
     } else {
@@ -1262,7 +1287,7 @@ fn compute_cost_result(
         discount_factor: cumulative_discount_factor,
         thermal_cost,
         anticipated_thermal_cost,
-        contract_cost: 0.0,
+        contract_cost,
         deficit_cost,
         excess_cost,
         storage_violation_cost: 0.0,
@@ -1465,11 +1490,80 @@ fn extract_pumping_stations(
     results
 }
 
+/// Extract one [`SimulationContractResult`] per (contract, block) from the solved
+/// dispatch primals — dense, one row per system contract at every stage.
+///
+/// The family base is `geometry.contract_import.start` (import) or
+/// `geometry.contract_export.start` (export); the per-family slot is the running
+/// count of same-direction contracts preceding `c` in ID-sorted order — `c` itself
+/// is the wrong grid stride (imports and exports share one ID-sorted list but
+/// occupy separate column blocks). `power_mw` is read directly from `view.primal`
+/// (already unscaled). `total_cost = price * power_mw * block_hours` uses the
+/// RESOLVED price, not the `col_scale`-scaled LP objective. A dormant `[0, 0]`-pinned
+/// contract emits a ZERO row with `operative_state_code = 1`.
+fn extract_contracts(
+    view: &SolutionView<'_>,
+    spec: &StageExtractionSpec<'_>,
+    stage_id: u32,
+) -> Vec<SimulationContractResult> {
+    let n_contracts = spec.entity_counts.contract_ids.len();
+    let n_blks = spec.n_blks;
+    if n_contracts == 0 || n_blks == 0 {
+        return Vec::new();
+    }
+
+    let import_base = spec.geometry.contract_import.start;
+    let export_base = spec.geometry.contract_export.start;
+    let import_end = spec.geometry.contract_import.end;
+    let export_end = spec.geometry.contract_export.end;
+    debug_assert!(
+        view.primal.len() >= import_end && view.primal.len() >= export_end,
+        "contract primal out of bounds: need import_end {import_end} / export_end {export_end}, have {}",
+        view.primal.len()
+    );
+
+    let grid = spec.block_grid();
+    let mut import_slot = 0_usize;
+    let mut export_slot = 0_usize;
+    let mut results = Vec::with_capacity(n_contracts * n_blks);
+    for (c, &contract_id) in spec.entity_counts.contract_ids.iter().enumerate() {
+        let is_import = spec.contract_is_import[c];
+        let (base, family_slot) = if is_import {
+            let slot = import_slot;
+            import_slot += 1;
+            (import_base, slot)
+        } else {
+            let slot = export_slot;
+            export_slot += 1;
+            (export_base, slot)
+        };
+        let price = spec.contract_prices[c];
+        for blk in 0..n_blks {
+            let col = grid.flat(base, family_slot, blk);
+            let power_mw = view.primal[col];
+            let dur = spec.block_hours[blk];
+            let energy_mwh = power_mw * dur;
+            let total_cost = price * energy_mwh;
+            #[allow(clippy::cast_possible_truncation)]
+            results.push(SimulationContractResult {
+                stage_id,
+                block_id: Some(blk as u32),
+                contract_id,
+                power_mw,
+                price_per_mwh: price,
+                total_cost,
+                operative_state_code: 1,
+            });
+        }
+    }
+    results
+}
+
 /// Extract per-entity result collections grouped by their shared iteration pattern.
 ///
-/// Inflow lags and pumping stations read real primal values; contracts produce
-/// zero-valued placeholders (an unmodeled entity type). Pumping extraction is
-/// delegated to [`extract_pumping_stations`].
+/// Inflow lags, pumping stations, and contracts read real primal values; the
+/// pumping and contract reads are delegated to [`extract_pumping_stations`] and
+/// [`extract_contracts`].
 fn extract_stub_collections(
     view: &SolutionView<'_>,
     spec: &StageExtractionSpec<'_>,
@@ -1498,20 +1592,7 @@ fn extract_stub_collections(
         })
         .collect();
     let pumping_stations = extract_pumping_stations(view, spec, stage_id);
-    let contracts: Vec<SimulationContractResult> = spec
-        .entity_counts
-        .contract_ids
-        .iter()
-        .map(|&contract_id| SimulationContractResult {
-            stage_id,
-            block_id: None,
-            contract_id,
-            power_mw: 0.0,
-            price_per_mwh: 0.0,
-            total_cost: 0.0,
-            operative_state_code: 1,
-        })
-        .collect();
+    let contracts = extract_contracts(view, spec, stage_id);
     (inflow_lags, pumping_stations, contracts)
 }
 
@@ -1603,12 +1684,14 @@ mod tests {
 
     use super::{
         EntityCounts, HydroReverseLookup, SolutionView, StageExtractionSpec,
-        accumulate_category_costs, assign_scenarios, extract_pumping_stations,
-        extract_stage_result,
+        accumulate_category_costs, assign_scenarios, extract_contracts, extract_pumping_stations,
+        extract_stage_result, extract_stub_collections,
     };
     use crate::indexer::StudyDimensions;
     use crate::lp_builder::StageGeometry;
-    use crate::simulation::types::{ScenarioCategoryCosts, SimulationCostResult};
+    use crate::simulation::types::{
+        ScenarioCategoryCosts, SimulationContractResult, SimulationCostResult,
+    };
 
     // -------------------------------------------------------------------------
     // HydroReverseLookup per-stage membership
@@ -1764,6 +1847,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -1851,6 +1936,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -2055,6 +2142,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -2112,6 +2201,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -2169,6 +2260,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -2228,6 +2321,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -2299,6 +2394,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -2352,6 +2449,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -2411,6 +2510,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -2574,6 +2675,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -2724,6 +2827,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -2827,6 +2932,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -2947,6 +3054,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -3022,6 +3131,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -3095,6 +3206,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -3185,6 +3298,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -3275,6 +3390,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -3407,6 +3524,8 @@ mod tests {
             pumping_col_start: 0,
             n_pumping: 0,
             pumping_consumption_mw_per_m3s: &[],
+            contract_prices: &[],
+            contract_is_import: &[],
             diversion_upstream: &HashMap::new(),
             hydro_productivities: &[],
             col_scale: &[],
@@ -3471,6 +3590,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -3561,6 +3682,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -3636,6 +3759,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -3729,6 +3854,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -3815,6 +3942,8 @@ mod tests {
             pumping_col_start: 0,
             n_pumping: 0,
             pumping_consumption_mw_per_m3s: &[],
+            contract_prices: &[],
+            contract_is_import: &[],
             diversion_upstream: &HashMap::new(),
             hydro_productivities: &[],
             col_scale: &[],
@@ -3886,6 +4015,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -3971,6 +4102,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -4072,6 +4205,8 @@ mod tests {
             pumping_col_start: 0,
             n_pumping: 0,
             pumping_consumption_mw_per_m3s: &[],
+            contract_prices: &[],
+            contract_is_import: &[],
             diversion_upstream: &HashMap::new(),
             hydro_productivities: &[],
             col_scale: &[],
@@ -4170,6 +4305,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0],
                 col_scale: &[],
@@ -4448,6 +4585,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -4548,6 +4687,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -4659,6 +4800,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -4781,6 +4924,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[0.0, 1.5],
                 col_scale: &[],
@@ -4866,6 +5011,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[0.0, 1.5],
                 col_scale: &[],
@@ -4981,6 +5128,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0],
                 col_scale: &[],
@@ -5067,6 +5216,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0],
                 col_scale: &[],
@@ -5159,6 +5310,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[0.0, 1.5],
                 col_scale: &[],
@@ -5245,6 +5398,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[0.0, 1.5],
                 col_scale: &[],
@@ -5281,6 +5436,217 @@ mod tests {
         assert!(
             (component_sum - cost.immediate_cost).abs() < 1.0,
             "per-component cost sum ({component_sum}) must equal immediate_cost ({})",
+            cost.immediate_cost
+        );
+        assert_eq!(
+            cost.contract_cost, 0.0,
+            "contract-free stage books zero contract_cost"
+        );
+    }
+
+    /// `contract_cost` for an active import contract equals `price * power * hours`.
+    /// The scaled LP objective coeff is `price * hours / COST_SCALE_FACTOR`; the
+    /// extractor recovers the original-unit cost.
+    #[test]
+    fn contract_cost_active_import_equals_price_power_hours() {
+        let indexer = make_indexer_2h_1fpha_1blk();
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&counts_2h_1fpha_1blk());
+        let state = crate::indexer::test_fixtures::state_layout(2, 0);
+        let base = indexer.generation_below_slack.end;
+        let contract_col = base;
+        let geometry = StageGeometry {
+            contract_import: contract_col..contract_col + 1,
+            contract_export: contract_col + 1..contract_col + 1,
+            ..indexer
+        };
+
+        let n_cols = contract_col + 1;
+        let mut primal = vec![0.0_f64; n_cols];
+        primal[6] = 500.0; // theta
+        primal[contract_col] = 40.0; // import power (MW)
+
+        let mut obj = vec![0.0_f64; n_cols];
+        obj[6] = 1.0;
+        // scaled objective coeff = price * hours / COST_SCALE_FACTOR = 200 * 730 / 1e6
+        obj[contract_col] = 200.0 * 730.0 / 1_000_000.0;
+        // objective = theta + contract = 500 + 40 * 0.146 = 505.84
+        let objective_val = 500.0 + 40.0 * (200.0 * 730.0 / 1_000_000.0);
+
+        let dual = vec![0.0_f64; 2];
+        let row_lower = vec![0.0_f64; 1];
+        let counts = EntityCounts {
+            hydro_ids: vec![1, 2],
+            hydro_productivities: vec![0.0, 1.5],
+            thermal_ids: vec![],
+            line_ids: vec![],
+            bus_ids: vec![],
+            pumping_station_ids: vec![],
+            contract_ids: vec![],
+            non_controllable_ids: vec![],
+        };
+        let ec = zero_energy_conversion(2, 1);
+
+        let result = extract_stage_result(
+            &SolutionView {
+                primal: &primal,
+                dual: &dual,
+                objective: objective_val,
+                objective_coeffs: &obj,
+                row_lower: &row_lower,
+            },
+            &StageExtractionSpec {
+                study_dims: &study_dims,
+                geometry: &geometry,
+                state: &state,
+                n_blks: geometry.n_blks,
+                entity_counts: &counts,
+                inflow_m3s_per_hydro: &[],
+                block_hours: &[],
+                generic_constraint_entries: &[],
+                ncs_col_start: 0,
+                n_ncs: 0,
+                ncs_entity_ids: &[],
+                ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
+                diversion_upstream: &HashMap::new(),
+                hydro_productivities: &[0.0, 1.5],
+                col_scale: &[],
+                row_scale: &[],
+                cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0; 2],
+                stage_index: 0,
+                n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
+            },
+            0,
+        );
+
+        let cost = &result.costs[0];
+        assert!(
+            (cost.contract_cost - 200.0 * 40.0 * 730.0).abs() < 1.0,
+            "contract_cost should be 200 * 40 * 730, got {}",
+            cost.contract_cost
+        );
+    }
+
+    /// Σ(macro categories) == `immediate_cost` when a contract is active — the
+    /// load-bearing invariant. An export contract (negative price) nets negative
+    /// `contract_cost` (revenue), so the sum still matches `immediate_cost`.
+    #[test]
+    fn cost_breakdown_sums_to_immediate_with_active_export_contract() {
+        let indexer = make_indexer_2h_1fpha_1blk();
+        let study_dims = crate::indexer::test_fixtures::study_dims_for(&counts_2h_1fpha_1blk());
+        let state = crate::indexer::test_fixtures::state_layout(2, 0);
+        let base = indexer.generation_below_slack.end;
+        let export_col = base;
+        let geometry = StageGeometry {
+            contract_import: export_col..export_col,
+            contract_export: export_col..export_col + 1,
+            ..indexer
+        };
+
+        let n_cols = export_col + 1;
+        let mut primal = vec![0.0_f64; n_cols];
+        primal[6] = 500.0; // theta
+        primal[7] = 30.0; // h0 turbine column
+        primal[export_col] = 30.0; // export power (MW)
+
+        let mut obj = vec![0.0_f64; n_cols];
+        obj[6] = 1.0;
+        obj[7] = 0.01; // turbined cost (scaled)
+        // export price < 0 (revenue): scaled coeff = -150 * 730 / 1e6
+        obj[export_col] = -150.0 * 730.0 / 1_000_000.0;
+        let objective_val = 500.0 + 30.0 * 0.01 + 30.0 * (-150.0 * 730.0 / 1_000_000.0);
+
+        let dual = vec![0.0_f64; 2];
+        let row_lower = vec![0.0_f64; 1];
+        let counts = EntityCounts {
+            hydro_ids: vec![1, 2],
+            hydro_productivities: vec![0.0, 1.5],
+            thermal_ids: vec![],
+            line_ids: vec![],
+            bus_ids: vec![],
+            pumping_station_ids: vec![],
+            contract_ids: vec![],
+            non_controllable_ids: vec![],
+        };
+        let ec = zero_energy_conversion(2, 1);
+
+        let result = extract_stage_result(
+            &SolutionView {
+                primal: &primal,
+                dual: &dual,
+                objective: objective_val,
+                objective_coeffs: &obj,
+                row_lower: &row_lower,
+            },
+            &StageExtractionSpec {
+                study_dims: &study_dims,
+                geometry: &geometry,
+                state: &state,
+                n_blks: geometry.n_blks,
+                entity_counts: &counts,
+                inflow_m3s_per_hydro: &[],
+                block_hours: &[],
+                generic_constraint_entries: &[],
+                ncs_col_start: 0,
+                n_ncs: 0,
+                ncs_entity_ids: &[],
+                ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
+                diversion_upstream: &HashMap::new(),
+                hydro_productivities: &[0.0, 1.5],
+                col_scale: &[],
+                row_scale: &[],
+                cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0; 2],
+                stage_index: 0,
+                n_stages: 1,
+                anticipated_windows: &[],
+                study_stage_ids: &[],
+            },
+            0,
+        );
+
+        let cost = &result.costs[0];
+        assert!(
+            cost.contract_cost < 0.0,
+            "export contract nets negative contract_cost (revenue), got {}",
+            cost.contract_cost
+        );
+        assert!(
+            (cost.contract_cost - (-150.0 * 30.0 * 730.0)).abs() < 1.0,
+            "contract_cost should be -150 * 30 * 730, got {}",
+            cost.contract_cost
+        );
+
+        let mut accum = ScenarioCategoryCosts {
+            resource_cost: 0.0,
+            recourse_cost: 0.0,
+            violation_cost: 0.0,
+            regularization_cost: 0.0,
+            imputed_cost: 0.0,
+        };
+        accumulate_category_costs(cost, &mut accum);
+        let macro_sum = accum.resource_cost
+            + accum.recourse_cost
+            + accum.violation_cost
+            + accum.regularization_cost
+            + accum.imputed_cost;
+        assert!(
+            (macro_sum - cost.immediate_cost).abs() < 1.0,
+            "Σ(macro categories) ({macro_sum}) must equal immediate_cost ({}) with an active contract",
             cost.immediate_cost
         );
     }
@@ -5349,6 +5715,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[0.0, 1.5],
                 col_scale: &col_scale,
@@ -5475,6 +5843,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[0.0, 1.5],
                 col_scale: &[],
@@ -5614,6 +5984,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0],
                 col_scale: &[],
@@ -5685,6 +6057,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0],
                 col_scale: &[],
@@ -5745,6 +6119,8 @@ mod tests {
                 pumping_col_start: 0,
                 n_pumping: 0,
                 pumping_consumption_mw_per_m3s: &[],
+                contract_prices: &[],
+                contract_is_import: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0],
                 col_scale: &[],
@@ -5825,6 +6201,8 @@ mod tests {
             pumping_col_start,
             n_pumping,
             pumping_consumption_mw_per_m3s: consumption,
+            contract_prices: &[],
+            contract_is_import: &[],
             diversion_upstream: diversion,
             hydro_productivities: &[],
             col_scale: &[],
@@ -5983,5 +6361,267 @@ mod tests {
 
         let rows = extract_pumping_stations(&view, &spec, 0);
         assert!(rows.is_empty(), "n_blks == 0 => no rows");
+    }
+
+    // -------------------------------------------------------------------------
+    // extract_contracts
+    // -------------------------------------------------------------------------
+
+    fn entity_counts_contracts(contract_ids: Vec<i32>) -> EntityCounts {
+        EntityCounts {
+            hydro_ids: vec![],
+            hydro_productivities: vec![],
+            thermal_ids: vec![],
+            line_ids: vec![],
+            bus_ids: vec![],
+            pumping_station_ids: vec![],
+            contract_ids,
+            non_controllable_ids: vec![],
+        }
+    }
+
+    /// Build a `StageExtractionSpec` whose only meaningful fields are the contract
+    /// inputs; all other fields are inert defaults. `n_blks` is `geometry.n_blks`.
+    // Rationale: mirrors `pumping_only_spec`; the parameter list IS the spec's
+    // borrowed contract inputs, so bundling them would obscure rather than clarify.
+    #[allow(clippy::too_many_arguments)]
+    fn contract_only_spec<'a>(
+        study_dims: &'a StudyDimensions,
+        geometry: &'a StageGeometry,
+        state: &'a crate::indexer::StateLayout,
+        entity_counts: &'a EntityCounts,
+        block_hours: &'a [f64],
+        contract_prices: &'a [f64],
+        contract_is_import: &'a [bool],
+        ec: &'a crate::energy_conversion::EnergyConversionSet,
+        diversion: &'a HashMap<cobre_core::EntityId, Vec<usize>>,
+    ) -> StageExtractionSpec<'a> {
+        StageExtractionSpec {
+            study_dims,
+            geometry,
+            state,
+            n_blks: geometry.n_blks,
+            entity_counts,
+            inflow_m3s_per_hydro: &[],
+            block_hours,
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices,
+            contract_is_import,
+            diversion_upstream: diversion,
+            hydro_productivities: &[],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            energy_conversion: ec,
+            hydro_min_storage_hm3: &[],
+            stage_index: 0,
+            n_stages: 1,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+        }
+    }
+
+    /// AC: an import contract column holding `40.0` with `block_hours = 730` and
+    /// resolved price `200` yields `power_mw == 40.0`,
+    /// `total_cost == 200 * 40 * 730`, and `operative_state_code == 1`.
+    #[test]
+    fn extract_contract_import_reads_primal_and_cost() {
+        let state = crate::indexer::test_fixtures::state_layout(0, 0);
+        let entity_counts = entity_counts_contracts(vec![7]);
+        let ec = zero_energy_conversion(0, 1);
+        let diversion = HashMap::new();
+
+        // Import block at column 4..5 (one import, one block); export block empty at 5..5.
+        let primal = vec![0.0, 0.0, 0.0, 0.0, 40.0];
+        let dual = vec![0.0; 1];
+        let view = SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &[],
+            row_lower: &[],
+        };
+        let geometry = StageGeometry {
+            n_blks: 1,
+            contract_import: 4..5,
+            contract_export: 5..5,
+            ..StageGeometry::default()
+        };
+        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let block_hours = [730.0_f64];
+        let prices = [200.0_f64];
+        let is_import = [true];
+        let spec = contract_only_spec(
+            &study_dims,
+            &geometry,
+            &state,
+            &entity_counts,
+            &block_hours,
+            &prices,
+            &is_import,
+            &ec,
+            &diversion,
+        );
+
+        let rows = extract_contracts(&view, &spec, 9);
+
+        assert_eq!(rows.len(), 1, "one contract x one block = one row");
+        assert_eq!(rows[0].stage_id, 9);
+        assert_eq!(rows[0].contract_id, 7);
+        assert_eq!(rows[0].block_id, Some(0));
+        assert_eq!(rows[0].power_mw, 40.0);
+        assert_eq!(rows[0].price_per_mwh, 200.0);
+        assert_eq!(rows[0].total_cost, 200.0 * 40.0 * 730.0);
+        assert_eq!(rows[0].operative_state_code, 1);
+    }
+
+    /// AC: an export contract column holding `30.0` with resolved price `-150` and
+    /// `block_hours = 730` yields a negative `total_cost` (export revenue), addressed
+    /// from the export family base.
+    #[test]
+    fn extract_contract_export_yields_negative_cost() {
+        let state = crate::indexer::test_fixtures::state_layout(0, 0);
+        let entity_counts = entity_counts_contracts(vec![8]);
+        let ec = zero_energy_conversion(0, 1);
+        let diversion = HashMap::new();
+
+        // No imports (empty 4..4); one export at column 4..5.
+        let primal = vec![0.0, 0.0, 0.0, 0.0, 30.0];
+        let dual = vec![0.0; 1];
+        let view = SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &[],
+            row_lower: &[],
+        };
+        let geometry = StageGeometry {
+            n_blks: 1,
+            contract_import: 4..4,
+            contract_export: 4..5,
+            ..StageGeometry::default()
+        };
+        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let block_hours = [730.0_f64];
+        let prices = [-150.0_f64];
+        let is_import = [false];
+        let spec = contract_only_spec(
+            &study_dims,
+            &geometry,
+            &state,
+            &entity_counts,
+            &block_hours,
+            &prices,
+            &is_import,
+            &ec,
+            &diversion,
+        );
+
+        let rows = extract_contracts(&view, &spec, 0);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].contract_id, 8);
+        assert_eq!(rows[0].power_mw, 30.0);
+        assert_eq!(rows[0].total_cost, -150.0 * 30.0 * 730.0);
+        assert!(rows[0].total_cost < 0.0, "export revenue is negative");
+        assert_eq!(rows[0].operative_state_code, 1);
+    }
+
+    /// AC: a dormant contract whose column is pinned to `0.0` yields `power_mw == 0.0`,
+    /// `total_cost == 0.0`, and still `operative_state_code == 1` (never a
+    /// commissioning flag).
+    #[test]
+    fn extract_contract_dormant_zero_row_keeps_state_code_1() {
+        let state = crate::indexer::test_fixtures::state_layout(0, 0);
+        let entity_counts = entity_counts_contracts(vec![3]);
+        let ec = zero_energy_conversion(0, 1);
+        let diversion = HashMap::new();
+
+        // Import column pinned to 0.0 (dormant) at 4..5.
+        let primal = vec![0.0, 0.0, 0.0, 0.0, 0.0];
+        let dual = vec![0.0; 1];
+        let view = SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &[],
+            row_lower: &[],
+        };
+        let geometry = StageGeometry {
+            n_blks: 1,
+            contract_import: 4..5,
+            contract_export: 5..5,
+            ..StageGeometry::default()
+        };
+        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let block_hours = [730.0_f64];
+        let prices = [200.0_f64];
+        let is_import = [true];
+        let spec = contract_only_spec(
+            &study_dims,
+            &geometry,
+            &state,
+            &entity_counts,
+            &block_hours,
+            &prices,
+            &is_import,
+            &ec,
+            &diversion,
+        );
+
+        let rows = extract_contracts(&view, &spec, 0);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].power_mw, 0.0);
+        assert_eq!(rows[0].total_cost, 0.0);
+        assert_eq!(rows[0].operative_state_code, 1);
+    }
+
+    /// AC: a contract-free system yields an empty contracts vector from
+    /// `extract_stub_collections` (parity-neutral with the prior zero-placeholder
+    /// behaviour, which also emitted no real dispatch).
+    #[test]
+    fn extract_stub_collections_contract_free_is_empty() {
+        let state = crate::indexer::test_fixtures::state_layout(0, 0);
+        let entity_counts = entity_counts_contracts(vec![]);
+        let ec = zero_energy_conversion(0, 1);
+        let diversion = HashMap::new();
+
+        let primal = vec![0.0; 4];
+        let dual = vec![0.0; 1];
+        let view = SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &[],
+            row_lower: &[],
+        };
+        let geometry = StageGeometry {
+            n_blks: 1,
+            ..StageGeometry::default()
+        };
+        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let spec = contract_only_spec(
+            &study_dims,
+            &geometry,
+            &state,
+            &entity_counts,
+            &[730.0],
+            &[],
+            &[],
+            &ec,
+            &diversion,
+        );
+
+        let (_inflow_lags, _pumping, contracts): (Vec<_>, Vec<_>, Vec<SimulationContractResult>) =
+            extract_stub_collections(&view, &spec, 0);
+        assert!(contracts.is_empty(), "no contracts => empty vector");
     }
 }

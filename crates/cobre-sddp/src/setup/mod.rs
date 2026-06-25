@@ -261,6 +261,10 @@ impl StudySetup {
     ///   the template list is empty ("system has no study stages").
     /// - [`SddpError::Solver`] — propagated from `build_stage_templates` on LP
     ///   construction failure.
+    // Rationale (too_many_lines): a single linear pass building the `StudySetup`
+    // literal from per-entity prep blocks; splitting it would scatter the
+    // construction the literal reads.
+    #[allow(clippy::too_many_lines)]
     pub fn from_broadcast_params(
         system: &System,
         mut stochastic: StochasticContext,
@@ -342,6 +346,8 @@ impl StudySetup {
             ncs_allow_curtailment,
         } = build_ncs_entity_data(system, &stage_templates, &stochastic)?;
         let pumping_consumption_mw_per_m3s = build_pumping_consumption(system);
+        let contract_prices_per_stage = build_contract_prices_per_stage(system, n_stages);
+        let contract_is_import = build_contract_is_import(system);
 
         let block_counts_per_stage: Vec<usize> = stage_templates
             .block_hours_per_stage
@@ -395,6 +401,8 @@ impl StudySetup {
                 stages,
                 entity_counts,
                 pumping_consumption_mw_per_m3s,
+                contract_prices_per_stage,
+                contract_is_import,
                 block_counts_per_stage,
                 stage_lag_transitions,
                 noise_group_ids,
@@ -987,6 +995,38 @@ fn build_pumping_consumption(system: &System) -> Vec<f64> {
         .pumping_stations()
         .iter()
         .map(|p| p.consumption_mw_per_m3s)
+        .collect()
+}
+
+/// Build the per-stage RESOLVED contract prices \[$/`MWh`\].
+///
+/// Outer index is the study-stage index `t` (0-based, matching the
+/// `contract_bounds` stage axis); each inner `Vec` is ID-sorted parallel to
+/// `system.contracts()` — the same order `EntityCounts::contract_ids` is built in —
+/// carrying `contract_bounds(c, t).price_per_mwh`. Empty inner `Vec`s for a
+/// contract-free system.
+fn build_contract_prices_per_stage(system: &System, n_stages: usize) -> Vec<Vec<f64>> {
+    let bounds = system.bounds();
+    let n_contracts = system.contracts().len();
+    (0..n_stages)
+        .map(|t| {
+            (0..n_contracts)
+                .map(|c| bounds.contract_bounds(c, t).price_per_mwh)
+                .collect()
+        })
+        .collect()
+}
+
+/// Build the per-contract direction flags (`true` = import).
+///
+/// ID-sorted parallel to `system.contracts()` — the same order
+/// `EntityCounts::contract_ids` is built in — so extraction's running per-direction
+/// slot count reproduces the LP builder's `fill_contract_columns` slot assignment.
+fn build_contract_is_import(system: &System) -> Vec<bool> {
+    system
+        .contracts()
+        .iter()
+        .map(|c| c.contract_type == cobre_core::ContractType::Import)
         .collect()
 }
 

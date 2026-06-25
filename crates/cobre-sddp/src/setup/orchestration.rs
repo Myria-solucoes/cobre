@@ -177,6 +177,8 @@ impl StudySetup {
             n_pumping: self.stage_data.stage_templates.n_pumping,
             geometry_per_stage: &self.stage_data.stage_templates.geometry_per_stage,
             pumping_consumption_mw_per_m3s: &self.stage_data.pumping_consumption_mw_per_m3s,
+            contract_prices_per_stage: &self.stage_data.contract_prices_per_stage,
+            contract_is_import: &self.stage_data.contract_is_import,
             ncs_entity_ids_per_stage: &self.ncs_entity_ids_per_stage,
             diversion_upstream: &self.stage_data.stage_templates.diversion_upstream,
             hydro_productivities_per_stage: &self

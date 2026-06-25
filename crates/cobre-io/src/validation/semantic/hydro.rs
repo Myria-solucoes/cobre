@@ -234,15 +234,15 @@ pub(super) fn check_lifecycle_consistency_remaining(
     }
 }
 
-/// Warns when a non-filling hydro or an energy contract sets
-/// `entry_stage_id`/`exit_stage_id` — the only windows still not honored by the
-/// LP, which models them active at every stage.
+/// Warns when a non-filling hydro sets `entry_stage_id`/`exit_stage_id` — the
+/// only window still not honored by the LP, which models it active at every
+/// stage.
 ///
 /// Deliberately excluded (warning for them would be a false signal): filling
 /// hydros (the `FillingConfig` drives the reservoir's lifecycle), and thermals,
-/// lines, NCS, and pumping stations (their windows ARE applied at the LP fill
-/// site, pinning a dormant entity's columns to `[0, 0]`). The all-`None` case is
-/// the correct inert default and stays silent.
+/// lines, NCS, pumping stations, and energy contracts (their windows ARE applied
+/// at the LP fill site, pinning a dormant entity's columns to `[0, 0]`). The
+/// all-`None` case is the correct inert default and stays silent.
 pub(super) fn warn_commissioning_parsed_not_applied(
     data: &ParsedData,
     ctx: &mut ValidationContext,
@@ -276,15 +276,6 @@ pub(super) fn warn_commissioning_parsed_not_applied(
             hydro.exit_stage_id,
             "system/hydros.json",
             &format!("Hydro {}", hydro.id.0),
-        );
-    }
-    for contract in &data.energy_contracts {
-        warn_if_set(
-            ctx,
-            contract.entry_stage_id,
-            contract.exit_stage_id,
-            "system/energy_contracts.json",
-            &format!("EnergyContract {}", contract.id.0),
         );
     }
 }
@@ -1139,7 +1130,7 @@ mod tests {
     /// A windowed thermal, line, NCS, and pumping station each have their
     /// commissioning window APPLIED at the LP fill site, so none of them emits
     /// the parsed-not-applied ModelQuality warning. Only a non-filling windowed
-    /// hydro and an energy contract — whose windows are still unapplied — warn.
+    /// hydro — whose window is still unapplied — warns.
     #[test]
     fn test_applied_window_entities_emit_no_warning() {
         let thermal = cobre_core::entities::Thermal {
@@ -1174,11 +1165,11 @@ mod tests {
         );
     }
 
-    /// A windowed energy contract still emits the parsed-not-applied warning:
-    /// contract windows remain unapplied (contracts are a stub), so the warning is
-    /// correct for them (unlike thermal/line/NCS/pumping, whose windows ARE applied).
+    /// A windowed energy contract's commissioning window IS applied at the LP fill
+    /// site (dormant stages zero-pinned), so it emits no parsed-not-applied
+    /// `ModelQuality` warning.
     #[test]
-    fn test_windowed_contract_still_warns() {
+    fn test_windowed_contract_emits_no_warning() {
         let mut data = make_data(
             vec![make_hydro(1, None)],
             vec![],
@@ -1187,7 +1178,7 @@ mod tests {
             vec![],
             vec![],
         );
-        data.energy_contracts = vec![make_contract_lc(5, Some(1), Some(2))];
+        data.energy_contracts = vec![make_contract_lc(5, Some(2), Some(10))];
         let mut ctx = ValidationContext::new();
         validate_semantic_hydro_thermal(&data, &mut ctx);
         let model_quality: Vec<_> = ctx
@@ -1195,13 +1186,19 @@ mod tests {
             .into_iter()
             .filter(|e| e.kind == ErrorKind::ModelQuality)
             .collect();
-        assert_eq!(
-            model_quality.len(),
-            1,
-            "a windowed energy contract must still warn, got: {:?}",
+        assert!(
+            model_quality.is_empty(),
+            "a windowed energy contract's window is applied; no parsed-not-applied \
+             warning is expected, got: {:?}",
             model_quality.iter().map(|e| &e.message).collect::<Vec<_>>()
         );
-        assert!(model_quality[0].message.contains("EnergyContract 5"));
+        assert!(
+            !model_quality
+                .iter()
+                .any(|e| e.message.contains("EnergyContract")),
+            "no warning should mention EnergyContract, got: {:?}",
+            model_quality.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
     }
 
     // ── Filling guard tests ───────────────────────────────────────────────────
