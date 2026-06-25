@@ -604,7 +604,7 @@ Key fields:
 | `hydros[].efficiency`                             | No       | Turbine efficiency model: `"constant"`                                                                        |
 | `hydros[].evaporation`                            | No       | Evaporation config: `coefficients_mm` (12 values) and optional `reference_volumes_hm3`                        |
 | `hydros[].diversion`                              | No       | Diversion channel: `downstream_id` and `max_flow_m3s`                                                         |
-| `hydros[].filling`                                | No       | Filling config: `start_stage_id` and `filling_min_rate_m3s`                                                     |
+| `hydros[].filling`                                | No       | Filling config: `start_stage_id` and `filling_min_rate_m3s`                                                   |
 | `hydros[].penalties`                              | No       | Entity-level hydro penalty overrides (all fields optional, fall back to global)                               |
 
 All fields within `hydros[].penalties` are optional. When a field is absent the
@@ -644,7 +644,7 @@ Thermal plant registry. Each entry defines a dispatchable generation unit.
 | `thermals[].generation.min_mw`  | Yes      | Minimum dispatch level (MW)                                        |
 | `thermals[].generation.max_mw`  | Yes      | Maximum dispatch level (MW)                                        |
 | `thermals[].cost_per_mwh`       | Yes      | Linear generation cost (USD/MWh)                                   |
-| `thermals[].entry_stage_id`     | No       | Stage when the unit enters service (`null` = present from stage 1) |
+| `thermals[].entry_stage_id`     | No       | Stage when the unit enters service (`null` = present from stage 0) |
 | `thermals[].exit_stage_id`      | No       | Stage when the unit is decommissioned (`null` = never)             |
 | `thermals[].anticipated_config` | No       | Anticipated-dispatch config (object with `lead_stages` ≥ 1)        |
 
@@ -657,19 +657,19 @@ installation that withdraws water from a source hydro reservoir, injects it into
 destination hydro reservoir, and consumes electrical power from a bus. The file is
 optional; when absent, no pumping stations are modeled.
 
-| Field                                              | Required | Description                                                                          |
-| -------------------------------------------------- | -------- | ------------------------------------------------------------------------------------ |
-| `pumping_stations[].id`                            | Yes      | Station identifier (integer, unique)                                                 |
-| `pumping_stations[].name`                          | Yes      | Human-readable station name (string)                                                 |
-| `pumping_stations[].bus_id`                        | Yes      | Bus from which electrical power is consumed                                          |
-| `pumping_stations[].source_hydro_id`               | Yes      | Hydro plant from whose reservoir water is extracted                                  |
-| `pumping_stations[].destination_hydro_id`          | Yes      | Hydro plant into whose reservoir water is injected                                   |
-| `pumping_stations[].consumption_mw_per_m3s`        | Yes      | Power drawn per unit of pumped flow [MW/(m³/s)]; must be >= 0                        |
-| `pumping_stations[].entry_stage_id`                | No       | Stage when the station enters service; `null` or absent = present from stage 0       |
-| `pumping_stations[].exit_stage_id`                 | No       | Stage when the station is decommissioned; `null` or absent = never                   |
-| `pumping_stations[].flow`                          | Yes      | Nested object with `min_m3s` and `max_m3s` (see below)                              |
-| `pumping_stations[].flow.min_m3s`                  | Yes      | Minimum pumped flow [m³/s]; must be >= 0                                             |
-| `pumping_stations[].flow.max_m3s`                  | Yes      | Maximum pumped flow (installed pump capacity) [m³/s]; must be >= `flow.min_m3s`     |
+| Field                                       | Required | Description                                                                     |
+| ------------------------------------------- | -------- | ------------------------------------------------------------------------------- |
+| `pumping_stations[].id`                     | Yes      | Station identifier (integer, unique)                                            |
+| `pumping_stations[].name`                   | Yes      | Human-readable station name (string)                                            |
+| `pumping_stations[].bus_id`                 | Yes      | Bus from which electrical power is consumed                                     |
+| `pumping_stations[].source_hydro_id`        | Yes      | Hydro plant from whose reservoir water is extracted                             |
+| `pumping_stations[].destination_hydro_id`   | Yes      | Hydro plant into whose reservoir water is injected                              |
+| `pumping_stations[].consumption_mw_per_m3s` | Yes      | Power drawn per unit of pumped flow [MW/(m³/s)]; must be >= 0                   |
+| `pumping_stations[].entry_stage_id`         | No       | Stage when the station enters service; `null` or absent = present from stage 0  |
+| `pumping_stations[].exit_stage_id`          | No       | Stage when the station is decommissioned; `null` or absent = never              |
+| `pumping_stations[].flow`                   | Yes      | Nested object with `min_m3s` and `max_m3s` (see below)                          |
+| `pumping_stations[].flow.min_m3s`           | Yes      | Minimum pumped flow [m³/s]; must be >= 0                                        |
+| `pumping_stations[].flow.max_m3s`           | Yes      | Maximum pumped flow (installed pump capacity) [m³/s]; must be >= `flow.min_m3s` |
 
 The pumped flow variable is bounded by `[flow.min_m3s, flow.max_m3s]` in the LP.
 At each stage within `[entry_stage_id, exit_stage_id)`, the flow appears with
@@ -705,17 +705,17 @@ Energy contract registry. Each entry defines a bilateral energy purchase or sale
 obligation with a counterparty outside the modeled system. The file is optional;
 when absent, no contracts are modeled.
 
-| Field                          | Required | Description                                                                         |
-| ------------------------------ | -------- | ----------------------------------------------------------------------------------- |
-| `contracts[].id`               | Yes      | Contract identifier (integer, unique)                                               |
-| `contracts[].name`             | Yes      | Human-readable contract name (string)                                               |
-| `contracts[].bus_id`           | Yes      | Bus where power is injected (import) or withdrawn (export)                          |
-| `contracts[].type`             | Yes      | Energy flow direction: `"import"` or `"export"`                                     |
-| `contracts[].price_per_mwh`    | Yes      | Contract price [monetary units/MWh]. Positive = cost (import); negative = revenue (export) |
-| `contracts[].limits.min_mw`    | Yes      | Minimum dispatch level [MW]; use `0.0` unless a take-or-pay floor applies           |
-| `contracts[].limits.max_mw`    | Yes      | Maximum dispatch level [MW]; must be >= `limits.min_mw`                             |
-| `contracts[].entry_stage_id`   | No       | Stage when the contract enters service; `null` or absent = present from stage 0     |
-| `contracts[].exit_stage_id`    | No       | Stage when the contract is decommissioned; `null` or absent = never                 |
+| Field                        | Required | Description                                                                                |
+| ---------------------------- | -------- | ------------------------------------------------------------------------------------------ |
+| `contracts[].id`             | Yes      | Contract identifier (integer, unique)                                                      |
+| `contracts[].name`           | Yes      | Human-readable contract name (string)                                                      |
+| `contracts[].bus_id`         | Yes      | Bus where power is injected (import) or withdrawn (export)                                 |
+| `contracts[].type`           | Yes      | Energy flow direction: `"import"` or `"export"`                                            |
+| `contracts[].price_per_mwh`  | Yes      | Contract price [monetary units/MWh]. Positive = cost (import); negative = revenue (export) |
+| `contracts[].limits.min_mw`  | Yes      | Minimum dispatch level [MW]; use `0.0` unless a take-or-pay floor applies                  |
+| `contracts[].limits.max_mw`  | Yes      | Maximum dispatch level [MW]; must be >= `limits.min_mw`                                    |
+| `contracts[].entry_stage_id` | No       | Stage when the contract enters service; `null` or absent = present from stage 0            |
+| `contracts[].exit_stage_id`  | No       | Stage when the contract is decommissioned; `null` or absent = never                        |
 
 At each active stage within `[entry_stage_id, exit_stage_id)`, the LP adds one
 column per block per direction bounded by `[limits.min_mw, limits.max_mw]`. An
@@ -1306,21 +1306,21 @@ Stage-varying generation bound overrides for thermal plants.
 
 Stage-varying operational bound overrides for hydro plants.
 
-| Column                 | Type   | Required | Description                     |
-| ---------------------- | ------ | -------- | ------------------------------- |
-| `hydro_id`             | INT32  | Yes      | Hydro plant ID                  |
-| `stage_id`             | INT32  | Yes      | Stage ID                        |
-| `min_turbined_m3s`     | DOUBLE | No       | Minimum turbined flow (m³/s)    |
-| `max_turbined_m3s`     | DOUBLE | No       | Maximum turbined flow (m³/s)    |
-| `min_storage_hm3`      | DOUBLE | No       | Minimum reservoir storage (hm³) |
-| `max_storage_hm3`      | DOUBLE | No       | Maximum reservoir storage (hm³) |
-| `min_outflow_m3s`      | DOUBLE | No       | Minimum total outflow (m³/s)    |
-| `max_outflow_m3s`      | DOUBLE | No       | Maximum total outflow (m³/s)    |
-| `min_generation_mw`    | DOUBLE | No       | Minimum generation (MW)         |
-| `max_generation_mw`    | DOUBLE | No       | Maximum generation (MW)         |
-| `max_diversion_m3s`    | DOUBLE | No       | Maximum diversion flow (m³/s)   |
-| `filling_min_rate_m3s`   | DOUBLE | No       | Filling minimum-rate override (m³/s)  |
-| `water_withdrawal_m3s` | DOUBLE | No       | Water withdrawal (m³/s)         |
+| Column                 | Type   | Required | Description                          |
+| ---------------------- | ------ | -------- | ------------------------------------ |
+| `hydro_id`             | INT32  | Yes      | Hydro plant ID                       |
+| `stage_id`             | INT32  | Yes      | Stage ID                             |
+| `min_turbined_m3s`     | DOUBLE | No       | Minimum turbined flow (m³/s)         |
+| `max_turbined_m3s`     | DOUBLE | No       | Maximum turbined flow (m³/s)         |
+| `min_storage_hm3`      | DOUBLE | No       | Minimum reservoir storage (hm³)      |
+| `max_storage_hm3`      | DOUBLE | No       | Maximum reservoir storage (hm³)      |
+| `min_outflow_m3s`      | DOUBLE | No       | Minimum total outflow (m³/s)         |
+| `max_outflow_m3s`      | DOUBLE | No       | Maximum total outflow (m³/s)         |
+| `min_generation_mw`    | DOUBLE | No       | Minimum generation (MW)              |
+| `max_generation_mw`    | DOUBLE | No       | Maximum generation (MW)              |
+| `max_diversion_m3s`    | DOUBLE | No       | Maximum diversion flow (m³/s)        |
+| `filling_min_rate_m3s` | DOUBLE | No       | Filling minimum-rate override (m³/s) |
+| `water_withdrawal_m3s` | DOUBLE | No       | Water withdrawal (m³/s)              |
 
 ---
 

@@ -35,9 +35,9 @@
 # at hand. Raw columns are printed so every score is auditable.
 #
 # Usage:
-#   scripts/quality-report.sh                # top 25, churn since 12 months ago
-#   CHURN_SINCE="6 months ago" scripts/quality-report.sh
-#   TOP_N=0 scripts/quality-report.sh        # TOP_N=0 prints every file
+#   scripts/ci/quality-report.sh                # top 25, churn since 12 months ago
+#   CHURN_SINCE="6 months ago" scripts/ci/quality-report.sh
+#   TOP_N=0 scripts/ci/quality-report.sh        # TOP_N=0 prints every file
 #
 # Exit code: ALWAYS 0 (advisory — a report, never a gate).
 

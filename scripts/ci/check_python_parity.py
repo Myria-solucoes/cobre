@@ -8,8 +8,8 @@ directory module whose write calls are spread across submodules) and
 `write_scaling_report`, and the stochastic export functions.
 
 Usage:
-    python3 scripts/check_python_parity.py              # default: --max 0
-    python3 scripts/check_python_parity.py --max 0      # strict — zero mismatches allowed
+    python3 scripts/ci/check_python_parity.py              # default: --max 0
+    python3 scripts/ci/check_python_parity.py --max 0      # strict — zero mismatches allowed
 
 Exit code 0 if parity holds (mismatches <= --max), 1 otherwise.
 """

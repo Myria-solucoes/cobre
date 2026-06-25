@@ -20,8 +20,8 @@ Two checks:
      transient number). Structural references ("stage 0", "1-based") are excluded.
 
 Usage:
-    python3 scripts/check_doc_voice.py
-    python3 scripts/check_doc_voice.py --root /path/to/repo
+    python3 scripts/ci/check_doc_voice.py
+    python3 scripts/ci/check_doc_voice.py --root /path/to/repo
 
 Exit code 0 only if no prose violation is found; 1 otherwise.
 """

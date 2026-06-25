@@ -23,8 +23,8 @@
 # already pin; it deliberately does not re-cover command-execution behavior.
 #
 # Usage:
-#   scripts/check-docs-examples.sh           — assumes ./target/release/cobre is built
-#   scripts/check-docs-examples.sh --build   — builds the release binary first
+#   scripts/ci/check-docs-examples.sh           — assumes ./target/release/cobre is built
+#   scripts/ci/check-docs-examples.sh --build   — builds the release binary first
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

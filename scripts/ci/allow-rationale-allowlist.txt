@@ -1,6 +1,6 @@
 # E4 rationale-on-suppression allowlist — intentionally EMPTY.
 #
-# The E4 gate (scripts/check-allow-rationale.sh) enforces comments.md directive
+# The E4 gate (scripts/ci/check-allow-rationale.sh) enforces comments.md directive
 # D4: every production `#[allow(...)]` of a shape/dead-code lint (too_many_lines,
 # too_many_arguments, type_complexity, dead_code, unused_*) must carry a
 # justifying comment. The gate evaluates only NEW/CHANGED suppressions, diffed

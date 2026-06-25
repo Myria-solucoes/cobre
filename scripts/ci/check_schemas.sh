@@ -3,8 +3,8 @@
 # Exits non-zero on any drift, printing the diff for the failing files.
 #
 # Usage:
-#   scripts/check_schemas.sh        — assumes ./target/release/cobre is built
-#   scripts/check_schemas.sh --build  — builds the release binary first
+#   scripts/ci/check_schemas.sh        — assumes ./target/release/cobre is built
+#   scripts/ci/check_schemas.sh --build  — builds the release binary first
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -34,7 +34,7 @@ if diff -ruN "$REPO_ROOT/book/src/schemas/" "$TMP_DIR/" > "$TMP_DIR/drift.diff";
 fi
 
 echo "ERROR: book/src/schemas/ drifts from \`cobre schema export\` output."
-echo "Run \`scripts/check_schemas.sh --build\` locally, then regenerate with:"
+echo "Run \`scripts/ci/check_schemas.sh --build\` locally, then regenerate with:"
 echo "  cargo build --release --bin cobre"
 echo "  ./target/release/cobre schema export --output-dir book/src/schemas"
 echo ""

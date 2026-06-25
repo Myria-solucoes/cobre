@@ -970,16 +970,16 @@ Pumping station results. One row per (stage, block, pumping station) triplet. 9 
 
 Energy contract results. One row per (stage, block, contract) triplet. 8 columns.
 
-| Column                 | Type    | Nullable | Description                                                         |
-| ---------------------- | ------- | -------- | ------------------------------------------------------------------- |
-| `stage_id`             | Int32   | No       | Stage index (0-based).                                              |
-| `block_id`             | Int32   | Yes      | Load block index. `null` for stage-level records.                   |
-| `contract_id`          | Int32   | No       | Contract ID.                                                        |
-| `power_mw`             | Float64 | No       | Contracted power in MW. Positive for imports, negative for exports. |
-| `energy_mwh`           | Float64 | No       | Contracted energy over the block in MWh.                            |
-| `price_per_mwh`        | Float64 | No       | Contract price in monetary units per MWh.                           |
-| `total_cost`           | Float64 | No       | Total contract cost for this block. Positive for imports.           |
-| `operative_state_code` | Int8    | No       | Operative state code (see `codes.json` `operative_state` mapping).  |
+| Column                 | Type    | Nullable | Description                                                                                                                                                             |
+| ---------------------- | ------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stage_id`             | Int32   | No       | Stage index (0-based).                                                                                                                                                  |
+| `block_id`             | Int32   | Yes      | Load block index. `null` for stage-level records.                                                                                                                       |
+| `contract_id`          | Int32   | No       | Contract ID.                                                                                                                                                            |
+| `power_mw`             | Float64 | No       | Contracted power in MW, non-negative for both import and export contracts. Direction is carried by the contract type and the price sign, not by the sign of this value. |
+| `energy_mwh`           | Float64 | No       | Contracted energy over the block in MWh.                                                                                                                                |
+| `price_per_mwh`        | Float64 | No       | Contract price in monetary units per MWh.                                                                                                                               |
+| `total_cost`           | Float64 | No       | Total contract cost for this block: positive for imports (cost), negative for exports (revenue).                                                                        |
+| `operative_state_code` | Int8    | No       | Operative state code (see `codes.json` `operative_state` mapping); always `1` for contracts (a dormant stage emits a zero-`power_mw` row, not a distinct code).         |
 
 ---
 

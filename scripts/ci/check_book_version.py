@@ -14,8 +14,8 @@ It also pins the book's MSRV: every Rust toolchain reference in MSRV context
 so the toolchain string cannot drift from the declared minimum.
 
 Usage:
-    python3 scripts/check_book_version.py
-    python3 scripts/check_book_version.py --root /path/to/repo
+    python3 scripts/ci/check_book_version.py
+    python3 scripts/ci/check_book_version.py --root /path/to/repo
 
 Exit code 0 only if every matched version equals the Cargo.toml `version` AND
 every MSRV reference equals the Cargo.toml `rust-version`; 1 otherwise.

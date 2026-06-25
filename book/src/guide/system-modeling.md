@@ -270,10 +270,10 @@ have `depth_mw: null` (unbounded) to guarantee LP feasibility.
 Entities can enter service or be decommissioned at specified stages using
 `entry_stage_id` and `exit_stage_id` fields:
 
-| Field            | Type            | Meaning                                                                                      |
-| ---------------- | --------------- | -------------------------------------------------------------------------------------------- |
-| `entry_stage_id` | integer or null | Stage index at which the entity enters service (inclusive). `null` = available from stage 0  |
-| `exit_stage_id`  | integer or null | Stage index at which the entity is decommissioned (inclusive). `null` = never decommissioned |
+| Field            | Type            | Meaning                                                                                                                                                                                              |
+| ---------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `entry_stage_id` | integer or null | Stage index at which the entity enters service (inclusive). `null` = available from stage 0                                                                                                          |
+| `exit_stage_id`  | integer or null | Stage index from which the entity is decommissioned — inactive at this stage and after, so the active window is the half-open range `[entry_stage_id, exit_stage_id)`. `null` = never decommissioned |
 
 These fields are available on `Hydro`, `Thermal`, `Line`, `NonControllableSource`,
 `PumpingStation`, and `EnergyContract` entities. When a plant has `entry_stage_id: 12`,
