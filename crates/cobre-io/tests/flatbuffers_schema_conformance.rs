@@ -1,40 +1,19 @@
-//! Schema-conformance tests for `schemas/policy.fbs`.
+//! Schema-conformance tests for `schemas/policy.fbs`, gated behind the
+//! `flatc-conformance` feature (requires `flatc` on `$PATH` or via `FLATC`).
 //!
-//! These tests are gated behind the `flatc-conformance` cargo feature and
-//! require the `flatc` compiler on `$PATH` (or the `FLATC` environment
-//! variable). They prove that the hand-rolled `FlatBuffers` writer/reader in
-//! `src/output/policy.rs` produces and consumes buffers that are
-//! bit-compatible with the canonical schema in `schemas/policy.fbs`.
+//! The hand-rolled writer/reader encode field positions via the `*_FIELD_*: u16`
+//! slot constants; the schema encodes them via `(id: N)` attributes. These two
+//! views must agree exactly, or every schema consumer is corrupted. The tests
+//! check both directions — writer→`flatc -t` (catches wrong/unknown slot writes)
+//! and `flatc -b`→reader (catches a slot the reader expects at another offset);
+//! changing one side without the other fails at least one check.
 //!
-//! ## What "drift" looks like
-//!
-//! The hand-rolled writer encodes field positions via the `*_FIELD_*: u16`
-//! slot constants in `policy.rs`. The schema encodes them via `(id: N)`
-//! attributes on each field of each table. These two views must agree
-//! exactly: a mismatch corrupts every consumer that uses the schema. The
-//! tests detect a mismatch in **both directions**:
-//!
-//! 1. **Writer → flatc:** the hand-rolled writer emits a buffer; `flatc -t`
-//!    decodes it to JSON using the schema. Assertions on the JSON catch
-//!    "writer wrote a slot the schema doesn't know about" and "writer wrote
-//!    a value at the wrong slot."
-//! 2. **flatc → reader:** `flatc -b` encodes a JSON document into a buffer
-//!    using the schema. The hand-rolled reader decodes it. Assertions on
-//!    the decoded struct catch "schema declared a slot the reader expects
-//!    at a different offset."
-//!
-//! Together the two directions form a tight loop: any single change to one
-//! side without the other will fail at least one of the two checks.
-//!
-//! ## Running
+//! Missing `flatc` panics rather than silently passing: invoking the feature is
+//! an explicit request to run these checks.
 //!
 //! ```bash
 //! cargo test -p cobre-io --features flatc-conformance --test flatbuffers_schema_conformance
 //! ```
-//!
-//! When `flatc` is missing the tests panic with a clear message rather than
-//! silently passing — invoking the feature is an explicit request to run
-//! these checks.
 
 #![cfg(feature = "flatc-conformance")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -51,7 +30,8 @@ use cobre_io::{
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-/// Resolve the `flatc` command. Panics with a clear message when missing.
+/// # Panics
+/// When `flatc` is not found on `$PATH` or via the `FLATC` env var.
 fn flatc_command() -> Command {
     let exe = std::env::var_os("FLATC").unwrap_or_else(|| "flatc".into());
     let mut probe = Command::new(&exe);
@@ -75,15 +55,12 @@ fn schema_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("schemas/policy.fbs")
 }
 
-/// Schema namespace prefix. flatc 23.x strictly resolves `--root-type`
-/// against the schema's namespace; passing the unqualified short name
-/// (e.g. `StageCuts`) fails with `unknown root type`.
+/// `--root-type` must be namespace-qualified: flatc rejects the unqualified
+/// short name (e.g. `StageCuts`) with `unknown root type`.
 fn qualified(root_type: &str) -> String {
     format!("Cobre.IO.Policy.{root_type}")
 }
 
-/// Run `flatc -t --strict-json --raw-binary --root-type T` and return the
-/// decoded JSON value.
 fn flatc_decode(buf: &[u8], root_type: &str) -> Value {
     let dir = TempDir::new().expect("create tempdir");
     let bin_path = dir.path().join("buf.bin");
@@ -113,8 +90,6 @@ fn flatc_decode(buf: &[u8], root_type: &str) -> Value {
     serde_json::from_slice(&json_bytes).expect("parse flatc JSON")
 }
 
-/// Run `flatc -b --root-type T` on the provided JSON document and return
-/// the binary buffer.
 fn flatc_encode(json: &Value, root_type: &str) -> Vec<u8> {
     let dir = TempDir::new().expect("create tempdir");
     let json_path = dir.path().join("doc.json");
@@ -139,7 +114,6 @@ fn flatc_encode(json: &Value, root_type: &str) -> Vec<u8> {
     std::fs::read(&bin_path).expect("read flatc-produced bin")
 }
 
-/// `serde_json::Value` field accessor that panics with a useful message.
 fn get<'a>(v: &'a Value, key: &str) -> &'a Value {
     v.get(key)
         .unwrap_or_else(|| panic!("flatc JSON missing field `{key}`; got: {v}"))
@@ -167,8 +141,6 @@ fn as_bool(v: &Value, key: &str) -> bool {
 
 #[test]
 fn stage_cuts_writer_matches_schema() {
-    // Two cuts at different slot positions, both active, with non-trivial
-    // coefficients. Three stage-level scalar fields exercised.
     let coeffs_a = [1.0, 2.0, 3.0, 4.0];
     let coeffs_b = [-0.5, 0.25, 0.125, 0.0625];
     let cuts = [
@@ -214,10 +186,7 @@ fn stage_cuts_writer_matches_schema() {
     assert!((as_f64(c0, "intercept") - 100.5).abs() < 1e-12);
     assert_eq!(get(c0, "coefficients"), &json!([1.0, 2.0, 3.0, 4.0]));
     assert!(as_bool(c0, "is_active"));
-    // The deprecated `domination_count` slot must be absent from flatc's
-    // JSON output. flatc's `deprecated` attribute strips the accessor on
-    // both sides; presence here would mean either the schema forgot the
-    // attribute or the writer regressed and started emitting it again.
+    // Presence of the deprecated `domination_count` would mean the schema lost the `deprecated` attribute or the writer re-emits the slot.
     assert!(
         c0.get("domination_count").is_none(),
         "deprecated domination_count must not appear in flatc-decoded JSON: {c0}"
@@ -361,17 +330,10 @@ fn stage_states_reader_consumes_flatc_buffer() {
 
 // ─── Legacy / deprecated-slot regression ─────────────────────────────────────
 
-/// Pre-v0.5.0 policy files set the now-deprecated `domination_count` slot
-/// (vtable slot 12) on every cut. The schema marks that slot
-/// `(id: 4, deprecated)`, which:
-///   • removes the accessor on the writer side, so flatc-generated writers
-///     cannot emit it, and
-///   • lets readers tolerate its presence in legacy files via the
-///     graceful-absence rule.
-///
-/// This test forces a value into the slot via flatc by temporarily
-/// rewriting the schema without `deprecated`, then verifies the
-/// hand-rolled reader still decodes the buffer correctly.
+/// The reader must tolerate the deprecated `domination_count` slot present in
+/// legacy policy files. flatc cannot emit a `deprecated` field, so the test
+/// rewrites the schema without `deprecated` to force a value into the slot, then
+/// asserts the hand-rolled reader still decodes the buffer.
 #[test]
 fn legacy_domination_count_slot_is_ignored_by_reader() {
     let schema_with_legacy = "

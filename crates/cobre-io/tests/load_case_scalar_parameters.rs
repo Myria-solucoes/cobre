@@ -1,11 +1,4 @@
 //! Integration tests for scalar-parameter cross-validation in [`load_case`].
-//!
-//! Exercises the pipeline-level call to `validate_scalar_parameters` added at
-//! Layer 6. Each test writes a minimal case plus a `system/scalar_parameters.json`
-//! that violates exactly one check (Check A: dangling `Computed` `hydro_id`,
-//! Check B: `PerStage` length mismatch, Check C: duplicate id/name), then asserts
-//! that `load_case` returns a [`LoadError::ConstraintError`] whose message
-//! mentions the violation.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -14,8 +7,7 @@ mod helpers;
 use cobre_io::{LoadError, load_case};
 use tempfile::TempDir;
 
-/// `system/scalar_parameters.json` referencing a `hydro_id` that does not exist
-/// in the minimal case (which has zero hydros). Must trigger Check A.
+/// References `hydro_id` 99, which the minimal case (zero hydros) cannot satisfy.
 const PARAMS_DANGLING_HYDRO: &str = r#"{
     "scalar_parameters": [
         {
@@ -30,8 +22,7 @@ const PARAMS_DANGLING_HYDRO: &str = r#"{
     ]
 }"#;
 
-/// `system/scalar_parameters.json` whose `per_stage` vector has length 2, but
-/// the minimal case has 1 study stage. Must trigger Check B.
+/// `per_stage` vector of length 2 against the minimal case's single study stage.
 const PARAMS_PER_STAGE_LENGTH_MISMATCH: &str = r#"{
     "scalar_parameters": [
         {
@@ -43,8 +34,6 @@ const PARAMS_PER_STAGE_LENGTH_MISMATCH: &str = r#"{
     ]
 }"#;
 
-/// `system/scalar_parameters.json` with two entries sharing the same id. Must
-/// trigger Check C.
 const PARAMS_DUPLICATE_ID: &str = r#"{
     "scalar_parameters": [
         { "id": 1, "name": "a", "kind": "constant", "value": 1.0 },

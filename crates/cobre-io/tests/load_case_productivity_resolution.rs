@@ -102,9 +102,7 @@ fn test_load_case_rejects_conflict() {
     let dir = TempDir::new().unwrap();
     helpers::make_multi_entity_case(&dir);
 
-    // JSON already supplies productivity_mw_per_m3s for hydro_id=1; the parquet
-    // also supplies it for (hydro_id=1, stage_id=0). The validator must reject
-    // the conflict at load_case time.
+    // The fixture JSON already supplies productivity for hydro 1; this parquet row duplicates it, which must be rejected as a conflict.
     write_productivity_parquet(&dir, &[(1, Some(0), Some(1.1))]);
 
     let err = load_case(dir.path()).expect_err("expected conflict to be rejected");
@@ -130,7 +128,7 @@ fn test_load_case_rejects_gap() {
     let dir = TempDir::new().unwrap();
     helpers::make_multi_entity_case(&dir);
 
-    // JSON supplies no productivity, and the parquet is absent.
+    // No JSON productivity and no parquet leaves (hydro 1, stage 0) uncovered.
     std::fs::write(
         dir.path().join("system/hydro_production_models.json"),
         PRODUCTION_MODEL_WITHOUT_PRODUCTIVITY,
@@ -152,8 +150,7 @@ fn test_load_case_accepts_parquet_only_authoring() {
     let dir = TempDir::new().unwrap();
     helpers::make_multi_entity_case(&dir);
 
-    // JSON model selector is present but supplies no productivity; the parquet
-    // covers every (hydro, stage) pair.
+    // JSON selector present but supplies no productivity; the parquet covers every (hydro, stage) pair.
     std::fs::write(
         dir.path().join("system/hydro_production_models.json"),
         PRODUCTION_MODEL_WITHOUT_PRODUCTIVITY,
@@ -171,8 +168,7 @@ fn test_load_case_accepts_per_hydro_default_row() {
     let dir = TempDir::new().unwrap();
     helpers::make_multi_entity_case(&dir);
 
-    // JSON supplies no productivity. The parquet supplies a per-hydro default
-    // row (stage_id = NULL) that covers every stage for this hydro.
+    // A parquet row with stage_id = NULL is a per-hydro default covering every stage.
     std::fs::write(
         dir.path().join("system/hydro_production_models.json"),
         PRODUCTION_MODEL_WITHOUT_PRODUCTIVITY,
@@ -190,8 +186,7 @@ fn test_load_case_accepts_json_only_when_parquet_absent() {
     let dir = TempDir::new().unwrap();
     helpers::make_multi_entity_case(&dir);
 
-    // JSON supplies productivity (the helper fixture does this by default);
-    // there is no parquet. The validator must accept this single-source case.
+    // JSON supplies productivity and no parquet exists — single-source authoring is accepted.
     std::fs::write(
         dir.path().join("system/hydro_production_models.json"),
         PRODUCTION_MODEL_WITH_PRODUCTIVITY,

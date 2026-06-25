@@ -1,14 +1,4 @@
-//! Test helper functions for integration tests.
-//!
-//! Provides fixture builders for creating case directories in a [`TempDir`],
-//! following the same patterns as the unit test helpers in
-//! `src/validation/schema.rs`.
-//!
-//! # Design
-//!
-//! All fixture helpers write JSON files programmatically — no binary fixtures
-//! are committed to the repository. Parquet fixtures are constructed with
-//! `ArrowWriter` when needed.
+//! Fixture builders that construct case directories in a [`TempDir`].
 #![allow(
     clippy::unwrap_used,
     clippy::panic,
@@ -23,9 +13,8 @@ use tempfile::TempDir;
 
 // ── JSON content constants ────────────────────────────────────────────────────
 //
-// These replicate the VALID_*_JSON constants from `src/validation/schema.rs`
-// tests.  They cannot be imported from that module (private test constants),
-// so they are redefined here.
+// Redefined here because the equivalent constants in the schema-validation unit
+// tests are private and cannot be imported.
 
 /// Minimal valid `config.json`.
 pub const VALID_CONFIG_JSON: &str = r#"{
@@ -102,8 +91,6 @@ const VALID_THERMALS_JSON: &str = r#"{ "thermals": [] }"#;
 // ── write_file ────────────────────────────────────────────────────────────────
 
 /// Write `content` to `root.join(relative)`, creating all parent directories.
-///
-/// Mirrors the same helper in `src/validation/schema.rs` tests.
 pub fn write_file(root: &Path, relative: &str, content: &str) {
     let full = root.join(relative);
     if let Some(parent) = full.parent() {
@@ -114,13 +101,8 @@ pub fn write_file(root: &Path, relative: &str, content: &str) {
 
 // ── make_minimal_case ─────────────────────────────────────────────────────────
 
-/// Populate `dir` with the 8 required JSON files for a minimal valid case.
-///
-/// The case has:
-/// - 1 bus (id=1, name="BUS\_1")
-/// - 0 lines, 0 hydros, 0 thermals
-/// - 1 study stage (id=0, 744 h flat block, 50 scenarios)
-/// - A finite-horizon policy graph with no transitions
+/// Populate `dir` with the 8 required JSON files for a minimal valid case:
+/// 1 bus, 0 lines/hydros/thermals, 1 finite-horizon stage with no transitions.
 pub fn make_minimal_case(dir: &TempDir) {
     let root = dir.path();
     write_file(root, "config.json", VALID_CONFIG_JSON);
@@ -139,22 +121,14 @@ pub fn make_minimal_case(dir: &TempDir) {
 
 // ── make_multi_entity_case ────────────────────────────────────────────────────
 
-/// Populate `dir` with a richer 8-file case: 2 buses, 1 hydro, 1 thermal,
-/// 1 line, 2 study stages with a transition.
-///
-/// Cross-references:
-/// - Hydro id=1 -> bus_id=1
-/// - Thermal id=1 -> bus_id=2
-/// - Line id=1: source_bus_id=1, target_bus_id=2
-///
-/// All references are valid: both buses exist in the registry.
+/// Populate `dir` with a richer 8-file case: 2 buses, 1 hydro (bus 1), 1 thermal
+/// (bus 2), 1 line (bus 1→2), 2 study stages with a transition.
 pub fn make_multi_entity_case(dir: &TempDir) {
     let root = dir.path();
 
     write_file(root, "config.json", VALID_CONFIG_JSON);
     write_file(root, "penalties.json", VALID_PENALTIES_JSON);
 
-    // Two-stage finite horizon with a single deterministic transition.
     write_file(
         root,
         "stages.json",
@@ -191,7 +165,6 @@ pub fn make_multi_entity_case(dir: &TempDir) {
         VALID_INITIAL_CONDITIONS_JSON,
     );
 
-    // Two buses.
     write_file(
         root,
         "system/buses.json",
@@ -203,7 +176,6 @@ pub fn make_multi_entity_case(dir: &TempDir) {
 }"#,
     );
 
-    // One transmission line connecting the two buses.
     write_file(
         root,
         "system/lines.json",
@@ -220,7 +192,6 @@ pub fn make_multi_entity_case(dir: &TempDir) {
 }"#,
     );
 
-    // One hydro plant injecting into bus_id=1.
     write_file(
         root,
         "system/hydros.json",
@@ -245,7 +216,6 @@ pub fn make_multi_entity_case(dir: &TempDir) {
 }"#,
     );
 
-    // One thermal plant injecting into bus_id=2.
     write_file(
         root,
         "system/thermals.json",
@@ -262,7 +232,6 @@ pub fn make_multi_entity_case(dir: &TempDir) {
 }"#,
     );
 
-    // Production model for hydro_id=1 covering both study stages.
     write_file(
         root,
         "system/hydro_production_models.json",
@@ -287,15 +256,11 @@ pub fn make_multi_entity_case(dir: &TempDir) {
 
 // ── make_referential_violation_case ───────────────────────────────────────────
 
-/// Populate `dir` with a case that has a referential integrity violation:
-/// a hydro plant whose `bus_id` (999) does not exist in the bus registry.
-///
-/// This is `make_multi_entity_case` with the hydro's `bus_id` overridden to 999.
+/// `make_multi_entity_case` with the hydro's `bus_id` set to a non-existent 999,
+/// so `load_case` must reject it for referential integrity.
 pub fn make_referential_violation_case(dir: &TempDir) {
-    // Start with the full multi-entity layout.
     make_multi_entity_case(dir);
 
-    // Overwrite hydros.json with an invalid bus_id reference.
     write_file(
         dir.path(),
         "system/hydros.json",

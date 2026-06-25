@@ -23,14 +23,12 @@ fn test_minimal_config_all_defaults() {
     );
     let cfg = parse_config(f.path()).unwrap();
 
-    // modeling defaults
     assert_eq!(
         cfg.modeling.inflow_non_negativity.method,
         InflowNonNegativityMethod::Penalty,
         "inflow_non_negativity.method should default to Penalty"
     );
 
-    // training optional flags
     assert!(
         cfg.training.enabled,
         "training.enabled should default to true"
@@ -44,7 +42,6 @@ fn test_minimal_config_all_defaults() {
         "training.tree_seed should default to None when absent"
     );
 
-    // simulation defaults
     assert!(
         !cfg.simulation.enabled,
         "simulation.enabled should default to false"
@@ -54,7 +51,6 @@ fn test_minimal_config_all_defaults() {
         "simulation.num_scenarios should default to 2000"
     );
 
-    // policy defaults
     assert_eq!(
         cfg.policy.mode,
         cobre_io::PolicyMode::Fresh,
@@ -65,7 +61,6 @@ fn test_minimal_config_all_defaults() {
         "policy.path should default to './policy'"
     );
 
-    // exports defaults
     assert!(
         !cfg.exports.states,
         "exports.states should default to false"
@@ -147,37 +142,30 @@ fn test_config_all_sections_explicit_no_defaults_applied() {
     );
     let cfg = parse_config(f.path()).unwrap();
 
-    // modeling: non-default values preserved
     assert_eq!(
         cfg.modeling.inflow_non_negativity.method,
         InflowNonNegativityMethod::Truncation
     );
 
-    // training: non-default values preserved
     assert!(!cfg.training.enabled, "enabled: false should be preserved");
     assert_eq!(cfg.training.tree_seed, Some(7));
     assert_eq!(cfg.training.forward_passes, Some(192));
     assert_eq!(cfg.training.stopping_mode, "all");
 
-    // simulation: non-default values preserved
     assert!(
         cfg.simulation.enabled,
         "simulation.enabled: true should be preserved"
     );
     assert_eq!(cfg.simulation.num_scenarios, 500);
 
-    // policy: non-default values preserved
     assert_eq!(cfg.policy.path, "./my_policy");
     assert_eq!(cfg.policy.mode, cobre_io::PolicyMode::WarmStart);
     assert!(!cfg.policy.validate_compatibility);
 
-    // exports: non-default values preserved
     assert!(cfg.exports.states);
     assert!(cfg.exports.stochastic);
 }
 
-/// Given a `config.json` where the `modeling` section is absent, the
-/// `inflow_non_negativity` defaults must be applied: method = `Penalty`.
 #[test]
 fn test_config_absent_modeling_uses_defaults() {
     let f = write_json(
