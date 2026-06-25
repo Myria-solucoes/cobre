@@ -1,14 +1,11 @@
 # Cobre
 
-**Open infrastructure for power system computation. Built in Rust.**
-
 Cobre solves long-term hydrothermal dispatch -- the problem of scheduling water
 and fuel across power grids with large hydroelectric capacity. It provides an
-open-source, reproducible alternative built on modern infrastructure: Rust for
-performance and safety, Parquet for data interchange, and Python for analysis
-workflows.
+open-source, reproducible implementation built on Rust, Parquet for data
+interchange, and Python for analysis workflows.
 
-## Choose Your Path
+## Navigation
 
 > **Coming from other energy optimization software?**
 > If you already work with hydrothermal dispatch tools and want to convert
@@ -22,8 +19,8 @@ workflows.
 > If you want to run studies from Jupyter or a Python script, see the
 > [Python Quickstart](./guide/python-quickstart.md).
 
-> **Ready to run?**
-> Jump straight to [Installation](./guide/installation.md) and
+> **Starting from scratch?**
+> See [Installation](./guide/installation.md) and then
 > [Quickstart](./tutorial/quickstart.md).
 
 ## What Cobre Does
@@ -35,7 +32,7 @@ workflows.
   and user-defined generic constraints.
 - **Generate stochastic scenarios** using periodic autoregressive (PAR) inflow
   models with correlated multi-site noise.
-- **Scale across clusters** with hybrid MPI + thread parallelism, producing
+- **Run across clusters** with hybrid MPI + thread parallelism, producing
   bit-for-bit identical results regardless of rank or thread count.
 - **Analyze results from Python** using Arrow zero-copy bindings, or directly
   from Parquet output files.

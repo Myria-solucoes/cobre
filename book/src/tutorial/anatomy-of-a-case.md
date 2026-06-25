@@ -17,7 +17,7 @@ For the complete field-by-field schema reference, see
 
 ## Directory Structure
 
-The `1dtoy` case contains 11 input files across three directories:
+The `1dtoy` case contains the input files listed below, across three directories:
 
 ```
 1dtoy/
@@ -230,8 +230,8 @@ January, 696 for February in 2024, and so on). These hours are used when convert
 power (MW) to energy (MWh) in the LP objective.
 
 `num_scenarios: 10` means 10 scenario trajectories are sampled at each stage during
-training forward passes. A small number like 10 is sufficient for a tutorial; real
-studies typically use 50 or more.
+training forward passes. A small number like 10 keeps the tutorial fast; real studies
+use more trajectories for a more representative scenario tree.
 
 Each stage can optionally include a `risk_measure` field. When omitted (as in
 the 1dtoy example), it defaults to `"expectation"` (risk-neutral expected value).
@@ -547,7 +547,7 @@ the system must serve in each scenario and how uncertain that demand is.
 
 ## Additional Files in Production Cases
 
-The 1dtoy example uses 11 input files. Larger cases may include additional files
+The 1dtoy example contains the files shown above. Larger cases may include additional files
 that are not needed for this minimal example:
 
 ```
@@ -582,7 +582,7 @@ my_real_case/
 ```
 
 Not all of these files are required. Cobre loads them if present and skips
-them if absent (except for the 8 core files which are always mandatory).
+them if absent (except for the core files, which are always mandatory; listed above).
 
 ---
 

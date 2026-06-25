@@ -26,7 +26,7 @@ cd my_study
 mkdir system
 ```
 
-You will need 8 JSON files. By the end of this guide your directory will look like:
+You will need the JSON files listed below. By the end of this guide your directory will look like:
 
 ```
 my_study/
@@ -440,7 +440,7 @@ It must be present even when empty.
 
 ## Step 9: Validate Your Case
 
-With all 8 files in place, validate the case to confirm every layer passes:
+With those files in place, validate the case to confirm every layer passes:
 
 ```bash
 cobre validate my_study
@@ -472,14 +472,13 @@ Fix each reported error and re-run `cobre validate` until the exit code is 0.
 
 ## What's Next
 
-Your hand-built case is functionally identical to the `1dtoy` template. You can
-run it directly:
+Run the case directly:
 
 ```bash
 cobre run my_study --output my_study/results
 ```
 
-To compare your files against the template at any point:
+Your hand-built case should match the `1dtoy` template; verify with the diff below:
 
 ```bash
 cobre init --template 1dtoy 1dtoy_reference

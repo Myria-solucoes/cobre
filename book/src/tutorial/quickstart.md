@@ -118,7 +118,7 @@ Output written to my_first_study/results/
 > is an extremely noisy sample of the true expected cost — one unlucky trajectory
 > can land far below the lower bound, driving the gap deeply negative. This is
 > expected behavior, not a solver error. The gap only becomes well-behaved and
-> stable when training runs with many forward passes (typically 10 or more), because
+> stable when training runs with multiple forward passes, because
 > averaging over more scenarios produces a reliable upper-bound estimate. The 1dtoy
 > template keeps `forward_passes: 1` for speed; in a production study you would
 > increase this value and add a convergence-based stopping rule so training halts

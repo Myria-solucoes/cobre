@@ -1,13 +1,13 @@
 # Installation
 
-Cobre is a statically linked binary available for five platforms.
+Cobre is a statically linked binary available for the platforms listed below.
 Choose the method that best fits your environment.
 
 ---
 
 ## Pre-built Binaries (Recommended)
 
-Fastest for end users. No Rust toolchain or C compiler required.
+No Rust toolchain or C compiler required.
 
 ### Linux and macOS
 
