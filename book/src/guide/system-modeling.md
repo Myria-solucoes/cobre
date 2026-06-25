@@ -5,7 +5,7 @@ represents a physical component — a bus, a generator, a transmission line — 
 contractual obligation. Together, they form the complete model that the solver turns
 into a sequence of LP sub-problems, one per stage per scenario trajectory.
 
-The fundamental organizing principle is simple: every generator and every load
+The fundamental organizing principle: every generator and every load
 connects to a **bus**. A bus is an electrical node at which the power balance
 constraint must hold. At each stage and each load block, the LP enforces that the
 total power injected into a bus equals the total power withdrawn from it. When the
@@ -172,9 +172,8 @@ Penalties are set at three levels, resolved from most specific to most general:
 2. **Entity-level override** — a `penalties` block inside the entity's JSON object
 3. **Global default** — the top-level `penalties.json` file in the case directory
 
-This three-tier cascade gives you precise control: you can set a strict global
-spillage penalty and then relax it for a specific plant that is known to spill
-frequently in wet years. For details on the penalty fields for each entity type,
+This three-tier cascade lets you set a strict global spillage penalty and relax
+it for a specific plant that is known to spill frequently in wet years. For details on the penalty fields for each entity type,
 see the [Configuration](./configuration.md) guide and the
 [Case Format Reference](../reference/case-format.md).
 

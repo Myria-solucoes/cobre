@@ -1,7 +1,7 @@
 # Hydro Plants
 
 Hydroelectric power plants are the central dispatchable resource in Cobre's system
-model. Unlike thermal units, which simply convert fuel into electricity at a cost,
+model. Unlike thermal units, which convert fuel into electricity at a cost,
 hydro plants manage a reservoir — a state variable that persists between stages and
 couples the dispatch decisions of today to the feasibility of tomorrow. This
 intertemporal coupling is precisely why hydrothermal scheduling requires stochastic
@@ -594,7 +594,7 @@ would be a cycle, which the validator rejects.
 
 ## Advanced Fields
 
-The following fields enable higher-fidelity physical modeling. They are all optional.
+The following fields enable more detailed physical modeling. They are all optional.
 For most system planning studies, these fields can be omitted; they become relevant
 when calibrating a model against historical dispatch data or when the head variation
 at a plant is significant.
