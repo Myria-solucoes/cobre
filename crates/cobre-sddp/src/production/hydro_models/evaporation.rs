@@ -46,11 +46,14 @@ use crate::SddpError;
 ///
 /// | Condition                                                        | Error variant             |
 /// | ---------------------------------------------------------------- | ------------------------- |
-/// | Hydro has evaporation coefficients but no geometry rows          | [`SddpError::Validation`] |
-/// | All geometry `area_km2` values are zero                          | [`SddpError::Validation`] |
 /// | Computed slope or intercept is NaN or infinite                   | [`SddpError::Validation`] |
 /// | Stage has no `season_id` (cannot map to a month)                 | [`SddpError::Validation`] |
 /// | I/O failure loading geometry Parquet                             | [`SddpError::Io`]         |
+///
+/// A hydro with evaporation coefficients but no usable surface-area data — no
+/// geometry rows, or every `area_km2` zero — does NOT error: evaporation is
+/// disabled for that hydro ([`EvaporationSource::DisabledNoArea`]) with a
+/// `tracing::warn!`, because zero surface area yields zero evaporation.
 // Rationale: a type alias for this three-output tuple would hide the concrete
 // types callers destructure at every call site.
 #[allow(clippy::type_complexity)]
@@ -174,23 +177,36 @@ fn resolve_evaporation_core(
         let geo_rows: &[&cobre_io::extensions::HydroGeometryRow] =
             geometry_map.get(&hydro.id).map_or(&[], Vec::as_slice);
 
+        // Evaporation needs a usable area-volume curve. A new or being-filled
+        // reservoir legitimately may have none (no geometry rows, or a single
+        // dead-volume point with zero area). Zero surface area yields zero
+        // evaporation, so disable it for this hydro and warn rather than failing
+        // the whole run — DisabledNoArea is the provenance the summary surfaces.
         if geo_rows.is_empty() {
-            return Err(SddpError::Validation(format!(
+            tracing::warn!(
                 "hydro {} (id={}) has evaporation_coefficients_mm but no geometry data \
-                 in hydro_geometry.parquet. Evaporation linearization requires \
-                 area-volume curve data.",
-                hydro.name, hydro.id.0
-            )));
+                 in hydro_geometry.parquet; disabling evaporation for this hydro",
+                hydro.name,
+                hydro.id.0
+            );
+            all_models.push(EvaporationModel::None);
+            provenance.push((hydro.id, EvaporationSource::DisabledNoArea));
+            reference_provenance.push((hydro.id, EvaporationReferenceSource::DefaultMidpoint));
+            continue;
         }
 
-        let all_zero_area = geo_rows.iter().all(|r| r.area_km2 == 0.0);
-        if all_zero_area {
-            return Err(SddpError::Validation(format!(
-                "hydro {} (id={}) has evaporation_coefficients_mm but all area_km2 \
-                 values in hydro_geometry.parquet are zero. \
-                 Evaporation linearization requires non-zero surface area data.",
-                hydro.name, hydro.id.0
-            )));
+        if geo_rows.iter().all(|r| r.area_km2 == 0.0) {
+            tracing::warn!(
+                "hydro {} (id={}) has evaporation_coefficients_mm but every area_km2 in \
+                 hydro_geometry.parquet is zero; disabling evaporation for this hydro \
+                 (zero surface area produces zero evaporation)",
+                hydro.name,
+                hydro.id.0
+            );
+            all_models.push(EvaporationModel::None);
+            provenance.push((hydro.id, EvaporationSource::DisabledNoArea));
+            reference_provenance.push((hydro.id, EvaporationReferenceSource::DefaultMidpoint));
+            continue;
         }
 
         let ref_source = if hydro.evaporation_reference_volumes_hm3.is_some() {
@@ -819,10 +835,10 @@ mod tests {
         }
     }
 
-    /// resolve_evaporation_models core logic: hydro with evaporation but no geometry rows
-    /// returns SddpError::Validation containing "geometry".
+    /// A hydro with evaporation coefficients but no geometry rows degrades to
+    /// disabled evaporation (`DisabledNoArea`) instead of erroring.
     #[test]
-    fn resolve_evaporation_missing_geometry_returns_validation_error() {
+    fn resolve_evaporation_missing_geometry_disables_evaporation() {
         let evap_mm = [5.0f64; 12];
         let hydro = make_hydro_with_evaporation(0, 100.0, 500.0, Some(evap_mm));
 
@@ -833,18 +849,53 @@ mod tests {
         let study_stages = [make_stage_with_month(0, 0)];
         let stage_refs: Vec<_> = study_stages.iter().collect();
 
-        let err = super::resolve_evaporation_core(&[hydro], &geometry_map, &stage_refs)
-            .expect_err("missing geometry must return an error");
+        let (models, provenance, _ref_provenance) =
+            super::resolve_evaporation_core(&[hydro], &geometry_map, &stage_refs)
+                .expect("missing geometry must degrade, not error");
 
-        match err {
-            crate::SddpError::Validation(msg) => {
-                assert!(
-                    msg.to_lowercase().contains("geometry"),
-                    "error message must mention 'geometry', got: {msg}"
-                );
-            }
-            other => panic!("expected Validation error, got {other:?}"),
-        }
+        assert!(
+            matches!(models.model(0), EvaporationModel::None),
+            "hydro 0 evaporation must be disabled (None)"
+        );
+        assert_eq!(
+            provenance[0].1,
+            EvaporationSource::DisabledNoArea,
+            "provenance must record DisabledNoArea"
+        );
+    }
+
+    /// A hydro with evaporation coefficients but a geometry whose areas are all
+    /// zero — e.g. a new/being-filled reservoir with only a dead-volume point,
+    /// as JURUENA in cobre_rodada_2001 — degrades to disabled evaporation
+    /// instead of failing the whole run.
+    #[test]
+    fn resolve_evaporation_all_zero_area_disables_evaporation() {
+        let evap_mm = [5.0f64; 12];
+        let hydro = make_hydro_with_evaporation(0, 100.0, 500.0, Some(evap_mm));
+
+        // Single dead-volume point with zero surface area (no area-volume curve).
+        let geo_rows = make_geo_rows(&[(2.93, 0.0)]);
+        let refs: Vec<_> = geo_rows.iter().collect();
+        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
+            HashMap::new();
+        geometry_map.insert(EntityId::from(0), refs);
+
+        let study_stages = [make_stage_with_month(0, 0)];
+        let stage_refs: Vec<_> = study_stages.iter().collect();
+
+        let (models, provenance, _ref_provenance) =
+            super::resolve_evaporation_core(&[hydro], &geometry_map, &stage_refs)
+                .expect("all-zero area must degrade, not error");
+
+        assert!(
+            matches!(models.model(0), EvaporationModel::None),
+            "hydro 0 evaporation must be disabled (None) when all areas are zero"
+        );
+        assert_eq!(
+            provenance[0].1,
+            EvaporationSource::DisabledNoArea,
+            "provenance must record DisabledNoArea"
+        );
     }
 
     /// resolve_evaporation_models core logic: 4 hydros where 2 have evaporation and 2 do not.

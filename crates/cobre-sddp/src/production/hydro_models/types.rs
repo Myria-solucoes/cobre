@@ -240,6 +240,13 @@ pub enum EvaporationSource {
     NotModeled,
     /// Evaporation coefficients were linearized from reservoir geometry.
     LinearizedFromGeometry,
+    /// Evaporation coefficients were supplied, but the reservoir has no usable
+    /// surface-area data (no geometry rows, or every `area_km2` is zero), so
+    /// evaporation is disabled for this hydro and a `tracing::warn!` is emitted
+    /// at resolution. Zero surface area yields zero evaporation, so disabling is
+    /// the physically-correct degradation rather than a hard error — a new or
+    /// being-filled reservoir legitimately may not have an area-volume curve yet.
+    DisabledNoArea,
 }
 
 /// Source of the reference volume used for evaporation linearization.

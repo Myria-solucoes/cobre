@@ -74,7 +74,9 @@ pub fn build_hydro_model_summary(
     for (_, source) in &result.provenance.evaporation_sources {
         match source {
             EvaporationSource::LinearizedFromGeometry => n_evaporation += 1,
-            EvaporationSource::NotModeled => n_no_evaporation += 1,
+            EvaporationSource::NotModeled | EvaporationSource::DisabledNoArea => {
+                n_no_evaporation += 1;
+            }
         }
     }
 
