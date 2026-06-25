@@ -12,12 +12,7 @@ deterministic case cost is flagged as a behavioural change. The test suite runs 
 cases under `cargo nextest run --workspace` and compares each result against its stored
 expected cost.
 
-The suite covers a progression from the simplest possible thermal-only system up through
-multi-hydro cascades, transmission constraints, FPHA production models, evaporation,
-PAR(p) inflow fitting, block factors, non-controllable sources, generic constraints,
-operational violation penalties, stage-decomposition patterns, and discount-rate
-accounting. New modelling features are expected to add one or more cases at the end of
-the sequence.
+The suite covers a progression from the simplest thermal-only system through the modeled features; new features add cases at the end of the sequence.
 
 ## Case Index
 

@@ -1,9 +1,9 @@
 # Output Format Reference
 
-This page is the exhaustive schema reference for every file produced by
+This page is the complete schema reference for every file produced by
 `cobre run`. It documents column names, Arrow data types, nullability, JSON
-field structures, and binary format layouts for all 10 Parquet schemas, the
-two metadata files, the five dictionary files, and the policy checkpoint format.
+field structures, and binary format layouts for the Parquet schemas, the
+metadata files, the dictionary files, and the policy checkpoint format.
 
 If you are new to Cobre output, start with
 [Understanding Results](../tutorial/understanding-results.md) first. That page

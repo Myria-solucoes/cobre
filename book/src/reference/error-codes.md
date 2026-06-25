@@ -13,7 +13,7 @@ phase runs, see [cobre-io](../crates/io.md).
 ## `LoadError` variants
 
 `LoadError` is the top-level error type returned by `load_case` and by every
-individual file parser. There are 6 variants, ordered by the pipeline phase
+individual file parser. The variants are listed below, ordered by the pipeline phase
 in which they typically occur.
 
 ### `IoError`
@@ -44,7 +44,7 @@ I/O error reading system/hydros.json: No such file or directory (os error 2)
 
 **Resolution:** Verify the file exists in the case directory. Check that the
 process has read permissions for the directory and file. For `load_case`, the
-case root must contain all 8 required files (see [Case Format](case-format.md)).
+case root must contain all required files (see [Case Format](case-format.md)).
 
 ---
 
@@ -232,12 +232,11 @@ diagnostic system. Every `ValidationEntry` carries one `ErrorKind`. When
 `ValidationContext::into_result()` produces a `ConstraintError`, each line in
 `description` is prefixed with the `ErrorKind` in debug format (e.g., `[FileNotFound]`).
 
-There are 15 `ErrorKind` values. Three (`UnusedEntity`, `ModelQuality`, and
-`SemanticAmbiguity`) default to `Severity::Warning` — they are reported but do
-not block execution. All others default to `Severity::Error` and must be
-resolved before `load_case` succeeds. One value, `NotImplemented`, is reserved
-and never emitted by the current validator, so it is not documented in detail
-below.
+The `ErrorKind` values are listed below. The `Severity::Warning` variants are
+reported but do not block execution; all other variants default to `Severity::Error`
+and must be resolved before `load_case` succeeds. One value, `NotImplemented`, is
+reserved and never emitted by the current validator, so it is not documented in
+detail below.
 
 ### `FileNotFound`
 
@@ -245,12 +244,11 @@ below.
 
 **What triggers it:** A file that is required by the case structure is missing
 from the case directory. Emitted by Layer 1 (structural validation) for each of
-the 8 required files that is not found on disk.
+the required files that is not found on disk.
 
 **Example message:** `required file 'system/hydros.json' not found in case directory`
 
-**Resolution:** Create the missing file in the correct subdirectory. The 8
-required files are: `config.json`, `penalties.json`, `stages.json`,
+**Resolution:** Create the missing file in the correct subdirectory. The required files are: `config.json`, `penalties.json`, `stages.json`,
 `initial_conditions.json`, `system/buses.json`, `system/lines.json`,
 `system/hydros.json`, and `system/thermals.json`.
 

@@ -34,7 +34,7 @@ my_case/
     thermals.json           # Thermal plant registry (required, may be empty)
 ```
 
-All eight files must be present. `lines.json`, `hydros.json`, and `thermals.json`
+All files listed above must be present. `lines.json`, `hydros.json`, and `thermals.json`
 may contain empty arrays (`"lines": []`, `"hydros": []`, `"thermals": []`), but
 the files themselves must exist. A case with no hydro plants and no thermals will
 fail physically — there is nothing to dispatch — but it will pass schema validation
@@ -110,7 +110,7 @@ For the complete list of schema URLs, see [Schemas](../reference/schemas.md).
 
 ## Step-by-Step: A Minimal 1-Bus, 1-Thermal Case
 
-This walkthrough creates the smallest possible runnable case: one bus, one thermal
+This walkthrough creates a minimal runnable case: one bus, one thermal
 plant, no hydro, four monthly stages, and deterministic load (zero standard
 deviation). Run these steps from your terminal.
 

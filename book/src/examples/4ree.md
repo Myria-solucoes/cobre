@@ -185,8 +185,7 @@ The run produces the same output directory structure as the 1dtoy case:
 [Output Structure](./1dtoy.md#output-structure) in the 1dtoy page for the
 full file listing.
 
-With 12 stages and 126 thermals the LP is substantially larger than 1dtoy. On a
-modern laptop the run typically completes within a few minutes for 256 iterations.
+With 12 stages and 126 thermals the LP is substantially larger than 1dtoy. Runtime scales with the LP size and the configured iteration count.
 
 ---
 

@@ -245,9 +245,9 @@ To test for convergence, add a `bound_stalling` rule alongside the iteration lim
 }
 ```
 
-With this configuration on the 1dtoy case, the solver typically converges within
-roughly 100 iterations (bound improvement stalls below 1%). Exact iteration counts
-vary with the random seed. Numerical values like gap percentages are stochastic —
+With this configuration, training ends once the lower bound improvement over the
+configured rolling window falls below the tolerance — the iteration count depends
+on the seed. Numerical values like gap percentages are stochastic —
 your run will differ from any pre-recorded reference values.
 
 The `convergence.parquet` file in the training output records lower bound, upper
