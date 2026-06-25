@@ -42,7 +42,7 @@ cobre-bridge convert newave /path/to/source/case /path/to/output/case
 
 ### What Gets Converted
 
-The conversion pipeline transforms approximately 20 input files into a
+The conversion pipeline transforms the source case's input files into a
 complete Cobre case directory. The mapping covers:
 
 | Source Concept              | Cobre Entity             | Output File                             |

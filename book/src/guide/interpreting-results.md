@@ -44,7 +44,7 @@ convergence assessment are:
 **Gap guidelines.** There is no universal threshold — acceptable gap depends
 on the decision being made and the study's time horizon. As rough guidance:
 
-- Below 1%: typically very good. The policy cost is within 1% of the
+- Below 1%: acceptable for most decisions. The policy cost is within 1% of the
   theoretical optimum.
 - 1% to 5%: acceptable for long-horizon planning studies where model
   uncertainty is already large.
