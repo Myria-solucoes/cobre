@@ -2,61 +2,27 @@
 //!
 //! Provides shared types for all backends: [`ReduceOp`], [`CommError`], [`BackendError`].
 
-/// Element-wise reduction operations for `allreduce`.
-///
-/// These map directly to MPI reduction operations used during distributed execution.
-/// The `Sum` and `Min` variants are the two operations required by the backward
-/// pass: `MPI_SUM` for upper bound statistics and `MPI_MIN` for the lower bound.
-/// Because MPI may not support mixed reduction operations in a single `allreduce`
-/// call, the training loop issues two separate calls — one with [`ReduceOp::Min`]
-/// for the lower bound scalar and one with [`ReduceOp::Sum`] for the remaining
-/// statistics.
+/// Element-wise reduction operations for `allreduce`, mapping to MPI ops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReduceOp {
-    /// Element-wise summation.
-    ///
-    /// Used for upper bound statistics: total cost sum, sum of squares, and
-    /// trajectory count aggregated across all ranks after the forward pass.
+    /// Element-wise summation (`MPI_SUM`).
     Sum,
 
-    /// Element-wise minimum.
-    ///
-    /// Used for lower bound aggregation: the minimum first-stage LP objective
-    /// across all ranks is the global lower bound for the current iteration.
+    /// Element-wise minimum (`MPI_MIN`).
     Min,
 
-    /// Element-wise maximum.
-    ///
-    /// Reserved for future use, for example maximum per-rank solve time for
-    /// load balance diagnostics.
+    /// Element-wise maximum (`MPI_MAX`).
     Max,
 
-    /// Element-wise bitwise OR.
-    ///
-    /// Used for bitmap reductions where any rank observing a condition should
-    /// set the corresponding bit in the global result. Semantically equivalent
-    /// to `MPI_BOR`. OR is commutative and associative, so the result is
-    /// deterministic under any rank count and message-ordering.
-    ///
-    /// In the MPI backend this is implemented via `allgatherv` followed by a
-    /// local fold, because ferrompi v0.3 does not yet expose `MPI_BOR`.
-    /// In the local backend (single rank) the identity copy is correct.
-    ///
-    /// Useful for bitmap reductions where any participating rank that
-    /// observes a condition should set the corresponding bit in the global
-    /// result.
+    /// Element-wise bitwise OR (`MPI_BOR`); commutative and associative, so the
+    /// result is deterministic under any rank count and message ordering.
     BitwiseOr,
 }
 
-/// Errors that can occur during collective communication or shared memory operations.
-///
-/// This type is returned by all fallible methods on `Communicator`
-/// and `SharedMemoryProvider`.
+/// Errors from collective communication or shared memory operations.
 #[derive(Debug, thiserror::Error)]
 pub enum CommError {
     /// An MPI collective operation failed at the library level.
-    ///
-    /// Contains the MPI error code and a human-readable description.
     #[error(
         "collective operation '{operation}' failed with MPI error code {mpi_error_code}: {message}"
     )]
@@ -69,10 +35,7 @@ pub enum CommError {
         message: String,
     },
 
-    /// The buffer sizes provided to a collective operation are inconsistent.
-    ///
-    /// For example, `recv.len() < sum(counts)` in `allgatherv`, or
-    /// `send.len() != recv.len()` in `allreduce`.
+    /// Buffer sizes provided to a collective operation are inconsistent.
     #[error("invalid buffer size for '{operation}': expected {expected} elements, got {actual}")]
     InvalidBufferSize {
         /// Name of the collective operation (e.g., `"allreduce"`).
@@ -93,17 +56,10 @@ pub enum CommError {
     },
 
     /// The communicator has been finalized or is in an invalid state.
-    ///
-    /// This typically occurs if `MPI_Finalize` has been called before all
-    /// collective operations have completed.
     #[error("communicator is in an invalid state (MPI may have been finalized)")]
     InvalidCommunicator,
 
     /// A shared memory allocation request was rejected by the OS.
-    ///
-    /// This can occur if the requested size exceeds system shared memory limits
-    /// (`/proc/sys/kernel/shmmax` on Linux), if the process lacks permissions for
-    /// shared memory operations, or if the system is out of shared memory resources.
     #[error("shared memory allocation of {requested_bytes} bytes failed: {message}")]
     AllocationFailed {
         /// Number of bytes that were requested.
@@ -113,16 +69,10 @@ pub enum CommError {
     },
 }
 
-/// Errors that can occur during backend selection and initialization.
-///
-/// This type is returned by the factory function `create_communicator` when the
-/// requested backend cannot be selected or initialized.
+/// Errors from backend selection and initialization in `create_communicator`.
 #[derive(Debug, thiserror::Error)]
 pub enum BackendError {
     /// The requested backend is not compiled into this binary.
-    ///
-    /// The user or environment requested a backend that was not enabled via Cargo
-    /// feature flags at compile time.
     #[error(
         "communication backend '{requested}' is not available in this build (available: {available})",
         available = available.join(", ")
@@ -134,9 +84,7 @@ pub enum BackendError {
         available: Vec<String>,
     },
 
-    /// The requested backend name is not recognized.
-    ///
-    /// The value set in `COBRE_COMM_BACKEND` does not match any known backend name.
+    /// The value set in `COBRE_COMM_BACKEND` matches no known backend name.
     #[error(
         "unknown communication backend '{requested}' (known backends: {available})",
         available = available.join(", ")
@@ -148,11 +96,7 @@ pub enum BackendError {
         available: Vec<String>,
     },
 
-    /// The backend initialization failed.
-    ///
-    /// The backend was correctly selected but failed to initialize, for example
-    /// because the MPI runtime is not installed, the TCP coordinator is unreachable,
-    /// or the shared memory segment does not exist.
+    /// The backend was selected but failed to initialize.
     #[error("'{backend}' backend initialization failed: {source}")]
     InitializationFailed {
         /// Name of the backend that failed to initialize (e.g., `"mpi"`).
@@ -162,9 +106,6 @@ pub enum BackendError {
     },
 
     /// Required environment variables for the selected backend are not set.
-    ///
-    /// The TCP and shared memory backends require additional configuration via
-    /// environment variables. This error lists the variables that are missing.
     #[error(
         "backend '{backend}' requires missing configuration: {missing_vars}",
         missing_vars = missing_vars.join(", ")

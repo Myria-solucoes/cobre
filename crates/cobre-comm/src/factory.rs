@@ -1,38 +1,13 @@
 //! Factory function for creating the active communication backend.
 //!
-//! [`create_communicator`] is the single entry point for constructing a
-//! [`Communicator`](crate::Communicator) instance at runtime. It selects the
-//! backend according to:
-//!
-//! 1. The `COBRE_COMM_BACKEND` environment variable (runtime override).
-//! 2. The Cargo feature flags compiled into the binary (`mpi`).
-//! 3. A fallback to [`LocalBackend`](crate::LocalBackend) when no distributed backend
-//!    is available.
-//!
-//! This indirection keeps algorithm crates decoupled from any specific backend: the
-//! calling code only sees the `Communicator` trait, never a concrete type.
+//! [`create_communicator`] is the single runtime entry point for constructing a
+//! [`Communicator`](crate::Communicator). Selection order: the
+//! `COBRE_COMM_BACKEND` environment variable, then compiled-in Cargo features
+//! (`mpi`), then a fallback to [`LocalBackend`](crate::LocalBackend).
 
-/// Programmatic backend selector for library-mode callers.
-///
-/// Used by `cobre-python` (`PyO3` bindings) and `cobre-mcp` (MCP server) to
-/// select a backend explicitly without relying on environment variables.
-/// The factory function [`create_communicator`] accepts a
-/// `BackendKind` argument when called from library code.
-///
-/// # Variants
-///
-/// - [`Auto`](BackendKind::Auto) — let the factory choose the best available
-///   backend (same priority order as the environment-variable path).
-/// - [`Mpi`](BackendKind::Mpi) — request the MPI backend. Returns an error
-///   if the `mpi` feature is not compiled in.
-/// - [`Local`](BackendKind::Local) — always use the single-process
-///   [`LocalBackend`](crate::LocalBackend), even when MPI is available.
-///
-/// # Future variants
-///
-/// `Tcp` and `Shm` will be added when the corresponding backend crates are
-/// implemented. They are deliberately excluded because no
-/// concrete `TcpBackend` or `ShmBackend` types exist yet.
+/// Programmatic backend selector for library-mode callers that pass a
+/// `BackendKind` to [`create_communicator`] instead of using environment
+/// variables.
 ///
 /// # Examples
 ///
@@ -40,66 +15,38 @@
 /// use cobre_comm::BackendKind;
 ///
 /// let kind = BackendKind::Auto;
-/// let copy = kind;  // Copy trait is derived
+/// let copy = kind;
 /// assert_eq!(copy, kind);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
-    /// Automatically select the best available backend.
-    ///
-    /// Priority order (highest to lowest):
-    /// 1. MPI (`mpi` feature enabled and MPI runtime detectable)
-    /// 2. Local (single-process fallback, always available)
+    /// Auto-detect the best available backend (same order as the env-var path).
     Auto,
-    /// Use the MPI backend (`FerrompiBackend`).
-    ///
-    /// Fails at runtime if the `mpi` feature is not compiled in.
+    /// MPI backend; fails at runtime if the `mpi` feature is not compiled in.
     Mpi,
-    /// Use the single-process local backend (`LocalBackend`).
-    ///
-    /// Always succeeds regardless of feature flags.
+    /// Single-process local backend; always available.
     Local,
 }
 
-/// Enum-dispatched communicator that wraps any available concrete backend.
+/// Enum-dispatched communicator wrapping any available concrete backend.
 ///
-/// # Design rationale
-///
-/// [`crate::Communicator`] carries generic methods that make the trait not object-safe.
-/// Enum dispatch for closed variant sets avoids `Box<dyn>`: a `match` arm delegates
-/// each method call to the inner concrete type. The dispatch overhead is negligible
-/// compared to the MPI collective or LP solve it wraps.
-///
-/// # Availability
-///
-/// This enum is only present in builds where the `mpi` feature is compiled in.
-/// In no-feature builds, callers use [`crate::LocalBackend`] directly.
-///
-/// # Variants
-///
-/// - `Mpi(FerrompiBackend)` — available when `features = ["mpi"]`
-/// - `Local(LocalBackend)` — always present inside this enum
-///
-/// # Thread safety
-///
-/// `CommBackend: Send + Sync` because all inner backend types are `Send + Sync`.
+/// Enum dispatch (not `Box<dyn>`) because [`crate::Communicator`] carries
+/// generic methods that make it non-object-safe; dispatch overhead is negligible
+/// against the MPI collective or LP solve it wraps. `CommBackend: Send + Sync`
+/// because all inner backends are. Only present in `mpi` builds; no-feature
+/// builds use [`crate::LocalBackend`] directly.
 #[cfg(feature = "mpi")]
 pub enum CommBackend {
     /// MPI backend powered by ferrompi.
     Mpi(Box<crate::FerrompiBackend>),
 
-    /// Single-process local backend.
-    ///
-    /// Always present as a fallback. Selected when no distributed runtime is
-    /// available or when the caller explicitly requests `BackendKind::Local`.
+    /// Single-process local backend (always-available fallback).
     Local(crate::LocalBackend),
 }
 
 #[cfg(feature = "mpi")]
-// Rationale: compile-time trait assertion — this function is intentionally never
-// called; its existence is the check. The compiler verifies `CommBackend: Send +
-// Sync` when it monomorphises `assert_send_sync::<CommBackend>()`, catching any
-// future field addition that would break thread safety without a runtime test.
+// Rationale: never called; its monomorphisation is the compile-time check that
+// `CommBackend: Send + Sync`, catching any future field that breaks it.
 #[allow(dead_code)]
 const fn _assert_comm_backend_send_sync() {
     const fn assert_send_sync<T: Send + Sync>() {}
@@ -182,11 +129,8 @@ impl crate::Communicator for CommBackend {
 
 #[cfg(all(feature = "mpi", feature = "shared-memory"))]
 impl crate::SharedMemoryProvider for CommBackend {
-    /// Both `LocalBackend` and `FerrompiBackend` use `HeapRegion<T>` as their
-    /// `Region<T>` type (`HeapFallback` semantics per spec SS4.7). Using
-    /// `HeapRegion<T>` as the concrete GAT here avoids an additional
-    /// enum wrapper around region types, since both inner backends already
-    /// unify on the same concrete region type.
+    /// `HeapRegion<T>` directly (not an enum wrapper): both inner backends
+    /// already unify on it as their `Region<T>`.
     type Region<T: crate::CommData> = crate::HeapRegion<T>;
 
     fn create_shared_region<T: crate::CommData>(
@@ -247,18 +191,11 @@ pub fn available_backends() -> Vec<String> {
     backends
 }
 
-/// Returns `true` if any MPI launcher environment variable is present.
+/// Returns `true` if any MPI launcher environment variable is present (checked
+/// via `var_os`, so non-UTF-8 values still count).
 ///
-/// Checks the following variables (without inspecting their values):
-/// `PMI_RANK`, `PMI_SIZE`, `OMPI_COMM_WORLD_RANK`, `OMPI_COMM_WORLD_SIZE`,
-/// `MPI_LOCALRANKID`, `SLURM_PROCID`.
-///
-/// Uses `std::env::var_os` so that non-UTF-8 values are still detected
-/// correctly. Always compiled in (no cfg gate) so that auto-detection
-/// logic is testable in no-feature builds.
-///
-/// In no-feature builds this function is not called from production code
-/// (only from tests), so dead-code lint is suppressed for that configuration.
+/// Always compiled (no cfg gate) so it is testable in no-feature builds, where
+/// it is unused outside tests — hence the dead-code allow.
 #[cfg_attr(not(feature = "mpi"), allow(dead_code))]
 fn mpi_launch_detected() -> bool {
     const MPI_ENV_VARS: [&str; 6] = [
@@ -375,12 +312,8 @@ pub fn create_communicator() -> Result<CommBackend, crate::BackendError> {
     }
 }
 
-/// Auto-detect the best available backend using a priority chain.
-///
-/// Priority order (highest to lowest):
-/// 1. MPI — if the `mpi` feature is compiled in and [`mpi_launch_detected`]
-///    returns `true`.
-/// 2. Local — unconditional fallback.
+/// Auto-detect the backend: MPI when [`mpi_launch_detected`] is `true`,
+/// otherwise the local fallback.
 ///
 /// # Errors
 ///
@@ -423,13 +356,8 @@ mod tests {
         assert_eq!(available_backends(), vec!["local".to_string()]);
     }
 
-    /// `mpi_launch_detected()` returns `false` when none of the 6 MPI env vars
+    /// `mpi_launch_detected()` returns `false` when none of the MPI env vars
     /// are set.
-    ///
-    /// This test is not perfectly hermetic in a multi-threaded test run because
-    /// other tests may set env vars concurrently. However, since none of the
-    /// *MPI-specific* vars (`PMI_RANK`, `PMI_SIZE`, etc.) are set by other
-    /// tests in this crate, the risk is negligible.
     #[test]
     fn test_mpi_launch_detected_false_by_default() {
         const MPI_VARS: [&str; 6] = [
@@ -451,15 +379,6 @@ mod tests {
     }
 
     /// `mpi_launch_detected()` returns `true` when `PMI_RANK` is set.
-    ///
-    /// # Safety (env var mutation in tests)
-    ///
-    /// `std::env::set_var` and `remove_var` are unsafe in Rust 2024 when called
-    /// from a multi-threaded process because concurrent reads of the environment
-    /// (e.g., from `std::env::var`) are not thread-safe on some platforms. These
-    /// tests access only a purpose-specific env var that no other test in this
-    /// crate reads, which makes concurrent mutation safe in practice. The
-    /// `unsafe` block is required by the compiler and documents this invariant.
     #[test]
     fn test_mpi_launch_detected_pmi_rank() {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -554,20 +473,17 @@ mod tests {
     fn test_backend_kind_derives() {
         let kind = BackendKind::Auto;
 
-        // Debug
         let s = format!("{kind:?}");
         assert!(s.contains("Auto"), "Debug output should contain 'Auto'");
 
-        // Clone — explicit call to Clone::clone to prove the trait is derived
+        // Rationale: explicit Clone::clone on a Copy type proves Clone is derived.
         #[allow(clippy::clone_on_copy)]
         let cloned = kind.clone();
         assert_eq!(cloned, kind);
 
-        // Copy
         let copied = kind;
         assert_eq!(copied, kind);
 
-        // PartialEq + Eq
         assert_eq!(BackendKind::Mpi, BackendKind::Mpi);
         assert_ne!(BackendKind::Mpi, BackendKind::Local);
         assert_eq!(BackendKind::Local, BackendKind::Local);
@@ -641,21 +557,17 @@ mod tests {
         fn test_comm_backend_local_shared_memory() {
             let backend = CommBackend::Local(LocalBackend);
 
-            // create_shared_region: returns a region with the correct element count
             let mut region = backend.create_shared_region::<f64>(10).unwrap();
             assert_eq!(region.as_slice().len(), 10);
-            // Verify the region is writable (population phase)
             region.as_mut_slice().fill(42.0);
             assert_eq!(region.as_slice(), &[42.0_f64; 10]);
             assert!(region.fence().is_ok());
 
-            // split_local: returns a local communicator with rank 0 and size 1
             let local_comm = backend.split_local().unwrap();
             assert_eq!(local_comm.rank(), 0);
             assert_eq!(local_comm.size(), 1);
             assert!(local_comm.barrier().is_ok());
 
-            // is_leader: LocalBackend is always the leader
             assert!(backend.is_leader());
         }
     }

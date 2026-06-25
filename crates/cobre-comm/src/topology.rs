@@ -1,19 +1,10 @@
-//! Execution topology types for cobre-comm.
-//!
-//! This module defines [`ExecutionTopology`] and its component structs, which
-//! describe the process layout, communication backend metadata, and optional
-//! scheduler information for a running Cobre job.
-//!
-//! Topology is gathered once during backend initialization and cached. All
-//! subsequent queries are non-collective and allocation-free.
+//! Execution topology types for cobre-comm: process layout, communication
+//! backend metadata, and optional scheduler information for a running job.
 
 use crate::factory::BackendKind;
 
-/// Execution topology gathered at communicator initialization.
-///
-/// Describes the process layout, communication backend metadata, and optional
-/// scheduler information. Built once during backend creation and queryable
-/// thereafter (no further collectives needed).
+/// Execution topology gathered once at communicator initialization; queryable
+/// thereafter with no further collectives.
 #[derive(Debug, Clone)]
 pub struct ExecutionTopology {
     /// Which backend is active.

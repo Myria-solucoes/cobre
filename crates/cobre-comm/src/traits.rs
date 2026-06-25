@@ -1,82 +1,42 @@
-//! Trait definitions for the cobre-comm abstraction layer.
-//!
-//! This module defines the core traits that decouple distributed computations from
-//! specific communication technologies:
-//!
-//! - [`CommData`] — marker trait for types that can be transmitted through a
-//!   `Communicator`.
-//! - [`Communicator`] — backend abstraction for collective communication
-//!   operations (`allgatherv`, `allreduce`, `broadcast`, `barrier`, `rank`, `size`).
-//! - [`LocalCommunicator`] — object-safe sub-trait exposing only the non-generic
-//!   methods of `Communicator` (`rank`, `size`, `barrier`). Only compiled with
-//!   the `shared-memory` feature (see below).
-//! - [`SharedRegion`] — handle to a shared memory region with read, write, and
-//!   fence-based synchronization methods. Only compiled with the `shared-memory`
-//!   feature.
-//! - [`SharedMemoryProvider`] — companion trait to `Communicator` for shared memory
-//!   region management. Only compiled with the `shared-memory` feature.
+//! Trait definitions for the cobre-comm abstraction layer, decoupling distributed
+//! computations from specific communication technologies: [`CommData`],
+//! [`Communicator`], and the `shared-memory`-gated [`LocalCommunicator`],
+//! [`SharedRegion`], and [`SharedMemoryProvider`].
 //!
 //! ## Shared-memory subsystem (`shared-memory` feature)
 //!
-//! `LocalCommunicator`, `SharedRegion`, and `SharedMemoryProvider` are gated behind
-//! `#[cfg(feature = "shared-memory")]` because the subsystem currently has zero
-//! production consumers and its only implementation (`HeapRegion`) provides no true
-//! intra-node shared memory — each rank holds its own `Vec<T>`.
+//! Gated behind the feature because it has zero production consumers and its only
+//! implementation (`HeapRegion`) is not true shared memory — each rank holds its
+//! own `Vec<T>`.
 //!
-//! The real implementation should be built on ferrompi's `SharedWindow<T>`, which
-//! wraps `MPI_Win_allocate_shared` / `MPI_Win_shared_query` and exposes
-//! `local_slice` / `remote_slice` / `fence` / `lock`. One open design tension:
-//! `SharedWindow<T>` is `!Send + !Sync` (ferrompi v0.4.x), whereas
-//! `LocalCommunicator` and `SharedRegion` require `Send + Sync`. Resolving this
-//! requires either a wrapper type that enforces single-threaded access, or a
-//! ferrompi API change. No downstream consumer exists yet, so this is deferred.
+//! The real implementation should build on ferrompi's `SharedWindow<T>`
+//! (`MPI_Win_allocate_shared` / `MPI_Win_shared_query`). Open tension:
+//! `SharedWindow<T>` is `!Send + !Sync` (ferrompi v0.4.x) while these traits
+//! require `Send + Sync` — needs a single-threaded-access wrapper or a ferrompi
+//! API change. Deferred until a downstream consumer exists.
 
 /// Marker trait for types that can be transmitted through collective operations.
 ///
-/// Requires `Send + Sync` (safe to share across threads and processes),
-/// `Copy` (bitwise copyable — no heap indirection), `Default`
-/// (zero-initializable — required by `SharedMemoryProvider::create_shared_region`
-/// to produce zero-filled regions without unsafe code), and `'static`
-/// (no borrowed data).
+/// Requires `Send + Sync`, `Copy`, `Default` (zero-fill regions in
+/// `SharedMemoryProvider::create_shared_region` without unsafe code), and
+/// `'static`.
 ///
-/// When the `mpi` feature is enabled, `CommData` additionally requires
-/// [`ferrompi::MpiDatatype`], which is the FFI marker trait sealing the seven
-/// primitive types that MPI can transmit directly (`f32`, `f64`, `i32`, `i64`,
-/// `u8`, `u32`, `u64`). This narrows the set of valid `CommData` types to those
-/// that ferrompi can pass to the MPI C library without a custom datatype commit.
-/// This restriction has no practical effect: the data plane only transmits
-/// these seven primitive types in practice.
+/// With the `mpi` feature it also requires [`ferrompi::MpiDatatype`], the sealed
+/// FFI marker for the primitives MPI transmits directly (`f32`, `f64`, `i32`,
+/// `i64`, `u8`, `u32`, `u64`) — exactly the set the data plane ever sends, so
+/// the `Communicator` impl can delegate to ferrompi's generic FFI without a
+/// per-method bound.
 ///
-/// # Future extensions: non-MpiDatatype payloads
-///
-/// If a future feature requires communicating types that are not
-/// `MpiDatatype` (e.g., `bool`, tuples, or fixed-size arrays), those
-/// types cannot be transmitted directly through MPI. The caller must
-/// serialize them into an MPI-compatible representation first — for
-/// example, mapping `bool` slices to `u8` bitmaps or packing struct
-/// fields into `f64` / `i32` arrays. This is a deliberate constraint:
-/// MPI collective operations are typed at the C level, and ferrompi's
-/// sealed `MpiDatatype` trait reflects that.
-///
-/// # Blanket implementation
-///
-/// All types that satisfy the bounds are automatically `CommData` without
-/// any explicit impl:
+/// All types satisfying the bounds are `CommData` via a blanket impl:
 ///
 /// ```rust
 /// # use cobre_comm::CommData;
 /// fn requires_comm_data<T: CommData>() {}
-///
-/// requires_comm_data::<f64>();  // f64 is CommData
-/// requires_comm_data::<u8>();   // u8 is CommData
-/// requires_comm_data::<i32>();  // i32 is CommData
-/// requires_comm_data::<u64>();  // u64 is CommData
+/// requires_comm_data::<f64>();
+/// requires_comm_data::<u8>();
+/// requires_comm_data::<i32>();
+/// requires_comm_data::<u64>();
 /// ```
-// When the `mpi` feature is active, CommData also requires MpiDatatype so that
-// the FerrompiBackend Communicator impl can delegate directly to ferrompi's
-// generic FFI methods without an extra bound on each method signature.
-// The intersection of CommData types (7 primitives that are MpiDatatype) is
-// exactly the set of types the communication data plane ever transmits.
 #[cfg(feature = "mpi")]
 pub trait CommData: Send + Sync + Copy + Default + 'static + ferrompi::MpiDatatype {}
 
@@ -92,41 +52,26 @@ impl<T: Send + Sync + Copy + Default + 'static + ferrompi::MpiDatatype> CommData
 pub trait CommData: Send + Sync + Copy + Default + 'static {}
 
 /// Blanket implementation (no mpi): any type satisfying the bounds is `CommData`.
-///
-/// This covers all payload types used in distributed computation (f64 arrays for
-/// cuts and trial points, scalar statistics) without requiring explicit impls.
 #[cfg(not(feature = "mpi"))]
 impl<T: Send + Sync + Copy + Default + 'static> CommData for T {}
 
-/// Backend abstraction for collective communication operations.
-///
-/// The trait provides the six operations used during distributed execution:
-/// four collective operations (`allgatherv`, `allreduce`, `broadcast`, `barrier`)
-/// and two infallible accessors (`rank`, `size`).
+/// Backend abstraction for collective communication operations: four collectives
+/// (`allgatherv`, `allreduce`, `broadcast`, `barrier`) and two infallible
+/// accessors (`rank`, `size`).
 ///
 /// # Design: compile-time static dispatch
 ///
-/// The trait is generic — three of its six methods carry a `T: CommData` type
-/// parameter. This means the trait is **intentionally not object-safe**: writing
-/// `Box<dyn Communicator>` does not compile. All callers use static dispatch via
-/// a generic bound `C: Communicator`, consistent with the solver abstraction
-/// pattern used throughout Cobre (see `SolverInterface`).
-///
-/// Since Cobre builds with exactly one communicator backend per binary (ferrompi
-/// for distributed execution, `LocalComm` for single-process mode), the binary
-/// size cost of monomorphization is negligible — only one instantiation exists
-/// per generic call site. The performance benefit is significant: `allgatherv`
-/// and `allreduce` are on the hot path, and the `LocalComm` no-op implementation
-/// compiles to zero instructions after inlining.
+/// Three methods carry a `T: CommData` parameter, so the trait is
+/// **intentionally not object-safe** — `Box<dyn Communicator>` does not compile.
+/// Callers use a generic bound `C: Communicator`; with one backend per binary,
+/// monomorphization cost is negligible and the hot-path no-op `LocalBackend`
+/// inlines to zero instructions.
 ///
 /// # Thread safety
 ///
-/// The trait requires `Send + Sync` to support hybrid MPI+OpenMP execution where
-/// the communicator handle is shared across threads within a rank. All collective
-/// operations take `&self` (shared reference). Callers are responsible for
-/// serializing concurrent calls — the calling algorithm serializes collective
-/// operations so that multiple threads never invoke the same collective
-/// simultaneously on the same communicator instance.
+/// Requires `Send + Sync` for hybrid MPI+OpenMP execution; all methods take
+/// `&self`. Callers must serialize concurrent collective calls — never invoke the
+/// same collective from two threads on one communicator instance simultaneously.
 ///
 /// # Example
 ///
@@ -140,15 +85,8 @@ impl<T: Send + Sync + Copy + Default + 'static> CommData for T {}
 pub trait Communicator: Send + Sync {
     /// Gather variable-length data from all ranks into all ranks.
     ///
-    /// Each rank contributes its local `send` buffer. After the call, the
-    /// receive buffer `recv` is populated in rank order: rank 0's contribution
-    /// occupies `recv[displs[0]..displs[0]+counts[0]]`, rank 1's contribution
-    /// occupies `recv[displs[1]..displs[1]+counts[1]]`, and so on.
-    ///
-    /// This is the most performance-critical method in the trait. It is called
-    /// twice per iteration: once after the forward pass to distribute trial
-    /// points (~206 MB at production scale) and once per backward stage to
-    /// synchronize new cuts (~3.2 MB per stage, ~381 MB across 119 stages).
+    /// Each rank contributes its `send` buffer; afterwards `recv` is populated in
+    /// rank order, rank `r`'s data at `recv[displs[r]..displs[r]+counts[r]]`.
     ///
     /// # Preconditions
     ///
@@ -173,12 +111,6 @@ pub trait Communicator: Send + Sync {
     /// Returns [`crate::CommError::InvalidBufferSize`] if any buffer-size precondition
     /// is violated. Returns [`crate::CommError::CollectiveFailed`] if the underlying
     /// MPI operation fails. On error, the contents of `recv` are unspecified.
-    ///
-    /// # Thread safety
-    ///
-    /// Takes `&self`. Collective operations must not be called concurrently on
-    /// the same communicator from multiple threads; the calling algorithm serializes
-    /// all collective calls.
     fn allgatherv<T: CommData>(
         &self,
         send: &[T],
@@ -187,23 +119,8 @@ pub trait Communicator: Send + Sync {
         displs: &[usize],
     ) -> Result<(), crate::CommError>;
 
-    /// Reduce data from all ranks using the specified operation, with the
-    /// result available on all ranks.
-    ///
-    /// The reduction is applied element-wise: `recv[i]` receives
-    /// `op(send_0[i], send_1[i], ..., send_{R-1}[i])` for all `i`. After the
-    /// call, all ranks have identical `recv` contents.
-    ///
-    /// This operation is used for scalar reductions: convergence bound
-    /// statistics during training and min/max cost aggregation during
-    /// simulation. It is NOT used for forward-pass scenario exchange
-    /// (which uses [`allgatherv`](Communicator::allgatherv)).
-    ///
-    /// During training, two calls are issued per iteration: one with
-    /// [`crate::ReduceOp::Min`] for the lower bound and one with
-    /// [`crate::ReduceOp::Sum`] for the remaining UB statistics. The payload
-    /// is minimal (four `f64` scalars = 32 bytes) but is on the critical
-    /// path for convergence checking.
+    /// Reduce data from all ranks element-wise (`recv[i] = op(send_0[i], ...,
+    /// send_{R-1}[i])`), with the result available identically on all ranks.
     ///
     /// # Preconditions
     ///
@@ -233,10 +150,6 @@ pub trait Communicator: Send + Sync {
     /// Returns [`crate::CommError::InvalidBufferSize`] if `send.len() != recv.len()`.
     /// Returns [`crate::CommError::CollectiveFailed`] if the underlying MPI operation
     /// fails. On error, the contents of `recv` are unspecified.
-    ///
-    /// # Thread safety
-    ///
-    /// Same as [`allgatherv`](Communicator::allgatherv).
     fn allreduce<T: CommData>(
         &self,
         send: &[T],
@@ -244,16 +157,9 @@ pub trait Communicator: Send + Sync {
         op: crate::ReduceOp,
     ) -> Result<(), crate::CommError>;
 
-    /// Broadcast data from `root` rank to all other ranks.
-    ///
-    /// On the root rank, `buf` contains the data to broadcast. On all other
-    /// ranks, `buf` is overwritten with the data from the root rank. After the
-    /// call, all ranks have identical contents in `buf`.
-    ///
-    /// Broadcast is used only during initialization (configuration data, case
-    /// data serialized via `postcard`) and is not on the per-iteration hot path.
-    /// It is guaranteed to produce identical results on all ranks regardless of
-    /// backend — the output is uniquely determined by the root rank's input buffer.
+    /// Broadcast `buf` from `root` to all other ranks, which overwrite their
+    /// `buf` with it; afterwards all ranks hold identical contents, uniquely
+    /// determined by the root's input regardless of backend.
     ///
     /// # Preconditions
     ///
@@ -275,22 +181,11 @@ pub trait Communicator: Send + Sync {
     /// [`crate::CommError::CollectiveFailed`] if the underlying MPI operation fails.
     /// On error, `buf` on non-root ranks may be partially overwritten; the root
     /// rank's `buf` is unchanged.
-    ///
-    /// # Thread safety
-    ///
-    /// Same as [`allgatherv`](Communicator::allgatherv). Broadcast is called
-    /// during single-threaded initialization before any parallel regions are entered.
     fn broadcast<T: CommData>(&self, buf: &mut [T], root: usize) -> Result<(), crate::CommError>;
 
-    /// Block until all ranks have called barrier.
+    /// Block until all ranks have called barrier. Exchanges no user data.
     ///
-    /// Used only for checkpoint synchronization — not during normal iteration
-    /// execution. Per-stage synchronization in the backward pass is achieved
-    /// implicitly through the `allgatherv` calls.
-    ///
-    /// **Every rank in the communicator must call `barrier`.** Failure to do so
-    /// results in a deadlock. The operation exchanges no user data: it is a
-    /// pure synchronization point.
+    /// **Every rank in the communicator must call `barrier`** or it deadlocks.
     ///
     /// # Preconditions
     ///
@@ -310,104 +205,38 @@ pub trait Communicator: Send + Sync {
     /// Returns [`crate::CommError::CollectiveFailed`] if the underlying MPI barrier
     /// fails. In practice the only failure mode is a process crash, detected
     /// as a communication timeout by the MPI runtime.
-    ///
-    /// # Thread safety
-    ///
-    /// Same as [`allgatherv`](Communicator::allgatherv).
     fn barrier(&self) -> Result<(), crate::CommError>;
 
-    /// Return the rank index of the calling process.
+    /// Return the rank index of the calling process, in `0..size()`.
     ///
-    /// Ranks are numbered `0..size()`. This value is fixed at communicator
-    /// initialization and never changes. Implementations must cache the value
-    /// at construction time — `rank()` is called frequently per iteration for
-    /// distribution arithmetic, logging, and row-slot computation.
-    ///
-    /// # Postconditions
-    ///
-    /// | Condition | Description |
-    /// |-----------|-------------|
-    /// | In range | The returned value is in `0..self.size()` |
-    /// | Unique | No two ranks in the same communicator return the same value |
-    /// | Constant | The value never changes after initialization |
-    ///
-    /// This method is infallible — it returns `usize` directly, not `Result`.
-    ///
-    /// # Thread safety
-    ///
-    /// Safe to call concurrently from multiple threads. The cached value is
-    /// read-only after initialization.
+    /// Implementations must cache this at construction — it is called frequently
+    /// on the hot path. The value never changes after initialization and is
+    /// unique per rank, so concurrent reads are safe.
     fn rank(&self) -> usize;
 
-    /// Return the total number of ranks in the communicator.
+    /// Return the total number of ranks (at least 1; identical on every rank).
     ///
-    /// This value is fixed at communicator initialization and never changes.
-    /// Implementations must cache the value at construction time — `size()` is
-    /// called frequently per iteration for distribution arithmetic, displacement
-    /// computation, and statistics aggregation.
-    ///
-    /// # Postconditions
-    ///
-    /// | Condition | Description |
-    /// |-----------|-------------|
-    /// | Positive | The returned value is at least 1 (single-process mode) |
-    /// | Consistent | All ranks in the communicator return the same value |
-    /// | Constant | The value never changes after initialization |
-    ///
-    /// This method is infallible — it returns `usize` directly, not `Result`.
-    ///
-    /// # Thread safety
-    ///
-    /// Safe to call concurrently from multiple threads. The cached value is
-    /// read-only after initialization.
+    /// Implementations must cache this at construction — it is called frequently
+    /// on the hot path. The value never changes after initialization, so
+    /// concurrent reads are safe.
     fn size(&self) -> usize;
 
-    /// Abort all ranks in the communicator.
+    /// Terminate every process in the communicator with `error_code` (`MPI_Abort`,
+    /// or [`std::process::exit`] on the local backend). **Never returns.**
     ///
-    /// Terminates every process in the communicator with the given
-    /// `error_code`. On MPI backends this calls `MPI_Abort`; on the local
-    /// backend it calls [`std::process::exit`].
-    ///
-    /// This method **never returns**. It should be called only when a
-    /// non-recoverable error makes continued execution impossible, and the
-    /// error cannot be coordinated through normal collective operations
-    /// (e.g., an asymmetric failure where some ranks succeed and others fail).
+    /// Use only for a non-recoverable error that cannot be coordinated through
+    /// normal collectives (e.g. an asymmetric failure across ranks).
     fn abort(&self, error_code: i32) -> !;
 }
 
 /// Object-safe sub-trait of [`Communicator`] for intra-node initialization
-/// coordination.
+/// coordination. Only available with the `shared-memory` Cargo feature.
 ///
-/// Only available with the `shared-memory` Cargo feature.
-///
-/// # Design rationale
-///
-/// [`Communicator`] is **intentionally not object-safe** — it carries generic
-/// methods (`allgatherv<T>`, `allreduce<T>`, `broadcast<T>`) that require static
-/// dispatch for hot-path performance. This prevents `Box<dyn Communicator>`.
-///
-/// `SharedMemoryProvider::split_local` returns an intra-node communicator that
-/// is used only during initialization (leader/follower role assignment, distributed
-/// region population counting). This is an inherently dynamic context: the caller
-/// does not know the concrete backend type at compile time, and the operation is
-/// far off the hot path. Dynamic dispatch is the correct trade-off here.
-///
-/// `LocalCommunicator` solves the tension by exposing only the three non-generic
-/// methods that intra-node setup code actually needs:
-/// - [`rank`](LocalCommunicator::rank) — local rank within the intra-node group
-/// - [`size`](LocalCommunicator::size) — number of ranks sharing this node
-/// - [`barrier`](LocalCommunicator::barrier) — synchronization fence for
-///   region population phases
-///
-/// The separation is intentional per spec (communicator-trait.md §4.5):
-/// `SharedMemoryProvider` is orthogonal to `Communicator` and backends implement
-/// them independently. `LocalCommunicator` is the bridge that lets
-/// `split_local` return a trait object without compromising the zero-cost
-/// static dispatch of the hot-path `Communicator` trait.
-///
-/// # Thread safety
-///
-/// The trait requires `Send + Sync`, matching the `Communicator` supertrait bounds.
+/// `Communicator` is not object-safe (its generic methods need static dispatch),
+/// but `split_local` returns an init-only intra-node communicator where dynamic
+/// dispatch is fine. `LocalCommunicator` exposes only the three non-generic
+/// methods (`rank`, `size`, `barrier`) that lets `split_local` return a trait
+/// object without compromising the hot-path trait (spec communicator-trait.md §4.5).
 ///
 /// # Example
 ///
@@ -420,53 +249,14 @@ pub trait Communicator: Send + Sync {
 /// ```
 #[cfg(feature = "shared-memory")]
 pub trait LocalCommunicator: Send + Sync {
-    /// Return the rank index of the calling process within the intra-node
-    /// communicator.
-    ///
-    /// Lifecycle phase: **allocation** — called once during startup to determine
-    /// leader/follower roles before any shared regions are created.
-    ///
-    /// Ranks are numbered `0..size()`. The leader for shared memory operations
-    /// is always local rank 0.
-    ///
-    /// # Postconditions
-    ///
-    /// | Condition | Description |
-    /// |-----------|-------------|
-    /// | In range | The returned value is in `0..self.size()` |
-    /// | Constant | The value never changes after initialization |
-    ///
-    /// This method is infallible — it returns `usize` directly, not `Result`.
+    /// Local rank within the intra-node communicator, in `0..size()`; the shared
+    /// memory leader is always local rank 0.
     fn rank(&self) -> usize;
 
-    /// Return the total number of ranks in the intra-node communicator.
-    ///
-    /// Lifecycle phase: **allocation** — used to partition population work
-    /// across co-located ranks before shared regions are created.
-    ///
-    /// For a `HeapFallback`, this always returns `1`. For a true shared memory
-    /// backend (MPI, POSIX shm), this returns the number of MPI ranks on the
-    /// same physical node.
-    ///
-    /// # Postconditions
-    ///
-    /// | Condition | Description |
-    /// |-----------|-------------|
-    /// | Positive | The returned value is at least 1 |
-    /// | Constant | The value never changes after initialization |
-    ///
-    /// This method is infallible — it returns `usize` directly, not `Result`.
+    /// Number of ranks sharing this node (`1` for `HeapFallback`).
     fn size(&self) -> usize;
 
-    /// Block until all intra-node ranks have called barrier.
-    ///
-    /// Lifecycle phase: **synchronization** — called after the leader writes
-    /// shared region data and calls `SharedRegion::fence()`, to ensure all
-    /// co-located ranks have completed their population step before any rank
-    /// transitions to **read-only access**.
-    ///
-    /// Every rank in the intra-node communicator must call `barrier`.
-    /// Failure to do so results in a deadlock.
+    /// Block until all intra-node ranks have called barrier, or it deadlocks.
     ///
     /// # Errors
     ///
@@ -475,12 +265,9 @@ pub trait LocalCommunicator: Send + Sync {
     fn barrier(&self) -> Result<(), crate::CommError>;
 }
 
-/// Concrete enum returned by [`SharedMemoryProvider::split_local`].
-///
-/// Provides enum dispatch over the closed set of intra-node communicator
-/// backends, replacing the former `Box<dyn LocalCommunicator>` return type.
-/// Adding a new variant here requires updating all `match` arms in the
-/// `LocalCommunicator` impl below.
+/// Enum dispatch over the closed set of intra-node communicator backends,
+/// returned by [`SharedMemoryProvider::split_local`]. A new variant requires
+/// updating all `match` arms in the `LocalCommunicator` impl below.
 ///
 /// Only available with the `shared-memory` Cargo feature.
 #[cfg(feature = "shared-memory")]
@@ -521,56 +308,17 @@ impl LocalCommunicator for LocalCommKind {
 
 /// Handle to a shared memory region holding `count` elements of type `T`.
 ///
-/// The region follows a strict **three-phase lifecycle**:
-///
-/// ## Step 1: Allocation
-///
-/// Created via [`SharedMemoryProvider::create_shared_region`] during the
-/// solver startup phase. The leader rank (local rank 0 in the intra-node
-/// communicator) allocates the full backing region. Follower ranks (local
-/// rank > 0) allocate size 0 and receive a handle into the leader's memory.
-///
-/// For `HeapFallback` backends, every rank allocates its own `Vec<T>` of
-/// `count` elements — no memory is shared, but the API is identical.
-///
-/// ## Step 2: Population (write + fence)
-///
-/// The leader writes data via [`as_mut_slice`](SharedRegion::as_mut_slice),
-/// then all ranks call [`fence`](SharedRegion::fence) to publish writes and
-/// acquire visibility. Followers must not read until `fence()` returns `Ok`.
-///
-/// ## Step 3: Read-only access
-///
-/// After the fence, all ranks read via [`as_slice`](SharedRegion::as_slice).
-/// No further writes occur during the training loop.
-///
-/// ## Deallocation (RAII)
-///
-/// When the handle is dropped:
-///
-/// | Backend      | Drop behavior |
-/// |--------------|---------------|
-/// | ferrompi     | Calls `MPI_Win_free`, releasing the MPI window |
-/// | `HeapFallback` | Drops the inner `Vec<T>` |
-///
-/// All ranks sharing a region must drop their handles before MPI finalization.
-///
-/// # Safety model
-///
-/// Trait methods use safe Rust signatures. Any `unsafe` for raw pointer
-/// dereference into MPI shared windows is encapsulated within backend
-/// implementations, not exposed here.
+/// Three-phase lifecycle: the leader (local rank 0) allocates and writes via
+/// [`as_mut_slice`](SharedRegion::as_mut_slice), all ranks call
+/// [`fence`](SharedRegion::fence) to publish, then all read via
+/// [`as_slice`](SharedRegion::as_slice). **Followers must not read until
+/// `fence()` returns `Ok`.** On `HeapFallback` every rank is its own leader with
+/// a private `Vec<T>`. Drop releases the backing resource (ferrompi:
+/// `MPI_Win_free`), so all handles must drop before MPI finalization.
 #[cfg(feature = "shared-memory")]
 pub trait SharedRegion<T: CommData>: Send + Sync {
-    /// Return a shared reference to the region contents as a contiguous slice.
-    ///
-    /// Lifecycle phase: **read-only access** — safe to call after `fence()`
-    /// has returned `Ok` on all ranks.
-    ///
-    /// Both the leader and followers can call this method. For true shared
-    /// memory backends, the slice points directly into the shared region
-    /// (zero-copy across ranks). For `HeapFallback`, it points into the
-    /// local `Vec<T>`.
+    /// Return the region contents as a contiguous slice of length `count`,
+    /// zero-copy on true shared memory backends.
     ///
     /// # Preconditions
     ///
@@ -578,24 +326,12 @@ pub trait SharedRegion<T: CommData>: Send + Sync {
     /// |-----------|-------------|
     /// | Fence completed | `fence()` must have returned `Ok` before any follower reads |
     /// | No concurrent writes | The region must be in its read-only phase |
-    ///
-    /// # Postconditions
-    ///
-    /// | Condition | Description |
-    /// |-----------|-------------|
-    /// | Length | The returned slice has length equal to `count` from `create_shared_region` |
-    /// | Zero-copy | For true shared memory backends, points directly into the shared region |
     fn as_slice(&self) -> &[T];
 
-    /// Return a mutable reference to the region contents as a contiguous slice.
-    ///
-    /// Lifecycle phase: **population** — called by the leader to write data
-    /// before calling `fence()`.
-    ///
-    /// Only the leader rank (local rank 0) should call this method. On follower
-    /// ranks with a true shared memory backend, the returned slice has length 0
-    /// because followers allocated size 0. On `HeapFallback`, every rank is a
-    /// leader and the full mutable slice is returned.
+    /// Return the region contents as a mutable slice for the leader to populate
+    /// before `fence()`. Length `count` on the leader, 0 on followers (true
+    /// shared memory backends); writes are invisible to other ranks until
+    /// `fence()`.
     ///
     /// # Preconditions
     ///
@@ -603,28 +339,11 @@ pub trait SharedRegion<T: CommData>: Send + Sync {
     /// |-----------|-------------|
     /// | Leader only | The caller must be the leader (`SharedMemoryProvider::is_leader()` returns `true`), or the backend must be `HeapFallback` |
     /// | Population phase | No concurrent reads may be in progress on any rank |
-    ///
-    /// # Postconditions
-    ///
-    /// | Condition | Description |
-    /// |-----------|-------------|
-    /// | Length | Returns a slice of `count` elements on the leader; length 0 on followers (true shared memory backends) |
-    /// | Visibility | Writes are not visible to other ranks until `fence()` is called |
     fn as_mut_slice(&mut self) -> &mut [T];
 
-    /// Execute a memory fence to publish leader writes to all co-located ranks.
-    ///
-    /// Lifecycle phase: **synchronization** — must be called by all ranks
-    /// after the leader finishes writing, before any follower calls `as_slice()`.
-    ///
-    /// This is a collective operation: all ranks sharing the region must call
-    /// `fence()`. After `fence()` returns `Ok`, followers can safely read via
-    /// `as_slice()`.
-    ///
-    /// | Backend      | Behavior |
-    /// |--------------|----------|
-    /// | ferrompi     | Maps to `MPI_Win_fence` on the underlying MPI window |
-    /// | `HeapFallback` | No-op — returns `Ok(())` immediately |
+    /// Publish leader writes to all co-located ranks (`MPI_Win_fence`; no-op for
+    /// `HeapFallback`). Collective — all ranks sharing the region must call it,
+    /// and followers may read via `as_slice()` only after it returns `Ok`.
     ///
     /// # Errors
     ///
@@ -636,73 +355,28 @@ pub trait SharedRegion<T: CommData>: Send + Sync {
 
 /// Backend abstraction for intra-node shared memory region management.
 ///
-/// `SharedMemoryProvider` is a **companion to [`Communicator`]**, not a
-/// supertrait of it. A backend type may implement both traits independently.
-/// When both traits are needed, use combined bounds:
+/// A **companion to [`Communicator`]**, not a supertrait — a backend implements
+/// each independently, so callers needing only collectives bound `C: Communicator`
+/// and those needing shared memory bound `C: Communicator + SharedMemoryProvider`:
 ///
 /// ```rust
 /// # use cobre_comm::{Communicator, SharedMemoryProvider};
 /// fn train<C: Communicator + SharedMemoryProvider>(comm: &C) {
-///     // comm.allgatherv(...) — collective communication
-///     // comm.create_shared_region::<f64>(n) — shared memory allocation
 /// }
 /// ```
 ///
-/// # Minimal viable simplification
-///
-/// For the minimal viable implementation, the training entry point uses
-/// `C: Communicator` only — the `SharedMemoryProvider` bound is **not**
-/// part of the `train()` constraint. `HeapFallback` semantics apply
-/// uniformly: each rank holds its own per-process `Vec<T>` copy. The
-/// shared memory path is activated post-profiling when memory pressure
-/// warrants it.
-///
-/// # Separate trait rationale
-///
-/// Not all backends support true shared memory. Keeping `SharedMemoryProvider`
-/// separate from `Communicator` preserves flexibility:
-/// - `LocalComm` / `TcpComm`: implement with `HeapFallback` (no true sharing)
-/// - `FerrompiComm` / `ShmComm`: implement with MPI windows or POSIX shm
-///
-/// Functions that only need collective communication use `C: Communicator`;
-/// functions that additionally need shared memory use
-/// `C: Communicator + SharedMemoryProvider`. No runtime feature detection needed.
-///
-/// # Thread safety
-///
-/// The trait requires `Send + Sync`. `create_shared_region` and `split_local`
-/// are initialization-only operations called before any parallel regions are
-/// entered.
+/// `Send + Sync`; `create_shared_region` and `split_local` are initialization-only,
+/// called before any parallel region.
 #[cfg(feature = "shared-memory")]
 pub trait SharedMemoryProvider: Send + Sync {
-    /// The shared memory region handle type.
-    ///
-    /// Each backend provides its own concrete region type:
-    ///
-    /// | Backend      | Region type |
-    /// |--------------|-------------|
-    /// | ferrompi     | Wraps `SharedWindow<T>` (MPI window) |
-    /// | `HeapFallback` | Wraps `Vec<T>` (regular heap allocation) |
-    ///
-    /// The type must implement [`SharedRegion<T>`] for all `T: CommData`.
+    /// The shared memory region handle type, one concrete type per backend
+    /// (ferrompi wraps `SharedWindow<T>`, `HeapFallback` wraps `Vec<T>`).
     type Region<T: CommData>: SharedRegion<T>;
 
-    /// Create a shared memory region capable of holding `count` elements of type `T`.
+    /// Create a shared memory region for `count` elements of `T`, at startup only.
     ///
-    /// Lifecycle phase: **allocation** — must be called during solver startup,
-    /// never during the training hot path.
-    ///
-    /// On a backend with true shared memory, the leader rank allocates the full
-    /// backing region (`count` elements) and follower ranks allocate size 0,
-    /// receiving a handle into the leader's memory. On `HeapFallback`, every rank
-    /// allocates its own `Vec<T>` of `count` elements.
-    ///
-    /// # Postconditions
-    ///
-    /// | Condition | Description |
-    /// |-----------|-------------|
-    /// | Ready for population | The returned region is in the allocation step; the leader may call `as_mut_slice()` |
-    /// | RAII | Dropping the returned region releases the backing resource |
+    /// On true shared memory, the leader allocates `count` elements and followers
+    /// allocate size 0; on `HeapFallback` every rank allocates its own `Vec<T>`.
     ///
     /// # Errors
     ///
@@ -716,32 +390,10 @@ pub trait SharedMemoryProvider: Send + Sync {
         count: usize,
     ) -> Result<Self::Region<T>, crate::CommError>;
 
-    /// Create an intra-node communicator containing only the ranks that share
-    /// the same physical node as the calling rank.
-    ///
-    /// Lifecycle phase: **allocation** — called once during startup to determine
-    /// leader/follower roles and partition region population work across co-located
-    /// ranks. Corresponds to `comm.split_shared()` in the ferrompi API
-    /// (spec: communicator-trait.md §4.3, hybrid-parallelism.md §6 Step 3).
-    ///
-    /// # Object-safety design note
-    ///
-    /// This method returns `Box<dyn LocalCommunicator>` rather than
-    /// `Box<dyn Communicator>`. [`Communicator`] is intentionally not
-    /// object-safe (it carries generic methods for hot-path collective operations).
-    /// [`LocalCommunicator`] is a purpose-built object-safe sub-trait that exposes
-    /// only the three methods needed for intra-node initialization coordination:
-    /// `rank()`, `size()`, and `barrier()`. This is the correct trade-off because
-    /// `split_local` is an initialization-only operation where dynamic dispatch
-    /// imposes negligible overhead, and the intra-node communicator is never used
-    /// for hot-path generic collectives.
-    ///
-    /// # Postconditions
-    ///
-    /// | Condition | Description |
-    /// |-----------|-------------|
-    /// | Leader is rank 0 | The rank with `local_comm.rank() == 0` is the leader for shared memory allocation |
-    /// | `HeapFallback` | Returns a communicator with `size() == 1` and `rank() == 0` |
+    /// Create an intra-node communicator of the ranks sharing the calling rank's
+    /// node, at startup only (ferrompi `comm.split_shared()`; spec
+    /// communicator-trait.md §4.3). Local rank 0 is the shared memory leader;
+    /// `HeapFallback` returns `size() == 1`, `rank() == 0`.
     ///
     /// # Errors
     ///
@@ -749,49 +401,19 @@ pub trait SharedMemoryProvider: Send + Sync {
     /// communicator split operation fails (e.g., MPI communicator split failure).
     fn split_local(&self) -> Result<LocalCommKind, crate::CommError>;
 
-    /// Return whether the calling rank is the leader for shared memory operations
-    /// on its node.
-    ///
-    /// Lifecycle phase: **allocation and population** — checked before
-    /// `create_shared_region` to determine allocation size, and before
-    /// `as_mut_slice()` to determine write permission.
-    ///
-    /// The leader is the rank with local rank 0 within the communicator returned
-    /// by `split_local()`. The leader:
-    /// - Allocates the full shared region (`count` elements)
-    /// - Writes data via `as_mut_slice()`
-    /// - Calls `fence()` to publish writes
-    ///
-    /// Followers (local rank > 0) allocate size 0, must not write, and read
-    /// via `as_slice()` after `fence()` returns.
-    ///
-    /// On `HeapFallback`, this always returns `true` because every rank is its
-    /// own leader (no memory is shared, every rank populates its own copy).
-    ///
-    /// # Postconditions
-    ///
-    /// | Condition | Description |
-    /// |-----------|-------------|
-    /// | Constant | The value never changes after initialization |
-    ///
-    /// This method is infallible — it returns `bool` directly, not `Result`.
+    /// Return whether the calling rank is its node's shared memory leader (local
+    /// rank 0 from `split_local()`); only the leader may write via
+    /// `as_mut_slice()`. Always `true` on `HeapFallback` (every rank owns its copy).
     fn is_leader(&self) -> bool;
 }
 
-/// Trait for backends that can report their execution topology.
+/// Trait for backends that can report their execution topology, separate from
+/// [`Communicator`] because not all backends expose one.
 ///
-/// Implementors provide access to an [`ExecutionTopology`](crate::topology::ExecutionTopology)
-/// gathered at communicator initialization. The topology is queried
-/// non-collectively (no MPI calls) and is allocation-free after construction.
-///
-/// This trait is separate from [`Communicator`] because not all backends expose
-/// topology information. It is implemented by backends that have the data
-/// (`FerrompiBackend`, `CommBackend`) and by `LocalBackend` with a single-host fallback.
+/// The [`ExecutionTopology`](crate::topology::ExecutionTopology) is gathered at
+/// initialization and queried non-collectively, allocation-free.
 pub trait TopologyProvider: Send + Sync {
-    /// Return a reference to the cached execution topology.
-    ///
-    /// The topology is gathered once during backend initialization.
-    /// This method is non-collective and may be called from any thread.
+    /// Return the cached execution topology (non-collective, any thread).
     #[must_use]
     fn topology(&self) -> &crate::topology::ExecutionTopology;
 }

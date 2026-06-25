@@ -1,133 +1,59 @@
 //! MPI communication backend powered by [ferrompi](https://github.com/cobre-rs/ferrompi).
 //!
 //! `FerrompiBackend` implements [`Communicator`](crate::Communicator) using
-//! MPI 4.x collective operations via the `ferrompi` crate. It is only available
-//! when the `mpi` Cargo feature is enabled.
-//!
-//! Key characteristics:
-//!
-//! - Wraps `ferrompi::Communicator` for rank/size queries and
-//!   collective operations.
-//! - Uses native blocking MPI collectives (`MPI_Allreduce`,
-//!   `MPI_Allgatherv`, `MPI_Bcast`); the bitwise-OR allreduce
-//!   used to synchronise the active-window bitmap is dispatched
-//!   directly to `MPI_Allreduce` with `MPI_BOR` (ferrompi 0.4.0).
-//! - Manages the MPI environment lifecycle via the `Mpi` RAII
-//!   guard so `MPI_Finalize` runs only after all communicators
-//!   are freed.
-//!
-//! # Feature gate
-//!
-//! This module is compiled only when `features = ["mpi"]` is specified in
-//! `Cargo.toml` (which activates the `ferrompi` optional dependency).
+//! MPI 4.x blocking collectives via the `ferrompi` crate, managing the MPI
+//! environment lifecycle through an `Mpi` RAII guard. Only available with the
+//! `mpi` Cargo feature.
 
 use crate::BackendError;
 
-/// MPI communication backend wrapping ferrompi v0.4.
+/// MPI communication backend wrapping ferrompi.
 ///
-/// Holds the MPI environment handle (`Mpi`), the world communicator, and the
-/// intra-node shared communicator. Field declaration order is significant:
-/// Rust drops fields in reverse declaration order, so `mpi` is declared first
-/// to ensure it is dropped last — after the `Communicator` handles are freed —
-/// which satisfies the MPI requirement that `MPI_Finalize` is called only after
-/// all communicators have been freed.
+/// `Send + Sync` (see the SAFETY note on the `unsafe impl` blocks below).
+/// Construct with [`FerrompiBackend::new`].
 ///
-/// # Thread safety
-///
-/// `FerrompiBackend` is `Send + Sync`. See the safety note on the `unsafe impl`
-/// blocks below for the full rationale.
-///
-/// # Initialization
-///
-/// Use [`FerrompiBackend::new`] to initialize MPI and obtain a ready-to-use
-/// backend. `new` calls `MPI_Init_thread` with `ThreadLevel::Funneled`, matching
-/// the Cobre training loop's model where only the main thread makes MPI calls.
-///
-/// # Drop
-///
-/// When `FerrompiBackend` is dropped:
-/// 1. `shared` communicator is freed.
-/// 2. `world` communicator handle goes out of scope.
-/// 3. `mpi` RAII guard calls `MPI_Finalize`.
+/// Field declaration order is load-bearing: Rust drops fields in reverse order,
+/// so `mpi` is declared first to be dropped last — `MPI_Finalize` must run only
+/// after all communicator handles are freed. Reordering finalizes prematurely.
 pub struct FerrompiBackend {
-    /// MPI environment RAII guard. Declared first so it is dropped last
-    /// (Rust drops in reverse field order), ensuring `MPI_Finalize` is called
-    /// only after all communicator handles have been released.
-    ///
-    /// This field is never read after construction — it is held solely for its
-    /// `Drop` side-effect. The suppression is intentional: removing the field
-    /// would cause `MPI_Finalize` to be called prematurely.
-    // Rationale: this field is held exclusively for its `Drop` side-effect;
-    // removing it would cause the MPI environment to be finalised prematurely,
-    // before all communicator handles derived from it are released.
+    /// MPI environment RAII guard; held solely for its `Drop` side-effect.
+    // Rationale: removing this field finalises MPI before the communicator
+    // handles derived from it are released (see the field-order note above).
     #[allow(dead_code)]
     mpi: ferrompi::Mpi,
 
-    /// The `MPI_COMM_WORLD` communicator handle.
-    ///
-    /// Used for all inter-node collective operations (allreduce, allgatherv,
-    /// broadcast, barrier) during distributed execution.
+    /// The `MPI_COMM_WORLD` communicator handle for inter-node collectives.
     world: ferrompi::Communicator,
 
-    /// Optional intra-node communicator obtained from `MPI_Comm_split_type`.
-    ///
-    /// Present only with the `shared-memory` feature. Used by
-    /// `SharedMemoryProvider::is_leader` to determine the intra-node leader rank.
-    /// When `shared-memory` is disabled this field is absent and the split is
-    /// never performed during initialization.
+    /// Intra-node communicator (`MPI_Comm_split_type`) for `is_leader`; present
+    /// only with the `shared-memory` feature.
     #[cfg(feature = "shared-memory")]
     shared: Option<ferrompi::Communicator>,
 
-    /// Cached world rank (0-based).
-    ///
-    /// Cached at construction to avoid repeated FFI calls on the hot path.
-    /// Rank is invariant for the lifetime of the backend.
+    /// World rank (0-based), cached at construction to avoid hot-path FFI calls.
     rank: usize,
 
-    /// Cached world size (total number of MPI ranks).
-    ///
-    /// Cached at construction for the same reason as `rank`.
+    /// World size (total MPI ranks), cached at construction.
     size: usize,
 
-    /// Cached execution topology gathered during initialization.
-    ///
-    /// Collected once via the collective `world.topology(&mpi)` call during
-    /// `FerrompiBackend::new` and cached here. All subsequent queries are
-    /// non-collective and allocation-free.
+    /// Execution topology, gathered once during `new` and cached.
     topology: crate::ExecutionTopology,
 }
 
-// SAFETY: ferrompi::Mpi is !Send + !Sync because PhantomData<*const ()> opts out
-// of both markers. This restriction exists to ensure that MPI_Init and MPI_Finalize
-// are called on the same thread. FerrompiBackend preserves this invariant:
-//
-//   1. `FerrompiBackend::new` constructs `Mpi` on the calling thread.
-//   2. `FerrompiBackend` is the sole owner of `Mpi` and holds it until drop.
-//   3. Rust's single-ownership model prevents any other thread from calling
-//      `MPI_Finalize` (via `Mpi::drop`) concurrently.
-//   4. The Cobre training loop uses ThreadLevel::Funneled, guaranteeing that all
-//      MPI calls are made from the main thread — the same thread that constructed
-//      this struct.
-//
-// All actual collective communication goes through `ferrompi::Communicator`, which
-// is already `Send + Sync` (it wraps an integer handle into a C-side table).
-//
-// Therefore it is sound to implement Send and Sync for FerrompiBackend.
+// SAFETY: ferrompi::Mpi is !Send + !Sync to force MPI_Init/MPI_Finalize onto the
+// same thread. FerrompiBackend upholds that invariant:
+//   1. `new` constructs `Mpi` on the calling thread.
+//   2. The backend is the sole owner of `Mpi` until drop, so single-ownership
+//      bars any other thread from calling `MPI_Finalize` (via `Mpi::drop`).
+//   3. The training loop is ThreadLevel::Funneled — all MPI calls come from the
+//      same (main) thread that constructed this struct.
+// All collective communication goes through `ferrompi::Communicator`, which is
+// already Send + Sync (an integer handle into a C-side table).
 unsafe impl Send for FerrompiBackend {}
 unsafe impl Sync for FerrompiBackend {}
 
 impl FerrompiBackend {
-    /// Initialize MPI and construct a `FerrompiBackend`.
-    ///
-    /// Initialization sequence:
-    ///
-    /// 1. Initialize MPI with `ThreadLevel::Funneled` via `Mpi::init_thread`.
-    /// 2. Obtain the world communicator and cache rank and size.
-    /// 3. Gather and cache the execution topology via the collective `world.topology(&mpi)`.
-    ///
-    /// When the `shared-memory` feature is enabled, an additional step occurs
-    /// between 2 and 3: create the intra-node shared communicator via
-    /// `world.split_shared()`.
+    /// Initialize MPI (`ThreadLevel::Funneled`) and construct a `FerrompiBackend`.
     ///
     /// # Errors
     ///
@@ -157,8 +83,7 @@ impl FerrompiBackend {
                 source: Box::new(e),
             })?;
 
-        // Collective: all ranks gather topology. Must be called before returning
-        // so all ranks participate (collective operation).
+        // Collective: every rank must reach this before returning.
         let ferrompi_topo =
             world
                 .topology(&mpi)
@@ -219,7 +144,6 @@ impl FerrompiBackend {
 fn sanitize_library_version(raw: &str) -> String {
     let first_line = raw.lines().next().unwrap_or(raw).trim();
 
-    // MPICH format: "MPICH Version:      4.3.2"
     if let Some(rest) = first_line.strip_prefix("MPICH Version:") {
         return format!("MPICH {}", rest.trim());
     }
@@ -247,31 +171,17 @@ fn convert_slurm_info(_topo: &ferrompi::TopologyInfo) -> Option<crate::SlurmJobI
 
 #[cfg(feature = "mpi")]
 impl crate::TopologyProvider for FerrompiBackend {
-    /// Returns the cached execution topology gathered during [`FerrompiBackend::new`].
-    ///
-    /// Non-collective and allocation-free. The topology was collected once via
-    /// `world.topology(&mpi)` during initialization.
+    /// Returns the cached execution topology (non-collective, allocation-free).
     fn topology(&self) -> &crate::ExecutionTopology {
         &self.topology
     }
 }
 
-/// Intra-node communicator wrapping a ferrompi shared communicator.
+/// Intra-node communicator wrapping a ferrompi shared communicator, returned by
+/// `FerrompiBackend::split_local` inside [`crate::traits::LocalCommKind::Ferrompi`].
 ///
-/// Implements [`crate::LocalCommunicator`] only (not full [`crate::Communicator`]).
-/// Returned by `FerrompiBackend::split_local` as the `Ferrompi` variant of
-/// [`crate::traits::LocalCommKind`].
-///
-/// Held by value inside the [`crate::traits::LocalCommKind::Ferrompi`] variant.
-/// Callers always interact with the enum, never with this type directly.
-///
+/// Implements [`crate::LocalCommunicator`] only, not full [`crate::Communicator`].
 /// Only available with the `shared-memory` Cargo feature.
-///
-/// # Thread safety
-///
-/// `FerrompiLocalComm` is `Send + Sync` because `ferrompi::Communicator` is
-/// already `Send + Sync` (it wraps an integer handle into a C-side table).
-/// No unsafe impl is needed.
 #[cfg(feature = "shared-memory")]
 pub struct FerrompiLocalComm(ferrompi::Communicator);
 
@@ -306,11 +216,8 @@ impl crate::traits::LocalCommunicator for FerrompiLocalComm {
 
 #[cfg(feature = "shared-memory")]
 impl crate::SharedMemoryProvider for FerrompiBackend {
-    /// Heap-fallback region type.
-    ///
-    /// Per spec SS4.7, true `MPI_Win` shared windows are deferred to post-profiling.
-    /// The minimal viable phase uses `HeapRegion<T>` on all ranks — each rank holds
-    /// its own `Vec<T>` copy with no memory shared across ranks.
+    /// Heap-fallback region type: every rank holds its own `Vec<T>`, no memory
+    /// shared across ranks (true `MPI_Win` windows deferred, spec SS4.7).
     type Region<T: crate::CommData> = crate::HeapRegion<T>;
 
     /// Allocate a `HeapRegion` with `count` zero-initialized elements.
@@ -328,12 +235,7 @@ impl crate::SharedMemoryProvider for FerrompiBackend {
 
     /// Create an intra-node communicator via `MPI_Comm_split_type SHARED`.
     ///
-    /// Calls `self.world.split_shared()` to obtain a communicator containing
-    /// only the ranks that share the same physical node as the calling rank,
-    /// then wraps it in the `Ferrompi` variant of [`crate::traits::LocalCommKind`].
-    ///
-    /// Each call to `split_local` issues a new `MPI_Comm_split_type` collective.
-    /// Callers should call this once during startup and cache the result.
+    /// Each call issues a fresh collective; call once at startup and cache.
     ///
     /// # Errors
     ///
@@ -345,32 +247,15 @@ impl crate::SharedMemoryProvider for FerrompiBackend {
             .map_err(|e| map_ferrompi_error(&e, "split_local"))
     }
 
-    /// Return whether the calling rank is the intra-node leader (local rank 0).
-    ///
-    /// Returns `self.shared.as_ref().map(|c| c.rank() == 0).unwrap_or(true)`.
-    /// When `shared` is `None` (should not occur for a fully initialized backend),
-    /// returns `true` as a safe default per spec SS3.1.
+    /// Return whether the calling rank is the intra-node leader (local rank 0);
+    /// defaults to `true` when `shared` is `None` (safe default, spec SS3.1).
     fn is_leader(&self) -> bool {
         self.shared.as_ref().is_none_or(|c| c.rank() == 0)
     }
 }
 
-/// Convert a `ferrompi::Error` to the most specific `CommError` variant.
-///
-/// Used by all [`crate::Communicator`] trait method implementations on
-/// [`FerrompiBackend`]. The mapping follows the error classification table in
-/// the spec (backend-ferrompi.md SS5.2):
-///
-/// | ferrompi variant              | `CommError` variant                                              |
-/// |-------------------------------|------------------------------------------------------------------|
-/// | `Error::Mpi { class: Comm }`  | `InvalidCommunicator`                                            |
-/// | `Error::Mpi { class: Root }`  | `InvalidRoot { root: 0, size: 0 }` (sentinel; message has detail)|
-/// | `Error::Mpi { class: Buffer \| Count }` | `InvalidBufferSize { expected: 0, actual: 0 }`          |
-/// | `Error::Mpi { class: _ }`     | `CollectiveFailed` with the MPI error code and message           |
-/// | `Error::InvalidBuffer`        | `InvalidBufferSize { expected: 0, actual: 0 }`                   |
-/// | `Error::AlreadyInitialized`   | `InvalidCommunicator`                                            |
-/// | `Error::NotSupported(_)`      | `CollectiveFailed { mpi_error_code: -1, .. }`                    |
-/// | `Error::Internal(_)`          | `CollectiveFailed { mpi_error_code: -1, .. }`                    |
+/// Convert a `ferrompi::Error` to the most specific `CommError` variant,
+/// following the classification in spec backend-ferrompi.md SS5.2.
 #[cfg(feature = "mpi")]
 fn map_ferrompi_error(e: &ferrompi::Error, operation: &'static str) -> crate::CommError {
     match e {
@@ -382,16 +267,14 @@ fn map_ferrompi_error(e: &ferrompi::Error, operation: &'static str) -> crate::Co
         } => match class {
             ferrompi::MpiErrorClass::Comm => crate::CommError::InvalidCommunicator,
             ferrompi::MpiErrorClass::Root => crate::CommError::InvalidRoot {
-                // ferrompi::Error does not carry root/size context; use sentinel
-                // values. The message string provides the diagnostic detail.
+                // Sentinels: ferrompi carries no root/size; detail is in the message.
                 root: 0,
                 size: 0,
             },
             ferrompi::MpiErrorClass::Buffer | ferrompi::MpiErrorClass::Count => {
                 crate::CommError::InvalidBufferSize {
                     operation,
-                    // ferrompi::Error does not carry expected/actual counts;
-                    // use sentinel values. The message string provides detail.
+                    // Sentinels: ferrompi carries no counts; detail is in the message.
                     expected: 0,
                     actual: 0,
                 }
@@ -408,7 +291,7 @@ fn map_ferrompi_error(e: &ferrompi::Error, operation: &'static str) -> crate::Co
             actual: 0,
         },
         ferrompi::Error::AlreadyInitialized => crate::CommError::InvalidCommunicator,
-        // NotSupported and Internal: no MPI error code available, use -1.
+        // NotSupported / Internal carry no MPI error code; use -1.
         _ => crate::CommError::CollectiveFailed {
             operation,
             mpi_error_code: -1,
@@ -430,15 +313,13 @@ fn map_reduce_op(op: crate::ReduceOp) -> ferrompi::ReduceOp {
     }
 }
 
-/// Convert a slice of `usize` values to a `Vec<i32>`.
-///
-/// Returns `Err(CommError::InvalidBufferSize)` if any value exceeds `i32::MAX`,
-/// because ferrompi's collective APIs use `i32` for counts and displacements.
+/// Convert a slice of `usize` to `Vec<i32>` (ferrompi collectives use `i32`
+/// counts/displacements).
 ///
 /// # Errors
 ///
 /// Returns [`crate::CommError::InvalidBufferSize`] if any element in `values`
-/// exceeds `i32::MAX` (2 147 483 647).
+/// exceeds `i32::MAX`.
 #[cfg(feature = "mpi")]
 fn to_i32_vec(values: &[usize], operation: &'static str) -> Result<Vec<i32>, crate::CommError> {
     values
@@ -549,8 +430,8 @@ impl crate::Communicator for FerrompiBackend {
                 size: self.size,
             });
         }
-        // root < self.size is guaranteed above; self.size fits in i32 because it
-        // was obtained from ferrompi::Communicator::size() which returns i32.
+        // root < self.size (checked above) and self.size came from a ferrompi i32,
+        // so the cast cannot truncate or wrap.
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let root_i32 = root as i32;
         self.world
