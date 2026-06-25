@@ -73,11 +73,8 @@ pub struct GenericConstraintBoundsRow {
     pub bound: f64,
 }
 
-/// Parse `constraints/generic_constraint_bounds.parquet` and return a sorted row table.
-///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(constraint_id, stage_id, block_id)`
-/// ascending. `None` block sorts before `Some(i)`.
+/// Parse `constraints/generic_constraint_bounds.parquet`, returning rows sorted by
+/// `(constraint_id, stage_id, block_id)` ascending (`None` block before `Some(i)`).
 ///
 /// # Errors
 ///
@@ -116,15 +113,12 @@ pub fn parse_generic_constraint_bounds(
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required columns ──────────────────────────────────────────────────
         let constraint_id_col = extract_required_int32(&batch, "constraint_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
         let bound_col = extract_required_float64(&batch, "bound", path)?;
 
-        // ── Optional column ───────────────────────────────────────────────────
         let block_id_col = extract_optional_int32(&batch, "block_id", path)?;
 
-        // ── Build rows with per-row validation ────────────────────────────────
         let n = batch.num_rows();
         let base_idx = rows.len();
         rows.reserve(n);
@@ -139,7 +133,6 @@ pub fn parse_generic_constraint_bounds(
                 .map(|col| col.value(i));
             let bound = bound_col.value(i);
 
-            // Validate bound: must be finite.
             if !bound.is_finite() {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -157,8 +150,7 @@ pub fn parse_generic_constraint_bounds(
         }
     }
 
-    // ── Sort by (constraint_id, stage_id, block_id) ascending ─────────────────
-    // None sorts before Some (null block = applies to all blocks comes first).
+    // None block (= applies to all blocks) sorts before Some.
     rows.sort_by(|a, b| {
         a.constraint_id
             .cmp(&b.constraint_id)

@@ -304,8 +304,7 @@ pub struct ContractBoundsRow {
 
 /// Validate that a present (non-null) optional float value is finite.
 ///
-/// Returns `SchemaError` when the value is NaN or infinite. The `file_label`
-/// is used in the field path: `"<file_label>[{row_idx}].<column>"`.
+/// Returns `SchemaError` when the value is NaN or infinite.
 fn validate_optional_finite(
     value: Option<f64>,
     file_label: &str,
@@ -325,10 +324,8 @@ fn validate_optional_finite(
     Ok(())
 }
 
-/// Parse `constraints/thermal_bounds.parquet` and return a sorted row table.
-///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(thermal_id, stage_id)` ascending.
+/// Parse `constraints/thermal_bounds.parquet`, returning rows sorted by
+/// `(thermal_id, stage_id)` ascending.
 ///
 /// # Errors
 ///
@@ -364,11 +361,9 @@ pub fn parse_thermal_bounds(path: &Path) -> Result<Vec<ThermalBoundsRow>, LoadEr
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required key columns ──────────────────────────────────────────────
         let thermal_id_col = extract_required_int32(&batch, "thermal_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
 
-        // ── Optional bound columns ────────────────────────────────────────────
         let min_gen_col = extract_optional_float64(&batch, "min_generation_mw", path)?;
         let max_gen_col = extract_optional_float64(&batch, "max_generation_mw", path)?;
         let cost_col = extract_optional_float64(&batch, "cost_per_mwh", path)?;
@@ -449,14 +444,12 @@ pub fn parse_thermal_bounds(path: &Path) -> Result<Vec<ThermalBoundsRow>, LoadEr
     Ok(rows)
 }
 
-/// Parse `constraints/hydro_bounds.parquet` and return a sorted row table.
+/// Parse `constraints/hydro_bounds.parquet`, returning rows sorted by
+/// `(hydro_id, stage_id)` ascending.
 ///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(hydro_id, stage_id)` ascending.
-///
-/// The Parquet file may contain any subset of the eleven optional bound columns.
-/// Columns absent from the file schema produce `None` in all rows (not a schema
-/// error — this is the intended sparse-override design).
+/// The file may contain any subset of the eleven optional bound columns; columns
+/// absent from the file schema produce `None` in all rows (the sparse-override design,
+/// not a schema error).
 ///
 /// # Errors
 ///
@@ -477,10 +470,8 @@ pub fn parse_thermal_bounds(path: &Path) -> Result<Vec<ThermalBoundsRow>, LoadEr
 ///     .expect("valid hydro bounds file");
 /// println!("loaded {} hydro bounds rows", rows.len());
 /// ```
-// Rationale: all 11 optional bound columns are extracted from a single Parquet record batch
-// and validated for finiteness in one sequential pass; splitting into sub-functions would
-// require multiple passes over the batch or would hide the invariant that every column is
-// checked for every row before any result is returned.
+// Rationale: a single sequential pass validates every column for every row before returning;
+// splitting would require multiple passes over the batch.
 #[allow(clippy::too_many_lines)]
 pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError> {
     let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
@@ -497,11 +488,9 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required key columns ──────────────────────────────────────────────
         let hydro_id_col = extract_required_int32(&batch, "hydro_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
 
-        // ── Optional bound columns (all 11) ───────────────────────────────────
         let min_turbined_col = extract_optional_float64(&batch, "min_turbined_m3s", path)?;
         let max_turbined_col = extract_optional_float64(&batch, "max_turbined_m3s", path)?;
         let min_storage_col = extract_optional_float64(&batch, "min_storage_hm3", path)?;
@@ -677,10 +666,8 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
     Ok(rows)
 }
 
-/// Parse `constraints/line_bounds.parquet` and return a sorted row table.
-///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(line_id, stage_id)` ascending.
+/// Parse `constraints/line_bounds.parquet`, returning rows sorted by
+/// `(line_id, stage_id)` ascending.
 ///
 /// # Errors
 ///
@@ -716,11 +703,9 @@ pub fn parse_line_bounds(path: &Path) -> Result<Vec<LineBoundsRow>, LoadError> {
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required key columns ──────────────────────────────────────────────
         let line_id_col = extract_required_int32(&batch, "line_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
 
-        // ── Optional bound columns ────────────────────────────────────────────
         let direct_col = extract_optional_float64(&batch, "direct_mw", path)?;
         let reverse_col = extract_optional_float64(&batch, "reverse_mw", path)?;
 
@@ -763,10 +748,8 @@ pub fn parse_line_bounds(path: &Path) -> Result<Vec<LineBoundsRow>, LoadError> {
     Ok(rows)
 }
 
-/// Parse `constraints/pumping_bounds.parquet` and return a sorted row table.
-///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(station_id, stage_id)` ascending.
+/// Parse `constraints/pumping_bounds.parquet`, returning rows sorted by
+/// `(station_id, stage_id)` ascending.
 ///
 /// # Errors
 ///
@@ -802,11 +785,9 @@ pub fn parse_pumping_bounds(path: &Path) -> Result<Vec<PumpingBoundsRow>, LoadEr
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required key columns ──────────────────────────────────────────────
         let station_id_col = extract_required_int32(&batch, "station_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
 
-        // ── Optional bound columns ────────────────────────────────────────────
         let min_col = extract_optional_float64(&batch, "min_m3s", path)?;
         let max_col = extract_optional_float64(&batch, "max_m3s", path)?;
 
@@ -830,10 +811,10 @@ pub fn parse_pumping_bounds(path: &Path) -> Result<Vec<PumpingBoundsRow>, LoadEr
             validate_optional_finite(min_m3s, "pumping_bounds", row_idx, "min_m3s", path)?;
             validate_optional_finite(max_m3s, "pumping_bounds", row_idx, "max_m3s", path)?;
 
-            // Mirror the `pumping_stations.json` entity-reader checks: a pumped-flow
-            // override is non-negative and `min <= max`. The finiteness gate above
-            // would otherwise pass a negative or inverted row through to an
-            // infeasible per-stage bound.
+            // A pumped-flow override is non-negative and `min <= max`; a negative or
+            // inverted row otherwise yields an infeasible per-stage bound (the
+            // `pumping_stations.json` entity-reader enforces this; the finiteness gate
+            // above does not).
             if let Some(v) = min_m3s
                 && v < 0.0
             {
@@ -881,10 +862,8 @@ pub fn parse_pumping_bounds(path: &Path) -> Result<Vec<PumpingBoundsRow>, LoadEr
     Ok(rows)
 }
 
-/// Parse `constraints/contract_bounds.parquet` and return a sorted row table.
-///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(contract_id, stage_id)` ascending.
+/// Parse `constraints/contract_bounds.parquet`, returning rows sorted by
+/// `(contract_id, stage_id)` ascending.
 ///
 /// # Errors
 ///
@@ -920,11 +899,9 @@ pub fn parse_contract_bounds(path: &Path) -> Result<Vec<ContractBoundsRow>, Load
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required key columns ──────────────────────────────────────────────
         let contract_id_col = extract_required_int32(&batch, "contract_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
 
-        // ── Optional bound columns ────────────────────────────────────────────
         let min_col = extract_optional_float64(&batch, "min_mw", path)?;
         let max_col = extract_optional_float64(&batch, "max_mw", path)?;
         let price_col = extract_optional_float64(&batch, "price_per_mwh", path)?;
