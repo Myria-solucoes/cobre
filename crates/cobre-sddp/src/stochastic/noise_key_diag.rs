@@ -1,84 +1,61 @@
-//! Throwaway, env-gated backward-pass diagnostic for the opening-ordering work.
+//! Throwaway, env-gated backward-pass diagnostic for opening-ordering analysis.
 //!
-//! When the `COBRE_W1_DIAG` environment variable is set, the backward pass emits
-//! one record per backward opening pairing a σ-weighted aggregate **noise key**
-//! with the just-consumed `simplex_iterations` of that opening's warm
-//! dual-simplex re-solve. Offline, the per-opening pivots are regressed on the
-//! consecutive-opening noise-key distance in natural order to predict whether
-//! reordering the opening solve sequence (so consecutive openings have similar
-//! noise) would shrink the warm-start hops — the gate for the ordering ticket.
+//! When `COBRE_W1_DIAG` is set, the backward pass emits one record per opening
+//! pairing a σ-weighted aggregate **noise key** with the just-consumed
+//! `simplex_iterations` of that opening's warm dual-simplex re-solve, to predict
+//! whether reordering openings by noise similarity would shrink warm-start hops.
 //!
-//! ## Why this lives entirely in `cobre-sddp`
-//!
-//! `noise_key[stage][ω]` is a pure function of setup-constant data — the synced
-//! opening tree's `raw_noise` and the fixed per-(hydro, stage) seasonal standard
-//! deviation `std_m3s`. It is therefore precomputed **once at setup**, where the
-//! inflow models and the synced tree are both in scope, and the backward hot
-//! path only **looks it up** by canonical ω (an indexed read, no compute). σ
-//! never reaches the hot path.
-//!
-//! The table is built **only** when `COBRE_W1_DIAG` is set
-//! (`NoiseKeyDiag::from_keys_if_enabled` returns `None` otherwise), so the
-//! default path allocates nothing and computes
-//! nothing new. No infrastructure crate (`cobre-core`, `cobre-stochastic`) is
-//! touched and no parquet column / Arrow schema is added — this is throwaway
-//! instrumentation, mirroring the reverted `COBRE_CLP_DIAG` pattern.
+//! `noise_key[stage][ω]` is a pure function of setup-constant data (the synced
+//! tree's `raw_noise` and the fixed per-(hydro, stage) `std_m3s`), so it is
+//! precomputed once at setup and the backward hot path only looks it up by
+//! canonical ω — σ never reaches the hot path. The table is built only when the
+//! env var is set, so the default path allocates and computes nothing new.
 //!
 //! ## σ layout alignment
 //!
 //! The opening noise vector's first `n_hydros` components are the per-hydro
-//! inflow residuals η, in canonical `System::hydros()` order. The σ weight for
-//! each is the seasonal `InflowModel::std_m3s` for that `(hydro, stage)` pair.
-//! `build_sigma_table` aligns σ to this layout by keying the inflow models on
-//! `(hydro_id, stage_id)` exactly as the PAR precompute does, indexed
-//! `[stage * n_hydros + h]`. A `(hydro, stage)` pair with no inflow model
-//! contributes σ = 0 (matching the PAR's deterministic-zero-inflow fallback).
+//! inflow residuals η, in canonical `System::hydros()` order, weighted by the
+//! seasonal `InflowModel::std_m3s` for that `(hydro, stage)` pair.
+//! `build_sigma_table` keys the inflow models on `(hydro_id, stage_id)` exactly
+//! as the PAR precompute does, indexed `[stage * n_hydros + h]`; a `(hydro,
+//! stage)` pair with no inflow model contributes σ = 0 (the PAR's
+//! deterministic-zero-inflow fallback).
 
 use cobre_core::{EntityId, System};
 use cobre_stochastic::StochasticContext;
 
 use crate::error::SddpError;
 
-/// Environment variable that enables the throwaway backward `noise_key`
-/// diagnostic. Presence (any value, including empty) enables it.
+/// Enables the diagnostic when present, with any value including empty.
 const DIAG_ENV_VAR: &str = "COBRE_W1_DIAG";
 
 /// Precomputed per-(stage, canonical-ω) σ-weighted noise keys for the backward
 /// diagnostic.
 ///
-/// Built once at setup by `NoiseKeyDiag::from_keys_if_enabled` and borrowed read-only by
-/// the backward pass via [`TrainingContext`](crate::context::TrainingContext).
+/// Built once at setup and borrowed read-only by the backward pass via
+/// [`TrainingContext`](crate::context::TrainingContext).
 /// `keys[stage][omega]` is `Σ_h std_m3s_{stage,h} · raw_noise_{stage,omega}[h]`
 /// over the `n_hydros` inflow components of the opening noise vector.
 #[derive(Debug, Clone)]
 pub struct NoiseKeyDiag {
-    /// `keys[stage][omega]` — the σ-weighted aggregate noise key.
     keys: Vec<Vec<f64>>,
 }
 
 impl NoiseKeyDiag {
-    /// Build the diagnostic table from the already-computed solve-order key
-    /// table **iff** the `COBRE_W1_DIAG` environment variable is set; otherwise
-    /// return `None`.
+    /// Build the diagnostic table iff `COBRE_W1_DIAG` is set, else `None`.
     ///
-    /// Reuses the caller's precomputed σ-weighted key table (the same table the
+    /// Reuses the caller's precomputed σ-weighted key table (the same one the
     /// backward solve order sorts by) so the diagnostic and the ordering cannot
-    /// drift, and so the table is built once — not twice — at setup. When `None`
-    /// (the default), the backward pass performs zero key computation and the
-    /// default solve path is byte-identical to `main`.
+    /// drift and the table is built once, not twice.
     pub(crate) fn from_keys_if_enabled(keys: &[Vec<f64>]) -> Option<Self> {
-        // Enabled only when the env var is present (any value, incl. empty);
-        // absent → `None` (the default, zero-cost path).
         std::env::var_os(DIAG_ENV_VAR)?;
         Some(Self {
             keys: keys.to_vec(),
         })
     }
 
-    /// Look up the precomputed noise key for `(stage, omega)`.
-    ///
-    /// Returns `None` for an out-of-range `(stage, omega)` rather than panicking,
-    /// so a malformed diagnostic request never aborts a run.
+    /// Look up the precomputed noise key for `(stage, omega)`, returning `None`
+    /// out of range rather than panicking, so a malformed request never aborts.
     #[must_use]
     pub(crate) fn key(&self, stage: usize, omega: usize) -> Option<f64> {
         self.keys.get(stage).and_then(|s| s.get(omega).copied())
@@ -86,17 +63,8 @@ impl NoiseKeyDiag {
 }
 
 /// Build the per-(stage, canonical-ω) σ-weighted noise key table from
-/// setup-constant data.
-///
-/// `table[stage][omega] = Σ_h std_m3s_{stage,h} · raw_noise_{stage,omega}[h]`
-/// over the `n_hydros` inflow components of the opening noise vector — the SAME
-/// key the throwaway diagnostic ([`NoiseKeyDiag`]) records and the ordering work
-/// sorts by, so the two cannot drift.
-///
-/// σ is aligned to the noise vector layout `[stage * n_hydros + h]` by
-/// [`build_sigma_table`], keying the inflow models on `(hydro_id, stage_id)`
-/// exactly as the PAR precompute does. A `(hydro, stage)` pair with no inflow
-/// model contributes σ = 0.
+/// setup-constant data — the SAME key [`NoiseKeyDiag`] records and the ordering
+/// work sorts by, so the two cannot drift.
 ///
 /// # Errors
 ///
@@ -117,7 +85,6 @@ pub(crate) fn build_noise_key_table(
         .collect();
     let n_stages = study_stage_ids.len();
 
-    // σ aligned to the noise vector layout: [stage * n_hydros + h].
     let sigma = build_sigma_table(system, &hydro_ids, &study_stage_ids, n_hydros);
 
     let tree = stochastic.tree_view();
@@ -138,10 +105,8 @@ pub(crate) fn build_noise_key_table(
 
 /// Compute the σ-weighted aggregate noise key `Σ_h σ_h · raw_noise[h]`.
 ///
-/// `sigma` is the per-hydro seasonal `std_m3s` slice for one stage, aligned 1:1
-/// with the inflow span of the opening `raw_noise` vector. Only the first
-/// `sigma.len()` components of `raw_noise` (the inflow η) are weighted; trailing
-/// load/NCS noise components are ignored.
+/// Only the first `sigma.len()` components of `raw_noise` (the inflow η) are
+/// weighted; trailing load/NCS noise components are ignored.
 ///
 /// # Errors
 ///
@@ -160,13 +125,10 @@ pub(crate) fn noise_key(sigma: &[f64], raw_noise: &[f64]) -> Result<f64, SddpErr
     Ok(sigma.iter().zip(raw_noise.iter()).map(|(s, n)| s * n).sum())
 }
 
-/// Build the per-(stage, hydro) seasonal `std_m3s` table, aligned to the opening
-/// noise vector layout `[stage * n_hydros + h]`.
-///
-/// Keys the system's inflow models on `(hydro_id, stage_id)` exactly as the PAR
-/// precompute does, so the σ index order matches the canonical hydro order of
-/// the noise vector. A `(hydro, stage)` pair with no inflow model contributes
-/// σ = 0 (the PAR's deterministic-zero-inflow fallback).
+/// Build the per-(stage, hydro) seasonal `std_m3s` table, indexed
+/// `[stage * n_hydros + h]`, keyed on `(hydro_id, stage_id)` exactly as the PAR
+/// precompute so σ matches the canonical hydro order; a `(hydro, stage)` pair
+/// with no inflow model contributes σ = 0.
 fn build_sigma_table(
     system: &System,
     hydro_ids: &[EntityId],

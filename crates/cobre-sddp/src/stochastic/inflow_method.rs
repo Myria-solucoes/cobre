@@ -1,16 +1,13 @@
 //! Inflow non-negativity treatment method for SDDP subproblems.
 //!
-//! [`InflowNonNegativityMethod`] is a flat enum representing the strategies
-//! for handling negative PAR(p) inflow realisations in the LP subproblems.
-//! It is dispatched via `match` when constructing LP templates and extracting
-//! simulation results. Enum dispatch is used because the variant set is closed
-//! (enum dispatch for closed variant sets).
+//! [`InflowNonNegativityMethod`] is a flat enum of the strategies for handling
+//! negative PAR(p) inflow realisations, dispatched via `match` when constructing
+//! LP templates and extracting simulation results.
 
 /// Inflow non-negativity treatment method.
 ///
-/// Determines whether slack columns are added to the LP and what objective
-/// coefficient they carry.  The variant must be the same across all stages
-/// (set once at solver initialisation from the loaded case config).
+/// The variant must be the same across all stages (set once at solver
+/// initialisation from the loaded case config).
 ///
 /// # Examples
 ///
@@ -25,37 +22,23 @@
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum InflowNonNegativityMethod {
-    /// No inflow non-negativity enforcement.
-    ///
-    /// The LP does not include slack columns.  Negative inflow noise may cause
-    /// LP infeasibility if the PAR(p) noise realisation is sufficiently negative.
+    /// No enforcement: no slack columns; a sufficiently negative PAR(p)
+    /// realisation may make the LP infeasible.
     None,
 
-    /// Truncation-based enforcement: clamps negative PAR(p) inflows to zero
-    /// by modifying the noise vector before LP patching.
-    ///
-    /// Does not add slack columns to the LP.  Instead, the PAR(p) model is
-    /// evaluated outside the LP to obtain the full inflow value; if the result
-    /// is negative, the noise component is adjusted so that the inflow is zero.
-    /// This prevents LP infeasibility without perturbing the objective function.
+    /// Clamps negative PAR(p) inflows to zero by adjusting the noise vector
+    /// before LP patching — no slack columns, no objective perturbation.
     Truncation,
 
-    /// Penalty-based enforcement.
-    ///
-    /// Appends `N` slack columns (`sigma_inf_h >= 0`) to the LP.  Each slack
-    /// enters the water balance row for hydro `h` with coefficient
-    /// `tau_total * M3S_TO_HM3`, where `tau_total` is the total stage duration
-    /// in hours.  The objective coefficient is sourced from
+    /// Appends `N` slack columns (`sigma_inf_h >= 0`); each enters hydro `h`'s
+    /// water-balance row with coefficient `tau_total * M3S_TO_HM3`
+    /// (`tau_total` = total stage hours). Objective coefficient from
     /// `penalties.json → hydro.inflow_nonnegativity_cost` (default 1000.0).
     Penalty,
 
-    /// Combined truncation and penalty enforcement.
-    ///
-    /// The PAR(p) noise is clamped (identical to `Truncation`) so that the
-    /// mean + noise inflow is never negative. In addition, penalty slack
-    /// columns are added (identical to `Penalty`) so the solver can "undo"
-    /// part of the clamping if cost-effective. This matches `SPTcpp`'s
-    /// `truncamento_penalizacao` mode.
+    /// Both `Truncation` and `Penalty`: the noise is clamped and slack columns
+    /// let the solver undo part of the clamping if cost-effective. Matches
+    /// `SPTcpp`'s `truncamento_penalizacao` mode.
     TruncationWithPenalty,
 }
 
@@ -80,11 +63,8 @@ impl InflowNonNegativityMethod {
 }
 
 impl From<&cobre_io::config::InflowNonNegativityConfig> for InflowNonNegativityMethod {
-    /// Convert from the cobre-io config type.
-    ///
-    /// Recognised method values are `None`, `Truncation`, `Penalty`,
-    /// and `TruncationWithPenalty` (the typed enum — typos are rejected at parse
-    /// time before this conversion runs).
+    /// The config method is a typed enum, so typos are rejected at parse time
+    /// before this total conversion runs.
     fn from(cfg: &cobre_io::config::InflowNonNegativityConfig) -> Self {
         match cfg.method {
             cobre_io::config::InflowNonNegativityMethod::None => InflowNonNegativityMethod::None,

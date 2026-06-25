@@ -1,9 +1,7 @@
 //! Shared noise transformation functions for the LP patching hot path.
 //!
-//! Both [`transform_inflow_noise`] and [`transform_load_noise`] convert raw
-//! PAR(p) or normal noise samples into the patched RHS values that are written
-//! into the stage LP before each solve.  Extracting them here eliminates the
-//! class of bugs where one call site receives a fix and others are forgotten.
+//! Single home for the noise→RHS transforms so a fix to one applies to every
+//! call site (forward, backward, lower-bound).
 
 use cobre_core::temporal::StageLagTransition;
 use cobre_stochastic::{StochasticContext, evaluate_par_batch, solve_par_noise_batch};
@@ -16,11 +14,9 @@ use crate::{
 
 /// Compute effective (possibly clamped) eta for each hydro.
 ///
-/// When truncation is active and any PAR(p) inflow is negative, clamps each
-/// negative hydro's eta upward to the floor that produces zero inflow.
-/// Otherwise writes raw eta unchanged.
-///
-/// For non-truncation methods (`None`, `Penalty`), writes raw eta directly.
+/// Under truncation, when any PAR(p) inflow would be negative each negative
+/// hydro's eta is raised to `eta_floor` (the value producing zero inflow);
+/// other methods pass raw eta through.
 pub(crate) fn compute_effective_eta(
     raw_noise: &[f64],
     n_hydros: usize,
@@ -51,13 +47,8 @@ pub(crate) fn compute_effective_eta(
     }
 }
 
-/// Transform raw inflow noise `η` into patched water-balance RHS values.
-///
-/// Writes `noise_buf[h] = base_rhs + noise_scale[stage * n_hydros + h] * η_effective[h]`
-/// for each hydro, where `η_effective` is clamped when truncation is active
-/// and negative inflow would occur.
-///
-/// No heap allocations; all scratch work uses pre-allocated buffers from `scratch`.
+/// Transform raw inflow noise `η` into patched water-balance RHS values,
+/// applying [`compute_effective_eta`] clamping under truncation.
 // Rationale: clippy::similar_names flags the role-(a) `state` handle (bound from
 // `training_ctx.state`) next to the `stage` index; both are established names, so
 // renaming either to satisfy the heuristic would obscure intent.
@@ -82,13 +73,9 @@ pub(crate) fn transform_inflow_noise(
     scratch.noise_buf.clear();
     scratch.z_inflow_rhs_buf.clear();
 
-    // Pre-fetch PAR parameters for z-inflow RHS computation.
     let par_lp = stochastic.par();
     let has_par = par_lp.n_stages() > 0 && par_lp.n_hydros() == n_hydros;
 
-    // Precompute PAR inflows and eta floor for truncation methods.
-    // For None/Penalty, par_inflow_buf and eta_floor_buf are unused by
-    // compute_effective_eta (it copies raw eta directly).
     match inflow_method {
         InflowNonNegativityMethod::Truncation
         | InflowNonNegativityMethod::TruncationWithPenalty => {
@@ -105,10 +92,8 @@ pub(crate) fn transform_inflow_noise(
 
             scratch.par_inflow_buf.clear();
             scratch.par_inflow_buf.resize(n_hydros, 0.0);
-            // `evaluate_par_batch` operates on the n_hydros PAR series only;
-            // `raw_noise` carries the full noise dimension (hydros + load buses
-            // + NCS). Slice to the hydro prefix to match the contract, exactly
-            // as the sibling `compute_effective_eta` call below does.
+            // raw_noise is [hydros | load | NCS]; slice the hydro prefix —
+            // evaluate_par_batch expects the n_hydros PAR series only.
             evaluate_par_batch(
                 par_lp,
                 stage,
@@ -134,7 +119,6 @@ pub(crate) fn transform_inflow_noise(
         InflowNonNegativityMethod::None | InflowNonNegativityMethod::Penalty => {}
     }
 
-    // Unified: compute effective eta then build RHS for all methods.
     compute_effective_eta(
         raw_noise,
         n_hydros,
@@ -150,7 +134,7 @@ pub(crate) fn transform_inflow_noise(
             .noise_buf
             .push(base_rhs + noise_scale[stage_offset + h] * eta_eff);
 
-        // Z-inflow RHS: base + sigma * eta_effective (m3/s, no zeta, no withdrawal).
+        // Z-inflow RHS in m3/s: no zeta, no withdrawal (unlike the water-balance RHS above).
         if has_par {
             let base = par_lp.deterministic_base(stage, h);
             let sigma = par_lp.sigma(stage, h);
@@ -161,10 +145,8 @@ pub(crate) fn transform_inflow_noise(
     }
 }
 
-/// Shift the lag portion of the outgoing state vector using realized inflow.
-///
-/// Shifts older lags backward, with newest lag = realized inflow from LP primal.
-/// No-op when `max_par_order == 0`. Zero heap allocations.
+/// Shift the lag portion of the outgoing state vector using realized inflow,
+/// newest lag set to the realized inflow from the LP primal.
 #[cfg(test)]
 pub(crate) fn shift_lag_state(
     state: &mut [f64],
@@ -180,24 +162,16 @@ pub(crate) fn shift_lag_state(
     let lag_start = layout.inflow_lags.start;
     for h in 0..n_h {
         let z_t_h = unscaled_primal[layout.z_inflow.start + h];
-        // Shift older lags down (read from incoming_lags to avoid aliasing).
-        // incoming_lags is in lag-major layout: incoming_lags[lag * n_h + h].
+        // Read from incoming_lags (lag-major: lag * n_h + h) to avoid aliasing state.
         for lag in (1..l_max).rev() {
             state[lag_start + lag * n_h + h] = incoming_lags[(lag - 1) * n_h + h];
         }
-        // Newest lag = realized inflow from z_h primal.
         state[lag_start + h] = z_t_h;
     }
 }
 
-/// Shift the lag portion of the outgoing state vector using pre-computed monthly inflows.
-///
-/// Private helper used by [`accumulate_and_shift_lag_state`] when finalizing a lag
-/// period. Takes a `monthly_inflows` slice of length `hydro_count` directly, avoiding
-/// the need to read z-inflow offsets from a full primal buffer.
-///
-/// The caller guarantees `monthly_inflows.len() >= layout.hydro_count`.
-/// No heap allocations.
+/// Shift the lag state using pre-computed monthly inflows, newest lag set to
+/// `monthly_inflows[h]`. Caller guarantees `monthly_inflows.len() >= hydro_count`.
 fn shift_lag_state_from_inflows(
     state: &mut [f64],
     incoming_lags: &[f64],
@@ -208,53 +182,25 @@ fn shift_lag_state_from_inflows(
     let l_max = layout.max_par_order;
     let lag_start = layout.inflow_lags.start;
     for h in 0..n_h {
-        // Shift older lags down (read from incoming_lags to avoid aliasing).
-        // incoming_lags is in lag-major layout: incoming_lags[lag * n_h + h].
+        // Read from incoming_lags (lag-major: lag * n_h + h) to avoid aliasing state.
         for lag in (1..l_max).rev() {
             state[lag_start + lag * n_h + h] = incoming_lags[(lag - 1) * n_h + h];
         }
-        // Newest lag = weighted-average monthly inflow for this period.
         state[lag_start + h] = monthly_inflows[h];
     }
 }
 
-/// Shift the anticipated-state ring buffer and write the new decision.
-///
-/// For each anticipated thermal `i` with lead time `K_i`, performs:
-///
-/// - **Slots `0..K_i-1`**: write `incoming_anticipated[(slot+1) * n_ant + i]`
-///   into `state[anticipated_state.start + slot * n_ant + i]` (shift down by
-///   one).  Slot 0 of the outgoing state holds what was slot 1 of the incoming
-///   state (the second-oldest commitment horizon).  The incoming slot 0
-///   (the oldest) falls out, consumed by the next-stage fishing constraint.
-///   At stage 0, slot 0 of the incoming state may carry a non-zero pre-horizon
-///   seed from `past_anticipated_commitments.values_mw[0]`; this is the normal
-///   case when the study has pre-horizon commitments and the seeding block in
-///   `setup/mod.rs` has populated the initial state.
-/// - **Slot `K_i - 1`**: write `unscaled_primal[anticipated_decision.start + i]`
-///   — the freshly-made commitment from this stage's solve, in MW.
-/// - **Slots `K_i..k_max`**: write `0.0` (deterministic padding for plants
-///   whose lead time is shorter than `k_max`).
-///
-/// No-op when `n_anticipated == 0` or `k_max == 0`.  Zero heap allocations.
+/// Shift the anticipated-state ring buffer down by one and write this stage's
+/// new commitment (MW) at slot `K_i - 1`, zero-padding slots `K_i..k_max`.
 ///
 /// ## Inactive plants (horizon boundary and operation window)
 ///
-/// This function does not gate per-plant on the decision-active predicate
-/// (`is_anticipated_decision_active`: horizon clause ∧ delivery-stage operation
-/// window). Inactive plants — those at stages where the LP did not emit a real
-/// decision column, whether because the delivery stage falls outside the horizon
-/// OR outside the plant's commissioning window — rely on the LP builder pinning
-/// their decision column bounds to `[0.0, 0.0]` (the LP-builder
-/// `fill_anticipated_columns` pass). The window case upholds the same `[0, 0]`
-/// contract as the horizon-boundary case: a dormant decision is pinned to
-/// `[0, 0]` exactly like a beyond-horizon one, so the unscaled primal at that
-/// column is `0.0`, and writing `0.0` into slot `K_i - 1` is the correct
-/// ring-buffer transition (no new commitment was placed, so slot `K_i - 1`
-/// should hold zero). A decommissioned plant therefore drains its ring buffer to
-/// `0` within `K_i` stages. If a future change relaxes the `[0, 0]` invariant for
-/// inactive columns, this function must be updated to gate on the activation
-/// predicate.
+/// This function does NOT gate per-plant on `is_anticipated_decision_active`; it
+/// relies on the LP builder pinning an inactive decision column to `[0, 0]`
+/// (`fill_anticipated_columns`) so the unscaled primal is `0.0` and writing it
+/// into slot `K_i - 1` is the correct no-commitment transition. If a future
+/// change relaxes the `[0, 0]` pin for inactive columns, this function must gate
+/// on the activation predicate instead.
 ///
 /// # Panics (debug only)
 ///
@@ -284,11 +230,9 @@ pub(crate) fn shift_anticipated_state(
         unscaled_primal.len() >= anticipated_decision.end,
         "unscaled_primal too short for anticipated_decision range",
     );
-    // `anticipated_state` (the ring-buffer base) is stage-invariant role-(a),
-    // read from `layout`; `anticipated_decision` is the priced control-region
-    // column whose base is n_blks-dependent, so it must be THIS stage's range —
-    // never a global stage-0 base, which would misread the decision column at any
-    // stage whose block count differs from stage 0's.
+    // `anticipated_decision` must be THIS stage's range (its base is
+    // n_blks-dependent); a global stage-0 base misreads the decision column at
+    // any stage whose block count differs from stage 0's.
     let state_start = layout.anticipated_state.start;
     let decision_start = anticipated_decision.start;
     for (plant, &k_i) in layout.anticipated_lead_stages.iter().enumerate() {
@@ -296,16 +240,13 @@ pub(crate) fn shift_anticipated_state(
             k_i >= 1,
             "K_i must be >= 1 (enforced by anticipation validation)"
         );
-        // Shift: slot s ← incoming slot s+1, for s in 0..K_i - 1.
         for slot in 0..(k_i - 1) {
             let dst = state_start + slot * n_ant + plant;
             let src = (slot + 1) * n_ant + plant;
             state[dst] = incoming_anticipated[src];
         }
-        // Write new decision at slot K_i - 1.
         let newest = state_start + (k_i - 1) * n_ant + plant;
         state[newest] = unscaled_primal[decision_start + plant];
-        // Zero padding for slots k_i..k_max (plants with K_i < k_max).
         for slot in k_i..k_max {
             let dst = state_start + slot * n_ant + plant;
             state[dst] = 0.0;
@@ -313,64 +254,41 @@ pub(crate) fn shift_anticipated_state(
     }
 }
 
-/// Mutable primary lag-accumulation buffers threaded through the hot path.
-///
-/// Groups `lag_accumulator` and `lag_weight_accum` so that
-/// [`accumulate_and_shift_lag_state`] stays within the 7-parameter budget.
+/// Primary lag-accumulation buffers, grouped to keep
+/// [`accumulate_and_shift_lag_state`] within the 7-parameter budget.
 pub(crate) struct LagAccumState<'a> {
-    /// Weighted-sum buffer, length `>= hydro_count`.
-    /// Holds the partial sum for the current primary lag period.
+    /// Weighted-sum buffer for the current primary lag period, length `>= hydro_count`.
     pub accumulator: &'a mut [f64],
     /// Total weight accumulated so far in the current primary lag period.
     pub weight_accum: &'a mut f64,
 }
 
-/// Mutable downstream accumulation buffers threaded through the hot path.
-///
-/// Groups the five downstream parameters so that
-/// [`accumulate_and_shift_lag_state`] stays within the 7-parameter budget.
+/// Downstream (coarser-resolution) accumulation buffers, grouped to keep
+/// [`accumulate_and_shift_lag_state`] within the 7-parameter budget.
 ///
 /// For uniform-resolution studies pass `accumulator: &mut []` (empty slice);
 /// all downstream code paths short-circuit on `accumulator.is_empty()`.
 pub(crate) struct DownstreamAccumState<'a> {
-    /// Weighted-sum accumulator buffer, length `>= hydro_count`.
-    /// Empty slice when `par_order == 0` — all downstream paths skip on `is_empty()`.
+    /// Weighted-sum accumulator buffer, length `>= hydro_count` (empty when `par_order == 0`).
     pub accumulator: &'a mut [f64],
     /// Accumulated weight for the current downstream lag period.
     pub weight_accum: &'a mut f64,
-    /// Slot-major ring buffer storing completed downstream lags.
-    /// Layout: `completed_lags[slot * n_h + h]`, slot 0 = oldest quarter.
-    /// Length `n_h * par_order` when `par_order > 0`, or empty.
+    /// Slot-major ring buffer (`completed_lags[slot * n_h + h]`, slot 0 = oldest
+    /// quarter), length `n_h * par_order` or empty.
     pub completed_lags: &'a mut [f64],
-    /// Number of completed downstream lags currently stored in the ring buffer
-    /// (capped at `par_order`).
+    /// Number of completed downstream lags in the ring buffer (capped at `par_order`).
     pub n_completed: &'a mut usize,
-    /// PAR order for the downstream (coarser) resolution.  `0` for
-    /// uniform-resolution studies; all downstream code paths are skipped.
+    /// PAR order for the downstream resolution; `0` for uniform-resolution studies.
     pub par_order: usize,
 }
 
-/// Accumulate this stage's inflow and, when a lag period finalizes, shift the lag state.
-///
-/// Replaces the direct `shift_lag_state` call for multi-resolution studies where
-/// stages may be shorter than the lag granularity (for example, weekly stages feeding
-/// a monthly lag slot).  The three-step logic:
-///
-/// 1. **Accumulate**: add `z_inflow[h] * stage_lag.accumulate_weight` to
-///    `lag_accumulator[h]` and `stage_lag.accumulate_weight` to `*lag_weight_accum`.
-/// 2. **Finalize** (only when `stage_lag.finalize_period && *lag_weight_accum > 0.0`):
-///    divide the accumulator by the total weight to get the weighted average, call
-///    [`shift_lag_state_from_inflows`] with those averages, then reset the accumulator.
-///    If `stage_lag.spillover_weight > 0.0`, seed the next period immediately.
-/// 3. **Non-finalizing stages**: `state` is left untouched (lags frozen).
+/// Accumulate this stage's inflow and, when a lag period finalizes, shift the
+/// lag state — supporting multi-resolution studies where stages are shorter than
+/// the lag granularity (e.g. weekly stages feeding a monthly lag slot).
 ///
 /// For the monthly identity case (`accumulate_weight=1.0, spillover_weight=0.0,
-/// finalize_period=true`) the function produces bit-for-bit identical results to
-/// `shift_lag_state`.
-///
-/// **Zero heap allocation.** All scratch work is performed in `lag.accumulator`,
-/// which is overwritten with the monthly averages during finalization before being
-/// reset.
+/// finalize_period=true`) this produces bit-for-bit identical results to
+/// [`shift_lag_state`].
 ///
 /// # Panics (debug only)
 ///
@@ -378,23 +296,15 @@ pub(crate) struct DownstreamAccumState<'a> {
 ///
 /// # Downstream accumulation (multi-resolution studies)
 ///
-/// When `ds.accumulator` is non-empty (i.e., `ds.par_order > 0`), the function
-/// additionally maintains a coarser-resolution ring buffer in parallel with the
-/// primary accumulation. See [`DownstreamAccumState`] for field docs.
-///
-/// For uniform-resolution studies pass `ds.accumulator = &mut []` (empty slice).
-/// All downstream code paths are skipped via a single `is_empty()` guard,
-/// producing zero overhead.
+/// When `ds.accumulator` is non-empty, a coarser-resolution ring buffer is
+/// maintained in parallel; see [`DownstreamAccumState`] for the empty-slice
+/// (uniform-resolution) contract.
 ///
 /// # Anticipated-thermal state
 ///
-/// This function does NOT shift the `anticipated_state` ring buffer.
-/// Anticipated commitments advance once per LP stage regardless of
-/// `StageLagTransition.finalize_period` or `accumulate_downstream`,
-/// because the decision cadence equals the LP-stage cadence. The
-/// companion function `shift_anticipated_state` performs the shift; the
-/// stage driver (currently `forward.rs::run_forward_stage`) calls both
-/// functions in sequence, once per stage.
+/// Does NOT shift the `anticipated_state` ring buffer — that cadence equals the
+/// LP-stage cadence, not the lag cadence. The stage driver calls the companion
+/// [`shift_anticipated_state`] separately, once per stage.
 pub(crate) fn accumulate_and_shift_lag_state(
     state: &mut [f64],
     incoming_lags: &[f64],
@@ -407,7 +317,7 @@ pub(crate) fn accumulate_and_shift_lag_state(
     let n_h = layout.hydro_count;
     let l_max = layout.max_par_order;
     if l_max == 0 || n_h == 0 {
-        return; // No lags to shift — identical early-return guard as shift_lag_state
+        return; // same early-return guard as shift_lag_state
     }
 
     debug_assert!(
@@ -418,17 +328,13 @@ pub(crate) fn accumulate_and_shift_lag_state(
 
     let z_start = layout.z_inflow.start;
 
-    // ── Step 1: Primary accumulate ────────────────────────────────────────────
-    // Must happen unconditionally before finalize check, so this stage's
-    // contribution is included in the average.
+    // Accumulate before the finalize check so this stage is in the average.
     let w = stage_lag.accumulate_weight;
     for h in 0..n_h {
         lag.accumulator[h] += unscaled_primal[z_start + h] * w;
     }
     *lag.weight_accum += w;
 
-    // ── Step 1b: Downstream accumulate (multi-resolution only) ───────────────
-    // Guard on empty slice: zero overhead for uniform studies.
     if !ds.accumulator.is_empty() && stage_lag.accumulate_downstream {
         debug_assert!(
             ds.accumulator.len() >= n_h,
@@ -454,14 +360,11 @@ pub(crate) fn accumulate_and_shift_lag_state(
                 *v *= inv;
             }
 
-            // Push weighted average into the ring buffer.
-            // Slot 0 = oldest completed quarter; slots fill in order.
             let slot = (*ds.n_completed).min(ds.par_order.saturating_sub(1));
             let offset = slot * n_h;
             ds.completed_lags[offset..offset + n_h].copy_from_slice(&ds.accumulator[..n_h]);
             *ds.n_completed = (*ds.n_completed + 1).min(ds.par_order);
 
-            // Reset downstream accumulator, optionally seeding spillover.
             if stage_lag.downstream_spillover_weight > 0.0 {
                 let dsw = stage_lag.downstream_spillover_weight;
                 for h in 0..n_h {
@@ -475,36 +378,29 @@ pub(crate) fn accumulate_and_shift_lag_state(
         }
     }
 
-    // ── Rebuild from downstream (transition stage) ────────────────────────────
-    // At the first quarterly stage, overwrite the primary lag state with the
-    // completed quarterly lags from the downstream ring buffer, then return
-    // (skipping the primary finalize which would overwrite with monthly data).
+    // Rebuild from the downstream ring buffer and return, skipping the primary
+    // finalize below — which would overwrite the lags with monthly data.
     if stage_lag.rebuild_from_downstream && *ds.n_completed > 0 {
         let n_fill = (*ds.n_completed).min(l_max);
         for lag_idx in 0..n_fill {
-            // Ring buffer is slot-major. Slot 0 = oldest. Newest lag = slot n_completed-1.
-            // state lag layout: state[lag_start + lag_idx * n_h + h]
-            //   lag_idx=0 → newest (slot n_completed-1), lag_idx=1 → second newest, …
+            // lag_idx 0 = newest = slot n_completed-1, descending into older slots.
             let src_slot = *ds.n_completed - 1 - lag_idx;
             let src_offset = src_slot * n_h;
             let dst_offset = layout.inflow_lags.start + lag_idx * n_h;
             state[dst_offset..dst_offset + n_h]
                 .copy_from_slice(&ds.completed_lags[src_offset..src_offset + n_h]);
         }
-        // Reset downstream state — all completed quarterly lags consumed.
         *ds.n_completed = 0;
         ds.completed_lags.fill(0.0);
         if !ds.accumulator.is_empty() {
             ds.accumulator[..n_h].fill(0.0);
         }
         *ds.weight_accum = 0.0;
-        return; // Lag state fully rebuilt; skip primary finalize.
+        return;
     }
 
-    // ── Step 2: Primary finalize (if this stage closes a lag period) ──────────
     if stage_lag.finalize_period && *lag.weight_accum > 0.0 {
-        // Overwrite lag.accumulator[h] with the weighted-average monthly inflow.
-        // The original accumulated sum is not needed after this point.
+        // Overwrite accumulator in place with the weighted average (sum no longer needed).
         let inv = 1.0 / *lag.weight_accum;
         for v in &mut lag.accumulator[..n_h] {
             *v *= inv;
@@ -512,9 +408,7 @@ pub(crate) fn accumulate_and_shift_lag_state(
 
         shift_lag_state_from_inflows(state, incoming_lags, lag.accumulator, layout);
 
-        // ── Reset accumulator, then optionally seed spillover ─────────────────
-        // Spillover uses the RAW z_inflow (not the averaged value), because it
-        // is this stage's contribution to the NEXT lag period.
+        // Spillover seeds the NEXT period with RAW z_inflow, not the averaged value.
         if stage_lag.spillover_weight > 0.0 {
             let sw = stage_lag.spillover_weight;
             for h in 0..n_h {
@@ -526,14 +420,11 @@ pub(crate) fn accumulate_and_shift_lag_state(
             *lag.weight_accum = 0.0;
         }
     }
-    // ── Step 3: Non-finalizing stage ─────────────────────────────────────────
-    // Lags frozen — state is not modified. Accumulation already applied above.
+    // Non-finalizing stages leave the lag state frozen (accumulation applied above).
 }
 
-/// Transform raw load noise `η` into patched load-balance RHS values.
-///
-/// Writes `(mean + std * η).max(0.0) * block_factor` for each load bus and block.
-/// Clamped to zero so load demand is never negative. No heap allocations.
+/// Transform raw load noise `η` into patched load-balance RHS values, one per
+/// load bus and block, clamped at zero so load demand is never negative.
 pub(crate) fn transform_load_noise(
     raw_noise: &[f64],
     n_hydros: usize,
@@ -560,10 +451,8 @@ pub(crate) fn transform_load_noise(
     }
 }
 
-/// Noise-vector offsets needed to locate the NCS slice within the raw noise array.
-///
-/// The shared raw noise vector is laid out as `[hydro noise | load noise | NCS noise]`.
-/// `n_hydros + n_load_buses` gives the start offset of the NCS section.
+/// Offsets locating the NCS slice in the raw noise vector, laid out as
+/// `[hydro noise | load noise | NCS noise]`.
 pub(crate) struct NcsNoiseOffsets {
     /// Number of hydro entries that precede the load slice.
     pub n_hydros: usize,
@@ -571,23 +460,18 @@ pub(crate) struct NcsNoiseOffsets {
     pub n_load_buses: usize,
 }
 
-/// Transform raw NCS noise into per-block column lower/upper bound values.
+/// Transform raw NCS noise into per-block column lower/upper bounds.
 ///
-/// For each NCS entity computes a per-scenario availability ratio
-/// `α = clamp(mean + std · η, 0, 1)`, then writes both column bounds:
+/// Availability `α = clamp(mean + std · η, 0, 1)` is a **dimensionless factor**;
+/// the realized cap is `max_gen · α · block_factor`. The parquet `(mean, std)`
+/// are stored as factors, not MW. (Authoritative home of this contract; see
+/// `.claude/rules/sddp.md`.)
 ///
-/// - `ncs_col_upper_buf[blk] = max_gen · α · block_factor`
-/// - `ncs_col_lower_buf[blk] = if allow_curtailment { 0 } else { upper }`
-///
-/// When `allow_curtailment[i] == false` the lower bound matches the upper
-/// bound so the source is dispatched at exactly the realized availability
-/// on every scenario — the **must-run** regime for non-simulated aggregate
-/// generation pre-netted from load. When
-/// `allow_curtailment[i] == true` the lower bound is zero and the LP can
-/// curtail at `curtailment_cost` per `MWh`.
-///
-/// The `offsets` bundle encodes the raw-noise vector layout (`n_hydros +
-/// n_load_buses` gives the start of the NCS slice).
+/// With `allow_curtailment == false` the lower bound equals the upper bound, so
+/// the source must run at exactly the realized availability (aggregate
+/// generation pre-netted from load); with `true` the lower bound is zero and the
+/// LP may curtail. The NCS slice within the raw-noise vector is located via
+/// [`NcsNoiseOffsets`].
 ///
 /// # Panics
 ///
@@ -637,17 +521,13 @@ pub(crate) fn transform_ncs_noise(
 
 /// Rebuild the NCS column-index buffer for one stage's stochastic NCS columns.
 ///
-/// Under the dense layout every NCS keeps a column at every stage, so every
-/// stochastic slot contributes a block: the pushed column index strides by
-/// `dense_col[slot]` — the slot's NCS **system index** (the dense column
-/// position), identical at every stage — for every slot. The forbidden
-/// alternative (striding by the raw slot index) misaddresses the column whenever
-/// only a subset of NCS are stochastic or the orders diverge, because the dense
-/// column block is system-indexed, not stochastic-slot-indexed.
+/// Each column index strides by `dense_col[slot]` — the slot's NCS **system
+/// index** (dense column position), not the raw slot index: the dense column
+/// block is system-indexed, so striding by slot misaddresses the column whenever
+/// only a subset of NCS are stochastic or their orders diverge.
 ///
-/// The buffer is cleared then refilled; callers rebuild it lazily on a stage
-/// transition — when the per-stage NCS column start changes (see the patch
-/// sites). No heap allocation beyond the initial capacity growth.
+/// Callers rebuild lazily on a stage transition, when the per-stage NCS column
+/// start changes.
 pub(crate) fn build_dense_ncs_col_indices(
     dense_col: &[usize],
     ncs_col_start: usize,
@@ -662,34 +542,21 @@ pub(crate) fn build_dense_ncs_col_indices(
     }
 }
 
-/// Gather the stochastic slots' NCS column bounds, zeroing dormant slots.
+/// Gather the stochastic slots' NCS column bounds, forcing dormant slots to `[0, 0]`.
 ///
-/// `lower_src` / `upper_src` are the verbatim `transform_ncs_noise` outputs — one
-/// `block_count`-wide block per stochastic slot, in slot order. Under the dense
-/// layout every slot has a column, so this copies every slot's block into
-/// `lower_out` / `upper_out`, EXCEPT a commissioning-dormant slot — one whose
-/// `windows[slot] = (entry, exit)` excludes `stage_id` per
-/// `commissioning_active` — whose block
-/// is forced to `[0, 0]` to override the stochastic availability cap, the
-/// zero-influence convention that makes a dormant NCS contribute nothing. The
-/// dormancy is computed inline from the stage-invariant `windows` and the stage's
-/// own `stage_id` (no per-stage dormancy mask is stored): the result is constant
-/// within a stage, so it is effectively computed once per stage. The forbidden
-/// alternative (copying the stochastic cap for a dormant slot) would let a
-/// not-yet-commissioned source dispatch. The gathered buffers run parallel to the
-/// index buffer built by [`build_dense_ncs_col_indices`], so the set-bounds call
-/// receives index/lower/upper buffers of equal length (`windows.len() *
-/// block_count`). When no slot is dormant the gather reproduces the source buffers
-/// exactly (hash-neutral for the no-window case). Cleared then refilled each call;
-/// the bounds change every opening, so unlike the index buffer this cannot be
-/// cached.
+/// Copies each `transform_ncs_noise` block (one `block_count`-wide block per slot)
+/// into `lower_out` / `upper_out`, EXCEPT a commissioning-dormant slot (whose
+/// `windows[slot]` excludes `stage_id` per `commissioning_active`), whose block is
+/// forced to `[0, 0]`. The forbidden alternative — copying the stochastic cap for a
+/// dormant slot — would let a not-yet-commissioned source dispatch. The output runs
+/// parallel to [`build_dense_ncs_col_indices`] (equal length `windows.len() *
+/// block_count`) and reproduces the source buffers exactly when no slot is dormant.
+/// Refilled every opening (the bounds change each opening, unlike the index buffer).
 ///
 /// # Panics
 ///
 /// Panics in debug builds when `lower_src` or `upper_src` is shorter than
-/// `windows.len() * block_count` — the highest slot's block at
-/// `slot * block_count..slot * block_count + block_count` would otherwise read
-/// out of range.
+/// `windows.len() * block_count`.
 pub(crate) fn gather_dense_ncs_bounds(
     windows: &[(Option<i32>, Option<i32>)],
     stage_id: i32,

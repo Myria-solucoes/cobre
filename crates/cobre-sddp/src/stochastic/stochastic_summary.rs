@@ -1,13 +1,10 @@
 //! Stochastic preprocessing summary types and builder.
 //!
-//! Provides [`StochasticSummary`], [`ArOrderSummary`], and [`StochasticSource`] for
-//! reporting the outcome of the stochastic preprocessing pipeline, plus the
-//! [`build_stochastic_summary`] constructor that derives all fields from a validated
-//! [`cobre_stochastic::StochasticContext`].
+//! Provides [`StochasticSummary`], [`ArOrderSummary`], and [`StochasticSource`]
+//! plus the [`build_stochastic_summary`] constructor.
 //!
-//! These types live in `cobre-sddp` so that they can be reused by Python bindings and
-//! other callers without pulling in CLI-specific display dependencies. Display/formatting
-//! methods that use `console::style` remain in `cobre-cli`.
+//! These types live in `cobre-sddp` (not `cobre-cli`) so Python bindings and
+//! other callers reuse them without the CLI's `console::style` display deps.
 
 use cobre_core::{System, scenario::SamplingScheme};
 use cobre_io::output::{FittingReductionEntry, FittingReport, HydroFittingEntry};
@@ -36,10 +33,7 @@ pub enum StochasticSource {
 pub struct ArOrderSummary {
     /// Method used for order selection (e.g., `"AIC"`, `"fixed"`).
     pub method: String,
-    /// Count of hydros at each AR order. Index = order, value = count.
-    ///
-    /// For example, `[0, 3, 2]` means 0 hydros at order 0, 3 at order 1,
-    /// 2 at order 2.
+    /// Count of hydros at each AR order, indexed by order (value = count).
     pub order_counts: Vec<usize>,
     /// Minimum AR order across all hydros.
     pub min_order: usize,
@@ -50,13 +44,8 @@ pub struct ArOrderSummary {
 }
 
 impl ArOrderSummary {
-    /// Render a compact human-readable string describing the AR order distribution.
-    ///
-    /// Three tiers based on the number of hydro plants:
-    ///
-    /// - **≤10 hydros**: compact distribution, e.g. `"AIC (3x order-1, 2x order-2)"`.
-    /// - **11–30 hydros**: range format, e.g. `"AIC (orders 1-4, 15 hydros)"`.
-    /// - **31+ hydros**: histogram format, e.g. `"AIC (order 1: 12, order 2: 8, 31 hydros)"`.
+    /// Render a compact human-readable string describing the AR order
+    /// distribution, with three format tiers at ≤10, 11–30, and 31+ hydros.
     ///
     /// # Examples
     ///
@@ -165,7 +154,8 @@ fn build_ar_order_summary(
             .collect();
         (report.method.clone(), orders)
     } else {
-        // Derive from loaded inflow models: use max AR coefficient length per hydro.
+        // No report: a hydro's order is the max AR coefficient length across its
+        // per-stage inflow models.
         let orders: Vec<usize> = system
             .hydros()
             .iter()
@@ -201,21 +191,13 @@ fn build_ar_order_summary(
 
 // ── Builder function ──────────────────────────────────────────────────────────
 
-/// Build a [`StochasticSummary`] from the system, stochastic context, and estimation report.
+/// Build a [`StochasticSummary`] from the system, stochastic context, and
+/// estimation report. All fields derive from already-validated inputs;
+/// construction is infallible.
 ///
-/// Called after [`cobre_stochastic::build_stochastic_context`] returns and before training
-/// starts. All fields are derived from the already-validated inputs; construction is
-/// infallible.
-///
-/// # Source detection
-///
-/// - **Inflow source**: `Estimated` when `estimation_report` is `Some(_)` — the estimation
-///   pipeline ran. `Loaded` when hydros are present but no report. `None` when no hydros.
-/// - **Correlation source**: determined by `stochastic.provenance().correlation`. When
-///   `Generated`, source follows estimation report presence (`Estimated` or `Loaded`).
-///   `UserSupplied` maps to `Loaded`. `NotApplicable` maps to `None`.
-/// - **Opening tree source**: determined by `stochastic.provenance().opening_tree` directly.
-///   `UserSupplied` → `Loaded`, `Generated` → `Estimated`, `NotApplicable` → `None`.
+/// Source detection follows component provenance, except that a `Generated`
+/// component cannot tell estimated from loaded on its own — `estimation_report`
+/// presence is the tiebreaker.
 #[must_use]
 pub fn build_stochastic_summary(
     system: &System,
@@ -233,7 +215,6 @@ pub fn build_stochastic_summary(
         StochasticSource::None
     };
 
-    // Count distinct stage_id values across all hydros' inflow models.
     let n_seasons = if n_hydros > 0 {
         let mut stage_ids: Vec<i32> = system.inflow_models().iter().map(|m| m.stage_id).collect();
         stage_ids.sort_unstable();
@@ -245,9 +226,6 @@ pub fn build_stochastic_summary(
 
     let ar_summary = build_ar_order_summary(system, estimation_report, n_hydros);
 
-    // When the correlation was Generated from system data, its provenance cannot
-    // distinguish estimated vs loaded on its own; the estimation report presence
-    // is the tiebreaker.
     let correlation_source = match stochastic.provenance().correlation {
         ComponentProvenance::Generated => {
             if estimation_report.is_some() {
@@ -260,9 +238,7 @@ pub fn build_stochastic_summary(
         ComponentProvenance::NotApplicable => StochasticSource::None,
     };
 
-    // Correlation dimension spans all correlated entities: hydros + load buses + NCS.
-    // `stochastic.dim()` returns `n_hydros + n_load_buses + n_stochastic_ncs`, which is
-    // the full noise dimension that the spectral decomposition operates on.
+    // Full noise dimension (hydros + load buses + NCS), not just n_hydros.
     let n_correlated = stochastic.dim();
     let correlation_dim = if n_correlated > 0 {
         Some(format!("{n_correlated}x{n_correlated}"))
@@ -270,8 +246,8 @@ pub fn build_stochastic_summary(
         None
     };
 
-    // Provenance distinguishes a user-supplied tree with one opening/stage from a
-    // generated tree; opening count alone cannot.
+    // Provenance, not opening count: a user-supplied one-opening tree is
+    // indistinguishable from a generated one by count alone.
     let opening_tree_source = match stochastic.provenance().opening_tree {
         ComponentProvenance::UserSupplied => StochasticSource::Loaded,
         ComponentProvenance::Generated => StochasticSource::Estimated,
@@ -388,19 +364,12 @@ pub fn inflow_models_to_ar_rows(
         .collect()
 }
 
-/// Convert a slice of [`cobre_core::scenario::InflowModel`]s to
-/// [`InflowAnnualComponentRow`]s for output to `inflow_annual_component.parquet`.
+/// Convert [`cobre_core::scenario::InflowModel`]s to
+/// [`InflowAnnualComponentRow`]s for `inflow_annual_component.parquet`.
 ///
-/// Extracts the three annual-component fields (`coefficient`, `mean_m3s`,
-/// `std_m3s`) from each model's [`cobre_core::scenario::AnnualComponent`] and pairs them with the
-/// model's `hydro_id` and `stage_id`. Models with `annual: None` (classical
-/// PAR(p)) are silently skipped; the function returns an empty `Vec` when no
-/// model carries an annual component. Output order mirrors the input slice
-/// order; the caller is responsible for sorting by `(hydro_id, stage_id)` if
+/// Models with `annual: None` (classical PAR(p)) are silently skipped. Output
+/// order mirrors the input slice; the caller sorts by `(hydro_id, stage_id)` if
 /// canonical ordering is required before writing.
-///
-/// The sibling function [`inflow_models_to_ar_rows`] performs the analogous
-/// projection for the classical AR coefficients.
 #[must_use]
 pub fn inflow_models_to_annual_component_rows(
     models: &[cobre_core::scenario::InflowModel],
@@ -1045,9 +1014,8 @@ mod tests {
 
     // ── build_stochastic_summary field and correlation_dim tests ─────────────
 
-    /// Verify that the new per-class scheme fields are populated from provenance
-    /// and that `correlation_dim` reflects the full noise dimension (not just
-    /// `n_hydros`).
+    /// Verify the per-class scheme fields are populated from provenance and that
+    /// `correlation_dim` reflects the full noise dimension (not just `n_hydros`).
     #[test]
     fn build_stochastic_summary_new_fields_and_correlation_dim() {
         let system = make_system_with_hydro();
@@ -1091,12 +1059,9 @@ mod tests {
             "n_stochastic_ncs must be 0 when no NCS entities"
         );
 
-        // correlation_dim must be derived from stochastic.dim(), not just n_hydros.
-        // For this single-hydro system with no load buses and no NCS: dim == 1.
+        // Single-hydro, no load buses, no NCS: dim == 1.
         let expected_dim = stochastic.dim();
         let expected_str = format!("{expected_dim}x{expected_dim}");
-        // correlation_dim is Some("NxN") when dim > 0, None when dim == 0.
-        // The dimension reflects the noise vector size, not the correlation model presence.
         assert_eq!(
             summary.correlation_dim,
             if stochastic.dim() > 0 {
