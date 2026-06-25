@@ -126,4 +126,9 @@ emit_rows | awk -F'\t' -v top="$TOP_N" -v since="$CHURN_SINCE" '
         printf "Advisory: this report never fails the build. Tune CHURN_SINCE / TOP_N / weights for the question at hand.\n"
     }
 '
+
+# E8 comment-bloat advisory — ranked candidates for the comment-skeptic pass.
+echo ""
+bash "${REPO_ROOT}/scripts/check-comment-bloat.sh" "${REPO_ROOT}"
+
 exit 0
