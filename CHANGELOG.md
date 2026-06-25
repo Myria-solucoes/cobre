@@ -11,6 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Energy contracts now participate in dispatch.** A `system/energy_contracts.json`
+  contract (a bilateral purchase or sale obligation) contributes one LP column per
+  block per direction (`type: "import"` or `"export"`) on its `bus_id`, bounded by
+  `[limits.min_mw, limits.max_mw]`. An import column injects `+1.0` MW into the bus
+  power-balance row; an export column withdraws `−1.0` MW. A positive `price_per_mwh`
+  is a cost (import); a negative value is revenue (export). Contracts honor a
+  commissioning window (`entry_stage_id`/`exit_stage_id`): outside `[entry, exit)` the
+  column is pinned to `[0, 0]` and a zero-power row is emitted. Stage-varying bounds
+  and prices are supplied via `constraints/contract_bounds.parquet`; a non-zero
+  `min_mw` row acts as a take-or-pay floor enforced as a hard LP column lower bound.
+  Simulation writes a new `simulation/contracts/` output (`stage_id`, `block_id`,
+  `contract_id`, `power_mw`, `energy_mwh`, `price_per_mwh`, `total_cost`,
+  `operative_state_code` per contract per block) plus a `contract_cost` cost column —
+  both emitted by the CLI and the Python bindings.
+
 - **Pumping stations now participate in dispatch.** A `system/pumping_stations.json`
   station (a pumped-storage / reversible plant) contributes a per-block pumped-flow
   decision bounded by `flow.min_m3s`/`flow.max_m3s` that transfers water from its

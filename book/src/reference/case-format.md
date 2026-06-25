@@ -699,6 +699,61 @@ Stage-varying flow bounds can be overridden via `constraints/pumping_bounds.parq
 
 ---
 
+### `system/energy_contracts.json`
+
+Energy contract registry. Each entry defines a bilateral energy purchase or sale
+obligation with a counterparty outside the modeled system. The file is optional;
+when absent, no contracts are modeled.
+
+| Field                          | Required | Description                                                                         |
+| ------------------------------ | -------- | ----------------------------------------------------------------------------------- |
+| `contracts[].id`               | Yes      | Contract identifier (integer, unique)                                               |
+| `contracts[].name`             | Yes      | Human-readable contract name (string)                                               |
+| `contracts[].bus_id`           | Yes      | Bus where power is injected (import) or withdrawn (export)                          |
+| `contracts[].type`             | Yes      | Energy flow direction: `"import"` or `"export"`                                     |
+| `contracts[].price_per_mwh`    | Yes      | Contract price [monetary units/MWh]. Positive = cost (import); negative = revenue (export) |
+| `contracts[].limits.min_mw`    | Yes      | Minimum dispatch level [MW]; use `0.0` unless a take-or-pay floor applies           |
+| `contracts[].limits.max_mw`    | Yes      | Maximum dispatch level [MW]; must be >= `limits.min_mw`                             |
+| `contracts[].entry_stage_id`   | No       | Stage when the contract enters service; `null` or absent = present from stage 0     |
+| `contracts[].exit_stage_id`    | No       | Stage when the contract is decommissioned; `null` or absent = never                 |
+
+At each active stage within `[entry_stage_id, exit_stage_id)`, the LP adds one
+column per block per direction bounded by `[limits.min_mw, limits.max_mw]`. An
+import column injects `+1.0` MW into the bus power-balance row; an export column
+withdraws `−1.0` MW. At dormant stages the column bounds are pinned to `[0, 0]`
+and the output row is emitted with `power_mw = 0`. Stage-varying bounds and prices
+can be overridden via `constraints/contract_bounds.parquet`.
+
+**Minimal valid example:**
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/energy_contracts.schema.json",
+  "contracts": [
+    {
+      "id": 0,
+      "name": "Import base load",
+      "bus_id": 0,
+      "type": "import",
+      "price_per_mwh": 200.0,
+      "limits": { "min_mw": 0.0, "max_mw": 50.0 }
+    },
+    {
+      "id": 1,
+      "name": "Export revenue (stage 1 only)",
+      "bus_id": 0,
+      "type": "export",
+      "entry_stage_id": 1,
+      "exit_stage_id": 2,
+      "price_per_mwh": -150.0,
+      "limits": { "min_mw": 0.0, "max_mw": 30.0 }
+    }
+  ]
+}
+```
+
+---
+
 ### `system/hydro_geometry.parquet`
 
 Volume-Height-Area (VHA) curves for hydro reservoirs. Required when any hydro is

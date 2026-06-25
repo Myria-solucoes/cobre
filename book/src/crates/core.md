@@ -17,7 +17,7 @@ conditions, generic constraints, and pre-resolved penalty/bound tables.
 
 | Module               | Purpose                                                                                                                                                                                                                                                                                                                                    |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `entities`           | Entity types: Bus, Line, Hydro, Thermal, PumpingStation, NonControllableSource, and EnergyContract (stub)                                                                                                                                                                                                                                  |
+| `entities`           | Entity types: Bus, Line, Hydro, Thermal, PumpingStation, NonControllableSource, and EnergyContract                                                                                                                                                                                                                                         |
 | `entity_id`          | `EntityId` newtype wrapper                                                                                                                                                                                                                                                                                                                 |
 | `error`              | `ValidationError` enum                                                                                                                                                                                                                                                                                                                     |
 | `generic_constraint` | User-defined linear constraints over LP variables                                                                                                                                                                                                                                                                                          |
@@ -187,15 +187,14 @@ and commissioning windows.
 Fields: `id`, `name`, `bus_id`, `entry_stage_id`, `exit_stage_id`,
 `max_generation_mw`, `curtailment_cost` (pre-resolved).
 
-### Stub entities
-
-This entity type is data-complete but does not contribute LP variables or
-constraints. Its type definition exists in the registry so analysis code can
-iterate over all seven entity types uniformly.
-
 #### EnergyContract
 
-A bilateral energy agreement with an entity outside the modeled system.
+A bilateral energy purchase or sale obligation with a counterparty outside the
+modeled system. Contributes one LP column per block per direction (import or
+export) on its `bus_id`, bounded by `[min_mw, max_mw]`. An import column injects
+`+1.0` MW into the bus power-balance row; an export column withdraws `−1.0` MW.
+Supports commissioning windows and stage-varying bound/price overrides. Simulation
+output is written to `simulation/contracts/` per (stage, block, contract) triplet.
 Fields: `id`, `name`, `bus_id`, `contract_type` (`ContractType::Import` or
 `ContractType::Export`), `entry_stage_id`, `exit_stage_id`, `price_per_mwh`,
 `min_mw`, `max_mw`. Negative `price_per_mwh` represents export revenue.

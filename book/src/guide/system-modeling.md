@@ -23,9 +23,8 @@ appear in the input files.
 
 ## Entity Types
 
-Cobre models seven entity types. Six contribute LP variables and constraints in
-optimization and simulation. One is a registered stub that appears in the entity
-model but does not contribute LP variables.
+Every modeled entity type contributes LP variables and constraints in optimization
+and simulation.
 
 | Entity Type      | Status | JSON File                              | Description                                                                                                                                                                                                |
 | ---------------- | ------ | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -35,10 +34,7 @@ model but does not contribute LP variables.
 | Thermal          | Full   | `system/thermals.json`                 | Dispatchable generator with piecewise-linear cost curve. See [Thermal Units](./thermal-units.md).                                                                                                          |
 | Pumping Station  | Full   | `system/pumping_stations.json`         | Pumped-storage or water-transfer station. Contributes a per-block pumped-flow variable; withdraws water from a source reservoir and injects it into a destination reservoir, consuming power from its bus. |
 | Non-Controllable | Full   | `system/non_controllable_sources.json` | Variable renewable source (wind, solar, run-of-river). Generation variable bounded by available capacity × block factor, with curtailment penalty.                                                         |
-| Contract         | Stub   | `system/energy_contracts.json`         | Energy purchase or sale obligation. Entity exists in registry; no LP variables.                                                                                                                            |
-
-The one remaining stub type (Contract) is registered in the entity model so that
-LP construction code can iterate over all seven types consistently.
+| Contract         | Full   | `system/energy_contracts.json`         | Bilateral energy purchase or sale obligation. Contributes one LP column per block per direction (import or export), bounded by `[min_mw, max_mw]`, with a signed injection into the bus power balance.     |
 
 ---
 
@@ -105,6 +101,89 @@ window the station contributes no columns. A worked example is available at
 
 ---
 
+## Energy Contracts
+
+An energy contract represents a bilateral purchase or sale obligation with a
+counterparty outside the modeled system. Each contract contributes one LP column
+per block per direction on its `bus_id`. An import contract injects power into the
+bus (`+1.0` coefficient in the power-balance row); an export contract withdraws
+power from the bus (`−1.0` coefficient). The column is bounded by:
+
+```
+min_mw <= power_mw <= max_mw
+```
+
+The price sign follows the economic convention: a positive `price_per_mwh`
+represents a cost (the system pays for imported energy), and a negative
+`price_per_mwh` represents revenue (the system earns from exported energy).
+
+Contracts support the same commissioning window used by other entity types:
+when `entry_stage_id` and `exit_stage_id` are set, the contract is active only
+at stages in `[entry_stage_id, exit_stage_id)`. At dormant stages the column
+bounds are pinned to `[0, 0]`, and the output row is emitted with `power_mw = 0`
+and `operative_state_code = 1` — the row is never absent.
+
+Stage-varying bounds and prices are supplied via `constraints/contract_bounds.parquet`,
+which accepts sparse `(contract_id, stage_id)` rows carrying any combination of
+`min_mw`, `max_mw`, and `price_per_mwh`. Absent rows use the base entity values.
+A non-zero `min_mw` at a given stage acts as a take-or-pay floor: the LP must
+dispatch at least that quantity at the contract price.
+
+Contract dispatch is stateless: contracts carry no state variable and do not
+contribute to Benders cuts. All contract cost is booked inside `resource_cost`
+in the cost breakdown. Simulation output is written to `simulation/contracts/`
+with columns for `stage_id`, `block_id`, `contract_id`, `power_mw`,
+`energy_mwh`, `price_per_mwh`, `total_cost`, and `operative_state_code`. See
+the [Output Format Reference](../reference/output-format.md) for the complete
+schema.
+
+### Worked example — `examples/deterministic/d41-energy-contracts`
+
+The D41 case has two contracts on a single bus, with three stages of 730 h each.
+
+**Contract 0 — import, always active:**
+
+```json
+{
+  "id": 0,
+  "type": "import",
+  "price_per_mwh": 200.0,
+  "limits": { "min_mw": 0.0, "max_mw": 50.0 }
+}
+```
+
+At stage 0 the import dispatches (`power_mw > 0`): the LP draws up to 50 MW
+of purchased energy at $200/MWh to balance the bus.
+
+**Contract 1 — export, commissioned at stage 1 only:**
+
+```json
+{
+  "id": 1,
+  "type": "export",
+  "entry_stage_id": 1,
+  "exit_stage_id": 2,
+  "price_per_mwh": -150.0,
+  "limits": { "min_mw": 0.0, "max_mw": 30.0 }
+}
+```
+
+At stage 0 the export is dormant (`operative_state_code = 1`, `power_mw = 0`).
+At stage 1 the export is active: the LP can dispatch up to 30 MW of sold energy,
+earning $150/MWh (`total_cost < 0`).
+
+**Stage-2 override on contract 0 via `constraints/contract_bounds.parquet`:**
+
+| `contract_id` | `stage_id` | `min_mw` | `price_per_mwh` |
+| ------------- | ---------- | -------- | --------------- |
+| 0             | 2          | 10.0     | 999.0           |
+
+At stage 2 the import is pinned to its `min_mw = 10.0` take-or-pay floor and
+priced at $999/MWh. The LP must dispatch at least 10 MW regardless of the thermal
+cost, because the floor is a hard column lower bound in the LP.
+
+---
+
 ## How Entities Connect
 
 The network is **bus-centric**. Every entity that produces or consumes power is
@@ -116,10 +195,11 @@ attached to a bus via a `bus_id` field:
   Thermal ─┤
            ├──> Bus <──── Line ────> Bus
   NCS ─────┘
+  Import ──┘
                 │
                load
                 │
-           Contract
+           Export
          Pumping Station
 ```
 
@@ -196,9 +276,9 @@ Entities can enter service or be decommissioned at specified stages using
 | `exit_stage_id`  | integer or null | Stage index at which the entity is decommissioned (inclusive). `null` = never decommissioned |
 
 These fields are available on `Hydro`, `Thermal`, `Line`, `NonControllableSource`,
-and `PumpingStation` entities. When a plant has `entry_stage_id: 12`, the LP does
-not include any variables for that plant in stages 0 through 11. From stage 12
-onward, the plant appears in every sub-problem as normal.
+`PumpingStation`, and `EnergyContract` entities. When a plant has `entry_stage_id: 12`,
+the LP does not include any variables for that plant in stages 0 through 11. From
+stage 12 onward, the plant appears in every sub-problem as normal.
 
 Lifecycle fields are useful for planning studies that span commissioning or retirement
 events: new thermal plants coming online mid-horizon, or aging hydro units being
