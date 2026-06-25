@@ -1,29 +1,19 @@
-//! PRNG wrapper for noise sampling.
-//!
-//! Initialises a `Pcg64` generator from a derived seed and samples
-//! vectors of independent standard-normal (`N(0,1)`) variates. The
-//! samples are consumed by the correlation module to produce spatially
-//! correlated noise vectors for each scenario and stage.
+//! PRNG wrapper: initialises a `Pcg64` from a derived seed for sampling
+//! standard-normal (`N(0,1)`) variates.
 
 use rand::SeedableRng;
 use rand_pcg::Pcg64;
 
 /// Initialize a `Pcg64` RNG from a derived 64-bit seed.
 ///
-/// Expands the 64-bit seed to the 256-bit state required by `Pcg64`
-/// using the [`SeedableRng::seed_from_u64`] method, which applies a
-/// deterministic expansion algorithm. Calling this function twice with
-/// the same seed produces two independent generators that yield
-/// identical sequences.
+/// Equal seeds yield identical sequences.
 ///
 /// # Resume invariant
 ///
-/// The training pipeline derives per-draw seeds from
-/// `(base_seed, iteration, scenario, stage)` via `derive_forward_seed`.
-/// Because `iteration` is the absolute iteration number (not a counter
-/// from zero), a resumed training run at iteration K+1 produces the
-/// same seed — and therefore the same noise — as a continuous run.
-/// This makes explicit RNG state serialization unnecessary for resume.
+/// Because per-draw seeds derive from the *absolute* iteration number (via
+/// [`derive_forward_seed`](crate::noise::seed::derive_forward_seed), not a
+/// from-zero counter), a resumed run at iteration K+1 reproduces the same noise
+/// as a continuous run — so RNG state need not be serialized for resume.
 ///
 /// # Examples
 ///
@@ -34,7 +24,6 @@ use rand_pcg::Pcg64;
 /// let mut rng1 = rng_from_seed(12345);
 /// let mut rng2 = rng_from_seed(12345);
 ///
-/// // Both generators produce the same sequence.
 /// assert_eq!(rng1.random::<f64>(), rng2.random::<f64>());
 /// ```
 #[must_use]
@@ -53,9 +42,8 @@ mod tests {
     fn rng_from_seed_is_deterministic() {
         let mut rng1 = rng_from_seed(12345);
         let mut rng2 = rng_from_seed(12345);
-        // Exact bitwise equality is intentional: we are testing that two RNGs
-        // seeded identically reproduce the same bit pattern, not that two
-        // computed floating-point results are approximately equal.
+        // Bitwise equality is the contract: identical seeds reproduce the same
+        // bit pattern, not merely an approximately-equal float result.
         for _ in 0..10 {
             assert_eq!(rng1.random::<f64>(), rng2.random::<f64>());
         }
@@ -66,13 +54,11 @@ mod tests {
     fn rng_from_seed_differs_for_different_seeds() {
         let mut rng1 = rng_from_seed(0);
         let mut rng2 = rng_from_seed(1);
-        // It is astronomically unlikely for the first f64 to coincide.
         assert_ne!(rng1.random::<f64>(), rng2.random::<f64>());
     }
 
     #[test]
     fn rng_from_seed_zero_is_valid() {
-        // Seed 0 must not panic or produce all-zeros.
         let mut rng = rng_from_seed(0);
         let v: f64 = rng.random();
         assert!(v.is_finite());
