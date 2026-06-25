@@ -1,8 +1,6 @@
-//! Raw FFI bindings to the CLP C wrapper layer.
-//!
-//! These are low-level unsafe functions that map 1:1 to the `cobre_clp_*`
-//! functions declared in `csrc/clp_wrapper.h`.  Use the safe wrappers in
-//! the parent module rather than calling these directly.
+//! Raw FFI bindings mapping 1:1 to the `cobre_clp_*` functions declared in
+//! `csrc/clp_wrapper.h`. Use the safe wrappers in the parent module rather
+//! than calling these directly.
 
 #![allow(dead_code)]
 #![allow(non_camel_case_types)]
@@ -225,13 +223,9 @@ unsafe extern "C" {
     //
     // These reach methods that exist only on the C++ `ClpSimplex` class and are
     // not in the CLP C interface: dual-steepest-edge pricing, factorization
-    // frequency, and the hot-start snapshot/restore trio. The C++ shim
-    // static-casts the opaque `model` handle to the concrete `Clp_Simplex`
-    // wrapper struct (what `cobre_clp_create` returns) and reads `->model_` to
-    // reach the live `ClpSimplex`, matching how every `Clp_*` C-API call reaches
-    // the model. The `save_stuff` token is CLP-owned and kept opaque on the Rust
-    // side — never dereferenced, always paired (mark/unmark) on the same model
-    // instance.
+    // frequency, and the hot-start snapshot/restore trio. The `save_stuff` token
+    // is CLP-owned and kept opaque on the Rust side — never dereferenced, always
+    // paired (mark/unmark) on the same model instance.
     // ============================================================
 
     /// Select dual-steepest-edge pricing. Wraps
@@ -307,13 +301,7 @@ mod tests {
         cobre_clp_status,
     };
 
-    /// Smoke test: create a CLP model, load a trivial 1-variable LP
-    /// (minimize x, x ∈ [0, 10], no constraints), solve it, verify optimality
-    /// and objective value, then destroy the model.
-    ///
-    /// This validates the full FFI pipeline: C wrapper compiles and links against
-    /// CLP, Rust declarations match the C signatures, and a basic solve works
-    /// end-to-end.
+    /// Smoke test that the FFI pipeline links and a trivial LP solves end-to-end.
     #[test]
     fn test_clp_ffi_smoke_create_solve_destroy() {
         // SAFETY: `cobre_clp_create` takes no arguments and returns a freshly

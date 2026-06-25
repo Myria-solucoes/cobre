@@ -1,8 +1,6 @@
-//! Raw FFI bindings to the `HiGHS` C wrapper layer.
-//!
-//! These are low-level unsafe functions that map 1:1 to the `cobre_highs_*`
-//! functions declared in `csrc/highs_wrapper.h`.  Use the safe wrappers in
-//! the parent module rather than calling these directly.
+//! Raw FFI bindings mapping 1:1 to the `cobre_highs_*` functions declared in
+//! `csrc/highs_wrapper.h`. Use the safe wrappers in the parent module rather
+//! than calling these directly.
 
 #![allow(dead_code)]
 #![allow(non_camel_case_types)]
@@ -181,13 +179,10 @@ unsafe extern "C" {
     // Basis Management
     // ============================================================
 
-    /// Set the basis using `alien = false`, saving one LU factorisation
-    /// compared to the alien setter (`Highs_setBasis`). Caller guarantees
-    /// basis consistency (total basic count equals `num_rows`);
-    /// inconsistent bases are rejected with `HIGHS_STATUS_ERROR`. The
-    /// Cobre caller surfaces the rejection as
-    /// [`SolverError::BasisInconsistent`](crate::types::SolverError) with
-    /// the exact basic counts; there is no alien-setter fallback.
+    /// Set the basis with `alien = false`, saving one LU factorisation versus the
+    /// alien setter (`Highs_setBasis`) at the cost of requiring caller-guaranteed
+    /// consistency: total basic count must equal `num_rows`, else the call is
+    /// rejected with `HIGHS_STATUS_ERROR` (there is no alien-setter fallback).
     /// Wraps `Highs::setBasis(const HighsBasis&)` with `basis.alien = false`.
     pub fn cobre_highs_set_basis_non_alien(
         highs: *mut c_void,
@@ -302,21 +297,12 @@ unsafe extern "C" {
     pub fn cobre_highs_version_patch() -> c_int;
 }
 
-// This smoke test calls the `cobre_highs_*` FFI symbols directly, which are
-// only compiled and linked into the wrapper when the `highs` backend is built.
-// Gate it behind `feature = "highs"` so a clp-only test build links no HiGHS
-// symbol.
+// Gated behind `feature = "highs"` so a clp-only test build links no HiGHS symbol.
 #[cfg(all(test, feature = "highs"))]
 mod tests {
     use super::*;
 
-    /// Smoke test: create a `HiGHS` instance, load a trivial 1-variable LP
-    /// (minimize x, x ∈ [0, 10], no constraints), solve it, verify optimality
-    /// and objective value, then destroy the instance.
-    ///
-    /// This validates the full FFI pipeline: C wrapper compiles and links against
-    /// `HiGHS`, Rust declarations match C signatures, and a basic solve works
-    /// end-to-end.
+    /// Smoke test that the FFI pipeline links and a trivial LP solves end-to-end.
     #[test]
     fn test_ffi_smoke_create_solve_destroy() {
         let highs = unsafe { cobre_highs_create() };
