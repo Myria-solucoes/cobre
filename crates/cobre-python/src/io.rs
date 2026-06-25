@@ -75,12 +75,8 @@ fn load_validate_config(
     }
 }
 
-/// Convert a [`LoadError`] to the appropriate Python exception.
-///
-/// A thin shim over the single [`crate::errors::convert_error`] mapping site:
-/// `IoError` → `cobre.errors.CaseIoError` (subclasses `OSError`); every other
-/// variant → `cobre.errors.ValidationError` / `PolicyIncompatibleError`
-/// (subclasses `ValueError`). The exception message is preserved verbatim.
+/// Convert a [`LoadError`] to the appropriate Python exception — a thin shim over
+/// the single [`crate::errors::convert_error`] mapping site.
 fn convert_load_error(err: &LoadError) -> PyErr {
     crate::errors::convert_error(crate::errors::ErrorSource::Load(err))
 }
@@ -202,10 +198,10 @@ pub fn validate(
     path: PathBuf,
     config_overrides: Option<Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Convert the override dict under the GIL up front so overrides are validated
-    // identically wherever they enter (matching the design doc). An unsupported
-    // value type or non-str key raises PyValueError here — this is a malformed
-    // call, not a case-validation failure, so it is the one path that may raise.
+    // A malformed override dict (non-str key or unsupported value) raises
+    // PyValueError here — a malformed call, not a case-validation failure, so it is
+    // the one path that may raise despite this function otherwise returning errors
+    // as data.
     let overrides = config_overrides
         .map(|d| crate::convert::pydict_to_json_map(&d))
         .transpose()?;
@@ -228,7 +224,6 @@ pub fn validate(
         }};
     }
 
-    // Phase 0: path existence check.
     if !path.exists() {
         return_error!(
             "IoError",
@@ -236,9 +231,8 @@ pub fn validate(
         );
     }
 
-    // Phases 1–6: cobre-io six-layer validation pipeline.
-    // Use the _with_artifacts variant to obtain the pre-parsed CaseArtifacts
-    // bundle needed by phase 10 without re-reading disk.
+    // The _with_artifacts variant yields the pre-parsed CaseArtifacts bundle phase
+    // 10 reuses without re-reading disk.
     let (loaded, report) = match cobre_io::validate_case_with_artifacts(&path) {
         Ok(result) => result,
         Err(err) => {
@@ -249,12 +243,6 @@ pub fn validate(
     let system = loaded.system;
     let artifacts = loaded.artifacts;
 
-    // Phase 7: parse config.json (override-aware). When overrides are present
-    // the file is read and deep-merged via `Config::with_overrides`, which
-    // re-deserializes and runs the same validation `parse_config` performs, so a
-    // typo or out-of-range override surfaces here as a SchemaError. Both error
-    // sources share the `load_error_kind` mapping, so overrides are validated
-    // identically wherever they enter.
     let config_path = path.join("config.json");
     let config = match load_validate_config(&config_path, overrides.as_ref()) {
         Ok(c) => c,
@@ -263,10 +251,6 @@ pub fn validate(
         }
     };
 
-    // Phase 8: StudyParams::from_config — validates solver-level fields such as
-    // stopping rules and cut-selection parameters that are only checked at
-    // algorithm startup, and emits deprecation warnings for fields scheduled
-    // for removal.
     let study_params = match StudyParams::from_config(&config) {
         Ok(p) => p,
         Err(ref err) => {
@@ -277,7 +261,6 @@ pub fn validate(
 
     let seed = study_params.seed;
 
-    // Extract the training scenario source (needed by prepare_stochastic).
     let training_source = match config.training_scenario_source(&config_path) {
         Ok(s) => s,
         Err(ref err) => {
@@ -285,8 +268,6 @@ pub fn validate(
         }
     };
 
-    // Phase 9: prepare_stochastic — runs PAR estimation from inflow history,
-    // loads user opening trees, builds the stochastic context.
     let prepared = match prepare_stochastic(system, &path, &config, seed, &training_source) {
         Ok(p) => p,
         Err(ref err) => {
@@ -295,8 +276,6 @@ pub fn validate(
         }
     };
 
-    // Phase 10: prepare_hydro_models_from_artifacts — resolves production and
-    // evaporation models. Uses the pre-parsed artifacts bundle from phases 1–6.
     if let Err(ref err) =
         prepare_hydro_models_from_artifacts(&prepared.system, &artifacts, false, None)
     {
@@ -304,7 +283,6 @@ pub fn validate(
         return_error!(kind, format!("{file_label}: {err}"));
     }
 
-    // All phases passed — populate warnings from the cobre-io pipeline report.
     dict.set_item("valid", true)?;
     dict.set_item("errors", PyList::empty(py))?;
     dict.set_item("warnings", build_warnings_list(py, &report.warnings)?)?;

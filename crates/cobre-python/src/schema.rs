@@ -1,10 +1,8 @@
 //! JSON Schema export helper for the `cobre.schema` sub-module.
 //!
-//! Exposes [`export`], which wraps [`cobre_io::schema::generate_schemas`] —
-//! the same generator backing the `cobre schema export` CLI subcommand. Unlike
-//! the CLI, which prints a confirmation line to stderr, the binding returns the
-//! integer count of files written so Python callers receive data, not terminal
-//! text.
+//! [`export`] wraps the same [`cobre_io::schema::generate_schemas`] generator as
+//! the `cobre schema export` CLI, but returns the count of files written rather
+//! than printing a confirmation line.
 
 use std::path::PathBuf;
 
@@ -12,19 +10,10 @@ use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
 
 /// Generate JSON Schema files for all case-directory input types and write them
-/// to `output_dir`.
+/// to `output_dir` (a `str` or `pathlib.Path`), creating it if needed.
 ///
-/// The directory is created if it does not exist. Existing schema files are
-/// overwritten without prompting (schemas are generated, not hand-edited).
-///
-/// # Arguments
-///
-/// * `output_dir` — directory to write schema files into, as a `str` or
-///   `pathlib.Path`. Defaults to the current directory.
-///
-/// # Returns
-///
-/// The number of schema files written.
+/// Existing schema files are overwritten without prompting — schemas are
+/// generated, not hand-edited. Returns the number of files written.
 ///
 /// # Raises
 ///

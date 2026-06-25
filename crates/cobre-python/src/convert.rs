@@ -1,26 +1,8 @@
-//! Conversions between Python objects and `serde_json` values.
+//! Conversions between Python objects and `serde_json` values, the inverse of
+//! [`crate::results::json_value_to_py`].
 //!
-//! These helpers are the inverse of [`crate::results::json_value_to_py`]: they
-//! take a Python object (typically a value from a `config_overrides` mapping)
-//! and produce a [`serde_json::Value`]. The dotted-key override map accepted by
-//! `cobre.run.run` and `cobre.io.validate` is converted into a
-//! [`serde_json::Map`] via [`pydict_to_json_map`] **under the GIL**, before the
-//! solver lifecycle releases it with `py.detach`.
-//!
-//! ## Supported value types
-//!
-//! | Python type      | JSON value                         |
-//! |------------------|------------------------------------|
-//! | `None`           | `null`                             |
-//! | `bool`           | `bool`                             |
-//! | `int`            | number (i64 / u64)                 |
-//! | `float`          | number (f64; rejects NaN/Inf)      |
-//! | `str`            | string                             |
-//! | `list` / `tuple` | array (recursive)                  |
-//! | `dict`           | object (string keys, recursive)    |
-//!
-//! Any other Python type raises [`PyValueError`]. Non-`str` dict keys also raise
-//! [`PyValueError`].
+//! The override map must be converted **under the GIL** (via [`pydict_to_json_map`])
+//! before the solver lifecycle releases it with `py.detach`.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -28,17 +10,10 @@ use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 
 /// Convert an arbitrary JSON-compatible Python object into a [`serde_json::Value`].
 ///
-/// The conversion is the dual of [`crate::results::json_value_to_py`]. The type
-/// dispatch checks `bool` before `int` because in Python `bool` is a subclass of
-/// `int`; checking `int` first would coerce `True`/`False` into `1`/`0`.
-///
 /// # Errors
 ///
-/// Returns [`PyValueError`] when:
-/// - `obj` is of an unsupported type (anything not in the table in the module docs).
-/// - a `float` is `NaN` or infinite (not representable in JSON).
-/// - an integer is outside the `i64`/`u64` range.
-/// - a `dict` key is not a `str`.
+/// Returns [`PyValueError`] when `obj` is an unsupported type, a `float` is
+/// `NaN`/infinite, an integer is outside `i64`/`u64`, or a `dict` key is not a `str`.
 pub fn py_to_json_value(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
     if obj.is_none() {
         return Ok(serde_json::Value::Null);
@@ -50,7 +25,6 @@ pub fn py_to_json_value(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
     }
 
     if let Ok(i) = obj.cast::<PyInt>() {
-        // Try signed first, then unsigned for values above i64::MAX.
         if let Ok(v) = i.extract::<i64>() {
             return Ok(serde_json::Value::Number(v.into()));
         }
@@ -105,9 +79,6 @@ pub fn py_to_json_value(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
 
 /// Convert a Python `dict` into a [`serde_json::Map`].
 ///
-/// Keys must be Python `str`; a non-`str` key raises [`PyValueError`]. Values are
-/// converted recursively via [`py_to_json_value`].
-///
 /// # Errors
 ///
 /// Returns [`PyValueError`] when a key is not a `str`, or when any value fails
@@ -130,10 +101,6 @@ pub fn pydict_to_json_map(
     Ok(map)
 }
 
-// NOTE: `py_to_json_value` / `pydict_to_json_map` are GIL-bound: a Rust
-// `#[cfg(test)]` module that calls `Python::attach` cannot link against the
-// extension-module build (no embedded interpreter). Their per-type and
-// rejection coverage lives in `tests/test_convert.py`, which exercises them
-// through `cobre.io.validate(..., config_overrides=...)` and
-// `cobre.run.run(..., config_overrides=...)` — mirroring how
-// `results::json_value_to_py` is covered from Python.
+// GIL-bound: a Rust `#[cfg(test)]` calling `Python::attach` cannot link the
+// extension-module build (no embedded interpreter), so coverage lives in
+// `tests/test_convert.py`.

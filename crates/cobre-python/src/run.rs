@@ -43,24 +43,20 @@ use cobre_solver::ActiveSolver;
 
 /// Error returned by [`run_via_study`].
 ///
-/// Most failures carry a descriptive `String` (mapped to the appropriate Python
-/// exception type by the caller). A user `on_iteration` callback that raises — or
-/// a `KeyboardInterrupt` surfaced by `py.check_signals()` — carries the original
-/// [`PyErr`] verbatim so its type and message reach Python unchanged, after the
-/// run's partial artifacts have already been written.
+/// A captured callback `PyErr` is carried verbatim (its type and message reach
+/// Python unchanged) and propagated only after the run's partial artifacts have
+/// been written.
 #[derive(Debug)]
 pub(crate) enum RunError {
     /// A descriptive message mapped to a Python exception type by the caller.
     Message(String),
-    /// A `PyErr` captured from the streaming callback (or `check_signals`),
-    /// propagated after artifacts are written.
+    /// A `PyErr` captured from the streaming callback (or `check_signals`).
     Callback(PyErr),
-    /// A typed SDDP failure from a training/simulation phase helper, carried
-    /// verbatim with its descriptive message so the mapping site can attach
-    /// structured fields (e.g. `Infeasible`'s stage/iteration/scenario) without
-    /// losing the message text.
+    /// A typed SDDP failure carried verbatim with its descriptive message, so the
+    /// mapping site can attach structured fields (e.g. `Infeasible`'s
+    /// stage/iteration/scenario) without losing the message text.
     Sddp {
-        /// The typed SDDP error (`Send + Sync + 'static`, safe across `py.detach`).
+        /// The typed SDDP error.
         error: cobre_sddp::SddpError,
         /// The verbatim descriptive message (preserved so `match=` assertions pass).
         message: String,
@@ -84,15 +80,12 @@ impl From<PhaseError> for RunError {
 
 /// Error returned by the training/simulation phase helpers.
 ///
-/// Mirrors [`RunError`] minus the callback variant: most phase failures carry a
-/// descriptive `String` (`HiGHS` init, drain-thread panic, writer init, cost
-/// aggregation, stats writes), while a hard `train`/`simulate` failure carries
-/// the typed [`cobre_sddp::SddpError`] alongside the message it would have
-/// stringified to. The `From<String>` impl keeps every existing `?` site
-/// unchanged — only the three stringify sites build the typed `Sddp` arm.
+/// Mirrors [`RunError`] minus the callback variant. The `From<String>` impl keeps
+/// every existing `?` site unchanged; only a hard `train`/`simulate` failure
+/// builds the typed `Sddp` arm.
 #[derive(Debug)]
 pub(crate) enum PhaseError {
-    /// A descriptive message (`HiGHS` init, drain panic, writer init, etc.).
+    /// A descriptive message.
     Message(String),
     /// A typed SDDP failure carried verbatim with its descriptive message.
     Sddp {
@@ -130,17 +123,17 @@ pub(crate) struct SimSummary {
 }
 
 /// Build a scoped rayon thread pool for the requested thread count and run the
-/// closure inside `pool.install(...)`, so the whole call's rayon work is
-/// confined to this pool and the pool is dropped when the call returns.
+/// closure inside `pool.install(...)`.
 ///
-/// Unlike a process-global rayon pool — which can only be configured once per
-/// process — this creates a fresh pool per call, so two sequential `run`
-/// invocations with different thread counts each honor their own value.
+/// A fresh pool per call — not a process-global pool, which can only be
+/// configured once per process — so two sequential `run` invocations with
+/// different thread counts each honor their own value. The effective `n` is
+/// passed into the closure so callers can record it in metadata.
 ///
-/// `threads` maps to `n = threads.map_or(1, |t| t as usize).max(1)`, which is
-/// passed into the closure so callers can record the effective thread count in
-/// metadata. On pool-construction failure, returns a descriptive `Err(String)`
-/// rather than silently falling back to an implicit pool.
+/// # Errors
+///
+/// Returns a descriptive `Err(String)` on pool-construction failure rather than
+/// silently falling back to an implicit pool.
 pub(crate) fn run_in_scoped_pool<T>(
     threads: Option<u32>,
     f: impl FnOnce(usize) -> T + Send,
@@ -156,18 +149,13 @@ where
     Ok(pool.install(|| f(n)))
 }
 
-/// Fold the per-phase training solver-stats log into category totals.
+/// Fold the per-phase training solver-stats log into category totals, mirroring
+/// the CLI's `aggregate_solver_stats` shape. Solve times are ms→s.
 ///
-/// Returns `(first_try, retried, failed, forward_solve_seconds,
-/// backward_solve_seconds)`, mirroring the CLI's `aggregate_solver_stats`
-/// shape. The Python path is single-process, so every log entry is summed (no
-/// per-rank filter). Solve times are converted from milliseconds to seconds.
-///
-/// `total_lp_solves` is intentionally NOT derived here. The CLI sources it from
-/// the per-iteration convergence records (`IterationRecord.lp_solves`), not from
-/// this per-phase/per-stage stats log; the two sums can diverge for multi-stage
-/// cases. The caller computes it from the convergence records to stay
-/// bit-for-bit identical to the CLI.
+/// `total_lp_solves` is intentionally NOT derived here: the CLI sources it from
+/// the per-iteration convergence records (`IterationRecord.lp_solves`), and the
+/// two sums can diverge for multi-stage cases — the caller must compute it from
+/// the convergence records to stay bit-for-bit identical to the CLI.
 fn aggregate_training_solve_stats(
     stats_log: &[cobre_sddp::SolverStatsLogEntry],
 ) -> (u64, u64, u64, f64, f64) {
@@ -207,14 +195,10 @@ pub(crate) struct TrainingPhaseResult {
 /// Assemble a [`TrainingPhaseResult`] from a finished training run and its
 /// full event stream.
 ///
-/// Shared by both the non-streaming path ([`run_training_phase_py`]) and the
-/// streaming path ([`run_training_phase_py_streaming`]) so the
-/// `convergence_records` and solve-stats carrier are built identically
-/// regardless of how the events were collected. `events` must be the complete
-/// set of [`TrainingEvent`]s emitted during the run (the streaming drain thread
-/// collects every event in addition to forwarding boundary summaries to the
-/// callback), so `build_training_output` sees exactly what the non-streaming
-/// path sees.
+/// `events` must be the complete set of [`TrainingEvent`]s emitted during the
+/// run: `build_training_output` builds `convergence_records` from them, so a
+/// partial set diverges convergence parity between the streaming and
+/// non-streaming paths.
 fn build_training_phase_result(
     setup: &StudySetup,
     training_result: cobre_sddp::TrainingResult,
@@ -225,11 +209,8 @@ fn build_training_phase_result(
 ) -> TrainingPhaseResult {
     let mut training_output = setup.build_training_output(&training_result, events);
 
-    // Populate the solve-stats carrier. `build_training_output` leaves it
-    // defaulted (and already set `final_upper_bound_std`, which must remain
-    // untouched). `total_lp_solves` is sourced from the per-iteration
-    // convergence records to mirror the CLI exactly; the phase-derived counts
-    // come from the per-phase stats-log fold.
+    // `total_lp_solves` is sourced from the per-iteration convergence records to
+    // mirror the CLI exactly (see `aggregate_training_solve_stats`).
     let total_lp_solves: u64 = training_output
         .convergence_records
         .iter()
@@ -255,13 +236,11 @@ fn build_training_phase_result(
     }
 }
 
-/// Run the training phase: solver init, train, write outputs.
+/// Run the training phase (no callback): solver init, train, collect events.
 ///
-/// This is the no-callback path. Events are collected with `event_rx.try_iter()`
-/// AFTER `train` returns, exactly as the historical implementation did, so the
-/// no-callback golden parity test stays bit-identical. The streaming variant
-/// ([`run_training_phase_py_streaming`]) is used only when an `on_iteration`
-/// callback is provided.
+/// Events are collected with `event_rx.try_iter()` only AFTER `train` returns,
+/// keeping the no-callback golden parity test bit-identical. The streaming
+/// variant ([`run_training_phase_py_streaming`]) handles the `on_iteration` case.
 pub(crate) fn run_training_phase_py(
     setup: &mut StudySetup,
     n_threads: usize,
@@ -300,31 +279,14 @@ pub(crate) fn run_training_phase_py(
 }
 
 /// Run the training phase with a Python `on_iteration` callback, streaming
-/// boundary events to Python as they are produced.
+/// boundary events to Python via a dedicated drain thread (see
+/// [`drain_training_events`]).
 ///
-/// # Design
-///
-/// `train` runs on this thread with the GIL released (the caller invokes
-/// `run_via_study` inside `py.detach`). A dedicated drain thread owns the receiver,
-/// a clone of the cooperative `shutdown_flag`, and the `Py<PyAny>` callback. For
-/// every event it receives the drain thread:
-///
-/// 1. pushes the event into a local `Vec<TrainingEvent>` so the full event set
-///    is recovered on join (`build_training_output` needs every event for
-///    `convergence.parquet` parity — identical to the non-streaming path);
-/// 2. reacquires the GIL via [`Python::attach`] to (a) poll `py.check_signals()`
-///    — an `Err` (e.g. `KeyboardInterrupt`) sets the shutdown flag and is
-///    remembered for propagation; (b) convert boundary `IterationSummary`
-///    events via [`iteration_summary_to_dict`] and, on `Some(dict)`, invoke the
-///    callback. A truthy callback return sets the shutdown flag (cooperative
-///    stop); a callback that raises captures the `PyErr` and sets the shutdown
-///    flag (it is propagated as the run's error after artifacts are written —
-///    the drain thread never panics).
-///
-/// The callback runs ONLY inside `Python::attach` in this drain thread, at
-/// iteration boundaries — never in the solver's hot LP loop (P2). The solver
-/// loop polls `shutdown_flag` at iteration boundaries and exits gracefully,
-/// writing whatever partial artifacts it completed (P3).
+/// `train` runs on this thread with the GIL released. The callback runs ONLY
+/// inside `Python::attach` in the drain thread, at iteration boundaries — never
+/// in the solver's hot LP loop. The solver loop polls `shutdown_flag` at
+/// iteration boundaries and exits gracefully, writing whatever partial artifacts
+/// it completed.
 ///
 /// # Errors
 ///
@@ -360,13 +322,11 @@ pub(crate) fn run_training_phase_py_streaming(
         Some(&shutdown_flag),
     );
 
-    // The channel is already closed here: `event_tx` was moved into
-    // `setup.train`, whose `TrainingSession` owns the only remaining sender and
-    // drops it in its destructor before `train` returns — so the drain thread's
-    // `recv()` loop has already terminated. Join, then surface a training error
-    // FIRST if there is one (it is more diagnostic than a drain-thread
-    // bookkeeping failure); a drain panic only wins when training itself
-    // succeeded.
+    // The channel is already closed: `event_tx` was moved into `setup.train`,
+    // whose `TrainingSession` drops the only remaining sender before returning,
+    // so the drain thread's `recv()` loop has terminated and `join()` will not
+    // block. Surface a training error before a drain panic — it is the more
+    // diagnostic failure.
     let drain_result = drain_handle.join();
     let training_outcome = training_outcome.map_err(|e| PhaseError::Sddp {
         message: format!("training error: {e}"),
@@ -391,9 +351,8 @@ pub(crate) fn run_training_phase_py_streaming(
 /// requests via the shared `shutdown_flag`.
 ///
 /// Returns the complete event collection (for `build_training_output` parity)
-/// and the first captured `PyErr` (a `KeyboardInterrupt` from `check_signals`
-/// or an exception raised by the callback), if any. Never panics: a raising
-/// callback is captured, not unwound.
+/// and the first captured `PyErr`, if any. Never panics: a raising callback is
+/// captured, not unwound.
 fn drain_training_events(
     event_rx: &mpsc::Receiver<TrainingEvent>,
     shutdown_flag: &Arc<AtomicBool>,
@@ -405,21 +364,16 @@ fn drain_training_events(
     let mut captured_pyerr: Option<PyErr> = None;
 
     while let Ok(event) = event_rx.recv() {
-        // Dispatch BEFORE pushing so the callback borrows `event` directly; the
-        // event is then moved into the collection for `build_training_output`
-        // parity (every event must reach it). Skip GIL reacquisition entirely
-        // once a stop has been requested (truthy callback, Ctrl-C, or a raising
-        // callback) — keep draining only to recover remaining events.
+        // Dispatch before pushing so the callback borrows `event` directly; the
+        // event is moved into the collection afterward. Once a stop is requested,
+        // keep draining (to recover remaining events) but skip GIL reacquisition.
         //
         // `Relaxed` suffices for `shutdown_flag`: it is a one-way latch (only
-        // ever flipped `false` -> `true`). The solver observes it at a later
-        // iteration boundary; both outcomes (stop now, or one extra iteration
-        // before the store is seen) are correct under the cooperative contract,
-        // so no acquire/release synchronization is needed.
+        // flipped `false` -> `true`). Both outcomes — stop now, or one extra
+        // iteration before the store is seen — are correct under the cooperative
+        // contract, so no acquire/release synchronization is needed.
         if !shutdown_flag.load(Ordering::Relaxed) {
             Python::attach(|py| {
-                // A stop request sets the flag and records the first PyErr (if
-                // any) so it can be propagated after artifacts are written.
                 let mut request_stop = |err: Option<PyErr>| {
                     shutdown_flag.store(true, Ordering::Relaxed);
                     if let Some(err) = err {
@@ -429,14 +383,11 @@ fn drain_training_events(
                     }
                 };
 
-                // (1) Cooperative Ctrl-C: a pending signal surfaces here as Err.
                 if let Err(err) = py.check_signals() {
                     request_stop(Some(err));
                     return;
                 }
 
-                // (2) Boundary summary → callback. Non-boundary events convert
-                // to None and are skipped (they are still collected below).
                 match iteration_summary_to_dict(py, &event) {
                     Ok(Some(dict)) => match on_iteration.bind(py).call1((dict,)) {
                         Ok(ret) => match ret.is_truthy() {
@@ -447,8 +398,7 @@ fn drain_training_events(
                         Err(err) => request_stop(Some(err)),
                     },
                     Ok(None) => {}
-                    // Conversion failure is unexpected; treat it like a callback
-                    // error so it surfaces rather than being silently dropped.
+                    // Surface a conversion failure rather than silently dropping it.
                     Err(err) => request_stop(Some(err)),
                 }
             });
@@ -461,8 +411,8 @@ fn drain_training_events(
     (collected, captured_pyerr)
 }
 
-/// Write all training artifacts: policy checkpoint, training results, solver stats,
-/// and cut selection records.
+/// Write the training artifacts: policy checkpoint, training results, solver
+/// stats, and cut selection records.
 pub(crate) fn write_training_artifacts(
     output_dir: &std::path::Path,
     system: &cobre_core::System,
@@ -516,19 +466,16 @@ pub(crate) fn write_training_artifacts(
             mpi_standard: None,
             thread_level: None,
             slurm_job_id: None,
-            // Single-process LocalBackend: one host, rank 0.
             hosts: vec![cobre_io::HostLayout {
                 hostname: cobre_io::get_hostname(),
                 ranks: vec![0],
             }],
         },
-        // Python single-process path collects no setup-phase timings, so the
-        // metadata `setup` section is absent (CLI-only). Matches the CLI shape via
-        // `skip_serializing_if = "Option::is_none"`.
+        // Absent (CLI-only): the Python single-process path collects no
+        // setup-phase timings. Matches the CLI shape via `skip_serializing_if`.
         setup: None,
-        // Roll the computed-FPHA fit deviations up into the metadata aggregate;
-        // `None` for a run that fitted no computed model. Mirrors the CLI write
-        // site so Python and CLI emit the same `production_fit_deviation` section.
+        // Mirrors the CLI write site so Python and CLI emit the same
+        // `production_fit_deviation` section.
         production_fit_deviation: cobre_sddp::build_deviation_summary(
             &setup.hydro_models.fpha_fit_deviations,
         ),
@@ -541,10 +488,8 @@ pub(crate) fn write_training_artifacts(
 
 /// Write the trained FPHA hyperplanes sidecar, when the model produced any.
 ///
-/// This file represents the trained model and is only meaningful once training
-/// has completed; simulation-only runs do not write it. Extracted so both
-/// [`run_via_study`] and `Study::train` emit it identically (bit-for-bit) after the
-/// rest of the training artifacts.
+/// Shared call site so both [`run_via_study`] and `Study::train` emit it
+/// identically. Training-only: simulation-only runs do not write it.
 pub(crate) fn write_fpha_hyperplanes_if_any(
     output_dir: &std::path::Path,
     setup: &StudySetup,
@@ -562,12 +507,9 @@ pub(crate) fn write_fpha_hyperplanes_if_any(
 /// Write the resolved evaporation-model coefficients sidecar, when the case
 /// models evaporation for at least one hydro.
 ///
-/// Mirrors [`write_fpha_hyperplanes_if_any`]: the file is written beside the
-/// FPHA export under `hydro_models/`, guarded by a non-empty check so a case
-/// with no evaporation-modeled hydro produces no file. Both Python write sites
-/// ([`run_via_study`] and `Study::train`) must emit this file to match the
-/// CLI's `write_evaporation_models` output (the Python-parity hard rule); the
-/// shared call site is what holds them to it.
+/// Both Python write sites ([`run_via_study`] and `Study::train`) must emit this
+/// to match the CLI's `write_evaporation_models` output (the Python-parity hard
+/// rule); the shared call site is what holds them to it.
 pub(crate) fn write_evaporation_models_if_any(
     output_dir: &std::path::Path,
     setup: &StudySetup,
@@ -585,16 +527,12 @@ pub(crate) fn write_evaporation_models_if_any(
 }
 
 /// Write the per-sampled-point FPHA deviation table sidecar, when the run opted
-/// in AND the fit produced any points.
+/// in (`config.exports.fpha_deviation_points`) AND the fit produced any points.
 ///
-/// Mirrors [`write_evaporation_models_if_any`] with an extra opt-in gate: the
-/// file is written beside the FPHA export under `hydro_models/`, but only when
-/// `config.exports.fpha_deviation_points` is on AND the rows are non-empty (a
-/// non-computed-FPHA run produces none). Off by default, so a default run writes
-/// no file and is byte-identical to the CLI. Both Python write sites
-/// ([`run_via_study`] and `Study::train`) must call this to match the CLI's
-/// `write_fpha_deviation_points` output (the Python-parity hard rule); the shared
-/// helper is what holds them to it.
+/// Off by default, so a default run writes no file and is byte-identical to the
+/// CLI. Both Python write sites ([`run_via_study`] and `Study::train`) must call
+/// this to match the CLI's `write_fpha_deviation_points` output (the
+/// Python-parity hard rule); the shared helper is what holds them to it.
 pub(crate) fn write_fpha_deviation_points_if_any(
     output_dir: &std::path::Path,
     setup: &StudySetup,
@@ -662,9 +600,8 @@ pub(crate) fn run_simulation_phase_py(
             &training_result.basis_cache,
         )
         .map_err(|e| {
-            // Build the verbatim message from the original `SimulationError`
-            // first (so the text is byte-identical to the old string path), then
-            // wrap it in `SddpError::Simulation` as the structured carrier.
+            // Build the message from the original `SimulationError` before
+            // wrapping, so the text stays byte-identical to the old string path.
             let message = format!("simulation error: {e}");
             PhaseError::Sddp {
                 message,
@@ -684,14 +621,13 @@ pub(crate) fn run_simulation_phase_py(
     let mut sim_out = sim_writer.finalize(sim_time_ms);
     sim_out.failed = write_failures;
 
-    // Fold every per-scenario solver delta into one aggregate (single-process:
-    // no opening or per-worker dimension to filter on).
+    // Single-process: no opening or per-worker dimension to filter on, so fold
+    // every per-scenario delta into one aggregate.
     let mut agg = SolverStatsDelta::default();
     for (_, _, delta) in &sim_run_result.solver_stats {
         SolverStatsDelta::accumulate_into(&mut agg, delta);
     }
 
-    // Aggregate per-scenario costs into the simulation cost summary.
     let cost_summary = cobre_sddp::aggregate_simulation(
         &sim_run_result.costs,
         setup.simulation_config(),
@@ -715,8 +651,7 @@ pub(crate) fn run_simulation_phase_py(
         parallelism: Some(parallelism),
     };
 
-    // Simulation has no opening dimension and no per-worker dimension yet;
-    // opening, rank, and worker_id are all None.
+    // Single-process: opening, rank, and worker_id are all None.
     if !sim_run_result.solver_stats.is_empty() {
         let rows: Vec<SolverStatsRow> = sim_run_result
             .solver_stats
@@ -757,15 +692,13 @@ pub(crate) fn run_simulation_phase_py(
             mpi_standard: None,
             thread_level: None,
             slurm_job_id: None,
-            // Single-process LocalBackend: one host, rank 0.
             hosts: vec![cobre_io::HostLayout {
                 hostname: cobre_io::get_hostname(),
                 ranks: vec![0],
             }],
         },
-        // Simulation metadata has no setup section.
         setup: None,
-        // Simulation metadata carries no production-fit deviation (training-only).
+        // training-only.
         production_fit_deviation: None,
     };
     cobre_io::write_simulation_results(output_dir, &sim_out, &sim_ctx)
@@ -776,13 +709,11 @@ pub(crate) fn run_simulation_phase_py(
 
 /// Load the effective [`cobre_io::Config`] for a run.
 ///
-/// When `overrides` is `None` or empty, this is exactly today's behavior:
-/// [`cobre_io::parse_config`] reads and validates `config.json`. When overrides
-/// are present, the file is read to a `serde_json::Value` and deep-merged with
-/// the overrides via [`cobre_io::Config::with_overrides`], which re-deserializes
-/// and runs the same validation `parse_config` performs. The merged config feeds
-/// the rest of the lifecycle unchanged, so the persisted metadata reflects the
-/// effective (post-override) config.
+/// With no overrides, [`cobre_io::parse_config`] reads and validates
+/// `config.json`. With overrides, the file is deep-merged with them via
+/// [`cobre_io::Config::with_overrides`], which runs the same validation
+/// `parse_config` performs, so the persisted metadata reflects the effective
+/// (post-override) config.
 fn load_effective_config(
     config_path: &std::path::Path,
     overrides: Option<&serde_json::Map<String, serde_json::Value>>,
@@ -802,14 +733,12 @@ fn load_effective_config(
 
 /// Everything the front half of the solve lifecycle produces: the live
 /// [`StudySetup`] plus the adjacent immutable state that `run_via_study` and the
-/// `Study` pyclass both consume.
+/// `Study` pyclass both consume. [`build_study_setup`] is the sole producer (the
+/// single load path).
 ///
-/// This is the single load path. [`build_study_setup`] is the sole producer;
-/// `run_via_study` destructures it and continues with training/simulation, while
-/// `Study::__new__` stores the fields for later `train`/`simulate` calls. The
-/// `warnings` carrier holds the `cobre-io` validation-pipeline warnings captured
-/// during load (via [`cobre_io::validate_case_with_artifacts`]) so
-/// `Study::validate` can replay them without re-reading disk.
+/// The `warnings` carrier holds the validation-pipeline warnings captured during
+/// load (via [`cobre_io::validate_case_with_artifacts`]) so `Study::validate` can
+/// replay them without re-reading disk.
 pub(crate) struct LoadedStudy {
     /// The live, fully prepared study setup (cuts pool, templates, stochastic
     /// context, hydro models, scenario libraries).
@@ -831,19 +760,17 @@ pub(crate) struct LoadedStudy {
 }
 
 /// Run the front half of the solve lifecycle: load the case, resolve the
-/// effective config, run stochastic preprocessing and hydro-model preparation,
-/// build the [`StudySetup`], build the provenance/summary carriers, and write
-/// the front-half sidecar artifacts (stochastic exports when enabled,
-/// `training/scaling_report.json`, `training/model_provenance.json`,
-/// `training/hydro_models.json`).
+/// effective config, run stochastic/hydro-model preprocessing, build the
+/// [`StudySetup`] and the provenance/summary carriers, and write the front-half
+/// sidecar artifacts.
 ///
-/// This is Python-free (no `PyO3` types in its signature) so its happy path can
-/// be exercised from a plain Rust `#[cfg(test)]` test without a GIL token. It is
-/// the ONLY place the front half runs: both [`run_via_study`] and the `Study`
-/// pyclass call it, so there is a single load path with no divergence.
+/// Python-free (no `PyO3` types in its signature) so its happy path can be
+/// exercised from a plain Rust `#[cfg(test)]` test without a GIL token. The ONLY
+/// place the front half runs: both [`run_via_study`] and the `Study` pyclass call
+/// it, so there is a single load path with no divergence.
 ///
-/// `overrides` is the already-converted (under the GIL, by the caller) dotted-key
-/// override map; `None` and an empty map both reproduce the no-override path.
+/// `overrides` is the already-converted dotted-key override map; `None` and an
+/// empty map both reproduce the no-override path.
 ///
 /// # Errors
 ///
@@ -855,9 +782,7 @@ pub(crate) fn build_study_setup(
     output_dir: &std::path::Path,
     overrides: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<LoadedStudy, String> {
-    // Single-source case load: pick up the System, the auxiliary parquet/JSON
-    // rows, and the validation-pipeline warnings in one validated pass. Using
-    // the `validate_*` variant (rather than `load_case_with_artifacts`) captures
+    // The `validate_*` variant (rather than `load_case_with_artifacts`) captures
     // the warnings so `Study::validate` can replay them without re-reading disk.
     let (loaded, report) =
         cobre_io::validate_case_with_artifacts(case_dir).map_err(|e| e.to_string())?;
@@ -913,10 +838,8 @@ pub(crate) fn build_study_setup(
         system.hydros().len(),
         &setup.hydro_models.provenance,
     );
-    // Fingerprint past_inflows when the historical scheme is active so stale-library
-    // detection can compare against a fresh digest on later runs. The training-side
-    // library is the canonical one; simulation-side is None when it borrows from
-    // training (identical past_inflows by construction).
+    // Fingerprint past_inflows (training-side library only) so stale-library
+    // detection can compare against a fresh digest on later runs.
     provenance_report
         .inflow
         .historical_library_past_inflows_digest =
@@ -949,9 +872,8 @@ pub(crate) fn build_study_setup(
         build_stochastic_summary(&system, &setup.stochastic, estimation_report.as_ref(), seed);
     let hydro_models_summary = build_hydro_model_summary(&setup.hydro_models, &system);
 
-    // Persist the structural hydro-model summary as a sidecar so `cobre summary`
-    // can render the Hydro-models section from a completed run. Built once above
-    // and reused here to avoid recomputing it for the write.
+    // Sidecar so `cobre summary` can render the Hydro-models section from a
+    // completed run.
     let hydro_models_path = output_dir.join("training/hydro_models.json");
     cobre_io::write_hydro_model_summary(&hydro_models_path, &hydro_models_summary)
         .map_err(|e| format!("output write error: failed to write hydro model summary: {e}"))?;
@@ -968,25 +890,13 @@ pub(crate) fn build_study_setup(
     })
 }
 
-/// Apply the configured policy mode to `setup` BEFORE training.
+/// Apply the configured policy mode (warm-start / resume / boundary cuts) to
+/// `setup` BEFORE training.
 ///
-/// This performs the warm-start / resume / boundary-cut future-cost-function
-/// replacement exactly as the training branch of [`run_via_study`] does, so the
-/// monolithic `run` path and the `Study::train` method share a single
-/// implementation (no divergence). It is Python-free (no `PyO3` types in its
-/// signature) so it can be exercised from a plain Rust `#[cfg(test)]` test
-/// without a GIL token, and so `Study::train` can call it inside `py.detach`.
-///
-/// Semantics:
-/// - `PolicyMode::WarmStart` → read the prior checkpoint, build a warm-start
-///   FCF (reserving one extra slot for the final iteration's cuts), and replace
-///   `setup.fcf`.
-/// - `PolicyMode::Resume` → as warm-start, plus restore the completed-iteration
-///   count via `setup.set_start_iteration`.
-/// - `config.policy.boundary` (orthogonal to the mode) → load the boundary cuts
-///   and inject them into the terminal pool, AFTER any warm-start/resume
-///   replacement so the two compose correctly.
-/// - default mode with no boundary cuts → a no-op; `setup` is unchanged.
+/// Shared by the monolithic `run` path and `Study::train` (no divergence), and
+/// Python-free (no `PyO3` types in its signature) so it can run inside `py.detach`
+/// and be exercised from a plain Rust `#[cfg(test)]` test without a GIL token.
+/// The default mode with no boundary cuts is a no-op.
 ///
 /// # Errors
 ///
@@ -1001,7 +911,6 @@ pub(crate) fn apply_training_policy_mode(
     config: &cobre_io::Config,
     output_dir: &std::path::Path,
 ) -> Result<(), String> {
-    // Warm-start: load prior policy and inject cuts before training.
     if config.policy.mode == cobre_io::PolicyMode::WarmStart {
         let policy_dir = output_dir.join(&setup.policy_path);
         if !policy_dir.exists() {
@@ -1032,10 +941,9 @@ pub(crate) fn apply_training_policy_mode(
         )
         .map_err(|e| format!("warm-start FCF construction error: {e}"))?;
         setup.replace_fcf(warm_fcf);
-        // Seed the warm-start basis store from the checkpoint's stored bases so
-        // iteration 1's cut-loaded LPs warm-start. Skip when the checkpoint
-        // carries no bases (written without `store_basis`): the store stays
-        // empty and iteration 1 cold-starts, matching the prior behavior.
+        // Seed the warm-start basis store so iteration 1's cut-loaded LPs
+        // warm-start. Empty bases (checkpoint written without `store_basis`) leave
+        // iteration 1 to cold-start.
         if !checkpoint.stage_bases.is_empty() {
             let basis_cache = cobre_sddp::build_basis_cache_from_checkpoint(
                 setup.stage_data.stage_templates.templates.len(),
@@ -1077,10 +985,9 @@ pub(crate) fn apply_training_policy_mode(
         .map_err(|e| format!("resume FCF construction error: {e}"))?;
         setup.replace_fcf(warm_fcf);
         setup.set_start_iteration(completed);
-        // Seed the warm-start basis store from the checkpoint's stored bases so
-        // iteration 1's cut-loaded LPs warm-start. Skip when the checkpoint
-        // carries no bases (written without `store_basis`): the store stays
-        // empty and iteration 1 cold-starts, matching the prior behavior.
+        // Seed the warm-start basis store so iteration 1's cut-loaded LPs
+        // warm-start. Empty bases (checkpoint written without `store_basis`) leave
+        // iteration 1 to cold-start.
         if !checkpoint.stage_bases.is_empty() {
             let basis_cache = cobre_sddp::build_basis_cache_from_checkpoint(
                 setup.stage_data.stage_templates.templates.len(),
@@ -1091,9 +998,9 @@ pub(crate) fn apply_training_policy_mode(
         }
     }
 
-    // Boundary cuts — orthogonal to policy mode. Runs after warm-start/resume
-    // so that both compose correctly: warm-start replaces the entire FCF first,
-    // then boundary cuts overwrite only the terminal pool.
+    // Boundary cuts run AFTER warm-start/resume so the two compose: warm-start
+    // replaces the entire FCF first, then boundary cuts overwrite only the
+    // terminal pool.
     if let Some(ref bp) = config.policy.boundary {
         let boundary_path = output_dir.join(&bp.path);
         #[allow(clippy::cast_possible_truncation)]
@@ -1108,31 +1015,19 @@ pub(crate) fn apply_training_policy_mode(
 }
 
 /// Reconstruct an on-disk policy checkpoint into a `(FutureCostFunction,
-/// TrainingResult)` pair for simulation-only / `Study.load_policy`.
+/// TrainingResult)` pair for simulation-only / `Study.load_policy`, exactly as
+/// the CLI's `load_policy_for_simulation` builds it (a synthetic
+/// [`TrainingResult::new`] with `baked_templates = None`).
 ///
-/// This is the single on-disk reconstruction path shared by the simulation-only
-/// branch of [`run_via_study`] and `Study::load_policy`. It performs, in order:
-/// existence check on `policy_dir` → [`read_policy_checkpoint`] → optional
-/// [`validate_policy_compatibility`] (when `config.policy.validate_compatibility`)
-/// → [`FutureCostFunction::from_deserialized`] →
-/// [`build_basis_cache_from_checkpoint`] (sized to
-/// `setup.stage_data.stage_templates.templates.len()`) → a synthetic
-/// [`TrainingResult::new`] with `baked_templates = None` and the
-/// `"loaded from checkpoint"` label — exactly as the CLI's
-/// `load_policy_for_simulation` builds it.
+/// The single on-disk reconstruction path shared by the simulation-only branch
+/// of [`run_via_study`] and `Study::load_policy`. Python-free (no `PyO3` types in
+/// its signature) so it can be exercised from a plain Rust `#[cfg(test)]` test
+/// without a GIL token.
 ///
-/// It deliberately does NOT call [`StudySetup::replace_fcf`]: the caller decides
-/// whether to mutate the study (the simulation-only branch and `Study::simulate`
-/// both `replace_fcf` the returned FCF before simulating, so a trained `Policy`
-/// and a loaded one feed the identical simulate path).
+/// Deliberately does NOT call [`StudySetup::replace_fcf`]: the caller decides
+/// whether to mutate the study, so a trained `Policy` and a loaded one feed the
+/// identical simulate path.
 ///
-/// This is Python-free (no `PyO3` types in its signature) so it can be exercised
-/// from a plain Rust `#[cfg(test)]` test without a GIL token.
-///
-/// [`read_policy_checkpoint`]: cobre_io::output::policy::read_policy_checkpoint
-/// [`validate_policy_compatibility`]: cobre_sddp::validate_policy_compatibility
-/// [`FutureCostFunction::from_deserialized`]: cobre_sddp::FutureCostFunction::from_deserialized
-/// [`build_basis_cache_from_checkpoint`]: cobre_sddp::build_basis_cache_from_checkpoint
 /// [`TrainingResult::new`]: cobre_sddp::TrainingResult::new
 /// [`StudySetup::replace_fcf`]: cobre_sddp::StudySetup::replace_fcf
 ///
@@ -1192,8 +1087,8 @@ pub(crate) fn reconstruct_policy_from_checkpoint(
         basis_cache,
         Vec::new(),
         None,
-        // Baked templates are not stored in policy checkpoints. simulate() re-bakes all
-        // stage templates at startup from the FCF cut pool when baked_templates is None.
+        // None: checkpoints store no baked templates; simulate() re-bakes from the
+        // FCF cut pool at startup.
         None,
     );
 
@@ -1202,27 +1097,20 @@ pub(crate) fn reconstruct_policy_from_checkpoint(
 
 /// Run the full solve lifecycle without MPI or progress bars (GIL released for computation).
 ///
-/// This is the SINGLE execution path: it sequences the exact same shared helpers
-/// the `Study` pyclass methods call (`build_study_setup`,
-/// `apply_training_policy_mode`, `run_training_phase_py` /
-/// `run_training_phase_py_streaming`, `write_training_artifacts`,
-/// `write_fpha_hyperplanes_if_any`, `reconstruct_policy_from_checkpoint`,
-/// `run_simulation_phase_py`) into the load → train → simulate lifecycle, and
-/// returns the [`RunSummary`] the [`run`] shim renders into the public dict. It
-/// performs no `PyO3` dict assembly itself.
+/// The SINGLE execution path: it sequences the same shared helpers the `Study`
+/// pyclass methods call into the load → train → simulate lifecycle and returns
+/// the [`RunSummary`] the [`run`] shim renders into the public dict. It performs
+/// no `PyO3` dict assembly itself.
 ///
-/// `overrides` is the already-converted `config_overrides` map (built under the
-/// GIL by the caller, before `py.detach`). When `Some` and non-empty, the
-/// effective config is the deep-merge of `config.json` and the overrides via
-/// [`cobre_io::Config::with_overrides`], so the persisted metadata reflects what
-/// actually ran. `None` and an empty map both reproduce the no-override path.
-// `overrides` is owned because it is moved across the `py.detach` /
-// scoped-pool boundary into this call; it is borrowed (not consumed) for the
-// merge, but owning it here is the correct lifecycle boundary.
-// Rationale (too_many_lines): this is the single execution path; it sequences
-// shared helpers without any logic that would form a coherent extracted
-// function — splitting would produce pass-through wrappers with no independent
-// invariant.
+/// `overrides` is the already-converted `config_overrides` map. When `Some` and
+/// non-empty, the effective config is the deep-merge of `config.json` and the
+/// overrides via [`cobre_io::Config::with_overrides`], so the persisted metadata
+/// reflects what actually ran. `None` and an empty map both reproduce the
+/// no-override path.
+// needless_pass_by_value: `overrides` is owned because it is moved across the
+// `py.detach` / scoped-pool boundary into this call.
+// too_many_lines: this is the single execution path sequencing shared helpers;
+// splitting would produce pass-through wrappers with no independent invariant.
 #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 pub(crate) fn run_via_study(
     case_dir: &std::path::Path,
@@ -1232,11 +1120,6 @@ pub(crate) fn run_via_study(
     overrides: Option<serde_json::Map<String, serde_json::Value>>,
     on_iteration: Option<Py<PyAny>>,
 ) -> Result<RunSummary, RunError> {
-    // Front half: the single load path. `build_study_setup` loads the case,
-    // resolves the effective config, runs stochastic/hydro preprocessing, builds
-    // the `StudySetup`, and writes the front-half sidecars. `run_via_study` and
-    // the `Study` pyclass both call it, so there is no divergence (the golden
-    // parity test guards this).
     let LoadedStudy {
         mut setup,
         system,
@@ -1255,15 +1138,10 @@ pub(crate) fn run_via_study(
     let training_enabled = config.training.enabled;
 
     if training_enabled {
-        // Warm-start / resume / boundary-cut FCF replacement, shared with
-        // `Study::train` via the single Python-free helper.
         apply_training_policy_mode(&mut setup, &system, &config, &output_dir)?;
 
-        // When a callback is provided, use the streaming drain thread; otherwise
-        // keep the historical "collect after return" path bit-identical so the
-        // no-callback golden parity test is preserved (P5). A captured callback
-        // error (or KeyboardInterrupt) is propagated only AFTER artifacts are
-        // written, so a stopped/raising run still persists what it completed.
+        // Streaming drain thread only when a callback is provided; otherwise the
+        // no-callback path stays bit-identical to the golden parity test.
         let (mut training, callback_error) = match on_iteration {
             Some(callback) => run_training_phase_py_streaming(&mut setup, n_threads, callback)?,
             None => (run_training_phase_py(&mut setup, n_threads)?, None),
@@ -1279,28 +1157,19 @@ pub(crate) fn run_via_study(
             n_threads,
         )?;
 
-        // Write FPHA hyperplanes after training (shared with `Study::train`).
         write_fpha_hyperplanes_if_any(&output_dir, &setup)?;
-
-        // Write evaporation-model coefficients after training (shared with
-        // `Study::train`). Mirrors the CLI's `write_evaporation_models` call.
         write_evaporation_models_if_any(&output_dir, &setup, &system)?;
-
-        // Write the opt-in per-sampled-point FPHA deviation table after training
-        // (shared with `Study::train`). Mirrors the CLI's
-        // `write_fpha_deviation_points` block, opt-in + if-any guarded.
         write_fpha_deviation_points_if_any(&output_dir, &setup, &config)?;
 
-        // Propagate a captured callback exception (or KeyboardInterrupt) only
-        // now that all training artifacts have been written, so a raising or
-        // Ctrl-C-stopped run still persists its partial metadata/parquets (P3).
+        // Propagate a captured callback exception only AFTER all training
+        // artifacts are written, so a raising or Ctrl-C-stopped run still persists
+        // its partial metadata/parquets.
         if let Some(err) = callback_error {
             return Err(RunError::Callback(err));
         }
 
-        // Move the typed error out of the carrier so the structured fields (e.g.
-        // `Infeasible`) survive to the mapping site, preserving the exact message
-        // text alongside it.
+        // `.take()` the typed error so the structured fields (e.g. `Infeasible`)
+        // survive to the mapping site with the exact message text.
         if let Some(error) = training.error.take() {
             let iterations = training.result.iterations;
             return Err(RunError::Sddp {
@@ -1336,16 +1205,10 @@ pub(crate) fn run_via_study(
         })
     } else {
         if should_simulate {
-            // Simulation-only mode: load policy and run simulation. The on-disk
-            // reconstruction is shared verbatim with `Study::load_policy` via the
-            // single Python-free helper, so the loaded and trained policies feed
-            // the identical simulate path (P3).
             let policy_dir = output_dir.join(&setup.policy_path);
             let (loaded_fcf, training_result) =
                 reconstruct_policy_from_checkpoint(&setup, &system, &config, &policy_dir)?;
 
-            // The caller mutates the study: replace the empty FCF with the loaded
-            // one before simulating, exactly as `Study::simulate` does.
             setup.replace_fcf(loaded_fcf);
 
             let simulation = Some(run_simulation_phase_py(
@@ -1375,7 +1238,6 @@ pub(crate) fn run_via_study(
             });
         }
 
-        // Both training and simulation disabled — return zero-iteration summary.
         Ok(RunSummary {
             converged: false,
             iterations: 0,
@@ -1516,30 +1378,12 @@ fn provenance_to_dict<'py>(
     Ok(dict)
 }
 
-/// Convert a boundary [`TrainingEvent::IterationSummary`] into a Python dict.
+/// Convert a boundary [`TrainingEvent::IterationSummary`] into a Python dict;
+/// every other variant returns `Ok(None)`, keeping GIL reacquisition rare.
 ///
-/// Only the end-of-iteration [`TrainingEvent::IterationSummary`] event crosses
-/// into Python; every other variant returns `Ok(None)` and is filtered out by
-/// the caller. This keeps GIL reacquisition rare (only the per-iteration
-/// boundary summary is forwarded, never the high-frequency intra-iteration or
-/// per-worker events).
-///
-/// On a match, returns `Ok(Some(dict))` with keys:
-/// - `"kind"` = `"iteration"`
-/// - `"iteration"` (`u64`)
-/// - `"lower_bound"` (`f64`)
-/// - `"upper_bound"` (`f64`)
-/// - `"gap"` (`f64`)
-/// - `"wall_time_ms"` (`u64`)
-///
-/// ## Unit of `gap`
-///
-/// `gap` is the **raw relative** optimality gap exactly as stored on the event
-/// (`(upper_bound - lower_bound) / |upper_bound|`), **not** multiplied by 100.
-/// This is intentionally distinct from the monolithic `run.run()` summary,
-/// which exposes `gap_percent = gap * 100`. The per-iteration callback mirrors
-/// the raw event field; the Python side must scale to a percentage itself if a
-/// percentage is desired.
+/// `gap` is the **raw relative** optimality gap as stored on the event, **not**
+/// multiplied by 100 — intentionally distinct from `run.run()`'s
+/// `gap_percent = gap * 100`. The Python side must scale to a percentage itself.
 fn iteration_summary_to_dict<'py>(
     py: Python<'py>,
     event: &cobre_core::TrainingEvent,
@@ -1586,9 +1430,8 @@ fn iteration_summary_to_dict<'py>(
 /// run's exception after artifacts are written. The callback runs in a dedicated
 /// drain thread under the GIL — never in the solver's hot loop. When `None`
 /// (the default), the run is bit-identical to the no-callback path.
-// Rationale: PyO3 #[pyfunction] extraction requires owned values for the
-// PathBuf and Py<PyAny> arguments; the from-Python extraction protocol hands
-// over owned values, so borrowing is not possible at this boundary.
+// needless_pass_by_value: PyO3's from-Python extraction hands over owned values,
+// so the `PathBuf`/`Py<PyAny>` arguments cannot be borrowed at this boundary.
 #[allow(clippy::needless_pass_by_value)]
 #[pyfunction]
 #[pyo3(signature = (case_dir, output_dir=None, threads=None, skip_simulation=None, config_overrides=None, on_iteration=None))]
@@ -1611,15 +1454,13 @@ pub fn run(
     let resolved_output = output_dir.unwrap_or_else(|| case_dir.join("output"));
     let skip = skip_simulation.unwrap_or(false);
 
-    // Convert the override dict UNDER THE GIL, before py.detach releases it.
-    // An unsupported value type or non-str key raises PyValueError here.
+    // Convert the override dict while the GIL is still held, before `py.detach`.
     let overrides = config_overrides
         .map(|dict| crate::convert::pydict_to_json_map(&dict))
         .transpose()?;
 
-    // `on_iteration` is already a `Py<PyAny>` (a GIL-independent owned handle),
-    // so it can cross the `py.detach` boundary into the drain thread and be
-    // re-bound under `Python::attach`.
+    // `on_iteration` is a `Py<PyAny>` (GIL-independent), so it can cross the
+    // `py.detach` boundary into the drain thread and be re-bound under attach.
     let result: Result<RunSummary, RunError> = py.detach(move || {
         run_in_scoped_pool(threads, |n| {
             run_via_study(&case_dir, resolved_output, n, skip, overrides, on_iteration)
@@ -1673,14 +1514,11 @@ pub fn run(
 
             Ok(dict.into())
         }
-        // A captured callback exception (or KeyboardInterrupt) is returned
-        // verbatim so its original type and message reach Python unchanged. It is
-        // NOT routed through `convert_error` — that would clobber the original
-        // traceback/type.
+        // Returned verbatim, NOT routed through `convert_error` — that would
+        // clobber the callback's original traceback/type.
         Err(RunError::Callback(err)) => Err(err),
-        // A typed SDDP failure: route the error and its verbatim message through
-        // the single mapping site so structured fields (e.g. `Infeasible`) reach
-        // Python as `SolverError` attributes.
+        // Routed through the single mapping site so structured fields (e.g.
+        // `Infeasible`) reach Python as `SolverError` attributes.
         Err(RunError::Sddp { error, message }) => Err(convert_error(ErrorSource::Sddp {
             error: &error,
             message,
