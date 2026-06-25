@@ -18,72 +18,49 @@ use crate::risk_measure::{BackwardOutcome, RiskMeasureScratch};
 /// A solver basis augmented with slot-tracking metadata for cut-set-aware
 /// warm-start reconstruction.
 ///
-/// `CapturedBasis` wraps a raw [`Basis`] and attaches two pieces of metadata
-/// that the reconstruction algorithm needs:
-///
-/// - `base_row_count`: the number of template (non-cut) rows in the LP when
-///   the basis was captured.  Row statuses at indices `0..base_row_count`
-///   belong to template rows and are always valid.
-///
-/// - `cut_row_slots`: maps each cut row in the captured basis to the cut pool
-///   slot it occupied at capture time.  Entry `i` corresponds to LP row
-///   `base_row_count + i`.  Length must equal
-///   `basis.row_status.len() - base_row_count` when both are populated;
-///
-/// - `state_at_capture`: the state vector `x_hat` at which the basis was
-///   captured.  Used by the backward warm-start to evaluate newly added cuts
-///   at the correct operating point.
-///
-/// # Zero-allocation design
-///
-/// `cut_row_slots` and `state_at_capture` are sized via explicit capacity
-/// parameters in [`CapturedBasis::new`] so the forward capture site can
-/// pre-allocate once and reuse the same `CapturedBasis` on subsequent
-/// iterations without heap reallocation.
+/// `cut_row_slots` maps each captured cut row to the cut pool slot it occupied
+/// at capture, so reconstruction binds stored statuses to current LP cut rows by
+/// slot identity rather than row count. Pre-sized via [`CapturedBasis::new`] so
+/// the forward capture site reuses one `CapturedBasis` across iterations without
+/// reallocation.
 #[derive(Clone, Debug)]
 pub struct CapturedBasis {
     /// The underlying solver basis (row and column statuses).
     pub basis: Basis,
-    /// Number of template (non-cut) LP rows at capture time.
+    /// Number of template (non-cut) LP rows at capture time; row statuses at
+    /// `0..base_row_count` are template rows.
     pub base_row_count: usize,
-    /// Cut pool slot for each cut row in `basis.row_status[base_row_count..]`.
+    /// Cut pool slot for each cut row in `basis.row_status[base_row_count..]`;
+    /// length equals `basis.row_status.len() - base_row_count` when populated.
     pub cut_row_slots: Vec<u32>,
-    /// State vector `x_hat` at which this basis was captured.
+    /// State vector `x_hat` at capture, the operating point for evaluating newly
+    /// added cuts on the backward warm-start.
     pub state_at_capture: Vec<f64>,
 }
 
 /// Wire-format version for `CapturedBasis` broadcast payloads.
 ///
-/// Stored as the second `i32` in every `Some`-path payload, immediately
-/// after the presence sentinel (`1_i32`). Bump this constant and update
+/// Stored as the second `i32` in every `Some`-path payload, immediately after
+/// the presence sentinel (`1_i32`). Bump this constant and update
 /// `try_from_broadcast_payload` whenever the field layout changes.
 ///
-/// Version 1 carries: column statuses, template-row statuses, cut-row
-/// statuses, `cut_row_slots`, and `state_at_capture`. `cut_row_slots` is
-/// load-bearing on the reconstruction path — `build_slot_lookup` reads
-/// it to bind stored cut-row statuses to target-LP cut rows by slot id.
-/// `state_at_capture` carries a real captured state only on the baked
-/// path: there it is written by the forward capture and refreshed by the
-/// backward reuse path. The DCS arm captures no basis by design (a captured
-/// basis would describe the baked layout, not the DCS resident subset — see
-/// `StageOpeningSolver::solve_lazy` in `backward.rs`), so on that arm the
-/// field is diagnostic-only and is never part of a consumed warm-start.
-/// Even on the baked path it is not read by any current reconstruction
-/// reader; it is retained for diagnostic value and to preserve the option
-/// of re-introducing a state-dependent reuse policy without a wire-format
-/// change.
+/// Version 1 carries: column statuses, template-row statuses, cut-row statuses,
+/// `cut_row_slots`, and `state_at_capture`. `cut_row_slots` is the load-bearing
+/// reconstruction key — `build_slot_lookup` binds stored cut-row statuses to
+/// target-LP cut rows by slot id. `state_at_capture` is not read by any current
+/// reconstruction reader; it is retained for diagnostics and to allow
+/// re-introducing a state-dependent reuse policy without a wire-format change.
+/// The DCS arm captures no basis by design (a captured basis would describe the
+/// baked layout, not the DCS resident subset — see
+/// `StageOpeningSolver::solve_lazy`), so there the field is never part of a
+/// consumed warm-start.
 pub const BASIS_BROADCAST_WIRE_VERSION: i32 = 1;
 
 impl CapturedBasis {
     /// Construct an empty `CapturedBasis` with the given capacities.
     ///
-    /// - `num_cols` / `num_rows`: forwarded to [`Basis::new`].
-    /// - `base_row_count`: stored as-is; typically `ctx.templates[t].num_rows`.
-    /// - `cut_slot_capacity`: pre-allocated capacity for `cut_row_slots`
-    ///   (`basis_row_capacity - base_row_count` in the forward pass).
-    /// - `n_state`: pre-allocated capacity for `state_at_capture`.
-    ///
-    /// `cut_row_slots` and `state_at_capture` start empty (length 0);
+    /// `cut_row_slots` and `state_at_capture` are pre-sized to
+    /// `cut_slot_capacity` / `n_state` but start empty (length 0).
     #[must_use]
     pub fn new(
         num_cols: usize,
@@ -100,11 +77,9 @@ impl CapturedBasis {
         }
     }
 
-    /// Clear slot and state metadata in place.
+    /// Clear slot and state metadata in place, retaining capacity.
     ///
-    /// Does **not** touch `basis` — the solver's `get_basis` call overwrites
-    /// that on the next capture.  Keeps the allocated capacity of both vectors
-    /// so subsequent pushes are allocation-free.
+    /// Does **not** touch `basis` — the next `get_basis` overwrites it.
     pub fn clear(&mut self) {
         self.cut_row_slots.clear();
         self.state_at_capture.clear();
@@ -198,7 +173,6 @@ impl CapturedBasis {
         f64_buf: &[f64],
         f64_cursor: &mut usize,
     ) -> Result<Option<Self>, crate::SddpError> {
-        // Read sentinel.
         if *i32_cursor >= i32_buf.len() {
             return Err(crate::SddpError::Validation(format!(
                 "try_from_broadcast_payload: buffer truncated at stage {stage} \
@@ -214,8 +188,7 @@ impl CapturedBasis {
             return Ok(None);
         }
 
-        // Read wire version — present only on the Some path, immediately after
-        // the presence sentinel.
+        // Version byte is present only on the Some path, after the sentinel.
         if *i32_cursor >= i32_buf.len() {
             return Err(crate::SddpError::Validation(format!(
                 "try_from_broadcast_payload: buffer truncated reading version at stage {stage}"
@@ -230,8 +203,6 @@ impl CapturedBasis {
             )));
         }
 
-        // Read 5 length/metadata fields: col_len, row_len, base_row_count,
-        // cut_slot_count, state_len.
         if *i32_cursor + 5 > i32_buf.len() {
             return Err(crate::SddpError::Validation(format!(
                 "try_from_broadcast_payload: buffer truncated reading lengths at stage {stage}"
@@ -248,7 +219,6 @@ impl CapturedBasis {
         let state_len = i32_buf[*i32_cursor] as usize;
         *i32_cursor += 1;
 
-        // Read col_status.
         if *i32_cursor + col_len > i32_buf.len() {
             return Err(crate::SddpError::Validation(format!(
                 "try_from_broadcast_payload: buffer truncated reading col_status at stage \
@@ -259,7 +229,6 @@ impl CapturedBasis {
         let col_status = i32_buf[*i32_cursor..*i32_cursor + col_len].to_vec();
         *i32_cursor += col_len;
 
-        // Read row_status.
         if *i32_cursor + row_len > i32_buf.len() {
             return Err(crate::SddpError::Validation(format!(
                 "try_from_broadcast_payload: buffer truncated reading row_status at stage \
@@ -270,7 +239,6 @@ impl CapturedBasis {
         let row_status = i32_buf[*i32_cursor..*i32_cursor + row_len].to_vec();
         *i32_cursor += row_len;
 
-        // Read cut_row_slots (stored as i32, cast back to u32).
         if *i32_cursor + cut_slot_count > i32_buf.len() {
             return Err(crate::SddpError::Validation(format!(
                 "try_from_broadcast_payload: buffer truncated reading cut_row_slots at stage \
@@ -286,7 +254,6 @@ impl CapturedBasis {
             .collect();
         *i32_cursor += cut_slot_count;
 
-        // Read state_at_capture from the f64 buffer.
         if *f64_cursor + state_len > f64_buf.len() {
             return Err(crate::SddpError::Validation(format!(
                 "try_from_broadcast_payload: f64 buffer truncated reading state_at_capture at \
@@ -312,15 +279,16 @@ impl CapturedBasis {
 /// Sizing parameters shared by [`SolverWorkspace`], [`WorkspacePool`], and
 /// `ScratchBuffers` constructors.
 ///
-/// Grouping these eight dimensions into one struct keeps constructor argument
-/// counts within the clippy budget while making the sizing relationship
-/// explicit: every workspace allocates a [`PatchBuffer`], `ScratchBuffers`,
-/// and `BackwardAccumulators` from exactly these values.
+/// Grouping these dimensions into one struct keeps constructor argument counts
+/// within the clippy budget; every workspace allocates a [`PatchBuffer`],
+/// `ScratchBuffers`, and `BackwardAccumulators` from exactly these values.
 ///
-/// Set `max_openings`, `initial_pool_capacity`, and `n_state` to `0` for
-/// simulation-only workspaces that do not participate in the backward pass.
-/// The `BackwardAccumulators` buffers will then start empty and grow
-/// on-demand via the growth-only resize semantics in the backward pass.
+/// Any dimension may be `0`: the corresponding buffer starts empty and grows
+/// on-demand via the growth-only resize semantics. Pass `0` for the backward
+/// fields (`max_openings`, `initial_pool_capacity`, `n_state`) on
+/// simulation-only workspaces, and for the forward fields (`max_local_fwd`,
+/// `total_forward_passes`, `noise_dim`) on backward-only or simulation-only
+/// workspaces.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WorkspaceSizing {
     /// Number of hydro plants in the study.
@@ -331,159 +299,99 @@ pub struct WorkspaceSizing {
     pub n_load_buses: usize,
     /// Maximum number of blocks per stage (0 if no stochastic load).
     pub max_blocks: usize,
-    /// PAR order of the downstream (coarser) resolution for multi-resolution
-    /// studies. Pass `0` for uniform-resolution studies (no downstream
-    /// transition).
+    /// PAR order of the downstream (coarser) resolution; `0` for
+    /// uniform-resolution studies (no downstream transition).
     pub downstream_par_order: usize,
-    /// Maximum number of openings across all successor stages. Used to
-    /// pre-size `BackwardAccumulators::outcomes`. Pass `0` for
-    /// simulation-only workspaces.
+    /// Maximum openings across all successor stages; pre-sizes
+    /// `BackwardAccumulators::outcomes`.
     pub max_openings: usize,
-    /// Initial cut pool capacity for pre-sizing
-    /// `BackwardAccumulators::slot_increments`. Pass `0` for
-    /// simulation-only workspaces.
+    /// Initial cut pool capacity; pre-sizes
+    /// `BackwardAccumulators::slot_increments`.
     pub initial_pool_capacity: usize,
-    /// State dimension `n_state` for pre-sizing
-    /// `BackwardAccumulators::agg_coefficients`. Pass `0` for
-    /// simulation-only workspaces.
+    /// State dimension `n_state`; pre-sizes
+    /// `BackwardAccumulators::agg_coefficients`.
     pub n_state: usize,
-    /// Maximum number of forward-pass scenarios assigned to this rank.
-    ///
-    /// Used to pre-size `ScratchBuffers::trajectory_costs_buf`. Pass `0`
-    /// for backward-only or simulation-only workspaces; the buffer will start
-    /// empty and resize on first use.
+    /// Maximum forward-pass scenarios assigned to this rank; pre-sizes
+    /// `ScratchBuffers::trajectory_costs_buf`.
     pub max_local_fwd: usize,
-    /// Total forward passes across all MPI ranks.
-    ///
-    /// Used to pre-size `ScratchBuffers::perm_scratch`. Pass `0` for
-    /// backward-only or simulation-only workspaces.
+    /// Total forward passes across all MPI ranks; pre-sizes
+    /// `ScratchBuffers::perm_scratch`.
     pub total_forward_passes: usize,
-    /// Noise dimension for forward-pass sampling buffers.
-    ///
-    /// Used to pre-size `ScratchBuffers::raw_noise_buf`. Pass `0` for
-    /// backward-only or simulation-only workspaces.
+    /// Noise dimension for forward-pass sampling; pre-sizes
+    /// `ScratchBuffers::raw_noise_buf`.
     pub noise_dim: usize,
-    /// Number of anticipated thermals (A).
-    ///
-    /// Used to pre-size `ScratchBuffers::anticipated_state_buf` and the
-    /// `PatchBuffer` Category 6 region. Pass `0` when there are no
-    /// anticipated thermals.
+    /// Number of anticipated thermals (A); pre-sizes
+    /// `ScratchBuffers::anticipated_state_buf` and the `PatchBuffer` Category 6
+    /// region. `0` when there are no anticipated thermals.
     pub n_anticipated: usize,
-    /// Maximum lead-time horizon across anticipated thermals (K).
-    ///
-    /// Used together with `n_anticipated` to determine the size of the
-    /// anticipated-state ring buffer. Pass `0` when there are no anticipated
-    /// thermals.
+    /// Maximum lead-time horizon across anticipated thermals (K); with
+    /// `n_anticipated`, sizes the anticipated-state ring buffer.
     pub k_max: usize,
 }
 
 /// Pre-allocated accumulators for the backward pass trial-point loop.
 ///
-/// Survives across stages and trial points without per-call allocation.
-/// Buffers grow monotonically (never shrink) using growth-only resize
-/// semantics — excess capacity from earlier stages is retained and reused.
-///
-/// Each rayon worker owns an exclusive [`SolverWorkspace`] and therefore an
-/// exclusive `BackwardAccumulators` instance; no synchronisation is needed.
+/// All buffers grow monotonically (never shrink) and are reused across stages
+/// and trial points without per-call allocation. Each rayon worker owns an
+/// exclusive [`SolverWorkspace`] and therefore an exclusive instance, so the
+/// per-worker fields need no synchronisation; the sequential merge phase after
+/// the parallel region sums their contributions.
 #[derive(Default)]
 pub(crate) struct BackwardAccumulators {
-    /// Per-opening backward outcomes. Grown monotonically to the maximum
-    /// `n_openings` seen so far via `push`.
+    /// Per-opening backward outcomes, grown to the maximum `n_openings` seen.
     pub(crate) outcomes: Vec<BackwardOutcome>,
-    /// Per-slot binding count, indexed by cut pool slot. Grown via
-    /// `.resize(pop, 0)` and zeroed per trial point via `.fill(0)`.
+    /// Per-slot binding count, indexed by cut pool slot; zeroed per trial point.
     pub(crate) slot_increments: Vec<u64>,
-    /// Scratch buffer for aggregated cut coefficients (`n_state` entries).
-    /// Written by `aggregate_weighted_into` and then copied into the
-    /// per-worker [`agg_arena`](Self::agg_arena) at the trial point's slot.
+    /// Aggregated cut coefficients (`n_state` entries), written by
+    /// `aggregate_weighted_into` then copied into [`agg_arena`](Self::agg_arena)
+    /// at the trial point's slot.
     pub(crate) agg_coefficients: Vec<f64>,
     /// Per-worker flat arena holding every staged cut's coefficient vector for
     /// the current stage.
     ///
-    /// Sized lazily in the per-worker stage setup to at least
-    /// `(end_m - start_m) * n_state` `f64`s and **never shrunk** (capacity is
-    /// retained across stages/iterations, like [`staged_cuts_buf`](Self::staged_cuts_buf)).
-    /// Slot `i` of the trial point with local index `local_idx = m - start_m`
-    /// lives at `agg_arena[local_idx * n_state + i]`. Each [`StagedCut`] stores
-    /// a `Range<usize>` into this arena instead of an owned `Vec<f64>`; the FCF
-    /// merge reads the slice after the parallel region returns (the arena is
-    /// exclusive to one rayon worker during the parallel region). The content
-    /// is overwritten per trial point before any read, so no zero-fill is
-    /// required.
+    /// Sized lazily to at least `(end_m - start_m) * n_state` `f64`s; slot `i` of
+    /// the trial point with local index `local_idx = m - start_m` lives at
+    /// `agg_arena[local_idx * n_state + i]`. Each [`StagedCut`] stores a
+    /// `Range<usize>` into this arena instead of an owned `Vec<f64>`; the FCF
+    /// merge reads the slice after the parallel region returns. Overwritten per
+    /// trial point before any read, so no zero-fill is required.
     pub(crate) agg_arena: Vec<f64>,
-    /// Per-worker metadata sync contribution, indexed by cut pool slot.
-    ///
-    /// Accumulates binding increments across all trial points processed by
-    /// this worker for a given stage. Grown via `.resize(pop, 0)` when the
-    /// pool grows, and zeroed once per stage (not per trial point) via
-    /// `.fill(0)`. After the parallel region the sequential merge phase sums
-    /// contributions across all workers into `metadata_sync_buf`, replacing
-    /// the old per-`StagedCut` `binding_increments` Vec iteration.
+    /// Per-worker metadata sync contribution, indexed by cut pool slot. Zeroed
+    /// once per stage (not per trial point); merged into `metadata_sync_buf`.
     pub(crate) metadata_sync_contribution: Vec<u64>,
-    /// Per-opening solver-statistics accumulator for this worker.
-    ///
-    /// Length equals `n_openings` for the current stage. Re-initialised to
-    /// `vec![Default::default(); n_openings]` once per stage at the start of
-    /// the parallel region (in `process_stage_backward`). Each trial point
-    /// processed by this worker adds its per-opening delta element-wise.
-    /// After the parallel region the sequential merge phase sums
-    /// contributions across all workers to produce the per-stage
-    /// `Vec<SolverStatsDelta>` stored in `BackwardResult::stage_stats`.
+    /// Per-worker per-opening solver-statistics accumulator (length
+    /// `n_openings`). Re-initialised once per stage; merged into the per-stage
+    /// `Vec<SolverStatsDelta>` in `BackwardResult::stage_stats`.
     pub(crate) per_opening_stats: Vec<crate::solver_stats::SolverStatsDelta>,
-    /// Per-opening scratch buffer for state-fixing-row duals.
-    ///
-    /// Reused across openings and trial points. Cleared via `clear()` then
-    /// filled with `extend_from_slice` or `extend(iter.map(...))` at the start
-    /// of each opening. Capacity grows monotonically to `indexer.n_state`; no
-    /// shrink ever occurs. Avoids the per-opening `to_vec()` allocation in
-    /// `process_trial_point_backward`.
+    /// Per-opening scratch for state-fixing-row duals; grows to `indexer.n_state`.
     pub(crate) state_duals_buf: Vec<f64>,
-    /// Per-opening scratch buffer for cut-row duals.
-    ///
-    /// Reused across openings and trial points. Cleared via `clear()` then
-    /// filled with `extend_from_slice` at the start of each opening that has
-    /// cuts. Capacity grows monotonically to `succ.num_cuts_at_successor`.
-    /// Avoids the per-opening `to_vec()` or `Vec::new()` allocation in
-    /// `process_trial_point_backward`.
+    /// Per-opening scratch for cut-row duals; grows to
+    /// `succ.num_cuts_at_successor`.
     pub(crate) cut_duals_buf: Vec<f64>,
-    /// Per-worker staging buffer for cuts produced within one stage.
-    ///
-    /// Cleared via `clear()` at the start of each stage's trial-point loop.
-    /// Populated with `push()` per trial point. At the rayon closure boundary
-    /// drained via `drain(..).collect::<Vec<_>>()` so the ownership can cross
-    /// the closure return. Avoids the per-stage `Vec::with_capacity(n_local)`
-    /// allocation in `process_stage_backward`.
+    /// Per-worker staging buffer for cuts produced within one stage; drained at
+    /// the rayon closure boundary so ownership can cross the closure return.
     pub(crate) staged_cuts_buf: Vec<StagedCut>,
-    /// Scratch buffers for `CVaR` weight computation in `RiskMeasure::CVaR`.
-    ///
-    /// The three internal `Vec`s (`upper_bounds`, `order`, `mu`) grow lazily
-    /// to `n_openings` on the first `CVaR` call and are reused thereafter.
-    /// For `RiskMeasure::Expectation` these buffers are never accessed.
+    /// Scratch for `CVaR` weight computation; the internal `Vec`s grow to
+    /// `n_openings` on the first `CVaR` call. Never accessed under
+    /// `RiskMeasure::Expectation`.
     pub(crate) risk_scratch: RiskMeasureScratch,
-    /// Reusable scratch for the dynamic-cut-selection lazy solve. Only touched
-    /// when the dynamic cut-selection method is active; its internal buffers
-    /// grow monotonically and are reused across openings and trial points.
+    /// Reusable scratch for the dynamic-cut-selection lazy solve, only touched
+    /// when that method is active.
     pub(crate) dcs_solve: DcsSolveScratch,
     /// Metadata-seeded initial resident-cut set for the dynamic-cut-selection
-    /// lazy solve. Cleared and refilled per (trial point, opening); capacity
-    /// grows to the cut-pool size and is then reused.
+    /// lazy solve; refilled per (trial point, opening).
     pub(crate) dcs_initial_resident: Vec<u32>,
-    /// Reusable solver-statistics snapshot buffer for the per-opening
-    /// before-solve metrics. Filled via `statistics_into` (reusing the
-    /// histogram allocation) and then diffed against `stats_after_buf`.
-    /// Avoids the per-opening histogram clone of `statistics()`.
+    /// Per-opening before-solve statistics snapshot, filled via `statistics_into`
+    /// (reusing the histogram allocation) and diffed against `stats_after_buf`.
     pub(crate) stats_before_buf: cobre_solver::SolverStatistics,
-    /// Reusable solver-statistics snapshot buffer for the per-opening
-    /// after-solve metrics. Counterpart to `stats_before_buf`.
+    /// Per-opening after-solve statistics snapshot; counterpart to
+    /// `stats_before_buf`.
     pub(crate) stats_after_buf: cobre_solver::SolverStatistics,
 }
 
 impl BackwardAccumulators {
-    /// Allocate accumulators pre-sized from the given workspace dimensions.
-    ///
-    /// `max_openings`, `initial_pool_capacity`, and `n_state` may all be
-    /// `0` for simulation-only workspaces; buffers will then start empty
-    /// and grow lazily on the first backward pass stage.
+    /// Allocate accumulators pre-sized from the given dimensions; any may be
+    /// `0`, in which case those buffers start empty and grow lazily.
     pub(crate) fn new(max_openings: usize, initial_pool_capacity: usize, n_state: usize) -> Self {
         let outcomes = (0..max_openings)
             .map(|_| BackwardOutcome {
@@ -513,10 +421,8 @@ impl BackwardAccumulators {
     }
 }
 
-/// Pre-allocated scratch buffers for noise transformation and simulation.
-///
-/// Grouped here for readability; individual fields are passed by `&mut`
-/// reference to noise transformation functions in `noise.rs`.
+/// Pre-allocated scratch buffers for noise transformation and simulation,
+/// passed by `&mut` to the transformation functions in `noise.rs`.
 #[allow(clippy::struct_field_names)]
 pub(crate) struct ScratchBuffers {
     pub(crate) noise_buf: Vec<f64>,
@@ -528,37 +434,29 @@ pub(crate) struct ScratchBuffers {
     pub(crate) ncs_col_upper_buf: Vec<f64>,
     pub(crate) ncs_col_lower_buf: Vec<f64>,
     pub(crate) ncs_col_indices_buf: Vec<usize>,
-    // Active-subset gather targets: `transform_ncs_noise` writes
-    // `ncs_col_{lower,upper}_buf` in full stochastic-slot order (one entry per
-    // slot, including slots inactive at this stage). The patch sites gather only
-    // the active slots' bounds here, parallel to `ncs_col_indices_buf`, so the
-    // set-bounds call receives index/lower/upper buffers of equal length =
-    // `(active stochastic NCS at this stage) * n_blks`. Passing the slot-order
+    // Active-subset gather targets, parallel to `ncs_col_indices_buf`:
+    // `transform_ncs_noise` writes `ncs_col_{lower,upper}_buf` in full slot order
+    // (incl. slots inactive at this stage); the patch gathers only active slots'
+    // bounds here so set-bounds gets equal-length buffers. Passing the slot-order
     // buffers verbatim would over-feed the call at a strict-subset stage.
     pub(crate) ncs_col_lower_active_buf: Vec<f64>,
     pub(crate) ncs_col_upper_active_buf: Vec<f64>,
-    /// Per-stage NCS column start that `ncs_col_indices_buf` was last built for.
+    /// Per-stage NCS column start `ncs_col_indices_buf` was last built for;
+    /// `usize::MAX` initially so the first patch always rebuilds.
     ///
-    /// The lazy index-buffer rebuild must fire when the per-stage NCS column
-    /// **start** changes, not only when its length changes: `ncs_col_starts[t]`
-    /// varies per stage (mid-horizon commissioning / differing block counts), so
-    /// two stages can share the same `active_count * n_blks` length yet address
-    /// different columns. Keying the rebuild on length alone (the forbidden
-    /// alternative) would retain the previous stage's indices and write
-    /// `set_col_bounds` onto the wrong LP columns. Initialised to `usize::MAX` so
-    /// the first patch always rebuilds; updated to the built start after each
-    /// rebuild. Comparing `ncs_col_indices_buf[0]` instead is insufficient — a
-    /// simultaneous change of start and first-active-local can collide on the
-    /// same first index while the rest of the buffer is stale.
+    /// The lazy rebuild must key on the **start**, not the length: two stages can
+    /// share the same `active_count * n_blks` length yet address different columns
+    /// (mid-horizon commissioning / differing block counts), so keying on length
+    /// would write `set_col_bounds` onto the wrong LP columns. Comparing
+    /// `ncs_col_indices_buf[0]` is also insufficient — a simultaneous change of
+    /// start and first-active-local can collide on the first index while the rest
+    /// of the buffer is stale.
     pub(crate) last_ncs_col_start: usize,
-    // Per-active-local-column NCS upper bounds for simulation extraction, length
-    // `n_ncs * n_blks` in active-local column order (NOT slot order). Defaults to
-    // the template `col_upper` (deterministic active columns) then overwrites each
-    // stochastic active column's block with the per-scenario realized availability
-    // from `ncs_col_upper_buf`. At a strict-subset stage this is what lets
-    // extraction report the realized availability instead of the unscaled template
-    // value; `ncs_col_upper_buf` (slot order) cannot be consumed directly because
-    // extraction indexes by active-local column.
+    // NCS upper bounds for simulation extraction, length `n_ncs * n_blks` in
+    // active-local column order (NOT slot order): template `col_upper` overwritten
+    // per stochastic active column's block with the realized availability from
+    // `ncs_col_upper_buf`. `ncs_col_upper_buf` (slot order) cannot be consumed
+    // directly because extraction indexes by active-local column.
     pub(crate) ncs_col_upper_extract_buf: Vec<f64>,
     pub(crate) load_rhs_buf: Vec<f64>,
     pub(crate) row_lower_buf: Vec<f64>,
@@ -566,103 +464,56 @@ pub(crate) struct ScratchBuffers {
     pub(crate) effective_eta_buf: Vec<f64>,
     pub(crate) unscaled_primal: Vec<f64>,
     pub(crate) unscaled_dual: Vec<f64>,
-    // Used by accumulate_and_shift_lag_state.
     pub(crate) lag_accumulator: Vec<f64>,
     pub(crate) lag_weight_accum: f64,
-    // Downstream ring buffer for multi-resolution lag accumulation.
     pub(crate) downstream_accumulator: Vec<f64>,
     pub(crate) downstream_weight_accum: f64,
-    // Slot-major: `completed_lags[slot * hydro_count + hydro]`.
-    // Slot 0 = oldest completed quarter, slot n-1 = most recent.
+    // Slot-major `[slot * hydro_count + hydro]`; slot 0 = oldest completed
+    // quarter, slot n-1 = most recent.
     pub(crate) downstream_completed_lags: Vec<f64>,
     pub(crate) downstream_n_completed: usize,
-    /// Scratch lookup table for basis reconstruction.
-    ///
     /// Maps each cut pool slot to its position in the stored
-    /// `CapturedBasis::cut_row_slots`, so the reconstruction algorithm can
-    /// locate the row status for any active cut in O(1) without allocation.
-    /// Pre-filled with `None` to `initial_pool_capacity` entries so the
-    /// first call can index up to that bound without resize.
-    ///
-    /// When `initial_pool_capacity == 0` (simulation-only workspaces), this
-    /// vec starts empty and grows in-place if needed.
+    /// `CapturedBasis::cut_row_slots`, so reconstruction locates any active cut's
+    /// row status in O(1). Pre-filled with `None` to `initial_pool_capacity`.
     pub(crate) recon_slot_lookup: Vec<Option<u32>>,
 
-    /// Per-worker trajectory-cost accumulator for the forward pass.
-    ///
-    /// Pre-sized to `max_local_fwd` at construction via [`WorkspaceSizing`].
-    /// Inside `run_forward_worker` the buffer is `clear()`ed then
-    /// `resize(n_local, 0.0)`d so no heap allocation occurs on the hot path.
-    /// At the worker boundary ownership is transferred via `std::mem::take`,
-    /// leaving this field empty until the next iteration's resize.
-    ///
-    /// Named `trajectory_costs_buf` (not `trajectory_costs`) to avoid
-    /// collision with the identically-named field on `ForwardWorkerResult`.
+    /// Per-worker forward-pass trajectory-cost accumulator, taken via
+    /// `std::mem::take` at the worker boundary. Named `..._buf` (not
+    /// `trajectory_costs`) to avoid collision with the identically-named field on
+    /// `ForwardWorkerResult`.
     pub(crate) trajectory_costs_buf: Vec<f64>,
 
     /// Per-worker raw-noise scratch for the forward-pass sampler and simulation
-    /// worker loop.
-    ///
-    /// Distinct from [`ScratchBuffers::noise_buf`] which is used by the
-    /// backward inflow-patch path.  Pre-sized to `noise_dim` at construction.
-    /// Inside `run_forward_worker` the buffer is `resize(noise_dim, 0.0)`d
-    /// before the inner scenario loop so no per-call allocation occurs.
-    /// Inside `run_worker_scenarios` the buffer is `resize(noise_dim, 0.0)`d
-    /// before the scenario loop; neither use overlaps the other within a single
-    /// `SolverWorkspace`.
+    /// worker loop. Distinct from [`ScratchBuffers::noise_buf`] (the backward
+    /// inflow-patch path); the two never overlap within one `SolverWorkspace`.
     pub(crate) raw_noise_buf: Vec<f64>,
 
-    /// Per-worker permutation scratch for the forward-pass sampler and
-    /// simulation worker loop.
-    ///
-    /// Pre-sized to `total_forward_passes.max(1)` at construction.
-    /// Inside `run_forward_worker` the buffer is
-    /// `resize(total_forward_passes.max(1), 0)`d before the inner scenario
-    /// loop so no per-call allocation occurs.
-    /// Inside `run_worker_scenarios` the buffer is
-    /// `resize(n_scenarios.max(1), 0)`d before the scenario loop; neither
-    /// use overlaps the other within a single `SolverWorkspace`.
+    /// Per-worker permutation scratch for the forward-pass sampler and simulation
+    /// worker loop. Pre-sized to `total_forward_passes.max(1)`.
     pub(crate) perm_scratch: Vec<usize>,
 
     /// Snapshot of the incoming anticipated-state slice saved before
-    /// `ws.current_state.clear()` clears the forward-stage state vector.
-    ///
-    /// Written in `run_forward_stage` (one `extend_from_slice` per stage) and
-    /// read by `shift_anticipated_state` to produce the new ring-buffer state.
-    /// Capacity is `n_anticipated * k_max`; when either dimension is zero the
-    /// vec starts empty and the anticipated-state path is skipped entirely.
+    /// `ws.current_state.clear()`, read by `shift_anticipated_state` to produce
+    /// the new ring-buffer state. Empty (path skipped) when `n_anticipated` or
+    /// `k_max` is zero.
     pub(crate) anticipated_state_buf: Vec<f64>,
 }
 
 /// All per-thread mutable resources required for one LP solve sequence.
 ///
-/// Each field is exclusively owned by the thread — there is no shared state
-/// between workspaces. Distributed to worker threads via mutable references
-/// from a [`WorkspacePool`].
-///
-/// # Identity fields
-///
-/// `rank` and `worker_id` are assigned at [`WorkspacePool::new`] construction
-/// time and never change. They provide a stable identity for per-worker
-/// observability without any thread-local lookup at call sites, and are the
-/// keys used by per-worker instrumentation buffers.
+/// Each instance is exclusively owned by one worker thread — no shared state
+/// between workspaces — and is distributed by mutable reference from a
+/// [`WorkspacePool`]. `rank` and `worker_id` are assigned once at
+/// [`WorkspacePool::new`] and never change.
 pub struct SolverWorkspace<S: SolverInterface> {
     /// MPI rank that owns this workspace. Stable across the run.
-    ///
-    /// Set to `i32::try_from(comm.rank()).expect("rank fits in i32")` at
-    /// [`WorkspacePool::new`] time. MPI world sizes are bounded well below
-    /// `i32::MAX` in practice.
     pub rank: i32,
-    /// Rayon worker index within this rank's pool, assigned at
-    /// [`WorkspacePool::new`]. Stable across the run. Range:
-    /// `0..n_workers_local`.
+    /// Rayon worker index within this rank's pool, range `0..n_workers_local`.
+    /// Stable across the run.
     pub worker_id: i32,
-    /// LP solver instance owned exclusively by this workspace.
-    ///
-    /// Wrapped in [`ProfiledSolver`] so that per-phase solver configuration
-    /// (tolerances, iteration limits) can be applied at phase boundaries via
-    /// [`ProfiledSolver::set_profile`] without modifying call sites that use
-    /// the solver through the [`SolverInterface`] trait.
+    /// LP solver, wrapped in [`ProfiledSolver`] so per-phase configuration
+    /// applies via [`ProfiledSolver::set_profile`] without touching call sites
+    /// that use the [`SolverInterface`] trait.
     pub solver: ProfiledSolver<S>,
     /// Pre-allocated row-bound patch buffer.
     pub patch_buf: PatchBuffer,
@@ -670,31 +521,21 @@ pub struct SolverWorkspace<S: SolverInterface> {
     pub current_state: Vec<f64>,
     /// Pre-allocated scratch buffers for noise transformation and simulation.
     pub(crate) scratch: ScratchBuffers,
-    /// Pre-allocated destination basis for [`reconstruct_basis`].
-    ///
-    /// Filled in-place from the read-only [`CapturedBasis`] in [`BasisStore`]
-    /// before being passed to `solve(Some(&basis))`. Sized after construction
-    /// via [`WorkspacePool::resize_scratch_bases`] to the maximum LP dimensions
+    /// Pre-allocated destination basis for [`reconstruct_basis`], filled in-place
+    /// from the read-only [`CapturedBasis`] in [`BasisStore`] then passed to
+    /// `solve(Some(&basis))`. Sized via [`WorkspacePool::resize_scratch_bases`]
     /// so reconstruction never reallocates on the hot path.
     ///
     /// [`reconstruct_basis`]: crate::basis_reconstruct::reconstruct_basis
     pub(crate) scratch_basis: Basis,
     /// Pre-allocated accumulators for the backward pass trial-point loop.
-    ///
-    /// Survives across stages without reallocation. Buffers grow
-    /// monotonically (never shrink) as larger stages are encountered.
-    /// Simulation-only workspaces (constructed with `max_openings = 0`)
-    /// start with empty buffers; the backward pass will never touch them.
+    /// Empty on simulation-only workspaces (`max_openings = 0`), which the
+    /// backward pass never touches.
     pub(crate) backward_accum: BackwardAccumulators,
 
-    /// Zero-allocation timing payload buffer for [`cobre_core::TrainingEvent::WorkerTiming`].
-    ///
-    /// Accumulated by the rayon closure inside the parallel region (forward or
-    /// backward) and moved by value into the event payload after the region
-    /// completes. Reset to `WorkerPhaseTimings::default()` at the start of
-    /// each iteration boundary before any accumulation begins.
-    /// `WorkerPhaseTimings` is `Copy` and stack-resident; no heap allocation
-    /// occurs per event.
+    /// Zero-allocation timing payload for [`cobre_core::TrainingEvent::WorkerTiming`],
+    /// accumulated in the parallel region and moved into the event payload after
+    /// it completes. Reset to default at each iteration boundary.
     ///
     /// Field-to-slot mapping for the writer record:
     /// `forward_wall_ms` → `WORKER_TIMING_SLOT_FWD_WALL`,
@@ -705,19 +546,10 @@ pub struct SolverWorkspace<S: SolverInterface> {
 }
 
 impl<S: SolverInterface> SolverWorkspace<S> {
-    /// Construct a workspace with explicit identity, solver, patch buffer, and state capacity.
+    /// Construct a workspace with explicit identity, solver, patch buffer, and
+    /// state capacity.
     ///
-    /// `rank` is the MPI rank that owns this workspace (stable across the run).
-    /// `worker_id` is the rayon worker index within the rank's pool (range
-    /// `0..n_workers_local`, assigned sequentially at [`WorkspacePool::new`]).
-    ///
-    /// `sizing` provides the buffer-dimension parameters shared between the
-    /// [`PatchBuffer`], the internal `ScratchBuffers`, and the
-    /// `BackwardAccumulators` allocation. Pass `max_openings = 0`,
-    /// `initial_pool_capacity = 0`, and `n_state = 0` in `sizing` for
-    /// simulation-only workspaces that do not participate in the backward pass.
-    ///
-    /// The `scratch_basis` starts empty. Call `WorkspacePool::resize_scratch_bases`
+    /// `scratch_basis` starts empty; call `WorkspacePool::resize_scratch_bases`
     /// after construction to pre-allocate it for in-place basis reconstruction.
     #[must_use]
     pub fn new(
@@ -747,11 +579,9 @@ impl<S: SolverInterface> SolverWorkspace<S> {
 }
 
 impl ScratchBuffers {
-    /// Allocate scratch buffers sized for the given per-worker parameters.
-    ///
-    /// Shared by all three `SolverWorkspace` construction sites
-    /// (`SolverWorkspace::new`, `WorkspacePool::new`, `WorkspacePool::try_new`)
-    /// to keep them in sync.
+    /// Allocate scratch buffers sized for the given per-worker parameters;
+    /// shared by all three `SolverWorkspace` construction sites to keep them in
+    /// sync.
     pub(crate) fn new(s: WorkspaceSizing) -> Self {
         let WorkspaceSizing {
             hydro_count,
@@ -765,8 +595,8 @@ impl ScratchBuffers {
             noise_dim,
             n_anticipated,
             k_max,
-            // `n_state` (state_at_capture sizing) and `max_openings` are used by
-            // CapturedBasis / BackwardAccumulators only.
+            // `n_state` and `max_openings` size CapturedBasis /
+            // BackwardAccumulators, not ScratchBuffers — deliberately skipped.
             ..
         } = s;
         Self {
@@ -825,22 +655,14 @@ pub struct WorkspacePool<S: SolverInterface> {
 }
 
 impl<S: SolverInterface> WorkspacePool<S> {
-    /// Construct a pool of `n_threads` independently allocated workspaces.
-    ///
-    /// `rank` is the MPI rank that owns this pool. Each workspace in the pool
-    /// receives a sequentially assigned `worker_id` in `0..n_threads`.
-    ///
-    /// Each workspace receives a fresh solver instance, patch buffer, and state buffer.
-    /// `solver_factory` is called once per thread.
-    ///
-    /// `sizing` provides all buffer-dimension parameters; pass
-    /// `WorkspaceSizing { n_load_buses: 0, max_blocks: 0, .. }` when there is
-    /// no stochastic load.
+    /// Construct a pool of `n_threads` independently allocated workspaces, each
+    /// with a sequentially assigned `worker_id` in `0..n_threads` and a fresh
+    /// solver from `solver_factory` (called once per thread).
     ///
     /// # Panics
     ///
-    /// Panics if `n_threads > i32::MAX`. Rayon pools are bounded by CPU count,
-    /// so this is physically impossible on any real system.
+    /// Panics if `n_threads > i32::MAX` — physically impossible since rayon pools
+    /// are bounded by CPU count.
     #[must_use]
     #[allow(clippy::expect_used)]
     pub fn new(
@@ -881,15 +703,8 @@ impl<S: SolverInterface> WorkspacePool<S> {
         Self { workspaces }
     }
 
-    /// Construct a pool of `n_threads` independently allocated workspaces using
-    /// a fallible factory.
-    ///
-    /// `rank` is the MPI rank that owns this pool. Each workspace in the pool
-    /// receives a sequentially assigned `worker_id` in `0..n_threads`.
-    ///
-    /// Identical to [`WorkspacePool::new`] except that `solver_factory` returns
-    /// `Result<S, E>`. The first error from any factory call is returned
-    /// immediately and no partial pool is produced.
+    /// Like [`WorkspacePool::new`] but with a fallible `solver_factory`; the
+    /// first factory error is returned immediately and no partial pool is built.
     ///
     /// # Errors
     ///
@@ -897,8 +712,8 @@ impl<S: SolverInterface> WorkspacePool<S> {
     ///
     /// # Panics
     ///
-    /// Panics if `n_threads > i32::MAX`. Rayon pools are bounded by CPU count,
-    /// so this is physically impossible on any real system.
+    /// Panics if `n_threads > i32::MAX` — physically impossible since rayon pools
+    /// are bounded by CPU count.
     #[allow(clippy::expect_used)]
     pub fn try_new<E>(
         rank: i32,
@@ -964,23 +779,12 @@ impl<S: SolverInterface> WorkspacePool<S> {
 ///
 /// # Cut selection interaction
 ///
-/// Basis row statuses are positional: `row_status[i]` corresponds to LP
-/// row `i`. When cut selection changes the active cut set between
-/// iterations, the number of cut rows in the LP changes and the stored
-/// basis row statuses become stale — they no longer align with the
-/// current LP row layout.
-///
-/// **Current behavior (option 1):** We accept the degraded warm-start.
-/// `HiGHS` detects the dimension mismatch when `solve(Some(&basis))` is called
-/// with a basis whose row count differs from the current LP row count and
-/// falls back to a crash start. This is tracked as a `basis_rejection` in
-/// [`SolverStatistics`]. The template (non-cut) row statuses remain valid;
-/// only the cut row portion becomes meaningless.
-///
-/// **If degradation is problematic (option 3):** After cut selection runs,
-/// discard the cut row statuses from all stored bases, retaining only the
-/// template row portion. This gives a clean partial warm-start at zero
-/// implementation cost beyond a single truncation.
+/// Row statuses are positional (`row_status[i]` is LP row `i`). When cut
+/// selection changes the active cut set, the cut-row count changes and the
+/// stored cut-row statuses become stale; the degraded warm-start is accepted —
+/// `HiGHS` detects the dimension mismatch on `solve(Some(&basis))`, crash-starts,
+/// and records a `basis_rejection` in [`SolverStatistics`]. Template (non-cut)
+/// row statuses remain valid.
 ///
 /// [`SolverStatistics`]: cobre_solver::SolverStatistics
 pub struct BasisStore {
