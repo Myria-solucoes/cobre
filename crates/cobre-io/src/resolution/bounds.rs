@@ -1,13 +1,6 @@
 //! Bound resolution from base entity values plus stage-varying overrides.
 //!
-//! [`resolve_bounds`] pre-computes per-(entity, stage) bound values by:
-//!
-//! 1. Deriving base `*StageBounds` values from each entity's fields (loaded from
-//!    entity JSON files).
-//! 2. Filling the [`ResolvedBounds`] table with these base values for all stages.
-//! 3. Applying sparse stage-varying overrides from the parsed Parquet rows.
-//!
-//! The result is a [`ResolvedBounds`] container ready for O(1) lookup by
+//! [`resolve_bounds`] produces a [`ResolvedBounds`] table for O(1) lookup by
 //! `(entity_index, stage_index)` during LP construction.
 
 use std::collections::HashMap;
@@ -25,52 +18,45 @@ use crate::constraints::{
     ContractBoundsRow, HydroBoundsRow, LineBoundsRow, PumpingBoundsRow, ThermalBoundsRow,
 };
 
-/// Entity slices needed for bounds resolution.
+/// Entity slices for bounds resolution. Each must be sorted by ID — the slice
+/// position becomes the entity's `entity_index` (declaration-order invariance).
 pub struct BoundsEntitySlices<'a> {
-    /// Hydro plants sorted by ID.
+    /// Hydro plants.
     pub hydros: &'a [Hydro],
-    /// Thermal units sorted by ID.
+    /// Thermal units.
     pub thermals: &'a [Thermal],
-    /// Transmission lines sorted by ID.
+    /// Transmission lines.
     pub lines: &'a [Line],
-    /// Pumping stations sorted by ID.
+    /// Pumping stations.
     pub pumping_stations: &'a [PumpingStation],
-    /// Energy contracts sorted by ID.
+    /// Energy contracts.
     pub contracts: &'a [EnergyContract],
 }
 
-/// Per-entity-type override rows for bounds resolution.
+/// Per-entity-type stage-varying override rows for bounds resolution.
 pub struct BoundsOverrides<'a> {
-    /// Stage-varying overrides for hydro bounds.
+    /// Hydro bound overrides.
     pub hydro: &'a [HydroBoundsRow],
-    /// Stage-varying overrides for thermal bounds.
+    /// Thermal bound overrides.
     pub thermal: &'a [ThermalBoundsRow],
-    /// Stage-varying overrides for line bounds.
+    /// Line bound overrides.
     pub line: &'a [LineBoundsRow],
-    /// Stage-varying overrides for pumping bounds.
+    /// Pumping bound overrides.
     pub pumping: &'a [PumpingBoundsRow],
-    /// Stage-varying overrides for contract bounds.
+    /// Contract bound overrides.
     pub contract: &'a [ContractBoundsRow],
 }
 
 /// Pre-compute the full bound table from entity base values and stage-varying overrides.
 ///
-/// Entity slices must already be sorted by ID (declaration-order invariance). This
-/// function uses positional index mapping: the position of an entity in its sorted
-/// slice becomes its `entity_index` in the [`ResolvedBounds`] flat array.
-///
 /// Override rows referencing unknown entity IDs or out-of-range stage IDs are silently
-/// skipped — referential integrity is a Layer 3 concern (deferred).
+/// skipped (referential integrity is deferred to validation).
 ///
 /// # Arguments
 ///
-/// * `entities` — entity slices grouped into [`BoundsEntitySlices`]
-/// * `n_stages` — total number of study stages
 /// * `k_max` — maximum lead-stages across anticipated thermals; extends the
 ///   thermal stage axis to `n_stages + k_max`. Pass `0` when no anticipated
 ///   thermals are present (the padded region is then empty)
-/// * `stage_index` — mapping from domain-level `stage_id` to positional 0-based index
-/// * `overrides` — per-entity-type override rows grouped into [`BoundsOverrides`]
 ///
 /// # Examples
 ///
@@ -178,12 +164,9 @@ pub struct BoundsOverrides<'a> {
 /// assert!((result.hydro_bounds(0, 1).max_storage_hm3 - 200.0).abs() < f64::EPSILON);
 /// assert!((result.hydro_bounds(0, 2).max_storage_hm3 - 200.0).abs() < f64::EPSILON);
 /// ```
-// Rationale: the function applies a shared three-tier override cascade (global → entity →
-// stage-varying) across five entity types using a common stage-index map; keeping all five
-// entity passes in one function makes the shared resolution contract visible and avoids
-// duplicating the stage-index lookup across per-entity helper functions.
-// `implicit_hasher`: the public API accepts the concrete `HashMap` type required by callers;
-// making it generic over `BuildHasher` would complicate call sites with no practical benefit.
+// too_many_lines: the five per-entity override passes share one stage-index map; splitting
+// them would duplicate the lookup and hide the common cascade.
+// implicit_hasher: callers pass a concrete `HashMap`; a `BuildHasher` generic buys nothing.
 #[must_use]
 #[allow(clippy::too_many_lines, clippy::implicit_hasher)]
 pub fn resolve_bounds(
@@ -230,12 +213,8 @@ pub fn resolve_bounds(
         .map(|(idx, c)| (c.id, idx))
         .collect();
 
-    // ── Step 2: Choose representative defaults for allocation ─────────────────
-    //
-    // ResolvedBounds::new fills the entire flat Vec with a single repeated value.
-    // Since entities can have different bound values, we use the first entity's values
-    // (or a sentinel zero struct for empty slices) to satisfy the allocation API.
-    // Step 3 unconditionally overwrites all cells with entity-specific base values.
+    // ResolvedBounds::new fills every cell with one repeated default; the per-entity
+    // fill loop below overwrites them all, so this default is allocation-only.
     let hydro_default = entities
         .hydros
         .first()
@@ -285,8 +264,8 @@ pub fn resolve_bounds(
         },
     );
 
-    // Handle the n_stages == 0 edge case: allocate with 1 but return immediately
-    // without filling (the flat Vecs are empty when n_stages == 0 is handled below).
+    // n_stages == 0: allocate with 1 (the API needs a non-zero stride) then return
+    // the empty table without filling.
     let alloc_stages = if n_stages == 0 { 1 } else { n_stages };
 
     let mut table = ResolvedBounds::new(
@@ -312,12 +291,6 @@ pub fn resolve_bounds(
         return table;
     }
 
-    // ── Step 3: Fill all cells with entity base values ─────────────────────────
-    //
-    // Each entity may have different bound values. We cannot rely on the uniform
-    // default filled by new() — iterate every entity and write its values to every
-    // stage cell.
-
     for (entity_idx, hydro) in entities.hydros.iter().enumerate() {
         let base = hydro_base_bounds(hydro);
         for stage_idx in 0..n_stages {
@@ -325,9 +298,8 @@ pub fn resolve_bounds(
         }
     }
 
-    // Thermal cells [0, n_stages) hold the study-horizon base values;
-    // cells [n_stages, n_stages + k_max) hold the same base values to
-    // support LP lookups at delivery stage t + K_i for anticipated thermals.
+    // Padded cells [n_stages, n_stages + k_max) carry each thermal's own base values
+    // so LP lookups at delivery stage t + K_i (anticipated thermals) stay in range.
     let thermal_axis = n_stages + k_max;
     for (entity_idx, thermal) in entities.thermals.iter().enumerate() {
         let base = ThermalStageBounds {
@@ -371,18 +343,12 @@ pub fn resolve_bounds(
         }
     }
 
-    // ── Step 4: Apply stage-varying overrides ──────────────────────────────────
-    //
-    // Override rows are sparse: only (entity_id, stage_id) pairs that differ from
-    // the base value need rows. Unknown entity IDs and out-of-range stage IDs are
-    // silently skipped (Layer 3 validation concern, deferred).
-
     for row in hydro_overrides {
         let Some(&entity_idx) = hydro_index.get(&row.hydro_id) else {
-            continue; // Unknown entity ID — silently skip.
+            continue;
         };
         let Some(&stage_idx) = stage_index.get(&row.stage_id) else {
-            continue; // Unknown or out-of-range stage_id — silently skip.
+            continue;
         };
         let cell = table.hydro_bounds_mut(entity_idx, stage_idx);
         if let Some(v) = row.min_storage_hm3 {
@@ -421,8 +387,7 @@ pub fn resolve_bounds(
     }
 
     for row in thermal_overrides {
-        // Rows with non-null block_id are reserved for future per-block cost support
-        // They are parsed but silently ignored during bounds resolution.
+        // Non-null block_id is reserved for future per-block cost support; ignore here.
         if row.block_id.is_some() {
             continue;
         }
@@ -500,16 +465,9 @@ pub fn resolve_bounds(
 
 /// Derive the base [`HydroStageBounds`] from a `Hydro` entity's fields.
 ///
-/// The 11 fields are mapped as follows:
-/// - `min_storage_hm3` / `max_storage_hm3` — direct field copy
-/// - `min_turbined_m3s` / `max_turbined_m3s` — direct field copy
-/// - `min_outflow_m3s` / `max_outflow_m3s` — direct field copy (`Option<f64>` preserved)
-/// - `min_generation_mw` / `max_generation_mw` — direct field copy
-/// - `max_diversion_m3s` — `hydro.diversion.as_ref().map(|d| d.max_flow_m3s)`;
-///   `None` when no diversion channel is configured
-/// - `filling_min_rate_m3s` — `hydro.filling.map_or(0.0, |f| f.filling_min_rate_m3s)`;
-///   defaults to `0.0` when no filling configuration is present
-/// - `water_withdrawal_m3s` — always `0.0` (no per-entity default; overrides only)
+/// `max_diversion_m3s` is `None` without a diversion channel; `filling_min_rate_m3s`
+/// is `0.0` without a filling config; `water_withdrawal_m3s` has no entity default
+/// (`0.0`, set only via overrides).
 #[inline]
 fn hydro_base_bounds(hydro: &Hydro) -> HydroStageBounds {
     HydroStageBounds {
@@ -858,13 +816,9 @@ mod tests {
             &[],
         );
 
-        // Stage 0: base value.
         assert!((result.hydro_bounds(0, 0).min_storage_hm3 - 10.0).abs() < f64::EPSILON);
-        // Stage 1: overridden.
         assert!((result.hydro_bounds(0, 1).min_storage_hm3 - 20.0).abs() < f64::EPSILON);
-        // Stage 2: base value.
         assert!((result.hydro_bounds(0, 2).min_storage_hm3 - 10.0).abs() < f64::EPSILON);
-        // max_storage_hm3 unchanged for all stages.
         for stage in 0..3 {
             assert!((result.hydro_bounds(0, stage).max_storage_hm3 - 200.0).abs() < f64::EPSILON);
         }
@@ -985,7 +939,6 @@ mod tests {
         assert!((result.line_bounds(0, 0).direct_mw - 1000.0).abs() < f64::EPSILON);
         assert!((result.line_bounds(0, 1).direct_mw - 750.0).abs() < f64::EPSILON);
         assert!((result.line_bounds(0, 2).direct_mw - 1000.0).abs() < f64::EPSILON);
-        // reverse_mw unchanged for all stages.
         for stage in 0..3 {
             assert!((result.line_bounds(0, stage).reverse_mw - 800.0).abs() < f64::EPSILON);
         }
@@ -1023,7 +976,6 @@ mod tests {
 
         assert!((result.pumping_bounds(0, 0).max_flow_m3s - 100.0).abs() < f64::EPSILON);
         assert!((result.pumping_bounds(0, 1).max_flow_m3s - 50.0).abs() < f64::EPSILON);
-        // min_flow_m3s unchanged.
         for stage in 0..2 {
             assert!((result.pumping_bounds(0, stage).min_flow_m3s - 0.0).abs() < f64::EPSILON);
         }
@@ -1061,7 +1013,6 @@ mod tests {
         assert!((result.contract_bounds(0, 0).price_per_mwh - 80.0).abs() < f64::EPSILON);
         assert!((result.contract_bounds(0, 1).price_per_mwh - 90.0).abs() < f64::EPSILON);
         assert!((result.contract_bounds(0, 2).price_per_mwh - 80.0).abs() < f64::EPSILON);
-        // min_mw and max_mw unchanged.
         for stage in 0..3 {
             assert!((result.contract_bounds(0, stage).min_mw - 0.0).abs() < f64::EPSILON);
             assert!((result.contract_bounds(0, stage).max_mw - 200.0).abs() < f64::EPSILON);

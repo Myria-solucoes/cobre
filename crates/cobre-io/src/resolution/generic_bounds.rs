@@ -1,15 +1,8 @@
 //! Resolution of raw generic constraint bound rows into an indexed lookup table.
 //!
-//! [`resolve_generic_constraint_bounds`] converts the parsed
-//! `Vec<GenericConstraintBoundsRow>` and the sorted `Vec<GenericConstraint>`
-//! (which provides the `constraint_id → positional_index` mapping) into a
-//! [`ResolvedGenericConstraintBounds`] that supports O(1) lookup by
-//! `(constraint_idx, stage_id)`.
-//!
-//! This function is infallible: the validation pipeline has already confirmed
-//! that every `constraint_id` in the bounds rows refers to a known constraint.
-//! Any residual unknown IDs (from rows that somehow slipped through or from
-//! future relaxation) are silently skipped.
+//! [`resolve_generic_constraint_bounds`] builds a [`ResolvedGenericConstraintBounds`]
+//! supporting O(1) lookup by `(constraint_idx, stage_id)`. Rows with an unknown
+//! `constraint_id` are silently skipped (already caught upstream).
 
 use std::collections::HashMap;
 
@@ -19,21 +12,8 @@ use crate::constraints::GenericConstraintBoundsRow;
 
 /// Build the resolved generic constraint bound table from sorted parsed inputs.
 ///
-/// Converts the positionally-sorted `constraints` slice (which must already be
-/// sorted by ID, as produced by `parse_generic_constraints`) and the flat
-/// `raw_bounds` rows (sorted by `(constraint_id, stage_id, block_id)`, as
-/// produced by `parse_generic_constraint_bounds`) into a
-/// [`ResolvedGenericConstraintBounds`] indexed lookup table.
-///
-/// Rows whose `constraint_id` is not found in the constraint registry are
-/// silently skipped — this is consistent with how other bound resolvers handle
-/// unknown entity IDs.
-///
-/// # Arguments
-///
-/// * `constraints` — generic constraint definitions sorted by ID (canonical order)
-/// * `raw_bounds` — sorted bound rows from
-///   `constraints/generic_constraint_bounds.parquet`
+/// `constraints` must be sorted by ID (slice position becomes the constraint index);
+/// `raw_bounds` must be sorted by `(constraint_id, stage_id, block_id)`.
 ///
 /// # Examples
 ///
@@ -74,15 +54,12 @@ pub fn resolve_generic_constraint_bounds(
     constraints: &[GenericConstraint],
     raw_bounds: &[GenericConstraintBoundsRow],
 ) -> ResolvedGenericConstraintBounds {
-    // Build a mapping from domain-level constraint_id (i32) to positional index.
-    // Constraints are already sorted by ID (canonical order from SystemBuilder).
     let id_to_idx: HashMap<i32, usize> = constraints
         .iter()
         .enumerate()
         .map(|(idx, c)| (c.id.0, idx))
         .collect();
 
-    // Feed the sorted rows as a (constraint_id, stage_id, block_id, bound) iterator.
     ResolvedGenericConstraintBounds::new(
         &id_to_idx,
         raw_bounds

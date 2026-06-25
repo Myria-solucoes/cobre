@@ -1,19 +1,9 @@
 //! Three-tier penalty cascade resolution.
 //!
-//! [`resolve_penalties`] pre-computes per-(entity, stage) penalty values by applying
-//! the three-tier cascade (global → entity → stage):
-//!
-//! 1. **Tier-1 (global defaults)** — already merged into entity fields during loading.
-//! 2. **Tier-2 (entity overrides)** — already merged into entity fields during loading.
-//! 3. **Tier-3 (stage-varying overrides)** — applied here from the parsed Parquet rows.
-//!
-//! By the time this function is called, tier-1 and tier-2 resolution are complete:
-//! `Hydro.penalties` holds the entity-level resolved value (the result of applying the
-//! entity JSON override on top of the global default). This function only needs to read
-//! those already-resolved values and apply sparse stage-level overrides from Parquet.
-//!
-//! The result is a [`ResolvedPenalties`] table that supports O(1) lookup for any
-//! `(entity_index, stage_index)` pair, ready for LP construction.
+//! [`resolve_penalties`] produces a [`ResolvedPenalties`] table for O(1) lookup by
+//! `(entity_index, stage_index)`. Tier-1 (global) and tier-2 (entity) values are
+//! already merged into the entity fields by the parsers; this function reads those
+//! and overlays only the sparse tier-3 stage-varying overrides.
 
 use std::collections::HashMap;
 
@@ -30,49 +20,35 @@ use crate::constraints::{
     BusPenaltyOverrideRow, HydroPenaltyOverrideRow, LinePenaltyOverrideRow, NcsPenaltyOverrideRow,
 };
 
-/// Entity slices needed for penalties resolution.
+/// Entity slices for penalties resolution. Each must be sorted by ID — the slice
+/// position becomes the entity's `entity_index` (declaration-order invariance).
 pub struct PenaltiesEntitySlices<'a> {
-    /// Hydro plants sorted by ID.
+    /// Hydro plants.
     pub hydros: &'a [Hydro],
-    /// Buses sorted by ID.
+    /// Buses.
     pub buses: &'a [Bus],
-    /// Transmission lines sorted by ID.
+    /// Transmission lines.
     pub lines: &'a [Line],
-    /// Non-controllable sources sorted by ID.
+    /// Non-controllable sources.
     pub ncs_sources: &'a [NonControllableSource],
 }
 
-/// Per-entity-type override rows for penalties resolution.
+/// Per-entity-type stage-varying override rows for penalties resolution.
 pub struct PenaltiesOverrides<'a> {
-    /// Stage-varying overrides for hydro penalties.
+    /// Hydro penalty overrides.
     pub hydro: &'a [HydroPenaltyOverrideRow],
-    /// Stage-varying overrides for bus penalties.
+    /// Bus penalty overrides.
     pub bus: &'a [BusPenaltyOverrideRow],
-    /// Stage-varying overrides for line penalties.
+    /// Line penalty overrides.
     pub line: &'a [LinePenaltyOverrideRow],
-    /// Stage-varying overrides for NCS penalties.
+    /// NCS penalty overrides.
     pub ncs: &'a [NcsPenaltyOverrideRow],
 }
 
 /// Pre-compute the full penalty table by applying the three-tier cascade.
 ///
-/// Entity slices must already be sorted by ID (declaration-order invariance). This
-/// function uses positional index mapping: the position of an entity in its sorted
-/// slice becomes its `entity_index` in the [`ResolvedPenalties`] flat array.
-///
-/// Tier-1 (global) and tier-2 (entity) resolution are already embedded in the entity
-/// struct fields by the entity parsers. This function reads those fields to initialise
-/// the table and then overlays the sparse tier-3 stage overrides.
-///
 /// Override rows referencing unknown entity IDs or out-of-range stage IDs are silently
-/// skipped — referential integrity is a Layer 3 concern (deferred).
-///
-/// # Arguments
-///
-/// * `entities` — entity slices grouped into [`PenaltiesEntitySlices`]
-/// * `n_stages` — total number of study stages
-/// * `stage_index` — mapping from domain-level `stage_id` to positional 0-based index
-/// * `overrides` — per-entity-type override rows grouped into [`PenaltiesOverrides`]
+/// skipped (referential integrity is deferred to validation).
 ///
 /// # Examples
 ///
@@ -169,12 +145,9 @@ pub struct PenaltiesOverrides<'a> {
 /// // Hydro index 1: never overridden.
 /// assert!((result.hydro_penalties(1, 1).spillage_cost - 0.01).abs() < f64::EPSILON);
 /// ```
-// Rationale: the function applies a shared three-tier override cascade (global → entity →
-// stage-varying) across four entity types using a common stage-index map; keeping all four
-// entity passes in one function makes the shared resolution contract visible and avoids
-// duplicating the stage-index lookup across per-entity helper functions.
-// `implicit_hasher`: the public API accepts the concrete `HashMap` type required by callers;
-// making it generic over `BuildHasher` would complicate call sites with no practical benefit.
+// too_many_lines: the four per-entity override passes share one stage-index map; splitting
+// them would duplicate the lookup and hide the common cascade.
+// implicit_hasher: callers pass a concrete `HashMap`; a `BuildHasher` generic buys nothing.
 #[must_use]
 #[allow(clippy::too_many_lines, clippy::implicit_hasher)]
 pub fn resolve_penalties(
@@ -213,12 +186,8 @@ pub fn resolve_penalties(
         .map(|(idx, n)| (n.id, idx))
         .collect();
 
-    // ResolvedPenalties::new fills the entire flat Vec with a single repeated value.
-    // Since entities can have different penalty values, we use arbitrary representative
-    // defaults here and immediately overwrite every cell in step 3.
-    //
-    // We choose the first entity's values (or a sentinel zero struct for empty slices)
-    // to satisfy the allocation API. Step 3 unconditionally overwrites all cells.
+    // ResolvedPenalties::new fills every cell with one repeated default; the per-entity
+    // fill loop below overwrites them all, so this default is allocation-only.
     let hydro_default = hydros.first().map_or(
         HydroStagePenalties {
             spillage_cost: 0.0,
@@ -263,8 +232,8 @@ pub fn resolve_penalties(
         },
     );
 
-    // Handle the n_stages == 0 edge case: use 1 as the allocation size but
-    // immediately return without filling (the flat Vecs are empty).
+    // n_stages == 0: allocate with 1 (the API needs a non-zero stride) then return
+    // the empty table without filling.
     let alloc_stages = if n_stages == 0 { 1 } else { n_stages };
 
     let mut table = ResolvedPenalties::new(
@@ -284,13 +253,8 @@ pub fn resolve_penalties(
     );
 
     if n_stages == 0 {
-        // Nothing to fill — return the empty table.
         return table;
     }
-
-    // Each entity may have different penalty values. We cannot rely on the uniform
-    // default filled by new() — iterate every entity and write its values to every
-    // stage cell.
 
     for (entity_idx, hydro) in hydros.iter().enumerate() {
         let hp = hydro_stage_penalties(hydro);
@@ -326,16 +290,12 @@ pub fn resolve_penalties(
         }
     }
 
-    // Override rows are sparse: only (entity_id, stage_id) pairs that differ from
-    // the entity-level value need rows. Unknown entity IDs and out-of-range stage IDs
-    // are silently skipped (Layer 3 validation concern, deferred).
-
     for row in hydro_overrides {
         let Some(&entity_idx) = hydro_index.get(&row.hydro_id) else {
-            continue; // Unknown entity ID — silently skip.
+            continue;
         };
         let Some(&stage_idx) = stage_index.get(&row.stage_id) else {
-            continue; // Unknown or out-of-range stage_id — silently skip.
+            continue;
         };
         let cell = table.hydro_penalties_mut(entity_idx, stage_idx);
         if let Some(v) = row.spillage_cost {
@@ -430,11 +390,8 @@ pub fn resolve_penalties(
     table
 }
 
-/// Convert a `Hydro`'s entity-level `HydroPenalties` to the `HydroStagePenalties` type.
-///
-/// The two types carry identical fields but are distinct types: `HydroPenalties` lives
-/// on the entity struct (in `cobre-core::entities`); `HydroStagePenalties` is the
-/// per-(entity, stage) cell type in the `ResolvedPenalties` table.
+/// Convert a `Hydro`'s entity-level `HydroPenalties` to the per-cell
+/// `HydroStagePenalties` — identical fields, distinct types.
 #[inline]
 fn hydro_stage_penalties(hydro: &Hydro) -> HydroStagePenalties {
     let p = &hydro.penalties;
@@ -791,12 +748,11 @@ mod tests {
         let result = resolve_penalties(&hydros, &[], &[], &[], 3, &[override_row], &[], &[], &[]);
 
         let cell = result.hydro_penalties(0, 2);
-        // Updated fields.
         assert!((cell.spillage_cost - 9.0).abs() < f64::EPSILON);
         assert!((cell.storage_violation_below_cost - 9999.0).abs() < f64::EPSILON);
         assert!((cell.filling_target_violation_cost - 99999.0).abs() < f64::EPSILON);
 
-        // Unchanged fields retain entity-level values from make_hydro_distinct_penalties.
+        // Unchanged fields retain make_hydro_distinct_penalties entity-level values.
         assert!((cell.diversion_cost - 0.02).abs() < f64::EPSILON);
         assert!((cell.turbined_cost - 0.03).abs() < f64::EPSILON);
         assert!((cell.turbined_violation_below_cost - 500.0).abs() < f64::EPSILON);

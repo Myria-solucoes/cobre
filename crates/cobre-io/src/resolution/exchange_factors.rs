@@ -1,12 +1,8 @@
 //! Resolution of parsed exchange factor entries into a dense lookup table.
 //!
-//! [`resolve_exchange_factors`] converts `Vec<ExchangeFactorEntry>` (from
-//! `constraints/exchange_factors.json`) into a [`ResolvedExchangeFactors`]
-//! indexed by `(line_index, stage_index, block_index)` for O(1) lookup
-//! during LP construction.
-//!
-//! Resolution is infallible: unknown line or stage IDs in the factor entries
-//! are silently skipped. The default factor pair is `(1.0, 1.0)`.
+//! [`resolve_exchange_factors`] builds a [`ResolvedExchangeFactors`] indexed by
+//! `(line_index, stage_index, block_index)` for O(1) lookup during LP construction.
+//! Unknown line/stage IDs are silently skipped; the default factor pair is `(1.0, 1.0)`.
 
 use std::collections::HashMap;
 
@@ -16,15 +12,9 @@ use crate::constraints::ExchangeFactorEntry;
 
 /// Build a resolved exchange factor table from parsed entries.
 ///
-/// Maps domain-level `line_id` and `stage_id` values to 0-based positional
-/// indices using the provided sorted entity slices. Entries referencing
-/// unknown lines or stages are silently skipped.
-///
-/// # Arguments
-///
-/// * `entries` — parsed exchange factor entries from `constraints/exchange_factors.json`
-/// * `lines` — sorted line collection (for `line_id` to index mapping)
-/// * `stages` — sorted stage collection (for `stage_id` to index mapping and max block count)
+/// `lines` and `stages` must be sorted: each entity's slice position becomes its
+/// 0-based table index. The stage axis spans study stages only (`id >= 0`); the
+/// block axis is sized to the largest per-stage block count.
 #[must_use]
 pub fn resolve_exchange_factors(
     entries: &[ExchangeFactorEntry],
