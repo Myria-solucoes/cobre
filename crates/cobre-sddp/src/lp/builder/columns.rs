@@ -743,8 +743,9 @@ pub(super) fn fill_pumping_columns(
 }
 
 /// Energy-contract columns. The family base (`col_contract_import_start` /
-/// `col_contract_export_start`) is addressed by the PER-FAMILY slot (the running
-/// position within its own direction), not by `c_sys`.
+/// `col_contract_export_start`) is addressed by the per-family slot from
+/// [`contract_family_slot`](crate::generic_constraints::contract_family_slot) — the
+/// single owner the load-balance fill and the resolver also share — not by `c_sys`.
 ///
 /// A commissioning-dormant contract has BOTH bounds forced to `[0, 0]`: zeroing only
 /// `max` would leave the infeasible `[min > 0, 0]` for a take-or-pay floor.
@@ -761,8 +762,6 @@ fn fill_contract_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     let grid = layout.block_grid();
-    let mut import_slot = 0_usize;
-    let mut export_slot = 0_usize;
     for (c_sys, contract) in ctx.contracts.iter().enumerate() {
         let active = crate::lp_builder::commissioning_active(
             contract.entry_stage_id,
@@ -770,25 +769,11 @@ fn fill_contract_columns(
             stage.id,
         );
         let cb = ctx.resolved.bounds.contract_bounds(c_sys, stage_idx);
-        let (base, family_slot, family_count) = match contract.contract_type {
-            ContractType::Import => {
-                let slot = import_slot;
-                import_slot += 1;
-                (
-                    layout.col_contract_import_start,
-                    slot,
-                    layout.n_contract_import,
-                )
-            }
-            ContractType::Export => {
-                let slot = export_slot;
-                export_slot += 1;
-                (
-                    layout.col_contract_export_start,
-                    slot,
-                    layout.n_contract_export,
-                )
-            }
+        let (contract_type, family_slot) =
+            crate::generic_constraints::contract_family_slot(ctx.contracts, c_sys);
+        let (base, family_count) = match contract_type {
+            ContractType::Import => (layout.col_contract_import_start, layout.n_contract_import),
+            ContractType::Export => (layout.col_contract_export_start, layout.n_contract_export),
         };
         debug_assert!(
             family_slot < family_count,

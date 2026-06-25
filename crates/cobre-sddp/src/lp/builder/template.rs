@@ -267,17 +267,9 @@ pub struct StageGeometry {
     pub generation_below_slack: Range<usize>,
     /// Import-contract column range (one per import contract per block); empty
     /// `start..start` (not `0..0`) at the pumping-end column when there are none.
-    // Voice 4: the per-stage column-shape carrier; no production read site yet (the
-    // generic-constraint fill reads `StageLayout.contract_import`). The
-    // `#[allow(dead_code)]` refires when a reader lands.
-    #[allow(dead_code)]
     pub contract_import: Range<usize>,
     /// Export-contract column range (one per export contract per block); empty
     /// `start..start` at the import-end column when there are none.
-    // Voice 4: the per-stage column-shape carrier; no production read site yet (the
-    // generic-constraint fill reads `StageLayout.contract_export`). The
-    // `#[allow(dead_code)]` refires when a reader lands.
-    #[allow(dead_code)]
     pub contract_export: Range<usize>,
 
     // ── Per-stage row ranges, identity lists, and block count ────────────────

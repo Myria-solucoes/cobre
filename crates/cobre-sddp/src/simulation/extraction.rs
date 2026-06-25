@@ -1602,7 +1602,7 @@ fn extract_stub_collections(
 ///
 /// | Field              | Sum expression                                        |
 /// |--------------------|-------------------------------------------------------|
-/// | `resource_cost`    | `thermal_cost + contract_cost`                        |
+/// | `resource_cost`    | `thermal_cost + anticipated_thermal_cost + contract_cost` |
 /// | `recourse_cost`    | `deficit_cost + excess_cost`                          |
 /// | `violation_cost`   | `storage_violation_cost + filling_target_cost`        |
 /// |                    | `+ hydro_violation_cost + inflow_penalty_cost`        |
