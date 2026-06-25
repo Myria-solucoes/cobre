@@ -11,8 +11,8 @@ use super::{
 use crate::StochasticError;
 use crate::par::fitting::{ArCoefficientEstimate, SeasonalStats};
 
-/// Apply coefficient magnitude bound and contribution-based order validation
-/// to all AR estimates (used only in tests).
+/// Test-only: magnitude bound + contribution-based order validation over all
+/// AR estimates.
 fn apply_contribution_validation(
     estimates: &mut [ArCoefficientEstimate],
     n_seasons: usize,
@@ -22,7 +22,6 @@ fn apply_contribution_validation(
 ) -> HashMap<EntityId, Vec<ContributionReduction>> {
     let mut all_reductions: HashMap<EntityId, Vec<ContributionReduction>> = HashMap::new();
 
-    // Pre-pass: magnitude bound safety check.
     if let Some(threshold) = max_coeff_magnitude {
         for est in estimates.iter_mut() {
             let has_explosive = est.coefficients.iter().any(|c| c.abs() > threshold);
@@ -35,7 +34,7 @@ fn apply_contribution_validation(
                         season_id: est.season_id,
                         original_order,
                         reduced_order: 0,
-                        contributions: Vec::new(), // magnitude-based, no contributions computed
+                        contributions: Vec::new(),
                         reason: ReductionReason::MagnitudeBound,
                     });
                 est.coefficients.clear();
@@ -44,10 +43,6 @@ fn apply_contribution_validation(
         }
     }
 
-    // Pre-pass 2: phi_1 negativity rejection.
-    // A negative first AR coefficient contradicts hydrological persistence.
-    // This check is cheaper than contribution analysis and catches most
-    // unstable models early.
     for est in estimates.iter_mut() {
         if has_negative_phi1(&est.coefficients) {
             let original_order = est.coefficients.len();
@@ -66,19 +61,16 @@ fn apply_contribution_validation(
         }
     }
 
-    // Group estimate indices by hydro_id for per-entity processing.
     let mut hydro_indices: BTreeMap<EntityId, Vec<usize>> = BTreeMap::new();
     for (idx, est) in estimates.iter().enumerate() {
         hydro_indices.entry(est.hydro_id).or_default().push(idx);
     }
 
     for (&hydro_id, indices) in &hydro_indices {
-        // Build std_by_season from seasonal_stats.
         let std_by_season: Vec<f64> = (0..n_seasons)
             .map(|sid| stats_map.get(&(hydro_id, sid)).map_or(0.0, |s| s.std))
             .collect();
 
-        // Build all_season_coefficients from current estimates.
         let mut all_coeffs: Vec<Vec<f64>> = vec![Vec::new(); n_seasons];
         for &idx in indices {
             let est = &estimates[idx];
@@ -87,7 +79,6 @@ fn apply_contribution_validation(
             }
         }
 
-        // Validate each season for this entity.
         for &idx in indices {
             let season_id = estimates[idx].season_id;
             let mut current_order = estimates[idx].coefficients.len();
@@ -119,10 +110,8 @@ fn apply_contribution_validation(
                         reason: ReductionReason::NegativeContribution,
                     });
 
-                // Truncate coefficients to the reduced order.
                 estimates[idx].coefficients.truncate(reduced_order);
 
-                // Recompute residual_std_ratio from stored sigma2 if available.
                 if reduced_order == 0 {
                     estimates[idx].residual_std_ratio = 1.0;
                 } else if let Some(sigma2_vec) = sigma2_map.get(&(hydro_id, season_id))
@@ -133,7 +122,6 @@ fn apply_contribution_validation(
                         if sigma2 <= 0.0 { 1.0 } else { sigma2.sqrt() };
                 }
 
-                // Update the shared coefficient array.
                 all_coeffs[season_id].clone_from(&estimates[idx].coefficients);
                 current_order = reduced_order;
             }
@@ -151,7 +139,6 @@ fn apply_contribution_validation(
 fn generate_ar_observations(coefficients: &[f64], n: usize) -> Vec<f64> {
     let p = coefficients.len();
     let mut values = vec![0.0_f64; n + p];
-    // Simple deterministic pseudo-noise using a linear congruential generator.
     let mut seed: u64 = 42;
     for i in p..(n + p) {
         seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
@@ -430,7 +417,6 @@ fn test_apply_contribution_validation_reduces_explosive() {
         None, // max_coeff_magnitude
     );
 
-    // After validation, the order should be reduced: [0.3, -0.8] -> [0.3]
     assert_eq!(
         estimates[0].coefficients.len(),
         1,
@@ -438,13 +424,11 @@ fn test_apply_contribution_validation_reduces_explosive() {
     );
     assert!((estimates[0].coefficients[0] - 0.3).abs() < 1e-10);
 
-    // Residual std ratio should be recomputed from sigma2_per_order[0]
     assert!(
         (estimates[0].residual_std_ratio - 0.81_f64.sqrt()).abs() < 1e-10,
         "residual_std_ratio should be recomputed from sigma2_per_order[0]"
     );
 
-    // Should have recorded the reduction event.
     let entity_reductions = reductions.get(&hydro_id).expect("should have reductions");
     assert_eq!(entity_reductions.len(), 1);
     assert_eq!(entity_reductions[0].original_order, 2);
@@ -459,23 +443,18 @@ fn test_pimental_like_multi_season_reduction() {
     let hydro_id = EntityId(156);
     let n_seasons = 12;
 
-    // Build estimates: most seasons have small AR(1), August has explosive AR(2).
+    // Season 7 (August): explosive AR(2); all others benign AR(1).
     let mut estimates: Vec<ArCoefficientEstimate> = (0..n_seasons)
         .map(|s| ArCoefficientEstimate {
             hydro_id,
             season_id: s,
-            coefficients: if s == 7 {
-                // August: explosive AR(2) with huge lag-2 coefficient
-                vec![0.5, 48.9]
-            } else {
-                vec![0.1] // benign AR(1)
-            },
+            coefficients: if s == 7 { vec![0.5, 48.9] } else { vec![0.1] },
             residual_std_ratio: 0.95,
             annual: None,
         })
         .collect();
 
-    // Std devs: most seasons ~200, August = 5 (high coefficient * low std = trouble)
+    // August std = 5 (vs ~200): a large coefficient × small std is what triggers it.
     let stds: Vec<f64> = (0..n_seasons)
         .map(|s| if s == 7 { 5.0 } else { 200.0 })
         .collect();
@@ -518,7 +497,6 @@ fn test_pimental_like_multi_season_reduction() {
         }
     }
 
-    // If August was reduced, there should be a reduction record.
     if august_order < 2 {
         let entity_reductions = reductions.get(&hydro_id).expect("should have reductions");
         assert!(
@@ -621,7 +599,6 @@ fn phi1_rejection_sets_order_to_zero() {
     let reductions =
         apply_contribution_validation(&mut estimates, n_seasons, &stats_map, &sigma2_map, None);
 
-    // Season 0 should have been rejected (negative phi_1).
     assert!(
         estimates[0].coefficients.is_empty(),
         "season 0 should be cleared to order 0"
@@ -631,14 +608,12 @@ fn phi1_rejection_sets_order_to_zero() {
         "season 0 residual_std_ratio should be 1.0"
     );
 
-    // Season 1 should be unchanged.
     assert_eq!(
         estimates[1].coefficients,
         vec![0.4, 0.2],
         "season 1 should be unchanged"
     );
 
-    // Verify reduction entry for season 0.
     let hydro_reductions = reductions.get(&hydro_id).expect("should have reductions");
     let r = hydro_reductions
         .iter()
@@ -678,7 +653,6 @@ fn phi1_rejection_before_contribution_analysis() {
     let reductions =
         apply_contribution_validation(&mut estimates, n_seasons, &stats_map, &sigma2_map, None);
 
-    // Should be rejected by phi_1 gate.
     assert!(
         estimates[0].coefficients.is_empty(),
         "phi_1 = -0.01 should trigger rejection"
@@ -715,7 +689,6 @@ fn phi1_zero_is_not_rejected() {
     let _reductions =
         apply_contribution_validation(&mut estimates, n_seasons, &stats_map, &sigma2_map, None);
 
-    // phi_1 = 0.0 is NOT negative, so it should pass to contribution analysis.
     assert_eq!(
         estimates[0].coefficients.len(),
         2,
@@ -757,13 +730,11 @@ fn phi1_rejection_interacts_with_magnitude_bound() {
         Some(10.0), // magnitude bound that catches -50.0
     );
 
-    // The season should be cleared (by magnitude bound).
     assert!(
         estimates[0].coefficients.is_empty(),
         "should be cleared to order 0"
     );
 
-    // Only ONE reduction entry should exist (from magnitude bound, NOT doubled).
     let hydro_reductions = reductions.get(&hydro_id).expect("should have reductions");
     assert_eq!(
         hydro_reductions.len(),
@@ -812,7 +783,6 @@ fn iterative_reduction_terminates_at_zero() {
         estimates[0].coefficients.len()
     );
 
-    // Should have at least one reduction entry.
     assert!(
         reductions.contains_key(&hydro_id),
         "should have a reduction entry"
@@ -821,7 +791,6 @@ fn iterative_reduction_terminates_at_zero() {
 
 #[test]
 fn iterative_reduction_only_affects_failing_seasons() {
-    // Two seasons: season 0 has negative contributions, season 1 passes.
     let hydro_id = EntityId(1);
     let n_seasons = 2;
 
@@ -868,14 +837,12 @@ fn iterative_reduction_only_affects_failing_seasons() {
     let _reductions =
         apply_contribution_validation(&mut estimates, n_seasons, &stats_map, &sigma2_map, None);
 
-    // Season 0 should have been reduced.
     assert!(
         estimates[0].coefficients.len() < 2,
         "season 0 order should be reduced from 2; got {}",
         estimates[0].coefficients.len()
     );
 
-    // Season 1 should remain unchanged at order 2.
     assert_eq!(
         estimates[1].coefficients,
         vec![0.4, 0.2],
@@ -885,14 +852,11 @@ fn iterative_reduction_only_affects_failing_seasons() {
 
 #[test]
 fn iterative_pacf_reduction_with_synthetic_observations() {
-    // Test the iterative_pacf_reduction function directly with
-    // synthetic observations. Generate data from a known AR process,
-    // then artificially set coefficients that will fail contribution
-    // analysis to trigger re-selection.
+    // Data from a known AR process, then coefficients set to fail contribution
+    // analysis so re-selection is triggered.
     let hydro_id = EntityId(1);
     let n_seasons = 1;
 
-    // Generate enough observations for PACF to work.
     let obs = generate_ar_observations(&[0.5, 0.2], 100);
 
     let mut group_obs: HashMap<(EntityId, usize), Vec<f64>> = HashMap::new();
@@ -907,8 +871,6 @@ fn iterative_pacf_reduction_with_synthetic_observations() {
     let stats_map: HashMap<(EntityId, usize), &SeasonalStats> =
         stats.iter().map(|s| ((s.entity_id, 0_usize), s)).collect();
 
-    // Start with coefficients that have a bad high-order term.
-    // The iterative loop should reduce the order.
     let mut estimates = vec![ArCoefficientEstimate {
         hydro_id,
         season_id: 0,
@@ -930,16 +892,12 @@ fn iterative_pacf_reduction_with_synthetic_observations() {
         },
     );
 
-    // The function should have re-estimated using PACF at a reduced
-    // max_order. The exact final order depends on the PACF selection,
-    // but it should be less than the original 3.
     assert!(
         estimates[0].coefficients.len() < 3,
         "order should be reduced from 3; got {}",
         estimates[0].coefficients.len()
     );
 
-    // Should have at least one reduction entry.
     assert!(
         reductions.contains_key(&hydro_id),
         "should have a reduction entry"
@@ -988,14 +946,12 @@ fn fixed_path_uses_truncation_not_reselection() {
         "Fixed path should truncate; got order {final_order}"
     );
 
-    // Verify a reduction was recorded.
     assert!(
         reductions.contains_key(&hydro_id),
         "should have a reduction entry"
     );
     let r = &reductions[&hydro_id][0];
     assert_eq!(r.original_order, 3);
-    // The reduced order should be from find_max_valid_order (truncation).
     assert!(r.reduced_order <= 2, "truncation should produce order <= 2");
 }
 
@@ -1133,7 +1089,6 @@ fn iterative_pacf_reduction_stable_par2_not_spuriously_reduced() {
 
     let (obs_s0, obs_s1) = simulate_two_season_par2(0.7, 0.15, n_years, 137);
 
-    // Build group_obs and stats_map.
     let mut group_obs: HashMap<(EntityId, usize), Vec<f64>> = HashMap::new();
     group_obs.insert((hydro_id, 0), obs_s0.clone());
     group_obs.insert((hydro_id, 1), obs_s1.clone());
@@ -1171,7 +1126,6 @@ fn iterative_pacf_reduction_stable_par2_not_spuriously_reduced() {
         .map(|(s, st)| ((hydro_id, s), st))
         .collect();
 
-    // Run PACF order selection + YW estimation to get the starting estimates.
     let stats_by_season_pop = {
         let n = obs_s0.len() as f64;
         let mu0 = mean_s0;
@@ -1214,7 +1168,6 @@ fn iterative_pacf_reduction_stable_par2_not_spuriously_reduced() {
         });
     }
 
-    // All seasons should select order 2 before reduction.
     for est in &estimates {
         assert_eq!(
             est.coefficients.len(),
@@ -1227,7 +1180,6 @@ fn iterative_pacf_reduction_stable_par2_not_spuriously_reduced() {
 
     let coeffs_before: Vec<Vec<f64>> = estimates.iter().map(|e| e.coefficients.clone()).collect();
 
-    // Run iterative PACF reduction (should terminate without spurious reductions).
     let reductions = iterative_pacf_reduction(
         &mut estimates,
         n_seasons,
@@ -1241,7 +1193,6 @@ fn iterative_pacf_reduction_stable_par2_not_spuriously_reduced() {
         },
     );
 
-    // Stable PAR(2) should not be reduced (order remains 2).
     for est in &estimates {
         assert_eq!(
             est.coefficients.len(),
@@ -1252,10 +1203,8 @@ fn iterative_pacf_reduction_stable_par2_not_spuriously_reduced() {
         );
     }
 
-    // Verify coefficients match (unchanged or recomputed at new order).
     for (est, before) in estimates.iter().zip(coeffs_before.iter()) {
         if est.coefficients.len() == before.len() {
-            // No reduction: verify coefficients unchanged.
             for (a, b) in est.coefficients.iter().zip(before.iter()) {
                 assert!(
                     (a - b).abs() < 1e-10,
@@ -1264,7 +1213,6 @@ fn iterative_pacf_reduction_stable_par2_not_spuriously_reduced() {
                 );
             }
         } else {
-            // Reduction occurred: verify against direct YW solve.
             let yw_direct = estimate_periodic_ar_coefficients(
                 est.season_id,
                 est.coefficients.len(),
@@ -1300,9 +1248,7 @@ fn roundtrip_estimation_two_season_par2_recovers_coefficients() {
 
     let (obs_s0, obs_s1) = simulate_two_season_par2(true_phi1, true_phi2, n_years, 42);
 
-    // Build 2 study stages, one per season.
-    // Season 0: Jan 1 – Jul 1 (any year); Season 1: Jul 1 – Jan 1.
-    // All observations will be mapped via the SeasonMap fallback.
+    // Season 0: Jan 1 – Jul 1; Season 1: Jul 1 – Jan 1.
     let ref_year = 2000_i32;
     let stages = vec![
         make_two_season_stage(0, 0, 0, ref_year, true),
@@ -1364,7 +1310,6 @@ fn roundtrip_estimation_two_season_par2_recovers_coefficients() {
     )
     .expect("estimation must succeed");
 
-    // Collect per-season coefficients.
     let est_s0 = estimates
         .iter()
         .find(|e| e.hydro_id == hydro_id && e.season_id == 0)
@@ -1428,7 +1373,6 @@ fn estimate_ar_with_pacf_annual_two_hydros_twelve_seasons() {
     let mut obs = synthetic_monthly_obs(h1, n_years, 100.0, 5.0, 1.0);
     obs.extend(synthetic_monthly_obs(h2, n_years, 200.0, 3.0, 0.5));
 
-    // Seasonal stats needed for the YW solve (standard values).
     let seasonal_stats = {
         use crate::par::fitting::estimate_seasonal_stats_with_season_map;
         estimate_seasonal_stats_with_season_map(&obs, &stages, &[h1, h2], None).unwrap()

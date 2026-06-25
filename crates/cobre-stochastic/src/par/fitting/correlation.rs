@@ -59,24 +59,14 @@ use crate::StochasticError;
 /// where both entities have valid residuals. When fewer than 2 overlapping
 /// steps exist, `r_{ij}` is set to 0.0.
 ///
-/// ## Output structure
-///
-/// Returns a [`CorrelationModel`] with:
-/// - `method: "spectral"`
-/// - A single profile named `"default"` with a single group containing all
-///   entities in canonical `hydro_ids` order and the estimated correlation matrix.
-/// - An empty `schedule` (the single profile applies to all stages).
-///
-/// The function does **not** enforce positive-semidefiniteness. The downstream
-/// spectral decomposition handles rank-deficient and non-PD matrices naturally.
+/// The returned [`CorrelationModel`] carries a single `"default"` profile over
+/// all entities in canonical `hydro_ids` order. The function does **not** enforce
+/// positive-semidefiniteness — the downstream spectral decomposition handles
+/// rank-deficient and non-PD matrices.
 ///
 /// # Parameters
 ///
-/// - `observations` — flat slice of `(entity_id, date, value)` triples,
-///   sorted by `(entity_id, date)`.
-/// - `ar_estimates` — output of [`estimate_ar_coefficients`](super::estimate_ar_coefficients).
-/// - `seasonal_stats` — output of [`estimate_seasonal_stats`](super::estimate_seasonal_stats).
-/// - `stages` — all study stages with `season_id` assignments.
+/// - `observations` — `(entity_id, date, value)` triples sorted by `(entity_id, date)`.
 /// - `hydro_ids` — canonical sorted entity IDs; determines matrix row/column order.
 ///
 /// # Errors
@@ -158,7 +148,6 @@ pub fn estimate_correlation_with_season_map(
     hydro_ids: &[EntityId],
     season_map: Option<&SeasonMap>,
 ) -> Result<CorrelationModel, StochasticError> {
-    // Trivial case: no hydros.
     if hydro_ids.is_empty() {
         let mut profiles = BTreeMap::new();
         profiles.insert(
@@ -189,8 +178,6 @@ pub fn estimate_correlation_with_season_map(
 
     let per_season_residuals = compute_hydro_residuals(&lookups, &ar_lookup, hydro_ids, season_map);
 
-    // Warn about potentially degenerate hydros (informational only; spectral
-    // decomposition handles near-zero eigenvalues naturally).
     warn_degenerate_hydros(&lookups, hydro_ids, &per_season_residuals);
 
     let pooled_residuals = flatten_residuals(&per_season_residuals);
@@ -206,28 +193,19 @@ pub fn estimate_correlation_with_season_map(
     ))
 }
 
-/// Compute standardized AR innovation residuals for each hydro, partitioned by season.
-///
-/// For each hydro and each observation date where the AR model has sufficient
-/// lag history, computes:
-///   `epsilon_t = z_t - sum(psi_{m,l} * z_{t-l})` for l in 1..=p
-///
-/// Returns one `HashMap<season_id, HashMap<NaiveDate, f64>>` per hydro (indexed
-/// by position in `hydro_ids`). Each residual is placed under its `season_id`
-/// key instead of being pooled into a flat date-keyed map.
+/// Compute standardized AR innovation residuals (see `estimate_correlation`'s
+/// residual formula) for each hydro, keyed by `season_id` rather than pooled
+/// into a flat date map; one entry per position in `hydro_ids`.
 fn compute_hydro_residuals(
     lookups: &SeasonLookups<'_>,
     ar_lookup: &HashMap<(EntityId, usize), &ArCoefficientEstimate>,
     hydro_ids: &[EntityId],
     season_map: Option<&SeasonMap>,
 ) -> Vec<HashMap<usize, HashMap<NaiveDate, f64>>> {
-    // Each hydro's residual map is computed independently from immutable shared
-    // inputs, so the outer per-hydro loop is embarrassingly parallel. Each task
-    // owns a local map and `collect()` reassembles results in canonical
-    // `hydro_ids` index order, making thread scheduling irrelevant to the output
-    // ordering (deterministic). The inner per-observation arithmetic — including
-    // the sequential `ar_sum` accumulation over lags — is reproduced verbatim so
-    // every output element is bit-identical to a single-threaded pass.
+    // Determinism: `collect()` reassembles per-hydro maps in canonical
+    // `hydro_ids` order, and the sequential `ar_sum` lag accumulation is
+    // bit-identical to a single-threaded pass — thread scheduling cannot change
+    // the output.
     hydro_ids
         .par_iter()
         .map(|&hydro_id| {
@@ -324,9 +302,9 @@ fn flatten_residuals(
         .collect()
 }
 
-/// Emit diagnostic warnings for hydros that exhibit degenerate statistical
-/// properties. These are informational only — the spectral decomposition handles
-/// near-zero eigenvalues naturally and no hydros are excluded.
+/// Emit diagnostic warnings for statistically degenerate hydros. Informational
+/// only — no hydros are excluded; the spectral decomposition handles near-zero
+/// eigenvalues.
 fn warn_degenerate_hydros(
     lookups: &SeasonLookups<'_>,
     hydro_ids: &[EntityId],
@@ -337,7 +315,6 @@ fn warn_degenerate_hydros(
             continue;
         };
 
-        // Partition raw observations by season.
         let mut obs_by_season: HashMap<usize, Vec<f64>> = HashMap::new();
         for &(date, value) in all_obs {
             if let Some(season_id) = find_season_for_date(&lookups.stage_index, date) {
@@ -353,7 +330,6 @@ fn warn_degenerate_hydros(
                 continue;
             }
 
-            // Warn: >50% negative observations.
             #[allow(clippy::cast_precision_loss)]
             let neg_frac = vals.iter().filter(|&&v| v < 0.0).count() as f64 / vals.len() as f64;
             if neg_frac > 0.5 {
@@ -366,7 +342,6 @@ fn warn_degenerate_hydros(
                 );
             }
 
-            // Warn: constant series (all values identical).
             let first = vals[0];
             if vals.iter().all(|&v| (v - first).abs() < f64::EPSILON) {
                 tracing::warn!(
@@ -376,12 +351,11 @@ fn warn_degenerate_hydros(
                     "hydro has constant series in season \
                      (included in correlation; near-zero eigenvalue expected)"
                 );
-                // Near-zero residual variance is implied by a constant series;
-                // skip the residual check for this season.
+                // Constant series implies near-zero residual variance; skip the
+                // redundant residual-variance warning below.
                 continue;
             }
 
-            // Warn: near-zero residual variance.
             if let Some(residuals) = per_season_residuals
                 .get(hidx)
                 .and_then(|m| m.get(&season_id))
@@ -410,15 +384,10 @@ fn warn_degenerate_hydros(
 
 /// Compute per-season Pearson correlation matrices.
 ///
-/// For each season, extracts the residuals belonging to that season from each
-/// hydro and computes the Pearson correlation matrix. Seasons where the minimum
-/// number of paired observations across all hydro pairs is below
-/// [`MIN_CORRELATION_PAIRS`] are excluded from the result and fall back to the
-/// pooled (all-season) matrix via the `"default"` profile.
-///
-/// All hydros participate regardless of degenerate status. Rank-deficient
-/// matrices (more hydros than observations) are acceptable because the downstream
-/// spectral decomposition handles them naturally.
+/// Seasons whose minimum paired-observation count across all hydro pairs is below
+/// [`MIN_CORRELATION_PAIRS`] are omitted and fall back to the pooled matrix via
+/// the `"default"` profile. All hydros participate regardless of degeneracy;
+/// rank-deficient matrices are acceptable (the spectral decomposition handles them).
 fn compute_seasonal_matrices(
     per_season_residuals: &[HashMap<usize, HashMap<NaiveDate, f64>>],
     n_seasons: usize,
@@ -427,13 +396,11 @@ fn compute_seasonal_matrices(
     let n_hydros = per_season_residuals.len();
 
     for season_id in 0..n_seasons {
-        // Extract per-hydro residuals for this season (all hydros, no exclusions).
         let season_residuals: Vec<HashMap<NaiveDate, f64>> = per_season_residuals
             .iter()
             .map(|hydro_seasons| hydro_seasons.get(&season_id).cloned().unwrap_or_default())
             .collect();
 
-        // Determine minimum paired observation count across all hydro pairs.
         let min_pairs = if n_hydros <= 1 {
             season_residuals.first().map_or(0, HashMap::len)
         } else {
@@ -462,24 +429,16 @@ fn compute_seasonal_matrices(
     result
 }
 
-/// Compute the `n_hydros` x `n_hydros` Pearson correlation matrix from residuals.
+/// Compute the `n_hydros` x `n_hydros` Pearson correlation matrix from residuals,
+/// using the standard formula with Bessel correction (N-1).
 ///
-/// For each pair `(i, j)`, collects time steps where both have residuals,
-/// then applies the standard Pearson formula with Bessel correction (N-1).
-///
-/// Pairs are sorted by their join key (`NaiveDate`) before accumulation. The
-/// date is the unique observation identifier shared by both residual series, so
-/// sorting on it yields an iteration order that is independent of (a) the
-/// nondeterministic `HashMap` traversal order and (b) which of the two series is
-/// the row (`i`) versus the column (`j`). The latter is what makes the result
-/// invariant to the declaration order of the input series: reversing the slice
-/// swaps the row/column roles of every pair but leaves the date-sorted summation
-/// order — and therefore every floating-point partial sum — bit-identical.
+/// Determinism: pairs are summed in `NaiveDate` order, making every partial sum
+/// independent of both `HashMap` traversal order and which series is row vs column
+/// — so the result is invariant to the declaration order of the input series.
 pub(super) fn compute_pearson_correlation_matrix(
     hydro_residuals: &[HashMap<NaiveDate, f64>],
 ) -> Vec<f64> {
     let n = hydro_residuals.len();
-    // Flat row-major N×N matrix: entry (i, j) is at index i * n + j.
     let mut matrix = vec![0.0_f64; n * n];
 
     for i in 0..n {
@@ -500,10 +459,8 @@ pub(super) fn compute_pearson_correlation_matrix(
                 continue;
             }
 
-            // Sort by the join key (date) so the accumulation order depends only
-            // on the shared observation dates — never on HashMap traversal order
-            // or on which series is i vs j. Dates are unique within a series, so
-            // this is a total order with no ties.
+            // Date-sorted accumulation for declaration-order determinism (see doc);
+            // dates are unique within a series, so the order is total.
             pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
             #[allow(clippy::cast_precision_loss)]
@@ -541,15 +498,12 @@ pub(super) fn compute_pearson_correlation_matrix(
     matrix
 }
 
-/// Assemble a multi-profile [`CorrelationModel`] from hydro IDs, a pooled
-/// matrix, per-season matrices, the stage list, and the total season count.
+/// Assemble a multi-profile [`CorrelationModel`].
 ///
-/// The pooled matrix is always inserted as the `"default"` profile.
-/// When `n_seasons <= 1`, only the default profile is produced (backward
-/// compatibility with the single-season path).
-/// For the multi-season case, each season that passed the minimum-sample check
-/// gets a `"season_XX"` profile (zero-padded to the width of the largest season
-/// index), and the schedule maps each stage to its season's profile name.
+/// The pooled matrix is always the `"default"` profile; when `n_seasons <= 1`
+/// it is the only profile. Otherwise each season passing the minimum-sample
+/// check adds a `"season_XX"` profile (zero-padded to the widest season index)
+/// and the schedule maps each stage to its season's profile.
 fn assemble_seasonal_correlation_model(
     hydro_ids: &[EntityId],
     pooled_matrix: &[f64],
@@ -569,13 +523,11 @@ fn assemble_seasonal_correlation_model(
 
     let mut profiles = BTreeMap::new();
 
-    // Convert a flat row-major N×N Vec<f64> to the AoS Vec<Vec<f64>> layout
-    // required by CorrelationGroup.matrix (defined in cobre-core).
+    // CorrelationGroup.matrix (cobre-core) is AoS, not the flat row-major buffer.
     let flat_to_aos = |flat: &[f64]| -> Vec<Vec<f64>> {
         (0..n).map(|i| flat[i * n..(i + 1) * n].to_vec()).collect()
     };
 
-    // Always include the pooled matrix as "default".
     profiles.insert(
         "default".to_string(),
         CorrelationProfile {
@@ -587,7 +539,6 @@ fn assemble_seasonal_correlation_model(
         },
     );
 
-    // Single-season: return early with no per-season profiles and empty schedule.
     if n_seasons <= 1 {
         return CorrelationModel {
             method: "spectral".to_string(),
@@ -596,7 +547,6 @@ fn assemble_seasonal_correlation_model(
         };
     }
 
-    // Multi-season: add per-season profiles.
     let width = format!("{}", n_seasons.saturating_sub(1)).len();
     for (&season_id, matrix) in seasonal_matrices {
         let name = format!("season_{season_id:0>width$}");
@@ -612,8 +562,6 @@ fn assemble_seasonal_correlation_model(
         );
     }
 
-    // Build schedule: map each stage to its season profile name, omitting
-    // stages whose season has no per-season profile (they fall back to "default").
     let mut schedule: Vec<CorrelationScheduleEntry> = stages
         .iter()
         .filter_map(|stage| {

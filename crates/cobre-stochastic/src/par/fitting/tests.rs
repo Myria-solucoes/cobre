@@ -1459,7 +1459,7 @@ fn build_periodic_yw_matrix_two_season_not_toeplitz() {
 #[test]
 fn build_periodic_yw_matrix_forward_prediction_two_season_ar2() {
     // Verify that build_periodic_yw_matrix solves the FORWARD prediction
-    // problem for a 2-season AR(2) model, not the (buggy) backward variant.
+    // problem for a 2-season AR(2) model, not the backward variant.
 
     let s0 = vec![3.0_f64, 5.0, 4.0, 6.0, 2.0];
     let s1 = vec![1.0_f64, 2.0, 3.0, 4.0, 0.0];
@@ -2890,7 +2890,7 @@ fn cross_correlation_z_a_clamped_to_unit_interval() {
 
 use super::conditional_facp_partitioned;
 
-/// AC#1: max_order = 0 returns an empty vector immediately.
+/// max_order = 0 returns an empty vector immediately.
 #[test]
 fn conditional_facp_partitioned_empty_for_zero_max_order() {
     let z0: &[f64] = &[1.0, 2.0, -1.0, 0.0, -2.0];
@@ -2917,7 +2917,7 @@ fn conditional_facp_partitioned_empty_for_zero_max_order() {
     );
 }
 
-/// AC#2: when A is a constant series (std = 0), all cross-correlations
+/// When A is a constant series (std = 0), all cross-correlations
 /// involving A are 0.0. At k=1 the conditioning set is just {A_{t-1}} and
 /// Σ_22 = [[1.0]], Σ_12[:,0] = [0, 0]. The Schur complement reduces to
 /// Σ̄ = Σ_11, so FACP(1) = ρ^season(1) = PACF(1). At k≥2 the conditioning
@@ -2993,7 +2993,7 @@ fn conditional_facp_partitioned_collapses_to_classical_when_a_constant_zero() {
     }
 }
 
-/// AC#3: every returned entry is in [-1.0, 1.0] for arbitrary synthetic data.
+/// Every returned entry is in [-1.0, 1.0] for arbitrary synthetic data.
 #[test]
 fn conditional_facp_partitioned_values_bounded() {
     // 12-season setup, 30 years of pseudo-random data.
@@ -3049,7 +3049,7 @@ fn conditional_facp_partitioned_values_bounded() {
     }
 }
 
-/// AC#4: hand-computed 2-season case verifying the partitioned-covariance
+/// Hand-computed 2-season case verifying the partitioned-covariance
 /// formula for lags k=1 and k=2.
 ///
 /// # Dataset
@@ -3208,8 +3208,8 @@ fn conditional_facp_partitioned_two_season_hand_computed() {
     );
 
     // k=2: ρ^0(2) = 0 (derived above). The partitioned result must be finite
-    // and in [-1, 1]. The ticket notes this entry is clamped to -1.0 because
-    // the unclamped ratio falls below -1.0 for this data.
+    // and in [-1, 1]; this entry clamps to -1.0 because the unclamped ratio
+    // falls below -1.0 for this data.
     assert!(
         result[1].is_finite(),
         "FACP(2) must be finite, got {}",
@@ -3257,9 +3257,8 @@ fn conditional_facp_partitioned_two_season_hand_computed() {
 /// sum by the LARGER bucket size (here 5) rather than n_pairs (4 after
 /// the year-forward-shift skips one Z entry).
 ///
-/// The Σ_12[1,*] block is the Bug #1 regression guard — pre-fix, this row
-/// was anchored at season_minus_k and produced unrelated values that
-/// happily passed the looser legacy test.
+/// The Σ_12[1,*] block guards the row anchoring: anchoring at season_minus_k
+/// (instead of the per-j ref season) produces unrelated values.
 #[test]
 fn assemble_partitioned_covariance_three_season_k3_hand_computed() {
     let z0: &[f64] = &[1.0, 2.0, -1.0, 0.0, -2.0];
@@ -3316,8 +3315,8 @@ fn assemble_partitioned_covariance_three_season_k3_hand_computed() {
         );
     }
 
-    // Σ_12 (2×3, row-major). Row 1 entries (Z_{t-3} cross conditioning Z's)
-    // are the Bug #1 regression guard.
+    // Σ_12 (2×3, row-major). Row 1 (Z_{t-3} cross conditioning Z's) guards the
+    // per-j row anchoring.
     let exp_12 = [0.5, -0.625, 0.10, 0.3, 0.7, 0.4];
     for (i, &expected) in exp_12.iter().enumerate() {
         assert!(
@@ -3330,7 +3329,7 @@ fn assemble_partitioned_covariance_three_season_k3_hand_computed() {
     }
 }
 
-/// AC#5: when Σ_22 becomes singular at k=2, the loop breaks early and returns
+/// When Σ_22 becomes singular at k=2, the loop breaks early and returns
 /// a Vec with length ≤ 1 (no entry for lag 2).
 #[test]
 fn conditional_facp_partitioned_singular_sigma22_breaks_early() {
@@ -3406,7 +3405,7 @@ fn conditional_facp_partitioned_singular_sigma22_breaks_early() {
     );
 }
 
-/// AC#6: when Σ̄[0,0]·Σ̄[1,1] ≤ 0, the function records 0.0 (no NaN/Inf).
+/// When Σ̄[0,0]·Σ̄[1,1] ≤ 0, the function records 0.0 (no NaN/Inf).
 ///
 /// Use Z = A = alternating [1,-1,1,-1,...] for exact integer arithmetic.
 ///
@@ -3582,12 +3581,12 @@ fn select_order_pacf_annual_matches_select_order_pacf_for_short_circuit_zero_at_
 }
 
 // -----------------------------------------------------------------------
-// estimate_annual_seasonal_stats tests (AC #1, AC #2)
+// estimate_annual_seasonal_stats tests
 // -----------------------------------------------------------------------
 
 use super::{estimate_annual_seasonal_stats, estimate_periodic_ar_annual_coefficients};
 
-/// AC #1 — Four-year synthetic monthly series; hand-computed Bessel-corrected
+/// Four-year synthetic monthly series; hand-computed Bessel-corrected
 /// mean and std.
 ///
 /// Series: `z[year*12 + month] = (month+1)*10 + year*5`.
@@ -3681,7 +3680,7 @@ fn estimate_annual_seasonal_stats_four_year_synthetic_hand_computed() {
     );
 }
 
-/// AC #2 — History too short: 11 observations cannot form any rolling window.
+/// History too short: 11 observations cannot form any rolling window.
 ///
 /// Requires at least 13 observations (indices 0..12 inclusive) for the first
 /// window to exist. 11 observations is strictly insufficient.
@@ -3711,10 +3710,10 @@ fn estimate_annual_seasonal_stats_too_short_history_errors() {
 }
 
 // -----------------------------------------------------------------------
-// estimate_periodic_ar_annual_coefficients tests (AC #3, AC #4, AC #5)
+// estimate_periodic_ar_annual_coefficients tests
 // -----------------------------------------------------------------------
 
-/// AC #3 — `selected_order = 0`: 1×1 system yields only ψ, `coefficients` is empty.
+/// `selected_order = 0`: 1×1 system yields only ψ, `coefficients` is empty.
 ///
 /// Data reuses the order-zero fixture from `build_extended_periodic_yw_matrix`.
 /// The 1×1 system has matrix `[[1.0]]` and rhs `[cross_correlation_a_z_neg1(...)]`.
@@ -3844,7 +3843,7 @@ fn estimate_periodic_ar_annual_coefficients_hand_computed_three_season() {
     );
 }
 
-/// AC #5 — Singular extended YW system returns the zero fallback.
+/// Singular extended YW system returns the zero fallback.
 ///
 /// Uses the alternating series `[-1, 1, -1, 1, -1, 1]` with `n_seasons=1`
 /// and `selected_order=1`.  Since Z and A are identical, `rho_za = 1.0`
@@ -3903,13 +3902,8 @@ fn estimate_periodic_ar_annual_coefficients_singular_returns_zero_result() {
 ///
 /// The cross-term `sigma_22[i, k-1]` must equal
 /// `cross_correlation_z_a(prev_season, lag=i, ...)` because `Z_{t-1-i}` is
-/// exactly `i` steps older than `A_{t-1}`.  The old (buggy) code used
-/// `lag = k-2-i`, which is only coincidentally correct when `k=2` (both
-/// formulae reduce to `lag=0`).  For `k=3` the bug swaps the lag-0 and
-/// lag-1 cross-terms.
-///
-/// This test FAILS on the old `k-2-i` formula and PASSES on the fixed `i`
-/// formula.
+/// exactly `i` steps older than `A_{t-1}` — not `lag = k-2-i`, which coincides
+/// only at `k=2` and swaps the lag-0 and lag-1 cross-terms at `k=3`.
 #[test]
 fn assemble_partitioned_covariance_sigma_22_cross_term_lag_indexing() {
     // 4-season synthetic dataset, 20 years of data.

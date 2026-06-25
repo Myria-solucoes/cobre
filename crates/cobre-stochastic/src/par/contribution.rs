@@ -9,16 +9,9 @@
 //! the expected persistence direction, signaling potential model instability
 //! and explosive oscillation in generated values.
 
-/// Compute the denormalized contribution for a single (season, lag) pair.
-///
-/// Converts the dimensionless AR coefficient at `lag` for the given `season`
-/// into a physically scaled transfer factor by multiplying with the ratio of
-/// the current season's standard deviation to the lagged season's standard
-/// deviation.
-///
-/// Returns `0.0` when:
-/// - The `lag` exceeds the number of coefficients available for the season.
-/// - The standard deviation of the lagged season is zero.
+/// Denormalize the AR coefficient at `(season, lag)` into a transfer factor
+/// `phi · std(season) / std(lagged_season)`. Returns `0.0` when the lag has no
+/// coefficient or the lagged season's std is zero.
 fn denormalized_contribution(
     season: usize,
     lag: usize,
@@ -40,40 +33,22 @@ fn denormalized_contribution(
     }
 }
 
-/// Compute the recursively-composed contribution vector for a periodic
-/// autoregressive model at a given season.
+/// Recursively-composed contribution vector at `season_index`: entry `k` is the
+/// contribution of lag `k+1` (cumulative direct + indirect influence through the
+/// periodic seasonal chain). Length `order`; empty when `order == 0`.
 ///
-/// The contribution of lag k (1-indexed) captures the cumulative influence
-/// of the value k periods ago on the current period, accounting for both
-/// direct effects and indirect effects that propagate through the periodic
-/// seasonal chain of the model.
+/// Under PAR(p)-A, `coefficients_by_season[m]` may have length 12 (annual ψ̂/12
+/// added to each lag slot); the recursion operates on it unchanged.
 ///
 /// # Algorithm
 ///
-/// 1. **Denormalize** each AR coefficient into a physical transfer factor
+/// 1. **Denormalize** each AR coefficient into a transfer factor
 ///    `fi(p, k) = phi(p, k) * std(p) / std(p - k)`.
 /// 2. **Compose recursively** via a matrix `A` where:
 ///    - `A[0][j] = fi(season, j)` for all j (direct effects).
 ///    - `A[i][j] = A[i-1][0] * fi(season - i, j) + A[i-1][j+1]` (indirect
 ///      effects through the periodic chain).
 /// 3. **Extract contributions**: the contribution of lag `k+1` is `A[k][0]`.
-///
-/// # Parameters
-///
-/// - `season_index` -- the season (0-based) being analyzed.
-/// - `n_seasons` -- total number of seasons in the periodic cycle.
-/// - `order` -- the AR order for this (entity, season) pair.
-/// - `coefficients_by_season` -- AR coefficients for each season, indexed by
-///   season id. `coefficients_by_season[m]` is the coefficient vector for
-///   season `m`. Under the PAR(p)-A extension the effective coefficient vector
-///   may have length 12 (annual ψ̂/12 contribution added to each lag slot);
-///   the function operates correctly on that vector without modification.
-/// - `std_by_season` -- standard deviations indexed by season id.
-///
-/// # Returns
-///
-/// A `Vec<f64>` of length `order` where entry `k` is the contribution of
-/// lag `k + 1`. Returns an empty vector when `order == 0`.
 #[must_use]
 pub fn compute_contributions(
     season_index: usize,
@@ -90,7 +65,6 @@ pub fn compute_contributions(
     let mut curr_row = vec![0.0; order];
     let mut contributions = Vec::with_capacity(order);
 
-    // Base row: direct denormalized contributions for the target season.
     for (j, slot) in prev_row.iter_mut().enumerate() {
         *slot = denormalized_contribution(
             season_index,
@@ -102,7 +76,6 @@ pub fn compute_contributions(
     }
     contributions.push(prev_row[0]);
 
-    // Recursive rows: compose through the periodic chain.
     for i in 1..order {
         let prev_season = (season_index + n_seasons - (i % n_seasons)) % n_seasons;
         for j in 0..(order - i) {
@@ -123,46 +96,25 @@ pub fn compute_contributions(
     contributions
 }
 
-/// Check whether any contribution in a periodic autoregressive model is negative.
-///
-/// A negative contribution indicates that the lag's influence, when composed
-/// through the periodic seasonal chain, opposes the expected persistence
-/// direction. This violates the physical structure of most seasonal time
-/// series and can cause explosive oscillation in generated values.
-///
-/// Returns `true` if any entry in `contributions` is strictly negative.
-/// Returns `false` for empty slices (an order-0 model has no contributions).
+/// Whether any contribution is strictly negative — a lag opposing the expected
+/// persistence direction, which can drive explosive oscillation in generated
+/// values. `false` for empty slices.
 #[must_use]
 pub fn check_negative_contributions(contributions: &[f64]) -> bool {
     contributions.iter().any(|&c| c < 0.0)
 }
 
-/// Check whether the first AR coefficient (`phi_1`) is negative.
-///
-/// A negative `phi_1` indicates that the AR model contradicts expected
-/// hydrological persistence: higher inflow in the previous period implies
-/// lower inflow in the current period. This is physically unrealistic for
-/// most seasonal inflow series.
-///
-/// Returns `true` when `coefficients` is non-empty and `coefficients[0] < 0.0`.
-/// Returns `false` when `coefficients` is empty (order-0 model has no `phi_1`).
+/// Whether the first AR coefficient (`phi_1`) is negative — the AR model
+/// contradicting expected hydrological persistence. `false` for empty
+/// `coefficients`.
 #[must_use]
 pub fn has_negative_phi1(coefficients: &[f64]) -> bool {
     coefficients.first().is_some_and(|&c| c < 0.0)
 }
 
-/// Find the maximum lag order with no negative contributions.
-///
-/// Scans `contributions` from lag 1 (index 0) forward and returns the index
-/// of the first negative entry, which represents the maximum lag order
-/// where all contributions are non-negative.
-///
-/// Returns `contributions.len()` when all contributions are non-negative
-/// (the full order is valid). Returns `0` when the first contribution is
-/// negative (no autoregressive dependence is stable).
-///
-/// Under PAR(p)-A, the input may be a length-12 effective contribution vector;
-/// the return value is then in `[0, 12]`.
+/// Maximum lag order with no negative contributions: the index of the first
+/// negative entry, or `contributions.len()` when none is negative. Under
+/// PAR(p)-A the input may be a length-12 vector, so the result is in `[0, 12]`.
 #[must_use]
 pub fn find_max_valid_order(contributions: &[f64]) -> usize {
     contributions

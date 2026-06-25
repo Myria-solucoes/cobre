@@ -1,34 +1,26 @@
 //! Pre-computation of PAR model coefficient arrays for LP RHS patching.
 //!
-//! This module provides [`PrecomputedPar`], the performance-adapted cache built
-//! once during initialization from raw [`InflowModel`] parameters. It exposes flat,
-//! contiguous arrays in stage-major layout so the calling algorithm can patch LP
-//! right-hand sides without per-scenario recomputation.
+//! [`PrecomputedPar`] is the cache built once from raw [`InflowModel`]
+//! parameters and consumed read-only during optimization.
 //!
 //! ## Array layout
 //!
-//! All two-dimensional arrays use **stage-major** layout:
-//! `array[stage * n_series + series_element]`.
-//!
-//! The three-dimensional `psi` array uses **stage-major, series-minor, lag-innermost**:
-//! `psi[stage * n_series * max_order + series_element * max_order + lag]`.
-//!
-//! This layout is optimal for sequential stage iteration within a scenario trajectory:
-//! all per-stage data for every series element is contiguous in memory, maximizing
-//! cache utilization during forward/backward LP passes.
+//! Two-dimensional arrays are **stage-major** `array[stage * n_series + series_element]`;
+//! the three-dimensional `psi` is **stage-major, series-minor, lag-innermost**
+//! `psi[stage * n_series * max_order + series_element * max_order + lag]`. This keeps
+//! a scenario trajectory's per-stage data contiguous for the forward/backward passes.
 //!
 //! ## Coefficient conversion
 //!
-//! Input `ar_coefficients` in [`InflowModel`] are stored in **standardized form**
-//! (ψ\*, the direct Yule-Walker output). This module converts them to
-//! **original-unit** form at build time:
+//! `ar_coefficients` are stored standardized (ψ\*, the Yule-Walker output) and
+//! converted to original units at build time:
 //!
 //! ```text
 //! ψ_{m,ℓ} = ψ*_{m,ℓ} · s_m / s_{m-ℓ}
 //! ```
 //!
-//! where `s_m` is `std_m3s` for the current stage's season and `s_{m-ℓ}` is
-//! `std_m3s` for the season `ℓ` stages prior.
+//! where `s_m` is `std_m3s` for the current season and `s_{m-ℓ}` for the season
+//! `ℓ` stages prior.
 //!
 //! ## PAR(p)-A annual component
 //!
@@ -61,25 +53,15 @@ use crate::StochasticError;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Resolve a stage ID to a season ID using modular arithmetic on the season
-/// cycle length, accounting for the offset between stage IDs and season IDs.
+/// Resolve a stage ID to a season ID by modular arithmetic on the cycle length.
 ///
-/// The `season_offset` is the season ID of stage 0. For a study starting in
-/// March with `season_id = 2`, the offset is 2. This ensures pre-study stages
-/// (negative `stage_id`) map to the correct season.
-///
-/// For a March-start monthly system (`n_seasons = 12`, `season_offset = 2`):
-/// - `stage_id = -1`  -> season 1  (February)
-/// - `stage_id = -2`  -> season 0  (January)
-/// - `stage_id = -3`  -> season 11 (December)
-/// - `stage_id = 0`   -> season 2  (March)
-///
-/// For a January-start system (`season_offset = 0`) the offset has no effect.
+/// `season_offset` is the season ID of stage 0 (e.g. 2 for a March-start study),
+/// so that negative pre-study `stage_id`s map to the correct season rather than
+/// assuming stage 0 ≡ season 0 (true only for January-start studies).
 fn resolve_season_id(stage_id: i32, n_seasons: usize, season_offset: usize) -> usize {
     debug_assert!(n_seasons > 0, "n_seasons must be positive");
-    // n_seasons is always small (12 for monthly, 52 for weekly) so truncation
-    // from usize to i32 is safe in practice. The debug_assert above guards
-    // against zero; values > i32::MAX are not realistic for season counts.
+    // n_seasons ≤ ~52 and the debug_assert excludes 0, so these casts neither
+    // wrap nor truncate.
     #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
     let n = n_seasons as i32;
     #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
@@ -95,16 +77,9 @@ fn resolve_season_id(stage_id: i32, n_seasons: usize, season_offset: usize) -> u
 
 /// Cache-friendly PAR(p) model data for LP RHS patching.
 ///
-/// Built once during initialization from raw [`InflowModel`] parameters.
-/// Consumed read-only during iterative optimization.
-///
-/// All arrays use stage-major layout: outer dimension is stage index,
-/// inner dimension is series element index (sorted by canonical entity ID order).
-/// This layout is optimal for sequential stage iteration within a
-/// scenario trajectory.
-///
-/// See the [module documentation](self) for the derivation of each cached
-/// component and the coefficient conversion formula.
+/// The series-element dimension is ordered by canonical entity ID (the
+/// declaration-order-invariant index). See the [module documentation](self) for
+/// the array layout and coefficient-conversion formulas.
 ///
 /// # Examples
 ///
@@ -144,32 +119,23 @@ fn resolve_season_id(stage_id: i32, n_seasons: usize, season_offset: usize) -> u
 /// ```
 #[derive(Debug)]
 pub struct PrecomputedPar {
-    /// Deterministic base `b_{h,m(t)} = μ_{m(t)} - Σ_ℓ ψ_{m(t),ℓ} · μ_{m(t-ℓ)}`.
-    /// Flat array indexed as `[stage * n_series + series_element]`.
-    /// Length: `n_stages * n_series`.
+    /// Deterministic base `b_{h,m(t)} = μ_{m(t)} - Σ_ℓ ψ_{m(t),ℓ} · μ_{m(t-ℓ)}`,
+    /// stage-major.
     deterministic_base: Box<[f64]>,
 
-    /// Residual standard deviation `σ_{m(t)}` per (stage, series element).
-    /// Derived as `σ = s_m · residual_std_ratio`.
-    /// Flat array indexed as `[stage * n_series + series_element]`.
-    /// Length: `n_stages * n_series`.
+    /// Residual standard deviation `σ = s_m · residual_std_ratio`, stage-major.
     sigma: Box<[f64]>,
 
-    /// AR lag coefficients `ψ_{m(t),ℓ}` in original units per (stage, series element, lag).
-    /// Flat array indexed as `[stage * n_series * max_order + series_element * max_order + lag]`.
-    /// Length: `n_stages * n_series * max_order`.
-    /// Padded with `0.0` for series elements with `ar_order < max_order`.
+    /// AR lag coefficients `ψ_{m(t),ℓ}` in original units, zero-padded for series
+    /// with `ar_order < max_order`.
     psi: Box<[f64]>,
 
-    /// AR order per series element. Length: `n_series`.
-    /// `orders[h]` gives the number of meaningful lags in `psi` for series element `h`.
+    /// Classical AR order per series element (count of meaningful lags in `psi`).
     orders: Box<[usize]>,
 
-    /// Whether each series element has an annual component at any stage.
-    /// Length: `n_series`.
-    /// `has_annual[h]` is `true` iff any [`InflowModel`] with this hydro's `EntityId`
-    /// carries `annual: Some(_)`. Controls whether lag slots beyond `orders[h]`
-    /// can carry non-zero `ψ̂/12` contributions (see [`Self::effective_lag_count`]).
+    /// Per series element, whether any [`InflowModel`] carries `annual: Some(_)`.
+    /// Gates whether lag slots beyond `orders[h]` carry `ψ̂/12` (see
+    /// [`Self::effective_lag_count`]).
     has_annual: Box<[bool]>,
 
     /// Number of study stages.
@@ -208,10 +174,6 @@ impl PrecomputedPar {
     ///
     /// Returns [`StochasticError::InvalidParParameters`] when a required lag stage
     /// does not have a `season_id`, which prevents coefficient unit conversion.
-    ///
-    /// # Panics
-    ///
-    /// Does not panic for valid inputs. All indexing is bounds-checked during build.
     pub fn build(
         inflow_models: &[InflowModel],
         stages: &[Stage],
@@ -349,15 +311,9 @@ impl PrecomputedPar {
         self.sigma[stage * self.n_hydros + hydro]
     }
 
-    /// Slice of AR lag coefficients `ψ_{m(t),ℓ}` (original units) for the given
-    /// stage and series element indices.
-    ///
-    /// The returned slice has length `max_order`. For a hydro **without** an annual
-    /// component, positions `0..orders[hydro]` are meaningful and
-    /// `orders[hydro]..max_order` are `0.0`. For a hydro **with** an annual
-    /// component, all 12 positions (= `max_order`) may carry the `ψ̂/12` term and
-    /// are therefore meaningful. Use [`Self::effective_lag_count`] to obtain the
-    /// authoritative meaningful-slot count for downstream consumers.
+    /// Slice of AR lag coefficients `ψ_{m(t),ℓ}` (original units), length
+    /// `max_order`. The meaningful-slot count (which trailing slots are
+    /// structurally zero vs. carry `ψ̂/12`) is [`Self::effective_lag_count`].
     ///
     /// # Panics
     ///
@@ -381,12 +337,9 @@ impl PrecomputedPar {
         &self.psi[start..start + self.max_order]
     }
 
-    /// AR order for the given series element (maximum across all stages).
-    ///
-    /// Returns the classical AR order `p` — the number of lag positions holding
-    /// explicit AR coefficients `φ̂_j`. For PAR(p)-A hydros, lag slots
-    /// `p..max_order` additionally carry `ψ̂/12`; use [`Self::effective_lag_count`]
-    /// to obtain the meaningful-slot count for downstream consumers.
+    /// Classical AR order `p` for the series element (max across stages) — the lag
+    /// positions holding explicit `φ̂_j`. For the PAR(p)-A meaningful-slot count
+    /// including `ψ̂/12` slots, use [`Self::effective_lag_count`].
     ///
     /// # Panics
     ///
@@ -401,21 +354,13 @@ impl PrecomputedPar {
         self.orders[hydro]
     }
 
-    /// Number of lag-state slots that may carry non-zero `ψ` coefficients for
-    /// the given series element.
+    /// Authoritative count of lag slots that may carry non-zero `ψ` for the series
+    /// element — what downstream consumers building sparse lag layouts must track:
     ///
-    /// This is the authoritative meaningful-slot count for any downstream
-    /// consumer that builds sparse layouts over lag state:
-    ///
-    /// - **Classical PAR(p)** (no annual component on this hydro): returns
-    ///   `order(hydro)`. Lag slots beyond the AR order are structurally zero.
-    /// - **PAR(p)-A** (annual component present on this hydro): returns
-    ///   `max_order` (= 12 for a standard monthly study). All 12 slots carry
-    ///   the `ψ̂/12` annual term and must be tracked by consumers that
-    ///   linearise against the AR-dynamics row.
-    ///
-    /// Equivalent to `psi_slice(_, hydro).len()` when trimmed to meaningful
-    /// entries, but cheaper to call.
+    /// - **Classical PAR(p)** (no annual component): `order(hydro)`; slots beyond
+    ///   the AR order are structurally zero.
+    /// - **PAR(p)-A** (annual component present): `max_order` (= 12 for a monthly
+    ///   study); all slots carry the `ψ̂/12` annual term.
     ///
     /// # Panics
     ///
@@ -434,12 +379,8 @@ impl PrecomputedPar {
         }
     }
 
-    /// Whether the given series element has an annual component at any stage.
-    ///
-    /// Returns `true` iff at least one [`InflowModel`] for this hydro was built
-    /// with `annual: Some(_)`. When `true`, lag slots `order(hydro)..max_order`
-    /// carry the `ψ̂/12` annual contribution and must be tracked by lag-aware
-    /// downstream consumers (see [`Self::effective_lag_count`]).
+    /// Whether any [`InflowModel`] for this series element was built with
+    /// `annual: Some(_)` (see [`Self::effective_lag_count`]).
     ///
     /// # Panics
     ///
@@ -474,10 +415,7 @@ impl PrecomputedPar {
 }
 
 impl Default for PrecomputedPar {
-    /// Returns an empty [`PrecomputedPar`] with zero stages and zero series elements.
-    ///
-    /// Useful as a sentinel value for callers that do not use PAR models
-    /// (e.g., test fixtures for systems with no series elements).
+    /// Empty [`PrecomputedPar`] sentinel for callers with no PAR models.
     fn default() -> Self {
         Self {
             deterministic_base: Box::new([]),
@@ -513,17 +451,11 @@ struct StageArrayBuffers<'a> {
     max_order: usize,
 }
 
-/// Fill the flat output arrays for every (stage, hydro) pair.
+/// Fill `bufs` for every (stage, hydro) pair.
 ///
-/// Builds the season-based fallback lookup structures from `inflow_models`
-/// and `stages`, then iterates over every (stage, hydro) combination to
-/// populate `bufs.deterministic_base`, `bufs.sigma`, and `bufs.psi`.
-///
-/// The season fallback is needed because pre-study lag stages (negative
-/// `stage_id`) may not appear as explicit entries in `inflow_models`. When
-/// an exact stage lookup misses, the lag stage id is mapped to a season via
-/// modular arithmetic on `n_seasons` and the per-season statistics are used
-/// instead.
+/// Pre-study lag stages (negative `stage_id`) may have no explicit
+/// `inflow_models` entry; when an exact lag-stage lookup misses, the lag stage is
+/// resolved to a season via modular arithmetic and its per-season stats are used.
 ///
 /// # Errors
 ///
@@ -541,8 +473,6 @@ fn fill_stage_arrays(
     let n_hydros = bufs.n_hydros;
     let max_order = bufs.max_order;
 
-    // Build a map (hydro_index, stage_id) → (mean_m3s, std_m3s) covering all
-    // entries in inflow_models, including pre-study stages with negative IDs.
     let model_stats: HashMap<(usize, i32), (f64, f64)> = inflow_models
         .iter()
         .filter_map(|m| {
@@ -552,18 +482,10 @@ fn fill_stage_arrays(
         })
         .collect();
 
-    // Season-based fallback for pre-study lag stages (negative stage_id).
-    //
-    // When the exact (h_idx, lag_stage_id) is not in model_stats (because
-    // the estimation pipeline or external files did not emit pre-study
-    // entries), we resolve lag_stage_id to a season_id via modular
-    // arithmetic on the season cycle length, then look up (h_idx, season_id)
-    // in season_stats.
-    // Prefer the true seasonal cycle length supplied by the caller; fall back to
-    // the count of distinct study `season_id`s when absent. For full-year studies
-    // the two agree, so this is a determinism no-op for the existing cases. For
-    // partial-year studies the true cycle length is required for the modular
-    // season fallback to resolve out-of-window lag stages to the correct season.
+    // Prefer the caller's true cycle length; fall back to the count of distinct
+    // study season_ids. The two agree for full-year studies (determinism no-op);
+    // partial-year studies need the true length so out-of-window lag stages
+    // resolve to the correct season.
     let n_seasons = cycle_len.unwrap_or_else(|| {
         stages
             .iter()
@@ -572,10 +494,8 @@ fn fill_stage_arrays(
             .len()
     });
 
-    // Season offset: the season_id of the first stage. For a March-start study
-    // with season_id=2, pre-study stage -1 maps to season 1 (February), not
-    // season 11 (December). Without this offset the modular arithmetic assumes
-    // stage_id 0 ≡ season 0, which is only true for January-start studies.
+    // season_id of stage 0 — the offset resolve_season_id needs for non-January
+    // starts.
     let season_offset = stages.iter().find_map(|s| s.season_id).unwrap_or(0);
 
     let stage_to_season: HashMap<i32, usize> = stages
@@ -592,23 +512,16 @@ fn fill_stage_arrays(
         })
         .collect();
 
-    // For converting ψ* → ψ we need std_m3s for the lag stage's season.
-    // The lag stage's stage_id is: current_stage.id - l (for lag l).
-    // We look up (h_idx, stage_id - l) in model_stats. If that misses,
-    // fall back to season_stats via modular arithmetic on n_seasons.
-
     for (s_idx, stage) in stages.iter().enumerate() {
         let stage_id = stage.id;
 
         for (h_idx, &hydro_id) in hydro_ids.iter().enumerate() {
             let flat2 = s_idx * n_hydros + h_idx;
 
-            // Look up the InflowModel for this (stage, hydro) pair.
             let model = model_map.get(&(hydro_id.0, stage_id));
 
             match model {
                 None => {
-                    // No model for this pair: deterministic zero inflow.
                     bufs.deterministic_base[flat2] = 0.0;
                     bufs.sigma[flat2] = 0.0;
                     // psi stays 0.0 (already initialized)
@@ -618,18 +531,11 @@ fn fill_stage_arrays(
                     let mu_m = m.mean_m3s;
                     let order = m.ar_order();
 
-                    // sigma = s_m * residual_std_ratio
                     bufs.sigma[flat2] = s_m * m.residual_std_ratio;
 
-                    // Compute the annual unit-converted coefficient ψ̂ for this
-                    // (stage, hydro). When PAR-A is off for this hydro (annual is
-                    // None) or the psi stride is classical (max_order < 12),
-                    // ψ̂ = 0 so the formula degenerates to the classical path.
-                    //
-                    // ψ̂ = ψ · σ_m / σ^A
-                    //
-                    // If σ^A == 0.0, the contribution is zero (same guard as
-                    // the zero-std lag-stage path for φ̂ coefficients).
+                    // Annual ψ̂ (see module docs). ψ̂ = 0 when PAR-A is off or the
+                    // stride is classical (max_order < 12) or σ^A == 0, degenerating
+                    // to the classical path.
                     let psi_hat = if bufs.max_order < 12 {
                         0.0
                     } else {
@@ -640,31 +546,14 @@ fn fill_stage_arrays(
                         }
                     };
 
-                    // Convert ψ* → ψ and compute the deterministic base.
-                    //
-                    // Classical:    ψ_{m,ℓ} = ψ*_{m,ℓ} · s_m / s_{m-ℓ}
-                    // PAR-A:        psi[j]  = φ̂_{j+1} + ψ̂/12  for j < order
-                    //                         ψ̂/12              for j ∈ [order, 12)
-                    //
-                    // deterministic_base = μ_m - Σ_ℓ psi[ℓ] · μ_{m-ℓ-1}
-                    //
-                    // When PAR-A is off (psi_hat == 0), the formula is identical
-                    // to the classical one.
+                    // Convert ψ* → ψ and fold the deterministic base (see module
+                    // docs for the classical and PAR-A formulas).
                     let mut base = mu_m;
 
                     for lag in 0..max_order {
-                        // lag is 0-based: coefficient index 0 corresponds to lag ℓ=1.
+                        // lag is 0-based: index 0 is lag ℓ=1.
                         let lag_stage_id = stage_id - i32::try_from(lag + 1).unwrap_or(i32::MAX);
 
-                        // Two-tier lookup for lag stage statistics:
-                        //
-                        // Tier 1: exact stage_id match (covers study-stage lags
-                        // and any pre-study entries explicitly present in
-                        // inflow_models).
-                        //
-                        // Tier 2: season-based fallback using modular arithmetic
-                        // with the season offset so that pre-study stages map
-                        // to the correct month.
                         let (mu_lag, s_lag) =
                             if let Some(&stats) = model_stats.get(&(h_idx, lag_stage_id)) {
                                 stats
@@ -676,38 +565,28 @@ fn fill_stage_arrays(
                                     .copied()
                                     .unwrap_or((0.0, 0.0))
                             } else {
-                                // No seasons defined -- cannot resolve; zero fallback.
                                 (0.0, 0.0)
                             };
 
-                        // φ̂_j: classical AR contribution for lags within the AR
-                        // order. For lags beyond the AR order, φ̂ = 0.
-                        //
-                        // Avoid divide-by-zero: if s_lag == 0.0, the ratio is
-                        // undefined. Treat ar_contrib as zero (no AR contribution
-                        // from that lag). The caller is responsible for validating
-                        // that lag stages with AR order > 0 have positive std.
+                        // φ̂ = 0 beyond the AR order; s_lag == 0 also yields 0 (the
+                        // caller must validate that AR-order-bearing lag stages have
+                        // positive std).
                         let ar_contrib = if lag >= order || s_lag == 0.0 {
                             0.0
                         } else {
                             m.ar_coefficients[lag] * s_m / s_lag
                         };
 
-                        // Effective psi at this lag: classical AR plus the
-                        // annual ψ̂ spread evenly over all 12 positions.
                         let psi_val = ar_contrib + psi_hat / 12.0;
 
-                        // Store in flat 3-D array.
                         let flat3 = s_idx * n_hydros * max_order + h_idx * max_order + lag;
                         bufs.psi[flat3] = psi_val;
 
                         base -= psi_val * mu_lag;
                     }
 
-                    // Verify that we have a valid season_id when AR order > 0
-                    // or when the annual component is present. Season is required
-                    // for the lag-stage statistics lookup (both classical and
-                    // PAR-A paths rely on the season fallback).
+                    // AR order > 0 or an annual component requires a season_id for
+                    // the lag-stage stats lookup.
                     if (order > 0 || m.annual.is_some()) && stage.season_id.is_none() {
                         return Err(StochasticError::InvalidParParameters {
                             hydro_id: hydro_id.0,
