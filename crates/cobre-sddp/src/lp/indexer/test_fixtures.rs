@@ -137,12 +137,12 @@ pub fn eq_with_anticipated(
 /// `fpha_hydro_indices` / `fpha_planes` describe the FPHA hydros at this stage
 /// (parallel, equal length); `evap_hydro_indices` lists the evaporation hydros.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 // Rationale: single cohesive LP column/row layout reproduction; every local
 // binding contributes to the `StageGeometry { .. }` literal that closes the
 // function. Splitting into sub-helpers would scatter the offset derivation order
 // and obscure the one-shot build contract where each offset derives from the
 // previous.
+#[allow(clippy::too_many_lines)]
 pub fn geometry(
     dims: &GeometryDims,
     fpha_hydro_indices: Vec<usize>,
