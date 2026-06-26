@@ -29,7 +29,8 @@ use cobre_sddp::build_cut_row_batch_into;
 use cobre_sddp::cut::fcf::FutureCostFunction;
 use cobre_sddp::indexer::StateLayout;
 use cobre_solver::RowBatch;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 const N: usize = 10;
 const L_BASELINE: usize = 12;

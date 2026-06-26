@@ -12,7 +12,8 @@ use cobre_solver::{
     SolverInterface,
     types::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate},
 };
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 use cobre_sddp::solver_stats::{SolverStatsDelta, StageWorkerStatsBuffer};
 

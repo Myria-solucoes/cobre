@@ -11,7 +11,8 @@
 
 use cobre_sddp::cut::CutPool;
 use cobre_sddp::cut_selection::CutSelectionStrategy;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);

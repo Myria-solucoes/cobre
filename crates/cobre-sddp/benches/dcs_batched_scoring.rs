@@ -18,7 +18,8 @@
 use cobre_sddp::cut::{CutPool, CutRowMap};
 use cobre_sddp::dcs::{DcsParams, DcsScoringScratch, score_violated_candidates};
 use cobre_sddp::indexer::StateLayout;
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 // --- deterministic PRNG (no external rand dep) ------------------------------
 

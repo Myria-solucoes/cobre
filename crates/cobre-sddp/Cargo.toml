@@ -73,14 +73,14 @@ tracing = "0.1"
 cc = "1.2"
 
 [dev-dependencies]
-arrow = { version = "58", default-features = false, features = ["prettyprint"] }
+arrow = { version = "59", default-features = false, features = ["prettyprint"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
-criterion = { version = "0.5", default-features = false }
+criterion = { version = "0.7", default-features = false }
 # Used only by the `dcs_batched_scoring` bench to reproduce the pre-batching
 # per-candidate `dgemm` baseline (the crate's own `gemm_block` wrapper is
 # `pub(crate)` and so unreachable from a bench). Same pin as the normal dep.
 matrixmultiply = { workspace = true }
-parquet = { version = "58", default-features = false, features = ["arrow", "zstd"] }
+parquet = { version = "59", default-features = false, features = ["arrow", "zstd"] }
 rand = "0.10"
 rand_distr = "0.6"
 serde_json = "1"
