@@ -37,9 +37,13 @@ jobs:
         uses: lycheeverse/lychee-action@v2
         with:
           # External http(s) only — repo-relative paths are check-doc-paths.sh's
-          # job. Retries + accepted transient status codes keep PR runs from
-          # red-failing on rate limits or flaky hosts; the weekly cron is the
-          # authoritative sweep. .lycheeignore (repo root) is read automatically.
+          # job. External-host availability is inherently flaky (a third-party
+          # site can be down at any moment), so on pull requests this check is
+          # report-only and never blocks a merge (see `fail:` below); the weekly
+          # cron and manual dispatch run authoritatively and fail on genuinely
+          # broken links. Retries + accepted transient status codes further cut
+          # false positives on those authoritative runs. .lycheeignore (repo
+          # root) is read automatically.
           args: >-
             --no-progress
             --scheme https
@@ -49,5 +53,7 @@ jobs:
             --accept 200,403,429
             README.md CONTRIBUTING.md 'book/src/**/*.md'
           # Do not open an issue on failure; surface the result via the job
-          # status (PR check) and the action's job summary.
-          fail: true
+          # status and the action's job summary. Fail the build on every trigger
+          # EXCEPT pull_request, so a flaky external host cannot red-fail a PR
+          # while the weekly cron / manual dispatch stay authoritative.
+          fail: ${{ github.event_name != 'pull_request' }}
