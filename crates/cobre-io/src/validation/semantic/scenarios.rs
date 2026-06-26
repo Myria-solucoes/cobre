@@ -11,7 +11,7 @@ use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 /// Emits one `ModelQuality` warning per violated ordering check, aggregating
 /// all violating entities into a single warning with the count and worst-case ID.
 // Rationale: five independent ordering rules, each a full entity pass with its
-// own worst-case aggregation; per-rule helpers would not cut the line count.
+// own worst-case aggregation; per-rule helpers would not reduce the line count.
 #[allow(clippy::too_many_lines)]
 pub(super) fn check_penalty_ordering(data: &ParsedData, ctx: &mut ValidationContext) {
     let max_deficit_cost: f64 = data
