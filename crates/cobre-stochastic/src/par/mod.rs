@@ -1,25 +1,10 @@
 //! Periodic Autoregressive (PAR) model construction and validation.
 //!
-//! This module provides the building blocks for fitting PAR(p) models
-//! to periodic time series such as seasonal records. The fitted
-//! model parameters are later used to generate correlated synthetic
-//! noise sequences during scenario construction.
+//! Fits PAR(p) models to periodic time series; the fitted parameters drive
+//! correlated synthetic noise generation during scenario construction.
 //!
-//! ## Submodules
-//!
-//! - [`precompute`] — derives LP-ready PAR coefficient matrices from
-//!   historical series data
-//! - [`validation`] — checks that PAR parameters satisfy the stationarity
-//!   and invertibility conditions required for sound scenario generation
-//! - [`evaluate`] — evaluates the PAR(p) model equation (forward) and
-//!   solves for the noise that produces a target value (inverse)
-//! - [`fitting`] — periodic Yule-Walker matrix method for AR coefficient
-//!   estimation and PACF-based order selection; provides periodic
-//!   autocorrelation, matrix construction, linear system solver, and the
-//!   top-level [`estimate_ar_coefficients_with_selection`] /
-//!   [`build_estimation_report`] estimation-orchestration layer
-//! - [`contribution`] — recursive contribution composition for detecting
-//!   explosive lag effects in periodic autoregressive models
+//! See [`precompute`], [`validation`], [`evaluate`], [`fitting`], and
+//! [`contribution`].
 
 pub mod aggregate;
 pub mod contribution;

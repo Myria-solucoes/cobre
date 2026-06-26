@@ -1,15 +1,10 @@
 //! Integration test: the CLI writes `hydro_models/evaporation_models.parquet`
 //! whose coefficient rows equal the resolved evaporation models.
 //!
-//! Runs the `cobre` binary on the D08 evaporation fixture, reads the written
-//! `evaporation_models.parquet`, and compares each row's `(intercept_m3s,
-//! volume_slope_m3s_per_hm3, reference_volume_hm3, stage_id, source)` against
-//! the rows the in-process resolver
-//! produces via `cobre_sddp::build_evaporation_model_rows`. Because the CLI and
-//! Python write sites both serialize the identical builder output, asserting the
-//! written file matches the builder output establishes CLI⇄Python file parity
-//! without launching a Python interpreter (the builder is the single source both
-//! call sites consume).
+//! Because the CLI and Python write sites both serialize the identical
+//! `cobre_sddp::build_evaporation_model_rows` output, asserting the written file
+//! matches that builder output establishes CLI⇄Python file parity without
+//! launching a Python interpreter (the builder is the single source both consume).
 
 #![allow(clippy::expect_used, clippy::panic, clippy::float_cmp)]
 
@@ -23,8 +18,6 @@ fn cobre() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("cobre"))
 }
 
-/// Absolute path to the D08 evaporation fixture, resolved relative to this
-/// crate's manifest directory (two levels below the repo root).
 fn d08_case_dir() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let root = manifest
@@ -43,7 +36,7 @@ fn cli_writes_evaporation_models_matching_resolver() {
         case.display()
     );
 
-    // Write outputs to a temp dir so the committed `output/` tree is untouched.
+    // Temp output dir so the committed `output/` tree is untouched.
     let out = TempDir::new().expect("create temp output dir");
 
     cobre()
@@ -57,7 +50,6 @@ fn cli_writes_evaporation_models_matching_resolver() {
         .assert()
         .success();
 
-    // The CLI writes the evaporation sidecar beside the FPHA export.
     let evaporation_path = out
         .path()
         .join("hydro_models")
@@ -68,8 +60,8 @@ fn cli_writes_evaporation_models_matching_resolver() {
         evaporation_path.display()
     );
 
-    // Parse the written file. The reader returns rows sorted by
-    // `(hydro_id, stage_id)`, which matches the builder's canonical order.
+    // The reader returns rows sorted by `(hydro_id, stage_id)`, matching the
+    // builder's canonical order — the row-for-row zip below depends on it.
     let written =
         cobre_io::parse_evaporation_models(&evaporation_path).expect("parse evaporation_models");
     assert!(
@@ -77,9 +69,6 @@ fn cli_writes_evaporation_models_matching_resolver() {
         "D08 must produce at least one evaporation row"
     );
 
-    // Re-resolve the same models in-process and build the expected rows. This is
-    // the exact source both the CLI and Python write sites serialize, so a
-    // row-for-row match proves the persisted file equals the resolver output.
     let system = cobre_io::load_case(&case).expect("load D08 system");
     let result = cobre_sddp::prepare_hydro_models(&system, &case, false)
         .expect("prepare hydro models for D08");
@@ -91,8 +80,7 @@ fn cli_writes_evaporation_models_matching_resolver() {
         "written row count must equal the resolver row count"
     );
 
-    // D08 has two study stages, so the single evaporation hydro yields two
-    // per-stage rows (stage_id 0 and 1) — exercising the multi-stage path.
+    // One evaporation hydro × two study stages = two per-stage rows.
     assert_eq!(
         written.len(),
         2,
@@ -120,7 +108,6 @@ fn cli_writes_evaporation_models_matching_resolver() {
         assert_eq!(got.source, want.source, "source tag must match");
     }
 
-    // Both per-stage rows carry an explicit stage_id (the multi-stage shape).
     assert_eq!(written[0].stage_id, Some(0), "first row tags stage 0");
     assert_eq!(written[1].stage_id, Some(1), "second row tags stage 1");
 }

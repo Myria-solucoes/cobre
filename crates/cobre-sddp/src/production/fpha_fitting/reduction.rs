@@ -1,23 +1,18 @@
 //! Similar-hyperplane reduction of the fitted FPHA plane set.
 //!
 //! Collapses near-parallel / near-coincident consecutive planes into their mean
-//! hyperplane to shrink the LP, walking the canonical post-dedup plane order.
-//! The single public entry point [`reduce_planes`] dispatches on
-//! [`PlaneReductionConfig`] (enum dispatch, no trait object): the `Angle` arm
-//! merges by the angle between plane normals and is RNG-free; the `Distance` arm
-//! merges by a sampled mean-squared distance drawn from a deterministically
-//! seeded PRNG (never wall-clock). Both arms are pure functions of the input
-//! slice and its order — identical input ordering and rank count yield
-//! bit-identical output — with no re-sort and no allocation beyond the output
-//! `Vec`.
+//! hyperplane, walking the canonical post-dedup plane order. [`reduce_planes`]
+//! dispatches on [`PlaneReductionConfig`] (enum dispatch): the `Angle` arm is
+//! RNG-free; the `Distance` arm samples from a deterministically seeded PRNG
+//! (never wall-clock). Both arms are pure functions of the input slice and its
+//! order — identical input ordering and rank count yield bit-identical output.
 //!
 //! # Origin-plane invariant (Voice 1)
 //!
-//! The plane through the origin (`γ₀ = 0 ∧ γ_V = 0`, generating zero power at
-//! zero turbining) is NEVER merged: it is excluded as either member of any
-//! candidate pair. Averaging it into a neighbour would shift the zero-generation
-//! anchor off the origin, so both the "candidate is origin" and "tail is origin"
-//! branches push without comparing. See [`is_origin_plane`].
+//! The plane through the origin (`γ₀ = 0 ∧ γ_V = 0`, zero power at zero turbining)
+//! is NEVER merged: averaging it into a neighbour would shift the zero-generation
+//! anchor off the origin, so it is excluded as either member of any candidate
+//! pair. See [`is_origin_plane`].
 
 use super::geometry::FittingBounds;
 use super::grid::{GridParams, build_grid};
@@ -28,23 +23,19 @@ use cobre_io::extensions::PlaneReductionConfig;
 
 /// Tolerance on `γ₀` and `γ_V` for the origin-plane predicate.
 ///
-/// A plane is the origin plane iff both `|γ₀|` and `|γ_V|` sit at or below this
-/// bound. The threshold is a tight numerical zero, not a physical tolerance:
-/// the origin plane is constructed exactly at `(0, 0, …)` and only carries
-/// roundoff from the α scaling.
+/// A tight numerical zero, not a physical tolerance: the origin plane is
+/// constructed exactly at `(0, 0, …)` and only carries α-scaling roundoff.
 const ORIGIN_EPS: f64 = 1e-9;
 
 /// The angle-test normal of a plane: `n = (γ_V, γ_Q, −1)`.
 ///
 /// # Contract — orientation only, in `(V, Q, generation)` (Voice 1)
 ///
-/// The surface `generation = γ₀ + γ_V·V + γ_Q·Q` written as `γ_V·V + γ_Q·Q − generation + γ₀ = 0`
-/// has gradient-form normal `(γ_V, γ_Q, −1)`. `γ_S` (the lateral-secant slope on
-/// a separate axis) and `γ₀` (the offset, not the orientation) are EXCLUDED:
-/// folding either into the normal is the wrong-but-compiling alternative — it
-/// would compare offset or lateral slope as if it were orientation, merging
-/// planes that are parallel in `(V, Q, generation)` but differ in offset/secant. The
-/// `−1` generation component guarantees `‖n‖ ≥ 1`, so [`angle_deg`] never divides by zero.
+/// `γ_S` (the lateral-secant slope on a separate axis) and `γ₀` (the offset, not
+/// the orientation) are EXCLUDED: folding either into the normal is the
+/// wrong-but-compiling alternative — it would merge planes parallel in
+/// `(V, Q, generation)` but differing in offset/secant. The `−1` generation
+/// component guarantees `‖n‖ ≥ 1`, so [`angle_deg`] never divides by zero.
 fn plane_normal(plane: &RawPlane) -> [f64; 3] {
     [plane.gamma_v, plane.gamma_q, -1.0]
 }
@@ -55,11 +46,10 @@ fn plane_normal(plane: &RawPlane) -> [f64; 3] {
 ///
 /// # Contract — clamp the cosine before `arccos` (Voice 1)
 ///
-/// Floating-point roundoff can push the cosine ratio just past `±1` (e.g.
-/// `1.0 + 1e-16`), making `arccos` return `NaN` and silently corrupting the
-/// `θ < tolerance` comparison. Clamping to `[−1, 1]` first is mandatory, not
-/// defensive. Both norms are `≥ 1` (the `−1` generation component of [`plane_normal`]),
-/// so the denominator is never zero.
+/// Roundoff can push the cosine ratio just past `±1`, making `arccos` return `NaN`
+/// and silently corrupting the `θ < tolerance` comparison; clamping to `[−1, 1]`
+/// first is mandatory, not defensive. Both norms are `≥ 1` (the `−1` generation
+/// component of [`plane_normal`]), so the denominator is never zero.
 fn angle_deg(a: &RawPlane, b: &RawPlane) -> f64 {
     let n1 = plane_normal(a);
     let n2 = plane_normal(b);
@@ -75,17 +65,13 @@ fn angle_deg(a: &RawPlane, b: &RawPlane) -> f64 {
 ///
 /// # Contract — sign-preservation (Voice 1)
 ///
-/// The mean of two `validate_fitted_planes`-valid planes is itself valid: the
-/// arithmetic mean of two non-negatives is non-negative (`γ_V`, `γ_Q`) and the
-/// mean of two non-positives is non-positive (`γ_S`). All four coefficients are
-/// averaged — averaging only the orientation `(γ_V, γ_Q)` while keeping one
-/// plane's `γ₀`/`γ_S` is the wrong-but-compiling alternative; it would leave the
-/// merged plane's offset and secant unbalanced relative to its averaged
-/// orientation.
+/// The mean of two `validate_fitted_planes`-valid planes is itself valid (the mean
+/// of two non-negatives is non-negative for `γ_V`/`γ_Q`; of two non-positives is
+/// non-positive for `γ_S`). All four coefficients are averaged — averaging only
+/// the orientation `(γ_V, γ_Q)` while keeping one plane's `γ₀`/`γ_S` is the
+/// wrong-but-compiling alternative, leaving the merged offset/secant unbalanced
+/// relative to its averaged orientation.
 fn mean_plane(a: &RawPlane, b: &RawPlane) -> RawPlane {
-    // `f64::midpoint(x, y)` is the arithmetic mean `(x + y) / 2` computed without
-    // an intermediate-overflow risk; for the finite, in-range FPHA coefficients it
-    // equals `(x + y) / 2.0` exactly.
     RawPlane {
         gamma_0: f64::midpoint(a.gamma_0, b.gamma_0),
         gamma_v: f64::midpoint(a.gamma_v, b.gamma_v),
@@ -96,10 +82,8 @@ fn mean_plane(a: &RawPlane, b: &RawPlane) -> RawPlane {
 
 /// Whether `plane` is the plane through the origin (`γ₀ = 0 ∧ γ_V = 0`).
 ///
-/// Such a plane generates zero power at zero turbining; merging it would move
-/// that anchor, so the merge sweep never makes it a member of a candidate pair
-/// (see the module header). Tested with [`ORIGIN_EPS`] to absorb α-scaling
-/// roundoff around an exact zero.
+/// Never merged (see the module-header invariant). Tested with [`ORIGIN_EPS`] to
+/// absorb α-scaling roundoff around an exact zero.
 fn is_origin_plane(plane: &RawPlane) -> bool {
     plane.gamma_0.abs() <= ORIGIN_EPS && plane.gamma_v.abs() <= ORIGIN_EPS
 }
@@ -107,58 +91,36 @@ fn is_origin_plane(plane: &RawPlane) -> bool {
 /// Greedy single-forward-sweep merge of consecutive planes, parameterised by the
 /// pair-similarity predicate.
 ///
-/// The output is seeded with the first plane, then each subsequent candidate is
-/// either merged into the current tail (when `should_merge` accepts the pair) or
-/// pushed as a new tail. Both the angle method and the sampled-distance method
-/// share this one walk so the canonical-order sweep, the origin invariant, and
-/// the greedy cascade have exactly one implementation; only the predicate
-/// differs.
+/// Both the angle method and the sampled-distance method share this one walk, so
+/// the canonical-order sweep, the origin invariant, and the greedy cascade have
+/// exactly one implementation; only the predicate differs. A merged plane can
+/// re-merge with the following candidate (the greedy cascade); the origin plane is
+/// always pushed unmerged.
 ///
 /// # Contract — element-for-element function of the input order (Voice 1 / D5)
 ///
 /// The sweep walks `planes` in its EXISTING canonical post-dedup order and never
-/// re-sorts. The output is therefore an element-for-element function of the
-/// input order, upholding declaration-order bit-determinism: re-ordering the
-/// input would re-order the output, so callers must pass the canonical order.
+/// re-sorts, so the output is an element-for-element function of the input order
+/// (declaration-order bit-determinism). Callers must pass the canonical order.
 ///
 /// # Contract — `should_merge` is keyed on the ORIGINAL slot indices (Voice 1)
 ///
-/// `should_merge(tail_slot, cand_slot, tail, cand)` receives the planes' 0-based
-/// indices in the ORIGINAL pre-merge `planes` slice — NOT the position in the
-/// growing `out` Vec. A merged tail keeps the slot of its FIRST member: the
-/// candidate index advances with the input, but the tail slot is only adopted
-/// when a fresh tail is pushed. This makes a distance predicate's per-pair seed
-/// stable under the re-merge cascade — the tail's coefficients change as it
-/// absorbs neighbours, but its slot (and so its seed) does not. Keying the seed
-/// on coefficient values instead would make the seed depend on merge history.
-///
-/// # Merge rule
-///
-/// For each candidate, when neither the current tail nor the candidate is the
-/// origin plane AND `should_merge` accepts the pair, the tail is REPLACED by
-/// `mean_plane(tail, candidate)`. A merged plane can itself re-merge with the
-/// following candidate — the greedy cascade. Otherwise the candidate is pushed
-/// as a new tail. The origin plane is always pushed unmerged: when the candidate
-/// is the origin plane it is pushed; when the tail is the origin plane the
-/// candidate is pushed without comparing.
+/// `should_merge(tail_slot, cand_slot, …)` receives 0-based indices in the
+/// ORIGINAL pre-merge slice, NOT positions in the growing `out` Vec. A merged tail
+/// keeps the slot of its FIRST member, so a distance predicate's per-pair seed
+/// stays stable under the re-merge cascade. Keying the seed on coefficient values
+/// instead would make the seed depend on merge history.
 fn reduce_planes_with<F>(planes: &[RawPlane], should_merge: F) -> Vec<RawPlane>
 where
     F: Fn(usize, usize, &RawPlane, &RawPlane) -> bool,
 {
     let mut out: Vec<RawPlane> = Vec::with_capacity(planes.len());
-    // The ORIGINAL slot of the current tail (the slot of its first member). It
-    // is adopted when a fresh tail is pushed and held through a re-merge cascade,
-    // so the predicate seed stays stable as the tail absorbs neighbours.
+    // The ORIGINAL slot of the current tail (its first member's slot), held
+    // through a re-merge cascade so the predicate seed stays stable.
     let mut tail_slot: usize = 0;
 
     for (cand_slot, candidate) in planes.iter().enumerate() {
-        // Decide against the current tail (a copy, so the `out` borrow ends
-        // before any mutation), then either replace the tail with the mean or
-        // push the candidate.
         let merged_tail = match out.last() {
-            // The origin plane never participates in a merge: when either the
-            // tail or the candidate is the origin, push the candidate as a new
-            // tail without comparing.
             Some(tail)
                 if !is_origin_plane(tail)
                     && !is_origin_plane(candidate)
@@ -166,20 +128,16 @@ where
             {
                 Some(mean_plane(tail, candidate))
             }
-            // No tail yet (seed), or a non-mergeable pair: push the candidate.
             _ => None,
         };
 
         if let Some(merged) = merged_tail {
-            // Replace the tail with the mean so the merged plane can cascade
-            // into the next candidate (greedy cascade). The tail KEEPS its
-            // original slot — only its coefficients change.
+            // Replace the tail (keeping its original slot) so the merged plane can
+            // cascade into the next candidate.
             if let Some(tail) = out.last_mut() {
                 *tail = merged;
             }
         } else {
-            // A fresh tail: adopt the candidate's original slot as the new tail
-            // slot so the next pair's predicate seeds from a stable identity.
             out.push(*candidate);
             tail_slot = cand_slot;
         }
@@ -191,10 +149,8 @@ where
 /// Merge consecutive near-parallel planes into their mean hyperplane (angle
 /// method).
 ///
-/// Shares [`reduce_planes_with`]'s greedy sweep, supplying the angle predicate:
-/// a pair merges when `θ_deg < tolerance_deg` (STRICT `<`, so `tolerance_deg = 0`
-/// merges nothing). The angle predicate ignores the slot indices — it is a pure
-/// function of the two planes' normals.
+/// A pair merges when `θ_deg < tolerance_deg` (STRICT `<`, so `tolerance_deg = 0`
+/// merges nothing). The predicate ignores the slot indices.
 fn reduce_planes_angle(planes: &[RawPlane], tolerance_deg: f64) -> Vec<RawPlane> {
     reduce_planes_with(planes, |_tail_slot, _cand_slot, tail, candidate| {
         angle_deg(tail, candidate) < tolerance_deg
@@ -204,17 +160,13 @@ fn reduce_planes_angle(planes: &[RawPlane], tolerance_deg: f64) -> Vec<RawPlane>
 /// The generation-window upper bound `generation_max`: the maximum
 /// `generation = pf.evaluate(v, q, 0)` over a prebuilt fitting `(V, Q)` grid.
 ///
-/// Takes a prebuilt grid so [`reduce_planes_distance`] can build the grid ONCE
-/// per plant and share it between this scan and the per-pair sampler — the grid
-/// is a pure function of `pf` + `bounds`, independent of the plane coefficients,
-/// so re-deriving it per pair would allocate identical axes repeatedly. The scan
-/// walks the closed-form axes in fixed `(v, q)` order — the same grid the cloud
-/// builder and the secant scan use — so the result is order-independent.
+/// Takes a prebuilt grid so [`reduce_planes_distance`] builds it ONCE per plant
+/// and shares it across the scan and every per-pair sampler. The scan walks the
+/// closed-form axes in fixed `(v, q)` order, so the result is order-independent.
 fn grid_max_gh(pf: &ProductionFunction, grid: &GridParams) -> f64 {
     let mut generation_max = f64::NEG_INFINITY;
     for &v in &grid.v_points {
         for &q in &grid.q_points {
-            // Spillage fixed at 0: the same no-lateral surface the cloud uses.
             let generation = pf.evaluate(v, q, 0.0);
             if generation > generation_max {
                 generation_max = generation;
@@ -228,27 +180,21 @@ fn grid_max_gh(pf: &ProductionFunction, grid: &GridParams) -> f64 {
 ///
 /// # Contract — pure-identity seed, NO clock/thread/rank (Voice 1 / D5)
 ///
-/// The seed is `fnv1a64` of the little-endian bytes of `hydro_id`,
-/// `entry_level_bits`, `tail_slot`, and `candidate_slot`, in that fixed order.
-/// It is a pure function of the plant, the stage/entry identity, and the two
-/// planes' ORIGINAL slot indices — it reads no wall clock, thread id, or MPI
-/// rank, so two runs (and two rank counts) sampling the same pair draw the
-/// identical point sequence. The forbidden alternative is seeding from the
-/// planes' coefficient values: a re-merged tail's coefficients change with the
-/// merge history, which would make the seed (and so the merge decision) depend
-/// on how many neighbours the tail already absorbed. The slot indices are
-/// stable under the cascade (the tail keeps its first member's slot), so they
-/// are the correct seed identity.
+/// The seed is a pure function of the plant, the stage/entry identity, and the two
+/// planes' ORIGINAL slot indices — it reads no wall clock, thread id, or MPI rank,
+/// so two runs (and two rank counts) sampling the same pair draw the identical
+/// point sequence. The forbidden alternative is seeding from coefficient values: a
+/// re-merged tail's coefficients change with the merge history, which would make
+/// the seed depend on how many neighbours the tail already absorbed. The slot
+/// indices are stable under the cascade, so they are the correct seed identity.
 fn pair_seed(hydro_id: i32, entry_level_bits: u64, tail_slot: usize, candidate_slot: usize) -> u64 {
-    // Slots are 0-based positions in the original pre-merge order; they are far
-    // below u32::MAX (plane counts are bounded by `max_planes_per_hydro`), so the
-    // saturating cast cannot lose a distinguishing index.
+    // Plane counts are bounded by `max_planes_per_hydro`, far below u32::MAX, so
+    // the saturating cast cannot lose a distinguishing slot index.
     let tail_slot_u32 = u32::try_from(tail_slot).unwrap_or(u32::MAX);
     let candidate_slot_u32 = u32::try_from(candidate_slot).unwrap_or(u32::MAX);
 
-    // The 20-byte identity buffer: hydro_id (4) ++ entry_level_bits (8) ++
-    // tail_slot (4) ++ candidate_slot (4), all little-endian, in that fixed
-    // order — the canonical seed composition.
+    // Canonical seed composition: hydro_id ++ entry_level_bits ++ tail_slot ++
+    // candidate_slot, all little-endian, in this fixed order.
     let mut buf = [0u8; 20];
     buf[0..4].copy_from_slice(&hydro_id.to_le_bytes());
     buf[4..12].copy_from_slice(&entry_level_bits.to_le_bytes());
@@ -266,20 +212,17 @@ fn pair_seed(hydro_id: i32, entry_level_bits: u64, tail_slot: usize, candidate_s
 /// # Contract — sequential `Σ d²` in canonical sample order (Voice 1 / D5)
 ///
 /// The squared differences accumulate in a single sequential loop over the PRNG
-/// draw order. A parallel / partitioned reduction would reorder the additions
-/// and break bit-determinism across rank counts; the sequential pass is
-/// deliberate. The PRNG is freshly seeded from `seed` each call, so the same
-/// seed reproduces the same `Σ d²` bit-for-bit.
+/// draw order; a parallel / partitioned reduction would reorder the additions and
+/// break bit-determinism across rank counts. The PRNG is freshly seeded from
+/// `seed` each call, so the same seed reproduces the same `Σ d²` bit-for-bit.
 ///
 /// # Contract — `δ` is a fraction; `tolerance_pct` is a percent (Voice 1)
 ///
-/// `δ = EQM / generation²_max` is a dimensionless fraction, while `tolerance_pct` is a
-/// percentage, so the comparison normalises the tolerance to a fraction:
-/// `δ < tolerance_pct / 100.0`. Comparing `δ` against the raw `tolerance_pct`
-/// (without the `/ 100`) is the wrong-but-compiling alternative — it would treat
-/// a `0.5 %` tolerance as `50 %` and merge far too aggressively. The caller
-/// guarantees `generation_max > 0` (the `generation_max <= 0` guard lives in
-/// [`reduce_planes_distance`]), so the division is well-defined here.
+/// `δ = EQM / generation²_max` is a dimensionless fraction, so the comparison
+/// normalises: `δ < tolerance_pct / 100.0`. Comparing against the raw
+/// `tolerance_pct` (without the `/ 100`) is the wrong-but-compiling alternative —
+/// it would treat a `0.5 %` tolerance as `50 %` and merge far too aggressively.
+/// The caller guarantees `generation_max > 0`, so the division is well-defined.
 fn pair_similar_distance(
     tail: &RawPlane,
     candidate: &RawPlane,
@@ -289,11 +232,8 @@ fn pair_similar_distance(
     seed: u64,
     tolerance_pct: f64,
 ) -> bool {
-    // The active region is the full fitting box: the closed-form grid axis
-    // endpoints. The grid is prebuilt ONCE per plant by the caller and shared
-    // across every pair — it is a pure function of `pf` + `bounds`, independent
-    // of the plane coefficients, so sampling the box (not a per-pair sub-region)
-    // keeps the sampled domain identical for every pair.
+    // Sample the full fitting box (the grid axis endpoints), so the sampled domain
+    // is identical for every pair.
     let v_first = grid.v_points.first().copied().unwrap_or(0.0);
     let v_last = grid.v_points.last().copied().unwrap_or(0.0);
     let q_first = grid.q_points.first().copied().unwrap_or(0.0);
@@ -303,7 +243,6 @@ fn pair_similar_distance(
 
     let mut rng = SplitMix64::new(seed);
     let mut sum_sq = 0.0_f64;
-    // Single sequential draw loop: V then Q per sample, Σ d² in draw order.
     for _ in 0..n_samples {
         let v = v_first + rng.next_unit_f64() * v_span;
         let q = q_first + rng.next_unit_f64() * q_span;
@@ -319,13 +258,12 @@ fn pair_similar_distance(
 /// Merge consecutive near-coincident planes by the sampled mean-squared-distance
 /// method.
 ///
-/// Shares [`reduce_planes_with`]'s greedy sweep, supplying the sampled-distance
-/// predicate. `generation_max` is computed ONCE per plant; when it is non-positive the
-/// normalisation is undefined, so no pair is merged (the method is inert for
-/// that plant) and the input is returned unchanged. Each pair's PRNG seed is
-/// derived from the STABLE `(hydro_id, entry_level_bits, tail_slot,
-/// candidate_slot)` identity via [`pair_seed`], so the sampling — and the merge
-/// decisions — are bit-identical across input ordering and MPI rank count.
+/// `generation_max` is computed ONCE per plant; when non-positive the
+/// normalisation is undefined, so the method is inert and returns the input
+/// unchanged. Each pair's PRNG seed comes from the STABLE
+/// `(hydro_id, entry_level_bits, tail_slot, candidate_slot)` identity via
+/// [`pair_seed`], so the merge decisions are bit-identical across input ordering
+/// and MPI rank count.
 fn reduce_planes_distance(
     planes: &[RawPlane],
     pf: &ProductionFunction,
@@ -335,16 +273,11 @@ fn reduce_planes_distance(
     hydro_id: i32,
     entry_level_bits: u64,
 ) -> Vec<RawPlane> {
-    // Build the fitting grid ONCE per plant and share it between the generation_max scan
-    // and every per-pair sampler — the grid is a pure function of `pf` + `bounds`,
-    // so re-deriving it per pair would allocate identical axes on every compare.
     let grid = build_grid(pf, bounds);
     let generation_max = grid_max_gh(pf, &grid);
 
-    // generation_max <= 0 guard: the squared normaliser generation²_max would be zero (or the
-    // window degenerate), making δ undefined. No pair is merged — return the
-    // input unchanged rather than dividing by zero. Checked ONCE, before the
-    // sweep, since generation_max is fixed per plant.
+    // generation_max <= 0 ⇒ the squared normaliser is zero (δ undefined); return
+    // the input unchanged rather than dividing by zero.
     if generation_max <= 0.0 {
         return planes.to_vec();
     }
@@ -365,12 +298,9 @@ fn reduce_planes_distance(
 
 /// Reduce a fitted plane set by the configured similar-hyperplane method.
 ///
-/// Enum dispatch over [`PlaneReductionConfig`] (no trait object). The `Angle`
-/// arm runs [`reduce_planes_angle`]; the `Distance` arm runs
-/// [`reduce_planes_distance`], which additionally consumes the production
-/// function, fitting bounds, and the stable seed identity (`hydro_id`,
-/// `entry_level_bits`). The angle arm ignores those extra inputs — its predicate
-/// is a pure function of the plane normals.
+/// Enum dispatch over [`PlaneReductionConfig`]. The `Distance` arm additionally
+/// consumes `pf`, `bounds`, and the stable seed identity (`hydro_id`,
+/// `entry_level_bits`); the `Angle` arm ignores them.
 pub(crate) fn reduce_planes(
     planes: &[RawPlane],
     config: &PlaneReductionConfig,
@@ -499,7 +429,6 @@ mod tests {
     /// A below-tolerance pair merges; an at/above-tolerance pair does not.
     #[test]
     fn below_tolerance_merges_at_or_above_does_not() {
-        // Two planes whose normals differ by a small angle.
         let a = plane(100.0, 0.0, 1.0, 0.0);
         let b = plane(100.0, 0.01, 1.0, 0.0);
         let theta = angle_deg(&a, &b);
@@ -508,11 +437,9 @@ mod tests {
             "the two normals must differ by a positive angle"
         );
 
-        // Strictly below the angle: merges.
         let below = reduce_planes_angle(&[a, b], theta + 1e-6);
         assert_eq!(below.len(), 1, "a below-tolerance pair must merge");
 
-        // Exactly at the angle (strict `<`): does not merge.
         let at = reduce_planes_angle(&[a, b], theta);
         assert_eq!(
             at.len(),
@@ -520,7 +447,6 @@ mod tests {
             "an at-tolerance pair must NOT merge (strict <)"
         );
 
-        // Above the angle: does not merge.
         let above = reduce_planes_angle(&[a, b], theta - 1e-6);
         assert_eq!(above.len(), 2, "an above-tolerance pair must NOT merge");
     }

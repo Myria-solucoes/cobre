@@ -1,48 +1,10 @@
-//! Parity hash harness for the deterministic cases enumerated in `case_dir`
-//! (the D01–D17 core plus the D31 backwater reference-volume case; gaps in the
-//! index reflect retired/absent cases).
+//! HiGHS parity-hash harness for the deterministic cases enumerated in `case_dir`.
 //!
-//! Computes a SHA-256 digest over a whitelist of semantic fields from each
-//! case's training + simulation output. On first run with `COBRE_PARITY_REGEN=1`
-//! the test **writes** the baseline files; on subsequent runs it **verifies**
-//! against the committed baselines.
-//!
-//! ## Hash whitelist (in fixed order)
-//!
-//! 1. Per-iteration convergence data: `iteration_u64_le || lower_bound_f64_le
-//!    || upper_bound_f64_le || upper_bound_std_f64_le || gap_f64_le`
-//!    Captured from [`TrainingEvent::ConvergenceUpdate`] events (one per
-//!    completed iteration, ordered 1..=N).
-//!
-//! 2. Per-stage, per-cut: `stage_u32_le || intercept_f64_le ||
-//!    coefficient_count_u32_le || coefficient_f64_le[]`
-//!    Iterated over stages 0..num_stages, then active cuts within each stage
-//!    in the slot order reported by [`FutureCostFunction::active_cuts`].
-//!
-//! 3. Simulation primal trajectory per scenario per stage:
-//!    `stage_u32_le || num_primals_u32_le || primal_f64_le[]`
-//!    Scenarios sorted ascending by `scenario_id`; stages by `stage_id`.
-//!    Primals = `storage_final_hm3` for each hydro at each stage, sorted by
-//!    `(block_id, hydro_id)`.  For pure-thermal cases the primal vector is
-//!    empty (`num_primals = 0`).
-//!
-//! 4. Simulation dual trajectory per scenario per stage:
-//!    `stage_u32_le || num_duals_u32_le || dual_f64_le[]`
-//!    Same ordering.  Duals = `water_value_per_hm3` for each hydro record,
-//!    sorted by `(block_id, hydro_id)`.
-//!
-//! ## Field-name translation from the schema spec
-//!
-//! The output-schema spec references generic "primal trajectory" and "dual
-//! trajectory" fields.  The actual structs use:
-//! - `SimulationHydroResult::storage_final_hm3`  → primal state variable
-//! - `SimulationHydroResult::water_value_per_hm3` → dual of storage balance
-//! - `TrainingEvent::ConvergenceUpdate::upper_bound_std` → `upper_bound_std_f64_le`
-//!
-//! ## Timing exclusion
-//!
-//! No field ending in `_ms`, containing `elapsed`, or containing `wall` is
-//! included in the hash. Timing fields are allowed to drift between runs.
+//! Each case's train + simulate output is digested over the semantic-field
+//! whitelist owned by [`compute_parity_hash`]; the hash pins bit-for-bit
+//! determinism and declaration-order invariance, so a changed hash means a real
+//! output change. With `COBRE_PARITY_REGEN=1` the test **writes** the baseline;
+//! otherwise it **verifies** against the committed baseline.
 
 #![allow(
     clippy::unwrap_used,
@@ -72,7 +34,7 @@ mod common;
 use crate::common::parity_hash::compute_parity_hash;
 
 // ---------------------------------------------------------------------------
-// Stub communicator (single-rank, copied from deterministic.rs)
+// Stub communicator (single-rank)
 // ---------------------------------------------------------------------------
 
 struct StubComm;
@@ -143,7 +105,6 @@ fn read_or_regen_baseline(case: &str, hash: &str) -> Result<(), String> {
     let path = baseline_path(case);
 
     if std::env::var("COBRE_PARITY_REGEN").as_deref() == Ok("1") {
-        // Regeneration mode: write the baseline.
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("cannot create baseline dir: {e}"))?;
@@ -154,7 +115,6 @@ fn read_or_regen_baseline(case: &str, hash: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    // Verification mode.
     if !path.exists() {
         return Err(format!(
             "baseline file for {case} is missing at {}; \
@@ -167,7 +127,6 @@ fn read_or_regen_baseline(case: &str, hash: &str) -> Result<(), String> {
         .map_err(|e| format!("cannot read baseline for {case}: {e}"))?;
     let expected = raw.trim();
 
-    // Validate the baseline is a well-formed 64-char hex string.
     if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(format!("baseline file {case} is malformed: {expected:?}"));
     }
@@ -204,16 +163,20 @@ fn case_dir(label: &str) -> std::path::PathBuf {
         "D14" => "d14-block-factors",
         "D15" => "d15-non-controllable-source",
         "D17" => "d17-evaporation-mixed-sign",
-        // Cascade case whose downstream plant declares a `reference_volume`,
-        // shifting the upstream computed-FPHA plant's backwater family. The
-        // reference-volume *default* (0.65) path is covered by the unchanged
-        // D05/D06/D07 baselines (no `reference_volume` declared there); D31
-        // exercises the *declared* path end-to-end.
+        "D18" => "d18-ncs-commissioning-window",
         "D31" => "d31-backwater-reference-volume",
+        "D32" => "d32-reversible-plant",
+        "D33" => "d33-per-stage-block-counts",
+        "D34" => "d34-anticipated-varying-blocks",
+        "D35" => "d35-pumping-commissioning",
+        "D36" => "d36-thermal-line-commissioning",
+        "D37" => "d37-anticipated-commissioning",
+        "D38" => "d38-dead-volume-filling",
+        "D39" => "d39-prefilling-upstream-of-filling",
+        "D40" => "d40-filling-cascade",
+        "D41" => "d41-energy-contracts",
         other => panic!("unknown case label: {other}"),
     };
-    // Integration tests run from the crate root; fixtures live at
-    // ../../examples/deterministic/<suffix> relative to the crate.
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/deterministic")
         .join(suffix)
@@ -236,15 +199,9 @@ fn run_case(label: &str) {
     let hydro_models =
         prepare_hydro_models(&system, &dir, false).expect("prepare_hydro_models must succeed");
 
-    // Enable simulation so we get per-scenario stage results.
     let mut config_with_sim = config.clone();
     config_with_sim.simulation.enabled = true;
-    // Use a small fixed scenario count for determinism and speed.
     config_with_sim.simulation.num_scenarios = 1;
-
-    // The `hydro_energy_productivity.parquet` override is already folded into
-    // `hydro_models.productivity_override` by the caller's
-    // `prepare_hydro_models` invocation, so this helper does no parquet I/O.
 
     let sentinel = Path::new("config.json");
     let training_source = config_with_sim
@@ -271,7 +228,6 @@ fn run_case(label: &str) {
     let comm = StubComm;
     let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
 
-    // Set up event channel to capture per-iteration convergence data.
     let (event_tx, event_rx) = mpsc::channel::<TrainingEvent>();
 
     let outcome = setup
@@ -290,7 +246,6 @@ fn run_case(label: &str) {
     );
     let result = outcome.result;
 
-    // Collect ConvergenceUpdate events and sort by iteration number.
     let mut convergence_updates: Vec<(u64, f64, f64, f64, f64)> = event_rx
         .into_iter()
         .filter_map(|ev| {
@@ -311,7 +266,6 @@ fn run_case(label: &str) {
         .collect();
     convergence_updates.sort_by_key(|&(iter, ..)| iter);
 
-    // Run simulation to collect per-scenario stage results.
     let mut pool = setup
         .create_workspace_pool(&comm, 1, HighsSolver::new)
         .expect("simulation workspace pool must build");
@@ -338,14 +292,13 @@ fn run_case(label: &str) {
     let _summary = aggregate_simulation(&local_costs.costs, sim_config, &comm)
         .expect("aggregate_simulation must succeed");
 
-    // Compute parity hash and compare/write baseline.
     let hash = compute_parity_hash(&convergence_updates, &setup, scenario_results);
 
     read_or_regen_baseline(label, &hash).unwrap_or_else(|msg| panic!("{msg}"));
 }
 
 // ---------------------------------------------------------------------------
-// Individual test functions — D01–D17, with D12 and D16 absent
+// Individual test functions — one per case label enumerated in `case_dir`
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -488,6 +441,105 @@ fn parity_hash_d17() {
     not(feature = "slow-tests"),
     ignore = "slow: run with --features slow-tests"
 )]
+fn parity_hash_d18() {
+    run_case("D18");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
 fn parity_hash_d31() {
     run_case("D31");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d32() {
+    run_case("D32");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d33() {
+    run_case("D33");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d34() {
+    run_case("D34");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d35() {
+    run_case("D35");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d36() {
+    run_case("D36");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d37() {
+    run_case("D37");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d38() {
+    run_case("D38");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d39() {
+    run_case("D39");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d40() {
+    run_case("D40");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d41() {
+    run_case("D41");
 }

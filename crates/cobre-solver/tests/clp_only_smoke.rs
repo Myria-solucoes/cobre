@@ -2,11 +2,9 @@
 //!
 //! Guarantees the clp-only build (`--no-default-features --features clp`) ships
 //! at least one runnable integration test, not just `#[cfg(test)]` unit tests.
-//! It constructs a `ClpSolver`, loads the shared SS1.1 fixture LP, solves, and
-//! asserts the documented optimum (objective `100.0`, primals `(6.0, 0.0, 2.0)`).
 //!
-//! The fixture body duplicates the one in `conformance.rs` / `clp.rs` unit tests
-//! intentionally: integration tests cannot reach `#[cfg(test)]` module internals.
+//! The fixture is duplicated from the `#[cfg(test)]` unit tests because
+//! integration tests cannot reach module internals.
 #![cfg(feature = "clp")]
 #![cfg_attr(
     test,

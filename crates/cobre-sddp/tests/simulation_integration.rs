@@ -1,7 +1,4 @@
-//! End-to-end integration test for the Phase 7 train + simulate + write cycle.
-//!
-//! Exercises the full pipeline: training loop → `build_training_output` →
-//! `write_policy_checkpoint` → `simulate` → `write_results`.
+//! End-to-end integration test for the train + simulate + write cycle.
 
 #![allow(
     clippy::unwrap_used,
@@ -47,7 +44,7 @@ use cobre_sddp::{
     cut::FutureCostFunction,
     energy_conversion::{EnergyConversion, EnergyConversionSet},
     horizon_mode::HorizonMode,
-    indexer::StageIndexer,
+    indexer::StateLayout,
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
     risk_measure::RiskMeasure,
@@ -57,7 +54,44 @@ use cobre_sddp::{
     workspace::{SolverWorkspace, WorkspaceSizing},
 };
 
-/// Single-rank communicator for testing.
+/// Mirrors the gated `indexer::test_fixtures::state_layout_for` via the public
+/// [`StateLayout::new`] constructor: this external test crate cannot see the parent
+/// crate's `#[cfg(test)]` surface, so it rebuilds byte-identical patch columns here.
+fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
+    StateLayout::new(
+        hydro_count,
+        max_par_order,
+        0,
+        0,
+        vec![],
+        &vec![max_par_order; hydro_count],
+    )
+}
+
+/// Carries the non-state study shape directly: this external test crate cannot see
+/// the parent crate's `#[cfg(test)]`/`test-support` surface. `max_deficit_segments`
+/// is `1`; `n_pumping`/`has_ncs`/anticipated are empty for these fixtures.
+fn study_dims_for(
+    n_thermals: usize,
+    n_lines: usize,
+    n_buses: usize,
+    hydro_count: usize,
+    has_inflow_penalty: bool,
+) -> cobre_sddp::indexer::StudyDimensions {
+    cobre_sddp::indexer::StudyDimensions {
+        n_thermals,
+        n_lines,
+        n_buses,
+        max_deficit_segments: 1,
+        has_ncs: false,
+        has_inflow_penalty,
+        has_withdrawal: hydro_count > 0,
+        has_operational_violations: hydro_count != 0,
+        anticipated_thermal_indices: vec![],
+        n_pumping: 0,
+    }
+}
+
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -103,7 +137,6 @@ impl Communicator for StubComm {
     }
 }
 
-/// Mock solver that cycles through objectives on each `solve` call.
 struct MockSolver {
     objectives: Vec<f64>,
     call_count: usize,
@@ -343,7 +376,7 @@ struct Fixture {
     n_stages: usize,
     templates: Vec<StageTemplate>,
     base_rows: Vec<usize>,
-    indexer: StageIndexer,
+    state: StateLayout,
     initial_state: Vec<f64>,
     stochastic: StochasticContext,
     horizon: HorizonMode,
@@ -354,30 +387,23 @@ const FCF_CAPACITY_ITERATIONS: u64 = 50;
 
 impl Fixture {
     fn new(n_stages: usize) -> Self {
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            // Finalize as production setup does: full-order mask + state→LP-column map.
-            let lag_counts = vec![ix.max_par_order; ix.hydro_count];
-            let anticipated_k = ix.anticipated_lead_stages.clone();
-            ix.set_nonzero_mask(&lag_counts, &anticipated_k);
-            ix.finalize_state_column_map();
-            ix
-        }; // N=1, L=0
+        let state = state_layout_for(1, 0);
         let templates = vec![minimal_template(); n_stages];
         // base_row: the AR-dynamics row offset is 1 (1 dual-relevant row)
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
+        let state = state_layout_for(1, 0);
         let risk_measures = vec![RiskMeasure::Expectation; n_stages];
 
         Self {
             n_stages,
             templates,
             base_rows,
-            indexer,
+            state,
             initial_state,
             stochastic,
             horizon,
@@ -484,7 +510,6 @@ fn make_system() -> cobre_core::System {
         },
     };
 
-    // Two stages are needed for the 2-stage fixture system.
     let make_stage = |idx: usize| {
         use cobre_core::temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
@@ -592,6 +617,7 @@ fn train_simulate_write_cycle() {
 
     let block_counts_per_stage = vec![1usize; fx.n_stages];
     let stage_ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &fx.templates,
         base_rows: &fx.base_rows,
         noise_scale: &[],
@@ -600,6 +626,12 @@ fn train_simulate_write_cycle() {
         load_balance_row_starts: &[],
         load_bus_indices: &[],
         block_counts_per_stage: &block_counts_per_stage,
+        ncs_col_starts: &[],
+        n_ncs: 0,
+        ncs_stochastic_dense_col: &[],
+        ncs_stochastic_windows: &[],
+        anticipated_windows: &[],
+        study_stage_ids: &[],
         ncs_max_gen: &[],
         ncs_allow_curtailment: &[],
         discount_factors: &[],
@@ -615,7 +647,8 @@ fn train_simulate_write_cycle() {
         &stage_ctx,
         &TrainingContext {
             horizon: &fx.horizon,
-            indexer: &fx.indexer,
+            state: &fx.state,
+            study_dims: &study_dims_for(0, 0, 0, 0, false),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -750,11 +783,11 @@ fn train_simulate_write_cycle() {
         0,
         0,
         sim_solver,
-        PatchBuffer::new(fx.indexer.hydro_count, fx.indexer.max_par_order, 0, 0, 0, 0),
-        fx.indexer.n_state,
+        PatchBuffer::new(fx.state.hydro_count, fx.state.max_par_order, 0, 0, 0, 0),
+        fx.state.n_state,
         WorkspaceSizing {
-            hydro_count: fx.indexer.hydro_count,
-            max_par_order: fx.indexer.max_par_order,
+            hydro_count: fx.state.hydro_count,
+            max_par_order: fx.state.max_par_order,
             n_load_buses: 0,
             max_blocks: 0,
             downstream_par_order: 0,
@@ -777,6 +810,7 @@ fn train_simulate_write_cycle() {
     simulate(
         &mut sim_workspaces,
         &StageContext {
+            geometry_per_stage: &[],
             templates: &fx.templates,
             base_rows: &fx.base_rows,
             noise_scale: &[],
@@ -785,6 +819,12 @@ fn train_simulate_write_cycle() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -796,7 +836,8 @@ fn train_simulate_write_cycle() {
         &fcf,
         &TrainingContext {
             horizon: &fx.horizon,
-            indexer: &fx.indexer,
+            state: &fx.state,
+            study_dims: &study_dims_for(0, 0, 0, 0, false),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -821,7 +862,13 @@ fn train_simulate_write_cycle() {
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
             ncs_col_starts: &[],
-            n_ncs_per_stage: &[],
+            n_ncs: 0,
+            pumping_col_starts: &[],
+            n_pumping: 0,
+            geometry_per_stage: &[],
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices_per_stage: &[],
+            contract_is_import: &[],
             ncs_entity_ids_per_stage: &[],
             diversion_upstream: &HashMap::new(),
             hydro_productivities_per_stage: &vec![vec![1.0]; fx.n_stages],
@@ -1159,7 +1206,7 @@ fn make_min_outflow_system() -> cobre_core::System {
                 min_generation_mw: 0.0,
                 max_generation_mw: 100.0,
                 max_diversion_m3s: None,
-                filling_inflow_m3s: 0.0,
+                filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 0.0,
             },
             thermal: ThermalStageBounds {
@@ -1250,14 +1297,9 @@ fn make_min_outflow_system() -> cobre_core::System {
         .unwrap()
 }
 
-/// Integration test: simulation with `min_outflow_m3s` > 0 produces non-zero
-/// `outflow_slack_below_m3s` when the primal vector has non-zero slack values.
-///
-/// This test uses the real LP template builder (`build_stage_templates`) to
-/// construct correctly-sized templates, then a `SizedMockSolver` whose primal
-/// vector has sentinel non-zero values at the `outflow_below_slack` column.
-/// The simulation extracts results from the primal, and we verify that the
-/// operational violation slack propagates correctly to the output.
+/// A sentinel value injected at the `outflow_below_slack` primal column (via a
+/// `SizedMockSolver` over a real `build_stage_templates` template) must propagate
+/// to `outflow_slack_below_m3s` in the simulation output.
 #[test]
 fn simulation_min_outflow_slack_extracted_from_primal() {
     use cobre_sddp::build_stage_templates;
@@ -1282,39 +1324,17 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
 
     let t0 = &templates_result.templates[0];
 
-    // Build indexer matching the template layout.
-    let mut indexer = StageIndexer::with_equipment(
-        &cobre_sddp::indexer::EquipmentCounts {
-            hydro_count: 1,
-            max_par_order: 0,
-            n_thermals: 0,
-            n_lines: 0,
-            n_buses: 1,
-            n_blks: 1,
-            has_inflow_penalty: false,
-            max_deficit_segments: 1,
-            n_anticipated: 0,
-            k_max: 0,
-            anticipated_lead_stages: vec![],
-            anticipated_thermal_indices: vec![],
-        },
-        &cobre_sddp::indexer::FphaColumnLayout {
-            hydro_indices: vec![],
-            planes_per_hydro: vec![],
-        },
-    );
-    // Finalize as production setup does: full-order mask + state→LP-column map.
-    {
-        let lag_counts = vec![indexer.max_par_order; indexer.hydro_count];
-        let anticipated_k = indexer.anticipated_lead_stages.clone();
-        indexer.set_nonzero_mask(&lag_counts, &anticipated_k);
-        indexer.finalize_state_column_map();
-    }
+    let study_dims = study_dims_for(0, 0, 1, 1, false);
+    // The operational-violation constraint *row* range is owned by `StageLayout` and
+    // pinned by `stage_layout_operational_violation_rows_are_contiguous_blocks`; this
+    // end-to-end test covers only the slack-*column* extraction path.
+    let geometry = &templates_result.geometry_per_stage[0];
+    let state = state_layout_for(1, 0);
 
-    assert!(indexer.has_operational_violations);
-    assert!(!indexer.outflow_below_slack.is_empty());
+    assert!(study_dims.has_operational_violations);
+    assert!(!geometry.outflow_below_slack.is_empty());
 
-    let slack_col = indexer.outflow_below_slack.start;
+    let slack_col = geometry.outflow_below_slack.start;
     assert!(
         slack_col < t0.num_cols,
         "outflow_below_slack col {} must be within template cols {}",
@@ -1327,21 +1347,11 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         "outflow_below_slack col_upper must be +inf when min_outflow > 0"
     );
 
-    let min_outflow_row = indexer.min_outflow_rows.start;
     let total_hours = 744.0_f64;
     let m3s_to_hm3 = 3_600.0 / 1_000_000.0;
     let zeta = total_hours * m3s_to_hm3;
-    // Per-block formulation: row_lower is in rate units (m3/s), not volume.
-    let expected_row_lower = 50.0;
-    assert!(
-        (t0.row_lower[min_outflow_row] - expected_row_lower).abs() < 1e-10,
-        "min_outflow row_lower = {}, expected {} (rate units m3/s)",
-        t0.row_lower[min_outflow_row],
-        expected_row_lower
-    );
 
-    // Inject a sentinel non-zero value at the slack column in the primal.
-    // Per-block: the slack column value IS in m3/s, no conversion needed.
+    // The slack column value is in m3/s, so no zeta conversion is applied.
     let sentinel_m3s = 5.0;
     let expected_slack_m3s = sentinel_m3s;
     let mut solver = SizedMockSolver::new(t0.num_cols, t0.num_rows);
@@ -1349,7 +1359,10 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
 
     let templates = vec![t0.clone(); n_stages];
     let base_rows = vec![templates_result.base_rows[0]; n_stages];
-    let initial_state = vec![100.0_f64; indexer.n_state];
+    // Every stage clones `t0`, so stage-0 geometry must be replicated across all
+    // stages for extraction to read the stage-correct slack columns.
+    let equipment_geometry = vec![templates_result.geometry_per_stage[0].clone(); n_stages];
+    let initial_state = vec![100.0_f64; state.n_state];
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
     };
@@ -1358,6 +1371,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
 
     let block_counts = vec![1usize; n_stages];
     let stage_ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &templates_result.noise_scale,
@@ -1366,6 +1380,12 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         load_balance_row_starts: &templates_result.load_balance_row_starts,
         load_bus_indices: &[],
         block_counts_per_stage: &block_counts,
+        ncs_col_starts: &[],
+        n_ncs: 0,
+        ncs_stochastic_dense_col: &[],
+        ncs_stochastic_windows: &[],
+        anticipated_windows: &[],
+        study_stage_ids: &[],
         ncs_max_gen: &[],
         ncs_allow_curtailment: &[],
         discount_factors: &[],
@@ -1406,7 +1426,8 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         &stage_ctx,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1460,11 +1481,11 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         0,
         0,
         sim_solver,
-        PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0),
-        indexer.n_state,
+        PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0),
+        state.n_state,
         WorkspaceSizing {
-            hydro_count: indexer.hydro_count,
-            max_par_order: indexer.max_par_order,
+            hydro_count: state.hydro_count,
+            max_par_order: state.max_par_order,
             n_load_buses: 0,
             max_blocks: 0,
             downstream_par_order: 0,
@@ -1490,7 +1511,8 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         &fcf,
         &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1515,7 +1537,13 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
             ncs_col_starts: &[],
-            n_ncs_per_stage: &[],
+            n_ncs: 0,
+            pumping_col_starts: &[],
+            n_pumping: 0,
+            geometry_per_stage: &equipment_geometry,
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices_per_stage: &[],
+            contract_is_import: &[],
             ncs_entity_ids_per_stage: &[],
             diversion_upstream: &HashMap::new(),
             hydro_productivities_per_stage: &hydro_productivities_per_stage,

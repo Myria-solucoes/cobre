@@ -26,6 +26,5 @@ pub mod energy_conversion;
 pub(crate) mod fpha_fitting;
 pub mod hydro_models;
 
-// This conversion layer is a pure intra-crate internal, never named from
-// outside the crate, so it stays `pub(crate)`.
+// Intra-crate internal, never named from outside the crate: keep `pub(crate)`.
 pub(crate) mod conversion;

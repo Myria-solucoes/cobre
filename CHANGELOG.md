@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- next-header -->
 
+## [Unreleased]
+
+## [0.9.0] - 2026-06-25
+
+### Added
+
+- **Energy contracts now participate in dispatch.** A `system/energy_contracts.json`
+  contract (a bilateral purchase or sale obligation) contributes one LP column per
+  block per direction (`type: "import"` or `"export"`) on its `bus_id`, bounded by
+  `[limits.min_mw, limits.max_mw]`. An import column injects `+1.0` MW into the bus
+  power-balance row; an export column withdraws `−1.0` MW. A positive `price_per_mwh`
+  is a cost (import); a negative value is revenue (export). Contracts honor a
+  commissioning window (`entry_stage_id`/`exit_stage_id`): outside `[entry, exit)` the
+  column is pinned to `[0, 0]` and a zero-power row is emitted. Stage-varying bounds
+  and prices are supplied via `constraints/contract_bounds.parquet`; a non-zero
+  `min_mw` row acts as a take-or-pay floor enforced as a hard LP column lower bound.
+  Simulation writes a new `simulation/contracts/` output (`stage_id`, `block_id`,
+  `contract_id`, `power_mw`, `energy_mwh`, `price_per_mwh`, `total_cost`,
+  `operative_state_code` per contract per block) plus a `contract_cost` cost column —
+  both emitted by the CLI and the Python bindings.
+
+- **Pumping stations now participate in dispatch.** A `system/pumping_stations.json`
+  station (a pumped-storage / reversible plant) contributes a per-block pumped-flow
+  decision bounded by `flow.min_m3s`/`flow.max_m3s` that transfers water from its
+  `source_hydro_id` reservoir to its `destination_hydro_id` reservoir and draws
+  `consumption_mw_per_m3s × flow` of electrical power on its `bus_id`. Stations honor
+  a commissioning window (`entry_stage_id`/`exit_stage_id`): a station is active only
+  at stages in `[entry, exit)` and contributes no LP columns outside it. Simulation
+  writes a new `simulation/pumping_stations/` output (pumped flow, volume, power,
+  energy, cost, and operative state per station per block) plus a `pumping_cost`
+  cost column — both emitted by the CLI and the Python bindings.
+
+### Changed
+
+- **Commissioning windows are now honored by thermal units, transmission lines,
+  and anticipated (GNL) thermals.** The `entry_stage_id`/`exit_stage_id` fields on
+  `system/thermals.json` and `system/lines.json` — previously parsed but inert —
+  now take effect. Outside `[entry, exit)` a thermal has both generation bounds
+  zeroed (including any must-run floor, so a windowed-out must-run unit stays
+  feasible) and a line has both flow caps zeroed. An anticipated thermal gates its
+  commitment and generation on the delivery stage's window. NCS and pumping
+  commissioning is unified onto the same zero-influence treatment, so a dormant
+  NCS, pumping, thermal, or line entity now emits a uniform zero-valued output row
+  rather than being omitted from the output. Only non-filling hydro commissioning
+  windows remain parsed-but-inert (still surfaced by a model-quality warning).
+
+- **`constraints/pumping_bounds.parquet` override rows are validated for domain
+  sanity.** A pumped-flow override row is now rejected when a bound is negative or
+  when `min_m3s > max_m3s`, matching the checks already enforced on the
+  `system/pumping_stations.json` entity path.
+
+- **BREAKING — `filling_min_rate_m3s` replaces `filling_inflow_m3s` and flips
+  semantics.** The `filling` block in `system/hydros.json` and the override
+  column in `constraints/hydro_bounds.parquet` are renamed from
+  `filling_inflow_m3s` to `filling_min_rate_m3s`. The field is no longer a
+  retention cap on impounded inflow (a ceiling limiting how much of the natural
+  inflow is kept): it is now a **per-stage minimum accumulation rate** (a floor
+  the reservoir must clear). Each Filling stage derives a minimum target storage
+  anchored on `min_storage_hm3` and accumulating `filling_min_rate_m3s` over
+  the stage duration; the reservoir must reach at least that running level by the
+  end of the stage. Natural inflow (PAR / AR coupling) is no longer cap-limited
+  during Filling — inflow above the old cap flows freely. The impound / retention
+  cap mechanism is removed entirely. Per-stage `V_target` filling floors replace
+  the single terminal filling target that was enforced only at the entry stage.
+  Any existing case that sets `filling_inflow_m3s` must rename the field and
+  review the value: the two semantics are inverses, not aliases.
+
 ## [0.8.2] - 2026-06-17
 
 ### Added
@@ -2164,7 +2231,8 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 <!-- next-url -->
 
-[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/cobre-rs/cobre/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/cobre-rs/cobre/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/cobre-rs/cobre/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/cobre-rs/cobre/compare/v0.7.0...v0.8.0

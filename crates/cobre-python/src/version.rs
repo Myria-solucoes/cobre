@@ -1,8 +1,6 @@
 //! Version and build-environment reporting for the top-level `cobre` module.
 //!
-//! Exposes [`version_info`], which assembles the same fields the `cobre version`
-//! CLI subcommand prints. The single-process invariant of this crate means
-//! `"comm"` is always reported as `"local"` — this crate never initializes MPI.
+//! [`version_info`] assembles the same fields the `cobre version` CLI prints.
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -41,8 +39,7 @@ pub fn version_info(py: Python<'_>) -> PyResult<Py<PyAny>> {
             cobre_solver::active_solver_version()
         ),
     )?;
-    // Single-process invariant (P1): this crate never initializes MPI, so the
-    // communication backend is always local.
+    // This crate never initializes MPI, so the backend is always local.
     dict.set_item("comm", "local")?;
     dict.set_item("zstd", "enabled")?;
     dict.set_item(

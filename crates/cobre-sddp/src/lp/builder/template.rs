@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::ops::Range;
 
-use cobre_core::{EntityId, Stage, System};
+use cobre_core::{ContractType, EntityId, Hydro, ResolvedBounds, Stage, System};
 use cobre_solver::StageTemplate;
 use cobre_stochastic::normal::precompute::PrecomputedNormal;
 use cobre_stochastic::par::precompute::PrecomputedPar;
@@ -13,17 +14,14 @@ use crate::setup::template_postprocess::{
     compute_cumulative_discount_factors, compute_per_stage_discount_factors,
 };
 
-use super::layout::{StageLayout, TemplateBuildCtx};
-use super::{COST_SCALE_FACTOR, GenericConstraintRowEntry, matrix, scaling};
+use super::layout::{ResolvedTables, StageLayout, TemplateBuildCtx};
+use super::{
+    COST_SCALE_FACTOR, GenericConstraintRowEntry, M3S_TO_HM3, columns, entries, rows, scaling,
+};
 
 /// Outcome of [`build_stage_templates`]: one [`StageTemplate`] per study stage
-/// plus the per-stage `base_rows` offsets needed by `PatchBuffer`.
-///
-/// `base_rows[s]` is the row index of the first water-balance (AR dynamics)
-/// constraint in stage `s`.  It equals `template.n_dual_relevant` for every
-/// stage (constant when all stages share the same entity set, which is the
-/// case for the minimal viable solver).  It is stored per-stage for forward
-/// compatibility with stages that have different active entity sets.
+/// plus the per-stage offsets and counts the forward/backward/simulation passes
+/// need. The per-stage `Vec`s are parallel — index `s` of each refers to stage `s`.
 #[derive(Debug, Clone)]
 pub struct StageTemplates {
     /// One structural LP template per study stage, in stage order.
@@ -89,17 +87,41 @@ pub struct StageTemplates {
     /// Per-stage NCS column start indices.
     ///
     /// `ncs_col_starts[stage_idx]` is the column index of the first NCS generation
-    /// variable for that stage.
+    /// variable for that stage. The base shifts per stage with `n_blks`, so it is
+    /// legitimate per-stage geometry; the COUNT it strides is the scalar
+    /// [`Self::n_ncs`].
     pub ncs_col_starts: Vec<usize>,
-    /// Per-stage active NCS counts.
+    /// NCS column count — the full system NCS count, identical at every stage.
     ///
-    /// `n_ncs_per_stage[stage_idx]` is the number of active NCS entities at that stage.
-    pub n_ncs_per_stage: Vec<usize>,
-    /// Per-stage active NCS system indices.
+    /// Under the dense layout every NCS keeps a column at every stage, so the count
+    /// is a single scalar, not a per-stage Vec; a commissioning-dormant NCS keeps
+    /// its column (pinned to `[0, 0]`).
+    pub n_ncs: usize,
+    /// Per-stage pumping-flow column start indices.
     ///
-    /// `active_ncs_indices[stage_idx]` lists the system-level NCS indices active at
-    /// that stage, in entity-ID order.
-    pub active_ncs_indices: Vec<Vec<usize>>,
+    /// `pumping_col_starts[stage_idx]` is the column index of the first
+    /// pumping-flow variable for that stage, sourced from
+    /// `StageLayout::col_pumping_start`, the sole owner of the pumping-flow column
+    /// base. Pumping columns are block-major over ALL system stations (dense):
+    /// `pumping_col_starts[stage_idx] + p_sys * n_blks + blk`, where `p_sys` is the
+    /// SYSTEM station index. The base shifts per stage with `n_blks`, so it is
+    /// legitimate per-stage geometry; the COUNT it strides is the scalar
+    /// [`Self::n_pumping`]. A commissioning-dormant station keeps its column
+    /// (pinned to `[0, 0]`).
+    pub pumping_col_starts: Vec<usize>,
+    /// Pumping-station column count — the full system station count, identical at
+    /// every stage (dense). A commissioning-dormant station keeps its column.
+    pub n_pumping: usize,
+    /// Per-stage equipment geometry for simulation extraction.
+    ///
+    /// `geometry_per_stage[stage_idx]` holds the stage-correct column and row
+    /// ranges for every block-major equipment family at that stage, sourced from
+    /// the per-stage `StageLayout`. A single global stage-0 geometry would carry
+    /// `n_blks`-striped bases/lengths that misread any stage with a differing
+    /// block count. Length equals `templates.len()`. Threaded into
+    /// `StageExtractionSpec` so the simulation read-path addresses the columns the
+    /// solved primal occupies at the stage being extracted.
+    pub geometry_per_stage: Vec<StageGeometry>,
     /// Mapping from target hydro ID to source hydro indices that divert to it.
     ///
     /// Used by the simulation extraction pipeline to compute `diverted_inflow_m3s`.
@@ -110,97 +132,341 @@ pub struct StageTemplates {
     /// `hydro_productivities_per_stage[stage][h]` is the productivity of hydro `h`
     /// at stage `stage`, accounting for per-stage overrides.  FPHA hydros have 0.0.
     pub hydro_productivities_per_stage: Vec<Vec<f64>>,
-    /// Per-stage one-step discount factor for the transition departing stage `t`.
+    /// Per-stage one-step discount factor for the transition departing stage `t`:
+    /// `discount_factors[t] = 1 / (1 + r_t)^(Dt / 365.25)` (`r_t` the annual rate,
+    /// `Dt` the stage duration in days); all `1.0` when the rate is `0.0` with no
+    /// overrides. Applied to the theta objective coefficient.
     ///
-    /// `discount_factors[t] = 1 / (1 + r_t)^(Dt / 365.25)` where `r_t` is the
-    /// annual discount rate (global or per-transition override) and `Dt` is the
-    /// stage duration in days. When `annual_discount_rate == 0.0` and no
-    /// per-transition overrides exist, all entries are `1.0`.
+    /// Private with a getter/setter: [`build_stage_templates`] leaves a
+    /// `1.0`-placeholder until [`StageTemplates::set_discount_factors`]. A `pub`
+    /// field would let a caller read the placeholder as the discounted value —
+    /// silently yielding undiscounted NPV. Read via
+    /// [`StageTemplates::discount_factors`].
+    discount_factors: Vec<f64>,
+    /// Cumulative discount factor for reporting: `cumulative[0] = 1.0`,
+    /// `cumulative[t] = cumulative[t-1] * discount_factors[t-1]`. The present value
+    /// of stage `t`'s immediate cost is `cumulative[t] * immediate_cost_t`.
     ///
-    /// Length equals `templates.len()`. Computed at setup time and applied to
-    /// the theta objective coefficient in the LP template.
-    pub discount_factors: Vec<f64>,
-    /// Cumulative discount factor at each stage for reporting.
-    ///
-    /// `cumulative_discount_factors[0] = 1.0` (present value).
-    /// `cumulative_discount_factors[t] = cumulative_discount_factors[t-1] * discount_factors[t-1]`
-    /// for `t >= 1`.
-    ///
-    /// Length equals `templates.len()` (one entry per study stage). The
-    /// anticipated-decision predicate is strict (`stage_idx + K_i < n_stages`),
-    /// so every active delivery stage satisfies `delivery_stage in [0, n_stages)`.
-    /// The present value of stage `t`'s immediate cost is
-    /// `cumulative_discount_factors[t] * immediate_cost_t`.
-    pub cumulative_discount_factors: Vec<f64>,
+    /// Private for the same reason as [`StageTemplates::discount_factors`] (shares
+    /// the placeholder window). Read via
+    /// [`StageTemplates::cumulative_discount_factors`].
+    cumulative_discount_factors: Vec<f64>,
 }
 
-/// Construct a [`StageTemplate`] for a single study stage.
+impl StageTemplates {
+    /// All-empty [`StageTemplates`] for a study with zero stages. Only `n_hydros`
+    /// (the stride into `noise_scale`) carries through; it is a system-level count
+    /// well-defined even with no stages.
+    #[must_use]
+    pub(crate) fn empty(n_hydros: usize) -> Self {
+        Self {
+            templates: Vec::new(),
+            base_rows: Vec::new(),
+            noise_scale: Vec::new(),
+            zeta_per_stage: Vec::new(),
+            block_hours_per_stage: Vec::new(),
+            n_hydros,
+            load_balance_row_starts: Vec::new(),
+            n_load_buses: 0,
+            load_bus_indices: Vec::new(),
+            generic_constraint_row_entries: Vec::new(),
+            ncs_col_starts: Vec::new(),
+            n_ncs: 0,
+            pumping_col_starts: Vec::new(),
+            n_pumping: 0,
+            geometry_per_stage: Vec::new(),
+            diversion_upstream: HashMap::new(),
+            hydro_productivities_per_stage: Vec::new(),
+            discount_factors: Vec::new(),
+            cumulative_discount_factors: Vec::new(),
+        }
+    }
+
+    /// Per-stage one-step discount factors (read access). A `1.0`-placeholder until
+    /// [`StageTemplates::set_discount_factors`] runs.
+    #[must_use]
+    pub(crate) fn discount_factors(&self) -> &[f64] {
+        &self.discount_factors
+    }
+
+    /// Cumulative discount factors for reporting (read access). A `1.0`-placeholder
+    /// until [`StageTemplates::set_discount_factors`] runs.
+    #[must_use]
+    pub(crate) fn cumulative_discount_factors(&self) -> &[f64] {
+        &self.cumulative_discount_factors
+    }
+
+    /// Install the per-stage discount factors and recompute the cumulative factors
+    /// from them in one call, so the two slices cannot drift out of step (a caller
+    /// cannot set per-stage factors while leaving a stale cumulative vector behind).
+    pub(crate) fn set_discount_factors(&mut self, per_stage: Vec<f64>) {
+        self.cumulative_discount_factors = compute_cumulative_discount_factors(&per_stage);
+        self.discount_factors = per_stage;
+    }
+}
+
+/// Per-stage equipment geometry for simulation extraction: the stage-correct
+/// column/row `Range`s, identity lists, and block count for every block-major
+/// family, each computed from **this** stage's `StageLayout`.
 ///
-/// Returns the template, the row index of the water-balance block
-/// (used as `base_row` by the `PatchBuffer` noise injection), the
-/// row index of the load-balance block (used for load-noise patches),
-/// the generic constraint row entries for this stage, and NCS metadata
-/// (column start, count, and active system indices).
-// Rationale: the return tuple exposes seven independently typed outputs — the template,
-// two base-row offsets, generic-constraint metadata, NCS column start/count, and active
-// NCS indices — that the caller destructures immediately into named bindings.  A type alias
-// or wrapper struct would hide the concrete types at the four call sites and force readers
-// to look up the alias to understand the destructure.
-#[allow(clippy::type_complexity)]
+/// A single global stage-0 geometry is the bug this struct forbids: every family
+/// after `turbine` has a base `turbine.start + Σ(prior)·n_blks` and length
+/// `count·n_blks`, both striped by stage 0's block count, so at any stage with a
+/// differing block count the stage-0 base/length addresses the WRONG primal
+/// columns. The per-stage `n_blks` stride was already correct; this closes the
+/// matching base/length gap. Uniform-block studies coincide with stage 0.
+///
+/// [`Default`] is the all-`0..0` geometry — every extraction read it gates returns
+/// zero — the safe fallback when no per-stage geometry is available, matching the
+/// sibling `ncs_col_starts` / `pumping_col_starts` empty-slice fallbacks.
+#[derive(Debug, Clone, Default)]
+pub struct StageGeometry {
+    /// Turbined-flow column range (one per hydro per block). `turbine.start` is
+    /// `theta + 1` and stage-invariant, but `turbine.end` is `n_blks`-dependent,
+    /// so the cost-breakdown `range_sum` still needs the per-stage range.
+    pub turbine: Range<usize>,
+    /// Spillage column range (one per hydro per block).
+    pub spillage: Range<usize>,
+    /// Diversion-flow column range (one per hydro per block).
+    pub diversion: Range<usize>,
+    /// Thermal-generation column range (one per thermal per block).
+    pub thermal: Range<usize>,
+    /// Anticipated-decision column range (one per anticipated thermal,
+    /// stage-level). Starts at `thermal.end`, which is `n_blks`-dependent, so the
+    /// cost-breakdown `range_sum` needs the per-stage base.
+    pub anticipated_decision: Range<usize>,
+    /// Forward line-flow column range (one per line per block).
+    pub line_fwd: Range<usize>,
+    /// Reverse line-flow column range (one per line per block).
+    pub line_rev: Range<usize>,
+    /// Bus-deficit column range (`B · S · K` columns).
+    pub deficit: Range<usize>,
+    /// Bus-excess column range (one per bus per block).
+    pub excess: Range<usize>,
+    /// FPHA-generation column range (one per FPHA hydro per block).
+    pub generation: Range<usize>,
+    /// Per-evaporation-hydro column/row indices, parallel to the evaporation
+    /// reverse-lookup `local_evap_idx`. The three evaporation columns are
+    /// stage-level but anchored at the `n_blks`-dependent FPHA-generation-block
+    /// end, so they shift under a non-uniform schedule — this per-stage copy
+    /// carries the stage-correct columns.
+    pub evap_indices: Vec<crate::indexer::EvaporationIndices>,
+    /// Inflow non-negativity slack column range (one per hydro, stage-level).
+    pub inflow_slack: Range<usize>,
+    /// Under-withdrawal slack column range (one per hydro, stage-level).
+    pub withdrawal_slack_neg: Range<usize>,
+    /// Over-withdrawal slack column range (one per hydro, stage-level).
+    pub withdrawal_slack_pos: Range<usize>,
+    /// Outflow-below-minimum slack column range (one per hydro per block).
+    pub outflow_below_slack: Range<usize>,
+    /// Outflow-above-maximum slack column range (one per hydro per block).
+    pub outflow_above_slack: Range<usize>,
+    /// Turbine-below-minimum slack column range (one per hydro per block).
+    pub turbine_below_slack: Range<usize>,
+    /// Generation-below-minimum slack column range (one per hydro per block).
+    pub generation_below_slack: Range<usize>,
+    /// Import-contract column range (one per import contract per block); empty
+    /// `start..start` (not `0..0`) at the pumping-end column when there are none.
+    pub contract_import: Range<usize>,
+    /// Export-contract column range (one per export contract per block); empty
+    /// `start..start` at the import-end column when there are none.
+    pub contract_export: Range<usize>,
+
+    // ── Per-stage row ranges, identity lists, and block count ────────────────
+    /// Water-balance row range (one row per hydro). Count is stage-invariant
+    /// (`n_hydros`) but the base rides the per-stage block-major rows before it.
+    pub water_balance: Range<usize>,
+    /// Load-balance row range (one row per bus per block; `n_buses · n_blks`).
+    pub load_balance: Range<usize>,
+    /// Per-stage `σ_fill`-target row range (one row per Filling-phase hydro); empty
+    /// `start..start` (not `0..0`) at every non-Filling stage.
+    // Voice 4: no read site consumes this yet — it is the per-stage carrier that
+    // keeps `StageGeometry` a faithful mirror of the row shape, the seam the sibling
+    // `σ^{v-}` family extends. The `#[allow(dead_code)]` refires if the seam is
+    // removed before a reader lands.
+    #[allow(dead_code)]
+    pub filling_target: Range<usize>,
+    /// Per-stage `σ_fill`-target slack column range (one column per Filling-phase
+    /// hydro); empty `start..start` at every non-Filling stage. Simulation
+    /// extraction reads the `σ_fill` primal at `start + local_idx`, resolving
+    /// `local_idx` via `filling_target_hydro_indices`.
+    pub filling_target_col: Range<usize>,
+    /// Soft `σ^{v-}` operating-floor row range (one row per Operating-phase filling
+    /// hydro); empty `start..start` (not `0..0`) at every non-operating stage.
+    // Voice 4: no read site consumes this yet — the per-stage row-shape carrier
+    // mirroring the `filling_target` seam. The `#[allow(dead_code)]` refires if the
+    // seam is removed before a reader lands.
+    #[allow(dead_code)]
+    pub filled_min_storage_floor: Range<usize>,
+    /// Soft `σ^{v-}` operating-floor slack column range (one column per
+    /// Operating-phase filling hydro); empty `start..start` at every non-operating
+    /// stage. Simulation extraction reads the `σ^{v-}` primal at `start + local_idx`,
+    /// resolving `local_idx` via `filled_min_storage_floor_hydro_indices`.
+    pub filled_min_storage_floor_col: Range<usize>,
+    /// Row index of the first z-inflow definition constraint. Always `0`: state
+    /// pinning uses column bounds, so no state-fixing rows precede the z-inflow
+    /// block. Carried per stage to mirror `StageLayout::z_inflow_row_start`.
+    pub z_inflow_row_start: usize,
+    /// Number of operating blocks (K) at this stage — the block-major stride for
+    /// every equipment family.
+    pub n_blks: usize,
+    /// System hydro indices using FPHA at this stage, in slot order. FPHA
+    /// membership is per `(hydro, stage)`, so this is the stage-correct list.
+    pub fpha_hydro_indices: Vec<usize>,
+    /// System hydro indices with linearized evaporation at this stage, in slot
+    /// order. Parallel to `evap_indices`.
+    pub evap_hydro_indices: Vec<usize>,
+    /// System hydro indices owning a `σ_fill`-target slack column at this stage (the
+    /// Filling-phase hydros), in slot order. Parallel to `filling_target_col` (slot
+    /// `i` → `filling_target_col.start + i`). The family is SPARSE — one column per
+    /// filling hydro — so extraction resolves a system hydro's column via this
+    /// system→slot list, never by the dense system index `h`.
+    pub filling_target_hydro_indices: Vec<usize>,
+    /// System hydro indices owning a `σ^{v-}` operating-floor slack column at this
+    /// stage (the Operating-phase filling hydros), in slot order. Parallel to
+    /// `filled_min_storage_floor_col`; SPARSE like `filling_target_hydro_indices`,
+    /// resolved the same way.
+    pub filled_min_storage_floor_hydro_indices: Vec<usize>,
+}
+
+impl StageGeometry {
+    /// Build the per-stage equipment geometry from this stage's `StageLayout`.
+    ///
+    /// This is the production source: every range is the stage-correct geometry
+    /// the LP template was baked with, so the simulation read-path addresses the
+    /// columns the solved primal actually occupies at this stage. The empty-block
+    /// `start` accessors (`col_generation_start`, the `col_*_slack` accessors)
+    /// resolve the dedicated empty-block cursor rather than a bare `0` when the
+    /// family collapses to `0..0`, matching the indexer convention.
+    fn from_layout(layout: &StageLayout<'_>) -> Self {
+        // Most ranges are cloned from `StageLayout` own fields (already `0..0` when
+        // empty). The `filling_*` families are built inline as
+        // `start..start + indices.len()`, so an empty family is `start..start` (not
+        // `0..0`) — both are `is_empty()`, and the read-path never dereferences an
+        // empty range.
+        let anticipated_decision = if layout.n_anticipated > 0 {
+            let s = layout.anticipated.col_anticipated_decision_start;
+            s..s + layout.n_anticipated
+        } else {
+            0..0
+        };
+        Self {
+            turbine: layout.turbine.clone(),
+            spillage: layout.spillage.clone(),
+            diversion: layout.diversion.clone(),
+            thermal: layout.thermal.clone(),
+            anticipated_decision,
+            line_fwd: layout.line_fwd.clone(),
+            line_rev: layout.line_rev.clone(),
+            deficit: layout.deficit.clone(),
+            excess: layout.excess.clone(),
+            generation: layout.generation.clone(),
+            evap_indices: layout.evap_indices.clone(),
+            inflow_slack: layout.inflow_slack.clone(),
+            withdrawal_slack_neg: layout.withdrawal_slack_neg.clone(),
+            withdrawal_slack_pos: layout.withdrawal_slack_pos.clone(),
+            outflow_below_slack: layout.outflow_below_slack.clone(),
+            outflow_above_slack: layout.outflow_above_slack.clone(),
+            turbine_below_slack: layout.turbine_below_slack.clone(),
+            generation_below_slack: layout.generation_below_slack.clone(),
+            contract_import: layout.col_contract_import_start
+                ..layout.col_contract_import_start + layout.n_contract_import * layout.n_blks,
+            contract_export: layout.col_contract_export_start
+                ..layout.col_contract_export_start + layout.n_contract_export * layout.n_blks,
+            water_balance: layout.water_balance.clone(),
+            load_balance: layout.load_balance.clone(),
+            filling_target: layout.row_filling_target_start
+                ..layout.row_filling_target_start + layout.filling_target_hydro_indices.len(),
+            filling_target_col: layout.col_filling_target_start
+                ..layout.col_filling_target_start + layout.filling_target_hydro_indices.len(),
+            filled_min_storage_floor: layout.row_filled_min_storage_floor_start
+                ..layout.row_filled_min_storage_floor_start
+                    + layout.filled_min_storage_floor_hydro_indices.len(),
+            filled_min_storage_floor_col: layout.col_filled_min_storage_floor_start
+                ..layout.col_filled_min_storage_floor_start
+                    + layout.filled_min_storage_floor_hydro_indices.len(),
+            z_inflow_row_start: layout.z_inflow_row_start,
+            n_blks: layout.n_blks,
+            fpha_hydro_indices: layout.fpha_hydro_indices.clone(),
+            evap_hydro_indices: layout.evap_hydro_indices.clone(),
+            filling_target_hydro_indices: layout.filling_target_hydro_indices.clone(),
+            filled_min_storage_floor_hydro_indices: layout
+                .filled_min_storage_floor_hydro_indices
+                .clone(),
+        }
+    }
+}
+
+/// Per-stage outputs of [`build_single_stage_template`], transposed by
+/// [`assemble_stage_templates_output`] into the parallel per-stage `Vec`s of
+/// [`StageTemplates`]. Adding a per-stage datum is one field here plus one
+/// transpose line in the assembler.
+pub(super) struct StageBuildOutput {
+    /// Structural LP template for the stage.
+    pub template: StageTemplate,
+    /// Row index of the first water-balance constraint (the `PatchBuffer`
+    /// noise-injection `base_row`).
+    pub stage_base_row: usize,
+    /// Row index of the first load-balance constraint (load-noise patches).
+    pub load_balance_row_start: usize,
+    /// Active generic-constraint row metadata for the stage.
+    pub gc_entries: Vec<GenericConstraintRowEntry>,
+    /// Column index of the first NCS generation variable.
+    pub ncs_col_start: usize,
+    /// Number of NCS entities at the stage — the full system count (dense).
+    pub ncs_count: usize,
+    /// Column index of the first pumping-flow variable (sourced from
+    /// `StageLayout::col_pumping_start`).
+    pub pumping_col_start: usize,
+    /// Number of pumping stations ACTIVE (contributing columns) at the stage
+    /// (the commissioning-gated count, sourced from [`StageLayout::n_pumping`]).
+    pub n_pumping: usize,
+    /// Stage-correct equipment column ranges for simulation extraction, computed
+    /// from this stage's [`StageLayout`].
+    pub equipment_geometry: StageGeometry,
+}
+
+/// Construct the [`StageBuildOutput`] for a single study stage.
+// Rationale: `clippy::similar_names` flags the `state` handle next to `stage`/`stage_idx`;
+// both names are established (the `StageLayout`/`StageData` field is `state`, the per-stage
+// inputs are `stage`/`stage_idx`), so renaming either to satisfy the heuristic would obscure
+// intent rather than clarify it.
+#[allow(clippy::similar_names)]
 pub(super) fn build_single_stage_template(
     ctx: &TemplateBuildCtx<'_>,
+    state: &crate::indexer::StateLayout,
     stage: &Stage,
     stage_idx: usize,
-) -> (
-    StageTemplate,
-    usize,
-    usize,
-    Vec<GenericConstraintRowEntry>,
-    usize,
-    usize,
-    Vec<usize>,
-) {
-    let layout = StageLayout::new(ctx, stage, stage_idx);
-    let stage_base_row = layout.row_water_balance_start;
-    let load_balance_row_start = layout.row_load_balance_start;
+) -> StageBuildOutput {
+    let layout = StageLayout::new(ctx, state, stage, stage_idx);
+    let stage_base_row = layout.row_water_balance_start();
+    let load_balance_row_start = layout.row_load_balance_start();
 
-    let (mut col_lower, mut col_upper, mut objective) =
-        matrix::fill_stage_columns(ctx, stage, stage_idx, &layout);
-    let (mut row_lower, mut row_upper) = matrix::fill_stage_rows(ctx, stage, stage_idx, &layout);
-    let mut col_entries = matrix::build_stage_matrix_entries(ctx, stage, stage_idx, &layout);
+    let (col_lower, mut col_upper, mut objective) =
+        columns::fill_stage_columns(ctx, stage, stage_idx, &layout);
+    let (mut row_lower, mut row_upper) = rows::fill_stage_rows(ctx, stage, stage_idx, &layout);
+    let mut col_entries = entries::build_stage_matrix_entries(ctx, stage, stage_idx, &layout);
 
-    // Fill generic constraint rows, slack columns, and CSC entries.
     {
-        let mut buffers = matrix::LpMatrixBuffers {
+        let mut buffers = entries::LpMatrixBuffers {
             col_entries: &mut col_entries,
-            _col_lower: &mut col_lower,
             col_upper: &mut col_upper,
             objective: &mut objective,
             row_lower: &mut row_lower,
             row_upper: &mut row_upper,
         };
-        matrix::fill_generic_constraint_entries(ctx, stage, stage_idx, &layout, &mut buffers);
+        entries::fill_generic_constraint_entries(ctx, stage, stage_idx, &layout, &mut buffers);
     }
 
-    // Scale all monetary objective coefficients for numerical conditioning.
-    // The entire SDDP algorithm operates in scaled cost space; outputs
-    // are unscaled at the reporting boundary (forward.rs, lower_bound.rs,
-    // simulation/pipeline.rs, simulation/extraction.rs).
+    // Scale every monetary objective coefficient by 1/K for numerical
+    // conditioning; outputs are unscaled at the reporting boundary.
     //
-    // Theta (the future cost approximation variable) must NOT be divided by
-    // COST_SCALE_FACTOR.  The Benders cuts enforce `theta >= intercept_scaled`
-    // where `intercept_scaled = Q_successor / K`, so theta holds the SCALED
-    // future cost.  The LP objective is `sum(c_i/K * x_i) + 1.0 * theta`, and
-    // the total scaled objective = (stage_cost + future_cost) / K.  Multiplying
-    // by K at the reporting boundary recovers the original monetary cost.
-    //
-    // If theta were also divided by K its objective coefficient would become
-    // 1/K, making the LP objective `stage_cost/K + (1/K)*theta` which, after
-    // multiplication by K, gives `stage_cost + future_cost/K` -- wrong.
-    // Use `layout.col_theta` so the correct index is read from the augmented
-    // indexer even when `n_anticipated > 0` shifts theta past the anticipated
-    // state block.
-    let theta_col = layout.col_theta;
+    // Theta must NOT be divided: the Benders cuts already enforce
+    // `theta >= Q_successor / K`, so theta holds the SCALED future cost. Dividing
+    // it too would make the LP `stage_cost/K + (1/K)*theta`, which recovers
+    // `stage_cost + future_cost/K` at the boundary — wrong. `layout.col_theta()`
+    // reads the correct index even when `n_anticipated > 0` shifts theta.
+    let theta_col = layout.col_theta();
     for (i, coeff) in objective.iter_mut().enumerate() {
         if i != theta_col {
             *coeff /= COST_SCALE_FACTOR;
@@ -208,11 +474,11 @@ pub(super) fn build_single_stage_template(
     }
 
     // Sort each column's entries by row index (CSC invariant).
-    for entries in &mut col_entries {
-        entries.sort_unstable_by_key(|&(row, _)| row);
+    for col_entry_vec in &mut col_entries {
+        col_entry_vec.sort_unstable_by_key(|&(row, _)| row);
     }
 
-    let (col_starts, row_indices, values) = matrix::assemble_csc(&col_entries);
+    let (col_starts, row_indices, values) = entries::assemble_csc(&col_entries);
 
     let n_transfer = ctx.n_hydros * ctx.max_par_order;
 
@@ -228,7 +494,7 @@ pub(super) fn build_single_stage_template(
         objective,
         row_lower,
         row_upper,
-        n_state: layout.n_state,
+        n_state: layout.n_state(),
         n_transfer,
         n_dual_relevant: layout.n_dual_relevant,
         n_hydro: layout.n_h,
@@ -237,15 +503,22 @@ pub(super) fn build_single_stage_template(
         row_scale: Vec::new(),
     };
 
-    (
+    // Snapshot the per-stage equipment geometry BEFORE moving `layout`'s owned
+    // `generic_constraint_rows` Vec into the output: `from_layout` only borrows,
+    // so it must run while `layout` is intact.
+    let equipment_geometry = StageGeometry::from_layout(&layout);
+
+    StageBuildOutput {
         template,
         stage_base_row,
         load_balance_row_start,
-        layout.generic_constraint_rows,
-        layout.col_ncs_start,
-        layout.n_ncs,
-        layout.active_ncs_indices,
-    )
+        gc_entries: layout.generic_constraint_rows,
+        ncs_col_start: layout.col_ncs_start,
+        ncs_count: layout.n_ncs,
+        pumping_col_start: layout.col_pumping_start,
+        n_pumping: layout.n_pumping,
+        equipment_geometry,
+    }
 }
 
 /// Collect the bus-slice positions of stochastic load buses.
@@ -253,9 +526,7 @@ pub(super) fn build_single_stage_template(
 /// Returns bus-position indices (into the buses slice) for every bus that has
 /// `std_mw > 0` in any load model, sorted by `EntityId` for declaration-order
 /// invariance.  Buses with duplicate IDs across stages are deduplicated.
-fn collect_load_bus_indices(system: &System, bus_pos: &HashMap<EntityId, usize>) -> Vec<usize> {
-    // `n_load_buses` must equal `normal_lp.n_entities()` in a consistent
-    // system; both are derived from buses with std_mw > 0 in the load models.
+fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>) -> Vec<usize> {
     let mut ids: Vec<EntityId> = system
         .load_models()
         .iter()
@@ -395,34 +666,13 @@ pub fn build_stage_templates(
     evaporation_models: &EvaporationModelSet,
     resolved_parameters: &ResolvedParameters,
 ) -> Result<StageTemplates, SddpError> {
-    // Only build templates for study stages (id >= 0), in canonical order.
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
     let n_hydros = system.hydros().len();
 
     if study_stages.is_empty() {
-        return Ok(StageTemplates {
-            templates: Vec::new(),
-            base_rows: Vec::new(),
-            noise_scale: Vec::new(),
-            zeta_per_stage: Vec::new(),
-            block_hours_per_stage: Vec::new(),
-            n_hydros,
-            load_balance_row_starts: Vec::new(),
-            n_load_buses: 0,
-            load_bus_indices: Vec::new(),
-            generic_constraint_row_entries: Vec::new(),
-            ncs_col_starts: Vec::new(),
-            n_ncs_per_stage: Vec::new(),
-            active_ncs_indices: Vec::new(),
-            diversion_upstream: HashMap::new(),
-            hydro_productivities_per_stage: Vec::new(),
-            discount_factors: Vec::new(),
-            cumulative_discount_factors: Vec::new(),
-        });
+        return Ok(StageTemplates::empty(n_hydros));
     }
 
-    // Consistency gate: a non-empty PrecomputedNormal must have the same
-    // entity count as the stochastic load buses derived from the system.
     let (ctx, load_bus_indices, diversion_upstream_output) = build_template_build_ctx(
         system,
         inflow_method,
@@ -439,41 +689,51 @@ pub fn build_stage_templates(
         n_load_buses
     );
 
+    // One canonical role-(a) `StateLayout` shared by every `StageLayout`: the
+    // column ranges and `state_to_lp_column_map` it reads are pure functions of the
+    // state dimensions, so they match the `StateLayout` setup stores on
+    // `StageData.state` regardless of the mask.
+    //
+    // `effective_lag_counts` feeds only the `nonzero_state_indices` mask (read off
+    // `StageData.state` by the cut path), never the template build. Sized to
+    // `ctx.n_hydros` per the `StateLayout::new` contract, falling back to the dense
+    // `max_par_order` stride for hydros the PAR model omits — so a hydro-free
+    // `PrecomputedPar` test still satisfies the length contract.
+    let effective_lag_counts: Vec<usize> = if ctx.max_par_order > 0 {
+        (0..ctx.n_hydros)
+            .map(|h| {
+                if h < par_lp.n_hydros() {
+                    par_lp.effective_lag_count(h)
+                } else {
+                    ctx.max_par_order
+                }
+            })
+            .collect()
+    } else {
+        vec![0; ctx.n_hydros]
+    };
+    let state_layout = crate::indexer::StateLayout::new(
+        ctx.n_hydros,
+        ctx.max_par_order,
+        ctx.n_anticipated,
+        ctx.k_max,
+        ctx.anticipated_lead_stages.clone(),
+        &effective_lag_counts,
+    );
+
     let n_study = study_stages.len();
-    let mut templates = Vec::with_capacity(n_study);
-    let mut base_rows = Vec::with_capacity(n_study);
-    let mut load_balance_row_starts = Vec::with_capacity(n_study);
-    let mut generic_constraint_row_entries = Vec::with_capacity(n_study);
-    let mut ncs_col_starts = Vec::with_capacity(n_study);
-    let mut n_ncs_per_stage = Vec::with_capacity(n_study);
-    let mut active_ncs_indices_per_stage = Vec::with_capacity(n_study);
+    let mut stage_outputs = Vec::with_capacity(n_study);
     for (stage_idx, stage) in study_stages.iter().enumerate() {
-        let (
-            template,
-            stage_base_row,
-            load_balance_row_start,
-            gc_entries,
-            ncs_col_start,
-            ncs_count,
-            ncs_active,
-        ) = build_single_stage_template(&ctx, stage, stage_idx);
-        templates.push(template);
-        base_rows.push(stage_base_row);
-        load_balance_row_starts.push(load_balance_row_start);
-        generic_constraint_row_entries.push(gc_entries);
-        ncs_col_starts.push(ncs_col_start);
-        n_ncs_per_stage.push(ncs_count);
-        active_ncs_indices_per_stage.push(ncs_active);
+        stage_outputs.push(build_single_stage_template(
+            &ctx,
+            &state_layout,
+            stage,
+            stage_idx,
+        ));
     }
 
     Ok(assemble_stage_templates_output(
-        templates,
-        base_rows,
-        load_balance_row_starts,
-        generic_constraint_row_entries,
-        ncs_col_starts,
-        n_ncs_per_stage,
-        active_ncs_indices_per_stage,
+        stage_outputs,
         load_bus_indices,
         diversion_upstream_output,
         &study_stages,
@@ -483,6 +743,73 @@ pub fn build_stage_templates(
         n_load_buses,
         n_study,
     ))
+}
+
+/// Precompute the per-stage minimum target-storage trajectory `V_target[t]` for
+/// every filling hydro, keyed `(hydro_idx, stage_id) → V_target` \[hm³\].
+///
+/// Computed ONCE here, where the full per-stage ζ·rate schedule is available (a
+/// per-stage row-fill helper sees one stage and cannot reconstruct the fold). With
+/// `L = entry_stage_id − 1` the last Filling stage, anchored on the dead volume and
+/// folded backward:
+///
+/// ```text
+/// V_target[L] = min_storage_hm3                          (at L's stage_idx)
+/// V_target[t] = min( V_target[t+1] − ζ_{t+1}·rate[t+1], min_storage_hm3 )
+/// ```
+///
+/// `ζ_t = total_hours_per_stage[stage_idx]·M3S_TO_HM3`; `rate`/`min_storage` are
+/// the RESOLVED per-stage bounds. The clip at `min_storage` enforces that no floor
+/// exceeds the dead volume — dropping it would let an over-provisioned schedule
+/// demand a floor ABOVE the dead volume (the design §3.1 forbidden alternative).
+/// The fold runs on the UNCLIPPED running value, clipping each stored `V_target[t]`
+/// independently to mirror the closed form.
+///
+/// Hydros are iterated in canonical slot order into a `BTreeMap`, so the result is
+/// declaration-order-invariant; a non-filling system yields an empty map.
+///
+/// `pub(super)` so the sibling builder test modules can exercise it against
+/// single-stage fixtures; production reaches it via `build_template_build_ctx`.
+pub(super) fn build_filling_v_target(
+    hydros: &[Hydro],
+    bounds: &ResolvedBounds,
+    total_hours_per_stage: &[f64],
+    stage_id_to_idx: &BTreeMap<i32, usize>,
+) -> BTreeMap<(usize, i32), f64> {
+    let mut v_target: BTreeMap<(usize, i32), f64> = BTreeMap::new();
+    for (h_idx, hydro) in hydros.iter().enumerate() {
+        let (Some(filling), Some(entry)) = (hydro.filling.as_ref(), hydro.entry_stage_id) else {
+            continue;
+        };
+        let start = filling.start_stage_id;
+        let last = entry - 1; // L: the last Filling stage id.
+        // Guard a hypothetical inverted config (`start < entry` is validated
+        // upstream) into an empty trajectory rather than a malformed loop.
+        if last < start {
+            continue;
+        }
+        let Some(&last_idx) = stage_id_to_idx.get(&last) else {
+            continue;
+        };
+        let min_storage_at_last = bounds.hydro_bounds(h_idx, last_idx).min_storage_hm3;
+        v_target.insert((h_idx, last), min_storage_at_last);
+        let mut running = min_storage_at_last;
+        let mut t = last;
+        while t > start {
+            if let Some(&t_idx) = stage_id_to_idx.get(&t) {
+                let zeta_t = total_hours_per_stage[t_idx] * M3S_TO_HM3;
+                let rate_t = bounds.hydro_bounds(h_idx, t_idx).filling_min_rate_m3s;
+                running -= zeta_t * rate_t;
+            }
+            let prev = t - 1;
+            if let Some(&prev_idx) = stage_id_to_idx.get(&prev) {
+                let min_storage_prev = bounds.hydro_bounds(h_idx, prev_idx).min_storage_hm3;
+                v_target.insert((h_idx, prev), running.min(min_storage_prev));
+            }
+            t = prev;
+        }
+    }
+    v_target
 }
 
 /// Build the [`TemplateBuildCtx`] and ancillary data needed by the stage loop.
@@ -495,6 +822,11 @@ pub fn build_stage_templates(
 ///
 /// Called once per `build_stage_templates` invocation, after the early-return
 /// guard for empty systems.
+// Rationale: too_many_lines — one linear pass of per-entity prep blocks (position
+// maps, anticipated metadata, contracts, discount factors) feeding a single
+// `TemplateBuildCtx` literal; splitting it would scatter the construction the
+// literal reads back, without removing any branching.
+#[allow(clippy::too_many_lines)]
 fn build_template_build_ctx<'a>(
     system: &'a System,
     inflow_method: InflowNonNegativityMethod,
@@ -511,22 +843,69 @@ fn build_template_build_ctx<'a>(
     let buses = system.buses();
     let n_hydros = hydros.len();
 
-    let hydro_pos: HashMap<EntityId, usize> =
+    let hydro_pos: BTreeMap<EntityId, usize> =
         hydros.iter().enumerate().map(|(i, h)| (h.id, i)).collect();
-    let thermal_pos: HashMap<EntityId, usize> = system
+    let thermal_pos: BTreeMap<EntityId, usize> = system
         .thermals()
         .iter()
         .enumerate()
         .map(|(i, t)| (t.id, i))
         .collect();
-    let line_pos: HashMap<EntityId, usize> = system
+    let line_pos: BTreeMap<EntityId, usize> = system
         .lines()
         .iter()
         .enumerate()
         .map(|(i, l)| (l.id, i))
         .collect();
-    let bus_pos: HashMap<EntityId, usize> =
+    let bus_pos: BTreeMap<EntityId, usize> =
         buses.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
+
+    // Iterate the (ID-sorted) station slice in slot order, NOT declaration order,
+    // to uphold the declaration-order bit-determinism rule.
+    let pumping_stations = system.pumping_stations();
+    let pumping_pos: BTreeMap<EntityId, usize> = pumping_stations
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.id, i))
+        .collect();
+    let n_pumping = pumping_stations.len();
+    // Fail fast on a station-count divergence rather than silently reserving the
+    // wrong number of pumping-flow columns.
+    debug_assert_eq!(
+        n_pumping,
+        system.bounds().n_pumping(),
+        "pumping_stations.len() ({}) != bounds.n_pumping() ({}): resolved-bounds \
+         station count disagrees with the entity slice",
+        n_pumping,
+        system.bounds().n_pumping()
+    );
+
+    // One id-sorted slice for both directions; the import/export split is derived
+    // here as counts (the dense per-direction column strides) by `contract_type`.
+    let contracts = system.contracts();
+    let contract_pos: BTreeMap<EntityId, usize> = contracts
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.id, i))
+        .collect();
+    let n_contract_import = contracts
+        .iter()
+        .filter(|c| c.contract_type == ContractType::Import)
+        .count();
+    let n_contract_export = contracts
+        .iter()
+        .filter(|c| c.contract_type == ContractType::Export)
+        .count();
+    // Fail fast on a contract-count divergence rather than silently reserving the
+    // wrong number of contract columns.
+    debug_assert_eq!(
+        contracts.len(),
+        system.bounds().n_contracts(),
+        "contracts.len() ({}) != bounds.n_contracts() ({}): resolved-bounds \
+         contract count disagrees with the entity slice",
+        contracts.len(),
+        system.bounds().n_contracts()
+    );
 
     let load_bus_indices = collect_load_bus_indices(system, &bus_pos);
 
@@ -539,25 +918,25 @@ fn build_template_build_ctx<'a>(
         .unwrap_or(0)
         .max(par_lp.max_order());
 
-    // Compute anticipated-thermal metadata in declaration order.
-    // For each thermal with `anticipated_config.is_some()`, record its global
-    // index and per-plant lead_stages (K_i).
+    // Per anticipated thermal: global index, lead_stages (K_i), and commissioning
+    // window. The window keys the decision gate's operation-window clause on the
+    // delivery stage; `(None, None)` means active every delivery stage in horizon.
     let mut anticipated_thermal_indices: Vec<usize> = Vec::new();
     let mut anticipated_lead_stages: Vec<usize> = Vec::new();
+    let mut anticipated_windows: Vec<(Option<i32>, Option<i32>)> = Vec::new();
     for (t_idx, thermal) in system.thermals().iter().enumerate() {
         if let Some(cfg) = thermal.anticipated_config.as_ref() {
             anticipated_thermal_indices.push(t_idx);
             // u32 always fits in usize on supported 32-bit and 64-bit targets.
             anticipated_lead_stages.push(cfg.lead_stages as usize);
+            anticipated_windows.push((thermal.entry_stage_id, thermal.exit_stage_id));
         }
     }
     let n_anticipated = anticipated_thermal_indices.len();
     let k_max = anticipated_lead_stages.iter().copied().max().unwrap_or(0);
 
-    // Precompute diversion upstream map: maps target hydro ID -> list of source
-    // hydro indices that divert water to it. O(1) lookup in water balance loop.
-    // Cloned so the map is available both for LP construction (ctx) and for the
-    // simulation extraction pipeline (StageTemplates output).
+    // Target hydro ID -> source hydro indices that divert to it. Cloned so the map
+    // serves both LP construction (ctx) and the simulation extraction output.
     let mut diversion_upstream: HashMap<EntityId, Vec<usize>> = HashMap::new();
     for (h_idx, hydro) in hydros.iter().enumerate() {
         if let Some(ref div) = hydro.diversion {
@@ -569,14 +948,9 @@ fn build_template_build_ctx<'a>(
     }
     let diversion_upstream_output = diversion_upstream.clone();
 
-    // Pre-compute discount factors and total stage hours before the per-stage
-    // template loop so that `fill_anticipated_decision_objective` can read them
-    // from the ctx at LP build time (before postprocess_templates runs).
-    //
-    // Both arrays have length `n_study_stages` exactly. The anticipated-decision
-    // predicate is strict (`stage_idx + K_i < n_stages`), so every active
-    // delivery stage satisfies `delivery_stage in [0, n_stages)` — no phantom
-    // boundary entry is needed.
+    // Computed before the per-stage loop so `fill_anticipated_columns` can read the
+    // discount factors and stage hours from the ctx at LP build time (before
+    // postprocess runs). Both arrays have length `n_study_stages`.
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
     let per_stage_discount =
         compute_per_stage_discount_factors(&study_stages, system.policy_graph());
@@ -597,6 +971,26 @@ fn build_template_build_ctx<'a>(
         "total_hours_per_stage length must equal n_study_stages"
     );
 
+    // Study-stage ids by study stage index: the decision gate keys its
+    // operation-window clause on the DELIVERY stage's `stage.id`, mapping the
+    // delivery index `t + K_i` to its id through this slice.
+    let study_stage_ids: Vec<i32> = study_stages.iter().map(|s| s.id).collect();
+
+    // Inverse: study `stage.id` → study stage index. The filling-target fold reads
+    // per-stage ζ and bounds at the INDEX but expresses the window in stage IDs.
+    let stage_id_to_idx: BTreeMap<i32, usize> = study_stage_ids
+        .iter()
+        .enumerate()
+        .map(|(idx, &id)| (id, idx))
+        .collect();
+
+    let filling_v_target = build_filling_v_target(
+        hydros,
+        system.bounds(),
+        &total_hours_per_stage,
+        &stage_id_to_idx,
+    );
+
     let ctx = TemplateBuildCtx {
         hydros,
         thermals: system.thermals(),
@@ -604,8 +998,16 @@ fn build_template_build_ctx<'a>(
         buses,
         load_models: system.load_models(),
         cascade: system.cascade(),
-        bounds: system.bounds(),
-        penalties: system.penalties(),
+        resolved: ResolvedTables {
+            bounds: system.bounds(),
+            penalties: system.penalties(),
+            resolved_generic_bounds: system.resolved_generic_bounds(),
+            resolved_load_factors: system.resolved_load_factors(),
+            resolved_exchange_factors: system.resolved_exchange_factors(),
+            resolved_ncs_bounds: system.resolved_ncs_bounds(),
+            resolved_ncs_factors: system.resolved_ncs_factors(),
+            resolved_parameters,
+        },
         hydro_pos,
         thermal_pos,
         line_pos,
@@ -614,13 +1016,14 @@ fn build_template_build_ctx<'a>(
         production_models,
         evaporation_models,
         generic_constraints: system.generic_constraints(),
-        resolved_generic_bounds: system.resolved_generic_bounds(),
-        resolved_load_factors: system.resolved_load_factors(),
-        resolved_exchange_factors: system.resolved_exchange_factors(),
         non_controllable_sources: system.non_controllable_sources(),
-        resolved_ncs_bounds: system.resolved_ncs_bounds(),
-        resolved_ncs_factors: system.resolved_ncs_factors(),
-        resolved_parameters,
+        pumping_stations,
+        pumping_pos,
+        n_pumping,
+        contracts,
+        contract_pos,
+        n_contract_import,
+        n_contract_export,
         diversion_upstream,
         n_hydros,
         n_thermals: system.thermals().len(),
@@ -631,34 +1034,26 @@ fn build_template_build_ctx<'a>(
         k_max,
         anticipated_lead_stages,
         anticipated_thermal_indices,
+        anticipated_windows,
+        study_stage_ids,
         has_penalty: n_hydros > 0 && inflow_method.has_slack_columns(),
         cumulative_discount_factors,
         total_hours_per_stage,
+        filling_v_target,
     };
 
     (ctx, load_bus_indices, diversion_upstream_output)
 }
 
-/// Assemble the final [`StageTemplates`] from per-stage loop outputs.
-///
-/// Computes noise-scale, zeta, block-hour, hydro-productivity, and discount
-/// arrays and packages them alongside the per-stage template vectors into the
-/// `StageTemplates` struct returned by `build_stage_templates`.
-///
-/// Called once, immediately after the per-stage loop completes.
-// RATIONALE: 15 args are the heterogeneous per-stage accumulator Vecs produced by the
-// per-stage build loop, each of a distinct type (templates, base_rows, ncs_col_starts, etc.).
-// They cannot be grouped into a context struct without either re-allocating them after the
-// loop or wrapping in Option, both of which add cost on this post-loop cold path.
+/// Transpose the per-stage `Vec<StageBuildOutput>` into the parallel per-stage
+/// `Vec`s of [`StageTemplates`], computing the noise-scale, zeta, block-hour,
+/// hydro-productivity, and discount arrays.
+// Rationale: the args have distinct lifetimes and ownership (some borrowed, some
+// owned), so bundling them into one struct would buy nothing on this single-call
+// cold path while obscuring the transpose inputs.
 #[allow(clippy::too_many_arguments)]
 fn assemble_stage_templates_output(
-    templates: Vec<cobre_solver::StageTemplate>,
-    base_rows: Vec<usize>,
-    load_balance_row_starts: Vec<usize>,
-    generic_constraint_row_entries: Vec<Vec<GenericConstraintRowEntry>>,
-    ncs_col_starts: Vec<usize>,
-    n_ncs_per_stage: Vec<usize>,
-    active_ncs_indices_per_stage: Vec<Vec<usize>>,
+    stage_outputs: Vec<StageBuildOutput>,
     load_bus_indices: Vec<usize>,
     diversion_upstream_output: HashMap<EntityId, Vec<usize>>,
     study_stages: &[&cobre_core::Stage],
@@ -668,10 +1063,46 @@ fn assemble_stage_templates_output(
     n_load_buses: usize,
     n_study: usize,
 ) -> StageTemplates {
-    let (noise_scale, zeta_per_stage, block_hours_per_stage) =
-        scaling::compute_noise_scale(study_stages, n_hydros, par_lp);
+    // Index `s` of every parallel Vec must refer to the same stage, so preserve the
+    // per-stage push order.
+    let mut templates = Vec::with_capacity(n_study);
+    let mut base_rows = Vec::with_capacity(n_study);
+    let mut load_balance_row_starts = Vec::with_capacity(n_study);
+    let mut generic_constraint_row_entries = Vec::with_capacity(n_study);
+    let mut ncs_col_starts = Vec::with_capacity(n_study);
+    let mut pumping_col_starts = Vec::with_capacity(n_study);
+    let mut geometry_per_stage = Vec::with_capacity(n_study);
+    // The dense NCS/pumping counts are constant across stages, so they collapse to
+    // scalars (column STARTS stay per-stage, riding `n_blks`): the first output
+    // seeds the scalars, later outputs must agree.
+    let mut n_ncs: usize = 0;
+    let mut n_pumping: usize = 0;
+    for (s, out) in stage_outputs.into_iter().enumerate() {
+        templates.push(out.template);
+        base_rows.push(out.stage_base_row);
+        load_balance_row_starts.push(out.load_balance_row_start);
+        generic_constraint_row_entries.push(out.gc_entries);
+        ncs_col_starts.push(out.ncs_col_start);
+        pumping_col_starts.push(out.pumping_col_start);
+        if s == 0 {
+            n_ncs = out.ncs_count;
+            n_pumping = out.n_pumping;
+        } else {
+            debug_assert_eq!(
+                out.ncs_count, n_ncs,
+                "dense NCS count must be constant across stages",
+            );
+            debug_assert_eq!(
+                out.n_pumping, n_pumping,
+                "dense pumping count must be constant across stages",
+            );
+        }
+        geometry_per_stage.push(out.equipment_geometry);
+    }
 
-    // Build per-stage productivity arrays for simulation extraction.
+    let (noise_scale, zeta_per_stage, block_hours_per_stage) =
+        scaling::compute_noise_scale(study_stages, ctx.hydros, n_hydros, par_lp);
+
     let hydro_productivities_per_stage: Vec<Vec<f64>> = (0..n_study)
         .map(|s| {
             (0..n_hydros)
@@ -682,11 +1113,6 @@ fn assemble_stage_templates_output(
                 .collect()
         })
         .collect();
-
-    // Default discount factors to 1.0 (no discounting). The actual
-    // per-stage factors are computed from the PolicyGraph in
-    // StudySetup::from_broadcast_params and overwrite this field.
-    let discount_factors = vec![1.0; templates.len()];
 
     StageTemplates {
         templates,
@@ -700,15 +1126,14 @@ fn assemble_stage_templates_output(
         load_bus_indices,
         generic_constraint_row_entries,
         ncs_col_starts,
-        n_ncs_per_stage,
-        active_ncs_indices: active_ncs_indices_per_stage,
+        n_ncs,
+        pumping_col_starts,
+        n_pumping,
+        geometry_per_stage,
         diversion_upstream: diversion_upstream_output,
         hydro_productivities_per_stage,
-        discount_factors,
-        // Cumulative factors default to 1.0; overwritten by setup.rs.
-        // Length is `n_study`: the strict anticipated-decision predicate
-        // (`stage_idx + K_i < n_stages`) guarantees every delivery lookup
-        // falls within `[0, n_stages)`.
+        // 1.0-placeholders until `StageTemplates::set_discount_factors`.
+        discount_factors: vec![1.0; n_study],
         cumulative_discount_factors: vec![1.0; n_study],
     }
 }
@@ -724,23 +1149,27 @@ fn assemble_stage_templates_output(
     clippy::cast_sign_loss,
     clippy::needless_range_loop,
     clippy::doc_markdown,
-    clippy::doc_overindented_list_items
+    clippy::doc_overindented_list_items,
+    clippy::similar_names
 )]
 mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
         AnticipatedConfig, Block, BlockMode, BoundsCountsSpec, BoundsDefaults, Bus,
-        BusStagePenalties, ContractStageBounds, DeficitSegment, EntityId, HydroStageBounds,
+        BusStagePenalties, ContractStageBounds, ContractType, DeficitSegment, EnergyContract,
+        EntityId, Hydro, HydroGenerationModel, HydroPenalties, HydroStageBounds,
         HydroStagePenalties, LineStageBounds, LineStagePenalties, LoadModel, NcsStagePenalties,
-        NoiseMethod, PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
-        ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
-        SystemBuilder, Thermal, ThermalStageBounds,
+        NoiseMethod, PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, PumpingStation,
+        ResolvedBounds, ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig, SystemBuilder, Thermal, ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
     use crate::hydro_models::PrepareHydroModelsResult;
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::resolved_parameters::ResolvedParameters;
+
+    use super::super::test_support::state_layout_for;
 
     // ── Fixtures ─────────────────────────────────────────────────────────────
 
@@ -755,7 +1184,7 @@ mod tests {
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             max_diversion_m3s: None,
-            filling_inflow_m3s: 0.0,
+            filling_min_rate_m3s: 0.0,
             water_withdrawal_m3s: 0.0,
         }
     }
@@ -903,6 +1332,732 @@ mod tests {
             per_param: vec![],
             id_to_slot: vec![],
         }
+    }
+
+    /// All-zero per-plant [`HydroPenalties`] for fixture hydros.
+    fn hydro_penalties_zero() -> HydroPenalties {
+        HydroPenalties {
+            spillage_cost: 0.0,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 0.0,
+        }
+    }
+
+    /// Minimal independent (no-downstream) hydro for pumping-station refs.
+    fn fixture_hydro(id: i32) -> Hydro {
+        Hydro {
+            id: EntityId(id),
+            name: format!("H{id}"),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 50.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 45.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: hydro_penalties_zero(),
+        }
+    }
+
+    /// Build a one-bus, two-hydro system with the supplied pumping stations.
+    ///
+    /// `SystemBuilder::build` sorts every entity Vec by `id.0`, so passing
+    /// stations out of declaration order exercises the canonical-ordering
+    /// guarantee that `build_template_build_ctx` relies on when threading the
+    /// slice into `ctx.pumping_stations`/`pumping_pos`. The two hydros and bus
+    /// exist solely to satisfy pumping-station reference validation.
+    fn system_with_pumping_stations(stations: Vec<PumpingStation>) -> cobre_core::System {
+        let n_pumping = stations.len();
+        let n_hydros = 2_usize;
+        let n_stages = 1_usize;
+
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+
+        let hydros = vec![fixture_hydro(1), fixture_hydro(2)];
+
+        let stages: Vec<Stage> = vec![Stage {
+            index: 0,
+            id: 0,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "BLK0".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: false,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }];
+
+        let load_models = vec![LoadModel {
+            bus_id: EntityId(1),
+            stage_id: 0,
+            mean_mw: 100.0,
+            std_mw: 0.0,
+        }];
+
+        let resolved_bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping,
+                n_contracts: 0,
+                n_stages,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 100.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages,
+            },
+            &PenaltiesDefaults {
+                hydro: default_hydro_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(hydros)
+            .pumping_stations(stations)
+            .stages(stages)
+            .load_models(load_models)
+            .bounds(resolved_bounds)
+            .penalties(penalties)
+            .build()
+            .expect("system_with_pumping_stations: valid system")
+    }
+
+    /// Build a pumping station with the given id (bus/hydro refs fixed to the
+    /// fixture entities; flow window and consumption are non-degenerate).
+    fn fixture_pumping_station(id: i32) -> PumpingStation {
+        PumpingStation {
+            id: EntityId(id),
+            name: format!("P{id}"),
+            bus_id: EntityId(1),
+            source_hydro_id: EntityId(1),
+            destination_hydro_id: EntityId(2),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            consumption_mw_per_m3s: 0.5,
+            min_flow_m3s: 0.0,
+            max_flow_m3s: 100.0,
+        }
+    }
+
+    // ── Pumping data threaded into TemplateBuildCtx ────────────────────────────
+
+    /// Stations declared out of ID order are exposed ID-sorted on the ctx, and
+    /// `pumping_pos` maps each station id to its slot in that sorted slice.
+    ///
+    /// Declaration order `[30, 10, 20]` must become `[10, 20, 30]` on the ctx
+    /// (the canonical sort applied by `SystemBuilder::build`), with
+    /// `pumping_pos = {10->0, 20->1, 30->2}`.
+    #[test]
+    fn build_template_build_ctx_pumping_stations_id_sorted_and_pos_mapped() {
+        let stations = vec![
+            fixture_pumping_station(30),
+            fixture_pumping_station(10),
+            fixture_pumping_station(20),
+        ];
+        let system = system_with_pumping_stations(stations);
+        let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+        let par_lp = PrecomputedPar::default();
+        let resolved_params = empty_resolved_params();
+
+        let (ctx, _, _) = super::build_template_build_ctx(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        );
+
+        let ids: Vec<i32> = ctx.pumping_stations.iter().map(|p| p.id.0).collect();
+        assert_eq!(
+            ids,
+            vec![10, 20, 30],
+            "ctx.pumping_stations must be ID-sorted regardless of declaration order"
+        );
+
+        assert_eq!(
+            ctx.pumping_pos.len(),
+            3,
+            "pumping_pos has one entry per station"
+        );
+        assert_eq!(ctx.pumping_pos[&EntityId(10)], 0);
+        assert_eq!(ctx.pumping_pos[&EntityId(20)], 1);
+        assert_eq!(ctx.pumping_pos[&EntityId(30)], 2);
+
+        // The position map must agree with the slot order of the sorted slice.
+        for (slot, station) in ctx.pumping_stations.iter().enumerate() {
+            assert_eq!(
+                ctx.pumping_pos[&station.id], slot,
+                "pumping_pos[{:?}] must equal its slot in the sorted slice",
+                station.id
+            );
+        }
+    }
+
+    /// `ctx.n_pumping` equals `pumping_stations.len()` and the resolved-bounds
+    /// station count, and that count is the source `StageLayout` reserves from.
+    #[test]
+    fn build_template_build_ctx_n_pumping_matches_slice_and_bounds() {
+        let stations = vec![fixture_pumping_station(7), fixture_pumping_station(3)];
+        let system = system_with_pumping_stations(stations);
+        let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+        let par_lp = PrecomputedPar::default();
+        let resolved_params = empty_resolved_params();
+
+        let (ctx, _, _) = super::build_template_build_ctx(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        );
+
+        assert_eq!(
+            ctx.n_pumping,
+            ctx.pumping_stations.len(),
+            "n_pumping == slice len"
+        );
+        assert_eq!(ctx.n_pumping, 2, "two stations were declared");
+        assert_eq!(
+            ctx.n_pumping,
+            ctx.resolved.bounds.n_pumping(),
+            "ctx.n_pumping must agree with the resolved-bounds station count"
+        );
+
+        // The re-pointed ctx count flows through to the layout: StageLayout reads
+        // its `n_pumping` from `ctx.n_pumping`. (The block-major column reservation
+        // itself is pinned by the layout-module test
+        // `pumping_layout_reserves_block_major_columns`.)
+        let stage = system
+            .stages()
+            .iter()
+            .find(|s| s.id >= 0)
+            .expect("one study stage");
+        let state = state_layout_for(&ctx);
+        let layout = super::super::layout::StageLayout::new(&ctx, &state, stage, 0);
+        assert_eq!(
+            layout.n_pumping, ctx.n_pumping,
+            "StageLayout.n_pumping must equal the ctx-sourced count"
+        );
+    }
+
+    /// `build_stage_templates` records the layout-owned pumping column base for
+    /// every stage: `pumping_col_starts[t]` equals
+    /// `StageLayout::new(..).col_pumping_start`, and the scalar `n_pumping`
+    /// equals `StageLayout::new(..).n_pumping` (constant across stages under the
+    /// dense layout).
+    ///
+    /// This pins the threading contract the simulation extraction pipeline reads
+    /// from: the column base is sourced from the layout, the sole owner of the
+    /// pumping-flow column base.
+    #[test]
+    fn build_stage_templates_records_layout_pumping_col_start_per_stage() {
+        let stations = vec![fixture_pumping_station(5), fixture_pumping_station(2)];
+        let system = system_with_pumping_stations(stations);
+        let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+        let par_lp = PrecomputedPar::default();
+        let normal_lp = cobre_stochastic::normal::precompute::PrecomputedNormal::default();
+        let resolved_params = empty_resolved_params();
+
+        let templates = super::build_stage_templates(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &normal_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        )
+        .expect("build_stage_templates: valid system");
+
+        // Rebuild the ctx once so each stage's StageLayout can be reconstructed
+        // and compared against the recorded per-stage value.
+        let (ctx, _, _) = super::build_template_build_ctx(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        );
+        let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
+
+        assert_eq!(templates.pumping_col_starts.len(), study_stages.len());
+        assert_eq!(
+            templates.n_pumping, 2,
+            "two stations were declared; the dense count is a scalar"
+        );
+        for (t, stage) in study_stages.iter().enumerate() {
+            let state = state_layout_for(&ctx);
+            let layout = super::super::layout::StageLayout::new(&ctx, &state, stage, t);
+            assert_eq!(
+                templates.pumping_col_starts[t], layout.col_pumping_start,
+                "stage {t}: pumping_col_starts must equal layout.col_pumping_start"
+            );
+            assert_eq!(
+                templates.n_pumping, layout.n_pumping,
+                "stage {t}: scalar n_pumping must equal layout.n_pumping",
+            );
+        }
+    }
+
+    // ── Contract data threaded into TemplateBuildCtx and StageGeometry ─────────
+
+    /// Build an energy contract with the given id and direction (bus fixed to the
+    /// fixture bus; a non-degenerate price/power window).
+    fn fixture_contract(id: i32, contract_type: ContractType) -> EnergyContract {
+        EnergyContract {
+            id: EntityId(id),
+            name: format!("C{id}"),
+            bus_id: EntityId(1),
+            contract_type,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            price_per_mwh: 100.0,
+            min_mw: 0.0,
+            max_mw: 500.0,
+        }
+    }
+
+    /// Build a one-bus, two-hydro system with the supplied contracts and a single
+    /// `n_blks`-block study stage. `n_contracts` matches the slice so the
+    /// resolved-bounds count check holds; the two hydros and bus exist solely to
+    /// satisfy contract bus-reference validation and give the layout pumping-end
+    /// anchor a non-trivial column prefix.
+    fn system_with_contracts(contracts: Vec<EnergyContract>, n_blks: usize) -> cobre_core::System {
+        let n_contracts = contracts.len();
+        let n_hydros = 2_usize;
+        let n_stages = 1_usize;
+
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+
+        let hydros = vec![fixture_hydro(1), fixture_hydro(2)];
+
+        let blocks: Vec<Block> = (0..n_blks)
+            .map(|b| Block {
+                index: b,
+                name: format!("BLK{b}"),
+                duration_hours: 372.0,
+            })
+            .collect();
+
+        let stages: Vec<Stage> = vec![Stage {
+            index: 0,
+            id: 0,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks,
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: false,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }];
+
+        let load_models = vec![LoadModel {
+            bus_id: EntityId(1),
+            stage_id: 0,
+            mean_mw: 100.0,
+            std_mw: 0.0,
+        }];
+
+        let resolved_bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts,
+                n_stages,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 500.0,
+                    price_per_mwh: 100.0,
+                },
+            },
+        );
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages,
+            },
+            &PenaltiesDefaults {
+                hydro: default_hydro_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(hydros)
+            .contracts(contracts)
+            .stages(stages)
+            .load_models(load_models)
+            .bounds(resolved_bounds)
+            .penalties(penalties)
+            .build()
+            .expect("system_with_contracts: valid system")
+    }
+
+    /// One import + one export contract (declared out of ID order) are exposed
+    /// ID-sorted on the ctx; `contract_pos` maps each id to its slot, and the
+    /// per-direction counts are derived by `contract_type`.
+    #[test]
+    fn build_template_build_ctx_contracts_counted_and_pos_mapped() {
+        let contracts = vec![
+            fixture_contract(20, ContractType::Export),
+            fixture_contract(10, ContractType::Import),
+        ];
+        let system = system_with_contracts(contracts, 1);
+        let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+        let par_lp = PrecomputedPar::default();
+        let resolved_params = empty_resolved_params();
+
+        let (ctx, _, _) = super::build_template_build_ctx(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        );
+
+        assert_eq!(ctx.contracts.len(), 2);
+        let ids: Vec<i32> = ctx.contracts.iter().map(|c| c.id.0).collect();
+        assert_eq!(
+            ids,
+            vec![10, 20],
+            "ctx.contracts must be ID-sorted regardless of declaration order"
+        );
+        assert_eq!(ctx.n_contract_import, 1);
+        assert_eq!(ctx.n_contract_export, 1);
+        assert_eq!(ctx.contract_pos[&EntityId(10)], 0);
+        assert_eq!(ctx.contract_pos[&EntityId(20)], 1);
+        for (slot, contract) in ctx.contracts.iter().enumerate() {
+            assert_eq!(
+                ctx.contract_pos[&contract.id], slot,
+                "contract_pos[{:?}] must equal its slot in the sorted slice",
+                contract.id
+            );
+        }
+    }
+
+    /// With `n_blks == 2` and one import + one export contract, `from_layout`
+    /// populates each contract column range with `n_contracts * n_blks` columns:
+    /// import follows pumping, export follows import.
+    #[test]
+    fn stage_geometry_from_layout_populates_contract_ranges() {
+        let contracts = vec![
+            fixture_contract(10, ContractType::Import),
+            fixture_contract(20, ContractType::Export),
+        ];
+        let system = system_with_contracts(contracts, 2);
+        let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+        let par_lp = PrecomputedPar::default();
+        let resolved_params = empty_resolved_params();
+
+        let (ctx, _, _) = super::build_template_build_ctx(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        );
+        let stage = system
+            .stages()
+            .iter()
+            .find(|s| s.id >= 0)
+            .expect("one study stage");
+        let state = state_layout_for(&ctx);
+        let layout = super::super::layout::StageLayout::new(&ctx, &state, stage, 0);
+        let geometry = super::StageGeometry::from_layout(&layout);
+
+        assert_eq!(geometry.contract_import.len(), 2, "1 import * 2 blocks");
+        assert_eq!(geometry.contract_export.len(), 2, "1 export * 2 blocks");
+        assert_eq!(
+            geometry.contract_import.start, layout.col_contract_import_start,
+            "import range anchored at the layout import-block start"
+        );
+        assert_eq!(
+            geometry.contract_export.start, geometry.contract_import.end,
+            "export block immediately follows the import block"
+        );
+    }
+
+    /// A contract-free system yields empty contract ranges anchored at the
+    /// pumping-end column (`start..start`, not `0..0`), leaving the prior column
+    /// layout byte-identical (parity-neutral).
+    #[test]
+    fn stage_geometry_from_layout_empty_contracts_are_pumping_end_anchored() {
+        let system = system_with_contracts(vec![], 2);
+        let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+        let par_lp = PrecomputedPar::default();
+        let resolved_params = empty_resolved_params();
+
+        let (ctx, _, _) = super::build_template_build_ctx(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        );
+        let stage = system
+            .stages()
+            .iter()
+            .find(|s| s.id >= 0)
+            .expect("one study stage");
+        let state = state_layout_for(&ctx);
+        let layout = super::super::layout::StageLayout::new(&ctx, &state, stage, 0);
+        let col_pumping_end = layout.col_pumping_start + layout.n_pumping * layout.n_blks;
+        let geometry = super::StageGeometry::from_layout(&layout);
+
+        assert!(geometry.contract_import.is_empty());
+        assert!(geometry.contract_export.is_empty());
+        assert_eq!(
+            geometry.contract_import.start, col_pumping_end,
+            "empty import range anchors at the pumping-end column, not 0"
+        );
+        assert_eq!(
+            geometry.contract_export.start, col_pumping_end,
+            "empty export range anchors at the pumping-end column, not 0"
+        );
+    }
+
+    /// A resolved-bounds count divergence (one contract entity, `n_contracts: 0`
+    /// in the bounds table) trips the `debug_assert_eq!` in
+    /// `build_template_build_ctx`.
+    #[test]
+    #[should_panic(expected = "resolved-bounds")]
+    fn build_template_build_ctx_contract_count_divergence_panics() {
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+        let stages: Vec<Stage> = vec![Stage {
+            index: 0,
+            id: 0,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "BLK0".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: false,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }];
+        let load_models = vec![LoadModel {
+            bus_id: EntityId(1),
+            stage_id: 0,
+            mean_mw: 100.0,
+            std_mw: 0.0,
+        }];
+        // n_contracts: 0 in the bounds table while one contract entity exists.
+        let resolved_bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 1,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 0,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: 1,
+            },
+            &PenaltiesDefaults {
+                hydro: default_hydro_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+        let system = SystemBuilder::new()
+            .buses(vec![bus])
+            .contracts(vec![fixture_contract(1, ContractType::Import)])
+            .stages(stages)
+            .load_models(load_models)
+            .bounds(resolved_bounds)
+            .penalties(penalties)
+            .build()
+            .expect("valid system; the count mismatch is caught downstream");
+        let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+        let par_lp = PrecomputedPar::default();
+        let resolved_params = empty_resolved_params();
+
+        let _ = super::build_template_build_ctx(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        );
     }
 
     // ── AC-1 ─────────────────────────────────────────────────────────────────
@@ -1229,9 +2384,8 @@ mod tests {
     ///
     /// `dec_start_a` / `dec_start_b`: column index of `col_anticipated_decision_start`
     /// in each template.
-    /// `state_start_a` / `state_start_b`: column AND row index of
-    /// `col_anticipated_state_start` / `row_anticipated_state_fixing_start` (these
-    /// coincide numerically per the indexer convention).
+    /// `state_start_a` / `state_start_b`: column index of
+    /// `col_anticipated_state_start` in each template.
     /// `n_ant`: number of anticipated plants (must be 2 for this swap).
     /// `k_max`: ring-buffer slots per plant.
     /// `fish_start_a` / `fish_start_b`: row index of `row_anticipated_fishing_start`.
@@ -1477,8 +2631,16 @@ mod tests {
             buses: ctx_a.buses,
             load_models: ctx_a.load_models,
             cascade: ctx_a.cascade,
-            bounds: ctx_a.bounds,
-            penalties: ctx_a.penalties,
+            resolved: super::super::layout::ResolvedTables {
+                bounds: ctx_a.resolved.bounds,
+                penalties: ctx_a.resolved.penalties,
+                resolved_generic_bounds: ctx_a.resolved.resolved_generic_bounds,
+                resolved_load_factors: ctx_a.resolved.resolved_load_factors,
+                resolved_exchange_factors: ctx_a.resolved.resolved_exchange_factors,
+                resolved_ncs_bounds: ctx_a.resolved.resolved_ncs_bounds,
+                resolved_ncs_factors: ctx_a.resolved.resolved_ncs_factors,
+                resolved_parameters: ctx_a.resolved.resolved_parameters,
+            },
             hydro_pos: ctx_a.hydro_pos.clone(),
             thermal_pos: ctx_a.thermal_pos.clone(),
             line_pos: ctx_a.line_pos.clone(),
@@ -1487,13 +2649,14 @@ mod tests {
             production_models: ctx_a.production_models,
             evaporation_models: ctx_a.evaporation_models,
             generic_constraints: ctx_a.generic_constraints,
-            resolved_generic_bounds: ctx_a.resolved_generic_bounds,
-            resolved_load_factors: ctx_a.resolved_load_factors,
-            resolved_exchange_factors: ctx_a.resolved_exchange_factors,
             non_controllable_sources: ctx_a.non_controllable_sources,
-            resolved_ncs_bounds: ctx_a.resolved_ncs_bounds,
-            resolved_ncs_factors: ctx_a.resolved_ncs_factors,
-            resolved_parameters: ctx_a.resolved_parameters,
+            pumping_stations: ctx_a.pumping_stations,
+            pumping_pos: ctx_a.pumping_pos.clone(),
+            n_pumping: ctx_a.n_pumping,
+            contracts: ctx_a.contracts,
+            contract_pos: ctx_a.contract_pos.clone(),
+            n_contract_import: ctx_a.n_contract_import,
+            n_contract_export: ctx_a.n_contract_export,
             diversion_upstream: ctx_a.diversion_upstream.clone(),
             n_hydros: ctx_a.n_hydros,
             n_thermals: ctx_a.n_thermals,
@@ -1511,9 +2674,14 @@ mod tests {
                 ctx_a.anticipated_thermal_indices[1],
                 ctx_a.anticipated_thermal_indices[0],
             ],
+            // Swap the windows in lockstep with the index/lead permutation so the
+            // per-plant window stays aligned with its anticipated-local position.
+            anticipated_windows: vec![ctx_a.anticipated_windows[1], ctx_a.anticipated_windows[0]],
+            study_stage_ids: ctx_a.study_stage_ids.clone(),
             has_penalty: ctx_a.has_penalty,
             cumulative_discount_factors: ctx_a.cumulative_discount_factors.clone(),
             total_hours_per_stage: ctx_a.total_hours_per_stage.clone(),
+            filling_v_target: ctx_a.filling_v_target.clone(),
         };
 
         // Sanity: ctx_b really has the swapped ordering.
@@ -1528,56 +2696,1164 @@ mod tests {
         for stage_idx in [0_usize, 2, 3] {
             let stage = study_stages[stage_idx];
 
-            let (tpl_a, _, _, _, _, _, _) =
-                super::build_single_stage_template(&ctx_a, stage, stage_idx);
-            let (tpl_b, _, _, _, _, _, _) =
-                super::build_single_stage_template(&ctx_b, stage, stage_idx);
+            let state_a = state_layout_for(&ctx_a);
+            let state_b = state_layout_for(&ctx_b);
 
-            // Reconstruct the indexer for tpl_a / tpl_b to find the
+            let tpl_a =
+                super::build_single_stage_template(&ctx_a, &state_a, stage, stage_idx).template;
+            let tpl_b =
+                super::build_single_stage_template(&ctx_b, &state_b, stage, stage_idx).template;
+
+            // Reconstruct the layout for tpl_a / tpl_b to find the
             // anticipated_decision / anticipated_state / fishing row offsets.
             // Both templates use the same num_cols/num_rows (the layout depends
             // only on n_anticipated and k_max, both unchanged by the swap).
-            let layout_a = super::super::layout::StageLayout::new(&ctx_a, stage, stage_idx);
-            let layout_b = super::super::layout::StageLayout::new(&ctx_b, stage, stage_idx);
+            let layout_a =
+                super::super::layout::StageLayout::new(&ctx_a, &state_a, stage, stage_idx);
+            let layout_b =
+                super::super::layout::StageLayout::new(&ctx_b, &state_b, stage, stage_idx);
 
             // Layout offsets must be identical (they depend only on counts,
             // not on the contents of the anticipated arrays).
             assert_eq!(
-                layout_a.col_anticipated_decision_start, layout_b.col_anticipated_decision_start,
+                layout_a.anticipated.col_anticipated_decision_start,
+                layout_b.anticipated.col_anticipated_decision_start,
                 "stage {stage_idx}: dec_start"
             );
             assert_eq!(
-                layout_a.col_anticipated_state_start, layout_b.col_anticipated_state_start,
+                layout_a.col_anticipated_state_start(),
+                layout_b.col_anticipated_state_start(),
                 "stage {stage_idx}: state_start"
             );
             assert_eq!(
-                layout_a.row_anticipated_fishing_start, layout_b.row_anticipated_fishing_start,
+                layout_a.anticipated.row_anticipated_fishing_start,
+                layout_b.anticipated.row_anticipated_fishing_start,
                 "stage {stage_idx}: fish_start"
             );
             assert_eq!(
-                layout_a.n_anticipated_fishing_rows, layout_b.n_anticipated_fishing_rows,
+                layout_a.anticipated.n_anticipated_fishing_rows,
+                layout_b.anticipated.n_anticipated_fishing_rows,
                 "stage {stage_idx}: n_fish_rows"
             );
 
             assert_lp_equivalence_after_anticipated_swap(
                 &tpl_a,
                 &tpl_b,
-                layout_a.col_anticipated_decision_start,
-                layout_b.col_anticipated_decision_start,
-                layout_a.col_anticipated_state_start,
-                layout_b.col_anticipated_state_start,
-                layout_a.col_anticipated_state_out_start,
-                layout_b.col_anticipated_state_out_start,
+                layout_a.anticipated.col_anticipated_decision_start,
+                layout_b.anticipated.col_anticipated_decision_start,
+                layout_a.col_anticipated_state_start(),
+                layout_b.col_anticipated_state_start(),
+                layout_a.anticipated.col_anticipated_state_out_start,
+                layout_b.anticipated.col_anticipated_state_out_start,
                 ctx_a.n_anticipated,
                 ctx_a.k_max,
-                layout_a.row_anticipated_fishing_start,
-                layout_b.row_anticipated_fishing_start,
-                layout_a.n_anticipated_fishing_rows,
-                layout_a.row_anticipated_state_out_def_start,
-                layout_b.row_anticipated_state_out_def_start,
-                layout_a.n_anticipated_state_out_def_rows,
+                layout_a.anticipated.row_anticipated_fishing_start,
+                layout_b.anticipated.row_anticipated_fishing_start,
+                layout_a.anticipated.n_anticipated_fishing_rows,
+                layout_a.anticipated.row_anticipated_state_out_def_start,
+                layout_b.anticipated.row_anticipated_state_out_def_start,
+                layout_a.anticipated.n_anticipated_state_out_def_rows,
                 stage_idx,
             );
         }
+    }
+
+    // ── StageTemplates::empty ──────────────────────────────────────────────────
+
+    /// `StageTemplates::empty(n)` yields every per-stage collection empty and
+    /// records `n_hydros == n`. This pins the all-empty shape the empty-study
+    /// early return relies on.
+    #[test]
+    fn stage_templates_empty_is_all_empty_with_n_hydros() {
+        let n = 7_usize;
+        let empty = super::StageTemplates::empty(n);
+
+        assert_eq!(empty.n_hydros, n, "empty(n).n_hydros must equal n");
+        assert_eq!(empty.n_load_buses, 0, "n_load_buses must be 0");
+
+        assert!(empty.templates.is_empty(), "templates");
+        assert!(empty.base_rows.is_empty(), "base_rows");
+        assert!(empty.noise_scale.is_empty(), "noise_scale");
+        assert!(empty.zeta_per_stage.is_empty(), "zeta_per_stage");
+        assert!(
+            empty.block_hours_per_stage.is_empty(),
+            "block_hours_per_stage"
+        );
+        assert!(
+            empty.load_balance_row_starts.is_empty(),
+            "load_balance_row_starts"
+        );
+        assert!(empty.load_bus_indices.is_empty(), "load_bus_indices");
+        assert!(
+            empty.generic_constraint_row_entries.is_empty(),
+            "generic_constraint_row_entries"
+        );
+        assert!(empty.ncs_col_starts.is_empty(), "ncs_col_starts");
+        assert_eq!(empty.n_ncs, 0, "n_ncs");
+        assert!(empty.pumping_col_starts.is_empty(), "pumping_col_starts");
+        assert_eq!(empty.n_pumping, 0, "n_pumping");
+        assert!(empty.diversion_upstream.is_empty(), "diversion_upstream");
+        assert!(
+            empty.hydro_productivities_per_stage.is_empty(),
+            "hydro_productivities_per_stage"
+        );
+        assert!(empty.discount_factors().is_empty(), "discount_factors");
+        assert!(
+            empty.cumulative_discount_factors().is_empty(),
+            "cumulative_discount_factors"
+        );
+    }
+
+    // ── discount-factor placeholder is replaced by the public path ─────────────
+
+    /// Build a 3-stage thermals-only system carrying a non-zero global annual
+    /// discount rate. Empty `transitions` means every stage falls back to the
+    /// global rate, so the postprocessed per-stage factors are all < 1.0 and the
+    /// cumulative vector compounds below the 1.0 placeholder.
+    fn discounted_multi_stage_system() -> cobre_core::System {
+        use cobre_core::{PolicyGraph, PolicyGraphType};
+
+        let n_stages = 3_usize;
+        let thermals = vec![Thermal {
+            id: EntityId(1),
+            name: "T1".to_string(),
+            bus_id: EntityId(1),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            cost_per_mwh: 10.0,
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            anticipated_config: None,
+        }];
+        let n_thermals = thermals.len();
+
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+
+        let stages: Vec<Stage> = (0..n_stages)
+            .map(|i| Stage {
+                index: i,
+                id: i as i32,
+                start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                season_id: Some(0),
+                blocks: vec![Block {
+                    index: 0,
+                    name: "BLK0".to_string(),
+                    duration_hours: 744.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: false,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..n_stages)
+            .map(|s| LoadModel {
+                bus_id: EntityId(1),
+                stage_id: s as i32,
+                mean_mw: 100.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let resolved_bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 10.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 0,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages,
+            },
+            &PenaltiesDefaults {
+                hydro: default_hydro_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        // Non-zero global rate with no per-transition overrides: every stage
+        // discounts at the global rate.
+        let policy_graph = PolicyGraph {
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.10,
+            transitions: Vec::new(),
+            season_map: None,
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(thermals)
+            .stages(stages)
+            .load_models(load_models)
+            .bounds(resolved_bounds)
+            .penalties(penalties)
+            .policy_graph(policy_graph)
+            .build()
+            .expect("discounted_multi_stage_system: valid system")
+    }
+
+    /// Any `StageTemplates` produced by the public build + postprocess path has
+    /// `cumulative_discount_factors().len() == templates.len()` and is no longer
+    /// the all-`1.0` placeholder once a non-zero discount rate is in effect.
+    ///
+    /// The discount fields are private, so an external caller can only ever observe
+    /// the postprocessed (discounted) values, never the placeholder
+    /// `build_stage_templates` leaves behind.
+    #[test]
+    fn postprocessed_stage_templates_carry_discounted_factors() {
+        let system = discounted_multi_stage_system();
+        let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+        let par_lp = PrecomputedPar::default();
+        let normal_lp = cobre_stochastic::normal::precompute::PrecomputedNormal::default();
+        let resolved_params = empty_resolved_params();
+
+        let mut templates = super::build_stage_templates(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &normal_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        )
+        .expect("build_stage_templates: valid system");
+
+        // Run the postprocess step that installs the real discount factors —
+        // exactly the public path StudySetup drives.
+        let _report =
+            crate::setup::template_postprocess::postprocess_templates(&mut templates, &system);
+
+        let cumulative = templates.cumulative_discount_factors();
+        assert_eq!(
+            cumulative.len(),
+            templates.templates.len(),
+            "cumulative_discount_factors length must equal templates.len() after postprocess"
+        );
+        assert_eq!(
+            cumulative[0], 1.0,
+            "cumulative_discount_factors[0] is the present value (1.0)"
+        );
+        // With a 10% annual rate the later cumulative factors compound strictly
+        // below the 1.0 placeholder, so the postprocessed vector is provably not
+        // the placeholder the builder hands back.
+        assert!(
+            cumulative.iter().any(|&d| d < 1.0),
+            "postprocessed cumulative factors must drop below the 1.0 placeholder, got {cumulative:?}"
+        );
+        assert!(
+            cumulative[cumulative.len() - 1] < 1.0,
+            "the final cumulative factor must be discounted below 1.0, got {}",
+            cumulative[cumulative.len() - 1]
+        );
+    }
+
+    // ── Operational-violation RHS & matrix-coefficient verification ──────────
+    //
+    // These verify the LP-builder's row bounds (RHS) and CSC matrix coefficients
+    // at the four operational-violation constraint-row families. They locate the
+    // rows via `StageLayout`'s op-violation row ranges directly — the row ranges
+    // the per-stage layout owns and the public `StageGeometry` does not expose —
+    // so this is the correct layer for them. The RHS/coefficient values are
+    // produced by `fill_operational_violation_rows` / `fill_operational_violation_entries`
+    // through `build_single_stage_template`.
+
+    use super::super::layout::StageLayout;
+    use super::COST_SCALE_FACTOR;
+    use crate::hydro_models::{ProductionModelSet, ResolvedProductionModel};
+    use cobre_core::System;
+    use cobre_solver::StageTemplate;
+
+    /// One-hydro system with all operational-violation bounds active (min/max
+    /// outflow, min turbine, min generation > 0), two blocks per stage, and
+    /// `1000.0` violation penalties — the fixture the operational-violation
+    /// builder tests exercise.
+    fn one_hydro_active_violations(n_stages: usize) -> System {
+        use cobre_core::scenario::{InflowModel, LoadModel};
+
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+
+        let hydro = Hydro {
+            id: EntityId(2),
+            name: "H1".to_string(),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            min_outflow_m3s: 50.0,
+            max_outflow_m3s: Some(800.0),
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 10.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 5.0,
+            max_generation_mw: 250.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 1000.0,
+                outflow_violation_below_cost: 1000.0,
+                outflow_violation_above_cost: 1000.0,
+                generation_violation_below_cost: 1000.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        };
+
+        let stages: Vec<Stage> = (0..n_stages)
+            .map(|i| Stage {
+                index: i,
+                id: i as i32,
+                start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                season_id: None,
+                blocks: vec![
+                    Block {
+                        index: 0,
+                        name: "Heavy".to_string(),
+                        duration_hours: 720.0,
+                    },
+                    Block {
+                        index: 1,
+                        name: "Light".to_string(),
+                        duration_hours: 48.0,
+                    },
+                ],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            })
+            .collect();
+
+        let inflow_models: Vec<InflowModel> = (0..n_stages)
+            .map(|i| InflowModel {
+                hydro_id: EntityId(2),
+                stage_id: i as i32,
+                mean_m3s: 80.0,
+                std_m3s: 20.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..n_stages)
+            .map(|i| LoadModel {
+                bus_id: EntityId(1),
+                stage_id: i as i32,
+                mean_mw: 100.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let n_st = n_stages.max(1);
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: n_st,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 200.0,
+                    min_turbined_m3s: 10.0,
+                    max_turbined_m3s: 100.0,
+                    min_outflow_m3s: 50.0,
+                    max_outflow_m3s: Some(800.0),
+                    min_generation_mw: 5.0,
+                    max_generation_mw: 250.0,
+                    max_diversion_m3s: None,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: n_st,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.01,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 0.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 1000.0,
+                    outflow_violation_below_cost: 1000.0,
+                    outflow_violation_above_cost: 1000.0,
+                    generation_violation_below_cost: 1000.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 1000.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .build()
+            .expect("one_hydro_active_violations: valid")
+    }
+
+    /// Get CSC entries for column `col` of a built `StageTemplate` as
+    /// `(row, value)` pairs.
+    #[allow(clippy::cast_sign_loss)]
+    fn csc_entries_for_col(t: &StageTemplate, col: usize) -> Vec<(usize, f64)> {
+        let start = t.col_starts[col] as usize;
+        let end = t.col_starts[col + 1] as usize;
+        (start..end)
+            .map(|nz| (t.row_indices[nz] as usize, t.values[nz]))
+            .collect()
+    }
+
+    /// Build the active-violations stage-0 `StageLayout` (the owner of the
+    /// op-violation row/column ranges) and the matching `StageTemplate` (RHS,
+    /// bounds, objective, CSC) from one shared `TemplateBuildCtx`, so the row
+    /// ranges and the template the tests query agree by construction.
+    ///
+    /// Productivity is `0.5` so the per-block min-generation row carries a
+    /// `0.5` turbine coefficient (asserted by
+    /// [`relocated_min_generation_constant_productivity_coefficients`]).
+    fn build_active_violations_layout_and_template() -> (StageLayout<'static>, StageTemplate) {
+        let system = Box::leak(Box::new(one_hydro_active_violations(1)));
+        let par_lp = Box::leak(Box::new(PrecomputedPar::default()));
+        let production = Box::leak(Box::new(ProductionModelSet::new(
+            vec![vec![ResolvedProductionModel::ConstantProductivity {
+                productivity: 0.5,
+            }]],
+            1,
+            1,
+        )));
+        let hydro_models = Box::leak(Box::new(PrepareHydroModelsResult::default_from_system(
+            system,
+        )));
+        let resolved_params = Box::leak(Box::new(ResolvedParameters {
+            per_param: vec![],
+            id_to_slot: vec![],
+        }));
+
+        let (ctx, _, _) = super::build_template_build_ctx(
+            system,
+            InflowNonNegativityMethod::None,
+            par_lp,
+            production,
+            &hydro_models.evaporation,
+            resolved_params,
+        );
+        let ctx = Box::leak(Box::new(ctx));
+        let state = Box::leak(Box::new(state_layout_for(ctx)));
+        let stage = &system.stages()[0];
+
+        // `build_single_stage_template` and `StageLayout::new` are deterministic
+        // functions of the same `(ctx, state, stage, 0)`, so the template and the
+        // layout agree on every row/column offset.
+        let template = super::build_single_stage_template(ctx, state, stage, 0).template;
+        let layout = StageLayout::new(ctx, state, stage, 0);
+        (layout, template)
+    }
+
+    #[test]
+    fn relocated_operational_violation_row_counts() {
+        // 1 hydro, 2 blocks => 4 operational violation rows of length 2 each.
+        let (layout, t) = build_active_violations_layout_and_template();
+
+        // 4 row ranges each contain n_hydros * n_blks = 1 * 2 = 2 rows.
+        assert_eq!(layout.min_outflow_rows.len(), 2);
+        assert_eq!(layout.max_outflow_rows.len(), 2);
+        assert_eq!(layout.min_turbine_rows.len(), 2);
+        assert_eq!(layout.min_generation_rows.len(), 2);
+
+        // All constraint rows are within the template's range.
+        assert!(
+            layout.min_generation_rows.end <= t.num_rows,
+            "operational violation rows exceed num_rows"
+        );
+    }
+
+    #[test]
+    fn relocated_min_outflow_row_bounds() {
+        // Per-block: RHS in rate units (m3/s), not volume.
+        let (layout, t) = build_active_violations_layout_and_template();
+        let expected_lower = 50.0; // min_outflow_m3s
+
+        // Both blocks get the same RHS.
+        for blk in 0..2 {
+            let row = layout.min_outflow_rows.start + blk;
+            assert!(
+                (t.row_lower[row] - expected_lower).abs() < 1e-10,
+                "min_outflow row_lower (block {blk}) = {}, expected {}",
+                t.row_lower[row],
+                expected_lower
+            );
+            assert_eq!(
+                t.row_upper[row],
+                f64::INFINITY,
+                "min_outflow row_upper must be +inf"
+            );
+        }
+    }
+
+    #[test]
+    fn relocated_max_outflow_row_bounds() {
+        // Per-block: RHS in rate units (m3/s).
+        let (layout, t) = build_active_violations_layout_and_template();
+        let expected_upper = 800.0; // max_outflow_m3s
+
+        for blk in 0..2 {
+            let row = layout.max_outflow_rows.start + blk;
+            assert_eq!(
+                t.row_lower[row],
+                f64::NEG_INFINITY,
+                "max_outflow row_lower must be -inf"
+            );
+            assert!(
+                (t.row_upper[row] - expected_upper).abs() < 1e-10,
+                "max_outflow row_upper (block {blk}) = {}, expected {}",
+                t.row_upper[row],
+                expected_upper
+            );
+        }
+    }
+
+    #[test]
+    fn relocated_min_turbine_row_bounds() {
+        // Per-block: RHS in rate units (m3/s).
+        let (layout, t) = build_active_violations_layout_and_template();
+        let expected_lower = 10.0; // min_turbined_m3s
+
+        for blk in 0..2 {
+            let row = layout.min_turbine_rows.start + blk;
+            assert!(
+                (t.row_lower[row] - expected_lower).abs() < 1e-10,
+                "min_turbine row_lower (block {blk}) = {}, expected {}",
+                t.row_lower[row],
+                expected_lower
+            );
+            assert_eq!(
+                t.row_upper[row],
+                f64::INFINITY,
+                "min_turbine row_upper must be +inf"
+            );
+        }
+    }
+
+    #[test]
+    fn relocated_min_generation_row_bounds() {
+        // Per-block: RHS in rate units (MW), not MWh.
+        let (layout, t) = build_active_violations_layout_and_template();
+        let expected_lower = 5.0; // min_generation_mw
+
+        for blk in 0..2 {
+            let row = layout.min_generation_rows.start + blk;
+            assert!(
+                (t.row_lower[row] - expected_lower).abs() < 1e-10,
+                "min_generation row_lower (block {blk}) = {}, expected {}",
+                t.row_lower[row],
+                expected_lower
+            );
+            assert_eq!(
+                t.row_upper[row],
+                f64::INFINITY,
+                "min_generation row_upper must be +inf"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::cast_sign_loss)]
+    fn relocated_min_outflow_matrix_coefficients() {
+        // Per-block min outflow: q + s + d + slack = 1.0 per block-row.
+        let (layout, t) = build_active_violations_layout_and_template();
+        let n_blks = 2;
+
+        for blk in 0..n_blks {
+            let row = layout.min_outflow_rows.start + blk;
+
+            // Turbine column for this block: coefficient 1.0
+            let entries = csc_entries_for_col(&t, layout.turbine.start + blk);
+            let v = entries.iter().find(|e| e.0 == row).map(|e| e.1);
+            assert!(
+                v.is_some() && (v.unwrap() - 1.0).abs() < 1e-15,
+                "turbine blk{blk} entry for min_outflow row: {v:?}"
+            );
+
+            // Spillage column for this block: coefficient 1.0
+            let entries = csc_entries_for_col(&t, layout.spillage.start + blk);
+            let v = entries.iter().find(|e| e.0 == row).map(|e| e.1);
+            assert!(
+                v.is_some() && (v.unwrap() - 1.0).abs() < 1e-15,
+                "spillage blk{blk} entry for min_outflow row: {v:?}"
+            );
+
+            // Slack column for this block: coefficient 1.0
+            let entries = csc_entries_for_col(&t, layout.outflow_below_slack.start + blk);
+            let v = entries.iter().find(|e| e.0 == row).map(|e| e.1);
+            assert!(
+                v.is_some() && (v.unwrap() - 1.0).abs() < 1e-15,
+                "outflow_below slack blk{blk}: {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::cast_sign_loss)]
+    fn relocated_max_outflow_matrix_slack_is_negative() {
+        // Per-block max outflow row: slack coefficient = -1.0.
+        let (layout, t) = build_active_violations_layout_and_template();
+        let n_blks = 2;
+
+        for blk in 0..n_blks {
+            let row = layout.max_outflow_rows.start + blk;
+            let entries = csc_entries_for_col(&t, layout.outflow_above_slack.start + blk);
+            let v = entries.iter().find(|e| e.0 == row).map(|e| e.1);
+            assert!(
+                v.is_some() && (v.unwrap() - (-1.0)).abs() < 1e-15,
+                "outflow_above slack blk{blk} must be -1.0, got {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::cast_sign_loss)]
+    fn relocated_min_turbine_matrix_only_turbine_cols() {
+        // Per-block min turbine: only turbine columns (no spillage), coefficient 1.0.
+        let (layout, t) = build_active_violations_layout_and_template();
+        let n_blks = 2;
+
+        for blk in 0..n_blks {
+            let row = layout.min_turbine_rows.start + blk;
+
+            // Turbine column: coefficient 1.0
+            let entries = csc_entries_for_col(&t, layout.turbine.start + blk);
+            let v = entries.iter().find(|e| e.0 == row).map(|e| e.1);
+            assert!(
+                v.is_some() && (v.unwrap() - 1.0).abs() < 1e-15,
+                "turbine blk{blk} min_turbine: {v:?}"
+            );
+
+            // Spillage should NOT appear in min_turbine row.
+            let entries_spill = csc_entries_for_col(&t, layout.spillage.start + blk);
+            let v_spill = entries_spill.iter().find(|e| e.0 == row);
+            assert!(
+                v_spill.is_none(),
+                "spillage should not appear in min_turbine row (blk {blk})"
+            );
+
+            // Slack = +1.0
+            let entries = csc_entries_for_col(&t, layout.turbine_below_slack.start + blk);
+            let v = entries.iter().find(|e| e.0 == row).map(|e| e.1);
+            assert!(
+                v.is_some() && (v.unwrap() - 1.0).abs() < 1e-15,
+                "turbine_below slack blk{blk}: {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::cast_sign_loss)]
+    fn relocated_min_generation_constant_productivity_coefficients() {
+        // Per-block constant productivity: coefficient = rho = 0.5 per block-row.
+        let (layout, t) = build_active_violations_layout_and_template();
+        let n_blks = 2;
+        let rho = 0.5;
+
+        for blk in 0..n_blks {
+            let row = layout.min_generation_rows.start + blk;
+
+            // Turbine column: coefficient = rho
+            let entries = csc_entries_for_col(&t, layout.turbine.start + blk);
+            let v = entries.iter().find(|e| e.0 == row).map(|e| e.1);
+            assert!(
+                v.is_some() && (v.unwrap() - rho).abs() < 1e-10,
+                "turbine blk{blk} min_gen coeff: {v:?}, expected {rho}"
+            );
+
+            // Slack: +1.0
+            let entries_s = csc_entries_for_col(&t, layout.generation_below_slack.start + blk);
+            let vs = entries_s.iter().find(|e| e.0 == row).map(|e| e.1);
+            assert!(
+                vs.is_some() && (vs.unwrap() - 1.0).abs() < 1e-15,
+                "generation_below slack blk{blk}: {vs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn relocated_operational_violation_rows_outside_dual_relevant() {
+        // n_dual_relevant is always 0 (state pinning uses column bounds). All
+        // operational violation rows must be placed beyond this range.
+        let (layout, t) = build_active_violations_layout_and_template();
+
+        assert_eq!(
+            t.n_dual_relevant, 0,
+            "n_dual_relevant is always 0 with column-bound state pinning"
+        );
+
+        // All 4 operational violation row ranges must start beyond n_dual_relevant.
+        assert!(
+            layout.min_outflow_rows.start > t.n_dual_relevant,
+            "min_outflow row {} must be > n_dual_relevant {}",
+            layout.min_outflow_rows.start,
+            t.n_dual_relevant
+        );
+        assert!(
+            layout.max_outflow_rows.start > t.n_dual_relevant,
+            "max_outflow row {} must be > n_dual_relevant {}",
+            layout.max_outflow_rows.start,
+            t.n_dual_relevant
+        );
+        assert!(
+            layout.min_turbine_rows.start > t.n_dual_relevant,
+            "min_turbine row {} must be > n_dual_relevant {}",
+            layout.min_turbine_rows.start,
+            t.n_dual_relevant
+        );
+        assert!(
+            layout.min_generation_rows.start > t.n_dual_relevant,
+            "min_generation row {} must be > n_dual_relevant {}",
+            layout.min_generation_rows.start,
+            t.n_dual_relevant
+        );
+    }
+
+    #[test]
+    fn relocated_diagnostic_template_operational_violation_correctness() {
+        let (layout, t) = build_active_violations_layout_and_template();
+
+        // Operational-violation presence: the non-empty min-outflow slack range
+        // is the evidence the families are present when hydros exist.
+        assert!(
+            !layout.outflow_below_slack.is_empty(),
+            "operational-violation slack columns must be present when hydros exist"
+        );
+
+        // Per-block formulation: RHS is in rate units (m3/s or MW), not volume/energy.
+        // Block 0 column at `.start`, block 1 at `.start + 1`.
+        let block_hours_0 = 720.0;
+
+        // Min outflow row (block 0): row_lower = 50.0 m3/s
+        let row = layout.min_outflow_rows.start;
+        assert!(
+            (t.row_lower[row] - 50.0).abs() < 1e-10,
+            "min_outflow row_lower = {}, expected 50.0 (rate units m3/s)",
+            t.row_lower[row],
+        );
+        assert_eq!(
+            t.row_upper[row],
+            f64::INFINITY,
+            "min_outflow row_upper must be +inf for >= constraint"
+        );
+
+        // Column bounds: outflow_below_slack block 0.
+        let col = layout.outflow_below_slack.start;
+        assert_eq!(
+            t.col_lower[col], 0.0,
+            "outflow_below_slack col_lower must be 0"
+        );
+        assert_eq!(
+            t.col_upper[col],
+            f64::INFINITY,
+            "outflow_below_slack col_upper must be +inf when min_outflow > 0"
+        );
+
+        // Objective: penalty * block_hours (block 0).
+        let expected_objective = 1000.0 * block_hours_0 / COST_SCALE_FACTOR;
+        assert!(
+            t.objective[col] > 0.0,
+            "outflow_below_slack objective must be positive (penalty), got {}",
+            t.objective[col]
+        );
+        assert!(
+            (t.objective[col] - expected_objective).abs() < 1e-10,
+            "outflow_below_slack objective = {}, expected {} (= 1000 * {} / {})",
+            t.objective[col],
+            expected_objective,
+            block_hours_0,
+            COST_SCALE_FACTOR
+        );
+
+        let col_above = layout.outflow_above_slack.start;
+        assert_eq!(t.col_upper[col_above], f64::INFINITY);
+        assert!(t.objective[col_above] > 0.0);
+
+        let col_turb = layout.turbine_below_slack.start;
+        assert_eq!(t.col_upper[col_turb], f64::INFINITY);
+        assert!(t.objective[col_turb] > 0.0);
+
+        let col_gen = layout.generation_below_slack.start;
+        assert_eq!(t.col_upper[col_gen], f64::INFINITY);
+        assert!(t.objective[col_gen] > 0.0);
+
+        // Min turbine row (block 0): row_lower = 10.0 m3/s
+        let min_turb_row = layout.min_turbine_rows.start;
+        assert!(
+            (t.row_lower[min_turb_row] - 10.0).abs() < 1e-10,
+            "min_turbine row_lower = {}, expected 10.0 (rate units m3/s)",
+            t.row_lower[min_turb_row],
+        );
+
+        // Min generation row (block 0): row_lower = 5.0 MW
+        let min_gen_row = layout.min_generation_rows.start;
+        assert!(
+            (t.row_lower[min_gen_row] - 5.0).abs() < 1e-10,
+            "min_generation row_lower = {}, expected 5.0 (rate units MW)",
+            t.row_lower[min_gen_row],
+        );
+
+        // Max outflow row (block 0): row_upper = 800.0 m3/s
+        let max_outflow_row = layout.max_outflow_rows.start;
+        assert!(
+            (t.row_upper[max_outflow_row] - 800.0).abs() < 1e-10,
+            "max_outflow row_upper = {}, expected 800.0 (rate units m3/s)",
+            t.row_upper[max_outflow_row],
+        );
+    }
+
+    // ── build_filling_v_target backward fold ─────────────────────────────────
+
+    use cobre_core::FillingConfig;
+    use std::collections::BTreeMap as VTargetMap;
+
+    /// A single non-cascade hydro carrying a `FillingConfig`
+    /// (`start_stage_id`/`entry_stage_id`), used by the `build_filling_v_target`
+    /// fold tests. All other fields are inert.
+    fn vtarget_filling_hydro(id: i32, start: i32, entry: i32) -> Hydro {
+        Hydro {
+            id: EntityId(id),
+            name: format!("H{id}"),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            entry_stage_id: Some(entry),
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 50.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 45.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: Some(FillingConfig {
+                start_stage_id: start,
+                filling_min_rate_m3s: 0.0,
+            }),
+            penalties: hydro_penalties_zero(),
+        }
+    }
+
+    /// A `ResolvedBounds` table for one hydro across `n_stages` stages, with every
+    /// stage's `min_storage_hm3` and `filling_min_rate_m3s` set to the given values.
+    fn vtarget_bounds(n_stages: usize, min_storage: f64, rate: f64) -> ResolvedBounds {
+        let mut bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        for stage_idx in 0..n_stages {
+            let hb = bounds.hydro_bounds_mut(0, stage_idx);
+            hb.min_storage_hm3 = min_storage;
+            hb.filling_min_rate_m3s = rate;
+        }
+        bounds
+    }
+
+    /// Identity `stage_id → stage_idx` map for `n_stages` study stages.
+    fn vtarget_id_map(n_stages: usize) -> VTargetMap<i32, usize> {
+        (0..n_stages).map(|i| (i as i32, i)).collect()
+    }
+
+    /// The AC: `start = 2`, `entry = 4`, `min_storage = 60`, per-stage ζ = 2.592
+    /// (`total_hours = 720`, `M3S_TO_HM3 = 0.0036`), `rate = 5`. The backward fold
+    /// pins `V_target[3] = 60` (the dead-volume anchor at L = entry − 1) and
+    /// `V_target[2] = 60 − 2.592·5 = 47.04` (one stage of minimum accumulation
+    /// below the anchor). No `V_target` is emitted at PreFilling (ids 0, 1) or
+    /// Operating (id ≥ 4).
+    #[test]
+    fn build_filling_v_target_backward_fold_ac_values() {
+        let n_stages = 5;
+        let hydros = vec![vtarget_filling_hydro(1, 2, 4)];
+        let bounds = vtarget_bounds(n_stages, 60.0, 5.0);
+        // ζ_t = total_hours[t]·M3S_TO_HM3 = 720·0.0036 = 2.592 at every stage.
+        let total_hours = vec![720.0; n_stages];
+        let v_target = super::build_filling_v_target(
+            &hydros,
+            &bounds,
+            &total_hours,
+            &vtarget_id_map(n_stages),
+        );
+
+        // L = entry − 1 = 3: anchored at the dead volume.
+        assert!(
+            (v_target[&(0, 3)] - 60.0).abs() < 1e-9,
+            "V_target[3] == min_storage == 60.0, got {}",
+            v_target[&(0, 3)]
+        );
+        // Early Filling stage 2: 60 − 2.592·5 = 47.04.
+        assert!(
+            (v_target[&(0, 2)] - 47.04).abs() < 1e-9,
+            "V_target[2] == 60 − 2.592·5 == 47.04, got {}",
+            v_target[&(0, 2)]
+        );
+        // No entry outside the Filling window {2, 3}.
+        assert!(
+            !v_target.contains_key(&(0, 0)),
+            "no V_target at PreFilling id 0"
+        );
+        assert!(
+            !v_target.contains_key(&(0, 1)),
+            "no V_target at PreFilling id 1"
+        );
+        assert!(
+            !v_target.contains_key(&(0, 4)),
+            "no V_target at Operating id 4"
+        );
+        // Exactly the two Filling-stage entries.
+        assert_eq!(v_target.len(), 2, "exactly one V_target per Filling stage");
+    }
+
+    /// Over-provisioned schedule: a fill rate large enough that the backward fold's
+    /// unclipped value would exceed `min_storage` is impossible (non-negative rate
+    /// only lowers it); the contract is that EVERY `V_target[t] ≤ min_storage`. With
+    /// a wide Filling window (ids 1..=5, entry = 6) and a high rate, every earliest
+    /// floor sits strictly below the dead volume and the clip never raises one above
+    /// it. The clip is verified to hold at every Filling stage.
+    #[test]
+    fn build_filling_v_target_clips_at_min_storage_when_over_provisioned() {
+        let n_stages = 7;
+        let min_storage = 30.0;
+        let hydros = vec![vtarget_filling_hydro(1, 1, 6)]; // Filling ids {1,2,3,4,5}.
+        // A high rate (50 m³/s over ζ = 2.592 ⇒ 129.6 hm³/stage) far exceeds the
+        // 30 hm³ dead volume, so the unclipped earliest floors go deeply negative.
+        let bounds = vtarget_bounds(n_stages, min_storage, 50.0);
+        let total_hours = vec![720.0; n_stages];
+        let v_target = super::build_filling_v_target(
+            &hydros,
+            &bounds,
+            &total_hours,
+            &vtarget_id_map(n_stages),
+        );
+
+        for stage_id in 1..=5 {
+            let v = v_target[&(0, stage_id)];
+            assert!(
+                v <= min_storage + 1e-12,
+                "V_target[{stage_id}] = {v} must not exceed the dead volume {min_storage}"
+            );
+        }
+        // The anchor (last Filling stage, id 5) is exactly the dead volume.
+        assert!(
+            (v_target[&(0, 5)] - min_storage).abs() < 1e-9,
+            "V_target[L] == min_storage (the clip is a no-op at the anchor)"
+        );
+        // The earliest floor is strictly below (deep accumulation requirement).
+        assert!(
+            v_target[&(0, 1)] < v_target[&(0, 5)],
+            "earliest floor strictly below the anchor"
+        );
+    }
+
+    /// A zero fill rate makes the trajectory FLAT: every Filling stage's floor
+    /// equals `min_storage` (the design's `rate == 0 ⇒ V_target[t] == V_target[t+1]`
+    /// degenerate case). The clip is a no-op throughout.
+    #[test]
+    fn build_filling_v_target_flat_when_rate_is_zero() {
+        let n_stages = 5;
+        let hydros = vec![vtarget_filling_hydro(1, 1, 4)]; // Filling ids {1,2,3}.
+        let bounds = vtarget_bounds(n_stages, 45.0, 0.0);
+        let total_hours = vec![720.0; n_stages];
+        let v_target = super::build_filling_v_target(
+            &hydros,
+            &bounds,
+            &total_hours,
+            &vtarget_id_map(n_stages),
+        );
+        for stage_id in 1..=3 {
+            assert!(
+                (v_target[&(0, stage_id)] - 45.0).abs() < 1e-9,
+                "flat trajectory: V_target[{stage_id}] == min_storage == 45.0"
+            );
+        }
+    }
+
+    /// A non-filling hydro (no `FillingConfig`) yields an EMPTY map — the
+    /// parity-neutrality contract for the precompute itself.
+    #[test]
+    fn build_filling_v_target_empty_for_non_filling() {
+        let n_stages = 3;
+        let mut h = vtarget_filling_hydro(1, 1, 2);
+        h.filling = None;
+        h.entry_stage_id = None;
+        let hydros = vec![h];
+        let bounds = vtarget_bounds(n_stages, 50.0, 5.0);
+        let total_hours = vec![720.0; n_stages];
+        let v_target = super::build_filling_v_target(
+            &hydros,
+            &bounds,
+            &total_hours,
+            &vtarget_id_map(n_stages),
+        );
+        assert!(
+            v_target.is_empty(),
+            "non-filling hydro ⇒ empty V_target map"
+        );
     }
 }

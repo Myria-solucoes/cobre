@@ -1,10 +1,8 @@
-//! Out-of-sample forward-pass noise generation.
+//! Out-of-sample forward-pass noise generation: fresh independent N(0,1) noise
+//! per draw, optionally followed by in-place spatial spectral correlation.
 //!
-//! Generates fresh N(0,1) noise on-the-fly during forward pass by:
-//! 1. Dispatching on [`NoiseMethod`] to fill output with independent N(0,1) samples
-//! 2. Applying spatial spectral correlation in-place
-//!
-//! Supported methods: SAA, LHS, QMC (Sobol/Halton), Selective (falls back to SAA).
+//! Methods: SAA, LHS, QMC (Sobol/Halton); Selective and `HistoricalResiduals`
+//! fall back to SAA in the forward pass.
 
 use cobre_core::temporal::NoiseMethod;
 use rand::RngExt;
@@ -24,8 +22,6 @@ use crate::{
 };
 
 /// Parameters for a single out-of-sample noise draw.
-///
-/// Bundles common seed/dimension fields to stay within the argument budget.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FreshNoiseSpec {
     pub forward_seed: u64,
@@ -33,19 +29,15 @@ pub(crate) struct FreshNoiseSpec {
     pub iteration: u32,
     pub scenario: u32,
     pub stage_id: u32,
-    /// Noise group identifier used for seed derivation (noise-group sharing).
-    ///
-    /// Stages within the same `(season_id, year)` bucket share the same
-    /// `noise_group_id` so that their noise draws are identical.
+    /// Seed-derivation identifier: stages sharing a `(season_id, year)` bucket
+    /// share a `noise_group_id` so their noise draws are identical.
     pub noise_group_id: u32,
     pub dim: usize,
     pub total_scenarios: u32,
 }
 
-/// Generate fresh correlated N(0,1) noise for a single `(iteration, scenario, stage)` triple.
-///
-/// Fills `output[0..spec.dim]` with independent N(0,1) samples, then applies
-/// spatial spectral correlation in-place. No heap allocation inside this function.
+/// Fill `output[0..spec.dim]` with fresh N(0,1) noise, then apply spatial
+/// spectral correlation in-place. No heap allocation.
 ///
 /// # Errors
 ///
@@ -70,12 +62,9 @@ pub(crate) fn sample_fresh(
     Ok(())
 }
 
-/// Fill `output[0..spec.dim]` with independent N(0,1) noise without applying correlation.
-///
-/// Dispatches on [`NoiseMethod`] exactly as [`sample_fresh`] does for the
-/// uncorrelated phase, but omits the spectral correlation step. Correlation is
-/// applied externally by the composite `ForwardSampler` after all class segments
-/// have been filled.
+/// Fill `output[0..spec.dim]` with independent N(0,1) noise, omitting the
+/// spectral correlation step that [`sample_fresh`] applies — the composite
+/// `ForwardSampler` correlates afterward, once all class segments are filled.
 ///
 /// # Errors
 ///

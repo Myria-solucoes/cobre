@@ -1,14 +1,5 @@
-//! Integration test: end-to-end run with K=2 anticipated thermals.
-//!
-//! Verifies that `simulation/thermals/` carries non-null, semantically
-//! correct values in the three columns `is_anticipated`,
-//! `anticipated_decision_mw`, and `anticipated_committed_mw` after a
-//! full training + simulation run on a 3-stage fixture with one regular and
-//! one anticipated thermal plant (`lead_stages=2`).
-//!
-//! Also verifies that `training/dictionaries/state_dictionary.json` is
-//! written with exactly `K_max * n_anticipated = 2 * 1 = 2` entries of
-//! type `"anticipated_state"` referencing `entity_id=2` at `slot_index` 0 and 1.
+//! Integration test: end-to-end run with K=2 anticipated thermals on a 3-stage
+//! fixture (one regular, one anticipated thermal with `lead_stages=2`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -25,7 +16,6 @@ fn cobre() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("cobre"))
 }
 
-/// Config with simulation enabled (1 scenario, 2 training iterations).
 const CONFIG_JSON: &str = r#"{
     "training": {
         "forward_passes": 1,
@@ -140,11 +130,6 @@ fn write_file(root: &Path, relative: &str, content: &str) {
     fs::write(&full, content).unwrap();
 }
 
-/// Reads all record batches from a Parquet file and concatenates them into
-/// a single collection of column arrays, indexed by column name.
-///
-/// Returns `(stage_ids, thermal_ids, is_anticipated, anticipated_committed_mw,
-/// anticipated_decision_mw)` extracted from every row.
 struct ThermalRows {
     stage_ids: Vec<i32>,
     thermal_ids: Vec<i32>,
@@ -272,8 +257,7 @@ fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
         .assert()
         .success();
 
-    // Simulation writes one parquet per scenario. With num_scenarios=1, the file
-    // is at simulation/thermals/scenario_id=0000/data.parquet.
+    // One parquet per scenario; num_scenarios=1 gives the single scenario_id=0000 file.
     let parquet_path = output.join("simulation/thermals/scenario_id=0000/data.parquet");
     assert!(
         parquet_path.exists(),
@@ -288,7 +272,6 @@ fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
         "thermals.parquet must contain at least one row"
     );
 
-    // Regular thermal — is_anticipated=false, both optional columns null.
     for (row_idx, &tid) in rows.thermal_ids.iter().enumerate() {
         if tid != regular_id {
             continue;
@@ -311,7 +294,6 @@ fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
         );
     }
 
-    // Verify we actually saw rows for the regular thermal.
     let regular_row_count = rows
         .thermal_ids
         .iter()
@@ -322,7 +304,6 @@ fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
         "no rows found for regular thermal id={regular_id} in thermals.parquet"
     );
 
-    // Anticipated thermal — is_anticipated=true for all rows.
     for (row_idx, &tid) in rows.thermal_ids.iter().enumerate() {
         if tid != anticipated_id {
             continue;
@@ -335,7 +316,6 @@ fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
         );
     }
 
-    // Verify we actually saw rows for the anticipated thermal.
     let anticipated_row_count = rows
         .thermal_ids
         .iter()
@@ -346,8 +326,6 @@ fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
         "no rows found for anticipated thermal id={anticipated_id} in thermals.parquet"
     );
 
-    // Anticipated thermal at stage 0 — anticipated_decision_mw non-null and >= 0.0,
-    // anticipated_committed_mw null (decision placed, K=2 not yet reached: 2 <= 0 is false).
     let stage_0_ant_rows: Vec<usize> = rows
         .thermal_ids
         .iter()
@@ -387,10 +365,6 @@ fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
         );
     }
 
-    // Anticipated thermal at stage 1 — anticipated_decision_mw null (horizon-boundary
-    // INACTIVE under the strict predicate: t + K_i = 1 + 2 = 3 = n_stages, so
-    // the decision column has [0, 0] bounds and the extraction returns None).
-    // anticipated_committed_mw non-null under always-active fishing (reads slot 0).
     let stage_1_ant_rows: Vec<usize> = rows
         .thermal_ids
         .iter()
@@ -425,8 +399,6 @@ fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
         );
     }
 
-    // Anticipated thermal at stage 2 — anticipated_decision_mw null (t + K_i = 2 + 2 = 4 >
-    // n_stages=3), anticipated_committed_mw non-null and >= 0.0 (delivery: K_i=2 <= 2).
     let stage_2_ant_rows: Vec<usize> = rows
         .thermal_ids
         .iter()
@@ -460,9 +432,6 @@ fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
         );
     }
 
-    // Assert training/dictionaries/state_dictionary.json exists and contains exactly
-    // K_max * n_anticipated = 2 * 1 = 2 entries with "type": "anticipated_state",
-    // both referencing entity_id=2 with slot_index in {0, 1} in slot-major order.
     let state_dict_path = output.join("training/dictionaries/state_dictionary.json");
     assert!(
         state_dict_path.exists(),
@@ -512,7 +481,6 @@ fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
         );
     }
 
-    // Verify slot-major order: slot_index values must be {0, 1}.
     let slot_indices: std::collections::HashSet<u64> = anticipated_entries
         .iter()
         .filter_map(|entry| entry["slot_index"].as_u64())
@@ -525,10 +493,8 @@ fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
         "anticipated_state entries must cover slot_index values {{0, 1}}, found {slot_indices:?}"
     );
 
-    // Each entry must carry `lead_stages` so consumers can
-    // distinguish active slots (slot_index < lead_stages) from padding
-    // slots (slot_index >= lead_stages). For this fixture lead_stages=2
-    // and k_max=2, so every slot is active.
+    // Consumers use lead_stages to split active slots (slot_index < lead_stages)
+    // from padding (slot_index >= lead_stages); here lead_stages=2=k_max, all active.
     for entry in &anticipated_entries {
         assert_eq!(
             entry["lead_stages"].as_u64(),

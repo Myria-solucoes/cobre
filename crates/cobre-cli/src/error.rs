@@ -1,8 +1,6 @@
 //! CLI error type with exit code mapping and terminal formatting.
 //!
 //! [`CliError`] is the single error type returned by all subcommand functions.
-//! It maps library errors to structured CLI exit codes and produces
-//! human-readable diagnostic output with actionable hints.
 //!
 //! # Exit codes
 //!
@@ -17,8 +15,7 @@ use console::Term;
 
 /// Errors that can occur during CLI command execution.
 ///
-/// Each variant maps to a specific exit code and carries enough context
-/// for [`CliError::format_error`] to print an actionable diagnostic to stderr.
+/// Each variant maps to a specific exit code (see the module-level table).
 ///
 /// # Examples
 ///
@@ -35,28 +32,19 @@ use console::Term;
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
     /// Case directory failed the validation pipeline (exit code 1).
-    ///
-    /// Covers schema errors, cross-reference errors, semantic constraint
-    /// violations, and policy compatibility mismatches detected during
-    /// `cobre_io::load_case`.
     #[error("validation error: {report}")]
     Validation {
         /// Human-readable summary of the validation failure.
         report: String,
         /// `true` when the originating subcommand already printed `report` to
-        /// stdout (the `validate` subcommand). When set, [`CliError::format_error`]
-        /// suppresses the stderr re-print and the "run `cobre validate`" hint, so
-        /// the report surfaces exactly once and the hint never points back at the
-        /// command the user just ran. `false` on every other path (`run`,
-        /// `report`, …), where the stderr render is the only surfacing and the
-        /// hint is actionable.
+        /// stdout (the `validate` subcommand): [`CliError::format_error`] then
+        /// suppresses the stderr re-print and the hint so the report surfaces
+        /// once and the hint never points back at the command just run. `false`
+        /// elsewhere, where the stderr render is the only surfacing.
         already_rendered: bool,
     },
 
     /// Filesystem I/O error (exit code 2).
-    ///
-    /// Covers file-not-found, permission denied, disk full, and write
-    /// failures in both the loading pipeline and the output writers.
     #[error("I/O error in {context}: {source}")]
     Io {
         /// Underlying I/O error.
@@ -66,9 +54,6 @@ pub enum CliError {
     },
 
     /// LP solver error during training or simulation (exit code 3).
-    ///
-    /// Covers infeasible subproblems and numerical solver failures. The
-    /// training loop performs a hard stop when this error is returned.
     #[error("solver error: {message}")]
     Solver {
         /// Human-readable description of the solver failure.
@@ -77,9 +62,7 @@ pub enum CliError {
 
     /// Internal or communication error (exit code 4).
     ///
-    /// Covers distributed communication failures, stochastic model errors,
-    /// unexpected channel closures, and other conditions that indicate a
-    /// software or environment problem rather than a user error.
+    /// A software or environment problem rather than a user error.
     #[error("internal error: {message}")]
     Internal {
         /// Human-readable description of the internal failure.
@@ -112,13 +95,8 @@ impl CliError {
 
     /// Build the stderr diagnostic lines for a [`CliError::Validation`].
     ///
-    /// Returns the report line plus the "run `cobre validate`" hint when the
-    /// caller has NOT already rendered the report to stdout. When
-    /// `already_rendered` is `true` (the `validate` subcommand printed the
-    /// report to stdout), returns an empty list: re-printing to stderr would
-    /// double the output and the hint would point back at the command the user
-    /// just ran. This is the single decision point exercised by the unit tests;
-    /// keeping it pure lets the test assert the rendered lines without a TTY.
+    /// Empty when `already_rendered`; otherwise the report line plus the
+    /// "run `cobre validate`" hint (see the `already_rendered` field).
     fn validation_lines(report: &str, already_rendered: bool) -> Vec<String> {
         if already_rendered {
             return Vec::new();
@@ -132,11 +110,6 @@ impl CliError {
     }
 
     /// Print a structured, colored diagnostic to `stderr`.
-    ///
-    /// Uses `console::style` for colored labels: `error:` in bold red,
-    /// hint lines prefixed with `->` in yellow. Colors are suppressed
-    /// automatically when the terminal is not interactive or when
-    /// `NO_COLOR` is set (handled by the `console` crate).
     ///
     /// # Examples
     ///
@@ -307,8 +280,6 @@ mod tests {
 
     #[test]
     fn validation_exit_code_is_1_when_already_rendered() {
-        // The discriminator must not perturb the exit code: a validate-originated
-        // failure still exits 1, identical to the run/report path.
         let err = CliError::Validation {
             report: "constraint violation".to_string(),
             already_rendered: true,
@@ -318,8 +289,6 @@ mod tests {
 
     #[test]
     fn validation_lines_skipped_when_already_rendered() {
-        // The validate subcommand already wrote the report to stdout; the stderr
-        // arm must emit nothing — no report re-print, no circular hint.
         let lines = CliError::validation_lines("constraint violation", true);
         assert!(
             lines.is_empty(),
@@ -329,8 +298,6 @@ mod tests {
 
     #[test]
     fn validation_lines_emitted_when_not_rendered() {
-        // The run/report path never rendered to stdout, so the stderr arm is the
-        // only surfacing: it must carry both the report and the actionable hint.
         console::set_colors_enabled_stderr(false);
         let lines = CliError::validation_lines("hydro cascade contains a cycle", false);
         let joined = lines.join("\n");
@@ -506,7 +473,6 @@ mod tests {
     fn from_sddp_error_io_maps_to_cli_io_or_validation() {
         use std::path::PathBuf;
 
-        // LoadError::IoError inside SddpError::Io -> CliError::Io
         let load_io = cobre_io::LoadError::IoError {
             path: PathBuf::from("system/hydros.json"),
             source: std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),

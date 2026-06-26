@@ -1,46 +1,8 @@
-//! Parsing for `scenarios/load_factors.json` — per-bus-per-stage block-level
-//! load scaling factors.
+//! Parsing for `scenarios/load_factors.json` (spec SS4) — per-bus-per-stage
+//! block-level load scaling factors.
 //!
-//! [`parse_load_factors`] reads `scenarios/load_factors.json` and returns a
-//! sorted `Vec<LoadFactorEntry>`. When the file is absent, the optional
-//! `load_load_factors` wrapper in `scenarios/mod.rs` returns `Ok(Vec::new())`.
-//!
-//! ## JSON structure (spec SS4)
-//!
-//! ```json
-//! {
-//!   "$schema": "...",
-//!   "load_factors": [
-//!     {
-//!       "bus_id": 0,
-//!       "stage_id": 0,
-//!       "block_factors": [
-//!         { "block_id": 0, "factor": 0.85 },
-//!         { "block_id": 1, "factor": 1.0 },
-//!         { "block_id": 2, "factor": 1.15 }
-//!       ]
-//!     }
-//!   ]
-//! }
-//! ```
-//!
-//! ## Output ordering
-//!
-//! Entries are sorted by `(bus_id, stage_id)` ascending. The `block_factors`
-//! within each entry are sorted by `block_id` ascending.
-//!
-//! ## Validation
-//!
-//! After deserializing, the following constraints are checked before conversion:
-//!
-//! - No two entries share the same `(bus_id, stage_id)` pair (no duplicates).
-//! - Every `factor` value must be strictly positive (> 0.0) and finite.
-//!
-//! Deferred validations (not performed here):
-//!
-//! - `bus_id` existence in the bus registry — Layer 3.
-//! - `stage_id` existence in the stages registry — Layer 3.
-//! - `block_id` contiguity and count matching the stage block count — Layer 3/5.
+//! Entity-ID existence, `block_id` contiguity, and block-count matching are
+//! deferred to Layer 3/5 referential validation.
 
 use cobre_core::EntityId;
 use serde::Deserialize;
@@ -94,8 +56,6 @@ struct RawBlockFactor {
 
 /// A single block factor entry from `scenarios/load_factors.json`.
 ///
-/// Pairs a block ID with its scaling factor.
-///
 /// # Examples
 ///
 /// ```
@@ -147,12 +107,9 @@ pub struct LoadFactorEntry {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Parse `scenarios/load_factors.json` and return a sorted entry list.
-///
-/// Reads the JSON file at `path`, deserializes it through intermediate types,
-/// validates per-entry and per-block constraints, then returns all entries
-/// sorted by `(bus_id, stage_id)` ascending. The `block_factors` within each
-/// entry are sorted by `block_id` ascending.
+/// Parse `scenarios/load_factors.json` and return entries sorted by
+/// `(bus_id, stage_id)` ascending, each entry's `block_factors` sorted by
+/// `block_id` ascending.
 ///
 /// # Errors
 ///
@@ -186,10 +143,8 @@ pub fn parse_load_factors(path: &Path) -> Result<Vec<LoadFactorEntry>, LoadError
 
 // ── Validation ────────────────────────────────────────────────────────────────
 
-/// Validate all invariants on the raw deserialized data.
-///
-/// Called before conversion so that error messages can reference JSON field
-/// paths rather than Rust field names.
+/// Validated before conversion so error messages reference JSON field paths,
+/// not Rust field names.
 fn validate_raw(raw: &RawLoadFactorsFile, path: &Path) -> Result<(), LoadError> {
     validate_no_duplicate_entries(&raw.load_factors, path)?;
     for (i, entry) in raw.load_factors.iter().enumerate() {
@@ -198,7 +153,6 @@ fn validate_raw(raw: &RawLoadFactorsFile, path: &Path) -> Result<(), LoadError> 
     Ok(())
 }
 
-/// Check that no two entries share the same `(bus_id, stage_id)` pair.
 fn validate_no_duplicate_entries(
     entries: &[RawLoadFactorEntry],
     path: &Path,
@@ -220,9 +174,6 @@ fn validate_no_duplicate_entries(
     Ok(())
 }
 
-/// Validate all block factors for a single entry.
-///
-/// Each `factor` must be strictly positive (> 0.0) and finite.
 fn validate_block_factors(
     block_factors: &[RawBlockFactor],
     entry_idx: usize,
@@ -242,11 +193,7 @@ fn validate_block_factors(
 
 // ── Conversion ────────────────────────────────────────────────────────────────
 
-/// Convert validated raw data into `Vec<LoadFactorEntry>`.
-///
 /// Precondition: [`validate_raw`] has returned `Ok(())` for this data.
-/// Entries are sorted by `(bus_id, stage_id)` ascending. Block factors within
-/// each entry are sorted by `block_id` ascending.
 fn convert(raw: RawLoadFactorsFile) -> Vec<LoadFactorEntry> {
     let mut entries: Vec<LoadFactorEntry> = raw
         .load_factors
@@ -295,14 +242,13 @@ mod tests {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /// Write a JSON string to a temp file and return the handle (keeps it alive).
+    /// Returns the handle; it must outlive use or the temp file is deleted.
     fn write_json(content: &str) -> NamedTempFile {
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(content.as_bytes()).unwrap();
         f
     }
 
-    /// Canonical valid JSON for error-path tests (2 entries, 3 block factors each).
     const VALID_JSON: &str = r#"{
   "load_factors": [
     {
@@ -328,8 +274,6 @@ mod tests {
 
     // ── AC: valid file with 2 entries, 3 block factors each ───────────────────
 
-    /// Valid 2-entry file. Bus 0 and bus 1, both stage 0. Result sorted by bus_id.
-    /// Block factors preserved in block_id order.
     #[test]
     fn test_valid_2_entries_sorted_and_block_factors_correct() {
         let tmp = write_json(VALID_JSON);
@@ -353,7 +297,6 @@ mod tests {
 
     // ── AC: sort order for entries out of order ───────────────────────────────
 
-    /// Entries out of sort order — result is sorted by (bus_id, stage_id).
     #[test]
     fn test_entries_sorted_by_bus_stage() {
         let json = r#"{
@@ -389,7 +332,6 @@ mod tests {
 
     // ── AC: block_factors sorted by block_id ─────────────────────────────────
 
-    /// Block factors out of block_id order — result is sorted by block_id.
     #[test]
     fn test_block_factors_sorted_by_block_id() {
         let json = r#"{
@@ -417,7 +359,6 @@ mod tests {
 
     // ── AC: factor = 0.0 -> SchemaError ──────────────────────────────────────
 
-    /// `factor = 0.0` is rejected (must be strictly positive).
     #[test]
     fn test_zero_factor_rejected() {
         let json = r#"{
@@ -445,7 +386,6 @@ mod tests {
 
     // ── AC: factor negative -> SchemaError ───────────────────────────────────
 
-    /// `factor = -0.5` is rejected (must be > 0.0).
     #[test]
     fn test_negative_factor_rejected() {
         let json = r#"{
@@ -473,8 +413,6 @@ mod tests {
 
     // ── AC: duplicate (bus_id, stage_id) -> SchemaError ──────────────────────
 
-    /// Two entries with the same `(bus_id=0, stage_id=0)` -> SchemaError with
-    /// field containing `"load_factors[1]"` and message containing `"duplicate"`.
     #[test]
     fn test_duplicate_bus_stage_rejected() {
         let json = r#"{
@@ -511,7 +449,6 @@ mod tests {
 
     // ── AC: empty load_factors array -> Ok(vec![]) ────────────────────────────
 
-    /// Empty `load_factors` array -> Ok(Vec::new()).
     #[test]
     fn test_empty_load_factors_returns_empty_vec() {
         let json = r#"{ "load_factors": [] }"#;
@@ -522,7 +459,6 @@ mod tests {
 
     // ── AC: missing block_factors field -> ParseError ─────────────────────────
 
-    /// Entry missing `block_factors` field -> ParseError (required by serde).
     #[test]
     fn test_missing_block_factors_field_is_parse_error() {
         let json = r#"{
@@ -534,16 +470,13 @@ mod tests {
         let err = parse_load_factors(tmp.path()).unwrap_err();
 
         match &err {
-            LoadError::ParseError { .. } => {
-                // Expected — serde missing field produces ParseError.
-            }
+            LoadError::ParseError { .. } => {}
             other => panic!("expected ParseError, got: {other:?}"),
         }
     }
 
     // ── AC: factor very small positive -> accepted ────────────────────────────
 
-    /// A very small positive factor (just above 0.0) is accepted.
     #[test]
     fn test_very_small_positive_factor_accepted() {
         let json = r#"{
@@ -564,7 +497,6 @@ mod tests {
 
     // ── AC: declaration-order invariance ─────────────────────────────────────
 
-    /// Reordering entries in the JSON array does not change the output ordering.
     #[test]
     fn test_declaration_order_invariance() {
         let json_fwd = r#"{

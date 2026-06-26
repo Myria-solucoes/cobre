@@ -24,10 +24,7 @@ use crate::{
 use super::StudySetup;
 
 impl StudySetup {
-    /// Execute the training loop.
-    ///
-    /// Constructs [`TrainingConfig`] and [`TrainingContext`], then delegates to
-    /// [`crate::train`]. Mutates `self.fcf` to store generated cuts.
+    /// Execute the training loop. Mutates `self.fcf` to store generated cuts.
     ///
     /// # Errors
     ///
@@ -72,19 +69,26 @@ impl StudySetup {
         let stage_ctx = StageContext {
             templates: &self.stage_data.stage_templates.templates,
             base_rows: &self.stage_data.stage_templates.base_rows,
+            geometry_per_stage: &self.stage_data.stage_templates.geometry_per_stage,
             noise_scale: &self.stage_data.stage_templates.noise_scale,
             n_hydros: self.stage_data.stage_templates.n_hydros,
             n_load_buses: self.stage_data.stage_templates.n_load_buses,
             load_balance_row_starts: &self.stage_data.stage_templates.load_balance_row_starts,
             load_bus_indices: &self.stage_data.stage_templates.load_bus_indices,
             block_counts_per_stage: &self.stage_data.block_counts_per_stage,
+            ncs_col_starts: &self.stage_data.stage_templates.ncs_col_starts,
+            n_ncs: self.stage_data.stage_templates.n_ncs,
+            ncs_stochastic_dense_col: &self.ncs_stochastic_dense_col,
+            ncs_stochastic_windows: &self.ncs_stochastic_windows,
+            anticipated_windows: &self.anticipated_windows,
+            study_stage_ids: &self.study_stage_ids,
             ncs_max_gen: &self.ncs_max_gen,
             ncs_allow_curtailment: &self.ncs_allow_curtailment,
-            discount_factors: &self.stage_data.stage_templates.discount_factors,
-            cumulative_discount_factors: &self
+            discount_factors: self.stage_data.stage_templates.discount_factors(),
+            cumulative_discount_factors: self
                 .stage_data
                 .stage_templates
-                .cumulative_discount_factors,
+                .cumulative_discount_factors(),
             stage_lag_transitions: &self.stage_data.stage_lag_transitions,
             noise_group_ids: &self.stage_data.noise_group_ids,
             downstream_par_order: self.downstream_par_order,
@@ -93,7 +97,8 @@ impl StudySetup {
         let tr = &self.scenario_libraries.training;
         let training_ctx = TrainingContext {
             horizon: &self.methodology.horizon,
-            indexer: &self.stage_data.indexer,
+            state: &self.stage_data.state,
+            study_dims: &self.stage_data.study_dims,
             inflow_method: &self.methodology.inflow_method,
             stochastic: &self.stochastic,
             initial_state: &self.initial_state,
@@ -107,22 +112,16 @@ impl StudySetup {
             external_ncs_library: tr.external_ncs.as_ref(),
             recent_accum_seed: &self.recent_observation_seed.accum_seed,
             recent_weight_seed: self.recent_observation_seed.weight_seed,
-            // DCS params reach the backward hot path via this context field.
-            // `Some` only for the dynamic cut-selection method; `None` otherwise.
             dcs: self
                 .cut_management
                 .cut_selection
                 .as_ref()
                 .and_then(DcsParams::from_strategy),
-            // Throwaway backward diagnostic; `Some` only when `COBRE_W1_DIAG`
-            // was set at setup, else `None` (byte-identical default path).
+            // `Some` only when `COBRE_W1_DIAG` was set at setup; `None` keeps the
+            // byte-identical default path.
             noise_key_diag: self.noise_key_diag.as_ref(),
         };
 
-        // Hand the warm-start basis cache (if any) to the training session so
-        // iteration 1's cut-loaded LPs warm-start from the checkpoint's stored
-        // bases. `take` leaves `None` behind — fresh starts pass `None` and are
-        // untouched.
         let warm_start_basis_cache = self.warm_start_basis_cache.take();
 
         crate::train(
@@ -173,7 +172,13 @@ impl StudySetup {
                 .stage_templates
                 .generic_constraint_row_entries,
             ncs_col_starts: &self.stage_data.stage_templates.ncs_col_starts,
-            n_ncs_per_stage: &self.stage_data.stage_templates.n_ncs_per_stage,
+            n_ncs: self.stage_data.stage_templates.n_ncs,
+            pumping_col_starts: &self.stage_data.stage_templates.pumping_col_starts,
+            n_pumping: self.stage_data.stage_templates.n_pumping,
+            geometry_per_stage: &self.stage_data.stage_templates.geometry_per_stage,
+            pumping_consumption_mw_per_m3s: &self.stage_data.pumping_consumption_mw_per_m3s,
+            contract_prices_per_stage: &self.stage_data.contract_prices_per_stage,
+            contract_is_import: &self.stage_data.contract_is_import,
             ncs_entity_ids_per_stage: &self.ncs_entity_ids_per_stage,
             diversion_upstream: &self.stage_data.stage_templates.diversion_upstream,
             hydro_productivities_per_stage: &self
@@ -199,8 +204,6 @@ impl StudySetup {
     }
 
     /// Convert [`TrainingResult`] and events into training output.
-    ///
-    /// Delegates to [`crate::build_training_output`] with cut statistics from `self.fcf`.
     #[must_use]
     pub fn build_training_output(
         &self,
@@ -210,11 +213,7 @@ impl StudySetup {
         crate::build_training_output(result, events, &self.fcf)
     }
 
-    /// Create a [`WorkspacePool`] sized for this study.
-    ///
-    /// Pool size equals `n_threads`. Each workspace gets a fresh solver instance.
-    /// `comm` is used to read the MPI rank that is stamped into each workspace's
-    /// `rank` field for downstream per-worker observability.
+    /// Create a [`WorkspacePool`] of `n_threads` workspaces sized for this study.
     ///
     /// # Errors
     ///
@@ -235,10 +234,10 @@ impl StudySetup {
         let mut pool = WorkspacePool::try_new(
             rank,
             n_threads,
-            self.stage_data.indexer.n_state,
+            self.stage_data.state.n_state,
             WorkspaceSizing {
-                hydro_count: self.stage_data.indexer.hydro_count,
-                max_par_order: self.stage_data.indexer.max_par_order,
+                hydro_count: self.stage_data.state.hydro_count,
+                max_par_order: self.stage_data.state.max_par_order,
                 n_load_buses: self.stage_data.stage_templates.n_load_buses,
                 max_blocks: self.loop_params.max_blocks,
                 downstream_par_order: self.downstream_par_order,
@@ -247,13 +246,13 @@ impl StudySetup {
                     .max()
                     .unwrap_or(0),
                 initial_pool_capacity: 0,
-                n_state: self.stage_data.indexer.n_state,
+                n_state: self.stage_data.state.n_state,
                 // Simulation-only pool: forward-worker scratch fields unused.
                 max_local_fwd: 0,
                 total_forward_passes: 0,
                 noise_dim: 0,
-                n_anticipated: self.stage_data.indexer.n_anticipated,
-                k_max: self.stage_data.indexer.k_max,
+                n_anticipated: self.stage_data.state.n_anticipated,
+                k_max: self.stage_data.state.k_max,
             },
             solver_factory,
         )?;

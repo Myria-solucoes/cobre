@@ -1,20 +1,15 @@
 //! Bus entity — an electrical network node with power balance constraint.
-//!
-//! A `Bus` represents a node in the transmission network. Each bus has an
-//! associated power balance constraint that must be satisfied at every stage
-//! and block. Pre-resolved deficit segments are stored on the bus after loading.
 
 use crate::EntityId;
 
 /// A single segment of the piecewise-linear deficit cost curve.
 ///
-/// Segments are cumulative: the first `depth_mw` MW of deficit costs `cost_per_mwh`,
-/// the next segment's `depth_mw` MW costs that segment's `cost_per_mwh`, and so on.
-/// The final segment has `depth_mw` = None (extends to infinity).
+/// Segments are cumulative: each covers its own `depth_mw` at its own
+/// `cost_per_mwh`; the final segment has `depth_mw` = None (extends to infinity).
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DeficitSegment {
-    /// MW of deficit covered by this segment \[MW\]. None for the final unbounded segment.
+    /// Deficit covered by this segment \[MW\]. None for the final unbounded segment.
     pub depth_mw: Option<f64>,
     /// Cost per `MWh` of deficit in this segment \[$/`MWh`\].
     pub cost_per_mwh: f64,
@@ -22,12 +17,10 @@ pub struct DeficitSegment {
 
 /// Electrical network node where energy balance is maintained.
 ///
-/// Buses represent aggregation points in the transmission network -- regional
-/// subsystems, substations, or any user-defined grouping. Each bus has a
-/// piecewise-linear deficit cost curve that ensures LP feasibility when demand
-/// cannot be met.
+/// Each bus carries a piecewise-linear deficit cost curve, whose final unbounded
+/// segment ensures LP feasibility when demand cannot be met.
 ///
-/// Source: system/buses.json. See Input System Entities SS1.
+/// See Input System Entities SS1.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Bus {
@@ -35,9 +28,7 @@ pub struct Bus {
     pub id: EntityId,
     /// Human-readable bus name.
     pub name: String,
-    /// Pre-resolved piecewise-linear deficit cost segments.
-    /// Segments are ordered by ascending cost. The final segment has `depth_mw` = None
-    /// (unbounded) to ensure LP feasibility.
+    /// Deficit cost segments, ordered by ascending cost.
     pub deficit_segments: Vec<DeficitSegment>,
     /// Cost per `MWh` for surplus generation absorption \[$/`MWh`\].
     pub excess_cost: f64,

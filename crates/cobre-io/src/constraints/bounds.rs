@@ -32,7 +32,7 @@
 //! | `min_generation_mw`   | DOUBLE | No       | Min generation (MW)                |
 //! | `max_generation_mw`   | DOUBLE | No       | Max generation (MW)                |
 //! | `max_diversion_m3s`   | DOUBLE | No       | Max diversion flow (m3/s)          |
-//! | `filling_inflow_m3s`  | DOUBLE | No       | Filling inflow override (m3/s)     |
+//! | `filling_min_rate_m3s`| DOUBLE | No       | Filling min-rate override (m3/s)   |
 //! | `water_withdrawal_m3s`| DOUBLE | No       | Water withdrawal (m3/s)            |
 //!
 //! ### `line_bounds`
@@ -73,12 +73,16 @@
 //!
 //! - Required key columns (`*_id`, `stage_id`) must be present with Int32 type.
 //! - Any provided (non-null) optional Float64 value must be finite — NaN and ±Inf are rejected.
+//! - Some parsers additionally enforce domain constraints on their own values:
+//!   `pumping_bounds` rejects negative flows and `min_m3s > max_m3s` (matching the
+//!   `pumping_stations.json` entity-reader checks); `thermal_bounds` rejects a
+//!   negative `cost_per_mwh`.
 //!
 //! Deferred validations (not performed here):
 //!
 //! - Entity ID existence in registries — Layer 3.
 //! - Duplicate `(entity_id, stage_id)` pairs — deferred.
-//! - Semantic cross-validation (e.g., min < max) — deferred.
+//! - Cross-field validation for the remaining bounds types — deferred.
 
 use arrow::array::Array;
 use cobre_core::EntityId;
@@ -160,7 +164,7 @@ pub struct ThermalBoundsRow {
 ///     min_generation_mw: None,
 ///     max_generation_mw: None,
 ///     max_diversion_m3s: None,
-///     filling_inflow_m3s: None,
+///     filling_min_rate_m3s: None,
 ///     water_withdrawal_m3s: None,
 /// };
 /// assert_eq!(row.min_turbined_m3s, Some(50.0));
@@ -191,8 +195,8 @@ pub struct HydroBoundsRow {
     pub max_generation_mw: Option<f64>,
     /// Maximum diversion override (m³/s).
     pub max_diversion_m3s: Option<f64>,
-    /// Filling inflow override (m³/s).
-    pub filling_inflow_m3s: Option<f64>,
+    /// Filling minimum accumulation rate override (m³/s).
+    pub filling_min_rate_m3s: Option<f64>,
     /// Water withdrawal override (m³/s).
     pub water_withdrawal_m3s: Option<f64>,
 }
@@ -300,8 +304,7 @@ pub struct ContractBoundsRow {
 
 /// Validate that a present (non-null) optional float value is finite.
 ///
-/// Returns `SchemaError` when the value is NaN or infinite. The `file_label`
-/// is used in the field path: `"<file_label>[{row_idx}].<column>"`.
+/// Returns `SchemaError` when the value is NaN or infinite.
 fn validate_optional_finite(
     value: Option<f64>,
     file_label: &str,
@@ -321,10 +324,8 @@ fn validate_optional_finite(
     Ok(())
 }
 
-/// Parse `constraints/thermal_bounds.parquet` and return a sorted row table.
-///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(thermal_id, stage_id)` ascending.
+/// Parse `constraints/thermal_bounds.parquet`, returning rows sorted by
+/// `(thermal_id, stage_id)` ascending.
 ///
 /// # Errors
 ///
@@ -360,11 +361,9 @@ pub fn parse_thermal_bounds(path: &Path) -> Result<Vec<ThermalBoundsRow>, LoadEr
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required key columns ──────────────────────────────────────────────
         let thermal_id_col = extract_required_int32(&batch, "thermal_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
 
-        // ── Optional bound columns ────────────────────────────────────────────
         let min_gen_col = extract_optional_float64(&batch, "min_generation_mw", path)?;
         let max_gen_col = extract_optional_float64(&batch, "max_generation_mw", path)?;
         let cost_col = extract_optional_float64(&batch, "cost_per_mwh", path)?;
@@ -445,14 +444,12 @@ pub fn parse_thermal_bounds(path: &Path) -> Result<Vec<ThermalBoundsRow>, LoadEr
     Ok(rows)
 }
 
-/// Parse `constraints/hydro_bounds.parquet` and return a sorted row table.
+/// Parse `constraints/hydro_bounds.parquet`, returning rows sorted by
+/// `(hydro_id, stage_id)` ascending.
 ///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(hydro_id, stage_id)` ascending.
-///
-/// The Parquet file may contain any subset of the eleven optional bound columns.
-/// Columns absent from the file schema produce `None` in all rows (not a schema
-/// error — this is the intended sparse-override design).
+/// The file may contain any subset of the eleven optional bound columns; columns
+/// absent from the file schema produce `None` in all rows (the sparse-override design,
+/// not a schema error).
 ///
 /// # Errors
 ///
@@ -473,10 +470,8 @@ pub fn parse_thermal_bounds(path: &Path) -> Result<Vec<ThermalBoundsRow>, LoadEr
 ///     .expect("valid hydro bounds file");
 /// println!("loaded {} hydro bounds rows", rows.len());
 /// ```
-// Rationale: all 11 optional bound columns are extracted from a single Parquet record batch
-// and validated for finiteness in one sequential pass; splitting into sub-functions would
-// require multiple passes over the batch or would hide the invariant that every column is
-// checked for every row before any result is returned.
+// Rationale: a single sequential pass validates every column for every row before returning;
+// splitting would require multiple passes over the batch.
 #[allow(clippy::too_many_lines)]
 pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError> {
     let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
@@ -493,11 +488,9 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required key columns ──────────────────────────────────────────────
         let hydro_id_col = extract_required_int32(&batch, "hydro_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
 
-        // ── Optional bound columns (all 11) ───────────────────────────────────
         let min_turbined_col = extract_optional_float64(&batch, "min_turbined_m3s", path)?;
         let max_turbined_col = extract_optional_float64(&batch, "max_turbined_m3s", path)?;
         let min_storage_col = extract_optional_float64(&batch, "min_storage_hm3", path)?;
@@ -507,7 +500,7 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
         let min_gen_col = extract_optional_float64(&batch, "min_generation_mw", path)?;
         let max_gen_col = extract_optional_float64(&batch, "max_generation_mw", path)?;
         let max_diversion_col = extract_optional_float64(&batch, "max_diversion_m3s", path)?;
-        let filling_inflow_col = extract_optional_float64(&batch, "filling_inflow_m3s", path)?;
+        let filling_min_rate_col = extract_optional_float64(&batch, "filling_min_rate_m3s", path)?;
         let water_withdrawal_col = extract_optional_float64(&batch, "water_withdrawal_m3s", path)?;
 
         let n = batch.num_rows();
@@ -547,7 +540,7 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
             let max_diversion_m3s = max_diversion_col
                 .filter(|col| !col.is_null(i))
                 .map(|col| col.value(i));
-            let filling_inflow_m3s = filling_inflow_col
+            let filling_min_rate_m3s = filling_min_rate_col
                 .filter(|col| !col.is_null(i))
                 .map(|col| col.value(i));
             let water_withdrawal_m3s = water_withdrawal_col
@@ -618,10 +611,10 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
                 path,
             )?;
             validate_optional_finite(
-                filling_inflow_m3s,
+                filling_min_rate_m3s,
                 "hydro_bounds",
                 row_idx,
-                "filling_inflow_m3s",
+                "filling_min_rate_m3s",
                 path,
             )?;
             validate_optional_finite(
@@ -631,6 +624,19 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
                 "water_withdrawal_m3s",
                 path,
             )?;
+
+            // build_filling_v_target and check_filling_sufficiency assume rate ≥ 0;
+            // a negative override silently inverts the V_target floor (validate_filling_configs
+            // enforces this for the entity; the finiteness gate above does not).
+            if let Some(v) = filling_min_rate_m3s
+                && v < 0.0
+            {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: format!("hydro_bounds[{row_idx}].filling_min_rate_m3s"),
+                    message: format!("value must be >= 0.0, got {v}"),
+                });
+            }
 
             rows.push(HydroBoundsRow {
                 hydro_id,
@@ -644,7 +650,7 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
                 min_generation_mw,
                 max_generation_mw,
                 max_diversion_m3s,
-                filling_inflow_m3s,
+                filling_min_rate_m3s,
                 water_withdrawal_m3s,
             });
         }
@@ -660,10 +666,8 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
     Ok(rows)
 }
 
-/// Parse `constraints/line_bounds.parquet` and return a sorted row table.
-///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(line_id, stage_id)` ascending.
+/// Parse `constraints/line_bounds.parquet`, returning rows sorted by
+/// `(line_id, stage_id)` ascending.
 ///
 /// # Errors
 ///
@@ -699,11 +703,9 @@ pub fn parse_line_bounds(path: &Path) -> Result<Vec<LineBoundsRow>, LoadError> {
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required key columns ──────────────────────────────────────────────
         let line_id_col = extract_required_int32(&batch, "line_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
 
-        // ── Optional bound columns ────────────────────────────────────────────
         let direct_col = extract_optional_float64(&batch, "direct_mw", path)?;
         let reverse_col = extract_optional_float64(&batch, "reverse_mw", path)?;
 
@@ -746,10 +748,8 @@ pub fn parse_line_bounds(path: &Path) -> Result<Vec<LineBoundsRow>, LoadError> {
     Ok(rows)
 }
 
-/// Parse `constraints/pumping_bounds.parquet` and return a sorted row table.
-///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(station_id, stage_id)` ascending.
+/// Parse `constraints/pumping_bounds.parquet`, returning rows sorted by
+/// `(station_id, stage_id)` ascending.
 ///
 /// # Errors
 ///
@@ -785,11 +785,9 @@ pub fn parse_pumping_bounds(path: &Path) -> Result<Vec<PumpingBoundsRow>, LoadEr
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required key columns ──────────────────────────────────────────────
         let station_id_col = extract_required_int32(&batch, "station_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
 
-        // ── Optional bound columns ────────────────────────────────────────────
         let min_col = extract_optional_float64(&batch, "min_m3s", path)?;
         let max_col = extract_optional_float64(&batch, "max_m3s", path)?;
 
@@ -813,6 +811,38 @@ pub fn parse_pumping_bounds(path: &Path) -> Result<Vec<PumpingBoundsRow>, LoadEr
             validate_optional_finite(min_m3s, "pumping_bounds", row_idx, "min_m3s", path)?;
             validate_optional_finite(max_m3s, "pumping_bounds", row_idx, "max_m3s", path)?;
 
+            // A pumped-flow override is non-negative and `min <= max`; a negative or
+            // inverted row otherwise yields an infeasible per-stage bound (the
+            // `pumping_stations.json` entity-reader enforces this; the finiteness gate
+            // above does not).
+            if let Some(v) = min_m3s
+                && v < 0.0
+            {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: format!("pumping_bounds[{row_idx}].min_m3s"),
+                    message: format!("value must be >= 0.0, got {v}"),
+                });
+            }
+            if let Some(v) = max_m3s
+                && v < 0.0
+            {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: format!("pumping_bounds[{row_idx}].max_m3s"),
+                    message: format!("value must be >= 0.0, got {v}"),
+                });
+            }
+            if let (Some(min), Some(max)) = (min_m3s, max_m3s)
+                && min > max
+            {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: format!("pumping_bounds[{row_idx}].max_m3s"),
+                    message: format!("max_m3s ({max}) must be >= min_m3s ({min})"),
+                });
+            }
+
             rows.push(PumpingBoundsRow {
                 station_id,
                 stage_id,
@@ -832,10 +862,8 @@ pub fn parse_pumping_bounds(path: &Path) -> Result<Vec<PumpingBoundsRow>, LoadEr
     Ok(rows)
 }
 
-/// Parse `constraints/contract_bounds.parquet` and return a sorted row table.
-///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(contract_id, stage_id)` ascending.
+/// Parse `constraints/contract_bounds.parquet`, returning rows sorted by
+/// `(contract_id, stage_id)` ascending.
 ///
 /// # Errors
 ///
@@ -871,11 +899,9 @@ pub fn parse_contract_bounds(path: &Path) -> Result<Vec<ContractBoundsRow>, Load
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required key columns ──────────────────────────────────────────────
         let contract_id_col = extract_required_int32(&batch, "contract_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
 
-        // ── Optional bound columns ────────────────────────────────────────────
         let min_col = extract_optional_float64(&batch, "min_mw", path)?;
         let max_col = extract_optional_float64(&batch, "max_mw", path)?;
         let price_col = extract_optional_float64(&batch, "price_per_mwh", path)?;
@@ -1299,7 +1325,7 @@ mod tests {
             Field::new("min_generation_mw", DataType::Float64, true),
             Field::new("max_generation_mw", DataType::Float64, true),
             Field::new("max_diversion_m3s", DataType::Float64, true),
-            Field::new("filling_inflow_m3s", DataType::Float64, true),
+            Field::new("filling_min_rate_m3s", DataType::Float64, true),
             Field::new("water_withdrawal_m3s", DataType::Float64, true),
         ]))
     }
@@ -1321,7 +1347,7 @@ mod tests {
                 Arc::new(Float64Array::from(vec![None::<f64>])),    // min_gen: null
                 Arc::new(Float64Array::from(vec![Some(80.0_f64)])), // max_gen
                 Arc::new(Float64Array::from(vec![None::<f64>])),    // max_diversion: null
-                Arc::new(Float64Array::from(vec![Some(10.0_f64)])), // filling_inflow
+                Arc::new(Float64Array::from(vec![Some(10.0_f64)])), // filling_min_rate
                 Arc::new(Float64Array::from(vec![None::<f64>])),    // water_withdrawal: null
             ],
         )
@@ -1342,7 +1368,7 @@ mod tests {
         assert!(r.min_generation_mw.is_none());
         assert!((r.max_generation_mw.unwrap() - 80.0).abs() < f64::EPSILON);
         assert!(r.max_diversion_m3s.is_none());
-        assert!((r.filling_inflow_m3s.unwrap() - 10.0).abs() < f64::EPSILON);
+        assert!((r.filling_min_rate_m3s.unwrap() - 10.0).abs() < f64::EPSILON);
         assert!(r.water_withdrawal_m3s.is_none());
     }
 
@@ -1382,7 +1408,7 @@ mod tests {
         assert!(r.min_generation_mw.is_none());
         assert!((r.max_generation_mw.unwrap() - 150.0).abs() < f64::EPSILON);
         assert!(r.max_diversion_m3s.is_none());
-        assert!(r.filling_inflow_m3s.is_none());
+        assert!(r.filling_min_rate_m3s.is_none());
         assert!(r.water_withdrawal_m3s.is_none());
     }
 
@@ -1447,6 +1473,40 @@ mod tests {
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_hydro_negative_filling_min_rate() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("hydro_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new("filling_min_rate_m3s", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1_i32])),
+                Arc::new(Int32Array::from(vec![0_i32])),
+                Arc::new(Float64Array::from(vec![Some(-5.0_f64)])),
+            ],
+        )
+        .unwrap();
+        let tmp = write_parquet(&batch);
+        let err = parse_hydro_bounds(tmp.path()).unwrap_err();
+
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(
+                    field.contains("filling_min_rate_m3s"),
+                    "field should contain 'filling_min_rate_m3s', got: {field}"
+                );
+                assert!(
+                    message.contains(">= 0.0"),
+                    "message should contain '>= 0.0', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError for negative filling rate, got: {other:?}"),
         }
     }
 
@@ -1746,6 +1806,54 @@ mod tests {
                 assert!(message.contains("finite"), "got: {message}");
             }
             other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// AC: negative `min_m3s` -> SchemaError mentioning "min_m3s" and ">= 0.0".
+    #[test]
+    fn test_pumping_negative_min_m3s() {
+        let batch = make_pumping_batch(&[1], &[0], vec![Some(-1.0)], vec![Some(10.0)]);
+        let tmp = write_parquet(&batch);
+        let err = parse_pumping_bounds(tmp.path()).unwrap_err();
+
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(field.contains("min_m3s"), "got: {field}");
+                assert!(message.contains(">= 0.0"), "got: {message}");
+            }
+            other => panic!("expected SchemaError for negative min, got: {other:?}"),
+        }
+    }
+
+    /// AC: negative `max_m3s` -> SchemaError mentioning "max_m3s" and ">= 0.0".
+    #[test]
+    fn test_pumping_negative_max_m3s() {
+        let batch = make_pumping_batch(&[1], &[0], vec![None], vec![Some(-5.0)]);
+        let tmp = write_parquet(&batch);
+        let err = parse_pumping_bounds(tmp.path()).unwrap_err();
+
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(field.contains("max_m3s"), "got: {field}");
+                assert!(message.contains(">= 0.0"), "got: {message}");
+            }
+            other => panic!("expected SchemaError for negative max, got: {other:?}"),
+        }
+    }
+
+    /// AC: `min_m3s > max_m3s` (both present) -> SchemaError mentioning "max_m3s".
+    #[test]
+    fn test_pumping_min_exceeds_max() {
+        let batch = make_pumping_batch(&[1], &[0], vec![Some(80.0)], vec![Some(10.0)]);
+        let tmp = write_parquet(&batch);
+        let err = parse_pumping_bounds(tmp.path()).unwrap_err();
+
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(field.contains("max_m3s"), "got: {field}");
+                assert!(message.contains("must be >= min_m3s"), "got: {message}");
+            }
+            other => panic!("expected SchemaError for inverted bounds, got: {other:?}"),
         }
     }
 

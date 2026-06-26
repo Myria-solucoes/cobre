@@ -1,23 +1,11 @@
 //! Spectral decomposition and runtime application of spatial correlation.
 //!
-//! Decomposes each correlation profile's groups into symmetric matrix square
-//! root factors (spectral factors) and builds a stage-to-profile schedule for
-//! runtime lookup. At runtime, [`DecomposedCorrelation::apply_correlation`]
-//! selects the active profile for the given stage and transforms independent
-//! standard-normal noise into spatially correlated noise using the spectral
-//! factor.
+//! Decomposes each correlation profile's groups into spectral factors and builds
+//! a stage-to-profile schedule for runtime lookup, then transforms independent
+//! standard-normal noise into spatially correlated noise.
 //!
-//! Entity position pre-computation via [`DecomposedCorrelation::resolve_positions`]
-//! eliminates the per-call O(n·m) linear scan, replacing it with O(1) indexed
-//! access for groups of up to `MAX_STACK_DIM` entities (stack-allocated) and a
-//! heap-allocated fallback for larger groups.
-//!
-//! Returns [`StochasticError::InvalidCorrelation`] when validation fails
-//! (mixed entity types, non-square matrix, non-symmetric matrix, or duplicate
-//! entity IDs across groups). Non-positive-definite matrices are handled
-//! gracefully by clipping negative eigenvalues to 0.0 (nearest PSD approximation).
-//!
-//! [`StochasticError::InvalidCorrelation`]: crate::StochasticError::InvalidCorrelation
+//! Non-positive-definite matrices do not error; negative eigenvalues are clipped
+//! to 0.0 (nearest PSD approximation).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -28,44 +16,35 @@ use crate::{
     correlation::spectral::{NEGLIGIBLE_NEGATIVE_EIGENVALUE, SpectralFactor},
 };
 
-/// Maximum group dimension for stack-allocated buffers in `apply_correlation`.
-/// Groups with more entities than this threshold use heap-allocated buffers.
+/// Group dimension at or below which `apply_correlation` buffers are stack-allocated;
+/// larger groups fall back to heap allocation.
 const MAX_STACK_DIM: usize = 64;
 
 /// A single correlation group's spectral factor with entity ID mapping.
 #[derive(Debug)]
 pub struct GroupFactor {
-    /// The spectral factor for this group.
+    /// Spectral factor for this group.
     pub factor: SpectralFactor,
-    /// Entity IDs in this group, in the order matching the factor rows/columns.
+    /// Entity IDs in the order matching the factor rows/columns.
     pub entity_ids: Vec<EntityId>,
-    /// Entity type shared by all entities in this group (e.g., `"inflow"`, `"load"`,
-    /// `"ncs"`). All entities in a group are guaranteed to be the same type after
-    /// validation in [`DecomposedCorrelation::build`].
+    /// Entity type shared by all entities in this group (`"inflow"`, `"load"`, `"ncs"`).
     pub entity_type: String,
-    /// Pre-computed positions of this group's entities within the canonical
-    /// full entity order. Filled by [`DecomposedCorrelation::resolve_positions`].
-    /// When `Some`, `apply_correlation` skips the per-call linear scan.
+    /// Positions within the canonical full entity order; when `Some`,
+    /// `apply_correlation` skips the per-call linear scan.
     positions: Option<Box<[usize]>>,
-    /// Pre-computed positions of this group's entities within the per-class
-    /// entity order. Filled by [`DecomposedCorrelation::resolve_class_positions`].
-    /// When `Some`, `apply_correlation_for_class` skips the per-call linear scan.
+    /// Positions within the per-class entity order; when `Some`,
+    /// `apply_correlation_for_class` skips the per-call linear scan.
     class_positions: Option<Box<[usize]>>,
 }
 
 /// Pre-decomposed correlation data for all profiles, with stage-to-profile mapping.
-///
-/// Built once during initialization. At runtime, the noise generator looks up
-/// the active profile for the current stage via `profile_for_stage()` and
-/// applies the spectral transform using the cached factor.
 #[derive(Debug)]
 pub struct DecomposedCorrelation {
-    /// Spectral factors keyed by profile name.
-    /// `BTreeMap` preserves deterministic iteration order.
+    /// Spectral factors keyed by profile name; `BTreeMap` for deterministic
+    /// iteration order (upholds declaration-order invariance).
     factors: BTreeMap<String, Vec<GroupFactor>>,
 
-    /// Stage-to-profile-name mapping. For stages not in this map,
-    /// the "default" profile is used.
+    /// Stage-to-profile mapping; stages absent here use the default profile.
     schedule: HashMap<i32, String>,
 
     /// Name of the default profile.
@@ -73,12 +52,9 @@ pub struct DecomposedCorrelation {
 }
 
 impl DecomposedCorrelation {
-    /// Constructs an empty `DecomposedCorrelation` for use when there are no
-    /// stochastic entities (e.g., thermal-only systems with zero hydro plants).
-    ///
-    /// The empty instance has no profiles and no schedule. Calling
-    /// [`apply_correlation`] on it is a no-op; [`profile_for_stage`] returns
-    /// an empty string.
+    /// Constructs an empty `DecomposedCorrelation` for systems with no stochastic
+    /// entities. [`apply_correlation`] is then a no-op; [`profile_for_stage`]
+    /// returns an empty string.
     ///
     /// [`apply_correlation`]: Self::apply_correlation
     /// [`profile_for_stage`]: Self::profile_for_stage
@@ -92,11 +68,6 @@ impl DecomposedCorrelation {
     }
 
     /// Builds a `DecomposedCorrelation` from a [`CorrelationModel`].
-    ///
-    /// Decomposes each profile's correlation groups into spectral factors and
-    /// builds the stage-to-profile schedule. Validates that a `"default"`
-    /// profile exists, or that exactly one profile exists (which then serves
-    /// as the default).
     ///
     /// # Errors
     ///
@@ -140,11 +111,9 @@ impl DecomposedCorrelation {
             });
         }
 
-        // Determine the default profile name.
         let default_profile = if model.profiles.contains_key("default") {
             "default".to_string()
         } else if model.profiles.len() == 1 {
-            // Use the single profile as implicit default (empty map ruled out above).
             model.profiles.keys().next().cloned().unwrap_or_default()
         } else {
             return Err(StochasticError::InvalidCorrelation {
@@ -157,18 +126,15 @@ impl DecomposedCorrelation {
             });
         };
 
-        // Decompose each profile.
         let mut factors: BTreeMap<String, Vec<GroupFactor>> = BTreeMap::new();
 
-        // Accumulate negative-eigenvalue clipping across every decomposed matrix
-        // so the whole build emits one summary instead of one line per matrix.
+        // Accumulate clipping across all matrices to emit one summary, not one line per matrix.
         let mut clip_matrices_total = 0_usize;
         let mut clip_matrices_affected = 0_usize;
         let mut clip_eigenvalues_total = 0_usize;
         let mut clip_largest_magnitude = 0.0_f64;
 
         for (profile_name, profile) in &model.profiles {
-            // Validate same-type constraint: all entities in a group must share one entity_type.
             for group in &profile.groups {
                 if group.entities.len() > 1 {
                     let first_type = &group.entities[0].entity_type;
@@ -188,8 +154,7 @@ impl DecomposedCorrelation {
                 }
             }
 
-            // Validate disjointness: no entity ID may appear in more than one group
-            // within the same profile. Overlapping groups produce incorrect covariance.
+            // Overlapping groups (an entity ID in more than one group) produce incorrect covariance.
             {
                 let mut seen: std::collections::HashSet<EntityId> =
                     std::collections::HashSet::new();
@@ -250,10 +215,8 @@ impl DecomposedCorrelation {
             factors.insert(profile_name.clone(), group_factors);
         }
 
-        // Single aggregated diagnostic for negative-eigenvalue clipping. Round-off-
-        // scale clipping (rank-deficient but effectively PSD inputs) is reported at
-        // debug; clipping large enough to indicate a genuinely indefinite matrix is
-        // escalated to warn.
+        // Clipping above NEGLIGIBLE_NEGATIVE_EIGENVALUE signals a genuinely indefinite
+        // input (warn); round-off-scale clipping is harmless PSD projection (debug).
         if clip_matrices_affected > 0 {
             if clip_largest_magnitude > NEGLIGIBLE_NEGATIVE_EIGENVALUE {
                 tracing::warn!(
@@ -278,7 +241,6 @@ impl DecomposedCorrelation {
             }
         }
 
-        // Build the stage-to-profile schedule.
         let schedule: HashMap<i32, String> = model
             .schedule
             .iter()
@@ -292,25 +254,17 @@ impl DecomposedCorrelation {
         })
     }
 
-    /// Returns the profile name active for the given stage.
-    ///
-    /// Looks up `stage_id` in the schedule; falls back to the default profile.
+    /// Returns the profile name active for `stage_id`, falling back to the default profile.
     pub fn profile_for_stage(&self, stage_id: i32) -> &str {
         self.schedule
             .get(&stage_id)
             .map_or(self.default_profile.as_str(), String::as_str)
     }
 
-    /// Pre-computes entity position indices for all correlation groups.
-    ///
-    /// Call this once after building the correlation data, before entering
-    /// the hot loop that calls [`Self::apply_correlation`]. This eliminates the
-    /// per-call O(n) linear scan over `entity_order`.
-    ///
-    /// Each `GroupFactor` stores the positions of its entity IDs within the
-    /// canonical `entity_order` slice. Groups whose entities do not appear
-    /// in `entity_order` get an empty position array and are skipped during
-    /// correlation application.
+    /// Pre-computes each group's entity positions within `entity_order`. Call once
+    /// before the [`Self::apply_correlation`] hot loop to eliminate its per-call
+    /// O(n) linear scan. Groups absent from `entity_order` get empty positions and
+    /// are skipped during application.
     pub fn resolve_positions(&mut self, entity_order: &[EntityId]) {
         let id_to_pos: HashMap<EntityId, usize> = entity_order
             .iter()
@@ -330,22 +284,11 @@ impl DecomposedCorrelation {
         }
     }
 
-    /// Pre-computes per-class entity position indices for all correlation groups.
-    ///
-    /// Call this once per entity class after building the correlation data,
-    /// before entering the hot loop that calls [`Self::apply_correlation_for_class`].
-    /// This eliminates the per-call O(n·m) linear scan, replacing it with O(1)
-    /// indexed access.
-    ///
-    /// The `class_entity_order` slice contains only the entity IDs for one
-    /// class (e.g., only inflow entities, only load entities). Positions stored
-    /// in each `GroupFactor` are indices into that per-class slice.
-    ///
-    /// Only groups whose `entity_type` matches `entity_type` are updated;
-    /// groups for other classes are left unchanged.
-    ///
-    /// Groups whose entities do not appear in `class_entity_order` receive an
-    /// empty position array and are skipped during correlation application.
+    /// Per-class counterpart to [`Self::resolve_positions`]: `class_entity_order`
+    /// holds only one class's entity IDs, and only groups matching `entity_type` are
+    /// updated. Call once per class before the [`Self::apply_correlation_for_class`]
+    /// hot loop. Groups absent from `class_entity_order` get empty positions and are
+    /// skipped during application.
     pub fn resolve_class_positions(&mut self, class_entity_order: &[EntityId], entity_type: &str) {
         let id_to_pos: HashMap<EntityId, usize> = class_entity_order
             .iter()
@@ -368,22 +311,12 @@ impl DecomposedCorrelation {
         }
     }
 
-    /// Applies spatial correlation to `independent_noise` for the given stage.
+    /// Applies spatial correlation to `independent_noise` for `stage_id`. Entities
+    /// in no correlation group keep their independent values.
     ///
-    /// Looks up the active correlation profile for `stage_id`, then for each
-    /// correlation group in that profile:
-    ///
-    /// 1. Finds the positions of the group's entity IDs within `entity_order`.
-    /// 2. Gathers the independent noise values for those positions.
-    /// 3. Applies the group's spectral factor in-place.
-    /// 4. Scatters the correlated values back to the matching positions.
-    ///
-    /// Entities that do not appear in any correlation group retain their
-    /// independent noise values unchanged.
-    ///
-    /// For best performance, call [`resolve_positions`] once before entering
-    /// the hot loop. When positions are pre-computed, this method performs
-    /// zero heap allocations for groups of up to 64 entities.
+    /// Call [`resolve_positions`] once before the hot loop; with positions
+    /// pre-computed this performs zero heap allocations for groups of up to
+    /// `MAX_STACK_DIM` entities.
     ///
     /// [`resolve_positions`]: Self::resolve_positions
     pub fn apply_correlation(
@@ -394,12 +327,11 @@ impl DecomposedCorrelation {
     ) {
         let profile_name = self.profile_for_stage(stage_id);
         let Some(group_factors) = self.factors.get(profile_name) else {
-            // Profile not found — leave noise unchanged (defensive).
+            // Missing profile leaves noise unchanged rather than erroring.
             return;
         };
 
         for gf in group_factors {
-            // Use pre-computed positions if available; fall back to linear scan.
             if let Some(ref precomputed) = gf.positions {
                 Self::apply_group_precomputed(&gf.factor, precomputed, independent_noise);
             } else {
@@ -408,28 +340,13 @@ impl DecomposedCorrelation {
         }
     }
 
-    /// Applies spatial correlation to a single entity-class noise segment.
+    /// Per-class counterpart to [`apply_correlation`], applying only groups whose
+    /// `entity_type` matches. `class_noise` and `class_entity_order` hold only that
+    /// class's entities, so positions are relative to the class segment, NOT the
+    /// full noise vector.
     ///
-    /// This is the per-class counterpart to [`apply_correlation`]. It applies the
-    /// spectral transform only for groups whose `entity_type` matches the given
-    /// `entity_type` argument.
-    ///
-    /// The `class_noise` and `class_entity_order` slices contain only the
-    /// entities belonging to that class — positions are relative to the class
-    /// segment (index 0 = first entity of that class), NOT to the full noise
-    /// vector.
-    ///
-    /// # Behaviour
-    ///
-    /// - Groups whose `entity_type` does not match `entity_type` are skipped.
-    /// - If no groups match, `class_noise` is unchanged.
-    /// - Profile lookup falls back to the default profile (same as
-    ///   [`apply_correlation`]).
-    ///
-    /// For best performance, call [`resolve_class_positions`] once per class
-    /// before entering the hot loop. When class positions are pre-computed,
-    /// this method performs zero heap allocations for groups of up to 64
-    /// entities (same stack-allocated fast path as [`apply_correlation`]).
+    /// Call [`resolve_class_positions`] once per class before the hot loop for the
+    /// same allocation-free fast path as [`apply_correlation`].
     ///
     /// [`apply_correlation`]: Self::apply_correlation
     /// [`resolve_class_positions`]: Self::resolve_class_positions
@@ -442,7 +359,7 @@ impl DecomposedCorrelation {
     ) {
         let profile_name = self.profile_for_stage(stage_id);
         let Some(group_factors) = self.factors.get(profile_name) else {
-            // Profile not found — leave noise unchanged (defensive).
+            // Missing profile leaves noise unchanged rather than erroring.
             return;
         };
 
@@ -450,8 +367,6 @@ impl DecomposedCorrelation {
             if gf.entity_type != entity_type {
                 continue;
             }
-            // Use per-class pre-computed positions if available; fall back to
-            // linear scan against class_entity_order.
             if let Some(ref precomputed) = gf.class_positions {
                 Self::apply_group_precomputed(&gf.factor, precomputed, class_noise);
             } else {
@@ -460,7 +375,6 @@ impl DecomposedCorrelation {
         }
     }
 
-    /// Fast path: positions are pre-computed. Uses stack buffers for groups ≤ 64.
     fn apply_group_precomputed(factor: &SpectralFactor, positions: &[usize], noise: &mut [f64]) {
         let n = positions.len();
         if n == 0 || n != factor.dim() {
@@ -487,11 +401,7 @@ impl DecomposedCorrelation {
         }
     }
 
-    /// Slow path: linear scan for positions (backward compatibility without `resolve_positions`).
-    ///
-    /// For groups of up to `MAX_STACK_DIM` entities all three working buffers
-    /// (positions, gathered noise, correlated noise) are stack-allocated to
-    /// avoid heap allocation on this hot path.
+    /// Linear-scan fallback for callers that did not pre-compute positions.
     fn apply_group_scan(
         factor: &SpectralFactor,
         entity_ids: &[EntityId],
@@ -504,7 +414,6 @@ impl DecomposedCorrelation {
         }
 
         if entity_count <= MAX_STACK_DIM {
-            // Stack-allocated path: no heap allocation for small groups.
             let mut positions = [0_usize; MAX_STACK_DIM];
             let mut gathered = [0.0_f64; MAX_STACK_DIM];
             let mut correlated = [0.0_f64; MAX_STACK_DIM];
@@ -529,7 +438,6 @@ impl DecomposedCorrelation {
                 noise[positions[i]] = correlated[i];
             }
         } else {
-            // Heap-allocated fallback for groups larger than MAX_STACK_DIM.
             let positions: Vec<usize> = entity_ids
                 .iter()
                 .filter_map(|eid| entity_order.iter().position(|e| e == eid))

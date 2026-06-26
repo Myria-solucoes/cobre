@@ -1,19 +1,8 @@
 //! Deterministic test suite for the SDDP pipeline.
 //!
-//! Each test case in this suite is fully deterministic: load is constant
-//! (zero variance), there are no stochastic inflows, and the optimal cost is
-//! hand-computable. This makes it possible to assert exact cost values and
-//! tight convergence bounds.
-//!
-//! ## Design philosophy
-//!
-//! - Cases live under `examples/deterministic/<case-id>/` in the workspace root.
-//! - Every test calls `run_deterministic` with the case directory path and then
-//!   asserts on `TrainingResult.final_lb` and `TrainingResult.iterations`.
-//! - Expected costs are derived analytically in the specification; the
-//!   derivation is documented in each test's doc comment.
-//! - `StubComm` provides a single-rank communicator that faithfully copies data
-//!   through `allgatherv` and `allreduce` so the pipeline runs without MPI.
+//! Each case is fully deterministic — constant load (zero variance), no
+//! stochastic inflows — so the optimal cost is hand-computable, which is what
+//! licenses the exact cost asserts and tight convergence bounds below.
 
 #![allow(
     clippy::unwrap_used,
@@ -44,7 +33,8 @@ use cobre_solver::SolverInterface;
 
 mod common;
 
-/// Single-rank communicator stub for deterministic testing.
+/// Single-rank communicator whose `allgatherv`/`allreduce` copy send→recv
+/// verbatim, so the pipeline runs without MPI.
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -90,11 +80,9 @@ impl Communicator for StubComm {
     }
 }
 
-/// Build a [`StudySetup`] for a case directory.
-///
-/// The `hydro_energy_productivity.parquet` override is already folded into
-/// `hydro_models.productivity_override` by the caller's `prepare_hydro_models`
-/// invocation, so this helper does no parquet I/O.
+/// Build a [`StudySetup`] for a case directory. Does no parquet I/O — the
+/// caller's `prepare_hydro_models` already folded any override into
+/// `hydro_models`, which is why `_case_dir` is unused.
 fn build_setup_for_case(
     _case_dir: &Path,
     config: &cobre_io::Config,
@@ -124,11 +112,8 @@ fn build_setup_for_case(
     .expect("StudySetup::from_broadcast_params must build")
 }
 
-/// Execute the full training pipeline for a case directory and return both the
-/// `TrainingResult` and the `ActiveSolver`. Uses `StubComm`, seed 42, and 1 thread.
-///
-/// Unlike `run_deterministic`, this helper keeps the solver alive so callers can
-/// inspect `solver.statistics()` (e.g. `basis_consistency_failures`) after training completes.
+/// Train a case (`StubComm`, seed 42, 1 thread) and return the result plus the
+/// live solver, so callers can inspect `solver.statistics()` after training.
 fn run_deterministic_with_solver(case_dir: &Path) -> (cobre_sddp::TrainingResult, ActiveSolver) {
     let config_path = case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path).expect("config must parse");
@@ -156,8 +141,7 @@ fn run_deterministic_with_solver(case_dir: &Path) -> (cobre_sddp::TrainingResult
     (outcome.result, solver)
 }
 
-/// Execute the full training pipeline for a case directory and return the
-/// `TrainingResult`. Uses `StubComm`, `ActiveSolver`, seed 42, and 1 thread.
+/// Train a case (`StubComm`, `ActiveSolver`, seed 42, 1 thread) and return the result.
 fn run_deterministic(case_dir: &Path) -> cobre_sddp::TrainingResult {
     let config_path = case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path).expect("config must parse");
@@ -185,10 +169,8 @@ fn run_deterministic(case_dir: &Path) -> cobre_sddp::TrainingResult {
     outcome.result
 }
 
-/// Train with simulation enabled, then simulate and return scenario results.
-///
-/// Loads the case, enables 1-scenario simulation, trains, runs simulation with
-/// HiGHS, and returns (training result, scenario results, simulation summary).
+/// Train with 1-scenario simulation enabled, then simulate, returning the
+/// training result, per-scenario results, and the aggregate summary.
 fn run_with_simulation(
     case_dir: &Path,
 ) -> (
@@ -260,10 +242,6 @@ fn run_with_simulation(
     (result, scenario_results, summary)
 }
 
-/// Assert that `actual` is within `tolerance` of `expected`.
-///
-/// Panics with a diagnostic message identifying the case and the actual vs
-/// expected values when the assertion fails.
 fn assert_cost(actual: f64, expected: f64, tolerance: f64, case_name: &str) {
     let diff = (actual - expected).abs();
     assert!(
@@ -272,11 +250,9 @@ fn assert_cost(actual: f64, expected: f64, tolerance: f64, case_name: &str) {
     );
 }
 
-/// Write a single-row `hydro_energy_productivity.parquet` file supplying a
-/// per-hydro-default `ρ_eq` override (`stage_id = NULL`).
-///
-/// Used by FPHA test cases that lack VHA geometry to satisfy the FPHA
-/// correctness gate without modifying LP economics.
+/// Write a single-row `hydro_energy_productivity.parquet` supplying a per-hydro
+/// `ρ_eq` override (`stage_id = NULL`, applies to all stages). Lets FPHA cases
+/// without VHA geometry pass the FPHA correctness gate without changing LP economics.
 fn write_energy_productivity_override(
     dest: &std::path::Path,
     hydro_id: i32,
@@ -305,7 +281,6 @@ fn write_energy_productivity_override(
         ),
     ]));
 
-    // One row: (hydro_id, stage_id=NULL, rho_eq, all others NULL).
     let batch = RecordBatch::try_new(
         Arc::clone(&schema),
         vec![
@@ -332,7 +307,7 @@ fn write_energy_productivity_override(
 ///
 /// Analytical thermal cost is `23_635_000 / 9 ≈ 2_626_111.11 $`. With
 /// `turbined_cost = 0.01 $/MWh` applied to every hydro's turbine column
-/// (see `lp_builder/matrix.rs::fill_turbine_columns`), the
+/// (see `fill_turbine_columns` in `lp::builder::columns`), the
 /// deterministic LB adds a fixed regularization contribution of
 /// `5_785 / 9 ≈ 642.78 $` (= 0.01 · 730 · (25_000/657 + 50) summed across the
 /// two stages' turbined flows). Total = `23_640_785 / 9 ≈ 2_626_753.89 $`.
@@ -495,15 +470,12 @@ fn d04_transmission() {
 fn d05_fpha_constant_head() {
     let case_dir = Path::new("../../examples/deterministic/d05-fpha-constant-head");
 
-    // Supply a hydro_energy_productivity.parquet override so that the FPHA
-    // correctness gate can derive ρ_eq for H0 without VHA geometry.
-    // rho_eq = 1.0 MW/(m³/s) is LP-neutral: the D05 FPHA hyperplane encodes
-    // gen_h = 1.0 × turbined_m3s, so ρ_eq = 1.0 matches the implicit scalar.
-    // NULL stage_id means the row applies to all stages for this hydro.
+    // ρ_eq = 1.0 is LP-neutral here: D05's FPHA hyperplane encodes
+    // gen_h = 1.0 × turbined_m3s, matching the override scalar.
     write_energy_productivity_override(
         &case_dir.join("system/hydro_energy_productivity.parquet"),
-        0,   // hydro_id
-        1.0, // equivalent_productivity_mw_per_m3s
+        0,
+        1.0,
     );
 
     let result = run_deterministic(case_dir);
@@ -602,13 +574,12 @@ pub const D06_EXPECTED_COST: f64 = 732_952_154.0 / 225.0;
 fn d06_fpha_variable_head() {
     let case_dir = Path::new("../../examples/deterministic/d06-fpha-variable-head");
 
-    // Supply a hydro_energy_productivity.parquet override so the FPHA gate can
-    // derive ρ_eq for H0. The exact value does not affect LP economics (D06
-    // assertions depend only on FPHA hyperplane evaluation, not on ρ_eq).
+    // ρ_eq value is irrelevant to D06 economics — assertions depend only on
+    // FPHA hyperplane evaluation, not on ρ_eq.
     write_energy_productivity_override(
         &case_dir.join("system/hydro_energy_productivity.parquet"),
-        0,   // hydro_id
-        1.0, // equivalent_productivity_mw_per_m3s
+        0,
+        1.0,
     );
 
     let result = run_deterministic(case_dir);
@@ -648,13 +619,8 @@ fn d06_fpha_variable_head() {
 /// the constant tailrace at 300 m), giving a net head of ~50–100 m. Factor losses
 /// of 3% and constant efficiency of 92% are applied.
 ///
-/// ## Assertions
-///
-/// - Convergence: `final_gap.abs() < 1e-6` (tight gap).
-/// - Iterations: `<= 10` (fast convergence on deterministic case).
-/// - Sanity: `final_lb > 0.0` (positive cost; system requires thermal dispatch).
-/// - The computed cost differs from D06 because the fitting pipeline uses a
-///   different discretization grid and number of planes; no exact match is asserted.
+/// No exact cost is asserted: the computed fitting pipeline uses a different
+/// discretization grid and plane count than D06's precomputed planes.
 #[cfg_attr(
     not(feature = "slow-tests"),
     ignore = "slow: run with --features slow-tests"
@@ -730,20 +696,10 @@ const D03_H0_V_INIT: f64 = 80.0;
 /// Stage-0 initial storage for D03 H1 \[hm³\] from `initial_conditions.json`.
 const D03_H1_V_INIT: f64 = 50.0;
 
-/// Verify the natural-inflow-energy and stored-energy columns in `simulation/hydros` for D02 and D03.
-///
-/// Both cases use `ConstantProductivity` hydros (bypassing the FPHA gate),
-/// which makes `ρ_eq` and `ρ_acum` directly computable from `hydros.json`
-/// without running the LP. The test asserts:
-///
-/// - `equivalent_productivity_mw_per_m3s` matches the stored scalar.
-/// - `accumulated_productivity_mw_per_m3s` matches the cascade-sum expectation.
-/// - `incremental_inflow_energy_mw = ρ_acum × incremental_inflow_m3s` (field
-///   consistency check — no fixed inflow constant needed for D03).
-/// - `stored_energy_initial_mwh = (storage_initial − V_min) × ρ_acum × FACTOR`.
-///   For stage 0 this is deterministic from `initial_conditions.json`.
-///
-/// All comparisons use absolute tolerance `1e-6`.
+/// Verify the natural-inflow-energy and stored-energy columns in
+/// `simulation/hydros` for D02 and D03. Both use `ConstantProductivity` hydros
+/// (bypassing the FPHA gate), so `ρ_eq` and `ρ_acum` are directly computable
+/// from `hydros.json` without running the LP.
 #[cfg_attr(
     not(feature = "slow-tests"),
     ignore = "slow: run with --features slow-tests"
@@ -771,7 +727,6 @@ fn d_case_energy_outputs() {
             );
             let h = &stage_result.hydros[0];
 
-            // Column 1: ρ_eq must equal the stored constant-productivity scalar.
             let diff_rho_eq = (h.equivalent_productivity_mw_per_m3s - D02_RHO_EQ).abs();
             assert!(
                 diff_rho_eq <= TOL,
@@ -779,7 +734,6 @@ fn d_case_energy_outputs() {
                 h.equivalent_productivity_mw_per_m3s,
             );
 
-            // Column 2: ρ_acum must equal ρ_eq (no downstream).
             let diff_rho_acum = (h.accumulated_productivity_mw_per_m3s - D02_RHO_ACUM).abs();
             assert!(
                 diff_rho_acum <= TOL,
@@ -787,7 +741,6 @@ fn d_case_energy_outputs() {
                 h.accumulated_productivity_mw_per_m3s,
             );
 
-            // Column 3: incremental_inflow_energy_mw = ρ_acum × incremental_inflow_m3s.
             let expected_energy = h.accumulated_productivity_mw_per_m3s * h.incremental_inflow_m3s;
             let diff_energy = (h.incremental_inflow_energy_mw - expected_energy).abs();
             assert!(
@@ -796,7 +749,6 @@ fn d_case_energy_outputs() {
                 h.incremental_inflow_energy_mw,
             );
 
-            // Column 4: stored_energy_initial_mwh = (V_initial − V_min) × ρ_acum × FACTOR.
             let expected_earm = (h.storage_initial_hm3 - V_MIN)
                 * h.accumulated_productivity_mw_per_m3s
                 * ENERGY_FACTOR;
@@ -808,7 +760,8 @@ fn d_case_energy_outputs() {
             );
         }
 
-        // Fixed-constant assertions for stage 0 (deterministic from inputs).
+        // Stage 0 against hand-fixed constants (deterministic from inputs),
+        // not just field-consistency.
         let h0_stage0 = scenario.stages[0]
             .hydros
             .iter()
@@ -872,7 +825,6 @@ fn d_case_energy_outputs() {
                     (D03_H1_RHO_EQ, D03_H1_RHO_ACUM)
                 };
 
-                // Column 1: ρ_eq.
                 let diff_rho_eq = (h.equivalent_productivity_mw_per_m3s - expected_rho_eq).abs();
                 assert!(
                     diff_rho_eq <= TOL,
@@ -881,7 +833,6 @@ fn d_case_energy_outputs() {
                     h.equivalent_productivity_mw_per_m3s,
                 );
 
-                // Column 2: ρ_acum.
                 let diff_rho_acum =
                     (h.accumulated_productivity_mw_per_m3s - expected_rho_acum).abs();
                 assert!(
@@ -891,7 +842,6 @@ fn d_case_energy_outputs() {
                     h.accumulated_productivity_mw_per_m3s,
                 );
 
-                // Column 3: incremental_inflow_energy consistency.
                 let expected_energy =
                     h.accumulated_productivity_mw_per_m3s * h.incremental_inflow_m3s;
                 let diff_energy = (h.incremental_inflow_energy_mw - expected_energy).abs();
@@ -902,7 +852,6 @@ fn d_case_energy_outputs() {
                     h.incremental_inflow_energy_mw,
                 );
 
-                // Column 4: stored_energy_initial consistency.
                 let expected_earm = (h.storage_initial_hm3 - V_MIN)
                     * h.accumulated_productivity_mw_per_m3s
                     * ENERGY_FACTOR;
@@ -916,7 +865,7 @@ fn d_case_energy_outputs() {
             }
         }
 
-        // Fixed-constant assertions for stage 0 (deterministic from initial conditions).
+        // Stage 0 against hand-fixed constants (deterministic from initial conditions).
         let h0_s0 = scenario.stages[0]
             .hydros
             .iter()
@@ -1107,9 +1056,9 @@ fn d09_multi_deficit() {
 /// Inflows: stage 0 = 40 m3/s (positive), stage 1 = -5 m3/s (negative).
 /// Config: `inflow_non_negativity: {method: "penalty", penalty_cost: 500.0}`.
 ///
-/// ## Penalty cost unit (verified from lp_builder.rs)
+/// ## Penalty cost unit (verified from `lp::builder::template`)
 ///
-/// From `lp_builder.rs` (`build_stage_templates`):
+/// From `build_stage_templates` in `lp::builder::template`:
 /// ```text
 /// let obj_coeff = penalty_cost * total_stage_hours;
 /// objective[col] = obj_coeff;
@@ -1184,9 +1133,7 @@ pub const D10_EXPECTED_COST: f64 = 28_562_500.0 / 9.0;
 ///
 /// ## Expected cost
 ///
-/// See [`D10_EXPECTED_COST`] for the full derivation. Stage 1's negative inflow
-/// activates a 5 m3/s slack (cost 1,825,000 $). The total cost is
-/// 3,164,185,000/657 ≈ 4,815,350.08 $.
+/// See [`D10_EXPECTED_COST`] for the full derivation.
 #[cfg_attr(
     not(feature = "slow-tests"),
     ignore = "slow: run with --features slow-tests"
@@ -1266,10 +1213,10 @@ fn d10_inflow_nonnegativity() {
 /// D11 cost > D02 cost (≈ 2,626,111.11 $) because the withdrawal reduces net
 /// inflow from 30 to 20 m3/s, leaving less water for generation across both
 /// stages and requiring significantly more thermal dispatch.
-/// Re-pinned after the universal `turbined_cost` regularization: the
-/// analytical thermal+deficit cost `3_930_320_000 / 657 ≈ 5_982_222.22 $`
-/// gains a `≈ 569.78 $` contribution from the turbine-column penalty,
-/// yielding `3_930_694_344 / 657 ≈ 5_982_792.00 $`.
+///
+/// The pinned value adds the universal `turbined_cost` regularization
+/// (`≈ 569.78 $`) to the analytical thermal+deficit cost
+/// `3_930_320_000 / 657 ≈ 5_982_222.22 $`, yielding `3_930_694_344 / 657`.
 pub const D11_WATER_WITHDRAWAL_EXPECTED_COST: f64 = 3_930_694_344.0 / 657.0;
 
 /// Two-stage hydrothermal dispatch with water withdrawal applied via hydro bounds.
@@ -1287,8 +1234,7 @@ pub const D11_WATER_WITHDRAWAL_EXPECTED_COST: f64 = 3_930_694_344.0 / 657.0;
 /// ## Expected cost
 ///
 /// See [`D11_WATER_WITHDRAWAL_EXPECTED_COST`] for the full derivation. The 10 m3/s
-/// withdrawal reduces effective net inflow from 30 to 20 m3/s, increasing thermal
-/// dispatch and pushing total cost to 3,930,320,000 / 657 ≈ 5,982,222.22 $.
+/// withdrawal reduces effective net inflow from 30 to 20 m3/s, increasing thermal dispatch.
 #[cfg_attr(
     not(feature = "slow-tests"),
     ignore = "slow: run with --features slow-tests"
@@ -1321,14 +1267,9 @@ fn d11_water_withdrawal() {
     );
 }
 
-/// Warm-start verification for the D02 system.
-///
-/// Validates that basis transfer via `solve(Some(&basis))` works end-to-end: after
-/// the training loop completes, `SolverStatistics.basis_consistency_failures` must be zero.
-/// A non-zero count would indicate silent cold-start fallbacks, which would
-/// degrade performance without surfacing an error.
-///
-/// Reuses the D02 example directory (no new case data needed).
+/// Warm-start verification for the D02 system: after training,
+/// `SolverStatistics.basis_consistency_failures` must be zero. A non-zero count
+/// means silent cold-start fallbacks that degrade performance without an error.
 #[cfg_attr(
     not(feature = "slow-tests"),
     ignore = "slow: run with --features slow-tests"
@@ -1353,24 +1294,15 @@ fn d11_warm_start_verification() {
     );
 }
 
-/// Checkpoint round-trip for the D02 system.
-///
-/// Exercises the full FlatBuffers persistence pipeline end-to-end:
-/// 1. Train D02 to convergence.
-/// 2. Build training output and write the policy checkpoint.
-/// 3. Read the checkpoint back and verify metadata fields.
-/// 4. Run simulation with the trained FCF (reloaded cuts in `setup`).
-/// 5. Assert mean simulation cost matches the training LB within 1e-2.
+/// Checkpoint round-trip for the D02 system: exercises the full FlatBuffers
+/// persistence pipeline (train → write → read → simulate from the loaded FCF).
 ///
 /// ## Why the simulation cost should equal the training LB
 ///
-/// D02 has deterministic (zero-variance) inflows and a deterministic load.
-/// With `num_scenarios = 1`, the single simulation scenario uses the same
-/// inflow realization as the training forward pass. Because the system is
-/// fully deterministic and the FCF converges to the true value function, the
-/// simulation cost equals the optimal cost captured by the training LB.
-///
-/// Reuses the D02 example directory (no new case data needed).
+/// D02 has deterministic (zero-variance) inflows and load. With
+/// `num_scenarios = 1`, the single simulation scenario uses the same inflow
+/// realization as the training forward pass, and the converged FCF is the true
+/// value function — so the simulation cost equals the training LB.
 #[cfg_attr(
     not(feature = "slow-tests"),
     ignore = "slow: run with --features slow-tests"
@@ -1379,14 +1311,10 @@ fn d11_warm_start_verification() {
 fn d12_checkpoint_round_trip() {
     let case_dir = Path::new("../../examples/deterministic/d02-single-hydro");
 
-    // ── Step 1: load config and case ─────────────────────────────────────────
-
     let config_path = case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path).expect("config must parse");
 
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
-
-    // ── Step 2: prepare stochastic and hydro models ───────────────────────────
 
     let pr = prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
         .expect("prepare_stochastic must succeed");
@@ -1396,13 +1324,9 @@ fn d12_checkpoint_round_trip() {
     let hydro_models =
         prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
-    // ── Step 3: override simulation config ────────────────────────────────────
-
     let mut config_with_sim = config.clone();
     config_with_sim.simulation.enabled = true;
     config_with_sim.simulation.num_scenarios = 1;
-
-    // ── Step 4: build StudySetup and train ────────────────────────────────────
 
     let mut setup = StudySetup::new(&system, &config_with_sim, stochastic, hydro_models)
         .expect("StudySetup must build");
@@ -1423,16 +1347,12 @@ fn d12_checkpoint_round_trip() {
         result.final_gap
     );
 
-    // ── Step 5: build training output (needed for StageCutsPayload extraction) ─
-
+    // Required side effect before StageCutsPayload extraction below.
     let _training_output = setup.build_training_output(&result, &[]);
-
-    // ── Step 6: write policy checkpoint ──────────────────────────────────────
 
     let tmp = tempfile::tempdir().expect("tempdir must succeed");
     let policy_dir = tmp.path().join("policy");
 
-    // Access the FCF pools to construct StageCutsPayload references.
     let fcf = &setup.fcf;
 
     let cut_records_per_stage: Vec<Vec<PolicyCutRecord<'_>>> = fcf
@@ -1510,8 +1430,6 @@ fn d12_checkpoint_round_trip() {
     )
     .expect("write_policy_checkpoint must succeed");
 
-    // ── Step 7: read checkpoint back and verify metadata ─────────────────────
-
     let checkpoint =
         cobre_io::read_policy_checkpoint(&policy_dir).expect("read_policy_checkpoint must succeed");
 
@@ -1537,8 +1455,6 @@ fn d12_checkpoint_round_trip() {
         "D12: cuts/stage_000.bin must exist"
     );
 
-    // ── Step 8: simulate using the FCF already in setup ───────────────────────
-
     let mut pool = setup
         .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("simulation workspace pool must build");
@@ -1561,8 +1477,6 @@ fn d12_checkpoint_round_trip() {
 
     drop(result_tx);
     let _scenario_results = drain_handle.join().expect("drain thread must not panic");
-
-    // ── Step 9: compute mean simulation cost and compare to training LB ───────
 
     let sim_config = setup.simulation_config();
     let summary = aggregate_simulation(&local_costs.costs, sim_config, &comm)
@@ -1612,7 +1526,6 @@ fn d13_generic_constraint() {
 
     let case_dir = Path::new("../../examples/deterministic/d13-generic-constraint");
 
-    // Create the generic_constraint_bounds.parquet before running the case.
     let constraints_dir = case_dir.join("constraints");
     std::fs::create_dir_all(&constraints_dir).expect("create constraints dir");
 
@@ -1626,10 +1539,10 @@ fn d13_generic_constraint() {
     let batch = RecordBatch::try_new(
         Arc::clone(&schema),
         vec![
-            Arc::new(Int32Array::from(vec![1, 1])), // constraint_id
-            Arc::new(Int32Array::from(vec![0, 1])), // stage_id
-            Arc::new(Int32Array::new_null(2)),      // block_id = null (all blocks)
-            Arc::new(Float64Array::from(vec![10.0, 10.0])), // bound = 10 MW
+            Arc::new(Int32Array::from(vec![1, 1])),
+            Arc::new(Int32Array::from(vec![0, 1])),
+            Arc::new(Int32Array::new_null(2)), // block_id null = all blocks
+            Arc::new(Float64Array::from(vec![10.0, 10.0])),
         ],
     )
     .expect("RecordBatch");
@@ -1684,7 +1597,6 @@ fn d14_block_factors() {
 
     let case_dir = Path::new("../../examples/deterministic/d14-block-factors");
 
-    // Create load_seasonal_stats.parquet: bus 0, stages 0 and 1, mean 20 MW, std 0.
     let scenarios_dir = case_dir.join("scenarios");
     std::fs::create_dir_all(&scenarios_dir).expect("create scenarios dir");
 
@@ -1712,7 +1624,7 @@ fn d14_block_factors() {
     writer.write(&load_batch).expect("write load batch");
     writer.close().expect("close load writer");
 
-    // Create empty inflow_seasonal_stats.parquet (no hydros).
+    // Empty inflow stats: D14 has no hydros.
     let inflow_schema = Arc::new(Schema::new(vec![
         Field::new("hydro_id", DataType::Int32, false),
         Field::new("stage_id", DataType::Int32, false),
@@ -1775,7 +1687,6 @@ fn d15_non_controllable_source() {
 
     let case_dir = Path::new("../../examples/deterministic/d15-non-controllable-source");
 
-    // Create load_seasonal_stats.parquet: bus 0, stages 0-1, mean 80 MW, std 0.
     let scenarios_dir = case_dir.join("scenarios");
     std::fs::create_dir_all(&scenarios_dir).expect("create scenarios dir");
 
@@ -1803,7 +1714,7 @@ fn d15_non_controllable_source() {
     writer.write(&load_batch).expect("write load batch");
     writer.close().expect("close load writer");
 
-    // Create empty inflow_seasonal_stats.parquet (no hydros).
+    // Empty inflow stats: D15 has no hydros.
     let inflow_schema = Arc::new(Schema::new(vec![
         Field::new("hydro_id", DataType::Int32, false),
         Field::new("stage_id", DataType::Int32, false),
@@ -1817,9 +1728,8 @@ fn d15_non_controllable_source() {
     writer.write(&inflow_batch).expect("write inflow batch");
     writer.close().expect("close inflow writer");
 
-    // Create non_controllable_stats.parquet: NCS 0 with availability factor 0.5
-    // (= 50 MW out of max 100 MW), std 0 (deterministic), for stages 0-1.
-    // Uses the stochastic NCS pipeline with zero noise.
+    // NCS availability is a factor: mean 0.5 × max 100 MW = 50 MW. std 0 drives
+    // the stochastic NCS pipeline with zero noise (deterministic).
     let ncs_schema = Arc::new(Schema::new(vec![
         Field::new("ncs_id", DataType::Int32, false),
         Field::new("stage_id", DataType::Int32, false),
@@ -1856,6 +1766,182 @@ fn d15_non_controllable_source() {
     assert!(
         result.final_gap.abs() < 1e-4,
         "D15: gap={:.2e}",
+        result.final_gap
+    );
+}
+
+/// D18 per-stage NCS commissioning dormancy varies across the window.
+///
+/// The fixture declares two NCS sources on a 3-stage horizon: NCS0 with
+/// `entry_stage_id = 1` (commissions at stage 1) and NCS1 with
+/// `exit_stage_id = 2` (decommissions at stage 2). Under the dense layout both
+/// NCS keep a column at every stage; the per-stage dormancy mask computed by
+/// `StudySetup::ncs_stochastic_dormant_for_test` (applying the commissioning
+/// predicate to the stored windows, keyed by stochastic slot) marks which is
+/// commissioning-dormant:
+///
+/// - stage 0 → exactly one slot dormant (NCS0 not yet commissioned)
+/// - stage 1 → no slot dormant (both active)
+/// - stage 2 → exactly one slot dormant (NCS1 decommissioned)
+///
+/// and the dormant slot at stage 0 differs from the dormant slot at stage 2.
+/// This guards the per-stage NCS patch path: a uniform-NCS case (no dormancy at
+/// any stage, as in D15) cannot detect an availability bound zeroed onto the
+/// wrong stage's columns. Asserting the dormancy genuinely varies across stages
+/// confirms the fixture exercises that path rather than collapsing to a uniform
+/// (no-dormancy) mask.
+///
+/// This assertion only builds the stage templates — it does not train — so it
+/// runs under the default `cargo test` profile, unconditionally.
+#[test]
+fn d18_ncs_commissioning_active_set_varies() {
+    let case_dir = Path::new("../../examples/deterministic/d18-ncs-commissioning-window");
+    let config = cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
+    let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
+    let prepare_result =
+        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
+            .expect("prepare_stochastic must succeed");
+    let system = prepare_result.system;
+    let hydro_models =
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
+    let setup = build_setup_for_case(
+        case_dir,
+        &config,
+        &system,
+        prepare_result.stochastic,
+        hydro_models,
+    );
+
+    let dormant = setup.ncs_stochastic_dormant_for_test();
+    assert_eq!(dormant.len(), 3, "D18: expected 3 study stages");
+
+    // The dense column count is the full NCS count (2) at every stage; the
+    // dormancy mask, not an active-subset list, carries the per-stage variance.
+    let dormant_count = |s: usize| dormant[s].iter().filter(|&&d| d).count();
+    assert_eq!(dormant_count(0), 1, "D18 stage 0: exactly one NCS dormant");
+    assert_eq!(dormant_count(1), 0, "D18 stage 1: both NCS active");
+    assert_eq!(dormant_count(2), 1, "D18 stage 2: exactly one NCS dormant");
+
+    // The load-bearing per-stage property: the dormant set is not uniform across
+    // the horizon — stage 0 differs from the fully-commissioned stage, and the
+    // dormant slot at stage 0 (NCS0 pre-entry) differs from stage 2 (NCS1 exit).
+    assert_ne!(
+        dormant[0], dormant[1],
+        "D18: dormancy must differ between stage 0 and the commissioned stage"
+    );
+    assert_ne!(
+        dormant[0], dormant[2],
+        "D18: the dormant NCS at stage 0 (pre-entry) must differ from stage 2 (post-exit)"
+    );
+}
+
+/// D33 per-stage block count varies across the horizon.
+///
+/// The fixture declares three study stages whose `blocks` arrays have different
+/// length — 1 / 3 / 2 — so each stage's per-block equipment column stride
+/// (turbine/spillage/thermal/bus) diverges from stage 0's. `block_hours_per_stage[t]`
+/// carries one entry per block of stage `t`, so its length equals that stage's
+/// `blocks.len()` — the per-stage block count threaded through the pipeline.
+///
+/// This guards the per-stage block-count path: a uniform-block case (every stage
+/// shares one block count, as in D14) cannot detect equipment columns read off
+/// the wrong stage's block width, because all stages share the same stride.
+/// Asserting the block count genuinely differs across stages confirms the
+/// fixture exercises that path rather than collapsing to a uniform width.
+///
+/// This assertion only builds the stage templates — it does not train — so it
+/// runs under the default `cargo test` profile, unconditionally.
+#[test]
+fn d33_per_stage_block_count_varies() {
+    let case_dir = Path::new("../../examples/deterministic/d33-per-stage-block-counts");
+    let config = cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
+    let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
+    let prepare_result =
+        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
+            .expect("prepare_stochastic must succeed");
+    let system = prepare_result.system;
+    let hydro_models =
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
+    let setup = build_setup_for_case(
+        case_dir,
+        &config,
+        &system,
+        prepare_result.stochastic,
+        hydro_models,
+    );
+
+    // `block_hours_per_stage[t].len()` is the block count of stage `t`
+    // (`compute_noise_scale` collects one `duration_hours` per block of the
+    // stage), which equals `block_counts_per_stage[t]` threaded through the
+    // pipeline.
+    let block_counts: Vec<usize> = setup
+        .stage_data
+        .stage_templates
+        .block_hours_per_stage
+        .iter()
+        .map(Vec::len)
+        .collect();
+    assert_eq!(block_counts, vec![1, 3, 2], "D33: per-stage block counts");
+
+    // The load-bearing per-stage property: the block count is not uniform across
+    // the horizon, so the per-block equipment stride genuinely differs per stage.
+    let distinct: std::collections::BTreeSet<usize> = block_counts.iter().copied().collect();
+    assert!(
+        distinct.len() >= 2,
+        "D33: per-stage block count must take at least two distinct values, got {block_counts:?}"
+    );
+    assert_ne!(
+        block_counts[0], block_counts[1],
+        "D33: block count must differ between stage 0 and stage 1"
+    );
+}
+
+/// D18: NCS commissioning window — three-stage thermal + NCS dispatch.
+///
+/// ## Case setup
+///
+/// - 1 bus, 1 thermal (T0 at $10/MWh, cap 100 MW), deterministic load 80 MW,
+///   3 stages each with 1 block of 730 hours, finite horizon, no discount.
+/// - Two NCS sources (bus 0, max 100 MW, curtailment_cost $0.001/MWh),
+///   availability factor 0.5 (= 50 MW each, std 0 deterministic). NCS0
+///   `entry_stage_id = 1`, NCS1 `exit_stage_id = 2`.
+///
+/// ## Expected cost derivation
+///
+/// Stages are fully decoupled (no storage, no discount, finite horizon), so the
+/// converged lower bound is the sum of per-stage optima. The NCS objective term
+/// is `-curtailment_cost × block_hours × g_ncs = -0.73 × g_ncs` (per MW
+/// dispatched); thermal is `+7300 × g_thermal`; excess is `+7.3 × g_excess`.
+///
+/// - Stage 0 (NCS1 active, 50 MW): NCS 50 + thermal 30.
+///   `50 × (-0.73) + 30 × 7300 = -36.5 + 219_000 = 218_963.5`.
+/// - Stage 1 (NCS0 + NCS1, 100 MW available, load 80): dispatching NCS beyond
+///   the 80 MW load would force excess (`+7.3/MW`) against only `-0.73/MW` of
+///   NCS incentive, so the optimum dispatches exactly 80 MW of NCS and zero
+///   thermal: `80 × (-0.73) = -58.4`.
+/// - Stage 2 (NCS0 active, 50 MW): NCS 50 + thermal 30 = `218_963.5`.
+///
+/// Total = `218_963.5 - 58.4 + 218_963.5 = 437_868.6`.
+///
+/// The case must stay feasible at stage 0, where NCS0 is not yet commissioned —
+/// the unlimited deficit segment plus the 100 MW thermal cap guarantee it.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d18_ncs_commissioning_window() {
+    let case_dir = Path::new("../../examples/deterministic/d18-ncs-commissioning-window");
+    let result = run_deterministic(case_dir);
+    assert_cost(result.final_lb, 437_868.6, 1e-2, "D18");
+    assert!(
+        result.iterations <= 10,
+        "D18: iterations={}",
+        result.iterations
+    );
+    assert!(
+        result.final_gap.abs() < 1e-4,
+        "D18: gap={:.2e}",
         result.final_gap
     );
 }
@@ -1897,34 +1983,19 @@ fn d15_non_controllable_source() {
 fn d16_par1_lag_shift() {
     let case_dir = Path::new("../../examples/deterministic/d16-par1-lag-shift");
     let result = run_deterministic(case_dir);
-    // With PAR(1) and deterministic noise (sigma~0), the SDDP lower bound
-    // should converge to the true cost. The expected cost is:
-    //   b = 100 - 0.5*100 = 50 (deterministic base)
-    //   Z_0 = 50 + 0.5*200 = 150, deficit = 50 MW
-    //   Z_1 = 50 + 0.5*150 = 125, deficit = 75 MW
-    //   Z_2 = 50 + 0.5*125 = 112.5, deficit = 87.5 MW
-    //   Total = (50+75+87.5) * 1000 * 730 = 155_125_000
-    //
-    // With PAR(1), the backward pass cuts include lag gradient terms.
-    // Convergence may require multiple iterations; we verify the lower bound
-    // is reasonably close to the expected cost.
-    // The PAR(1) system with lag shift runs to completion without errors.
-    // With sigma~0 and branching_factor=1, the forward pass is deterministic.
-    // The lower bound is positive and the system produces meaningful costs.
     assert!(
         result.final_lb > 0.0,
         "D16: lower bound must be positive, got {}",
         result.final_lb
     );
-    // The expected cost with correct lag shift differs from the PAR(0)-equivalent
-    // cost. With psi=0.5 and initial lag=200, inflows decrease across stages
-    // (150, 125, 112.5), producing higher deficits than if the lag never shifted.
-    // Re-pinned after the universal `turbined_cost` regularization shifted
-    // the LB from `7_756_250.0` by `≈ +2_828.75 $`.
+    // The lag shift makes inflows decrease across stages (Z = 150, 125, 112.5),
+    // producing higher deficits than the no-shift bug (Z = 150 at every stage).
+    // Pinned value adds the universal `turbined_cost` regularization (`≈ 2_828.75 $`)
+    // to the deficit-only cost `7_756_250.0`.
     assert_cost(result.final_lb, 7_759_078.749_993_78, 1.0, "D16");
 }
 
-/// Regression guard for the model-persistence optimization (S1).
+/// Regression guard for the model-persistence optimization.
 ///
 /// Runs D01 (2 stages, 2 thermals, deterministic) and verifies that the
 /// solver's `load_model_count` is consistent with per-stage loading, NOT
@@ -1941,27 +2012,18 @@ fn model_persistence_regression_d01() {
     let case_dir = Path::new("../../examples/deterministic/d01-thermal-dispatch");
     let (result, solver) = run_deterministic_with_solver(case_dir);
 
-    // D01 uses 2 forward passes and 2 stages. With model persistence, the
-    // forward pass calls load_model once per stage (not per scenario).
-    // Exact cost must match D01 expected value.
     assert_cost(result.final_lb, 182_500.0, 1e-6, "D01-persistence");
 
-    // With persistence: load_model per-stage, not per-scenario.
-    // The exact count depends on iterations, but it MUST be less than
-    // n_stages * forward_passes * iterations (the per-scenario count).
     let stats = solver.statistics();
     let n_stages = 2_u64;
     let forward_passes = 2_u64;
     let iterations = result.iterations;
 
-    // Without persistence: forward would do n_stages * forward_passes * iterations
     let without_persistence_forward = n_stages * forward_passes * iterations;
-    // With persistence: forward does n_stages * iterations (1 worker)
     let with_persistence_forward = n_stages * iterations;
 
-    // load_model_count includes forward + backward + lower bound calls.
-    // It must be strictly less than the without-persistence forward-only count,
-    // confirming the optimization is active.
+    // load_model_count (forward + backward + LB) must stay below the
+    // per-scenario forward-only count, confirming per-stage persistence is active.
     assert!(
         stats.load_model_count < without_persistence_forward,
         "model persistence regression: load_model_count ({}) should be < {} (per-scenario forward-only count), \
@@ -1999,22 +2061,19 @@ fn incremental_lb_reduces_load_model_count() {
     let case_dir = Path::new("../../examples/deterministic/d03-two-hydro-cascade");
     let (result, solver) = run_deterministic_with_solver(case_dir);
 
-    // D03 must converge to the expected cost.
     assert_cost(result.final_lb, D03_EXPECTED_COST, 1e-4, "D03-incremental");
 
     let stats = solver.statistics();
     let n_stages = 3_u64;
     let iterations = result.iterations;
 
-    // Without incremental LB: forward + backward + LB each do load_model per stage.
-    let non_incremental_lb = iterations; // 1 load_model per iteration for LB
+    // Non-incremental LB would call load_model once per iteration; incremental
+    // calls it only on the first. Total budget = forward + backward + LB.
+    let non_incremental_lb = iterations;
     let forward_count = n_stages * iterations;
     let backward_count = (n_stages - 1) * iterations;
     let total_without_incremental = forward_count + backward_count + non_incremental_lb;
 
-    // With incremental LB: LB does load_model only once (first iteration).
-    // So total should be roughly forward + backward + 1.
-    // Allow some margin for periodic rebuilds.
     assert!(
         stats.load_model_count < total_without_incremental,
         "incremental LB should reduce load_model_count: got {} >= {} (non-incremental total), \
@@ -2025,8 +2084,8 @@ fn incremental_lb_reduces_load_model_count() {
         n_stages
     );
 
-    // The reduction should be at least (iterations - 1) fewer load_model calls
-    // from the LB solver (it does 1 instead of iterations).
+    // The LB solver does 1 load_model instead of `iterations`, so the reduction
+    // is at least (iterations - 1).
     let expected_savings = iterations.saturating_sub(1);
     let actual_savings = total_without_incremental - stats.load_model_count;
     assert!(
@@ -2040,23 +2099,16 @@ fn incremental_lb_reduces_load_model_count() {
     );
 }
 
-/// Verify that all D01-D15 deterministic tests pass with the incremental cut
-/// management code path active (bit-for-bit equivalence spot check).
-///
-/// This test runs D01 (simplest case) and verifies the full per-iteration
-/// convergence trace matches the expected values. Since the D01-D15 tests
-/// use the same training pipeline with incremental LB management, all passing
-/// confirms bit-for-bit equivalence.
+/// Bit-for-bit equivalence spot check for the incremental cut-management path:
+/// D01's converged trace must match its expected cost. All D-cases share this
+/// pipeline, so D01 passing exercises the same incremental LB management.
 #[test]
 fn incremental_bit_for_bit_d01_trace() {
     let case_dir = Path::new("../../examples/deterministic/d01-thermal-dispatch");
     let (result, _solver) = run_deterministic_with_solver(case_dir);
 
-    // D01 converges in iteration 1 (thermal dispatch with no hydro has
-    // a trivial optimal solution). The LB should match the expected cost.
     assert_cost(result.final_lb, 182_500.0, 1e-6, "D01-trace");
 
-    // Gap should be zero or very small for D01.
     assert!(
         result.final_gap.abs() < 1e-6,
         "D01-trace: gap={:.2e} should be < 1e-6",
@@ -2103,31 +2155,20 @@ fn d19_multi_hydro_par_truncation() {
         "D19: lower bound must be positive, got {}",
         result.final_lb
     );
-    // With PAR(2), 2 hydros, and truncation, convergence within 50 iterations
-    // is not guaranteed (large state space). The key regression check is that
-    // the lower bound matches the reference value, confirming the lag-major
-    // indexing is correct.
+    // No iteration bound: the 2-hydro × 2-lag state space need not converge
+    // within 50 iterations. The LB match is the lag-major indexing regression check.
     assert_cost(result.final_lb, D19_EXPECTED_COST, 1.0, "D19");
 }
 
 /// Expected lower bound for D19 (2-hydro PAR(2) with truncation, 3 stages).
 ///
-/// Recorded empirically with the corrected lag-major indexing
-/// and season-based fallback for pre-study lag stats. The value depends on
-/// the PAR evaluation and truncation logic -- it is not hand-computable
-/// due to the 2-hydro x 2-lag state space.
+/// Empirical, not hand-computable (2-hydro × 2-lag state space). D19's 3 study
+/// stages all carry `season_id=0` in 2024, so `precompute_noise_groups` assigns
+/// one group ID and `generate_opening_tree` makes stages 1 and 2 share stage 0's
+/// correlated noise draws — a different but still deterministic optimal cost.
 ///
-/// Updated from 1,332,425.292_764_49 after `noise_group_ids` was wired
-/// to the opening tree. D19 has all 3 study stages with
-/// `season_id=0` in year 2024, so `precompute_noise_groups` assigns them
-/// the same group ID. The noise-group copy path in `generate_opening_tree`
-/// therefore makes stages 1 and 2 share stage 0's correlated noise draws,
-/// producing a different — but still deterministic — optimal cost.
-///
-/// If the lag-major/hydro-major indexing bug regresses, different lag values
-/// are read for each hydro during PAR evaluation, producing a different cost.
-/// Re-pinned after the universal `turbined_cost` regularization
-/// (previous value `1_332_571.796_891_952_6`, delta `≈ +2_083.38 $`).
+/// A lag-major/hydro-major indexing regression reads the wrong lag for each
+/// hydro in PAR evaluation, producing a different cost.
 pub const D19_EXPECTED_COST: f64 = 1_334_655.175_543_562_7;
 
 /// Operational violation slacks: 1 hydro with active min_outflow, max_outflow,
@@ -2179,6 +2220,7 @@ fn d20_operational_violations() {
     let scenario = &scenario_results[0];
     assert_eq!(scenario.stages.len(), 2);
 
+    // Verify operational violation slacks fire in at least one stage.
     let mut found_outflow_below = false;
     let mut found_turbine_below = false;
     for stage_result in &scenario.stages {
@@ -2201,9 +2243,8 @@ fn d20_operational_violations() {
     );
 }
 
-/// Recorded empirically with initial_storage=10 hm3. Re-pinned after the
-/// universal `turbined_cost` regularization (previous value
-/// `195_744_444.444_444_48`, delta `≈ +392.78 $`).
+/// Empirical lower bound, initial_storage=10 hm3 (includes the universal
+/// `turbined_cost` regularization).
 pub const D20_EXPECTED_COST: f64 = 195_744_837.222_222_24;
 
 /// LP consistency test: cost consistency between outflow violation slacks
@@ -2223,7 +2264,6 @@ fn d21_min_outflow_regression() {
 
     let case_dir = Path::new("../../examples/deterministic/d21-min-outflow-regression");
 
-    // Create scenario parquet files (deterministic: std=0).
     let scenarios_dir = case_dir.join("scenarios");
     std::fs::create_dir_all(&scenarios_dir).expect("create scenarios dir");
 
@@ -2293,7 +2333,6 @@ fn d21_min_outflow_regression() {
         "D21-sim-vs-training",
     );
 
-    // Verify non-zero outflow violation slacks.
     assert_eq!(scenario_results.len(), 1);
     let scenario = &scenario_results[0];
     assert_eq!(scenario.stages.len(), 2);
@@ -2308,7 +2347,6 @@ fn d21_min_outflow_regression() {
         "D21: expected non-zero outflow_slack_below_m3s"
     );
 
-    // Verify cost consistency: hydro_violation_cost = slack_m3s * penalty * hours.
     // Per-block formulation: slack is in m3/s, objective = penalty * block_hours.
     let penalty = 5000.0_f64;
     let hours = 730.0_f64;
@@ -2336,12 +2374,12 @@ fn d21_min_outflow_regression() {
         "D21: hydro_violation_cost must be positive"
     );
 
-    // Verify decomposed cost fields.
+    // Decomposed cost fields. D21 has only min-outflow violations, so every
+    // other violation component must be zero and the below-cost must carry the
+    // whole hydro_violation_cost.
     for (s, stage_result) in scenario.stages.iter().enumerate() {
         let cost = &stage_result.costs[0];
 
-        // 1. outflow_violation_below_cost matches hydro_violation_cost
-        //    (D21 only has min-outflow violations).
         let component_sum = cost.outflow_violation_below_cost
             + cost.outflow_violation_above_cost
             + cost.turbined_violation_cost
@@ -2355,7 +2393,6 @@ fn d21_min_outflow_regression() {
             component_sum
         );
 
-        // 2. Non-applicable components must be zero (D21 only has min-outflow).
         assert!(
             cost.outflow_violation_above_cost.abs() < 1e-10,
             "D21 stage {s}: outflow_above should be 0, got {}",
@@ -2382,7 +2419,6 @@ fn d21_min_outflow_regression() {
             cost.withdrawal_violation_cost
         );
 
-        // 3. outflow_violation_below_cost matches the formula.
         let slack_m3s = stage_result.hydros[0].outflow_slack_below_m3s;
         if slack_m3s > 1e-10 {
             let expected_below_cost = slack_m3s * penalty * hours;
@@ -2395,7 +2431,6 @@ fn d21_min_outflow_regression() {
         }
     }
 
-    // 4. At least one stage has non-zero outflow_violation_below_cost.
     let found_below_cost = scenario
         .stages
         .iter()
@@ -2407,9 +2442,8 @@ fn d21_min_outflow_regression() {
     );
 }
 
-/// Recorded empirically with initial_storage=5 hm3 and inflow=10 m3/s.
-/// Re-pinned after the universal `turbined_cost` regularization
-/// (previous value `285_716_111.111_111_1`, delta `≈ +159.89 $`).
+/// Empirical lower bound, initial_storage=5 hm3, inflow=10 m3/s (includes the
+/// universal `turbined_cost` regularization).
 pub const D21_EXPECTED_COST: f64 = 285_716_271.0;
 
 /// D22: Multi-block per-block min outflow regression test.
@@ -2432,7 +2466,6 @@ fn d22_per_block_min_outflow() {
 
     let case_dir = Path::new("../../examples/deterministic/d22-per-block-min-outflow");
 
-    // Create scenario parquet files (deterministic: std=0).
     let scenarios_dir = case_dir.join("scenarios");
     std::fs::create_dir_all(&scenarios_dir).expect("create scenarios dir");
 
@@ -2480,7 +2513,6 @@ fn d22_per_block_min_outflow() {
     writer.write(&inflow_batch).expect("write inflow batch");
     writer.close().expect("close inflow writer");
 
-    // Train + simulate.
     let (result, scenario_results, summary) = run_with_simulation(case_dir);
 
     assert!(
@@ -2502,13 +2534,12 @@ fn d22_per_block_min_outflow() {
         "D22-sim-vs-training",
     );
 
-    // Verify per-block outflow violation slacks.
     let scenario = &scenario_results[0];
     let block_hours = [200.0_f64, 300.0, 230.0];
     let penalty = 5000.0_f64;
 
     for (s, stage_result) in scenario.stages.iter().enumerate() {
-        // Per-block results: 1 hydro * 3 blocks = 3 rows.
+        // 1 hydro × 3 blocks = 3 rows.
         assert_eq!(
             stage_result.hydros.len(),
             3,
@@ -2516,7 +2547,7 @@ fn d22_per_block_min_outflow() {
         );
 
         for (b, hr) in stage_result.hydros.iter().enumerate() {
-            // Each block should have non-zero outflow violation (inflow=10 < min_outflow=30).
+            // inflow=10 < min_outflow=30, so every block violates.
             assert!(
                 hr.outflow_slack_below_m3s > 1e-6,
                 "D22 stage {s} block {b}: outflow_slack_below_m3s should be > 0, got {}",
@@ -2524,12 +2555,8 @@ fn d22_per_block_min_outflow() {
             );
         }
 
-        // Per-block constraints produce different slack values per block because
-        // the penalty cost is proportional to block_hours. The optimizer concentrates
-        // available outflow into blocks with higher penalty costs (longer blocks).
-        // This is the intended per-block behavior: each block enforces its own bound.
-
-        // Total violation cost for this stage should match the sum of per-block costs.
+        // Slack differs per block: penalty ∝ block_hours, so the optimizer
+        // concentrates outflow into the longer (more expensive) blocks.
         assert_eq!(stage_result.costs.len(), 1);
         let total_violation_cost = stage_result.costs[0].hydro_violation_cost;
         let expected_total: f64 = stage_result
@@ -2545,9 +2572,8 @@ fn d22_per_block_min_outflow() {
     }
 }
 
-/// Recorded empirically with multi-block (3 blocks) per-block min outflow.
-/// Re-pinned after the universal `turbined_cost` regularization
-/// (previous value `140_376_666.666_666_66`, delta `≈ +159.89 $`).
+/// Empirical lower bound, multi-block (3 blocks) per-block min outflow
+/// (includes the universal `turbined_cost` regularization).
 pub const D22_EXPECTED_COST: f64 = 140_376_826.555_555_58;
 
 /// D23: Bidirectional withdrawal -- over-withdrawal activation.
@@ -2594,7 +2620,6 @@ fn d23_bidirectional_withdrawal() {
 
     let case_dir = Path::new("../../examples/deterministic/d23-bidirectional-withdrawal");
 
-    // Create scenario parquet files (deterministic: std=0).
     let scenarios_dir = case_dir.join("scenarios");
     std::fs::create_dir_all(&scenarios_dir).expect("create scenarios dir");
 
@@ -2642,7 +2667,6 @@ fn d23_bidirectional_withdrawal() {
     writer.write(&inflow_batch).expect("write inflow batch");
     writer.close().expect("close inflow writer");
 
-    // Create hydro_bounds parquet with withdrawal target.
     let constraints_dir = case_dir.join("constraints");
     std::fs::create_dir_all(&constraints_dir).expect("create constraints dir");
 
@@ -2680,7 +2704,6 @@ fn d23_bidirectional_withdrawal() {
         result.final_gap
     );
 
-    // AC-1: over-withdrawal slack is activated in at least one stage.
     assert_eq!(scenario_results.len(), 1);
     let scenario = &scenario_results[0];
     assert_eq!(scenario.stages.len(), 2);
@@ -2691,7 +2714,7 @@ fn d23_bidirectional_withdrawal() {
             if hydro_result.water_withdrawal_violation_pos_m3s > 1e-10 {
                 found_ww_pos = true;
             }
-            // AC-2: under-withdrawal should NOT activate (neg cost is high).
+            // Under-withdrawal must not activate: its neg cost is high.
             assert!(
                 hydro_result.water_withdrawal_violation_neg_m3s < 1e-10,
                 "D23: unexpected under-withdrawal violation: {}",
@@ -2704,7 +2727,7 @@ fn d23_bidirectional_withdrawal() {
         "D23: expected non-zero water_withdrawal_violation_pos_m3s (over-withdrawal)"
     );
 
-    // AC-3: water balance identity holds for each stage.
+    // Water balance identity, per stage:
     // V_out = V_in + kappa * (inflow - ww_target + ww_neg - ww_pos - turbined - spillage)
     let kappa = 730.0 * 3600.0 / 1e6; // hm3 per (m3/s)
     let ww_target = 5.0;
@@ -2728,22 +2751,16 @@ fn d23_bidirectional_withdrawal() {
     }
 }
 
-/// Verify bus balance: generation + deficit - excess + net_exchange = load for each block.
-///
-/// This catches LP-extraction mismatches where the bus balance coefficient
-/// (e.g., productivity) differs between the LP builder and the extraction
-/// pipeline. For every block in the stage, the helper sums all generation
-/// injections (hydro + thermal + NCS), deficit, excess, and net exchange,
-/// then asserts that the supply equals the extracted load within `tolerance`.
+/// Verify per-block bus balance: generation + deficit - excess + net_exchange =
+/// load. Catches LP-extraction mismatches where a bus-balance coefficient
+/// (e.g. productivity) diverges between the LP builder and the extraction pipeline.
 ///
 /// # Limitations
 ///
-/// Entity result structs do not carry a `bus_id`, so this helper sums all
-/// generation across all buses. It is accurate for single-bus systems. For
-/// multi-bus systems with exchange lines, a bus-entity mapping would be needed
-/// to validate per-bus balance individually.
+/// Entity result structs carry no `bus_id`, so this sums generation across all
+/// buses — accurate only for single-bus systems. Multi-bus systems with exchange
+/// lines would need a bus-entity mapping for per-bus balance.
 fn assert_bus_balance(stage: &cobre_sddp::SimulationStageResult, tolerance: f64, label: &str) {
-    // Collect unique block IDs from bus results (buses always have block_id set).
     let mut block_ids: Vec<u32> = stage.buses.iter().filter_map(|b| b.block_id).collect();
     block_ids.sort_unstable();
     block_ids.dedup();
@@ -2779,8 +2796,7 @@ fn assert_bus_balance(stage: &cobre_sddp::SimulationStageResult, tolerance: f64,
             .filter(|b| b.block_id == Some(block_id))
             .map(|b| b.excess_mw)
             .sum();
-        // Net exchange: direct flow enters the system, reverse flow leaves.
-        // For a single-bus system with no lines this sums to zero.
+        // Net exchange sign: direct flow enters the bus, reverse flow leaves.
         let net_exchange: f64 = stage
             .exchanges
             .iter()
@@ -2848,10 +2864,10 @@ fn assert_bus_balance(stage: &cobre_sddp::SimulationStageResult, tolerance: f64,
 /// If the bug were present (using entity rho=1.0 instead of the overrides),
 /// the cost would equal D02: 23635000/9 ~ 2626111.11 $. The difference
 /// (~ $34444) is well above the 1e-4 tolerance, so the test catches the bug.
-/// Re-pinned after the universal `turbined_cost` regularization: the
-/// analytical thermal cost `23_945_000 / 9 ≈ 2_660_555.56 $` gains the same
-/// `5_785 / 9 ≈ 642.78 $` contribution as D02 (same single-hydro turbined
-/// flows), yielding `23_950_785 / 9 ≈ 2_661_198.33 $`.
+///
+/// The pinned value adds D02's universal `turbined_cost` regularization
+/// (`5_785 / 9 ≈ 642.78 $`, same single-hydro turbined flows) to the analytical
+/// thermal cost `23_945_000 / 9`, yielding `23_950_785 / 9`.
 pub const D24_EXPECTED_COST: f64 = 23_950_785.0 / 9.0;
 
 /// D24: Productivity override — per-stage productivity from `hydro_production_models.json`.
@@ -2876,7 +2892,6 @@ fn d24_productivity_override() {
 
     let case_dir = Path::new("../../examples/deterministic/d24-productivity-override");
 
-    // Create scenario parquet files (deterministic: std=0).
     let scenarios_dir = case_dir.join("scenarios");
     std::fs::create_dir_all(&scenarios_dir).expect("create scenarios dir");
 
@@ -2936,14 +2951,11 @@ fn d24_productivity_override() {
         "D24: gap={:.2e}",
         result.final_gap
     );
-    // Verify cost differs from D02 (entity productivity 1.0).
     assert!(
         (result.final_lb - D02_EXPECTED_COST).abs() > 1.0,
         "D24: cost must differ from D02 (per-stage overrides change economics)"
     );
 
-    // Bus balance validation: verify that extracted generation + deficit - excess = load
-    // for every (stage, block) in the simulation output.
     assert_eq!(
         scenario_results.len(),
         1,
@@ -2969,8 +2981,7 @@ fn d24_productivity_override() {
 /// the stage-0 LP objective, reducing the present value of future costs.
 /// This shifts the optimal dispatch toward less water conservation, yielding
 /// a lower total present-value cost than the undiscounted D02 case.
-/// Re-pinned after the universal `turbined_cost` regularization
-/// (previous value `2_611_454.584_787_283`, delta `≈ +640.12 $`).
+/// Includes the universal `turbined_cost` regularization (`≈ 640.12 $`).
 const D25_EXPECTED_COST: f64 = 2_612_094.703_543_594_6;
 
 /// D25: Two-stage single-hydro with 12% annual discount rate.
@@ -2996,7 +3007,6 @@ fn d25_discount_rate() {
         "D25: gap={:.2e}",
         result.final_gap
     );
-    // Discounted LB must be strictly less than undiscounted D02 LB.
     assert!(
         result.final_lb < D02_EXPECTED_COST,
         "D25: discounted LB ({}) must be < undiscounted D02 LB ({})",
@@ -3019,23 +3029,19 @@ fn d25_simulation_discount_factors() {
     let case_dir = Path::new("../../examples/deterministic/d25-discount-rate");
     let (result, scenarios, _summary) = run_with_simulation(case_dir);
 
-    // Training LB must still match.
     assert_cost(result.final_lb, D25_EXPECTED_COST, 1e-4, "D25-sim");
 
-    // 1 scenario, 2 stages.
     assert_eq!(scenarios.len(), 1, "D25: expected 1 simulation scenario");
     let stages = &scenarios[0].stages;
     assert_eq!(stages.len(), 2, "D25: expected 2 stages");
 
-    // Stage 0: cumulative discount factor = 1.0 (always).
+    // Stage 0 cumulative discount factor is always 1.0.
     let df0 = stages[0].costs[0].discount_factor;
     assert!(
         (df0 - 1.0).abs() < 1e-12,
         "D25: stage 0 discount_factor expected 1.0, got {df0}"
     );
 
-    // Stage 1: cumulative discount factor = d_0.
-    // d_0 = 1 / (1.12)^(31 / 365.25)
     let d0 = 1.0_f64 / 1.12_f64.powf(31.0 / 365.25);
     let df1 = stages[1].costs[0].discount_factor;
     assert!(
@@ -3048,10 +3054,9 @@ fn d25_simulation_discount_factors() {
 // D26: Estimated PAR(2) — regression guard for the forward-prediction fix
 // ---------------------------------------------------------------------------
 
-/// D26 expected lower bound: recorded with corrected forward-prediction fix.
-/// Regression guard against backward-prediction (P5) bug.
-/// Re-pinned after the universal `turbined_cost` regularization
-/// (previous value `50_607_484.905_810_06`, delta `≈ +17_830.06 $`).
+/// D26 expected lower bound — regression guard that PAR prediction uses the
+/// forward (not backward) lag. Includes the universal `turbined_cost`
+/// regularization (`≈ 17_830.06 $`).
 pub const D26_EXPECTED_COST: f64 = 50_625_314.970_196_81;
 
 /// D26: PAR(2) estimation from inflow history (regression guard for forward-prediction fix).
@@ -3170,9 +3175,8 @@ fn d27_per_stage_thermal_cost() {
         result.final_gap
     );
 
-    // The per-stage cost override must produce a strictly higher total cost
-    // than the uniform-cost baseline (T1 at 50 $/MWh in both stages = 9_052_000 $).
-    // This confirms the override is applied and changes dispatch ordering at stage 1.
+    // Exceeding the uniform-cost baseline confirms the override is applied and
+    // reorders stage-1 dispatch (see D27_EXPECTED_COST for the baseline).
     let uniform_baseline = 9_052_000.0_f64;
     assert!(
         result.final_lb > uniform_baseline,
@@ -3256,7 +3260,6 @@ fn d29_weekly_par_noise_sharing() {
     let mut setup =
         StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
 
-    // AC: All 4 weekly stages in January 2024 must share the same noise group ID.
     let groups = &setup.stage_data.noise_group_ids;
     assert_eq!(groups.len(), 4, "expected 4 study stages");
     assert!(
@@ -3264,7 +3267,6 @@ fn d29_weekly_par_noise_sharing() {
         "all weekly stages in the same month must share the same group ID, got {groups:?}"
     );
 
-    // Train.
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
@@ -3288,7 +3290,6 @@ fn d29_weekly_par_noise_sharing() {
         result.final_lb
     );
 
-    // Simulate.
     let mut pool = setup
         .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("simulation workspace pool must build");
@@ -3392,19 +3393,11 @@ fn d30_multi_resolution_loads_and_trains() {
 
 // ── integration test ──────────────────────────────────────────────
 
-/// Verify that the baked-template simulation path produces bit-exactly identical
-/// per-scenario costs to the legacy (fallback) path.
-///
-/// Trains D01 (thermal dispatch, purely deterministic), which runs >= 2 iterations
-/// and therefore has `baked_templates: Some(...)`. Runs two simulations:
-/// 1. Baked path: passes `training_result.baked_templates.as_deref()`.
-/// 2. Fallback path: forces `None` for `baked_templates`.
-///
-/// Asserts that every `(scenario_id, total_cost)` pair is bit-for-bit identical
-/// between the two runs (i.e., relative error == 0.0, well within 1e-12).
-///
-/// This confirms that `bake_rows_into_template` produces a mathematically
-/// equivalent LP to `load_model + add_rows`.
+/// The baked-template simulation path must produce bit-for-bit identical
+/// per-scenario costs to the legacy fallback path (rel error == 0.0, within
+/// 1e-12), confirming `bake_rows_into_template` builds a mathematically
+/// equivalent LP to `load_model + add_rows`. Trained on D01, which runs >= 2
+/// iterations so `baked_templates` is `Some`.
 #[test]
 fn baked_vs_fallback_simulation_costs_are_identical() {
     let case_dir = Path::new("../../examples/deterministic/d01-thermal-dispatch");
@@ -3443,7 +3436,6 @@ fn baked_vs_fallback_simulation_costs_are_identical() {
     assert!(outcome.error.is_none(), "expected no training error");
     let training_result = outcome.result;
 
-    // D01 trains for > 1 iteration; the bake step must have run.
     assert!(
         training_result.baked_templates.is_some(),
         "D01 training must produce baked templates (requires >= 2 iterations)"
@@ -3453,7 +3445,6 @@ fn baked_vs_fallback_simulation_costs_are_identical() {
         .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("simulation workspace pool must build");
 
-    // ── Baked path ────────────────────────────────────────────────────────────
     let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
     let (tx_baked, rx_baked) = mpsc::sync_channel(io_capacity);
     let drain_baked = std::thread::spawn(move || rx_baked.into_iter().collect::<Vec<_>>());
@@ -3471,7 +3462,6 @@ fn baked_vs_fallback_simulation_costs_are_identical() {
     drop(tx_baked);
     drop(drain_baked.join().expect("drain thread must not panic"));
 
-    // ── Fallback path (force None) ────────────────────────────────────────────
     let (tx_fallback, rx_fallback) = mpsc::sync_channel(io_capacity);
     let drain_fallback = std::thread::spawn(move || rx_fallback.into_iter().collect::<Vec<_>>());
 
@@ -3488,7 +3478,6 @@ fn baked_vs_fallback_simulation_costs_are_identical() {
     drop(tx_fallback);
     drop(drain_fallback.join().expect("drain thread must not panic"));
 
-    // ── Compare costs ─────────────────────────────────────────────────────────
     assert_eq!(
         baked_run.costs.len(),
         fallback_run.costs.len(),

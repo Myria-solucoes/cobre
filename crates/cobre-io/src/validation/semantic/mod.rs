@@ -13,8 +13,9 @@
 //! | 3 | `min_turbined_m3s <= max_turbined_m3s`            | `system/hydros.json`                  | `InvalidValue`         |
 //! | 4 | `min_outflow_m3s <= max_outflow_m3s` (when Some)  | `system/hydros.json`                  | `InvalidValue`         |
 //! | 5 | `min_generation_mw <= max_generation_mw` (hydro)  | `system/hydros.json`                  | `InvalidValue`         |
-//! | 6 | `entry_stage_id < exit_stage_id` (when both Some) | hydros/lines/thermals                 | `InvalidValue`         |
+//! | 6 | `entry_stage_id < exit_stage_id` (when both Some) | all six entity types                  | `InvalidValue`         |
 //! | 7 | Filling `start_stage_id` in study stage set       | `system/hydros.json`                  | `InvalidValue`         |
+//! | 7a| Filling guards: entry⟺filling paired, `start_stage_id < entry_stage_id`, `entry_stage_id < horizon`, seed in `[0, min_storage_hm3)`, no `exit_stage_id` on a filling hydro | `system/hydros.json` | `InvalidValue` |
 //! | 8 | Geometry `volume_hm3` strictly increasing         | `system/hydro_geometry.parquet`       | `BusinessRuleViolation`|
 //! | 9 | Geometry `height_m` non-decreasing                | `system/hydro_geometry.parquet`       | `BusinessRuleViolation`|
 //! |10 | Geometry `area_km2` non-decreasing                | `system/hydro_geometry.parquet`       | `BusinessRuleViolation`|
@@ -26,6 +27,8 @@
 //! |16 | Thermal `thermal_bounds.parquet` override `stage_id` within `[0, n_stages)` | `constraints/thermal_bounds.parquet` | `BusinessRuleViolation` |
 //! |17 | `anticipated_decision(N)` in generic constraint targets an anticipated thermal | `constraints/generic_constraints.json` | `BusinessRuleViolation` |
 //! |18 | `thermal_generation(N)` in generic constraint when `N` is anticipated (warn) | `constraints/generic_constraints.json` | `SemanticAmbiguity` (warning) |
+//! |19 | Pumping `source_hydro_id != destination_hydro_id`  | `system/pumping_stations.json`        | `InvalidValue`         |
+//! |20 | Non-filling hydro sets `entry_stage_id`/`exit_stage_id` (parsed, not applied; filling hydros, thermal/line/NCS/pumping/contract windows ARE applied) | `system/hydros.json` | `ModelQuality` (warning) |
 //!
 //! ## Layer 5b rules (stages, penalties, and scenario domain) — `validate_semantic_stages_penalties_scenarios`
 //!
@@ -36,7 +39,7 @@
 //! | 3  | Cyclic graph: `annual_discount_rate > 0.0`                              | `stages.json`                                  | `InvalidValue`           |
 //! | 4  | Every `Block.duration_hours > 0.0`                                      | `stages.json`                                  | `InvalidValue`           |
 //! | 5  | CVaR: `alpha` in (0, 1], `lambda` in [0, 1]                             | `stages.json`                                  | `InvalidValue`           |
-//! | 6  | `filling_target_violation_cost > storage_violation_below_cost`          | `penalties.json`                               | `ModelQuality` (warning) |
+//! | 6  | `max(deficit_segment_costs) > filling_target_violation_cost`            | `penalties.json`                               | `ModelQuality` (warning) |
 //! | 7  | `storage_violation_below_cost > max(deficit_segment_costs)`             | `penalties.json`                               | `ModelQuality` (warning) |
 //! | 8  | `max(deficit_segment_costs) > max(constraint_violation_costs)`          | `penalties.json`                               | `ModelQuality` (warning) |
 //! | 9  | `min(constraint_violation_costs) > max(resource_costs)`                 | `penalties.json`                               | `ModelQuality` (warning) |
@@ -63,11 +66,13 @@
 //! |30  | Season defined in `season_definitions` but not referenced by any stage   | `stages.json`                                  | `ModelQuality` (warning) |
 //! |31  | Observation resolution must not be finer than season resolution          | `scenarios/inflow_history.parquet`             | `BusinessRuleViolation`  |
 //! |32  | Each `season_id` in `past_inflows[i].season_ids` must exist in `SeasonMap` | `initial_conditions.json`                    | `BusinessRuleViolation`  |
+//! |33  | Filling schedule reaches the dead volume: `Σ ζ_s·rate_s >= min_storage − seed` | `system/hydros.json`               | `BusinessRuleViolation`  |
 
 use super::{ValidationContext, schema::ParsedData};
 
 mod correlation;
 mod hydro;
+mod pumping;
 mod scenarios;
 mod season;
 mod sobol;
@@ -81,7 +86,10 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     hydro::check_cascade_acyclic(data, ctx);
     hydro::check_hydro_bounds(data, ctx);
     hydro::check_lifecycle_consistency(data, ctx);
+    hydro::check_lifecycle_consistency_remaining(data, ctx);
+    hydro::warn_commissioning_parsed_not_applied(data, ctx);
     hydro::check_filling_config(data, ctx);
+    hydro::check_filling_guards(data, ctx);
     hydro::check_geometry_monotonicity(data, ctx);
     hydro::check_evaporation_geometry_coverage(data, ctx);
     hydro::check_fpha_constraints(data, ctx);
@@ -90,23 +98,14 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     thermal::check_thermal_bounds_override_stage_range(data, ctx);
     thermal::check_anticipated_decision_target_is_anticipated(data, ctx);
     thermal::warn_thermal_generation_on_anticipated_thermal(data, ctx);
+    pumping::check_pumping_semantics(data, ctx);
 }
 
 // ── validate_semantic_stages_penalties_scenarios ──────────────────────────────
 
 /// Performs Layer 5b semantic validation: stage structure, penalty ordering,
-/// and scenario model rules.
-///
-/// All 21 rules are checked regardless of failures in earlier rules — every
-/// violation is collected before returning.  This function is infallible; it
-/// never returns a `Result`.  Errors are pushed to `ctx` as
-/// [`ErrorKind::InvalidValue`] or [`ErrorKind::BusinessRuleViolation`] entries;
-/// penalty ordering warnings use [`ErrorKind::ModelQuality`].
-///
-/// # Arguments
-///
-/// * `data` — fully parsed case data produced by [`super::schema::validate_schema`].
-/// * `ctx`  — mutable validation context that accumulates diagnostics.
+/// and scenario model rules. Every violation is collected into `ctx` before
+/// returning — no rule short-circuits another.
 ///
 /// # Conditional checks
 ///
@@ -120,6 +119,7 @@ pub(crate) fn validate_semantic_stages_penalties_scenarios(
     stages::check_stage_structure(data, ctx);
     sobol::check_sobol_power_of_2(data, ctx);
     scenarios::check_penalty_ordering(data, ctx);
+    scenarios::check_filling_sufficiency(data, ctx);
     scenarios::check_fpha_penalty_rule(data, ctx);
     scenarios::check_scenario_models(data, ctx);
     correlation::check_correlation_matrices(data, ctx);

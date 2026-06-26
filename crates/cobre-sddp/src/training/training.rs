@@ -1,31 +1,12 @@
 //! Training loop orchestrator for the SDDP algorithm.
 //!
-//! [`train`] wires together the forward pass, forward synchronization, state
-//! exchange, backward pass, cut synchronization, lower bound evaluation, and
-//! convergence check into a single iterative loop.
+//! [`train`] wires the forward pass, forward sync, state exchange, backward
+//! pass, cut sync, lower-bound evaluation, and convergence check into a single
+//! iterative loop. The per-iteration ordering is enforced by
+//! `TrainingSession::run_iteration`.
 //!
-//! ## Iteration lifecycle
-//!
-//! Each iteration follows the corrected per-iteration ordering:
-//!
-//! 1. Forward pass — scenario simulation, local UB statistics.
-//! 2. Forward sync — global synchronization for UB statistics.
-//! 3. State exchange — `allgatherv` trial points for the backward pass.
-//! 4. Backward pass — Benders cut generation.
-//! 5. Cut sync — `allgatherv` new cuts across ranks.
-//!    5a. Cut selection — optional periodic pool pruning via `CutSelectionStrategy`.
-//!    5b. Budget enforcement — active-cut hard cap (every iteration when set).
-//!    5c. Template baking — rebuild per-stage baked LP templates.
-//! 6. Lower bound evaluation — rank 0 solves stage-0 openings, broadcasts scalar.
-//! 7. Convergence check — stopping rules evaluated.
-//! 8. Event emission — `IterationSummary` and per-step events via channel.
-//!
-//! ## Pre-allocation discipline
-//!
-//! All workspace buffers (`PatchBuffer`, `TrajectoryRecord` flat vec,
-//! `ExchangeBuffers`, `CutSyncBuffers`) are allocated once before the
-//! iteration loop and reused across all iterations. No heap allocation
-//! occurs on the hot path.
+//! All workspace buffers are allocated once before the loop and reused: no heap
+//! allocation occurs on the hot path.
 
 use cobre_comm::Communicator;
 use cobre_solver::{SolverInterface, StageTemplate};
@@ -45,15 +26,13 @@ use crate::{
 
 /// Result of a training run that always carries partial results.
 ///
-/// When training completes normally, `error` is `None` and `result` contains
-/// the full training statistics. When training fails mid-iteration, `error`
-/// carries the failure cause and `result` contains statistics from all
-/// fully completed iterations (the failing iteration is excluded).
+/// On normal completion `error` is `None` and `result` holds the full
+/// statistics. On mid-iteration failure `error` carries the cause and `result`
+/// holds statistics from the fully completed iterations (the failing one
+/// excluded).
 #[derive(Debug)]
 pub struct TrainingOutcome {
-    /// Training result from completed iterations. Always populated, even when
-    /// `error` is `Some` -- in that case, `result.iterations` reflects only
-    /// the iterations that completed without error.
+    /// Training result from the completed iterations; always populated.
     pub result: TrainingResult,
 
     /// If training was interrupted by an error, the cause. `None` when
@@ -87,53 +66,33 @@ pub struct TrainingResult {
     /// Total wall-clock time for the training run, in milliseconds.
     pub total_time_ms: u64,
 
-    /// Per-stage captured basis from the last iteration, indexed 0-based.
-    ///
-    /// Each entry is `Some(captured)` if the stage was solved at least once
-    /// during the final iteration, or `None` if no solve occurred (e.g.,
-    /// the last stage in finite-horizon mode has no successor cuts).
-    /// Used for policy checkpoint persistence and simulation warm-start
-    /// via slot-tracked reconstruction.
+    /// Per-stage captured basis from the last iteration, 0-based. `None` when
+    /// the stage was never solved in the final iteration (e.g. the last
+    /// finite-horizon stage has no successor cuts).
     pub basis_cache: Vec<Option<CapturedBasis>>,
 
-    /// Per-iteration, per-phase solver statistics log.
-    ///
-    /// Each [`SolverStatsLogEntry`] carries `(iteration, phase, stage, opening,
-    /// rank, worker_id, delta)`. Phase names: `"forward"`, `"backward"`,
-    /// `"lower_bound"`. Stage index is `-1` for lower bound (rank-aggregated, no
-    /// stage axis) and the actual stage index for forward and backward entries.
+    /// Per-iteration, per-phase solver statistics log. Stage index is `-1` for
+    /// `"lower_bound"` entries (rank-aggregated, no stage axis).
     pub solver_stats_log: Vec<SolverStatsLogEntry>,
 
-    /// Visited states archive containing all forward-pass trial points.
-    ///
-    /// Always populated during training. The caller decides whether to
-    /// persist it to the policy checkpoint based on `exports.states`.
+    /// Visited-states archive of all forward-pass trial points; the caller
+    /// decides whether to persist it based on `exports.states`.
     pub visited_archive: Option<crate::visited_states::VisitedStatesArchive>,
 
-    /// Final-iteration baked templates, one per stage.
-    ///
-    /// Always `Some` — templates are baked unconditionally before the first
-    /// iteration of the training loop and never reverted.
+    /// Final-iteration baked templates, one per stage. Always `Some`: baking
+    /// runs unconditionally before the first iteration and is never reverted.
     pub baked_templates: Option<Vec<StageTemplate>>,
 }
 
 impl TrainingResult {
     /// Construct a `TrainingResult` with explicit field values.
     ///
-    /// Prefer this constructor over struct-literal syntax for compiler-enforced
-    /// parity when adding new fields.
-    ///
-    /// Structurally independent parameters: each of the 11 fields is the output
-    /// of a distinct training-loop stage (convergence metrics, timing, basis
-    /// cache, solver stats, visited archive, baked templates). Absorbing them
-    /// into a context struct would not reduce the argument count at the call
-    /// sites, because each call site constructs the full `TrainingResult` as
-    /// the terminal value — there is no shared upstream context to forward.
+    /// Prefer this over struct-literal syntax: adding a field then fails to
+    /// compile until every call site is updated.
     #[must_use]
-    // Rationale: the 11 arguments are independently sourced outputs of distinct training-loop
-    // phases (convergence metrics, timing, basis cache, solver stats, visited archive, baked
-    // templates); every call site constructs the full `TrainingResult` as the terminal value,
-    // so a context struct would not reduce the arity at any call site.
+    // Rationale: the arguments are independently sourced phase outputs and every
+    // call site constructs the full result, so a context struct would not reduce
+    // the arity.
     #[allow(clippy::too_many_arguments, clippy::similar_names)]
     pub fn new(
         final_lb: f64,
@@ -170,9 +129,10 @@ impl TrainingResult {
 
 /// Convert a buffer length to `i32` for use as an MPI broadcast count.
 ///
-/// Returns `Err(SddpError::Communication(CommError::InvalidBufferSize { .. }))`
-/// when `len > i32::MAX`, carrying the operation name, the maximum legal value
-/// (`i32::MAX as usize`), and the actual (oversized) length.
+/// # Errors
+///
+/// Returns `SddpError::Communication(CommError::InvalidBufferSize { .. })`
+/// when `len > i32::MAX` (the MPI count limit).
 fn checked_broadcast_len(len: usize, operation: &'static str) -> Result<i32, SddpError> {
     i32::try_from(len).map_err(|_| {
         SddpError::Communication(cobre_comm::CommError::InvalidBufferSize {
@@ -183,53 +143,28 @@ fn checked_broadcast_len(len: usize, operation: &'static str) -> Result<i32, Sdd
     })
 }
 
-/// Build a `basis_cache` from the canonical global scenario 0, broadcasting
-/// rank 0's bases to all other ranks so that every rank has an identical
-/// warm-start basis for the simulation phase.
+/// Build a `basis_cache` from global scenario 0, broadcasting rank 0's bases to
+/// all ranks so every rank starts simulation from an identical warm-start vertex.
 ///
-/// ## Why global scenario 0?
+/// Scenario 0 (not the last local scenario) is broadcast because `basis_store`
+/// is local-indexed: each rank's last local scenario follows a distinct noise
+/// realisation and would yield divergent bases, whereas rank 0's local
+/// scenario 0 is always global scenario 0 (`my_fwd_offset == 0`).
 ///
-/// `basis_store` is indexed by **local** scenario index. Local scenario 0 on
-/// rank 0 is always global scenario 0 (rank 0's `my_fwd_offset` is 0). On
-/// rank *r > 0*, local scenario 0 maps to a different global scenario. Using
-/// the last local scenario (`my_actual_fwd - 1`) therefore produces different
-/// bases on different ranks, because each rank follows a distinct noise
-/// realisation. Broadcasting rank 0's scenario 0 ensures all ranks start
-/// simulation from the identical LP vertex.
-///
-/// ## Serialization format
-///
-/// Two broadcast buffers per call (four broadcasts total: length then payload
-/// for each):
-///
-/// **i32 buffer** — for each stage *t* in `0..num_stages`:
-/// - `0_i32` sentinel when `basis_store.get(0, t)` is `None`
-/// - When `Some(captured)`: `1_i32` sentinel, then `col_len`, `row_len`,
-///   `base_row_count`, `cut_slot_count`, `state_len` (all `i32`), then
-///   `col_status[..]`, `row_status[..]`, `cut_row_slots[..] as i32`
-///
-/// **f64 buffer** — for each stage *t* in `0..num_stages`:
-/// - When `sentinel == 1`: `state_at_capture[..]` appended sequentially
-/// - When `sentinel == 0`: no entries appended
-///
-/// `u32` slot values are cast to `i32` for transmission; they are always
-/// non-negative (LP pool indices) and fit comfortably in `i32`.
-///
-/// ## Single-rank optimization
-///
-/// When `comm.size() == 1` the broadcast is skipped; only the extraction
-/// from local scenario 0 runs. All metadata is preserved via `Clone`.
+/// The two-buffer wire layout is owned by
+/// [`CapturedBasis::to_broadcast_payload`](crate::workspace::CapturedBasis::to_broadcast_payload)
+/// /
+/// [`try_from_broadcast_payload`](crate::workspace::CapturedBasis::try_from_broadcast_payload);
+/// this function only sequences the four MPI broadcasts (length then payload,
+/// for the i32 and f64 buffers). Single-rank runs skip the broadcast and clone
+/// local scenario 0 directly.
 ///
 /// # Errors
 ///
-/// Returns `SddpError::Communication(CommError::InvalidBufferSize { .. })`
-/// if either buffer length exceeds `i32::MAX` (the MPI count limit).
-/// Buffer length scalars are broadcast as i32 (MPI `CommData` requires Copy,
-/// ruling out usize); the usize→i32 conversions are checked via
-/// [`checked_broadcast_len`] before any MPI call is issued.
-/// Returns `SddpError::Communication` if any `comm.broadcast` call fails.
-/// Returns `SddpError::Validation` if any length prefix is inconsistent with
-/// the received buffer size, naming the offending stage in the message.
+/// Returns `SddpError::Communication(CommError::InvalidBufferSize { .. })` when
+/// a buffer length exceeds `i32::MAX`, `SddpError::Communication` when a
+/// `comm.broadcast` fails, or `SddpError::Validation` when a length prefix is
+/// inconsistent with the received buffer (naming the offending stage).
 pub(crate) fn broadcast_basis_cache<C: Communicator>(
     basis_store: &crate::workspace::BasisStore,
     num_stages: usize,
@@ -327,26 +262,17 @@ pub(crate) fn broadcast_basis_cache<C: Communicator>(
 /// rule triggers or `config.max_iterations` is reached, and returns a
 /// [`TrainingOutcome`] summarising the final convergence statistics.
 ///
-/// ## Error handling
-///
-/// Returns `Err(SddpError)` immediately on:
-/// - LP infeasibility in the forward or backward pass → `SddpError::Infeasible`
-/// - Solver failure → `SddpError::Solver`
-/// - Communication failure → `SddpError::Communication`
-///
 /// ## Event channel
 ///
-/// When `config.event_sender` is `Some`, typed [`cobre_core::TrainingEvent`] values are
-/// emitted at each lifecycle step boundary. Event send failures (receiver
+/// When `config.event_sender` is `Some`, typed [`cobre_core::TrainingEvent`]
+/// values are emitted at each lifecycle boundary. Send failures (receiver
 /// dropped) are silently ignored so they cannot interrupt training.
 ///
 /// ## Cut selection
 ///
-/// When `cut_selection` is `Some(strategy)`, step 5a runs after every cut
-/// synchronisation. The strategy's `should_run(iteration)` gate controls the
-/// frequency; at eligible iterations every stage's cut pool is scanned and
-/// inactive cuts are deactivated. When `cut_selection` is `None`, step 5a is
-/// skipped entirely and no [`cobre_core::TrainingEvent::PolicySelectionComplete`] events are
+/// When `cut_selection` is `Some(strategy)`, its `should_run(iteration)` gate
+/// controls how often each stage's pool is scanned for inactive cuts. When
+/// `None`, no [`cobre_core::TrainingEvent::PolicySelectionComplete`] events are
 /// emitted.
 ///
 /// # Errors
@@ -411,16 +337,11 @@ where
         comm,
         solver_factory,
     )?;
-    // Seed the per-scenario basis store from the checkpoint's stored bases
-    // (warm-start / resume only) so iteration 1's cut-loaded LPs warm-start
-    // instead of cold-start. Must run before `prime_baked_templates` bakes the
-    // loaded cuts into the templates. No-op for a fresh start (`None`).
+    // Must seed the basis store before `prime_baked_templates` bakes the loaded
+    // cuts into the templates. No-op for a fresh start (`None`).
     if let Some(cache) = warm_start_basis_cache {
         session.seed_basis_store(&cache);
     }
-    // Bake any warm-start / resume cuts into the stage templates before the
-    // first iteration so iteration 1's forward pass solves the loaded policy
-    // rather than a cut-less, myopic one. No-op for a fresh start.
     session.prime_baked_templates();
     for iteration in session.iteration_range() {
         match session.run_iteration(iteration) {
@@ -477,7 +398,6 @@ mod tests {
         cut::fcf::FutureCostFunction,
         error::SddpError,
         horizon_mode::HorizonMode,
-        indexer::StageIndexer,
         inflow_method::InflowNonNegativityMethod,
         risk_measure::RiskMeasure,
         solver_stats::{SolverStatsDelta, SolverStatsLogEntry},
@@ -874,20 +794,16 @@ mod tests {
     #[test]
     fn ac_train_completes_with_iteration_limit() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        }; // N=1, L=0
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let config = TrainingConfig {
             loop_config: LoopConfig {
@@ -917,6 +833,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -925,6 +842,12 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -940,7 +863,8 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
+                state: &state,
+                study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -977,20 +901,16 @@ mod tests {
     #[test]
     fn ac_train_returns_partial_on_infeasible() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let config = TrainingConfig {
             loop_config: LoopConfig {
@@ -1020,6 +940,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1028,6 +949,12 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1043,7 +970,8 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
+                state: &state,
+                study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1097,20 +1025,16 @@ mod tests {
     #[test]
     fn ac_train_emits_correct_event_sequence() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let (tx, rx) = mpsc::channel::<TrainingEvent>();
 
@@ -1142,6 +1066,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1150,6 +1075,12 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1165,7 +1096,8 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
+                state: &state,
+                study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1302,20 +1234,16 @@ mod tests {
         use cobre_core::WorkerTimingPhase;
 
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let (tx, rx) = mpsc::channel::<TrainingEvent>();
 
@@ -1347,6 +1275,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1355,6 +1284,12 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1370,7 +1305,8 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
+                state: &state,
+                study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1478,20 +1414,16 @@ mod tests {
     #[test]
     fn ac_train_result_fields_populated() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let config = TrainingConfig {
             loop_config: LoopConfig {
@@ -1521,6 +1453,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1529,6 +1462,12 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1544,7 +1483,8 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
+                state: &state,
+                study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1579,20 +1519,16 @@ mod tests {
     #[test]
     fn ac_train_with_no_event_sender() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let config = TrainingConfig {
             loop_config: LoopConfig {
@@ -1622,6 +1558,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1630,6 +1567,12 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1645,7 +1588,8 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
+                state: &state,
+                study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1677,20 +1621,16 @@ mod tests {
     #[test]
     fn ac_total_time_ms_is_non_negative() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let config = TrainingConfig {
             loop_config: LoopConfig {
@@ -1720,6 +1660,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1728,6 +1669,12 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1743,7 +1690,8 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
+                state: &state,
+                study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1781,20 +1729,16 @@ mod tests {
     #[test]
     fn cut_selection_none_skips_step() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let (tx, rx) = mpsc::channel::<TrainingEvent>();
 
@@ -1826,6 +1770,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1834,6 +1779,12 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1849,7 +1800,8 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
+                state: &state,
+                study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1894,20 +1846,16 @@ mod tests {
         use crate::cut_selection::CutSelectionStrategy;
 
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let (tx, rx) = mpsc::channel::<TrainingEvent>();
 
@@ -1942,6 +1890,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1950,6 +1899,12 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1965,7 +1920,8 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
+                state: &state,
+                study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2020,20 +1976,16 @@ mod tests {
         use crate::cut_selection::CutSelectionStrategy;
 
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let (tx, rx) = mpsc::channel::<TrainingEvent>();
 
@@ -2068,6 +2020,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -2076,6 +2029,12 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -2091,7 +2050,8 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
+                state: &state,
+                study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2162,20 +2122,16 @@ mod tests {
     #[test]
     fn existing_train_tests_pass_with_none() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let config = TrainingConfig {
             loop_config: LoopConfig {
@@ -2205,6 +2161,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -2213,6 +2170,12 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -2228,7 +2191,8 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
+                state: &state,
+                study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2267,20 +2231,16 @@ mod tests {
     #[test]
     fn ac_train_partial_result_on_mid_iteration_failure() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let (tx, rx) = mpsc::channel::<TrainingEvent>();
 
@@ -2316,6 +2276,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -2324,6 +2285,12 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -2339,7 +2306,8 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
+                state: &state,
+                study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2393,20 +2361,16 @@ mod tests {
     #[test]
     fn start_iteration_resumes_from_offset() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let config = TrainingConfig {
             loop_config: LoopConfig {
@@ -2436,6 +2400,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -2444,6 +2409,12 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -2459,7 +2430,8 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
+                state: &state,
+                study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2494,20 +2466,16 @@ mod tests {
     #[test]
     fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let config = TrainingConfig {
             loop_config: LoopConfig {
@@ -2537,6 +2505,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -2545,6 +2514,12 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -2560,7 +2535,8 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
+                state: &state,
+                study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -3223,20 +3199,16 @@ mod tests {
     #[test]
     fn template_bake_event_emitted() {
         let n_stages = 2;
-        let indexer = {
-            let mut ix = StageIndexer::new(1, 0);
-            ix.finalize_for_test();
-            ix
-        };
-        let templates = vec![minimal_template(indexer.n_state); n_stages];
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
-        let initial_state = vec![0.0_f64; indexer.n_state];
+        let initial_state = vec![0.0_f64; state.n_state];
         let stochastic = make_stochastic_context(n_stages, 1);
         let stages = make_stages(n_stages);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let mut fcf = make_fcf(n_stages, indexer.n_state, 1, 10);
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
 
         let (tx, rx) = mpsc::channel::<TrainingEvent>();
 
@@ -3268,6 +3240,7 @@ mod tests {
         let comm = StubComm;
 
         let stage_ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -3276,6 +3249,12 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -3292,7 +3271,8 @@ mod tests {
             &stage_ctx,
             &TrainingContext {
                 horizon: &horizon,
-                indexer: &indexer,
+                state: &state,
+                study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,

@@ -2,20 +2,15 @@
 //! stage templates for numerical conditioning (`D_r * A * D_c` form), plus the
 //! noise pre-scaling helper. Invoked from `setup/template_postprocess::postprocess_templates`.
 
-use cobre_core::Stage;
+use cobre_core::{Hydro, Stage};
 use cobre_solver::StageTemplate;
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
 use super::M3S_TO_HM3;
 
-/// Compute per-column geometric-mean scaling factors from a CSC constraint matrix.
-///
-/// For each column `j`, the scale factor is `1 / sqrt(max|A_ij| * min|A_ij|)` over
-/// nonzero entries. Columns with no nonzero entries receive a scale factor of 1.0.
-///
-/// The returned vector has length `num_cols`. Applying column scaling transforms the
-/// LP: multiply each column's matrix entries, objective coefficient, and column bounds
-/// by the corresponding scale factor.
+/// Per-column geometric-mean scaling factors from a CSC matrix:
+/// `1 / sqrt(max|A_ij| * min|A_ij|)` over nonzeros, `1.0` for an empty column.
+/// Length `num_cols`.
 #[must_use]
 #[allow(clippy::cast_sign_loss)] // col_starts are non-negative by CSC construction
 pub(crate) fn compute_col_scale(num_cols: usize, col_starts: &[i32], values: &[f64]) -> Vec<f64> {
@@ -24,7 +19,6 @@ pub(crate) fn compute_col_scale(num_cols: usize, col_starts: &[i32], values: &[f
         let start = col_starts[j] as usize;
         let end = col_starts[j + 1] as usize;
         if start == end {
-            // No nonzero entries in this column.
             continue;
         }
         let mut max_abs = 0.0_f64;
@@ -40,26 +34,17 @@ pub(crate) fn compute_col_scale(num_cols: usize, col_starts: &[i32], values: &[f
             let d = 1.0 / (max_abs * min_abs).sqrt();
             scale[j] = d;
         }
-        // Otherwise keep 1.0 (all structural zeros or defensive fallback).
     }
     scale
 }
 
-/// Apply column scaling to a stage template's matrix, objective, and bounds.
-///
-/// Modifies the template in-place. After this call:
-/// - `values[k]` has been multiplied by `col_scale[col_of(k)]`
-/// - `objective[j]` has been multiplied by `col_scale[j]`
-/// - `col_lower[j]` has been divided by `col_scale[j]`
-/// - `col_upper[j]` has been divided by `col_scale[j]`
-///
-/// Infinite bounds remain infinite (dividing infinity by a finite positive
-/// scale factor yields infinity).
+/// Apply column scaling in-place. After this call, per column `j`: `values` and
+/// `objective` are MULTIPLIED by `col_scale[j]`, while `col_lower`/`col_upper` are
+/// DIVIDED by it (the scaled variable is `x̃ = x / d_j`).
 pub(crate) fn apply_col_scale(template: &mut StageTemplate, col_scale: &[f64]) {
     let num_cols = template.num_cols;
     debug_assert_eq!(col_scale.len(), num_cols);
 
-    // Scale matrix values (CSC: iterate columns).
     #[allow(clippy::needless_range_loop, clippy::cast_sign_loss)]
     // j+1 access; col_starts non-negative by construction
     for j in 0..num_cols {
@@ -71,14 +56,11 @@ pub(crate) fn apply_col_scale(template: &mut StageTemplate, col_scale: &[f64]) {
         }
     }
 
-    // Scale objective coefficients.
     for (obj, &d) in template.objective.iter_mut().zip(col_scale) {
         *obj *= d;
     }
 
-    // Inverse-scale column bounds.
-    // The scaled variable is x_tilde = x / d_j, so bounds become [lo/d, hi/d].
-    // For d > 0 this preserves bound ordering.
+    // Inverse-scale column bounds: `x̃ = x / d_j`, so bounds become `[lo/d, hi/d]`.
     for ((lo, hi), &d) in template
         .col_lower
         .iter_mut()
@@ -90,19 +72,12 @@ pub(crate) fn apply_col_scale(template: &mut StageTemplate, col_scale: &[f64]) {
     }
 }
 
-/// Compute per-row geometric-mean scaling factors from a CSC constraint matrix.
+/// Per-row geometric-mean scaling factors from a CSC matrix:
+/// `1 / sqrt(max|A_ij| * min|A_ij|)` over a row's nonzeros, `1.0` for an empty row.
+/// Length `num_rows`.
 ///
-/// For each row `i`, the scale factor is `1 / sqrt(max|A_ij| * min|A_ij|)` over
-/// all nonzero entries in that row. Rows with no nonzero entries receive a scale
-/// factor of 1.0.
-///
-/// The matrix is given in CSC (column-major) form; row statistics are accumulated
-/// by iterating all nonzeros once in O(nnz). This function should be called on
-/// the already column-scaled matrix to obtain the standard `D_r * A * D_c` form.
-///
-/// The returned vector has length `num_rows`. Applying row scaling transforms the
-/// LP: multiply each row's matrix entries, row lower bound, and row upper bound
-/// by the corresponding scale factor.
+/// MUST be called on the ALREADY column-scaled matrix to obtain the standard
+/// `D_r * A * D_c` form (column scaling before row scaling).
 #[must_use]
 #[allow(clippy::cast_sign_loss)] // col_starts and row_indices are non-negative by CSC construction
 pub(crate) fn compute_row_scale(
@@ -134,28 +109,17 @@ pub(crate) fn compute_row_scale(
         if rmax > 0.0 && rmin < f64::INFINITY {
             *s = 1.0 / (rmax * rmin).sqrt();
         }
-        // Otherwise keep 1.0 (empty row or all structural zeros).
     }
     scale
 }
 
-/// Apply row scaling to a stage template's matrix and row bounds.
-///
-/// Modifies the template in-place. After this call:
-/// - `values[k]` has been multiplied by `row_scale[row_of(k)]`
-/// - `row_lower[i]` has been multiplied by `row_scale[i]`
-/// - `row_upper[i]` has been multiplied by `row_scale[i]`
-///
-/// Infinite bounds remain infinite (multiplying infinity by a finite positive
-/// scale factor yields infinity).
-///
-/// The objective and column bounds are not modified — those are column-domain
-/// quantities already handled by column scaling.
+/// Apply row scaling in-place: per row `i`, `values` and `row_lower`/`row_upper`
+/// are MULTIPLIED by `row_scale[i]`. Objective and column bounds are NOT touched —
+/// those are column-domain quantities handled by [`apply_col_scale`].
 pub(crate) fn apply_row_scale(template: &mut StageTemplate, row_scale: &[f64]) {
     let num_rows = template.num_rows;
     debug_assert_eq!(row_scale.len(), num_rows);
 
-    // Scale matrix values (CSC: iterate columns, apply per-row factor).
     let num_cols = template.num_cols;
     #[allow(clippy::needless_range_loop, clippy::cast_sign_loss)]
     // j+1 access; values non-negative by construction
@@ -168,7 +132,6 @@ pub(crate) fn apply_row_scale(template: &mut StageTemplate, row_scale: &[f64]) {
         }
     }
 
-    // Scale row bounds.
     for ((lo, hi), &d) in template
         .row_lower
         .iter_mut()
@@ -180,13 +143,19 @@ pub(crate) fn apply_row_scale(template: &mut StageTemplate, row_scale: &[f64]) {
     }
 }
 
-/// Pre-compute `ζ * σ` per `(stage, hydro)` for noise transformation.
+/// Pre-compute `ζ * σ` per `(stage, hydro)` for noise transformation, returning
+/// `(noise_scale, zeta_per_stage, block_hours_per_stage)`. `noise_scale` is flat,
+/// `[s_idx * n_hydros + h_idx]`, so the forward pass indexes it without branching.
 ///
-/// Returns `(noise_scale, zeta_per_stage, block_hours_per_stage)`.  The
-/// `noise_scale` flat vector has layout `[s_idx * n_hydros + h_idx]` so that
-/// the forward pass can index it without branching.
+/// A `PreFilling` hydro gets `noise_scale = 0`: its water-balance row is the
+/// frozen-storage identity `v_h − v_h_in = 0`, so leaving `noise_scale` nonzero
+/// would patch `noise_scale·eta` onto that RHS and unfreeze the storage column. This
+/// is the ONLY noise channel touched — the `z_inflow` RHS is NOT zeroed, so realized
+/// inflow `z_h` still flows downstream in the `PreFilling` cascade short-circuit. A
+/// non-filling hydro is `Operating` at every stage (parity-neutral).
 pub(super) fn compute_noise_scale(
     study_stages: &[&Stage],
+    hydros: &[Hydro],
     n_hydros: usize,
     par_lp: &PrecomputedPar,
 ) -> (Vec<f64>, Vec<f64>, Vec<Vec<f64>>) {
@@ -201,7 +170,20 @@ pub(super) fn compute_noise_scale(
         zeta_per_stage.push(zeta_s);
         block_hours_per_stage.push(stage.blocks.iter().map(|b| b.duration_hours).collect());
         for h_idx in 0..n_hydros {
-            let sigma = if par_lp.n_stages() > 0 && par_lp.n_hydros() == n_hydros {
+            // `hydros` shorter than `n_hydros` (a direct-construction test path)
+            // defaults missing entries to `Operating` via `.get()`, never a panic.
+            let is_prefilling = hydros.get(h_idx).is_some_and(|hydro| {
+                matches!(
+                    crate::lp_builder::filling_phase(
+                        hydro.filling.as_ref(),
+                        hydro.entry_stage_id,
+                        stage.id,
+                    ),
+                    crate::lp_builder::Phase::PreFilling
+                )
+            });
+            let sigma = if !is_prefilling && par_lp.n_stages() > 0 && par_lp.n_hydros() == n_hydros
+            {
                 par_lp.sigma(s_idx, h_idx)
             } else {
                 0.0
@@ -217,7 +199,10 @@ pub(super) fn compute_noise_scale(
 #[allow(
     clippy::doc_markdown,
     clippy::cast_sign_loss,
-    clippy::cast_possible_truncation
+    clippy::cast_possible_truncation,
+    clippy::float_cmp,
+    clippy::unwrap_used,
+    clippy::expect_used
 )]
 mod tests {
     use cobre_solver::StageTemplate;
@@ -264,16 +249,14 @@ mod tests {
 
     /// AC E3-001-1: a matrix where every row has min_abs == max_abs gives scale 1.0.
     ///
-    /// Matrix (2 rows × 2 cols, column-major):
+    /// Matrix (2 rows × 2 cols, column-major), all nonzeros |value| = 1.0:
     ///
     /// ```text
-    /// col 0: row 0 → 3.0, row 1 → 3.0
-    /// col 1: row 0 → 3.0, row 1 → 3.0
+    /// col 0: row 0 → 1.0, row 1 → 1.0
+    /// col 1: row 0 → 1.0, row 1 → 1.0
     /// ```
     ///
-    /// For each row: min_abs = max_abs = 3.0 → scale = 1/sqrt(3*3) = 1/3.
-    /// Wait — "uniform" means min == max, so scale = 1/sqrt(max*min) = 1/max.
-    /// With all values 1.0: scale = 1/sqrt(1*1) = 1.0.
+    /// For each row: min_abs = max_abs = 1.0 → scale = 1/sqrt(1*1) = 1.0.
     #[test]
     fn row_scale_identity_for_uniform_matrix() {
         // All nonzeros have |value| = 1.0.  min_abs = max_abs = 1.0.
@@ -410,6 +393,195 @@ mod tests {
         assert!(
             (scale[2] - 1.0).abs() < 1e-15,
             "empty row 2 scale should be 1.0"
+        );
+    }
+
+    // =========================================================================
+    // PreFilling noise-scale zeroing
+    // =========================================================================
+
+    use chrono::NaiveDate;
+    use cobre_core::scenario::InflowModel;
+    use cobre_core::{
+        Block, BlockMode, EntityId, FillingConfig, Hydro, HydroGenerationModel, HydroPenalties,
+        NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
+    };
+    use cobre_stochastic::par::precompute::PrecomputedPar;
+
+    fn zero_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
+            spillage_cost: 0.0,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 0.0,
+        }
+    }
+
+    /// A constant-productivity hydro with optional filling at `start_stage_id = 2`,
+    /// `entry_stage_id = 4`. With `filling = true` a stage id `< 2` is PreFilling.
+    fn noise_hydro(id: i32, filling: bool) -> Hydro {
+        Hydro {
+            id: EntityId(id),
+            name: format!("H{id}"),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            entry_stage_id: filling.then_some(4),
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 50.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 45.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: filling.then_some(FillingConfig {
+                start_stage_id: 2,
+                filling_min_rate_m3s: 0.0,
+            }),
+            penalties: zero_hydro_penalties(),
+        }
+    }
+
+    fn one_block_stage(id: i32) -> Stage {
+        Stage {
+            index: usize::try_from(id).unwrap(),
+            id,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "BLK0".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: false,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }
+    }
+
+    fn white_noise_model(id: i32, stage_id: i32, std: f64) -> InflowModel {
+        InflowModel {
+            hydro_id: EntityId(id),
+            stage_id,
+            mean_m3s: 50.0,
+            std_m3s: std,
+            ar_coefficients: vec![],
+            residual_std_ratio: 1.0,
+            annual: None,
+        }
+    }
+
+    /// A PreFilling hydro's water-balance `noise_scale` is zeroed for that
+    /// `(stage, hydro)`, while an Operating hydro at the same stage (with σ > 0)
+    /// keeps its `ζ·σ` value. The forbidden alternative — leaving the PreFilling
+    /// noise_scale nonzero — would patch `noise_scale·eta ≠ 0` onto the
+    /// frozen-storage-identity row and unfreeze the storage column.
+    #[test]
+    fn prefilling_water_noise_scale_is_zeroed_operating_is_not() {
+        // H1 (id 1): non-filling (Operating). H2 (id 2): filling, PreFilling at id 0.
+        let hydros = vec![noise_hydro(1, false), noise_hydro(2, true)];
+        let n_hydros = 2;
+        let std = 4.0_f64;
+        let stage = one_block_stage(0); // id 0 < start_stage_id 2 ⇒ H2 PreFilling.
+        let inflow_models = vec![white_noise_model(1, 0, std), white_noise_model(2, 0, std)];
+        let par_lp = PrecomputedPar::build(
+            &inflow_models,
+            std::slice::from_ref(&stage),
+            &[EntityId(1), EntityId(2)],
+            None,
+        )
+        .expect("white-noise PrecomputedPar build must succeed");
+
+        let study_stages = [&stage];
+        let (noise_scale, zeta_per_stage, _bh) =
+            super::compute_noise_scale(&study_stages, &hydros, n_hydros, &par_lp);
+
+        let zeta = zeta_per_stage[0];
+        let h1_op = 0; // id 1 → system index 0 (Operating).
+        let h2_pf = 1; // id 2 → system index 1 (PreFilling at stage id 0).
+
+        // Operating H1 keeps ζ·σ (σ = std > 0 for white noise).
+        assert_eq!(
+            noise_scale[h1_op],
+            zeta * par_lp.sigma(0, h1_op),
+            "Operating hydro's noise_scale is the standard ζ·σ"
+        );
+        assert!(
+            noise_scale[h1_op] > 0.0,
+            "control precondition: Operating σ > 0 so the contrast is real"
+        );
+
+        // PreFilling H2 is zeroed despite σ > 0.
+        assert!(
+            par_lp.sigma(0, h2_pf) > 0.0,
+            "precondition: H2 has σ > 0, so the zeroing is not vacuous"
+        );
+        assert_eq!(
+            noise_scale[h2_pf], 0.0,
+            "PreFilling hydro's water-balance noise_scale is zeroed (frozen-identity freeze)"
+        );
+    }
+
+    /// At a Filling stage (id == start_stage_id), the filling hydro is NOT
+    /// PreFilling, so its noise_scale is NOT zeroed — the freeze is PreFilling-only.
+    /// (Filling keeps PAR/noise per the retention design.)
+    #[test]
+    fn filling_stage_noise_scale_is_not_zeroed() {
+        let hydros = vec![noise_hydro(2, true)];
+        let n_hydros = 1;
+        let std = 4.0_f64;
+        // Stage id 2 == start_stage_id ⇒ Filling (not PreFilling).
+        let stage = one_block_stage(2);
+        let inflow_models = vec![white_noise_model(2, 2, std)];
+        let par_lp = PrecomputedPar::build(
+            &inflow_models,
+            std::slice::from_ref(&stage),
+            &[EntityId(2)],
+            None,
+        )
+        .expect("build");
+
+        let study_stages = [&stage];
+        let (noise_scale, zeta_per_stage, _bh) =
+            super::compute_noise_scale(&study_stages, &hydros, n_hydros, &par_lp);
+
+        assert_eq!(
+            noise_scale[0],
+            zeta_per_stage[0] * par_lp.sigma(0, 0),
+            "Filling-stage noise_scale keeps ζ·σ (only PreFilling is zeroed)"
+        );
+        assert!(
+            noise_scale[0] > 0.0,
+            "Filling stage keeps a nonzero noise_scale"
         );
     }
 }

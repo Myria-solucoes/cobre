@@ -1,11 +1,7 @@
-//! Pipeline orchestrator for the six-layer validation and `System` construction pipeline.
+//! Loading pipeline: validation, resolution, scenario assembly, and
+//! `SystemBuilder::build` for a case directory.
 //!
-//! [`run_pipeline`] and [`run_pipeline_with_report`] wire together all six validation
-//! layers, the resolution step, the scenario assembly step, and `SystemBuilder::build`
-//! into single callables that either return a fully-validated [`cobre_core::System`] or a
-//! [`LoadError`] explaining what went wrong.
-//!
-//! Use [`run_pipeline_with_report`] when the caller needs access to warnings collected
+//! Use [`run_pipeline_with_report`] when the caller needs the warnings collected
 //! during validation (e.g., the `validate` CLI subcommand).
 
 use std::collections::HashMap;
@@ -37,29 +33,23 @@ use crate::{CaseArtifacts, LoadedCase};
 use cobre_core::System;
 use std::path::Path;
 
-/// Run the complete loading pipeline for a case directory.
+/// Run the complete loading pipeline for a case directory, discarding warnings.
 ///
-/// Executes all six validation layers, the three-tier resolution step, scenario
-/// assembly, and `SystemBuilder::build`. Returns `Ok(System)` when every layer
-/// succeeds, or the first `Err(LoadError)` encountered. Warnings collected during
-/// validation are silently discarded; use [`run_pipeline_with_report`] to retrieve them.
+/// Use [`run_pipeline_with_report`] to retrieve the collected warnings.
 ///
 /// # Errors
 ///
 /// - [`LoadError::IoError`] / [`LoadError::ParseError`] — file read or JSON/Parquet
-///   parse failure in Layer 2.
-/// - [`LoadError::ConstraintError`] — one or more validation errors collected by
-///   Layers 1-6, or `SystemBuilder::build` rejection.
+///   parse failure.
+/// - [`LoadError::ConstraintError`] — collected validation errors or
+///   `SystemBuilder::build` rejection.
 /// - [`LoadError::SchemaError`] — AR coefficient count mismatch in scenario assembly.
 pub(crate) fn run_pipeline(path: &Path) -> Result<System, LoadError> {
     run_pipeline_with_report(path).map(|(system, _report)| system)
 }
 
-/// Run the complete loading pipeline and return both the [`System`] and a
-/// [`ValidationReport`] containing any warnings collected during validation.
-///
-/// This is the same pipeline as [`run_pipeline`] but preserves warnings so that
-/// callers (e.g., the `validate` CLI subcommand) can display them to the user.
+/// Run the complete loading pipeline, returning the [`System`] and the
+/// [`ValidationReport`] of collected warnings.
 ///
 /// # Errors
 ///
@@ -70,53 +60,39 @@ pub(crate) fn run_pipeline_with_report(
     run_pipeline_with_artifacts(path).map(|(loaded, report)| (loaded.system, report))
 }
 
-/// Run the complete loading pipeline and return the validated [`System`] in a
-/// [`LoadedCase`] bundle alongside the auxiliary [`CaseArtifacts`] rows and a
-/// [`ValidationReport`] of any collected warnings.
-///
-/// This is the canonical pipeline; the simpler `run_pipeline` /
-/// `run_pipeline_with_report` entry points delegate here and strip what they
-/// don't need.
+/// The canonical pipeline: returns the validated [`System`] in a [`LoadedCase`]
+/// bundle with the [`CaseArtifacts`] rows and the [`ValidationReport`].
+/// `run_pipeline` / `run_pipeline_with_report` delegate here.
 ///
 /// # Errors
 ///
 /// Same error conditions as [`run_pipeline`].
-// Rationale: the function is the canonical orchestrator that runs all six validation layers and
-// resolution steps in strict dependency order, where each stage's output feeds the next; splitting
-// at arbitrary layer boundaries would introduce artificial module seams in a single linear cascade
-// and scatter the global ordering guarantee across multiple call sites.
+// Rationale: a single linear cascade where each stage's output feeds the next; splitting at layer
+// boundaries would scatter the global ordering guarantee across call sites.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn run_pipeline_with_artifacts(
     path: &Path,
 ) -> Result<(LoadedCase, ValidationReport), LoadError> {
     let mut ctx = ValidationContext::new();
 
-    // Layer 1 — structural validation (required files present on disk).
     let manifest = validate_structure(path, &mut ctx);
 
-    // Layer 2 — schema validation (parse all files, collect parse/schema errors).
     let data = validate_schema(path, &manifest, &mut ctx);
 
     let Some(data) = data else {
-        // validate_schema returns None when it collected parse/schema errors.
-        // into_result() should always return Err here, but if it doesn't we
-        // return a descriptive error rather than panicking.
         return ctx.into_result().and(Err(LoadError::ConstraintError {
             description: "schema validation failed but no errors were collected".to_string(),
         }));
     };
 
-    // Layers 3-5 — referential integrity, dimensional consistency, semantic rules.
     validate_referential_integrity(&data, &mut ctx);
     validate_dimensional_consistency(&data, &mut ctx);
     validate_semantic_hydro_thermal(&data, &mut ctx);
     validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
 
-    // Layer 6 — cross-file resolution and cross-validation.
     validate_productivity_resolution(&data, &mut ctx);
-    // Scalar-parameter cross-validation: Computed hydro_id existence, PerStage
-    // length, id/name uniqueness. n_stages is the count of study stages (id >= 0);
-    // this matches what `build_resolved_parameters` consumes downstream.
+    // n_stages counts study stages (id >= 0) only — must match what
+    // `build_resolved_parameters` consumes downstream.
     let n_study_stages = data.stages.stages.iter().filter(|s| s.id >= 0).count();
     validate_scalar_parameters(
         &data.scalar_parameters,
@@ -125,14 +101,11 @@ pub(crate) fn run_pipeline_with_artifacts(
         &mut ctx,
     );
 
-    // Capture warnings before consuming the context. Errors cause early return.
     let report = generate_report(&ctx);
     ctx.into_result()?;
 
-    // ── Resolution step ───────────────────────────────────────────────────────
-
-    // Count study stages only (pre-study stages have negative IDs) and build
-    // a mapping from domain-level stage_id to positional 0-based index.
+    // Study stages only (pre-study stages have negative IDs); stage_index maps
+    // domain-level stage_id to a positional 0-based index.
     let study_stages: Vec<_> = data.stages.stages.iter().filter(|s| s.id >= 0).collect();
     let n_stages = study_stages.len();
     let stage_index: HashMap<i32, usize> = study_stages
@@ -208,8 +181,6 @@ pub(crate) fn run_pipeline_with_artifacts(
         &data.stages.stages,
     );
 
-    // ── Scenario assembly ─────────────────────────────────────────────────────
-
     let inflow_models = assemble_inflow_models(
         data.inflow_seasonal_stats,
         data.inflow_ar_coefficients,
@@ -217,17 +188,9 @@ pub(crate) fn run_pipeline_with_artifacts(
     )?;
     let load_models = assemble_load_models(data.load_seasonal_stats);
 
-    // ── Auxiliary artifacts ───────────────────────────────────────────────────
-    //
-    // Move the already-parsed/validated rows out of `ParsedData` before
-    // `SystemBuilder::build` consumes the rest. Downstream consumers receive
-    // these via [`CaseArtifacts`] instead of re-opening the files from disk.
-    // Tailrace-curve families back the computed-FPHA backwater coupling and the
-    // lateral-flow γ_S secant; the fit reads them via `CaseArtifacts`. Gate the
-    // load on the manifest flag and resolve the same `system/tailrace_curves.parquet`
-    // path the structural layer detected, so a case WITH the file feeds real
-    // families into the fit instead of silently collapsing to the constant
-    // entity tailrace (which zeroes γ_S and emits sub-ULP LP coefficients).
+    // Load tailrace curves only when the manifest detected the file: without
+    // them the fit collapses to the constant entity tailrace, which zeroes γ_S
+    // and emits sub-ULP LP coefficients.
     let tailrace_curves = if manifest.system_tailrace_curves_parquet {
         let tailrace_path = path.join("system").join("tailrace_curves.parquet");
         crate::extensions::load_tailrace_curves(Some(tailrace_path.as_path()))?
@@ -245,8 +208,6 @@ pub(crate) fn run_pipeline_with_artifacts(
         scalar_parameters: data.scalar_parameters,
         tailrace_curves,
     };
-
-    // ── System construction ───────────────────────────────────────────────────
 
     let system = SystemBuilder::new()
         .buses(data.buses)

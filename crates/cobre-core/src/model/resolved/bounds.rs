@@ -1,25 +1,14 @@
 //! Pre-resolved per-(entity, stage) bound containers for O(1) solver lookup.
 //!
-//! Holds the stage-resolved bound structs (`HydroStageBounds`,
-//! `ThermalStageBounds`, `LineStageBounds`, `PumpingStageBounds`,
-//! `ContractStageBounds`) and the `ResolvedBounds` table. Most entity tables use
-//! the flat layout `data[entity_idx * n_stages + stage_idx]`; the thermal table
-//! uses an extended stride `n_stages + k_max` so the padded region
-//! `[n_stages, n_stages + k_max)` can host delivery-stage values for
-//! anticipated-decision columns. Populated by `cobre-io` after base bounds are
-//! overlaid with stage-specific overrides; never modified after construction.
-
-// ─── Per-(entity, stage) bound structs ───────────────────────────────────────
+//! Most entity tables use the flat layout `data[entity_idx * n_stages + stage_idx]`;
+//! the thermal table's extended stride is documented on [`ResolvedBounds`].
+//! Populated by `cobre-io` after base bounds are overlaid with stage-specific
+//! overrides; never modified after construction.
 
 /// All hydro bound values for a given (hydro, stage) pair.
 ///
-/// The 11 fields match the 11 rows in spec SS11 hydro bounds table. These are
-/// the fully resolved bounds after base values from `hydros.json` have been
-/// overlaid with any stage-specific overrides from `constraints/hydro_bounds.parquet`.
-///
-/// `max_outflow_m3s` is `Option<f64>` because the outflow upper bound may be absent
-/// (unbounded above) when no flood-control limit is defined for the hydro.
-/// `water_withdrawal_m3s` defaults to `0.0` when no per-stage override is present.
+/// Resolved from `hydros.json` overlaid with optional per-stage overrides from
+/// `constraints/hydro_bounds.parquet`. Rows mirror the spec SS11 hydro bounds table.
 ///
 /// # Examples
 ///
@@ -36,7 +25,7 @@
 ///     min_generation_mw: 0.0,
 ///     max_generation_mw: 100.0,
 ///     max_diversion_m3s: None,
-///     filling_inflow_m3s: 0.0,
+///     filling_min_rate_m3s: 0.0,
 ///     water_withdrawal_m3s: 0.0,
 /// };
 /// assert!((b.min_storage_hm3 - 10.0).abs() < f64::EPSILON);
@@ -45,42 +34,34 @@
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HydroStageBounds {
-    /// Minimum reservoir storage — dead volume \[hm³\]. Soft lower bound;
-    /// violation uses `storage_violation_below` slack.
+    /// Dead volume \[hm³\]. Soft lower bound; slack `storage_violation_below`.
     pub min_storage_hm3: f64,
-    /// Maximum reservoir storage — physical capacity \[hm³\]. Hard upper bound;
-    /// emergency spillage handles excess.
+    /// Physical capacity \[hm³\]. Hard upper bound.
     pub max_storage_hm3: f64,
-    /// Minimum turbined flow \[m³/s\]. Soft lower bound;
-    /// violation uses `turbined_violation_below` slack.
+    /// Minimum turbined flow \[m³/s\]. Soft lower bound; slack `turbined_violation_below`.
     pub min_turbined_m3s: f64,
     /// Maximum turbined flow \[m³/s\]. Hard upper bound.
     pub max_turbined_m3s: f64,
-    /// Minimum outflow — environmental flow requirement \[m³/s\]. Soft lower bound;
-    /// violation uses `outflow_violation_below` slack.
+    /// Environmental flow requirement \[m³/s\]. Soft lower bound; slack `outflow_violation_below`.
     pub min_outflow_m3s: f64,
-    /// Maximum outflow — flood-control limit \[m³/s\]. Soft upper bound;
-    /// violation uses `outflow_violation_above` slack. `None` = unbounded.
+    /// Flood-control limit \[m³/s\]. Soft upper bound; slack `outflow_violation_above`. `None` = unbounded.
     pub max_outflow_m3s: Option<f64>,
-    /// Minimum generation \[MW\]. Soft lower bound;
-    /// violation uses `generation_violation_below` slack.
+    /// Minimum generation \[MW\]. Soft lower bound; slack `generation_violation_below`.
     pub min_generation_mw: f64,
     /// Maximum generation \[MW\]. Hard upper bound.
     pub max_generation_mw: f64,
     /// Maximum diversion flow \[m³/s\]. Hard upper bound. `None` = no diversion channel.
     pub max_diversion_m3s: Option<f64>,
-    /// Filling inflow retained for dead-volume filling during filling stages \[m³/s\].
-    /// Resolved from entity default → stage override cascade. Default `0.0`.
-    pub filling_inflow_m3s: f64,
-    /// Water withdrawal from reservoir per stage \[m³/s\]. Positive = water removed;
-    /// negative = external addition. Default `0.0`.
+    /// Minimum dead-volume filling rate \[m³/s\], anchoring a per-stage minimum
+    /// target-storage trajectory on `min_storage_hm3`. Not an inflow and not a cap. Default `0.0`.
+    pub filling_min_rate_m3s: f64,
+    /// Water withdrawal per stage \[m³/s\]. Positive = removed; negative = added. Default `0.0`.
     pub water_withdrawal_m3s: f64,
 }
 
 /// Thermal bound values for a given (thermal, stage) pair.
 ///
-/// Resolved from base values in `thermals.json` with optional per-stage overrides
-/// from `constraints/thermal_bounds.parquet`.
+/// Resolved from `thermals.json` overlaid with `constraints/thermal_bounds.parquet`.
 ///
 /// # Examples
 ///
@@ -106,10 +87,10 @@ pub struct ThermalStageBounds {
 
 /// Transmission line bound values for a given (line, stage) pair.
 ///
-/// Resolved from base values in `lines.json` with optional per-stage overrides
-/// from `constraints/line_bounds.parquet`. Note that block-level exchange factors
-/// (per-block capacity multipliers) are stored separately and applied on top of
-/// these stage-level bounds at LP construction time.
+/// Resolved from `lines.json` overlaid with `constraints/line_bounds.parquet`.
+/// Per-block exchange factors are stored separately
+/// ([`ResolvedExchangeFactors`](crate::ResolvedExchangeFactors)) and applied on top
+/// of these stage-level bounds at LP construction time.
 ///
 /// # Examples
 ///
@@ -131,8 +112,7 @@ pub struct LineStageBounds {
 
 /// Pumping station bound values for a given (pumping, stage) pair.
 ///
-/// Resolved from base values in `pumping_stations.json` with optional per-stage
-/// overrides from `constraints/pumping_bounds.parquet`.
+/// Resolved from `pumping_stations.json` overlaid with `constraints/pumping_bounds.parquet`.
 ///
 /// # Examples
 ///
@@ -154,9 +134,7 @@ pub struct PumpingStageBounds {
 
 /// Energy contract bound values for a given (contract, stage) pair.
 ///
-/// Resolved from base values in `energy_contracts.json` with optional per-stage
-/// overrides from `constraints/contract_bounds.parquet`. The price field can also
-/// be stage-varying.
+/// Resolved from `energy_contracts.json` overlaid with `constraints/contract_bounds.parquet`.
 ///
 /// # Examples
 ///
@@ -183,16 +161,9 @@ pub struct ContractStageBounds {
 
 /// Pre-resolved bound table for all entities across all stages.
 ///
-/// Populated by `cobre-io` after base bounds are overlaid with stage-specific
-/// overrides. Provides O(1) lookup via direct array indexing.
-///
-/// Internal layout: most tables use `data[entity_idx * n_stages + stage_idx]`.
-/// The `thermal` table uses an extended stride
-/// `data[thermal_idx * thermal_stage_axis_len + stage_idx]` with
-/// `thermal_stage_axis_len = n_stages + k_max`, where `k_max` is the maximum
-/// lead-stages across anticipated thermals. The padded region
-/// `[n_stages, n_stages + k_max)` is reserved for delivery-stage lookups by
-/// anticipated-decision columns.
+/// Most tables index `data[entity_idx * n_stages + stage_idx]`; the `thermal`
+/// table uses an extended `n_stages + k_max` stride — see
+/// [`thermal_stage_axis_len`](Self::thermal_stage_axis_len).
 ///
 /// # Examples
 ///
@@ -208,7 +179,7 @@ pub struct ContractStageBounds {
 ///     min_outflow_m3s: 0.0, max_outflow_m3s: None,
 ///     min_generation_mw: 0.0, max_generation_mw: 30.0,
 ///     max_diversion_m3s: None,
-///     filling_inflow_m3s: 0.0, water_withdrawal_m3s: 0.0,
+///     filling_min_rate_m3s: 0.0, water_withdrawal_m3s: 0.0,
 /// };
 /// let thermal_default = ThermalStageBounds { min_generation_mw: 0.0, max_generation_mw: 100.0, cost_per_mwh: 50.0 };
 /// let line_default = LineStageBounds { direct_mw: 500.0, reverse_mw: 500.0 };
@@ -227,46 +198,30 @@ pub struct ContractStageBounds {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(try_from = "ResolvedBoundsWire"))]
 pub struct ResolvedBounds {
-    /// Total number of stages. Used to compute flat indices.
+    /// Stride for every entity table except `thermal`: `data[entity_idx * n_stages + stage_idx]`.
     n_stages: usize,
-    /// Stride used to index the `thermal` Vec; equals `n_stages + k_max`.
-    ///
-    /// Stored as a denormalized scalar so the hot-path accessors do not need
-    /// to recompute it from a `BoundsCountsSpec` (which is not retained).
-    ///
-    /// Contract: this field is **required** on the wire — it is never defaulted.
-    /// A payload that omits it, or that supplies `0` while `thermal` is
-    /// non-empty, is rejected by [`ResolvedBoundsWire`]'s `TryFrom`. Defaulting a
-    /// missing field to `0` would alias every thermal to thermal 0's stage block
-    /// (the divisor in `thermal_idx * thermal_stage_axis_len + stage_idx`
-    /// collapses to `stage_idx`), silently returning wrong bounds.
+    /// Stride for the `thermal` Vec; equals `n_stages + k_max`. Required on the
+    /// wire and never defaulted: a missing or zero stride (with `thermal`
+    /// non-empty) is rejected by [`ResolvedBoundsWire`]'s `TryFrom`, because
+    /// defaulting to `0` would alias every thermal to thermal 0's stage block and
+    /// silently return wrong bounds.
     thermal_stage_axis_len: usize,
-    /// Flat `n_hydros * n_stages` array indexed `[hydro_idx * n_stages + stage_idx]`.
     hydro: Vec<HydroStageBounds>,
-    /// Flat `n_thermals * (n_stages + k_max)` array indexed
-    /// `[thermal_idx * thermal_stage_axis_len + stage_idx]`.
-    ///
-    /// The stage axis is asymmetric relative to the other entity tables: it is
-    /// extended by `k_max` cells per thermal to host delivery-stage values for
-    /// anticipated-decision columns. Indices `[0, n_stages)` are the regular
-    /// study horizon; indices `[n_stages, n_stages + k_max)` are the padded
-    /// region.
+    /// Indexed `[thermal_idx * thermal_stage_axis_len + stage_idx]`. The stage axis
+    /// is extended by `k_max` cells per thermal: `[0, n_stages)` is the study
+    /// horizon, `[n_stages, n_stages + k_max)` the padding for delivery-stage
+    /// lookups by anticipated-decision columns.
     thermal: Vec<ThermalStageBounds>,
-    /// Flat `n_lines * n_stages` array indexed `[line_idx * n_stages + stage_idx]`.
     line: Vec<LineStageBounds>,
-    /// Flat `n_pumping * n_stages` array indexed `[pumping_idx * n_stages + stage_idx]`.
     pumping: Vec<PumpingStageBounds>,
-    /// Flat `n_contracts * n_stages` array indexed `[contract_idx * n_stages + stage_idx]`.
     contract: Vec<ContractStageBounds>,
 }
 
 /// Deserialization shadow for [`ResolvedBounds`].
 ///
-/// Mirrors the serialized field layout exactly so round-trips are lossless, but
-/// crucially does **not** apply `serde(default)` to `thermal_stage_axis_len`: a
-/// payload missing that field fails at the field level rather than aliasing
-/// every thermal to thermal 0. The `TryFrom` below additionally rejects a
-/// present-but-zero stride when the thermal table is non-empty.
+/// Has no `serde(default)` on `thermal_stage_axis_len`, so a missing field is
+/// rejected rather than aliasing every thermal to thermal 0; the `TryFrom` below
+/// also rejects a present-but-zero stride with a non-empty thermal table.
 #[cfg(feature = "serde")]
 #[derive(serde::Deserialize)]
 struct ResolvedBoundsWire {
@@ -341,9 +296,7 @@ pub struct BoundsDefaults {
 impl ResolvedBounds {
     /// Return an empty bounds table with zero entities and zero stages.
     ///
-    /// Used as the default value in [`System`](crate::System) when no bound
-    /// resolution has been performed yet (e.g., when building a `System` from
-    /// raw entity collections without `cobre-io`).
+    /// The default value in [`System`](crate::System) before bound resolution.
     ///
     /// # Examples
     ///
@@ -369,11 +322,6 @@ impl ResolvedBounds {
     /// Allocate a new resolved-bounds table filled with the given defaults.
     ///
     /// `counts.n_stages` must be `> 0`. Entity counts may be `0`.
-    ///
-    /// # Arguments
-    ///
-    /// * `counts` — entity counts grouped into [`BoundsCountsSpec`]
-    /// * `defaults` — default per-stage bound values grouped into [`BoundsDefaults`]
     #[must_use]
     pub fn new(counts: &BoundsCountsSpec, defaults: &BoundsDefaults) -> Self {
         debug_assert!(
@@ -394,11 +342,7 @@ impl ResolvedBounds {
 
     /// Return the resolved bounds for a hydro plant at a specific stage.
     ///
-    /// Returns a shared reference to avoid copying the 11-field struct on hot paths.
-    ///
-    /// # Panics
-    ///
-    /// Panics in debug builds if `hydro_index >= n_hydros` or `stage_index >= n_stages`.
+    /// Returns a reference rather than a copy to avoid copying the struct on hot paths.
     #[inline]
     #[must_use]
     pub fn hydro_bounds(&self, hydro_index: usize, stage_index: usize) -> &HydroStageBounds {
@@ -407,9 +351,8 @@ impl ResolvedBounds {
 
     /// Return the resolved bounds for a thermal unit at a specific stage.
     ///
-    /// `stage_index` is valid in `[0, thermal_stage_axis_len())`, which equals
-    /// `n_stages() + k_max`. Indices `>= n_stages()` access the padded region
-    /// reserved for delivery-stage lookups by anticipated-decision columns.
+    /// `stage_index` is valid in `[0, thermal_stage_axis_len())`; indices
+    /// `>= n_stages()` access the padded delivery-stage region.
     #[inline]
     #[must_use]
     pub fn thermal_bounds(&self, thermal_index: usize, stage_index: usize) -> ThermalStageBounds {
@@ -446,8 +389,6 @@ impl ResolvedBounds {
     }
 
     /// Return a mutable reference to the hydro bounds cell for in-place update.
-    ///
-    /// Used by `cobre-io` during bound resolution to set stage-specific overrides.
     #[inline]
     pub fn hydro_bounds_mut(
         &mut self,
@@ -459,9 +400,8 @@ impl ResolvedBounds {
 
     /// Return a mutable reference to the thermal bounds cell for in-place update.
     ///
-    /// `stage_index` is valid in `[0, thermal_stage_axis_len())`. Indices
-    /// `>= n_stages()` write into the padded region reserved for
-    /// delivery-stage lookups by anticipated-decision columns.
+    /// `stage_index` is valid in `[0, thermal_stage_axis_len())`; indices
+    /// `>= n_stages()` write into the padded delivery-stage region.
     #[inline]
     pub fn thermal_bounds_mut(
         &mut self,
@@ -512,13 +452,46 @@ impl ResolvedBounds {
         self.n_stages
     }
 
-    /// Return the stride used to index the thermal Vec.
+    /// Return the number of pumping stations.
     ///
-    /// Equals `n_stages() + k_max`, where `k_max` is the maximum lead-stages
-    /// across anticipated thermals. When `k_max == 0` this equals
-    /// `n_stages()`. The thermal table reserves indices
-    /// `[n_stages(), thermal_stage_axis_len())` for delivery-stage lookups by
-    /// anticipated-decision columns.
+    /// Derived from the `pumping` Vec length and `n_stages` rather than a stored
+    /// count, since `n_pumping` is never serialized. The `n_stages == 0` guard
+    /// avoids divide-by-zero on [`ResolvedBounds::empty`].
+    #[inline]
+    #[must_use]
+    pub fn n_pumping(&self) -> usize {
+        if self.n_stages == 0 {
+            0
+        } else {
+            self.pumping.len() / self.n_stages
+        }
+    }
+
+    /// Return the number of energy contracts.
+    ///
+    /// Derived from the `contract` Vec length and `n_stages` rather than a stored
+    /// count, since `n_contracts` is never serialized. The `n_stages == 0` guard
+    /// avoids divide-by-zero on [`ResolvedBounds::empty`].
+    #[inline]
+    #[must_use]
+    pub fn n_contracts(&self) -> usize {
+        if self.n_stages == 0 {
+            0
+        } else {
+            debug_assert_eq!(
+                self.contract.len() % self.n_stages,
+                0,
+                "contract Vec length must be a multiple of n_stages"
+            );
+            self.contract.len() / self.n_stages
+        }
+    }
+
+    /// Return the stride used to index the thermal Vec; equals `n_stages() + k_max`.
+    ///
+    /// `k_max` is the maximum lead-stages across anticipated thermals. The thermal
+    /// table reserves indices `[n_stages(), thermal_stage_axis_len())` for
+    /// delivery-stage lookups by anticipated-decision columns.
     #[inline]
     #[must_use]
     pub fn thermal_stage_axis_len(&self) -> usize {
@@ -546,7 +519,7 @@ mod tests {
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             max_diversion_m3s: None,
-            filling_inflow_m3s: 0.0,
+            filling_min_rate_m3s: 0.0,
             water_withdrawal_m3s: 0.0,
         }
     }
@@ -786,20 +759,60 @@ mod tests {
         assert_eq!(empty.n_stages(), 0);
     }
 
+    #[test]
+    fn test_n_pumping_recovers_station_count() {
+        let table = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 2,
+                n_contracts: 0,
+                n_stages: 3,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: zero_hydro_default_for_tests(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        assert_eq!(table.n_pumping(), 2);
+    }
+
+    #[test]
+    fn test_n_pumping_zero_when_no_stations() {
+        let table = make_bounds_for_boundary_tests(4, 0);
+        assert_eq!(table.n_pumping(), 0);
+    }
+
+    #[test]
+    fn test_n_pumping_empty_table_is_zero() {
+        // The `n_stages == 0` guard avoids a divide-by-zero on the empty table.
+        assert_eq!(ResolvedBounds::empty().n_pumping(), 0);
+    }
+
     // ─── Thermal-bounds padding boundary tests ───────────────────────────────
     //
-    // These tests pin down the lookup contract at the four boundary stage
-    // indices that the LP-template wiring exercises:
-    //
-    //   * `T - 1` — last study stage (real, possibly overridden).
-    //   * `T`     — first padded stage (must inherit plant base).
-    //   * `T + K - 1` — last padded stage (still plant base).
-    //   * `T + K` — one past the padding (panics in debug builds).
-    //
-    // The per-thermal base-fill semantics are verified in
-    // `crates/cobre-io/src/resolution/bounds.rs::tests` because that file owns
-    // `Thermal` entity construction; this module only verifies the uniform
-    // `BoundsDefaults.thermal` fill behavior.
+    // This module verifies only the uniform `BoundsDefaults.thermal` fill; the
+    // per-thermal base-fill semantics are owned by `cobre-io`'s resolution tests,
+    // which construct `Thermal` entities.
 
     /// Sentinel default used by the thermal-padding boundary tests. Values are
     /// picked so an off-by-one read returns a value that does not collide with
@@ -1010,7 +1023,7 @@ mod tests {
             min_generation_mw: 0.0,
             max_generation_mw: 0.0,
             max_diversion_m3s: None,
-            filling_inflow_m3s: 0.0,
+            filling_min_rate_m3s: 0.0,
             water_withdrawal_m3s: 0.0,
         }
     }
@@ -1027,7 +1040,7 @@ mod tests {
             min_generation_mw: 7.0,
             max_generation_mw: 8.0,
             max_diversion_m3s: Some(9.0),
-            filling_inflow_m3s: 10.0,
+            filling_min_rate_m3s: 10.0,
             water_withdrawal_m3s: 11.0,
         };
         assert!((b.min_storage_hm3 - 1.0).abs() < f64::EPSILON);

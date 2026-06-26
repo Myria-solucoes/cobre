@@ -1,30 +1,22 @@
 //! Pre-computation of normal noise model parameter arrays for LP RHS patching.
 //!
-//! This module provides [`PrecomputedNormal`], the performance-adapted cache built
-//! once during initialization from raw normal noise model parameters. It exposes flat,
-//! contiguous arrays in stage-major layout so the calling algorithm can patch LP
-//! right-hand sides without per-scenario recomputation.
+//! [`PrecomputedNormal`] is a cache built once from raw parameters, exposing flat
+//! arrays in stage-major layout so callers patch LP right-hand sides without
+//! per-scenario recomputation.
 //!
 //! ## Array layout
 //!
-//! Two-dimensional arrays (mean, std) use **stage-major** layout:
-//! `array[stage * n_entities + entity_idx]`.
+//! Stage-major keeps all per-stage data contiguous, the access order of sequential
+//! stage iteration within a scenario trajectory:
 //!
-//! The three-dimensional factor array uses **stage-major, entity-minor, block-innermost**:
-//! `factors[stage * n_entities * max_blocks + entity_idx * max_blocks + block_idx]`.
-//!
-//! This layout is optimal for sequential stage iteration within a scenario trajectory:
-//! all per-stage data for every entity is contiguous in memory, maximizing cache
-//! utilization during forward/backward LP passes.
+//! - mean, std: `array[stage * n_entities + entity_idx]`.
+//! - factors (entity-minor, block-innermost):
+//!   `factors[stage * n_entities * max_blocks + entity_idx * max_blocks + block_idx]`.
 //!
 //! ## Normal noise model
 //!
-//! Each entity follows: `x = μ_{e,m} + σ_{e,m} · f_{e,m,b} · ε`, where:
-//!
-//! - `μ_{e,m}` is the stage-level mean for entity `e` at stage `m`
-//! - `σ_{e,m}` is the stage-level standard deviation for entity `e` at stage `m`
-//! - `f_{e,m,b}` is the block scaling factor for entity `e` at stage `m`, block `b`
-//! - `ε ~ N(0, 1)` is i.i.d. standard normal noise
+//! `x = μ_{e,m} + σ_{e,m} · f_{e,m,b} · ε`, with `ε ~ N(0, 1)` i.i.d. standard
+//! normal, for entity `e`, stage `m`, block `b`.
 
 use std::collections::HashMap;
 
@@ -36,34 +28,21 @@ use crate::StochasticError;
 // Helper types
 // ---------------------------------------------------------------------------
 
-/// A `(block_id, factor)` pair used as input to [`PrecomputedNormal::build`].
-///
-/// `block_id` is the 0-based block index; `factor` is the multiplicative
-/// scaling applied to the stage-level noise realization for that block.
+/// A `(block_id, factor)` pair input to [`PrecomputedNormal::build`]: 0-based block
+/// index, multiplicative scaling on the stage-level noise realization.
 pub type BlockFactorPair = (i32, f64);
 
-/// A single entity-stage factor entry used as input to [`PrecomputedNormal::build`].
-///
-/// The tuple contains `(entity_id, stage_id, block_factors)` where
-/// `block_factors` is a slice of [`BlockFactorPair`] values.
+/// An `(entity_id, stage_id, block_factors)` factor entry input to
+/// [`PrecomputedNormal::build`].
 pub type EntityFactorEntry<'a> = (EntityId, i32, &'a [BlockFactorPair]);
 
 // ---------------------------------------------------------------------------
 // PrecomputedNormal
 // ---------------------------------------------------------------------------
 
-/// Cache-friendly normal noise model data for LP RHS patching.
-///
-/// Built once during initialization from raw normal noise model parameters.
-/// Consumed read-only during iterative optimization.
-///
-/// All two-dimensional arrays use stage-major layout: outer dimension is stage
-/// index, inner dimension is entity index (sorted by canonical entity ID order).
-/// The three-dimensional factor array is additionally indexed by block within
-/// each (stage, entity) pair.
-///
-/// See the [module documentation](self) for the array layout and noise model
-/// description.
+/// Cache-friendly normal noise model data for LP RHS patching, built once and
+/// consumed read-only. Entities are in canonical entity-ID order; see the
+/// [module documentation](self) for the array layout and noise model.
 ///
 /// # Examples
 ///
@@ -103,29 +82,20 @@ pub type EntityFactorEntry<'a> = (EntityId, i32, &'a [BlockFactorPair]);
 #[must_use]
 #[derive(Debug)]
 pub struct PrecomputedNormal {
-    /// Stage-level mean per (stage, entity).
-    /// Flat array indexed as `[stage * n_entities + entity_idx]`.
-    /// Length: `n_stages * n_entities`.
+    /// Stage-level mean, length `n_stages * n_entities`.
     mean: Box<[f64]>,
 
-    /// Stage-level standard deviation per (stage, entity).
-    /// Flat array indexed as `[stage * n_entities + entity_idx]`.
-    /// Length: `n_stages * n_entities`.
+    /// Stage-level standard deviation, length `n_stages * n_entities`.
     std: Box<[f64]>,
 
-    /// Per-block scaling factor per (stage, entity, block).
-    /// Flat array indexed as `[stage * n_entities * max_blocks + entity_idx * max_blocks + block_idx]`.
-    /// Length: `n_stages * n_entities * max_blocks`.
-    /// Defaults to `1.0` for entries not present in the input factor data.
+    /// Per-block scaling factor, length `n_stages * n_entities * max_blocks`;
+    /// `1.0` where the input factor data has no entry.
     factors: Box<[f64]>,
 
-    /// Number of study stages.
     n_stages: usize,
 
-    /// Number of entities.
     n_entities: usize,
 
-    /// Maximum block count across all stages.
     max_blocks: usize,
 }
 
@@ -138,26 +108,16 @@ impl PrecomputedNormal {
     ///
     /// # Parameters
     ///
-    /// - `models`: raw stage-level mean and standard deviation parameters,
-    ///   sorted by `(entity_id, stage_id)`. May contain entries for entity IDs
-    ///   not present in `entity_ids`; those entries are silently ignored.
-    /// - `factors`: per-(entity, stage, block) scaling factors. Each entry is
-    ///   `(entity_id, stage_id, block_factors)` where `block_factors` is a
-    ///   slice of `(block_id, factor)` pairs. Missing entries default to `1.0`.
-    /// - `study_stages`: study stages in order (non-negative IDs).
-    /// - `entity_ids`: canonical sorted entity IDs (determines entity array index order).
-    /// - `max_blocks`: maximum block count across all stages.
+    /// - `models`: entries whose `bus_id` is absent from `entity_ids` are silently
+    ///   ignored; missing `(entity, stage)` pairs default to zero mean/std.
+    /// - `factors`: per-`(entity, stage, block)` scaling; missing entries default
+    ///   to `1.0`.
+    /// - `entity_ids`: canonical sorted order; determines entity array index order.
     ///
     /// # Errors
     ///
-    /// Currently returns `Ok` for all valid input combinations; missing
-    /// (entity, stage) pairs default to zero mean/std and unit factors.
-    /// The `Result` return type is retained for API consistency and to allow
-    /// future validation without a breaking change.
-    ///
-    /// # Panics
-    ///
-    /// Does not panic for valid inputs. All indexing is bounds-checked during build.
+    /// Always `Ok` today; the `Result` is retained so future validation is not a
+    /// breaking change.
     pub fn build(
         models: &[LoadModel],
         factors: &[EntityFactorEntry<'_>],
@@ -168,28 +128,24 @@ impl PrecomputedNormal {
         let n_stages = study_stages.len();
         let n_entities = entity_ids.len();
 
-        // Map entity EntityId → canonical index (0-based, canonical sorted order).
         let entity_index: HashMap<EntityId, usize> = entity_ids
             .iter()
             .enumerate()
             .map(|(i, &id)| (id, i))
             .collect();
 
-        // Map stage_id → stage index.
         let stage_index: HashMap<i32, usize> = study_stages
             .iter()
             .enumerate()
             .map(|(i, s)| (s.id, i))
             .collect();
 
-        // Allocate flat output arrays.
         let n2 = n_stages * n_entities;
         let n3 = n_stages * n_entities * max_blocks.max(1);
         let mut mean_arr = vec![0.0f64; n2];
         let mut std_arr = vec![0.0f64; n2];
         let mut factors_arr = vec![1.0f64; n3];
 
-        // Populate mean and std from models.
         for model in models {
             let Some(&e_idx) = entity_index.get(&model.bus_id) else {
                 continue;
@@ -202,8 +158,6 @@ impl PrecomputedNormal {
             std_arr[flat2] = model.std_mw;
         }
 
-        // Populate block factors. Missing (entity, stage, block) combinations
-        // remain at the default value of 1.0.
         if max_blocks > 0 {
             for (entity_id, stage_id, block_factors) in factors {
                 let Some(&e_idx) = entity_index.get(entity_id) else {
@@ -325,11 +279,7 @@ impl PrecomputedNormal {
 }
 
 impl Default for PrecomputedNormal {
-    /// Returns an empty [`PrecomputedNormal`] with zero stages, entities, and blocks.
-    ///
-    /// Useful as a sentinel value for callers that do not use the normal noise
-    /// model (e.g., test fixtures for systems with no stochastic entities of
-    /// this type).
+    /// Empty sentinel for callers without any normal noise model entities.
     fn default() -> Self {
         Self {
             mean: Box::new([]),
@@ -398,10 +348,6 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // build_empty_returns_zero_mean_std_one_factors
-    // -----------------------------------------------------------------------
-
     #[test]
     fn build_empty_returns_zero_mean_std_one_factors() {
         let stages = [make_stage(0, 0)];
@@ -430,10 +376,6 @@ mod tests {
             "empty factors → factor = 1.0 for block 1"
         );
     }
-
-    // -----------------------------------------------------------------------
-    // build_with_models_populates_mean_std
-    // -----------------------------------------------------------------------
 
     #[test]
     fn build_with_models_populates_mean_std() {
@@ -468,10 +410,6 @@ mod tests {
         assert!((lp.std(2, 1) - 28.0).abs() < f64::EPSILON);
     }
 
-    // -----------------------------------------------------------------------
-    // build_with_factors_populates_block_factors
-    // -----------------------------------------------------------------------
-
     #[test]
     fn build_with_factors_populates_block_factors() {
         let stages = [make_stage(0, 0)];
@@ -503,10 +441,6 @@ mod tests {
             "missing factor → 1.0"
         );
     }
-
-    // -----------------------------------------------------------------------
-    // build_with_missing_entity_stage_defaults_to_zero
-    // -----------------------------------------------------------------------
 
     #[test]
     fn build_with_missing_entity_stage_defaults_to_zero() {
@@ -551,10 +485,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // build_with_missing_factor_defaults_to_one
-    // -----------------------------------------------------------------------
-
     #[test]
     fn build_with_missing_factor_defaults_to_one() {
         let stages = [make_stage(0, 0), make_stage(1, 1)];
@@ -578,10 +508,6 @@ mod tests {
         assert!((lp.block_factor(1, 0, 0) - 1.0).abs() < f64::EPSILON);
         assert!((lp.block_factor(1, 1, 0) - 1.0).abs() < f64::EPSILON);
     }
-
-    // -----------------------------------------------------------------------
-    // accessor_consistency_across_stages
-    // -----------------------------------------------------------------------
 
     #[test]
     fn accessor_consistency_across_stages() {
@@ -638,11 +564,6 @@ mod tests {
         assert!((lp.mean(2, 1) - 68.0).abs() < f64::EPSILON);
     }
 
-    // -----------------------------------------------------------------------
-    // Acceptance criterion: mean(1, 0) returns correct value for 2 entities,
-    // 3 stages setup
-    // -----------------------------------------------------------------------
-
     #[test]
     fn acceptance_criterion_mean_stage1_entity0() {
         let stages = [make_stage(0, 0), make_stage(1, 1), make_stage(2, 2)];
@@ -669,10 +590,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Declaration-order invariance
-    // -----------------------------------------------------------------------
-
     #[test]
     fn declaration_order_invariance() {
         let stage = make_stage(0, 0);
@@ -697,11 +614,8 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Bounds-checking panics (debug-only — release lets native Vec indexing
-    // panic with a different message that would fail #[should_panic])
-    // -----------------------------------------------------------------------
-
+    // debug-only: release lets native Vec indexing panic with a different message
+    // that would fail #[should_panic].
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "stage index 1 is out of bounds")]
@@ -740,10 +654,6 @@ mod tests {
         let lp = PrecomputedNormal::build(&[], &[], &[stage], &[EntityId(1)], 1).unwrap();
         let _ = lp.block_factor(0, 0, 1);
     }
-
-    // -----------------------------------------------------------------------
-    // Default is empty
-    // -----------------------------------------------------------------------
 
     #[test]
     fn default_is_empty() {

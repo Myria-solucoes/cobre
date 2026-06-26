@@ -1,29 +1,10 @@
 //! Conformance tests for [`LocalBackend`] through the public `cobre_comm` API.
 //!
-//! These integration tests verify that `LocalBackend` satisfies the `Communicator`,
-//! `SharedMemoryProvider`, and `LocalCommunicator` trait contracts as specified in
-//! `backend-testing.md` SS1.1-SS1.8, adapted for the identity semantics of a
-//! single-rank (size=1) backend.
-//!
-//! # Test organisation
-//!
-//! Tests are grouped by spec section via inline comments:
-//! - SS1.1 `allgatherv` — identity copy semantics, displacement offset
-//! - SS1.2 `allreduce` — Sum/Min/Max identity, single-element buffer
-//! - SS1.3 `broadcast` — root=0 no-op, data preservation
-//! - SS1.4 `barrier` — repeated barrier calls
-//! - SS1.5 rank/size — postcondition checks
-//! - SS1.6 compound sequencing — four-operation sequence without interference
-//! - SS1.7 `SharedMemoryProvider` lifecycle — allocate -> write -> fence -> read,
-//!   `is_leader`, `split_local` rank/size
-//! - SS1.8 error cases — `InvalidBufferSize` and `InvalidRoot` precondition violations
-//!
-//! # Float comparisons
-//!
-//! `LocalBackend` uses identity copy semantics, so exact float equality is correct.
-//! The `clippy::float_cmp` lint is suppressed at module level for this file.
+//! Verifies the `Communicator`, `SharedMemoryProvider`, and `LocalCommunicator`
+//! contracts of `backend-testing.md` SS1.1-SS1.8, adapted for the identity
+//! semantics of a single-rank (size=1) backend.
+// float_cmp: identity copy semantics make exact float equality the correct check.
 #![allow(clippy::float_cmp)]
-// Allow expect/unwrap in test code — these guard test setup paths that must not fail.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use cobre_comm::{CommError, Communicator, LocalBackend, ReduceOp};
@@ -33,7 +14,6 @@ use cobre_comm::{LocalCommunicator, SharedMemoryProvider, SharedRegion};
 
 // ── SS1.1 allgatherv ─────────────────────────────────────────────────────────
 
-/// SS1.1: Identity copy with `counts=[3]`, `displs=[0]`.
 #[test]
 fn test_local_allgatherv_identity_size1() {
     let comm = LocalBackend;
@@ -46,7 +26,6 @@ fn test_local_allgatherv_identity_size1() {
     assert_eq!(recv, [10.0, 20.0, 30.0]);
 }
 
-/// SS1.1: Identity copy with non-zero displacement.
 #[test]
 fn test_local_allgatherv_with_displacement() {
     let comm = LocalBackend;
@@ -61,7 +40,6 @@ fn test_local_allgatherv_with_displacement() {
 
 // ── SS1.2 allreduce ───────────────────────────────────────────────────────────
 
-/// SS1.2: `ReduceOp::Sum` is the identity for a single rank.
 #[test]
 fn test_local_allreduce_identity_sum() {
     let comm = LocalBackend;
@@ -74,7 +52,6 @@ fn test_local_allreduce_identity_sum() {
     assert_eq!(recv, send);
 }
 
-/// SS1.2: `ReduceOp::Min` is the identity for a single rank.
 #[test]
 fn test_local_allreduce_identity_min() {
     let comm = LocalBackend;
@@ -87,7 +64,6 @@ fn test_local_allreduce_identity_min() {
     assert_eq!(recv, send);
 }
 
-/// SS1.2: `ReduceOp::Max` is the identity for a single rank.
 #[test]
 fn test_local_allreduce_identity_max() {
     let comm = LocalBackend;
@@ -100,7 +76,6 @@ fn test_local_allreduce_identity_max() {
     assert_eq!(recv, send);
 }
 
-/// SS1.2: Single-element buffer reduction.
 #[test]
 fn test_local_allreduce_single_element() {
     let comm = LocalBackend;
@@ -115,7 +90,6 @@ fn test_local_allreduce_single_element() {
 
 // ── SS1.3 broadcast ───────────────────────────────────────────────────────────
 
-/// SS1.3: `root=0` is valid and is a no-op that preserves the buffer contents.
 #[test]
 fn test_local_broadcast_root0_noop() {
     let comm = LocalBackend;
@@ -129,7 +103,6 @@ fn test_local_broadcast_root0_noop() {
 
 // ── SS1.4 barrier ─────────────────────────────────────────────────────────────
 
-/// SS1.4: Three consecutive barriers must all complete without error.
 #[test]
 fn test_local_barrier_repeated() {
     let comm = LocalBackend;
@@ -141,7 +114,6 @@ fn test_local_barrier_repeated() {
 
 // ── SS1.5 rank/size ───────────────────────────────────────────────────────────
 
-/// SS1.5: `rank()` returns 0 and `size()` returns 1 through the `Communicator` trait.
 #[test]
 fn test_local_rank_size() {
     let comm = LocalBackend;
@@ -152,8 +124,6 @@ fn test_local_rank_size() {
 
 // ── SS1.6 compound sequencing ─────────────────────────────────────────────────
 
-/// SS1.6: Four-operation sequence — `allgatherv` -> `allreduce(Sum)` -> `barrier`
-/// -> `allgatherv` — with no stale state between operations.
 #[test]
 fn test_local_collective_sequence() {
     let comm = LocalBackend;
@@ -181,7 +151,6 @@ fn test_local_collective_sequence() {
 
 // ── SS1.7 SharedMemoryProvider lifecycle ──────────────────────────────────────
 
-/// SS1.7: Full lifecycle — allocate -> write -> fence -> read.
 #[cfg(feature = "shared-memory")]
 #[test]
 fn test_local_shared_region_lifecycle() {
@@ -205,7 +174,6 @@ fn test_local_shared_region_lifecycle() {
     }
 }
 
-/// SS1.7: `is_leader()` returns `true` for `LocalBackend`.
 #[cfg(feature = "shared-memory")]
 #[test]
 fn test_local_shared_region_is_leader() {
@@ -213,7 +181,6 @@ fn test_local_shared_region_is_leader() {
     assert!(backend.is_leader());
 }
 
-/// SS1.7: `split_local()` returns a communicator with `rank() == 0` and `size() == 1`.
 #[cfg(feature = "shared-memory")]
 #[test]
 fn test_local_split_local_rank_size() {
@@ -227,7 +194,6 @@ fn test_local_split_local_rank_size() {
 
 // ── SS1.8 error cases ─────────────────────────────────────────────────────────
 
-/// SS1.8.1: `allreduce` with mismatched send/recv buffer lengths.
 #[test]
 fn test_local_allreduce_buffer_mismatch() {
     let comm = LocalBackend;
@@ -251,7 +217,6 @@ fn test_local_allreduce_buffer_mismatch() {
     );
 }
 
-/// SS1.8.1: `allreduce` with empty buffers.
 #[test]
 fn test_local_allreduce_empty_buffer() {
     let comm = LocalBackend;
@@ -275,7 +240,6 @@ fn test_local_allreduce_empty_buffer() {
     );
 }
 
-/// SS1.8.1: `allgatherv` with a receive buffer that is too small.
 #[test]
 fn test_local_allgatherv_recv_too_small() {
     let comm = LocalBackend;
@@ -299,7 +263,6 @@ fn test_local_allgatherv_recv_too_small() {
     );
 }
 
-/// SS1.8.1: `allgatherv` with `counts.len() != size()`.
 #[test]
 fn test_local_allgatherv_counts_mismatch() {
     let comm = LocalBackend;
@@ -323,7 +286,6 @@ fn test_local_allgatherv_counts_mismatch() {
     );
 }
 
-/// SS1.8.2: `broadcast` with `root >= size()`.
 #[test]
 fn test_local_broadcast_invalid_root() {
     let comm = LocalBackend;

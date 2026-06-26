@@ -1,31 +1,24 @@
 //! Sobol quasi-Monte Carlo sequence generation with Joe-Kuo direction tables.
 //!
-//! This module embeds the Joe-Kuo 2010 direction number dataset for up to
-//! `MAX_SOBOL_DIM` dimensions. The data is stored as a statically-typed
-//! Rust static array that requires no runtime allocation or deserialization.
-//!
-//! ## Dimension numbering
-//!
-//! - Dimension 1 uses the van der Corput sequence (no direction table needed).
-//! - Dimensions 2–21201 each have an entry in `SOBOL_DIRECTIONS`.
-//! - Array index 0 corresponds to dimension 2.
+//! Embeds the Joe-Kuo direction-number dataset for up to `MAX_SOBOL_DIM`
+//! dimensions. Dimension 1 uses the van der Corput sequence;
+//! dimensions 2+ read `SOBOL_DIRECTIONS` (array index 0 is dimension 2).
 //!
 //! ## Direction number convention
 //!
-//! `SobolDirEntry::initial_dirs` stores raw `m_i` values exactly as listed in
-//! the Joe-Kuo file. The sequence generator applies the left-shift
-//! `v[j] = m_j << (32 - j)` when constructing the direction vectors for the
-//! standard Gray-code Sobol formulation.
+//! `SobolDirEntry::initial_dirs` stores raw `m_i` values as listed in the Joe-Kuo
+//! file; the generator applies the left-shift `v[j] = m_j << (32 - j)` — do not
+//! pre-shift the stored values.
 //!
 //! ## Entry points
 //!
-//! - [`generate_qmc_sobol`]: batch generation for all openings of a stage,
-//!   using Gray-code recurrence for O(1) updates per point.
-//! - [`scrambled_sobol_point`]: single-scenario point-wise generation via
-//!   direct binary decomposition, used by the out-of-sample forward pass.
+//! - [`generate_qmc_sobol`]: batch generation via Gray-code recurrence (O(1) per
+//!   point).
+//! - [`scrambled_sobol_point`]: single-scenario point-wise generation via direct
+//!   binary decomposition, for the out-of-sample forward pass.
 //!
-//! Both paths apply Matousek linear scrambling `x' = a*x + b (mod 2^32)` with
-//! seed-derived parameters, then transform to N(0,1) via `norm_quantile`.
+//! Both apply Matousek linear scrambling `x' = a*x + b (mod 2^32)` with
+//! seed-derived parameters, then map to N(0,1) via `norm_quantile`.
 
 mod sobol_directions;
 
@@ -39,24 +32,18 @@ use crate::noise::{
     seed::{derive_opening_seed, derive_stage_seed},
 };
 
-/// Maximum supported dimension for Sobol sequences.
-///
-/// Equals 21,201: dimension 1 uses the van der Corput sequence and
-/// dimensions 2–21,201 are covered by the 21,200 Joe-Kuo entries in
-/// [`SOBOL_DIRECTIONS`].
+/// Maximum supported Sobol dimension: dimension 1 (van der Corput) plus the
+/// Joe-Kuo entries in `SOBOL_DIRECTIONS`.
 pub(crate) const MAX_SOBOL_DIM: usize = SOBOL_MAX_DIM;
 
-/// Scaling constant: `1.0 / 2^32`.
-///
-/// Used to convert a uniform u32 to a float in `[0, 1)`.
-/// Written as a reciprocal constant so the compiler pre-computes it.
+/// `1.0 / 2^32`, scaling a uniform u32 to a float in `[0, 1)`.
 const INV_2_32: f64 = 1.0 / 4_294_967_296.0;
 
 /// Build the full 32-bit direction vectors for each of the `dim` dimensions.
 ///
-/// Dimension 1 uses the van der Corput sequence; dimensions 2+ use Joe-Kuo
-/// direction numbers with polynomial recurrence. Returns `result[d][j]` as the
-/// `j`-th direction number for dimension `d` with significant bit at `31 - j`.
+/// Returns `result[d][j]`: the `j`-th direction number for dimension `d`, its
+/// significant bit at `31 - j`. Dimension 1 is van der Corput; dimensions 2+ use
+/// the Joe-Kuo polynomial recurrence.
 ///
 /// # Panics
 ///
@@ -73,30 +60,23 @@ fn build_direction_matrix(dim: usize) -> Vec<[u32; 32]> {
         let mut v = [0u32; 32];
 
         if d == 0 {
-            // Dimension 1: van der Corput sequence.
-            // v[j] = 1 << (31 - j) for j = 0..32.
+            // Dimension 1: van der Corput.
             for (j, slot) in v.iter_mut().enumerate() {
                 *slot = 1u32 << (31 - j);
             }
         } else {
-            // Dimensions 2+: read from SOBOL_DIRECTIONS[d-1].
             let entry = &SOBOL_DIRECTIONS[d - 1];
             let s = entry.degree as usize;
             let a = entry.poly;
 
-            // Left-shift the initial direction numbers to their bit positions.
-            // Joe-Kuo stores raw m_j values; we need v[j] = m_j << (32 - (j+1)).
-            // j here is 0-indexed, so j=0 gives shift = 31, j=1 gives shift = 30, etc.
+            // Raw m_j shifted into place: shift 31 - j (0-indexed j), i.e. the
+            // m_j << (32 - (j+1)) convention.
             for (j, slot) in v[..s].iter_mut().enumerate() {
                 *slot = entry.initial_dirs[j] << (31 - j);
             }
 
-            // Apply the recurrence for j >= s (0-indexed).
-            // Recurrence (Joe-Kuo convention, 1-indexed j):
-            //   v[j] = v[j-s] XOR (v[j-s] >> s) XOR sum_{k=1}^{s-1} a_{s-1-k} * v[j-k]
-            // In 0-indexed terms (j >= s):
-            //   v[j] = v[j-s] XOR (v[j-s] >> s)
-            //          XOR sum_{k=1}^{s-1} ((a >> (s-1-k)) & 1) * v[j-k]
+            // Joe-Kuo recurrence in 0-indexed j (the source states it 1-indexed):
+            //   v[j] = v[j-s] ^ (v[j-s] >> s) ^ sum_{k=1}^{s-1} ((a >> (s-1-k)) & 1) * v[j-k]
             for j in s..32 {
                 let mut x = v[j - s] ^ (v[j - s] >> s);
                 for k in 1..s {
@@ -120,7 +100,7 @@ fn derive_scramble_params(seed: u64, dim: usize) -> Vec<(u32, u32)> {
     let mut rng = rng_from_seed(seed);
     (0..dim)
         .map(|_| {
-            let a: u32 = rng.random::<u32>() | 1; // ensure odd for bijection
+            let a: u32 = rng.random::<u32>() | 1;
             let b: u32 = rng.random();
             (a, b)
         })
@@ -157,10 +137,9 @@ pub fn generate_qmc_sobol(
     let directions = build_direction_matrix(dim);
     let scramble = derive_scramble_params(seed, dim);
 
-    // Running Sobol state: sobol_state[d] holds the current unscrambled coordinate.
+    // Unscrambled coordinate per dimension; point 0 is the zero state.
     let mut sobol_state = vec![0u32; dim];
 
-    // Point 0: sobol_state = 0 for all dimensions.
     for d in 0..dim {
         let (a, b) = scramble[d];
         let xp = a.wrapping_mul(sobol_state[d]).wrapping_add(b);
@@ -168,9 +147,8 @@ pub fn generate_qmc_sobol(
         output[d] = norm_quantile(u);
     }
 
-    // Points 1..n_openings: Gray-code recurrence.
-    // For the i-th point (i >= 1), XOR v_d[c] into sobol_state[d] where
-    // c = i.trailing_zeros() (position of rightmost 1-bit of i).
+    // Gray-code recurrence: for point i, XOR direction c = i.trailing_zeros()
+    // (the rightmost set bit) into each dimension's state.
     for i in 1..n_openings {
         #[allow(clippy::cast_possible_truncation)]
         let c = i.trailing_zeros() as usize;
@@ -184,11 +162,9 @@ pub fn generate_qmc_sobol(
     }
 }
 
-/// Precomputed direction matrix and scramble parameters for Sobol generation.
-///
-/// Build once per (`sampling_seed`, `iteration`, `stage_id`, `dim`) tuple and
-/// reuse across all scenarios at that stage. This avoids redundantly computing
-/// the direction matrix and scramble params per scenario.
+/// Direction matrix and scramble parameters built once per
+/// (`sampling_seed`, `iteration`, `stage_id`, `dim`) tuple and reused across all
+/// scenarios at that stage.
 #[derive(Debug, Clone)]
 pub struct SobolPrecomputed {
     directions: Vec<[u32; 32]>,
@@ -196,8 +172,7 @@ pub struct SobolPrecomputed {
 }
 
 impl SobolPrecomputed {
-    /// Precompute the direction matrix and scramble parameters for a given
-    /// (seed, iteration, stage, dim) combination.
+    /// Precompute for a given (seed, iteration, stage, dim) combination.
     ///
     /// # Panics
     ///

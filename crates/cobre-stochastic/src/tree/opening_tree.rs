@@ -7,13 +7,9 @@
 
 use crate::error::StochasticError;
 
-/// Direction in which per-stage openings are ordered by their aggregate key.
-///
-/// The opening *solve order* (see [`OpeningTree::set_solve_order`]) is a per-stage
-/// permutation of `0..n_openings(stage)` obtained by sorting openings by a
-/// caller-supplied scalar key. `Descending` places the largest-key opening first;
-/// `Ascending` places the smallest-key opening first. This type is purely an
-/// ordering policy and carries no algorithm-specific meaning.
+/// Direction in which [`OpeningTree::set_solve_order`] sorts each stage's
+/// openings by their caller-supplied key. Purely an ordering policy, with no
+/// algorithm-specific meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SweepDirection {
     /// Smallest key first.
@@ -22,31 +18,17 @@ pub enum SweepDirection {
     Descending,
 }
 
-/// Fixed opening tree holding pre-generated noise realisations for
-/// the backward pass of iterative optimisation algorithms.
+/// Fixed opening tree of pre-generated noise realisations, read-only after
+/// construction.
 ///
-/// All noise values are stored in a flat contiguous array with
-/// stage-major ordering: all openings for stage 0, then all openings
-/// for stage 1, etc. Within each stage, openings are contiguous blocks
-/// of `dim` f64 values.
+/// Noise is stored stage-major in a flat array: all of stage 0's openings, then
+/// stage 1's, etc.; each opening is a contiguous block of `dim` f64 values, at
+/// `data[stage_offsets[stage] + opening_idx * dim ..][..dim]`. The sentinel
+/// `stage_offsets[n_stages] == data.len()` keeps bounds checks exact without
+/// special-casing the last stage.
 ///
-/// Access pattern: `data[stage_offsets[stage] + opening_idx * dim .. + dim]`
-///
-/// The sentinel value `stage_offsets[n_stages]` equals `data.len()`,
-/// so bounds checks are always exact without special-casing the last stage.
-///
-/// # Memory layout
-///
-/// ```text
-/// stage 0: [opening_0_entity_0 .. opening_0_entity_{dim-1}]
-///                   [opening_1_entity_0 .. opening_1_entity_{dim-1}]
-///                   ...
-/// stage 1: [opening_0_entity_0 .. opening_0_entity_{dim-1}]
-///                   ...
-/// ```
-///
-/// See [Scenario Generation SS2.3a](scenario-generation.md) for the
-/// full type specification and memory layout rationale.
+/// See [Scenario Generation SS2.3a](scenario-generation.md) for the full
+/// type specification and memory-layout rationale.
 #[derive(Debug)]
 pub struct OpeningTree {
     data: Box<[f64]>,
@@ -54,19 +36,13 @@ pub struct OpeningTree {
     openings_per_stage: Box<[usize]>,
     n_stages: usize,
     dim: usize,
-    /// Per-stage solve-order permutation, stored stage-major in a flat buffer of
-    /// `Σ_s n_openings(s)` `u32` indices.
-    ///
-    /// `solve_order[order_offsets[s] .. order_offsets[s+1]]` is a permutation of
-    /// `0..n_openings(s)` giving the order in which a consumer may iterate the
-    /// stage's openings. Initialised to the **identity** (`0, 1, …, n-1`) at
-    /// construction, so by default the solve order equals the canonical order and
-    /// any consumer that indexes it observes byte-identical behaviour to iterating
-    /// `0..n_openings(s)`. A caller may replace it via [`Self::set_solve_order`].
+    /// Per-stage solve-order permutation, stage-major in a flat buffer of
+    /// `Σ_s n_openings(s)` `u32` indices. `solve_order[order_offsets[s]..order_offsets[s+1]]`
+    /// permutes `0..n_openings(s)`. Initialised to the **identity** so the default
+    /// solve order is byte-identical to canonical `0..n_openings(s)` iteration;
+    /// [`Self::set_solve_order`] may replace it.
     solve_order: Box<[u32]>,
-    /// Stage-start offsets into [`Self::solve_order`], length `n_stages + 1`.
-    ///
-    /// `order_offsets[s]` is the cumulative opening count before stage `s`; the
+    /// Stage-start offsets into [`Self::solve_order`], length `n_stages + 1`; the
     /// sentinel `order_offsets[n_stages]` equals `solve_order.len()`.
     order_offsets: Box<[usize]>,
 }
@@ -132,16 +108,11 @@ impl OpeningTree {
     /// Replace the per-stage solve order by sorting each stage's openings by a
     /// caller-supplied scalar key, in the given [`SweepDirection`].
     ///
-    /// `keys[s]` must hold exactly `n_openings(s)` key values, one per canonical
-    /// opening ω, with `keys.len() == n_stages()`. Each stage's openings are
-    /// sorted by their key in `direction`; ties (equal keys) are broken by
-    /// **ascending canonical ω**, making the resulting permutation a deterministic
-    /// function of `(keys, direction)` alone — independent of any input ordering
-    /// and identical on every process that is handed the same keys.
-    ///
-    /// The keys themselves are *not* retained; only the resulting permutation is
-    /// stored. Callers compute keys from setup-constant data (so the order is
-    /// run-constant) and pass them here once.
+    /// `keys[s]` holds one key per canonical opening ω (`keys.len() == n_stages()`,
+    /// `keys[s].len() == n_openings(s)`). Ties are broken by **ascending canonical
+    /// ω**, so the permutation is a deterministic function of `(keys, direction)`
+    /// alone — independent of input ordering and identical on every process given
+    /// the same keys. Only the permutation is stored, not the keys.
     ///
     /// # Errors
     ///
@@ -176,27 +147,26 @@ impl OpeningTree {
             }
         }
 
-        // All lengths validated; build each stage's permutation in place.
         for (s, stage_keys) in keys.iter().enumerate() {
             let start = self.order_offsets[s];
             let end = self.order_offsets[s + 1];
             let n_openings = self.openings_per_stage[s];
             let order = &mut self.solve_order[start..end];
             // Reset to canonical 0..n before sorting so the result is a pure
-            // function of `keys` regardless of any prior installed order.
+            // function of `keys`, independent of any prior installed order.
             for (idx, slot) in order.iter_mut().enumerate() {
                 #[allow(clippy::cast_possible_truncation)]
                 {
                     *slot = idx as u32;
                 }
             }
-            // Stable sort by key in `direction`; stability + the pre-set 0..n
-            // identity makes equal-key ties fall back to ascending canonical ω.
+            // Stable sort + the pre-set identity breaks equal-key ties by
+            // ascending canonical ω.
             order.sort_by(|&a, &b| {
                 let ka = stage_keys[a as usize];
                 let kb = stage_keys[b as usize];
-                // `total_cmp` gives a deterministic total order over all f64 bit
-                // patterns (incl. NaN/±0), so the permutation is rank-invariant.
+                // total_cmp totally orders all f64 bit patterns (NaN/±0), so the
+                // permutation is rank-invariant.
                 match direction {
                     SweepDirection::Ascending => ka.total_cmp(&kb),
                     SweepDirection::Descending => kb.total_cmp(&ka),
@@ -449,13 +419,10 @@ impl<'a> OpeningTreeView<'a> {
     }
 }
 
-/// Return `true` iff `order` is a permutation of `0..n` (each index in range and
-/// no duplicates). Referenced only by the `debug_assert!` in
-/// [`OpeningTree::set_solve_order`]; defined unconditionally because a
-/// `debug_assert!` still compiles (type-checks) its argument in release builds —
-/// gating this behind `debug_assertions` would break the release build. The
-/// `if cfg!(debug_assertions)` branch keeps it counted as "used", so no
-/// dead-code warning results in release.
+/// Return `true` iff `order` is a permutation of `0..n`. Defined unconditionally
+/// (not behind `debug_assertions`): the `debug_assert!` in
+/// [`OpeningTree::set_solve_order`] still type-checks its argument in release, so
+/// gating this would break the release build.
 fn is_permutation(order: &[u32], n: usize) -> bool {
     if order.len() != n {
         return false;
@@ -685,10 +652,8 @@ mod tests {
         tree.set_solve_order(&keys, SweepDirection::Descending)
             .expect("dims aligned");
 
-        // Each stage's order is a permutation of 0..n.
         assert!(is_permutation(tree.solve_order(0), 3));
         assert!(is_permutation(tree.solve_order(1), 4));
-        // Descending: first entry has the largest key.
         assert_eq!(tree.solve_order(0), &[1, 2, 0]);
         assert_eq!(tree.solve_order(1), &[2, 3, 1, 0]);
     }

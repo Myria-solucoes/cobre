@@ -1,6 +1,6 @@
 # Python Quickstart
 
-Install Cobre and run your first study in a few steps.
+Install Cobre and run a study in a few steps.
 
 ## Installation
 

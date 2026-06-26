@@ -13,12 +13,11 @@
 //!    accepts the delivery at zero additional cost.
 //!
 //! 2. Deliver `committed_at(1) == 50.0 MW` — `shift_anticipated_state`
-//!    (`noise.rs:253`) moves slot 1 (`values_mw[1] = 50.0`) into slot 0 at
-//!    the start of stage 1. Stage 1's always-active fishing equality then
-//!    reads slot 0 = 50.0 MW. This is the K=2-specific assertion that the
-//!    K=1 delivery test (`anticipated_pre_horizon_seed_delivery_k1.rs`) cannot
-//!    reach: K=1 has only one pre-horizon stage, so there is no ring-buffer
-//!    shift between two pre-horizon stages to exercise.
+//!    moves slot 1 (`values_mw[1] = 50.0`) into slot 0 at the start of stage 1.
+//!    Stage 1's always-active fishing equality then reads slot 0 = 50.0 MW. This
+//!    is the K=2-specific assertion that the K=1 delivery test cannot reach: K=1
+//!    has only one pre-horizon stage, so there is no ring-buffer shift between
+//!    two pre-horizon stages to exercise.
 //!
 //! 3. Satisfy `committed_at(t) ≈ decision_at(t-2)` for t ∈ {2,3,4} — the
 //!    K=2 ring-buffer matures decisions two stages after they are made. With
@@ -42,24 +41,11 @@
 //!    - Decision cost ≤ 3 × 200 MW × $10/MWh × 744 h = $4,464,000.
 //!    - Total ≤ $636,865,000.
 //!
-//! ## Legacy behaviour
-//!
-//! The old predicate `K_i > stage_idx` had fishing active at both stage 0 and 1.
-//! However, there was no test pinning both `committed_at(0)` and `committed_at(1)`
-//! to their respective seed values, so the inter-pre-horizon ring-buffer shift
-//! was never exercised. This test closes that gap for the K=2 case.
-//!
 //! ## Entity IDs
 //!
-//! IDs 41 (hydro), 42 (anticipated thermal), 43 (backup thermal) are chosen
-//! to be distinct from all existing anticipated tests:
-//! - `anticipated_simulation_ring_buffer.rs` uses IDs 2/3/4
-//! - `anticipated_numerical_reconciliation_k2.rs` uses IDs 5/6/7
-//! - `anticipated_d_t_saturation_k2.rs` uses IDs 2/3/4
-//! - `anticipated_d_t_saturation_k3.rs` uses IDs 3/4/5
-//! - `anticipated_pre_horizon_seed_delivery_k1.rs` uses IDs 30/31/32
-//!
-//! The 40-series ensures no cross-test entity confusion in nextest.
+//! IDs 41 (hydro), 42 (anticipated thermal), 43 (backup thermal) — the 40-series
+//! is kept distinct from the other anticipated tests' ids to avoid cross-test
+//! entity confusion when nextest runs them in one process.
 
 #![allow(
     clippy::unwrap_used,
@@ -200,8 +186,6 @@ fn build_system() -> cobre_core::System {
         excess_cost: 0.0,
     };
 
-    // Anticipated thermal: K=2 lead stages, very cheap so the LP saturates
-    // commitment at max_gen = 200 MW at every active decision stage.
     let anticipated_id = EntityId(42);
     let thermal_ant = Thermal {
         id: anticipated_id,
@@ -215,9 +199,6 @@ fn build_system() -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // Backup thermal: expensive so the LP uses it only when anticipated
-    // capacity is unavailable (stage 0: seed covers 80 MW, backup 70 MW;
-    // stage 1: shifted seed covers 50 MW, backup 100 MW).
     let thermal_backup = Thermal {
         id: EntityId(43),
         name: "T_backup_seed_k2".to_string(),
@@ -230,9 +211,8 @@ fn build_system() -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // Trivial hydro: present to satisfy `n_hydros = 1` in ResolvedBounds;
-    // zero inflow and 1 MW max_gen keep the system firmly in the thermal
-    // regime.
+    // Present only to satisfy `n_hydros = 1`; zero inflow and 1 MW max_gen keep
+    // the system in the thermal regime.
     let hydro = Hydro {
         id: EntityId(41),
         name: "H1_seed_k2".to_string(),
@@ -302,7 +282,6 @@ fn build_system() -> cobre_core::System {
         })
         .collect();
 
-    // Zero inflow keeps the model deterministic.
     let inflow_models: Vec<InflowModel> = (0..n_stages)
         .map(|i| InflowModel {
             hydro_id: EntityId(41),
@@ -335,7 +314,7 @@ fn build_system() -> cobre_core::System {
             min_generation_mw: 0.0,
             max_generation_mw: 1.0,
             max_diversion_m3s: None,
-            filling_inflow_m3s: 0.0,
+            filling_min_rate_m3s: 0.0,
             water_withdrawal_m3s: 0.0,
         }
     }
@@ -362,7 +341,7 @@ fn build_system() -> cobre_core::System {
     }
 
     // The padding region [n_stages, n_stages + k) is the delivery-stage axis
-    // read by `fill_anticipated_decision_objective`; it must carry per-thermal
+    // read by `fill_anticipated_columns`; it must carry per-thermal
     // costs so the decision column's objective coefficient is non-zero.
     let thermal_axis = n_stages + k;
     let mut bounds = ResolvedBounds::new(
@@ -397,14 +376,10 @@ fn build_system() -> cobre_core::System {
             },
         },
     );
-    // Thermal index 0 = anticipated (id=42): cheap at $10/MWh, max 200 MW.
-    // Thermal index 1 = backup (id=43): expensive at $5000/MWh, max 500 MW.
-    // These per-thermal overrides ensure the LP distinguishes them. Without
-    // the override the LP has no cost incentive to commit anticipated capacity
-    // and decision_at(t) collapses to zero, masking the regression assertion.
-    // The thermal_axis range [0, n_stages + k) covers the delivery-stage
-    // padding; omitting the padding causes the decision cost coefficient to
-    // default to 0 and the LP commits everywhere, hiding the AC4 regression.
+    // Thermal index 0 = anticipated (id=42, cheap); index 1 = backup (id=43,
+    // expensive). Without these per-thermal overrides the LP has no incentive to
+    // commit anticipated capacity and `decision_at(t)` collapses to zero, masking
+    // the AC4 regression.
     for s in 0..thermal_axis {
         bounds.thermal_bounds_mut(0, s).cost_per_mwh = 10.0;
         bounds.thermal_bounds_mut(0, s).max_generation_mw = 200.0;
@@ -430,16 +405,8 @@ fn build_system() -> cobre_core::System {
         },
     );
 
-    // Seed the anticipated ring buffer with [80.0, 50.0] MW.
-    //
-    // With the always-active fishing predicate, stage 0 reads slot 0 (= 80.0 MW)
-    // via the fishing equality and delivers it at zero LP cost (cost-zeroing
-    // predicate). Stage 1 reads slot 0 after the ring-buffer shift
-    // (`noise.rs:253 shift_anticipated_state`) moves slot 1 (= 50.0 MW) into
-    // slot 0; stage 1's fishing equality delivers that 50.0 MW at zero LP cost.
-    //
-    // Distinct values (80.0 vs 50.0) catch slot-swap bugs that identical values
-    // would silently mask.
+    // Seed the anticipated ring buffer with [80.0, 50.0] MW; the distinct values
+    // (80.0 vs 50.0) catch slot-swap bugs that identical seeds would silently mask.
     let initial_conditions = InitialConditions {
         storage: vec![HydroStorage {
             hydro_id: EntityId(41),
@@ -539,8 +506,8 @@ fn pre_horizon_seed_delivers_pre_horizon_stages_k2() {
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
 
-    // Step 1: train for 5 iterations so cuts sharpen enough to cover stage-3 delivery.
-    // (After 1 iteration, stage-1 decisions are too loose to satisfy AC5 cost bound.)
+    // Train for 5 iterations: after 1, stage-1 decisions are too loose to satisfy
+    // the AC5 cost bound.
     let outcome = setup
         .train(&mut solver, &comm, 5, ActiveSolver::new, None, None)
         .expect("train: must not return Err");
@@ -550,7 +517,6 @@ fn pre_horizon_seed_delivers_pre_horizon_stages_k2() {
         outcome.error
     );
 
-    // Step 2: run a single deterministic simulation.
     let mut pool = setup
         .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("create_workspace_pool: must succeed");
@@ -585,7 +551,6 @@ fn pre_horizon_seed_delivers_pre_horizon_stages_k2() {
         "scenario must contain one record per study stage (n_stages=5)",
     );
 
-    // Step 3: define accessors for the anticipated thermal (id=42).
     let anticipated_thermal_id: i32 = 42;
     let decision_at = |t: usize| -> Option<f64> {
         scenario.stages[t]
@@ -620,7 +585,7 @@ fn pre_horizon_seed_delivers_pre_horizon_stages_k2() {
     // (K=2-specific: tests ring-buffer shift between pre-horizon stages 0→1)
     let c1 = committed_at(1).expect(
         "AC2 FAIL: committed_at(1) is None. \
-         The always-active fishing predicate must be active at stage 1 (indexer.rs:1556 is_anticipated_fishing_active). \
+         The fishing constraint is always active for every anticipated plant, so it must be active at stage 1. \
          If committed_at(1) is None, the fishing constraint is absent for stage 1.",
     );
     assert!(

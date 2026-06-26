@@ -1,9 +1,4 @@
 //! Error types for the `cobre-sddp` crate.
-//!
-//! [`SddpError`] is the single error type returned by all fallible SDDP
-//! operations. It aggregates errors from dependency crates into a unified
-//! type that is `Send + Sync + 'static`, making it safe to propagate across
-//! threads and store in `Box<dyn Error>` contexts.
 
 use cobre_io::LoadError;
 use cobre_solver::SolverError;
@@ -31,48 +26,29 @@ use crate::fpha_fitting::FphaFittingError;
 pub enum SddpError {
     /// An LP subproblem solve failed in the forward or backward pass.
     ///
-    /// Wraps a [`cobre_solver::SolverError`] that persisted through all
-    /// retry attempts. The calling code should treat this as a hard stop
-    /// unless the variant carries a usable partial solution.
+    /// Wraps a [`cobre_solver::SolverError`] that persisted through all retries.
     #[error("solver error: {0}")]
     Solver(#[from] SolverError),
 
     /// A distributed communication operation failed.
-    ///
-    /// Wraps a [`cobre_comm::CommError`] from MPI collectives, buffer
-    /// validation, or shared memory operations.
     #[error("communication error: {0}")]
     Communication(#[from] cobre_comm::CommError),
 
     /// Stochastic model construction or scenario generation failed.
-    ///
-    /// Wraps a [`cobre_stochastic::StochasticError`] from PAR model
-    /// validation, spectral decomposition, or seed derivation.
     #[error("stochastic error: {0}")]
     Stochastic(#[from] StochasticError),
 
     /// Case directory loading or validation failed.
-    ///
-    /// Wraps a [`cobre_io::LoadError`] from any layer of the six-layer
-    /// validation pipeline.
     #[error("I/O error: {0}")]
     Io(#[from] LoadError),
 
-    /// SDDP configuration is invalid.
-    ///
-    /// Covers semantic errors detected at algorithm startup that are not
-    /// already caught by the upstream loading pipeline (e.g., `forward_passes`
-    /// is zero, `max_iterations` overflows the cut pool, or required fields
-    /// are inconsistent with the loaded system).
+    /// SDDP configuration is invalid (semantic errors not caught by the
+    /// upstream loading pipeline).
     #[error("configuration validation error: {0}")]
     Validation(String),
 
-    /// An LP subproblem was infeasible after all recourse actions were applied.
-    ///
-    /// This differs from [`SddpError::Solver`] (which covers numerical and
-    /// timeout failures) in that the subproblem has provably no feasible
-    /// solution. The training loop must perform a hard stop when it receives
-    /// this variant.
+    /// An LP subproblem was provably infeasible after all recourse actions —
+    /// distinct from [`SddpError::Solver`] (numerical/timeout failure). A hard stop.
     #[error("infeasible subproblem at stage {stage}, iteration {iteration}, scenario {scenario}")]
     Infeasible {
         /// Stage index (0-based) at which infeasibility was detected.
@@ -83,20 +59,12 @@ pub enum SddpError {
         scenario: usize,
     },
 
-    /// A simulation phase operation failed.
-    ///
-    /// Wraps simulation-specific errors (LP infeasibility during policy
-    /// evaluation, I/O channel failure, policy incompatibility) as a
-    /// string message. The detailed error type is
-    /// [`SimulationError`](crate::SimulationError).
+    /// A simulation phase operation failed; the detailed type is
+    /// [`SimulationError`](crate::SimulationError), stringified here.
     #[error("simulation error: {0}")]
     Simulation(String),
 
-    /// A postcard-encoded payload was produced by an incompatible binary.
-    ///
-    /// Raised when the `version` field in a wire envelope does not match the
-    /// version expected by the current binary. Callers should abort the run and
-    /// restart all ranks with a consistent binary.
+    /// A postcard-encoded payload's wire `version` does not match the current binary.
     #[error(
         "wire format version mismatch: encoded={encoded}, expected={expected}; \
          restart all ranks with the same binary"

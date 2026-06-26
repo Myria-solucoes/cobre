@@ -35,11 +35,13 @@
 //! Until the parameter loader is wired, callers pass `&HashMap::new()` and
 //! expressions must not contain `@name` tokens.
 //!
-//! All 21 variable names from the variable catalog are recognised. Block-specific
-//! variables accept an optional second argument; stage-only variables (`hydro_storage`,
-//! `hydro_evaporation`, `hydro_withdrawal`, `anticipated_decision`) must not have a
-//! block argument. Use `anticipated_decision(thermal_id)` to reference the per-stage
-//! commitment column of an anticipated thermal unit (no block index accepted).
+//! All 22 variable names from the variable catalog are recognised. Block-capable
+//! variables accept an optional second argument (`hydro_turbined`, `hydro_spillage`,
+//! `hydro_diversion`, `hydro_outflow`, `hydro_generation`, `hydro_inflow`, …); stage-only
+//! variables (`hydro_storage`, `hydro_evaporation`, `hydro_withdrawal`,
+//! `anticipated_decision`) must not have a block argument. Use
+//! `anticipated_decision(thermal_id)` to reference the per-stage commitment column of an
+//! anticipated thermal unit (no block index accepted).
 //!
 //! ## Validation
 //!
@@ -121,12 +123,8 @@ struct RawSlackConfig {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Load and validate `constraints/generic_constraints.json` from `path`.
-///
-/// Reads the JSON file, deserialises it through intermediate serde types,
-/// performs post-deserialization validation (including expression parsing),
-/// then converts to `Vec<GenericConstraint>`. The result is sorted by `id`
-/// ascending to satisfy declaration-order invariance.
+/// Load and validate `constraints/generic_constraints.json` from `path`, returning
+/// constraints sorted by `id` ascending (declaration-order invariance).
 ///
 /// # Errors
 ///
@@ -270,7 +268,6 @@ fn convert(
     let mut result = Vec::with_capacity(raw.constraints.len());
 
     for (i, c) in raw.constraints.into_iter().enumerate() {
-        // Expression already validated; re-parse is infallible at this stage.
         let expression =
             parse_expression(&c.expression, name_to_id).map_err(|msg| LoadError::SchemaError {
                 path: path.to_path_buf(),
@@ -307,7 +304,6 @@ fn convert(
         });
     }
 
-    // Sort by id for declaration-order invariance.
     result.sort_by_key(|gc| gc.id.0);
 
     Ok(result)
@@ -315,26 +311,11 @@ fn convert(
 
 // ── Expression parser ─────────────────────────────────────────────────────────
 
-/// Parse an expression string into a [`ConstraintExpression`].
+/// Parse an expression string (grammar: module doc) into a [`ConstraintExpression`].
 ///
-/// Grammar (spec SS3):
-/// ```text
-/// expression ::= term (('+' | '-') term)*
-/// term       ::= coefficient '*' '@' name '*' variable
-///              | '@' name '*' variable
-///              | coefficient '*' variable
-///              | variable
-/// variable   ::= var_name '(' entity_id (',' block_id)? ')'
-/// ```
-///
-/// `@name` tokens are resolved against `name_to_id`. Pass `&HashMap::new()`
-/// when no parameters have been loaded; any `@name` token will then produce a
-/// schema error. Once the parameter loader is wired, the real mapping is passed
-/// instead.
-///
-/// Returns `Err(String)` with a human-readable error message on parse failure.
-/// The caller wraps this in `LoadError::SchemaError` with the appropriate
-/// field path.
+/// `@name` tokens are resolved against `name_to_id`; pass `&HashMap::new()` when no
+/// parameters are loaded and any `@name` token then errors. Returns `Err(String)` on
+/// parse failure; the caller wraps it in `LoadError::SchemaError` with the field path.
 pub(crate) fn parse_expression(
     input: &str,
     name_to_id: &HashMap<String, EntityId>,
@@ -349,30 +330,22 @@ pub(crate) fn parse_expression(
 /// Tokens produced by the expression tokenizer.
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
-    /// `+` operator.
     Plus,
-    /// `-` operator (also handles unary negation of a term coefficient).
+    /// Also handles unary negation of a term coefficient.
     Minus,
-    /// `*` operator (coefficient × variable).
     Star,
-    /// `(` opening parenthesis.
     LParen,
-    /// `)` closing parenthesis.
     RParen,
-    /// `,` separator between `entity_id` and `block_id`.
+    /// Separator between `entity_id` and `block_id`.
     Comma,
-    /// A non-negative floating-point or integer literal.
+    /// A non-negative literal — the tokenizer never emits a sign.
     Number(f64),
-    /// An identifier: variable name.
     Ident(String),
-    /// A `@name` parameter reference. The `String` holds the identifier after `@`.
+    /// A `@name` parameter reference; holds the identifier after `@`.
     ParamRef(String),
 }
 
 /// Tokenize an expression string into a `Vec<Token>`.
-///
-/// Splits on whitespace and special characters (`+`, `-`, `*`, `(`, `)`, `,`).
-/// Numbers and identifiers are recognized as multi-character tokens.
 fn tokenize(input: &str) -> Result<Vec<Token>, String> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = input.chars().collect();
@@ -412,7 +385,6 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 i += 1;
             }
             c if c.is_ascii_digit() || c == '.' => {
-                // Parse a number literal (integer or floating-point).
                 let start = i;
                 while i < chars.len()
                     && (chars[i].is_ascii_digit()
@@ -432,7 +404,6 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 tokens.push(Token::Number(val));
             }
             c if c.is_alphabetic() || c == '_' => {
-                // Parse an identifier.
                 let start = i;
                 while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
                     i += 1;
@@ -441,9 +412,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 tokens.push(Token::Ident(ident));
             }
             '@' => {
-                // Parse a parameter reference: `@` followed immediately by an identifier.
                 let at_pos = i;
-                i += 1; // consume `@`
+                i += 1;
                 if i >= chars.len() || !(chars[i].is_alphabetic() || chars[i] == '_') {
                     return Err(format!(
                         "@ must be followed by an identifier at position {at_pos}"
@@ -467,16 +437,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
 
 // ── Term parser ───────────────────────────────────────────────────────────────
 
-/// Parse a token stream into a list of `LinearTerm` entries.
-///
-/// Grammar:
-/// ```text
-/// expression ::= term (('+' | '-') term)*
-/// term       ::= coefficient '*' '@' name '*' variable
-///              | '@' name '*' variable
-///              | coefficient '*' variable
-///              | variable
-/// ```
+/// Parse a token stream into a list of `LinearTerm` entries (grammar: module doc).
 fn parse_terms(
     tokens: &[Token],
     name_to_id: &HashMap<String, EntityId>,
@@ -488,8 +449,6 @@ fn parse_terms(
     let mut terms = Vec::new();
     let mut pos = 0;
 
-    // Parse the sign and optional leading coefficient before the first term.
-    // The first term may have a unary `-` or `+` prefix.
     let mut sign: f64 = 1.0;
     if pos < tokens.len() {
         match &tokens[pos] {
@@ -510,12 +469,10 @@ fn parse_terms(
         }
     }
 
-    // Parse the first term.
     let (term, next_pos) = parse_single_term(tokens, pos, sign, name_to_id)?;
     terms.push(term);
     pos = next_pos;
 
-    // Parse remaining `('+' | '-') term` pairs.
     while pos < tokens.len() {
         let op_sign = match &tokens[pos] {
             Token::Plus => 1.0,
@@ -536,15 +493,8 @@ fn parse_terms(
     Ok(terms)
 }
 
-/// Parse one term starting at `tokens[pos]` with the given sign prefix.
-///
-/// A term is one of:
-/// - `coefficient '*' '@' name '*' variable(...)` — literal scale and parameter coefficient
-/// - `'@' name '*' variable(...)` — parameter coefficient with implicit scale 1.0
-/// - `coefficient '*' variable(...)` — explicit literal coefficient
-/// - `variable(...)` — implicit literal coefficient 1.0 (multiplied by sign)
-///
-/// Returns the parsed `LinearTerm` and the new token position after the term.
+/// Parse one term starting at `tokens[pos]` with the given sign prefix, returning the
+/// `LinearTerm` and the token position after the term.
 fn parse_single_term(
     tokens: &[Token],
     pos: usize,
@@ -559,7 +509,6 @@ fn parse_single_term(
 
     match &tokens[pos] {
         Token::Number(coeff_val) => {
-            // Leading numeric literal. Next must be `*`.
             let literal = *coeff_val * sign;
             let next = pos + 1;
 
@@ -583,9 +532,7 @@ fn parse_single_term(
                 );
             }
 
-            // Peek: is the next token a `@name`?
             if let Token::ParamRef(name) = &tokens[after_star] {
-                // Shape: `literal '*' '@' name '*' variable`
                 let name = name.clone();
                 let id = resolve_param_ref(&name, name_to_id)?;
                 let star2 = after_star + 1;
@@ -599,13 +546,11 @@ fn parse_single_term(
                 let (variable, end_pos) = parse_variable_ref(tokens, var_pos)?;
                 Ok((LinearTerm::parameter(id, literal, variable), end_pos))
             } else {
-                // Shape: `literal '*' variable`
                 let (variable, end_pos) = parse_variable_ref(tokens, after_star)?;
                 Ok((LinearTerm::literal(literal, variable), end_pos))
             }
         }
         Token::ParamRef(name) => {
-            // Shape: `'@' name '*' variable`
             let name = name.clone();
             let id = resolve_param_ref(&name, name_to_id)?;
             let star = pos + 1;
@@ -630,7 +575,6 @@ fn parse_single_term(
             Ok((LinearTerm::parameter(id, sign, variable), end_pos))
         }
         Token::Ident(_) => {
-            // Variable reference with implicit literal coefficient 1.0 × sign.
             let (variable, end_pos) = parse_variable_ref(tokens, pos)?;
             Ok((LinearTerm::literal(sign, variable), end_pos))
         }
@@ -682,7 +626,6 @@ fn token_f64_to_usize(v: f64) -> Option<usize> {
 ///
 /// Returns the [`VariableRef`] and the position of the next unconsumed token.
 fn parse_variable_ref(tokens: &[Token], pos: usize) -> Result<(VariableRef, usize), String> {
-    // Expect identifier.
     let var_name = match tokens.get(pos) {
         Some(Token::Ident(name)) => name.clone(),
         Some(other) => {
@@ -693,7 +636,6 @@ fn parse_variable_ref(tokens: &[Token], pos: usize) -> Result<(VariableRef, usiz
         None => return Err("expected variable name, got end of expression".to_string()),
     };
 
-    // Expect '('.
     if tokens.get(pos + 1) != Some(&Token::LParen) {
         return Err(format!(
             "expected '(' after variable name \"{var_name}\" at position {}",
@@ -701,7 +643,6 @@ fn parse_variable_ref(tokens: &[Token], pos: usize) -> Result<(VariableRef, usiz
         ));
     }
 
-    // Expect entity_id (integer).
     let entity_id = match tokens.get(pos + 2) {
         Some(Token::Number(n)) => {
             let n_i32 = token_f64_to_i32(*n).ok_or_else(|| {
@@ -724,12 +665,10 @@ fn parse_variable_ref(tokens: &[Token], pos: usize) -> Result<(VariableRef, usiz
         }
     };
 
-    // Peek at next token: either ',' (block_id follows) or ')' (no block).
     let mut cursor = pos + 3;
     let block_id: Option<usize> = match tokens.get(cursor) {
         Some(Token::Comma) => {
             cursor += 1;
-            // Expect block_id.
             match tokens.get(cursor) {
                 Some(Token::Number(b)) => {
                     let b_usize = token_f64_to_usize(*b).ok_or_else(|| {
@@ -765,7 +704,6 @@ fn parse_variable_ref(tokens: &[Token], pos: usize) -> Result<(VariableRef, usiz
         }
     };
 
-    // Expect ')'.
     if tokens.get(cursor) != Some(&Token::RParen) {
         return Err(format!(
             "expected ')' to close variable \"{var_name}\", got {:?} at position {cursor}",
@@ -774,7 +712,6 @@ fn parse_variable_ref(tokens: &[Token], pos: usize) -> Result<(VariableRef, usiz
     }
     cursor += 1;
 
-    // Map variable name to VariableRef variant.
     let variable = build_variable_ref(&var_name, entity_id, block_id)?;
 
     Ok((variable, cursor))
@@ -782,12 +719,10 @@ fn parse_variable_ref(tokens: &[Token], pos: usize) -> Result<(VariableRef, usiz
 
 /// Build a [`VariableRef`] from the parsed variable name, entity ID, and optional block ID.
 ///
-/// Returns `Err(String)` if the variable name is not one of the 20 known names, or
+/// Returns `Err(String)` if the variable name is not one of the 22 known names, or
 /// if a block argument is provided for a stage-only variable (no block argument expected).
-// Rationale: the function body is a single exhaustive match over all 21 recognized LP variable
-// name strings; each arm maps to its typed `VariableRef` variant and enforces block-vs-stage-only
-// semantics inline. Splitting by group would break the compile-time exhaustiveness check and
-// scatter the canonical variable catalog across multiple call sites.
+// Rationale: one exhaustive match over the 22 variable names; splitting would scatter the
+// canonical catalog and drop the compile-time exhaustiveness check.
 #[allow(clippy::too_many_lines)]
 fn build_variable_ref(
     name: &str,
@@ -827,6 +762,10 @@ fn build_variable_ref(
             })
         }
         // Block-capable variables.
+        "hydro_inflow" => Ok(VariableRef::HydroInflow {
+            hydro_id: entity_id,
+            block_id,
+        }),
         "hydro_turbined" => Ok(VariableRef::HydroTurbined {
             hydro_id: entity_id,
             block_id,
@@ -896,7 +835,6 @@ fn build_variable_ref(
             block_id,
         }),
         "anticipated_decision" => {
-            // Stage-level (no block_id). Reject explicit block_id with a clear error.
             if block_id.is_some() {
                 return Err(format!(
                     "variable \"anticipated_decision\" is a stage-level scalar and \
@@ -910,7 +848,7 @@ fn build_variable_ref(
             })
         }
         other => Err(format!(
-            "unknown variable name \"{other}\": not one of the 21 supported LP variable types"
+            "unknown variable name \"{other}\": not one of the 22 supported LP variable types"
         )),
     }
 }
@@ -1114,6 +1052,33 @@ mod tests {
         );
     }
 
+    /// `hydro_inflow` is block-capable: a bare entity id parses with `block_id: None`.
+    #[test]
+    fn test_build_hydro_inflow_no_block() {
+        let var = build_variable_ref("hydro_inflow", EntityId(3), None).unwrap();
+        assert_eq!(
+            var,
+            VariableRef::HydroInflow {
+                hydro_id: EntityId(3),
+                block_id: None,
+            }
+        );
+    }
+
+    /// `hydro_inflow` accepts a block argument: the upstream-release terms are per-block,
+    /// so `hydro_inflow(h, k)` threads `block_id: Some(k)` through.
+    #[test]
+    fn test_build_hydro_inflow_with_block() {
+        let var = build_variable_ref("hydro_inflow", EntityId(3), Some(0)).unwrap();
+        assert_eq!(
+            var,
+            VariableRef::HydroInflow {
+                hydro_id: EntityId(3),
+                block_id: Some(0),
+            }
+        );
+    }
+
     /// AC-3: Unknown variable name → error.
     #[test]
     fn test_expr_unknown_variable_name() {
@@ -1144,9 +1109,11 @@ mod tests {
         );
     }
 
-    /// All 20 variable types are recognised.
+    /// All stage-only and block-capable variable names parse to the right
+    /// [`VariableRef`]. Covers the 21 entity-keyed keywords (the stage-level
+    /// `anticipated_decision` is exercised by its own dedicated tests).
     #[test]
-    fn test_expr_all_19_variable_types_recognised() {
+    fn test_expr_all_21_entity_keyed_variable_types_recognised() {
         let cases: &[(&str, VariableRef)] = &[
             (
                 "hydro_storage(0)",
@@ -1199,6 +1166,13 @@ mod tests {
                 "hydro_withdrawal(0)",
                 VariableRef::HydroWithdrawal {
                     hydro_id: EntityId(0),
+                },
+            ),
+            (
+                "hydro_inflow(0)",
+                VariableRef::HydroInflow {
+                    hydro_id: EntityId(0),
+                    block_id: None,
                 },
             ),
             (
@@ -1287,7 +1261,7 @@ mod tests {
             ),
         ];
 
-        assert_eq!(cases.len(), 20, "must have exactly 20 variable types");
+        assert_eq!(cases.len(), 21, "must have exactly 21 variable types");
 
         for (input, expected) in cases {
             let expr = parse_expression(input, &HashMap::new())

@@ -16,17 +16,6 @@
 //! 2-stage K=1 fixture whose lower bound is hand-derivable in five minutes.
 //! That canary defends the LP/cut math; this smoke test defends multi-stage
 //! state propagation, the K=2 ring-buffer shift, and basis-cache capture.
-//!
-//! ## Fixture description
-//!
-//! - 5 stages, each 744 hours (one calendar month).
-//! - 1 bus (deficit cost 500 $/MWh).
-//! - 1 hydro (storage cap 200 hm³, initial 100 hm³, max_gen 250 MW,
-//!   inflow mean 80 m³/s, spillage cost 0.01 $/hm³).
-//! - 1 anticipated thermal (K=2, cost 50 $/MWh, max 100 MW, id=2).
-//! - 1 backup thermal (cost 500 $/MWh, max 200 MW, id=4).
-//! - Load 150 MW constant across all stages.
-//! - `past_anticipated_commitments = [(id=2, [100.0, 50.0])]`.
 
 #![allow(
     clippy::unwrap_used,
@@ -66,7 +55,7 @@ use cobre_io::config::{
     SimulationConfig as IoSimulationConfig, StoppingRuleConfig, TrainingConfig,
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
-use cobre_sddp::{StudySetup, hydro_models::PrepareHydroModelsResult};
+use cobre_sddp::{SolverStatsDelta, StudySetup, hydro_models::PrepareHydroModelsResult};
 use cobre_solver::ActiveSolver;
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
@@ -80,7 +69,6 @@ use common::anticipated_structural_assertions::{
 // StubComm — single-rank communicator for testing
 // ---------------------------------------------------------------------------
 
-/// Single-rank communicator stub for testing.
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -130,15 +118,7 @@ impl Communicator for StubComm {
 // System builder
 // ---------------------------------------------------------------------------
 
-/// Build a 5-stage system with:
-/// - 1 bus (deficit cost 500 $/MWh)
-/// - 1 hydro (storage 200 hm³, max_gen 250 MW, inflow mean 80 m³/s)
-/// - 1 anticipated thermal (K=2, cost 50 $/MWh, max_gen 100 MW) — id=2
-/// - 1 backup standard thermal (cost 500 $/MWh, max_gen 200 MW) — id=4
-/// - Load 150 MW constant across all stages
-/// - `past_anticipated_commitments = [(id=2, [100.0, 50.0])]`
-///
-/// The LP is always feasible: backup thermal alone covers 150 MW.
+/// The LP is always feasible: the backup thermal alone covers the load.
 fn build_system() -> cobre_core::System {
     use chrono::NaiveDate;
 
@@ -152,7 +132,6 @@ fn build_system() -> cobre_core::System {
         excess_cost: 0.0,
     };
 
-    // Anticipated thermal: K=2 lead stages, cost 50 $/MWh, max 100 MW.
     let anticipated_id = EntityId(2);
     let thermal_ant = Thermal {
         id: anticipated_id,
@@ -166,7 +145,6 @@ fn build_system() -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // Backup standard thermal: cost 500 $/MWh (high, always feasible).
     let thermal_backup = Thermal {
         id: EntityId(4),
         name: "T_backup".to_string(),
@@ -179,7 +157,6 @@ fn build_system() -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // Hydro: constant-productivity, large storage so spill is unlikely.
     let hydro = Hydro {
         id: EntityId(3),
         name: "H1".to_string(),
@@ -271,7 +248,6 @@ fn build_system() -> cobre_core::System {
         })
         .collect();
 
-    // k_max=2 for the anticipated thermal bounds layout.
     let k_max: usize = 2;
     let n_st = n_stages;
 
@@ -286,7 +262,7 @@ fn build_system() -> cobre_core::System {
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             max_diversion_m3s: None,
-            filling_inflow_m3s: 0.0,
+            filling_min_rate_m3s: 0.0,
             water_withdrawal_m3s: 0.0,
         }
     }
@@ -312,7 +288,6 @@ fn build_system() -> cobre_core::System {
         }
     }
 
-    // 2 thermals (anticipated + backup), k_max=2.
     let bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
             n_hydros: 1,
@@ -364,7 +339,6 @@ fn build_system() -> cobre_core::System {
         },
     );
 
-    // Seed the anticipated ring buffer: slot 0 = 100.0 MW, slot 1 = 50.0 MW.
     let initial_conditions = InitialConditions {
         storage: vec![HydroStorage {
             hydro_id: EntityId(3),
@@ -397,7 +371,6 @@ fn build_system() -> cobre_core::System {
 // Config builder
 // ---------------------------------------------------------------------------
 
-/// Build a minimal [`Config`] for 1 forward pass and 8 iterations.
 fn build_config() -> Config {
     Config {
         schema: None,
@@ -428,10 +401,6 @@ fn build_config() -> Config {
 // Setup builder
 // ---------------------------------------------------------------------------
 
-/// Construct a [`StudySetup`] in-process from the given system and config.
-///
-/// Uses [`build_stochastic_context`] directly (no external scenario files),
-/// which keeps the test hermetic.
 fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
     let stochastic = build_stochastic_context(
         &system,
@@ -476,21 +445,73 @@ fn test_anticipated_5stage_k2_analytical_lb() {
     );
 
     let result = &outcome.result;
-    let indexer = setup.stage_indexer();
-    let anticipated_state_start = indexer.anticipated_state.start;
-    let n_anticipated = indexer.n_anticipated;
+    let state = setup.stage_state();
+    let anticipated_state_start = state.anticipated_state.start;
+    let n_anticipated = state.n_anticipated;
 
-    // Structural assertions — no EXPECTED_LB. Value-correctness coverage
-    // lives in anticipated_closed_form_lb_k1_single_thermal.rs (closed-form
-    // canary).
     assert_training_converged_structurally(result, &[], 8);
     assert_basis_cache_fully_populated(result, 5);
-    // Delivery stages for K=2 with strict predicate: t + K < n_stages
-    // means decisions at t in {0,1,2}, deliveries at t+K in {2,3,4}.
+    // K=2 strict predicate (t + K < n_stages): decisions at t in {0,1,2} deliver
+    // at t+K in {2,3,4}.
     assert_anticipated_delivery_slots_populated(
         result,
         anticipated_state_start,
         n_anticipated,
         &[2, 3, 4],
+    );
+}
+
+/// Warm-start regression: an anticipated-thermal study trained with warm-start
+/// must reconstruct every stored basis with zero rejections.
+///
+/// `anticipated_state_out` lives in the stage-invariant state region, so the
+/// cut row that targets it shifts `z_inflow`/`storage_in`/`theta` and the whole
+/// control region downstream by `n_anticipated`. The risk this test pins: that
+/// the shift breaks `reconstruct_basis`'s slot-identity matching and starts
+/// producing bases `HiGHS` rejects. It cannot, because `reconstruct_basis`
+/// matches stored cut rows to current LP rows by `CutPool` slot identity — never
+/// by absolute column index — and copies the column block verbatim before
+/// resizing to the (now-wider) column count. `basis_consistency_failures` is the
+/// `SolverStatistics` counter incremented whenever the solver rejects an offered
+/// warm-start basis (`isBasisConsistent` returns false): every reconstructed
+/// basis must be accepted by the solver.
+#[test]
+fn test_anticipated_5stage_k2_warm_start_zero_basis_rejections() {
+    let system = build_system();
+    let config = build_config();
+    let mut setup = build_setup(system, &config);
+    let comm = StubComm;
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+
+    let outcome = setup
+        .train(&mut solver, &comm, 8, ActiveSolver::new, None, None)
+        .expect("train must not return Err");
+    assert!(
+        outcome.error.is_none(),
+        "training error: {:?}",
+        outcome.error
+    );
+
+    let result = &outcome.result;
+    assert_eq!(
+        result.iterations, 8,
+        "warm-start regression needs the full 8-iteration run to exercise \
+         reconstruct_basis on iterations 2..8"
+    );
+
+    // Aggregate basis-rejection telemetry across every phase. On the baked
+    // warm-start path `reconstruct_basis` runs once per warm-start solve; a
+    // single rejection here would mean the relocated-column LP produced a basis
+    // HiGHS could not accept.
+    let total_rejections =
+        SolverStatsDelta::aggregate(result.solver_stats_log.iter().map(|entry| &entry.delta))
+            .basis_consistency_failures;
+
+    assert_eq!(
+        total_rejections, 0,
+        "anticipated warm-start: expected 0 basis rejections after relocating \
+         anticipated_state_out into the state region, got {total_rejections} \
+         (reconstruct_basis must match cut rows by CutPool slot identity, not by \
+         absolute column index, so the column shift is transparent)"
     );
 }

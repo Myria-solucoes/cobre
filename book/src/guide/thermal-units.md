@@ -7,7 +7,7 @@ combustion turbines, combined-cycle plants, coal-fired units, nuclear plants, an
 diesel generators all map onto the same Cobre `Thermal` entity type.
 
 Unlike hydro plants, thermal units carry no state between stages. Each stage's
-LP sub-problem treats a thermal unit as a simple bounded generation variable with
+LP sub-problem treats a thermal unit as a bounded generation variable with
 a marginal cost. The solver dispatches thermal units in merit order — from cheapest
 to most expensive — to meet any residual demand not covered by hydro generation.
 In a hydrothermal system, the long-run value of stored water is compared against

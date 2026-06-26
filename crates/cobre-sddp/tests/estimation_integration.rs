@@ -1,17 +1,10 @@
 //! Integration tests for the estimation pipeline.
 //!
-//! Exercises [`cobre_sddp::estimate_from_history`] end-to-end with a
-//! real temporary case directory, a synthetic `inflow_history.parquet`, and
-//! minimal supporting files. Covers acceptance criteria C2 (fixed-order)
-//!
-//! ## Design constraints
-//!
-//! - Only public `cobre_sddp::` and `cobre_core::` APIs are used.
-//! - Each test is fully self-contained with its own `TempDir`.
-//! - Parquet files are written using the `arrow` + `parquet` crates (dev-deps).
-//! - Stages span the full history period so every observation date falls within
-//!   a stage's `[start_date, end_date)` range, which is required by
-//!   `estimate_seasonal_stats`.
+//! Exercises [`cobre_sddp::estimate_from_history`] end-to-end with a real
+//! temporary case directory, a synthetic `inflow_history.parquet`, and minimal
+//! supporting files. Stages span the full history period so every observation
+//! date falls within a stage's `[start_date, end_date)` range, which
+//! `estimate_seasonal_stats` requires.
 
 #![allow(
     clippy::unwrap_used,
@@ -45,19 +38,15 @@ use tempfile::TempDir;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/// Number of seasons (months) in one annual cycle.
 const N_SEASONS: usize = 12;
 
-/// Number of simulated history years — enough for stable PAR(2) estimation.
+/// History years — enough for stable PAR(2) estimation.
 const N_YEARS: usize = 15;
 
-/// First year of the history period.
 const START_YEAR: i32 = 2000;
 
-/// Hydro plant ID used throughout these tests.
 const HYDRO_ID: i32 = 1;
 
-/// Bus ID for the hydro plant.
 const BUS_ID: i32 = 10;
 
 // ── Parquet helpers ───────────────────────────────────────────────────────────
@@ -70,19 +59,16 @@ fn inflow_history_schema() -> Arc<Schema> {
     ]))
 }
 
-/// Convert a `NaiveDate` to a Date32 integer (days since Unix epoch 1970-01-01).
+/// Convert a `NaiveDate` to a Date32 integer (days since the Unix epoch).
 fn date_to_date32(date: NaiveDate) -> i32 {
     let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
     i32::try_from((date - epoch).num_days()).expect("date in Date32 range")
 }
 
-/// Write a Parquet file containing synthetic inflow history.
-///
-/// Generates `N_YEARS * N_SEASONS` observations for one hydro plant, one
-/// per calendar month, starting from January of `START_YEAR`. Each observation
-/// is dated the 15th of the month so it falls comfortably inside the stage's
-/// `[1st, 1st-of-next-month)` window. Values use a seasonal sine-wave pattern
-/// to provide non-trivial autocorrelation structure for PAR(p) fitting.
+/// Write a Parquet file of synthetic inflow history: `N_YEARS * N_SEASONS` monthly
+/// observations for one hydro, each dated the 15th so it falls inside the stage's
+/// `[1st, 1st-of-next-month)` window. Values use a seasonal sine-wave pattern to
+/// give non-trivial autocorrelation structure for PAR(p) fitting.
 fn write_inflow_history(path: &Path) {
     let schema = inflow_history_schema();
 
@@ -94,11 +80,9 @@ fn write_inflow_history(path: &Path) {
         for month in 0..N_SEASONS {
             let cal_year = START_YEAR + year as i32;
             let cal_month = (month as u32) + 1;
-            // Use the 15th so the date is well inside [1st, 1st-of-next-month).
             let date = NaiveDate::from_ymd_opt(cal_year, cal_month, 15).unwrap();
 
-            // Seasonal pattern: mean ~500, amplitude ~200, plus deterministic
-            // perturbation so values differ across years.
+            // Deterministic perturbation so values differ across years.
             let phase = std::f64::consts::TAU * (month as f64) / (N_SEASONS as f64);
             let noise_seed = (year * N_SEASONS + month) as f64;
             let noise = (noise_seed * std::f64::consts::PI).sin() * 30.0;
@@ -128,7 +112,6 @@ fn write_inflow_history(path: &Path) {
 
 // ── Case directory helpers ────────────────────────────────────────────────────
 
-/// Minimal `config.json` string with the requested estimation settings.
 fn config_json(order_selection: &str, max_order: u32) -> String {
     format!(
         r#"{{
@@ -146,13 +129,9 @@ fn config_json(order_selection: &str, max_order: u32) -> String {
     )
 }
 
-/// Create the minimal directory skeleton required by `validate_structure`.
-///
-/// Required stubs (content `{}` — only existence matters for the manifest):
-/// - `config.json` (written with the given estimation settings)
-/// - `penalties.json`, `stages.json`, `initial_conditions.json`
-/// - `system/buses.json`, `system/lines.json`, `system/hydros.json`,
-///   `system/thermals.json`
+/// Create the minimal directory skeleton required by `validate_structure`. The
+/// stub files have content `{}` — only their existence matters for the manifest;
+/// only `config.json` carries real estimation settings.
 fn create_minimal_case_skeleton(case_dir: &Path, order_selection: &str, max_order: u32) {
     std::fs::create_dir_all(case_dir.join("system")).unwrap();
     std::fs::create_dir_all(case_dir.join("scenarios")).unwrap();
@@ -178,14 +157,11 @@ fn create_minimal_case_skeleton(case_dir: &Path, order_selection: &str, max_orde
 
 // ── System builder helpers ────────────────────────────────────────────────────
 
-/// Build a `System` with one hydro plant and `N_YEARS × N_SEASONS` monthly
-/// study stages spanning the full history period [`START_YEAR`, `START_YEAR +
-/// N_YEARS`).
-///
-/// Each stage covers one calendar month and carries `season_id = month_index`
-/// (0 = January, …, 11 = December), so every observation in `inflow_history.parquet`
-/// falls within a stage's `[start_date, end_date)` window. This mirrors what
-/// `load_case` would produce when `stages.json` has per-stage `season_id` fields.
+/// Build a `System` with one hydro and `N_YEARS × N_SEASONS` monthly study stages
+/// spanning the full history period. Each stage carries `season_id = month_index`
+/// (0 = January, …, 11 = December) so every observation in `inflow_history.parquet`
+/// falls within a stage's `[start_date, end_date)` window — mirroring what
+/// `load_case` produces from per-stage `season_id` fields.
 fn build_system_with_one_hydro() -> cobre_core::System {
     let bus = Bus {
         id: EntityId::from(BUS_ID),
@@ -241,8 +217,6 @@ fn build_system_with_one_hydro() -> cobre_core::System {
         },
     };
 
-    // Generate N_YEARS * N_SEASONS monthly stages, each covering [1st, 1st-of-next-month).
-    // season_id cycles 0..11 (January=0, December=11) regardless of the year.
     let mut stages: Vec<Stage> = Vec::with_capacity(N_YEARS * N_SEASONS);
     let mut stage_index: usize = 0;
 
@@ -252,7 +226,6 @@ fn build_system_with_one_hydro() -> cobre_core::System {
             let cal_month = (month as u32) + 1;
 
             let start_date = NaiveDate::from_ymd_opt(cal_year, cal_month, 1).unwrap();
-            // End date wraps to January of the next year for December.
             let (end_year, end_month) = if cal_month == 12 {
                 (cal_year + 1, 1u32)
             } else {
@@ -265,7 +238,7 @@ fn build_system_with_one_hydro() -> cobre_core::System {
                 id: stage_index as i32,
                 start_date,
                 end_date,
-                season_id: Some(month), // season repeats every 12 months
+                season_id: Some(month),
                 blocks: vec![Block {
                     index: 0,
                     name: format!("M{month:02}"),
@@ -294,7 +267,6 @@ fn build_system_with_one_hydro() -> cobre_core::System {
         .expect("valid system")
 }
 
-/// Parse the `Config` from the `config.json` written in the case directory.
 fn parse_config(case_dir: &Path) -> Config {
     let content = std::fs::read_to_string(case_dir.join("config.json")).unwrap();
     serde_json::from_str(&content).expect("valid config JSON")
@@ -302,17 +274,10 @@ fn parse_config(case_dir: &Path) -> Config {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-/// C2 — PACF estimation with `max_order = 2`: `estimate_from_history` with
-/// `estimation.order_selection = "pacf"` and `estimation.max_order = 2`
-/// produces one `InflowModel` per (hydro, stage) pair with `ar_order() <= 2`
-/// and finite, positive `mean_m3s` and `std_m3s`.
-///
-/// Setup:
-/// - 1 hydro plant (ID 1), 12 seasons, 15 years × 12 months = 180 stages.
-/// - `inflow_history.parquet`: 180 monthly observations (one per stage),
-///   dated the 15th of each month so they fall within each stage's window.
-/// - No `inflow_seasonal_stats.parquet` or `inflow_ar_coefficients.parquet`
-///   → estimation path is triggered.
+/// PACF estimation with `max_order = 2` produces one `InflowModel` per
+/// (hydro, stage) pair with `ar_order() <= 2` and finite, positive `mean_m3s` /
+/// `std_m3s`. With no `inflow_seasonal_stats.parquet` /
+/// `inflow_ar_coefficients.parquet` present, the from-history estimation path runs.
 #[test]
 fn test_estimate_from_history_fixed_order() {
     let dir = TempDir::new().unwrap();
@@ -327,8 +292,8 @@ fn test_estimate_from_history_fixed_order() {
     let (updated, _report, _path) = estimate_from_history(system, case_dir, &config)
         .expect("estimation should succeed with 15 years of monthly data");
 
-    // One InflowModel per (hydro_id, stage_id) pair: 1 hydro × 180 stages = 180 models.
-    // Per-season estimates are expanded to every stage sharing the same season_id.
+    // Per-season estimates are expanded to every stage sharing the same season_id,
+    // so 1 hydro × 180 stages = 180 models.
     let models = updated.inflow_models();
     assert_eq!(
         models.len(),
@@ -353,9 +318,8 @@ fn test_estimate_from_history_fixed_order() {
             m.stage_id
         );
 
-        // Fixed order = 2 with contribution validation: every model must have
-        // at most 2 AR coefficients. Some may be reduced to lower order if the
-        // contribution analysis detects explosive behavior.
+        // Contribution validation may reduce a model below order 2 if it detects
+        // explosive behaviour, so the bound is `<=`, not `==`.
         assert!(
             m.ar_order() <= 2,
             "fixed-order=2 should produce ar_order()<=2, got {} for stage {}",
@@ -365,14 +329,12 @@ fn test_estimate_from_history_fixed_order() {
     }
 }
 
-/// C5 — AIC order selection: `estimate_from_history` with
-/// `estimation.order_selection = "aic"` and `estimation.max_order = 3`
-/// produces `InflowModel`s whose `ar_order()` is in the range `[0, max_order]`.
-/// All models still have finite, positive `mean_m3s` and `std_m3s`.
+/// AIC order selection produces `InflowModel`s whose `ar_order()` is in
+/// `[0, max_order]` with finite, positive `mean_m3s` / `std_m3s`.
 ///
-/// The test does NOT assert that AIC always selects a lower order than
-/// `max_order` because whether it does depends on the synthetic data's
-/// autocorrelation structure. The invariant is that AIC order ≤ `max_order`.
+/// The test does NOT assert AIC always selects below `max_order` — whether it does
+/// depends on the synthetic data's autocorrelation structure; the invariant is only
+/// `ar_order() <= max_order`.
 #[test]
 fn test_estimate_from_history_aic_order() {
     const MAX_ORDER: u32 = 3;
@@ -413,7 +375,6 @@ fn test_estimate_from_history_aic_order() {
             m.stage_id
         );
 
-        // AIC-selected order must be in [0, max_order].
         assert!(
             m.ar_order() <= MAX_ORDER as usize,
             "AIC order {} exceeds max_order {} for stage {}",
@@ -426,10 +387,8 @@ fn test_estimate_from_history_aic_order() {
 
 // ── PAR(1) round-trip tests ───────────────────────────────────────────────────
 
-/// Number of observations per (hydro, season) for the round-trip tests.
 const N_OBS_PER_SEASON: usize = 200;
 
-/// Number of seasons used in the round-trip tests.
 const N_SEASONS_RT: usize = 2;
 
 /// True AR(1) coefficient for the round-trip tests.
@@ -441,30 +400,24 @@ const TRUE_MEAN: f64 = 300.0;
 /// True standard deviation for the round-trip tests (m³/s).
 const TRUE_STD: f64 = 60.0;
 
-/// Statistical tolerance for AR(1) coefficient estimates with N=200 observations.
 /// AR(1) coefficient SE ≈ 1/sqrt(N) ≈ 0.07; two standard errors ≈ 0.14 < 0.15.
 const PHI_TOLERANCE: f64 = 0.15;
 
 /// Relative tolerance for mean and std estimates (10% of true value).
 const STAT_RELATIVE_TOLERANCE: f64 = 0.10;
 
-/// Generate an interleaved PAR(1) time series for two seasons with identical
-/// mean, std, and phi for both seasons.
+/// Generate an interleaved PAR(1) time series for two seasons, identical mean,
+/// std, and phi for both.
 ///
-/// The PAR(1) model used is the cross-season form matching `estimate_ar_coefficients`:
+/// The generative model is the cross-season form matching
+/// `estimate_ar_coefficients`, where `x_{t-1}` is the IMMEDIATELY preceding
+/// observation (from the previous season):
 ///
 /// `(x_t,s - mu) / sigma = phi * (x_{t-1,s-1} - mu) / sigma + sqrt(1 - phi^2) * eps_t`
 ///
-/// equivalently:
-///
-/// `x_t,s = mu + phi * (x_{t-1} - mu) + sigma * sqrt(1 - phi^2) * eps_t`
-///
-/// where `x_{t-1}` is the IMMEDIATELY preceding observation (from the previous season).
-///
-/// Returns a vector of `2 * n_per_season` values alternating between season 0 and
-/// season 1: `[s0_0, s1_0, s0_1, s1_1, ..., s0_{n-1}, s1_{n-1}]`.
-/// This interleaved ordering matches the chronological date ordering used in the
-/// lag-lookup inside `estimate_ar_coefficients`.
+/// Returns `2 * n_per_season` values alternating between the two seasons
+/// (`[s0_0, s1_0, s0_1, s1_1, ...]`) — the chronological ordering the lag-lookup
+/// in `estimate_ar_coefficients` requires.
 fn generate_par1_interleaved(
     mean: f64,
     std: f64,
@@ -482,12 +435,10 @@ fn generate_par1_interleaved(
     let total = 2 * n_per_season;
     let mut values = Vec::with_capacity(total);
 
-    // Initialise with the stationary mean.
     let mut prev = mean;
 
     for _ in 0..total {
         let eps = normal.sample(&mut rng);
-        // PAR(1): x_t = mu + phi * (x_{t-1} - mu) + sigma * sqrt(1-phi^2) * eps
         let x = mean + phi * (prev - mean) + residual_std * eps;
         let x_clamped = x.max(1.0);
         values.push(x_clamped);
@@ -497,15 +448,12 @@ fn generate_par1_interleaved(
     values
 }
 
-/// Write `inflow_history.parquet` for `n_hydros` hydros with 2 seasons.
+/// Write `inflow_history.parquet` for `n_hydros` hydros with 2 seasons (January
+/// season 0, February season 1, dated the 15th to fall within their stage windows).
 ///
-/// Observations are placed in January (season 0) and February (season 1) of
-/// successive years, dated the 15th so they fall within their stage windows.
-///
-/// The chronological ordering is: Jan2000, Feb2000, Jan2001, Feb2001, ...
-/// which ensures the lag-1 lookup in `estimate_ar_coefficients` (which looks
-/// `lag` positions back in the sorted-by-date observation vector) correctly
-/// finds the cross-season predecessor needed for PAR(1) estimation.
+/// The Jan2000, Feb2000, Jan2001, ... chronological ordering ensures the lag-1
+/// lookup in `estimate_ar_coefficients` (which looks `lag` positions back in the
+/// sorted-by-date observations) finds the cross-season predecessor PAR(1) needs.
 fn write_par1_inflow_history(path: &Path, n_hydros: usize) {
     let schema = inflow_history_schema();
 
@@ -516,13 +464,11 @@ fn write_par1_inflow_history(path: &Path, n_hydros: usize) {
     for h in 0..n_hydros {
         let hydro_id = (h + 1) as i32;
 
-        // Generate 2 * N_OBS_PER_SEASON interleaved values for this hydro.
-        // Use a different seed per hydro to make hydros statistically independent.
+        // A different seed per hydro makes the hydros statistically independent.
         let series =
             generate_par1_interleaved(TRUE_MEAN, TRUE_STD, TRUE_PHI, N_OBS_PER_SEASON, h as u64);
 
-        // Assign dates: even-indexed observations → January, odd → February.
-        // Jan2000, Feb2000, Jan2001, Feb2001, ...
+        // Even-indexed observations -> January, odd -> February.
         for (i, v) in series.into_iter().enumerate() {
             let year = 2000 + (i / 2) as i32;
             let month = if i % 2 == 0 { 1u32 } else { 2u32 };
@@ -549,13 +495,10 @@ fn write_par1_inflow_history(path: &Path, n_hydros: usize) {
     writer.close().expect("close writer");
 }
 
-/// Build a `System` with `n_hydros` hydro plants and stages covering
-/// `N_OBS_PER_SEASON` years, each year containing 2 monthly stages:
-/// - Stage at January (`season_id` = 0)
-/// - Stage at February (`season_id` = 1)
-///
-/// This structure ensures every observation in the PAR(1) history (dated the
-/// 15th of January or February) falls within a stage's `[1st, 1st-of-next)` window.
+/// Build a `System` with `n_hydros` hydros and `N_OBS_PER_SEASON` years of stages,
+/// each year a January stage (`season_id` 0) and a February stage (`season_id` 1),
+/// so every PAR(1) observation (dated the 15th) falls within a stage's
+/// `[1st, 1st-of-next)` window.
 fn build_system_for_par1(n_hydros: usize) -> cobre_core::System {
     use cobre_core::{
         Bus, DeficitSegment, EntityId, SystemBuilder,
@@ -622,8 +565,6 @@ fn build_system_for_par1(n_hydros: usize) -> cobre_core::System {
         })
         .collect();
 
-    // Build N_OBS_PER_SEASON years × N_SEASONS_RT months per year of stages.
-    // Year y has: January stage (season 0) then February stage (season 1).
     let mut stages: Vec<Stage> = Vec::with_capacity(N_OBS_PER_SEASON * N_SEASONS_RT);
     let mut stage_index: usize = 0;
     for year in 0..N_OBS_PER_SEASON {
@@ -688,15 +629,9 @@ fn build_system_for_par1(n_hydros: usize) -> cobre_core::System {
         .expect("valid system for PAR(1) round-trip")
 }
 
-/// C-037-4: PAR(1) round-trip accuracy with 1 hydro and 2 seasons.
-///
-/// Generates synthetic PAR(1) observations with `phi = 0.6` for 1 hydro and
-/// 2 seasons (200 observations per season), runs the full estimation pipeline,
-/// and verifies that the estimated AR(1) coefficient is within 0.15 of the
-/// true value for each (hydro, season) pair.
-///
-/// Also verifies that `mean_m3s` and `std_m3s` are within 10% of the true
-/// values for N=200.
+/// PAR(1) round-trip accuracy with 1 hydro and 2 seasons: synthetic `phi = 0.6`
+/// observations through the full estimation pipeline must recover phi within
+/// `PHI_TOLERANCE` and mean/std within `STAT_RELATIVE_TOLERANCE`.
 #[test]
 fn test_estimation_round_trip_par1() {
     let dir = TempDir::new().unwrap();
@@ -742,7 +677,6 @@ fn test_estimation_round_trip_par1() {
             m.stage_id
         );
 
-        // AR(1) coefficient accuracy: within PHI_TOLERANCE of true value.
         assert_eq!(
             m.ar_order(),
             1,
@@ -757,7 +691,6 @@ fn test_estimation_round_trip_par1() {
             m.stage_id
         );
 
-        // Mean accuracy: within 10% of true value.
         let mean_err = (m.mean_m3s - TRUE_MEAN).abs() / TRUE_MEAN;
         assert!(
             mean_err < STAT_RELATIVE_TOLERANCE,
@@ -768,7 +701,6 @@ fn test_estimation_round_trip_par1() {
             m.stage_id
         );
 
-        // Std accuracy: within 10% of true value.
         let std_err = (m.std_m3s - TRUE_STD).abs() / TRUE_STD;
         assert!(
             std_err < STAT_RELATIVE_TOLERANCE,
@@ -783,16 +715,14 @@ fn test_estimation_round_trip_par1() {
 
 // ── PartialEstimation integration tests ──────────────────────────────────────
 
-/// Write `inflow_seasonal_stats.parquet` with known user stats for one hydro
-/// covering all stages in `build_system_for_par1(1)`.
-///
-/// The user values are `mean_m3s = USER_MEAN` and `std_m3s = USER_STD`, chosen
-/// to be clearly distinct from anything the estimator would produce from the
-/// synthetic PAR(1) data (whose true mean is `TRUE_MEAN = 300.0` and std is
-/// `TRUE_STD = 60.0`).
+/// User-supplied seasonal stats, chosen far from anything the estimator would
+/// produce from the synthetic PAR(1) data (`TRUE_MEAN` / `TRUE_STD`) so that
+/// "stats preserved unchanged" is unambiguous.
 const USER_MEAN: f64 = 12_345.6;
 const USER_STD: f64 = 1_111.1;
 
+/// Write `inflow_seasonal_stats.parquet` with `USER_MEAN` / `USER_STD` for one
+/// hydro across all stages in `build_system_for_par1(1)`.
 fn write_user_inflow_seasonal_stats(case_dir: &Path) {
     use cobre_core::EntityId;
     use cobre_io::output::write_inflow_seasonal_stats;
@@ -800,7 +730,6 @@ fn write_user_inflow_seasonal_stats(case_dir: &Path) {
 
     let n_stages = N_OBS_PER_SEASON * N_SEASONS_RT;
 
-    // One row per stage (seasons alternate 0, 1, 0, 1, ...).
     let rows: Vec<InflowSeasonalStatsRow> = (0..n_stages)
         .map(|stage_id| InflowSeasonalStatsRow {
             hydro_id: EntityId::from(1_i32),
@@ -817,12 +746,9 @@ fn write_user_inflow_seasonal_stats(case_dir: &Path) {
     .expect("write_inflow_seasonal_stats must succeed");
 }
 
-/// Build the same system as `build_system_for_par1(1)` but with pre-loaded
-/// inflow models whose `mean_m3s = USER_MEAN` and `std_m3s = USER_STD`.
-///
-/// This represents the state after `load_case` has parsed
-/// `inflow_seasonal_stats.parquet` and produced `InflowModel` entries
-/// (with empty `ar_coefficients`), before estimation.
+/// `build_system_for_par1(1)` with pre-loaded inflow models carrying `USER_MEAN` /
+/// `USER_STD` and empty `ar_coefficients` — the state after `load_case` has parsed
+/// `inflow_seasonal_stats.parquet`, before estimation.
 fn build_system_for_par1_with_user_stats() -> cobre_core::System {
     use cobre_core::scenario::InflowModel;
 
@@ -842,8 +768,6 @@ fn build_system_for_par1_with_user_stats() -> cobre_core::System {
         })
         .collect();
 
-    // Re-build with the same entities + stages + user inflow models.
-    // We take the stages and hydros out of the base system.
     let stages_owned = stages.to_vec();
     let hydros_owned = base.hydros().to_vec();
     let buses_owned = (0..base.n_buses())
@@ -868,51 +792,29 @@ fn build_system_for_par1_with_user_stats() -> cobre_core::System {
         .expect("valid system for PAR(1) partial estimation")
 }
 
-/// P1 / AC-T8-3: `PartialEstimation` end-to-end — user stats are preserved
-/// and AR coefficients are estimated from history.
-///
-/// Setup:
-/// - `inflow_history.parquet`: real PAR(1) data for 1 hydro, 2 seasons,
-///   200 observations per season.
-/// - `inflow_seasonal_stats.parquet`: real Parquet written via
-///   `write_inflow_seasonal_stats` with known user values
-///   (`USER_MEAN = 12345.6`, `USER_STD = 1111.1`).
-/// - No `inflow_ar_coefficients.parquet` → `PartialEstimation` path.
-/// - System pre-loaded with user inflow models (same `USER_MEAN` / `USER_STD`).
-///
-/// Asserts:
-/// - Every returned `InflowModel` has `mean_m3s == USER_MEAN` (bitwise).
-/// - Every returned `InflowModel` has `std_m3s == USER_STD` (bitwise).
-/// - Every returned `InflowModel` has at least one AR coefficient.
+/// `PartialEstimation` end-to-end: with user seasonal stats present but no
+/// `inflow_ar_coefficients.parquet`, the user `mean_m3s` / `std_m3s` survive
+/// bitwise-unchanged while AR coefficients are estimated from history.
 #[test]
 fn test_partial_estimation_end_to_end() {
     let dir = TempDir::new().unwrap();
     let case_dir = dir.path();
 
-    // Write the case skeleton (config.json and required stubs).
     create_minimal_case_skeleton(case_dir, "pacf", 2);
-
-    // Write real inflow history for 1 hydro (PAR(1), 200 obs per season).
     write_par1_inflow_history(&case_dir.join("scenarios/inflow_history.parquet"), 1);
-
-    // Write real user seasonal stats — these must survive partial estimation unchanged.
     write_user_inflow_seasonal_stats(case_dir);
-
-    // Build system with pre-loaded user inflow models.
     let system = build_system_for_par1_with_user_stats();
     let config = parse_config(case_dir);
 
     let (updated, report, path) =
         estimate_from_history(system, case_dir, &config).expect("partial estimation must succeed");
 
-    // Verify the correct path was taken.
     assert_eq!(
         path,
         cobre_sddp::EstimationPath::PartialEstimation,
         "expected PartialEstimation path, got {path:?}"
     );
 
-    // Report must be present for the PartialEstimation path.
     let report = report.expect("PartialEstimation must return Some(EstimationReport)");
     assert_eq!(report.method, "PACF", "estimation method must be PACF");
     assert_eq!(
@@ -925,7 +827,8 @@ fn test_partial_estimation_end_to_end() {
     assert!(!models.is_empty(), "must produce at least one inflow model");
 
     for m in models {
-        // User stats must be bitwise identical — no rounding or transformation.
+        // Bitwise (to_bits) comparison: partial estimation must not round or
+        // transform the user stats.
         assert_eq!(
             m.mean_m3s.to_bits(),
             USER_MEAN.to_bits(),
@@ -941,7 +844,6 @@ fn test_partial_estimation_end_to_end() {
             m.std_m3s
         );
 
-        // AR coefficients must be estimated from history (non-empty).
         assert!(
             !m.ar_coefficients.is_empty(),
             "ar_coefficients must be non-empty for stage {} (estimated from history)",
@@ -950,12 +852,9 @@ fn test_partial_estimation_end_to_end() {
     }
 }
 
-/// C-037-5: PAR(1) round-trip with 2 hydros and 2 seasons.
-///
-/// Same as `test_estimation_round_trip_par1` but with 2 hydros. Verifies that
-/// `system.inflow_models().len() == n_hydros * n_seasons` and that all
-/// `n_hydros * n_seasons` models have `mean_m3s > 0.0` and `std_m3s > 0.0`.
-/// Also verifies AR(1) coefficient accuracy for each pair.
+/// PAR(1) round-trip with 2 hydros: `test_estimation_round_trip_par1` extended to
+/// two statistically independent hydros, asserting the model count scales and each
+/// hydro recovers phi within `PHI_TOLERANCE`.
 #[test]
 fn test_estimation_round_trip_two_hydros() {
     const N_HYDROS: usize = 2;
@@ -999,7 +898,6 @@ fn test_estimation_round_trip_two_hydros() {
             m.stage_id
         );
 
-        // AR(1) coefficient accuracy.
         assert_eq!(
             m.ar_order(),
             1,

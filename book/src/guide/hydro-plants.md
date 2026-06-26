@@ -1,7 +1,7 @@
 # Hydro Plants
 
 Hydroelectric power plants are the central dispatchable resource in Cobre's system
-model. Unlike thermal units, which simply convert fuel into electricity at a cost,
+model. Unlike thermal units, which convert fuel into electricity at a cost,
 hydro plants manage a reservoir — a state variable that persists between stages and
 couples the dispatch decisions of today to the feasibility of tomorrow. This
 intertemporal coupling is precisely why hydrothermal scheduling requires stochastic
@@ -86,14 +86,14 @@ all fields — required and optional — for a single plant:
       },
       "filling": {
         "start_stage_id": 48,
-        "filling_inflow_m3s": 100.0
+        "filling_min_rate_m3s": 100.0
       },
       "penalties": {
         "spillage_cost": 0.01,
         "diversion_cost": 0.1,
         "turbined_cost": 0.05,
         "storage_violation_below_cost": 10000.0,
-        "filling_target_violation_cost": 50000.0,
+        "filling_target_violation_cost": 6000.0,
         "turbined_violation_below_cost": 500.0,
         "outflow_violation_below_cost": 500.0,
         "outflow_violation_above_cost": 500.0,
@@ -594,7 +594,7 @@ would be a cycle, which the validator rejects.
 
 ## Advanced Fields
 
-The following fields enable higher-fidelity physical modeling. They are all optional.
+The following fields enable more detailed physical modeling. They are all optional.
 For most system planning studies, these fields can be omitted; they become relevant
 when calibrating a model against historical dispatch data or when the head variation
 at a plant is significant.
@@ -727,14 +727,14 @@ filling operation is active.
 ```json
 "filling": {
   "start_stage_id": 48,
-  "filling_inflow_m3s": 100.0
+  "filling_min_rate_m3s": 100.0
 }
 ```
 
-| Field                | Description                                                     |
-| -------------------- | --------------------------------------------------------------- |
-| `start_stage_id`     | Stage index at which filling begins (inclusive).                |
-| `filling_inflow_m3s` | Constant inflow applied to the reservoir during filling [m³/s]. |
+| Field                  | Description                                                                                                                                                                 |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `start_stage_id`       | Stage index at which filling begins (inclusive).                                                                                                                            |
+| `filling_min_rate_m3s` | Per-stage minimum accumulation rate during filling [m³/s]: anchors a per-stage minimum target-storage trajectory on `min_storage_hm3`. Not an applied inflow and not a cap. |
 
 ---
 
@@ -755,7 +755,7 @@ solver to avoid infeasible or undesirable operating states.
   "diversion_cost": 0.1,
   "turbined_cost": 0.05,
   "storage_violation_below_cost": 10000.0,
-  "filling_target_violation_cost": 50000.0,
+  "filling_target_violation_cost": 6000.0,
   "turbined_violation_below_cost": 500.0,
   "outflow_violation_below_cost": 500.0,
   "outflow_violation_above_cost": 500.0,

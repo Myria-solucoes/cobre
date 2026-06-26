@@ -1,10 +1,7 @@
 //! User-supplied productivity override table: the
 //! [`HydroEnergyProductivityOverride`] lookup struct and its
-//! [`build_hydro_energy_productivity_override`] constructor.
-//!
-//! The struct fields are private, so the constructor — which scatters parsed
-//! rows into the per-stage / per-hydro-default lookup tables via a
-//! private-field struct literal — must live in the same module.
+//! [`build_hydro_energy_productivity_override`] constructor (which the struct's
+//! private fields keep colocated here).
 
 use std::collections::{HashMap, HashSet};
 
@@ -33,9 +30,7 @@ pub struct HydroEnergyProductivityOverride {
 impl HydroEnergyProductivityOverride {
     /// Returns the user-supplied `ρ_eq` for `(hydro, stage)` if any.
     ///
-    /// Looks up the stage-specific entry first, then falls back to the
-    /// per-hydro default (NULL `stage_id` rows), then returns `None`.
-    /// An out-of-range `stage` (larger than `i32::MAX`) always returns `None`.
+    /// A `stage` larger than `i32::MAX` always returns `None`.
     #[must_use]
     pub fn equivalent_productivity(&self, hydro: EntityId, stage: usize) -> Option<f64> {
         let s = i32::try_from(stage).ok()?;
@@ -46,9 +41,6 @@ impl HydroEnergyProductivityOverride {
     }
 
     /// Returns the user-supplied `Q_ref` \[m³/s\] for `(hydro, stage)` if any.
-    ///
-    /// Applies the same per-stage → per-hydro-default → `None` fallback as
-    /// [`equivalent_productivity`](Self::equivalent_productivity).
     #[must_use]
     pub fn reference_outflow(&self, hydro: EntityId, stage: usize) -> Option<f64> {
         let s = i32::try_from(stage).ok()?;
@@ -59,9 +51,6 @@ impl HydroEnergyProductivityOverride {
     }
 
     /// Returns the user-supplied `ρ_esp` \[MW/(m³/s)/m\] for `(hydro, stage)` if any.
-    ///
-    /// Applies the same per-stage → per-hydro-default → `None` fallback as
-    /// [`equivalent_productivity`](Self::equivalent_productivity).
     #[must_use]
     pub fn specific_productivity(&self, hydro: EntityId, stage: usize) -> Option<f64> {
         let s = i32::try_from(stage).ok()?;
@@ -74,9 +63,8 @@ impl HydroEnergyProductivityOverride {
 
 /// Build a [`HydroEnergyProductivityOverride`] from parsed rows.
 ///
-/// Each non-`None` override column is scattered into the matching per-stage or
-/// per-hydro-default lookup table. Duplicate `(hydro_id, stage_id)` pairs
-/// (with NULL `stage_id` distinct from any concrete value) are rejected.
+/// A NULL `stage_id` is a distinct key from any concrete stage (it is the
+/// per-hydro default, not a wildcard).
 ///
 /// # Errors
 ///

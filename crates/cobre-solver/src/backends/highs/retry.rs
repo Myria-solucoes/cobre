@@ -1,11 +1,7 @@
 //! Warm-start retry-escalation ladder for [`HighsSolver`](super::HighsSolver).
 //!
-//! Additional `impl HighsSolver` block (the struct is owned by `solver`): the
-//! 12-level escalation `retry_escalation` plus the per-level option appliers
-//! `apply_retry_level_options` / `apply_extended_retry_options`, and the
-//! `RetryOutcome` the escalation returns to `solver`'s `solve_inner`. The
-//! escalation governs the spurious-INFEASIBLE / spurious-UNBOUNDED recovery
-//! path and is determinism-sensitive.
+//! Governs the spurious-INFEASIBLE / spurious-UNBOUNDED recovery path and is
+//! determinism-sensitive.
 
 use std::time::Instant;
 
@@ -13,9 +9,6 @@ use super::solver::HighsSolver;
 use crate::{ffi, types::SolverError};
 
 /// Outcome of a successful retry escalation in [`HighsSolver::retry_escalation`].
-///
-/// Contains the accumulated attempt count and the solve time / iteration
-/// count from the successful retry level.
 pub(super) struct RetryOutcome {
     pub(super) attempts: u64,
     pub(super) solve_time: f64,
@@ -38,32 +31,10 @@ impl HighsSolver {
         &mut self,
         is_unbounded: bool,
     ) -> Result<RetryOutcome, (u64, SolverError)> {
-        // 12-level retry escalation (HiGHS Implementation SS3). Organised into
-        // two phases:
-        //
-        // Phase 1 (levels 0-4): Core cumulative sequence. Each level adds one
-        //   option on top of the previous state. This proven sequence resolves
-        //   the vast majority of retry-recoverable failures.
-        //   L0: cold restart
-        //   L1: + presolve
-        //   L2: + dual simplex
-        //   L3: + relaxed tolerances 1e-6
-        //   L4: + IPM
-        //
-        // Phase 2 (levels 5-11): Extended strategies. Each level starts from
-        //   a clean default state with presolve enabled and a time cap, then
-        //   applies a specific combination of scaling, tolerances, and solver
-        //   type. These address LPs with extreme coefficient ranges that the
-        //   core sequence cannot resolve.
-        //
-        // Wall-clock per-level budgets: 15s (Phase 1, levels 0-4), 30s (Phase 2,
-        // levels 5-11). Overall 120s wall-clock budget caps the total.
-        //
         // HiGHS `time_limit` is NOT used because HiGHS tracks elapsed time
         // cumulatively from instance creation — neither `clear_solver()` nor
-        // option changes reset the internal timer. Iteration limits provide
-        // the primary per-attempt safeguard; wall-clock budgets provide the
-        // secondary time-based guard.
+        // option changes reset the internal timer. Iteration limits provide the
+        // primary per-attempt safeguard; wall-clock budgets the secondary guard.
         let phase1_wall_budget = 15.0_f64;
         let phase2_wall_budget = 30.0_f64;
         let overall_budget = 120.0_f64;
@@ -78,7 +49,6 @@ impl HighsSolver {
         let mut optimal_level = 0_u32;
 
         for level in 0..num_retry_levels {
-            // Check overall wall-clock budget before starting a new level.
             if retry_start.elapsed().as_secs_f64() >= overall_budget {
                 break;
             }
@@ -92,7 +62,6 @@ impl HighsSolver {
             let retry_time = t_retry.elapsed().as_secs_f64();
 
             if retry_status == ffi::HIGHS_MODEL_STATUS_OPTIMAL {
-                // Capture stats before establishing the borrow.
                 // SAFETY: handle is valid non-null HiGHS pointer.
                 #[allow(clippy::cast_sign_loss)]
                 let iters =
@@ -104,11 +73,9 @@ impl HighsSolver {
                 break;
             }
 
-            // UNBOUNDED and ITERATION_LIMIT during retry continue to the next
-            // level: UNBOUNDED may be spurious (presolve resolves it);
-            // ITERATION_LIMIT means this strategy is cycling but another may
-            // converge. Wall-clock budget exceeded also continues (strategy
-            // too slow). Other terminal statuses (INFEASIBLE) stop immediately.
+            // UNBOUNDED / ITERATION_LIMIT / budget-exceeded continue (the
+            // failure may be spurious and another strategy may converge);
+            // other terminal statuses (INFEASIBLE) stop immediately.
             let level_budget = if level <= 4 {
                 phase1_wall_budget
             } else {
@@ -123,16 +90,12 @@ impl HighsSolver {
                 terminal_err = Some(e);
                 break;
             }
-            // Still SOLVE_ERROR, UNKNOWN, UNBOUNDED, ITERATION_LIMIT, or
-            // wall-clock exceeded -- continue to next level.
         }
 
-        // Restore default settings and safeguard limits unconditionally.
-        // `restore_default_settings()` covers the 13 defaults (including the
-        // hardcoded 1e-9 tolerance values). `apply_profile_tolerances()` then
-        // re-applies the caller's profile tolerances on top, keeping HiGHS
-        // state and `current_profile` in sync (design §5.5). Retry-only options
-        // and safeguard limits need explicit reset.
+        // Unconditional restore: `apply_profile_tolerances` re-applies the
+        // caller's profile on top of `restore_default_settings` so HiGHS state
+        // and `current_profile` stay in sync; retry-only options
+        // (`user_objective_scale` / `user_bound_scale`) need explicit reset.
         self.restore_default_settings();
         self.apply_profile_tolerances();
         self.restore_iteration_limits();
@@ -153,7 +116,6 @@ impl HighsSolver {
         Err((
             retry_attempts,
             terminal_err.unwrap_or_else(|| {
-                // All 12 retry levels exhausted or overall budget exceeded.
                 if is_unbounded {
                     SolverError::Unbounded
                 } else {
@@ -181,15 +143,10 @@ impl HighsSolver {
     /// Option names and values are static C strings with no retained pointers.
     pub(super) fn apply_retry_level_options(&mut self, level: u32) {
         match level {
-            // -- Phase 1: Core cumulative sequence (levels 0-4) ---------------
-            //
-            // Level 0: cold restart (clear solver state) and re-enable the
-            // dual-simplex cost perturbation. The default configuration runs
-            // with perturbation off (see `DUAL_SIMPLEX_COST_PERTURBATION_MULTIPLIER`)
-            // for warm-start performance, which can stall on degenerate vertices;
-            // restoring the `HiGHS` default of `1.0` is the cheapest first-line
-            // intervention against cycling. Persists through levels 1-4 because
-            // Phase 1 is cumulative.
+            // Re-enable dual-simplex cost perturbation: the default runs with it
+            // off for warm-start performance, which can stall on degenerate
+            // vertices; restoring the `HiGHS` default `1.0` is the cheapest
+            // first-line intervention against cycling.
             0 => {
                 unsafe {
                     ffi::cobre_highs_clear_solver(self.handle);
@@ -201,7 +158,6 @@ impl HighsSolver {
                 }
                 self.set_iteration_limits();
             }
-            // Level 1: + presolve.
             1 => unsafe {
                 ffi::cobre_highs_set_string_option(
                     self.handle,
@@ -209,16 +165,11 @@ impl HighsSolver {
                     c"on".as_ptr(),
                 );
             },
-            // Level 2: + dual simplex.
-            // Cumulative: presolve + dual simplex.
             2 => unsafe {
                 ffi::cobre_highs_set_int_option(self.handle, c"simplex_strategy".as_ptr(), 1);
             },
-            // Level 3: + relaxed tolerances.
-            // Cumulative: presolve + dual simplex + relaxed tolerances.
-            // Applied value = max(level_default=1e-8, profile_value) so that a
-            // looser profile is preserved while a tighter profile falls back to
-            // the level's own default.
+            // Applied value = max(1e-8, profile_value): a looser profile is
+            // preserved while a tighter one falls back to the level's default.
             3 => {
                 let primal = f64::max(1e-8, self.current_profile.primal_feasibility_tolerance);
                 let dual = f64::max(1e-8, self.current_profile.dual_feasibility_tolerance);
@@ -237,8 +188,6 @@ impl HighsSolver {
                     );
                 }
             }
-            // Level 4: + IPM.
-            // Cumulative: presolve + relaxed tolerances + IPM.
             4 => unsafe {
                 ffi::cobre_highs_set_string_option(
                     self.handle,
@@ -246,10 +195,6 @@ impl HighsSolver {
                     c"ipm".as_ptr(),
                 );
             },
-
-            // -- Phase 2: Extended strategies (levels 5-11) -------------------
-            // Each level starts from a clean default state with presolve
-            // and iteration limits, then applies specific options.
             _ => self.apply_extended_retry_options(level),
         }
     }

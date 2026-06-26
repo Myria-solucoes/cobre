@@ -139,7 +139,6 @@ pub fn parse_inflow_ar_coefficients(path: &Path) -> Result<Vec<InflowArCoefficie
             let coefficient = coefficient_col.value(i);
             let residual_std_ratio = residual_std_ratio_col.value(i);
 
-            // Validate lag: must be >= 1 (1-based per spec).
             if lag < 1 {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -148,7 +147,6 @@ pub fn parse_inflow_ar_coefficients(path: &Path) -> Result<Vec<InflowArCoefficie
                 });
             }
 
-            // Validate residual_std_ratio: must be finite and in (0, 1].
             if !residual_std_ratio.is_finite()
                 || residual_std_ratio <= 0.0
                 || residual_std_ratio > 1.0

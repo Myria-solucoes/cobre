@@ -1,9 +1,8 @@
 //! Conformance tests for the `SolverInterface` trait (SS1).
 //!
-//! These are backend-agnostic integration tests that verify the `SolverInterface`
-//! contract from the outside, using only the public API. The fixture functions
-//! here duplicate the ones in `highs.rs` unit tests intentionally: integration
-//! tests cannot access `#[cfg(test)]` module internals.
+//! Backend-agnostic integration tests verifying the `SolverInterface` contract
+//! through the public API only. Fixtures are duplicated from the `highs.rs` unit
+//! tests because integration tests cannot access `#[cfg(test)]` module internals.
 #![cfg_attr(
     test,
     allow(
@@ -15,12 +14,9 @@
     )
 )]
 
-// Backend-agnostic types used by the shared fixture builders and the fixture
-// self-check tests, regardless of which solver backend is active.
 use cobre_solver::{RowBatch, StageTemplate};
 
-// Shared by both backends' conformance tests; gated on either backend so a
-// no-backend build (neither `highs` nor `clp`) does not import unused items.
+// Gated on either backend so a no-backend build does not import unused items.
 #[cfg(any(feature = "highs", feature = "clp"))]
 use cobre_solver::{Basis, SolverInterface};
 
@@ -30,9 +26,8 @@ use cobre_solver::{HighsSolver, SolutionView, SolverError};
 #[cfg(feature = "clp")]
 use cobre_solver::ClpSolver;
 
-// `test_support` is consumed only by the HiGHS option-poking tests below, which
-// are gated `#[cfg(all(feature = "highs", feature = "test-support"))]`. Gate the
-// import identically so the clp+test-support build does not see an unused import.
+// Gated identically to its only consumers (the HiGHS option-poking tests) so the
+// clp+test-support build does not see an unused import.
 #[cfg(all(feature = "test-support", feature = "highs"))]
 use cobre_solver::test_support;
 
@@ -107,7 +102,6 @@ fn test_solver_highs_load_model_and_solve() {
     );
 }
 
-// SS1.4 row 3: load_model replaces previous model completely
 #[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_load_model_replaces_previous() {
@@ -208,7 +202,6 @@ fn test_solver_highs_add_rows_tightens() {
     );
 }
 
-// SS1.5 row 3: add_rows with single cut
 #[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_add_rows_single_cut() {
@@ -307,7 +300,6 @@ fn test_solver_highs_set_col_bounds_basic() {
     );
 }
 
-// SS1.6a row 3: set_col_bounds tightens variable
 #[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_set_col_bounds_tightens() {
@@ -315,7 +307,6 @@ fn test_solver_highs_set_col_bounds_tightens() {
     let template = make_fixture_stage_template();
 
     solver.load_model(&template);
-    // Force x1 >= 10.0
     solver.set_col_bounds(&[1], &[10.0], &[f64::INFINITY]);
     let solution = solver
         .solve(None)
@@ -335,7 +326,6 @@ fn test_solver_highs_set_col_bounds_tightens() {
     );
 }
 
-// SS1.6a row 5: set_col_bounds: patch, re-patch, verify restore
 #[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_set_col_bounds_repatch() {
@@ -406,7 +396,6 @@ fn test_solver_highs_solve_dual_values() {
     );
 }
 
-// SS1.7 row 3: solve() returns correct dual values with binding cuts
 #[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_solve_dual_values_with_cuts() {
@@ -437,7 +426,6 @@ fn test_solver_highs_solve_dual_values_with_cuts() {
     }
 }
 
-// SS1.7 row 5: solve() returns correct reduced costs
 #[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_solve_reduced_costs() {
@@ -463,7 +451,6 @@ fn test_solver_highs_solve_reduced_costs() {
     );
 }
 
-// SS1.7 row 7: solve() reports iteration count and solve time
 #[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_solve_iterations_reported() {
@@ -475,9 +462,8 @@ fn test_solver_highs_solve_iterations_reported() {
         .solve(None)
         .expect("solve() must succeed on feasible LP");
 
-    // HiGHS may solve a small equality-only LP entirely via presolve (0 simplex
-    // iterations); the iterations field is u64 so any value is valid by type.
-    // Correctness is confirmed by solve_time_seconds being non-negative.
+    // HiGHS may solve this LP entirely via presolve (0 simplex iterations), so do
+    // not assert on iteration count; solve_time_seconds confirms the call ran.
     assert!(
         solution.solve_time_seconds >= 0.0,
         "expected solve_time_seconds >= 0.0, got {}",
@@ -514,7 +500,6 @@ fn test_solver_highs_dual_normalization_sensitivity_check() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
     let template = make_fixture_stage_template();
 
-    // Solve original problem (Row 0 RHS = 6.0, z* = 100.0)
     solver.load_model(&template);
     let z_original = solver
         .solve(None)
@@ -525,14 +510,13 @@ fn test_solver_highs_dual_normalization_sensitivity_check() {
         "expected original objective = 100.0, got {z_original}"
     );
 
-    // Patch Row 0 RHS to 6.01 (perturb state-fixing constraint by +0.01)
+    // Perturb the state-fixing RHS by +0.01 (the divisor below).
     solver.set_row_bounds(&[0], &[6.01], &[6.01]);
     let z_perturbed = solver
         .solve(None)
         .expect("second solve() must succeed after patching Row 0 RHS")
         .objective;
 
-    // Finite-difference approximation of the sensitivity
     let finite_diff = (z_perturbed - z_original) / 0.01;
     assert!(
         (finite_diff - (-100.0)).abs() < 1e-2,
@@ -564,17 +548,13 @@ fn test_solver_highs_dual_normalization_with_binding_cut() {
 
 // ─── SS1.9 statistics-accumulation conformance tests ─────────────────────────
 
-/// SS1.9: solve twice, verify statistics are cumulative across solves.
-///
-/// `reset()` was removed — statistics are now always cumulative
-/// and survive `load_model` calls.
+/// SS1.9: statistics are always cumulative and survive `load_model` calls.
 #[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_statistics_are_cumulative() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
     let template = make_fixture_stage_template();
 
-    // Solve twice to accumulate non-trivial statistics
     solver.load_model(&template);
     solver.solve(None).expect("first solve() must succeed");
     solver.solve(None).expect("second solve() must succeed");
@@ -583,7 +563,6 @@ fn test_solver_highs_statistics_are_cumulative() {
     assert_eq!(stats.solve_count, 2, "expected 2 solves");
     assert_eq!(stats.success_count, 2, "expected 2 successes");
 
-    // Reload model and solve again — statistics must continue to accumulate
     solver.load_model(&template);
     solver.solve(None).expect("third solve() must succeed");
 
@@ -665,9 +644,8 @@ fn test_solver_highs_statistics_increment() {
         "expected failure_count = 0, got {}",
         stats.failure_count
     );
-    // HiGHS may solve a small equality-only LP entirely via presolve (0 simplex
-    // iterations per solve); total_iterations is u64 so any value is valid by
-    // type.  total_solve_time_seconds > 0.0 confirms the solver was invoked.
+    // HiGHS may solve via presolve (0 simplex iterations), so do not assert on
+    // total_iterations; total_solve_time_seconds > 0.0 confirms the solver ran.
     assert!(
         stats.total_solve_time_seconds > 0.0,
         "expected total_solve_time_seconds > 0.0, got {}",
@@ -696,12 +674,6 @@ fn test_solver_highs_name_returns_identifier() {
 // ─── SS4 LP lifecycle conformance tests ───────────────────────────────────────
 
 /// SS4 row 3: repeated RHS patching with infeasibility on the third patch.
-///
-/// Steps:
-/// 1. Load SS1.1, add both cuts.
-/// 2. Solve → objective = 162.0 (base + cuts, no patching).
-/// 3. Patch Row 0 to 4.0, solve → objective = 368.0.
-/// 4. Patch Row 0 to 8.0, solve → expect `Err(SolverError::Infeasible { .. })`.
 ///
 /// The infeasibility at x0=8 arises because the power balance requires
 /// x2 = 14 - 2*8 = -2, which violates x2 >= 0.
@@ -748,13 +720,8 @@ fn test_solver_highs_lifecycle_repeated_patch_solve() {
 /// SS3.1: infeasible LP — contradictory column bounds.
 ///
 /// A 1-variable LP with `col_lower = [5.0]` and `col_upper = [3.0]` has no
-/// feasible point. `HiGHS` must report model status 8 (Infeasible), which
+/// feasible point. `HiGHS` reports model status 8 (Infeasible), which
 /// `interpret_terminal_status()` maps to `SolverError::Infeasible`.
-///
-/// Statistics after the failed solve:
-/// - `solve_count` = 1
-/// - `failure_count` = 1
-/// - `success_count` = 0
 #[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_solve_infeasible() {
@@ -810,15 +777,9 @@ fn test_solver_highs_solve_infeasible() {
 /// objective coefficient.
 ///
 /// A 1-variable LP with `col_lower = [NEG_INFINITY]`, `col_upper = [INFINITY]`,
-/// and `objective = [-1.0]` is unbounded below (driving the variable to
-/// -infinity minimises the objective). `HiGHS` reports model status 10
+/// and `objective = [-1.0]` is unbounded below. `HiGHS` reports model status 10
 /// (Unbounded) or 9 (`UnboundedOrInfeasible`); both map to
 /// `SolverError::Unbounded` via `interpret_terminal_status()`.
-///
-/// Statistics after the failed solve:
-/// - `solve_count` = 1
-/// - `failure_count` = 1
-/// - `success_count` = 0
 #[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_solve_unbounded() {
@@ -873,42 +834,16 @@ fn test_solver_highs_solve_unbounded() {
 // ─── Edge case: time and iteration limits ─────────────────────────────────────
 //
 // These tests exercise the time-limit and iteration-limit branches in
-// `interpret_terminal_status`, which are never reached by tests that only
-// use perfectly solvable LPs.
-//
-// The SS1.1 fixture (3 vars, 2 constraints) is too small to trigger these limits:
-// HiGHS's crash heuristic produces an optimal starting point without entering the
-// simplex loop, so per-iteration and per-second checks never fire. A larger LP
-// is required
-//
-// ─── Larger LP fixture (5 vars, 4 constraints) ───────────────────────────────
-//
-//   Minimize:   x0 + x1 + x2 + x3 + x4
-//   Subject to:
-//     x0 + x1           >= 10  (row 0)
-//          x1 + x2      >= 8   (row 1)
-//               x2 + x3 >= 6   (row 2)
-//                    x3 + x4 >= 4  (row 3)
-//   0 <= xi <= 100, i = 0..4
-//
-// This LP cannot be solved at the crash point (all xi=0); it requires at least
-// 4 simplex pivots. The chained structure means presolve cannot reduce it to
-// a trivially optimal form in a single pass. This makes it reliable for
-// triggering both TIME_LIMIT (time_limit=0.0) and ITERATION_LIMIT
-// (presolve="off", simplex_iteration_limit=0).
-//
-// CSC format (column-wise sparse):
-//   col_starts  = [0, 1, 3, 5, 7, 8]       len = num_cols + 1 = 6
-//   row_indices = [0, 0, 1, 1, 2, 2, 3, 3] len = num_nz = 8
-//   values      = [1.0; 8]                 len = num_nz = 8
-//
-// StageTemplate fields n_state, n_transfer, n_dual_relevant, n_hydro, max_par_order
-// are set to 0/1 as needed to satisfy the struct; they do not affect LP solving.
+// `interpret_terminal_status`. The SS1.1 fixture is too small: HiGHS's crash
+// heuristic produces an optimal starting point without entering the simplex loop,
+// so the limit checks never fire. The larger chained-constraint fixture below
+// cannot be solved at the crash point and requires real pivots.
 
 /// Constructs the "larger LP" fixture used for time/iteration limit tests.
 ///
-/// 5 variables, 4 chained >= constraints, all coefficients 1.0.
-/// Cannot be solved at the crash point; requires >= 4 simplex pivots.
+/// 5 variables, 4 chained >= constraints, all coefficients 1.0. Cannot be solved
+/// at the crash point; requires >= 4 simplex pivots, so presolve cannot reduce it
+/// to a trivially optimal form and the limit branches reliably fire.
 #[cfg(feature = "highs")]
 #[allow(dead_code)]
 fn make_larger_lp_template() -> StageTemplate {
@@ -936,18 +871,15 @@ fn make_larger_lp_template() -> StageTemplate {
 
 /// SS limit row 1: external `time_limit=0` causes graceful failure.
 ///
-/// `HiGHS` tracks elapsed time cumulatively from instance creation —
-/// `time_limit` is not used by the safeguard system (iteration limits
-/// and wall-clock checks are used instead). An externally-set
-/// `time_limit=0` causes immediate `TIME_LIMIT` on every `run_once()`,
-/// exhausting all retry levels and returning `NumericalDifficulty`.
+/// An externally-set `time_limit=0` causes immediate `TIME_LIMIT` on every
+/// `run_once()`, exhausting all retry levels — `solve()` does not override the
+/// external time limit the way it overrides the iteration limit.
 #[cfg(all(feature = "highs", feature = "test-support"))]
 #[test]
 fn test_solver_highs_solve_time_limit() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
     solver.load_model(&make_larger_lp_template());
 
-    // External time_limit=0 persists through all retry levels.
     unsafe {
         test_support::cobre_highs_set_double_option(
             solver.raw_handle(),
@@ -980,7 +912,6 @@ fn test_solver_highs_solve_iteration_limit() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
     solver.load_model(&make_larger_lp_template());
 
-    // Set an impossibly tight external limit — internal safeguards must override it.
     unsafe {
         test_support::cobre_highs_set_string_option(
             solver.raw_handle(),
@@ -994,7 +925,6 @@ fn test_solver_highs_solve_iteration_limit() {
         );
     }
 
-    // Solve succeeds because internal safeguards override the external limit.
     let result = solver.solve(None);
     assert!(
         result.is_ok(),
@@ -1017,7 +947,6 @@ fn test_solver_highs_solve_iteration_limit() {
 fn test_solver_highs_restore_defaults_after_limit() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
 
-    // First solve succeeds despite external iter_limit=0 (internal safeguards override).
     solver.load_model(&make_larger_lp_template());
     unsafe {
         test_support::cobre_highs_set_int_option(
@@ -1031,8 +960,7 @@ fn test_solver_highs_restore_defaults_after_limit() {
         "internal safeguards must override external simplex_iteration_limit=0"
     );
 
-    // Reload a different LP — solve must still work because
-    // safeguard limits are restored after each solve.
+    // A different LP must still solve: safeguard limits are restored each solve.
     solver.load_model(&make_fixture_stage_template());
     let objective = solver
         .solve(None)
@@ -1047,38 +975,19 @@ fn test_solver_highs_restore_defaults_after_limit() {
 
 // ─── Retry escalation note ────────────────────────────────────────────────────
 //
-// The 5-level retry escalation loop in `highs.rs` lines 920-1006 is entered
-// only when `run_once()` returns `HIGHS_MODEL_STATUS_SOLVE_ERROR` (4) or
-// `HIGHS_MODEL_STATUS_UNKNOWN` (15). These statuses are NOT triggered by any
-// pure LP formulation reliably across platforms:
-//
-// - SOLVE_ERROR requires `cobre_highs_run` to return `HIGHS_STATUS_ERROR` (-1),
-//   which only happens for semi-continuous/semi-integer variables (not supported
-//   by cobre-solver's LP-only interface) or LPs with HiGHS-internal-infinity
-//   cost coefficients (not representable as IEEE 754 doubles).
-// - UNKNOWN requires IPM crossover failure on a degenerate LP, which is
-//   platform- and version-dependent.
-//
-// A mock-based test would require either:
-//   a) Making `run_once` replaceable (trait object or function pointer), which
-//      changes the production code structure; or
-//   b) Injecting invalid model data through `unsafe` code, which violates the
-//      workspace `unsafe_code = "forbid"` lint.
-//
-// Neither approach is acceptable without explicit user approval. The retry loop
-// and `restore_default_settings` are therefore covered indirectly:
-// `restore_default_settings` is exercised by `test_solver_highs_restore_defaults_after_limit`
-// (which verifies that cleanup after a limit error allows a subsequent optimal solve),
-// and the retry loop's coverage is deferred
-//
-// Reference: research-edge-case-lps.md §3.3 "Retry Escalation" and §8 item 3.
+// The 5-level retry escalation loop is entered only on `SOLVE_ERROR` (4) or
+// `UNKNOWN` (15), which no pure LP triggers reliably across platforms. Reaching
+// it from a test would require either making `run_once` replaceable (a production
+// structure change) or injecting invalid model data via `unsafe` (violating the
+// workspace `unsafe_code = "forbid"` lint) — neither acceptable without approval,
+// so the loop is covered only indirectly via
+// `test_solver_highs_restore_defaults_after_limit`.
 
 // ─── Infeasible / unbounded ray extraction ───────────────────────────────────
 //
-// The existing infeasible and unbounded tests use trivial 0-row LPs where HiGHS
-// detects the status through bound-checking alone (no simplex). For those LPs,
-// HiGHS does not compute dual/primal rays. These tests use multi-row LPs that
-// force simplex to discover infeasibility/unboundedness, producing rays.
+// The trivial 0-row infeasible/unbounded tests detect status via bound-checking
+// alone, so HiGHS computes no rays. These multi-row LPs force simplex to discover
+// infeasibility/unboundedness, exercising the ray-extraction branch.
 
 /// SS3.3: infeasible LP with constraints — exercises the infeasible classification path.
 ///
@@ -1091,9 +1000,6 @@ fn test_solver_highs_restore_defaults_after_limit() {
 #[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_infeasible_with_rows() {
-    // CSC: 2 cols, 2 rows, 4 non-zeros
-    // col 0: rows [0, 1] -> a_start = [0, 2, 4]
-    // col 1: rows [0, 1]
     let infeasible_with_rows = StageTemplate {
         num_cols: 2,
         num_rows: 2,
@@ -1157,7 +1063,6 @@ fn test_solver_highs_infeasible_with_presolve() {
 
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
 
-    // Enable presolve — may help HiGHS compute infeasibility certificates.
     unsafe {
         test_support::cobre_highs_set_string_option(
             solver.raw_handle(),
@@ -1186,9 +1091,6 @@ fn test_solver_highs_infeasible_with_presolve() {
 #[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_unbounded_with_primal_ray() {
-    // CSC: 2 cols, 1 row, 1 non-zero
-    // col 0: row [0] -> a_start = [0, 1, 1]
-    // col 1: (empty)
     let unbounded_with_rows = StageTemplate {
         num_cols: 2,
         num_rows: 1,
@@ -1239,9 +1141,6 @@ fn test_solver_highs_unbounded_with_primal_ray() {
 #[cfg(all(feature = "highs", feature = "test-support"))]
 #[test]
 fn test_solver_highs_unbounded_or_infeasible() {
-    // CSC: 2 cols, 2 rows, 2 non-zeros
-    // col 0: rows [0, 1] -> a_start = [0, 2, 2]
-    // col 1: (empty — free variable not in constraints)
     let ambiguous_template = StageTemplate {
         num_cols: 2,
         num_rows: 2,
@@ -1265,7 +1164,6 @@ fn test_solver_highs_unbounded_or_infeasible() {
 
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
 
-    // Enable presolve to trigger UNBOUNDED_OR_INFEASIBLE detection.
     unsafe {
         test_support::cobre_highs_set_string_option(
             solver.raw_handle(),
@@ -1277,12 +1175,9 @@ fn test_solver_highs_unbounded_or_infeasible() {
     solver.load_model(&ambiguous_template);
     let result = solver.solve(None).map(|s| s.objective);
 
-    // Accept either UNBOUNDED_OR_INFEASIBLE or INFEASIBLE — both are valid
-    // responses for this LP depending on the HiGHS solver path taken.
+    // Either is valid for this LP, depending on the HiGHS solver path taken.
     match &result {
-        Err(SolverError::Infeasible | SolverError::Unbounded) => {
-            // Both are acceptable outcomes.
-        }
+        Err(SolverError::Infeasible | SolverError::Unbounded) => {}
         other => panic!("expected Infeasible or Unbounded error, got {other:?}"),
     }
 }
@@ -1296,7 +1191,6 @@ fn test_solver_highs_unbounded_or_infeasible() {
 #[cfg(feature = "highs")]
 #[test]
 fn solve_equals_solve_owned() {
-    // Solver A: view path converted to owned
     let mut solver_a = HighsSolver::new().expect("HighsSolver::new() must succeed");
     solver_a.load_model(&make_fixture_stage_template());
     let owned = solver_a
@@ -1304,7 +1198,6 @@ fn solve_equals_solve_owned() {
         .expect("solve() must succeed")
         .to_owned();
 
-    // Solver B: zero-copy view path
     let mut solver_b = HighsSolver::new().expect("HighsSolver::new() must succeed");
     solver_b.load_model(&make_fixture_stage_template());
     let view = solver_b.solve(None).expect("solve() must succeed");
@@ -1340,14 +1233,12 @@ fn solve_borrows_internal_buffers() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
     solver.load_model(&make_fixture_stage_template());
 
-    // First solve — read a couple of values then let it go out of scope.
     let (obj1, primal0_first) = {
         let view = solver.solve(None).expect("first solve() must succeed");
         (view.objective, view.primal[0])
     };
-    // view is dropped here; the &mut self borrow is released.
+    // view dropped here, releasing the &mut self borrow for the second solve.
 
-    // Second solve — model is unchanged, so results must be identical.
     let view2 = solver.solve(None).expect("second solve() must succeed");
     assert_eq!(
         obj1, view2.objective,
@@ -1463,7 +1354,6 @@ fn basis_cut_extension() {
     let mut basis = Basis::new(template.num_cols, template.num_rows);
     solver.get_basis(&mut basis);
 
-    // Reload and add cuts (2 structural + 2 cuts = 4 rows)
     solver.load_model(&template);
     let cuts = make_fixture_row_batch();
     solver.add_rows(&cuts);
@@ -1487,7 +1377,6 @@ fn basis_warm_start_iterations() {
     solver.load_model(&template);
     let cold_view = solver.solve(None).expect("cold solve");
     let cold_iterations = cold_view.iterations;
-    // cold_view is dropped here; the &mut self borrow on solver is released.
 
     let mut basis = Basis::new(template.num_cols, template.num_rows);
     solver.get_basis(&mut basis);
@@ -1501,7 +1390,6 @@ fn basis_warm_start_iterations() {
         warm_view.iterations,
         cold_iterations
     );
-    // warm_view is dropped here; the &mut self borrow on solver is released.
 
     let stats = solver.statistics();
     assert_eq!(
@@ -1520,15 +1408,13 @@ fn test_basis_roundtrip() {
     let mut solver = HighsSolver::new().expect("solver");
     let template = make_fixture_stage_template();
 
-    // Cold-start solve to obtain the optimal basis.
     solver.load_model(&template);
     solver.solve(None).expect("cold solve must succeed");
 
-    // Extract the basis into a pre-allocated buffer.
     let mut basis = Basis::new(template.num_cols, template.num_rows);
     solver.get_basis(&mut basis);
 
-    // Reload the model to reset HiGHS internal state, then warm-start.
+    // Reload to reset HiGHS internal state before warm-starting from the basis.
     solver.load_model(&template);
     let warm_view = solver
         .solve(Some(&basis))
@@ -1548,12 +1434,10 @@ fn test_basis_roundtrip() {
 
 // ─── CLP-gated conformance tests (mirror HiGHS) ──────────────────────────────
 //
-// These mirror the core HiGHS conformance tests against the CLP backend,
-// proving the two solvers agree apples-to-apples on the shared SS1 fixtures.
-// They are compiled only when the `clp` feature is enabled (CI `--all-features`)
-// and are absent from the binary under the default `cargo test`. The dual sign
-// convention is the canonical HiGHS sign — `normalize_row_dual` in `clp.rs` is
-// the identity function — so the expected values are reused verbatim.
+// These mirror the core HiGHS conformance tests against the CLP backend, proving
+// the two solvers agree on the shared SS1 fixtures. The dual sign convention is
+// the canonical HiGHS sign — `normalize_row_dual` in `clp.rs` is the identity
+// function — so the HiGHS expected values are reused verbatim, with no negation.
 
 /// Mirrors `test_solver_highs_load_model_and_solve`: assert objective `100.0`
 /// and primals `(6.0, 0.0, 2.0)`.
@@ -1670,15 +1554,14 @@ fn test_solver_clp_warm_start_roundtrip() {
     let mut solver = ClpSolver::new().expect("ClpSolver::new() must succeed");
     let template = make_fixture_stage_template();
 
-    // Cold-start solve to obtain the optimal basis.
     solver.load_model(&template);
     solver.solve(None).expect("cold solve must succeed");
 
-    // Extract the basis into a buffer; `get_basis` resizes it.
+    // `get_basis` resizes the buffer, so a 0×0 basis is fine to start.
     let mut basis = Basis::new(0, 0);
     solver.get_basis(&mut basis);
 
-    // Reload the model to reset CLP internal state, then warm-start.
+    // Reload to reset CLP internal state before warm-starting from the basis.
     solver.load_model(&template);
     let warm_view = solver
         .solve(Some(&basis))

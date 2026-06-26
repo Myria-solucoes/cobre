@@ -11,21 +11,17 @@
 
 /// Single-stage visited-states buffer.
 ///
-/// Stores forward-pass trial points as a flat contiguous `Vec<f64>`.
-/// Entry `i * state_dimension .. (i + 1) * state_dimension` holds state `i`.
+/// Stores forward-pass trial points as a flat contiguous `Vec<f64>`:
+/// entry `i * state_dimension .. (i + 1) * state_dimension` holds state `i`.
 #[derive(Debug, Clone)]
 pub struct StageStates {
-    /// Flat buffer of accumulated state vectors.
     data: Vec<f64>,
-    /// Number of states currently stored.
     count: usize,
-    /// Length of each state vector.
     state_dimension: usize,
 }
 
 impl StageStates {
-    /// Creates a new single-stage buffer, pre-allocating space for
-    /// `capacity_states` state vectors of length `state_dimension`.
+    /// Creates a buffer pre-allocated for `capacity_states` state vectors.
     #[must_use]
     pub fn new(state_dimension: usize, capacity_states: usize) -> Self {
         Self {
@@ -47,11 +43,8 @@ impl StageStates {
         self.state_dimension
     }
 
-    /// Append `total_fwd` state vectors from `gathered` into this stage's
-    /// buffer.
-    ///
-    /// `gathered` is a flat slice of length `total_fwd * state_dimension`,
-    /// produced by `ExchangeBuffers::gathered_states()`.
+    /// Append `total_fwd` state vectors from `gathered`, a flat slice of length
+    /// `total_fwd * state_dimension`.
     ///
     /// # Panics (debug only)
     ///
@@ -62,33 +55,17 @@ impl StageStates {
         self.count += total_fwd;
     }
 
-    /// Return the flat slice of all accumulated states.
-    ///
-    /// Length is `self.count * self.state_dimension`.
+    /// Return the flat slice of all accumulated states (length `count * state_dimension`).
     #[must_use]
     pub fn states(&self) -> &[f64] {
         &self.data[..self.count * self.state_dimension]
     }
 
-    /// Retain only the most recent `window_states` state vectors.
+    /// Retain only the most recent `window_states` state vectors; no-op when
+    /// `count <= window_states`.
     ///
-    /// Drains the oldest `(count - window_states)` state vectors from the
-    /// beginning of the buffer using `Vec::drain(..n)`. The drain shifts the
-    /// remaining elements left in O(retained) time, which is acceptable
-    /// because trimming runs at the cut-selection cadence (once per
-    /// `check_frequency` iterations), not per cut or per state.
-    ///
-    /// If `count <= window_states`, this is a no-op.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// // 100 states of dimension 2, keep last 30.
-    /// let mut s = StageStates::new(2, 100);
-    /// // ... append states ...
-    /// s.trim_to_window(30);
-    /// assert_eq!(s.count(), 30);
-    /// ```
+    /// The O(retained) left-shift from `Vec::drain` is acceptable because
+    /// trimming runs at the cut-selection cadence, not per cut or per state.
     pub fn trim_to_window(&mut self, window_states: usize) {
         if self.count <= window_states {
             return;
@@ -102,38 +79,28 @@ impl StageStates {
     }
 }
 
-/// Multi-stage archive of visited forward-pass states.
+/// Multi-stage archive of visited forward-pass states, one [`StageStates`] per
+/// stage.
 ///
-/// One [`StageStates`] per stage. Allocated whenever any
-/// [`CutSelectionStrategy`] variant is enabled, because the unified
-/// value-evaluation kernel evaluates every populated cut at every
-/// state in this archive. Also allocated when state export is
-/// requested via
+/// Allocated when any [`CutSelectionStrategy`](crate::CutSelectionStrategy)
+/// variant is enabled (the value-evaluation kernel evaluates every populated cut
+/// at every archived state) or when state export is requested via
 /// [`EventConfig::export_states`](crate::config::EventConfig::export_states).
 #[derive(Debug, Clone)]
 pub struct VisitedStatesArchive {
     stages: Vec<StageStates>,
-    /// Number of forward-pass states added per iteration (gathered across all
-    /// MPI ranks). Used by [`Self::trim_to_window`] to convert an iteration
-    /// window into a state count.
     total_forward_passes: usize,
 }
 
 impl VisitedStatesArchive {
-    /// Maximum number of state vectors to pre-allocate per stage.
-    ///
-    /// Prevents excessive upfront virtual memory reservation when
-    /// `max_iterations * total_forward_passes` is very large (e.g., 1000 × 100).
-    /// The `Vec` will grow beyond this cap on demand via its doubling strategy.
+    /// Per-stage pre-allocation cap, bounding upfront virtual-memory reservation
+    /// when `max_iterations * total_forward_passes` is large; the `Vec` still
+    /// grows past it on demand.
     const MAX_INITIAL_CAPACITY: usize = 4096;
 
-    /// Creates a new archive with one [`StageStates`] per stage.
-    ///
-    /// Each stage buffer is pre-allocated for up to
-    /// `max_iterations * total_forward_passes` state vectors, capped at
-    /// `MAX_INITIAL_CAPACITY` to avoid excessive virtual memory
-    /// reservation on large configurations. The underlying `Vec` will grow
-    /// beyond the cap if needed.
+    /// Creates an archive with one [`StageStates`] per stage, each pre-allocated
+    /// for `max_iterations * total_forward_passes` state vectors capped at
+    /// [`Self::MAX_INITIAL_CAPACITY`].
     #[must_use]
     pub fn new(
         num_stages: usize,
@@ -179,17 +146,12 @@ impl VisitedStatesArchive {
         &mut self.stages[stage]
     }
 
-    /// Archive one iteration's gathered states for a specific stage.
-    ///
-    /// Called in the backward pass after `exchange.exchange()` produces
-    /// the gathered buffer for stage `t`.
+    /// Archive one iteration's gathered states for `stage`.
     pub fn archive_gathered_states(&mut self, stage: usize, gathered: &[f64], total_fwd: usize) {
         self.stages[stage].append(gathered, total_fwd);
     }
 
-    /// Return the flat state slice for a stage.
-    ///
-    /// Used by `select_for_stage` during cut selection.
+    /// Return the flat state slice for `stage`.
     #[must_use]
     pub fn states_for_stage(&self, stage: usize) -> &[f64] {
         self.stages[stage].states()
@@ -201,33 +163,14 @@ impl VisitedStatesArchive {
         self.stages[stage].count()
     }
 
-    /// Trim each stage's buffer so it retains only the most recent
-    /// `window_iterations` iterations' worth of forward-pass states.
+    /// Trim each stage to the most recent `window_iterations` iterations' worth
+    /// of forward-pass states (`window_iterations * total_forward_passes`).
     ///
-    /// Internally this converts the iteration window into a state count by
-    /// multiplying by `total_forward_passes` (the gathered forward passes per
-    /// iteration across all MPI ranks, captured at construction time), then
-    /// delegates to [`StageStates::trim_to_window`] for each stage.
-    ///
-    /// Trimming is a no-op for stages whose `count <= window_iterations *
-    /// total_forward_passes`.
-    ///
-    /// The training loop is expected to call this at the same cadence as the
-    /// cut-selection check (i.e. every `check_frequency` iterations), so the
-    /// **steady-state** archive size stays bounded by `window_iterations *
-    /// total_forward_passes` regardless of total training length.
-    ///
-    /// ## Peak vs steady-state size
-    ///
-    /// The training loop calls this method **after** cut selection has
-    /// consumed the archive contents. Between two consecutive trims, the
-    /// archive accumulates up to a second window's worth of states (the
-    /// forward passes added since the previous trim plus the residual that
-    /// the previous trim retained). The **peak** pre-trim size is therefore
-    /// roughly `2 * window_iterations * total_forward_passes`. The bound
-    /// above is the post-trim (steady-state) size; the temporary ~2x peak
-    /// just before this call is by design — selection evaluates against the
-    /// full accumulated archive for better quality.
+    /// Called once per cut-selection check, so the post-trim (steady-state)
+    /// archive stays bounded regardless of training length. Because the trim
+    /// runs **after** selection has consumed the archive, the pre-trim peak is
+    /// ~`2 * window_iterations * total_forward_passes`; that ~2x is by design —
+    /// selection evaluates against the full accumulated archive for quality.
     pub fn trim_to_window(&mut self, window_iterations: u64) {
         let window_states = usize::try_from(window_iterations)
             .unwrap_or(usize::MAX)
@@ -256,7 +199,6 @@ mod tests {
         assert!(s.states().is_empty());
         assert_eq!(s.count(), 0);
         assert_eq!(s.state_dimension(), 4);
-        // Vec capacity is at least what we asked for.
         assert!(s.data.capacity() >= 400);
     }
 
@@ -272,10 +214,8 @@ mod tests {
     #[test]
     fn stage_states_append_multiple_batches() {
         let mut s = StageStates::new(2, 10);
-        // Batch 1: 3 states.
         let g1 = make_gathered(2, 3, 0.0);
         s.append(&g1, 3);
-        // Batch 2: 2 states.
         let g2 = make_gathered(2, 2, 100.0);
         s.append(&g2, 2);
         assert_eq!(s.count(), 5);
@@ -335,8 +275,8 @@ mod tests {
 
     // -- StageStates::trim_to_window ------------------------------------
 
-    // AC1: 100 states of dimension 2 trimmed with window 30 keeps the LAST 30
-    // states (elements 140..200 of the original flat buffer).
+    // Trimming 100 dim-2 states to window 30 keeps the LAST 30
+    // (elements 140..200 of the original flat buffer).
     #[test]
     fn stage_states_trim_to_window_drops_oldest_states() {
         let state_dim = 2;
@@ -357,7 +297,6 @@ mod tests {
         assert_eq!(s.states(), expected.as_slice());
     }
 
-    // AC2: trim_to_window with window strictly greater than count is a no-op.
     #[test]
     fn stage_states_trim_to_window_noop_when_count_below_window() {
         let state_dim = 2;
@@ -403,8 +342,8 @@ mod tests {
         assert!(s.states().is_empty());
     }
 
-    // Trim followed by append must preserve data integrity: the retained
-    // window stays at the head, and the newly appended states sit at the tail.
+    // After a trim, the retained window stays at the head and newly appended
+    // states sit at the tail.
     #[test]
     fn stage_states_trim_then_append_preserves_data() {
         let state_dim = 2;
@@ -429,8 +368,8 @@ mod tests {
 
     // -- VisitedStatesArchive::trim_to_window ---------------------------
 
-    // AC3: an archive with 5 stages of 100 states each, trimmed with
-    // window=3 and total_fwd=10, leaves each stage with at most 30 states.
+    // 5 stages of 100 states each, trimmed with window=3 and total_fwd=10,
+    // leaves each stage with 30 states.
     #[test]
     fn archive_trim_to_window_trims_each_stage() {
         let num_stages = 5;
@@ -457,7 +396,6 @@ mod tests {
         }
     }
 
-    // Archive trim is a no-op when count is already within the window.
     #[test]
     fn archive_trim_to_window_noop_when_within_window() {
         let total_fwd = 10;
@@ -480,8 +418,6 @@ mod tests {
         assert_eq!(a.states_for_stage(1), before_1.as_slice());
     }
 
-    // Archive trim retains the most recent states (verifies tail semantics,
-    // not just count).
     #[test]
     fn archive_trim_to_window_retains_most_recent() {
         let state_dim = 2;
@@ -509,7 +445,6 @@ mod tests {
         assert_eq!(a.states_for_stage(0), expected.as_slice());
     }
 
-    // Trim with window=0 clears every stage in the archive.
     #[test]
     fn archive_trim_to_window_zero_clears_all_stages() {
         let total_fwd = 4;

@@ -90,8 +90,8 @@ fn d02_case_dir() -> std::path::PathBuf {
 /// Drive one full train + simulate pass and return the parity hash.
 ///
 /// Mirrors the body of `run_case` in `parity_hash_d01_d15.rs` but skips the
-/// baseline read/write: this test compares two in-process invocations against
-/// each other, not against committed hashes.
+/// baseline read/write — this test compares two in-process invocations against
+/// each other.
 fn run_d02_once() -> String {
     let dir = d02_case_dir();
     let config_path = dir.join("config.json");

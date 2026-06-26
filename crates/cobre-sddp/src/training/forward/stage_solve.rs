@@ -1,12 +1,7 @@
 //! Per-(scenario, stage) LP solve kernel for the forward pass.
 //!
-//! Owns `run_forward_stage`: applies the noise patches, warm-starts the solver,
-//! records the trajectory step, and advances the current state and basis store.
-//! All scratch is owned by the workspace and reused across scenarios;
-//! `run_forward_stage` reuses the `ws.scratch.unscaled_primal` buffer via
-//! `mem::take`/restore (taken out before the solve so it can be filled while the
-//! `view` borrow of `ws` is live, then restored after the last read), the same
-//! pattern as `simulation/pipeline.rs`.
+//! All scratch is owned by the workspace and reused across scenarios; no
+//! allocation occurs on this hot path.
 
 use cobre_solver::SolverInterface;
 
@@ -14,6 +9,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     error::SddpError,
+    indexer::BlockGrid,
     lp_builder::COST_SCALE_FACTOR,
     noise::{NcsNoiseOffsets, transform_inflow_noise, transform_load_noise, transform_ncs_noise},
     trajectory::TrajectoryRecord,
@@ -62,20 +58,18 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     } = *key;
     let n_hydros = ctx.n_hydros;
     let n_load_buses = ctx.n_load_buses;
-    let indexer = training_ctx.indexer;
+    let study_dims = training_ctx.study_dims;
+    let state = training_ctx.state;
     let stochastic = training_ctx.stochastic;
     let horizon = training_ctx.horizon;
 
-    // On the DCS path, load the cut-free base structural template here (the
-    // caller skips its baked load), so the bounds patch below applies to the
-    // cut-free LP that `lazy_solve_preloaded` then grows with the resident cut
-    // subset. Loading the baked template would make the lazy loop's fresh
+    // DCS path: load the cut-free base template here (the caller skips its baked
+    // load). Loading the baked template instead would make the lazy loop's fresh
     // CutRowMap double-append the embedded cut rows.
     if dcs.is_some() {
         ws.solver.load_model(&ctx.templates[t]);
     }
 
-    // Split borrows: current_state and scratch are distinct fields of ws.
     let (state_ref, scratch) = (&ws.current_state[..], &mut ws.scratch);
     transform_inflow_noise(raw_noise, t, state_ref, ctx, training_ctx, scratch);
     let blk = if n_load_buses > 0 {
@@ -110,26 +104,43 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         );
     }
 
-    ws.patch_buf
-        .fill_col_state_patches(indexer, &ws.current_state, &ctx.templates[t].col_scale);
+    ws.patch_buf.fill_col_state_patches(
+        training_ctx.state,
+        &ws.current_state,
+        &ctx.templates[t].col_scale,
+    );
     ws.patch_buf.fill_forward_patches(
-        indexer,
+        state,
         &ws.current_state,
         &ws.scratch.noise_buf,
         ctx.base_rows[t],
         &ctx.templates[t].row_scale,
     );
     if n_load_buses > 0 {
+        // Per-stage block count, NOT the global `indexer.n_blks` (the
+        // nonuniform-block extraction trap). `max_deficit_segments` is
+        // study-invariant, read from `study_dims`.
+        let grid = BlockGrid::new(
+            ctx.block_counts_per_stage[t],
+            study_dims.max_deficit_segments,
+        );
         ws.patch_buf.fill_load_patches(
             ctx.load_balance_row_starts[t],
-            ctx.block_counts_per_stage[t],
+            grid,
             &ws.scratch.load_rhs_buf,
             ctx.load_bus_indices,
             &ctx.templates[t].row_scale,
         );
     }
+    // Per-stage `geometry.z_inflow_row_start`, always 0: state pinning uses
+    // column bounds, so no rows precede the z-inflow block. Empty
+    // `geometry_per_stage` (synthetic tests) falls back to 0.
+    let z_inflow_row_start = ctx
+        .geometry_per_stage
+        .get(t)
+        .map_or(0, |g| g.z_inflow_row_start);
     ws.patch_buf.fill_z_inflow_patches(
-        indexer.z_inflow_row_start,
+        z_inflow_row_start,
         &ws.scratch.z_inflow_rhs_buf,
         &ctx.templates[t].row_scale,
     );
@@ -145,55 +156,70 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         &ws.patch_buf.lower[..pc],
         &ws.patch_buf.upper[..pc],
     );
-    // Patch NCS column bounds with per-scenario availability. Both lower
-    // and upper buffers were rebuilt by `transform_ncs_noise` above; only
-    // the indices buffer is lazy-built when the size changes (i.e., on a
-    // stage transition).
-    if n_stochastic_ncs > 0 && !indexer.ncs_generation.is_empty() {
+    // Patch NCS availability bounds onto this stage's dense NCS columns. The
+    // gather forces `[0, 0]` for a slot whose `ncs_stochastic_windows[slot]`
+    // excludes this stage's id, so a not-yet-commissioned source dispatches
+    // nothing. The index buffer is constant across openings (rebuilt lazily on a
+    // stage transition); the bounds change every scenario, gathered every solve.
+    if n_stochastic_ncs > 0 && study_dims.has_ncs {
         let n_blks = ctx.block_counts_per_stage[t];
-        let expected_len = n_stochastic_ncs * n_blks;
-        if ws.scratch.ncs_col_indices_buf.len() != expected_len {
-            ws.scratch.ncs_col_indices_buf.clear();
-            for ncs_idx in 0..n_stochastic_ncs {
-                for blk in 0..n_blks {
-                    ws.scratch
-                        .ncs_col_indices_buf
-                        .push(indexer.ncs_generation.start + ncs_idx * n_blks + blk);
-                }
-            }
+        let dense_col = ctx.ncs_stochastic_dense_col;
+        let windows = ctx.ncs_stochastic_windows;
+        // Stage id is the dormancy key (NOT the index `t`; filtered placeholder
+        // stages can shift the id off the index).
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let stage_id = training_ctx
+            .stages
+            .get(t)
+            .map_or(t as i32, |stage| stage.id);
+        let ncs_col_start = ctx.ncs_col_starts[t];
+        let expected_len = dense_col.len() * n_blks;
+        // Rebuild the index buffer when the column **start** changes, not only its
+        // length: two stages can share a length yet address different columns, so
+        // keying on length alone would set bounds on the previous stage's columns.
+        if ws.scratch.last_ncs_col_start != ncs_col_start
+            || ws.scratch.ncs_col_indices_buf.len() != expected_len
+        {
+            crate::noise::build_dense_ncs_col_indices(
+                dense_col,
+                ncs_col_start,
+                n_blks,
+                &mut ws.scratch.ncs_col_indices_buf,
+            );
+            ws.scratch.last_ncs_col_start = ncs_col_start;
         }
-        ws.solver.set_col_bounds(
-            &ws.scratch.ncs_col_indices_buf,
+        crate::noise::gather_dense_ncs_bounds(
+            windows,
+            stage_id,
+            n_blks,
             &ws.scratch.ncs_col_lower_buf,
             &ws.scratch.ncs_col_upper_buf,
+            &mut ws.scratch.ncs_col_lower_active_buf,
+            &mut ws.scratch.ncs_col_upper_active_buf,
+        );
+        ws.solver.set_col_bounds(
+            &ws.scratch.ncs_col_indices_buf,
+            &ws.scratch.ncs_col_lower_active_buf,
+            &ws.scratch.ncs_col_upper_active_buf,
         );
     }
-    // Zero out the theta column at the terminal stage (the last study stage,
-    // `T-1`) so that the LP does not penalise future cost when there is no
-    // successor.  The zeroing is skipped when boundary (warm-start) cuts have
-    // been loaded for the terminal stage: in that case the cuts constrain
-    // theta from below and their contribution to the objective must remain
-    // visible to the solver.
+    // Zero theta at the terminal stage (no successor to penalise), but NOT when
+    // boundary cuts are loaded — those constrain theta from below and must stay
+    // visible in the objective.
     if horizon.is_terminal(t + 1) && !terminal_has_boundary_cuts {
-        ws.solver.set_col_bounds(&[indexer.theta], &[0.0], &[0.0]);
+        ws.solver.set_col_bounds(&[state.theta], &[0.0], &[0.0]);
     }
 
     let col_scale = &ctx.templates[t].col_scale;
 
-    // Take the reusable scratch buffer out of ws before the solve borrows ws.
-    // The `mem::take` pattern (capacity retained, empty vec left in field) lets
-    // us fill unscaled_primal from `view` slices that are still tied to 'ws
-    // while `&mut ws` is also live. Restored to ws.scratch after the last read
-    // so the next stage reuses the warmed allocation (mirrors pipeline.rs).
+    // `mem::take` the scratch buffer out before the solve borrows ws, so it can
+    // be filled from `view` slices tied to ws while `&mut ws` is live; restored
+    // after the last read so the next stage reuses the warmed allocation.
     let mut unscaled_primal: Vec<f64> = std::mem::take(&mut ws.scratch.unscaled_primal);
 
-    // Solve and fill the unscaled primal buffer. The DCS branch solves the cut
-    // pool lazily from the cut-free base loaded above (mirroring
-    // `StageOpeningSolver::solve_lazy`, but extracting the primal rather than the
-    // dual); the baked branch solves the already-loaded all-cuts LP via
-    // `run_stage_solve`. Each branch fills `unscaled_primal` from `view` (tied to
-    // `ws`) and captures the objective before ending the view borrow
-    // (`SolutionView` is `Copy`).
+    // DCS branch solves the cut pool lazily from the cut-free base loaded above
+    // (extracting the primal, not the dual); baked branch solves the all-cuts LP
+    // via `run_stage_solve`.
     let view_objective: f64 = if let Some(params) = dcs {
         // Metadata-seeded initial resident subset (deterministic, rank-invariant).
         build_initial_resident_set(
@@ -210,15 +236,11 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             // solve, never a carried continuation.
             continue_carry: false,
         };
-        // Disjoint borrows of `ws`: `solver`, `backward_accum.dcs_initial_resident`
-        // (shared), and `backward_accum.dcs_solve` (mut) are distinct fields.
-        // `lazy_solve_preloaded` copies the final solve into `dcs_solve`'s result
-        // buffers and returns `Result<()>`; the zero-cost view is rebuilt below.
         lazy_solve_preloaded(
             &mut ws.solver,
             &ctx.templates[t],
             pool,
-            indexer,
+            state,
             col_scale,
             None,
             &ws.backward_accum.dcs_initial_resident,
@@ -242,56 +264,48 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         };
 
         let view = crate::stage_solve::run_stage_solve(ws, &inputs).map_err(|e| {
-            // Preserve today's behavior: invalidate the stored basis on
-            // Infeasible so the next warm-start attempt cold-solves.
+            // Invalidate the stored basis on Infeasible so the next warm-start
+            // attempt cold-solves.
             if matches!(e, SddpError::Infeasible { .. }) {
                 *basis_slice.get_mut(m, t) = None;
             }
             e
         })?;
 
-        // Unscale primal values and capture the objective before the ws borrow
-        // held by `view` ends its overlap with subsequent ws.scratch accesses.
         let objective = view.objective;
         crate::stage_solve::fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
-        // `view` is Copy, so end its borrow of ws before the mutable borrows below.
         let _ = view;
         objective
     };
 
     let d_t = ctx.discount_factors.get(t).copied().unwrap_or(1.0);
-    let stage_cost = (view_objective - d_t * unscaled_primal[indexer.theta]) * COST_SCALE_FACTOR;
+    let stage_cost = (view_objective - d_t * unscaled_primal[state.theta]) * COST_SCALE_FACTOR;
     let rec = &mut worker_records[local_m * num_stages + t];
-    // Skip primal storage: only rec.state is consumed downstream; primals
-    // are read directly from the solver when needed (simulation).
+    // Only rec.state is consumed downstream; the backward pass needs no primal
+    // or dual here, and simulation reads them directly from the solver.
     rec.primal.clear();
-    // Skip dual storage: rec.dual is not read by the backward pass or any
-    // training-path code. Simulation reads duals directly from the solver view.
     rec.dual.clear();
     rec.stage_cost = stage_cost;
 
     // Save incoming lag values before overwriting state with primal.
-    // Uses the pre-allocated lag_matrix_buf scratch buffer (no allocation).
-    let lag_start = indexer.inflow_lags.start;
-    let lag_len = indexer.hydro_count * indexer.max_par_order;
+    let lag_start = state.inflow_lags.start;
+    let lag_len = state.hydro_count * state.max_par_order;
     ws.scratch.lag_matrix_buf.clear();
     ws.scratch
         .lag_matrix_buf
         .extend_from_slice(&ws.current_state[lag_start..lag_start + lag_len]);
 
     // Save incoming anticipated-state slice before overwriting state with primal.
-    // Uses the pre-allocated anticipated_state_buf scratch buffer (no allocation).
-    let ant_start = indexer.anticipated_state.start;
-    let ant_len = indexer.n_anticipated * indexer.k_max;
+    let ant_start = state.anticipated_state.start;
+    let ant_len = state.n_anticipated * state.k_max;
     ws.scratch.anticipated_state_buf.clear();
     ws.scratch
         .anticipated_state_buf
         .extend_from_slice(&ws.current_state[ant_start..ant_start + ant_len]);
 
-    // Compute shifted lag state once into ws.current_state, then copy to rec.state.
     ws.current_state.clear();
     ws.current_state
-        .extend_from_slice(&unscaled_primal[..indexer.n_state]);
+        .extend_from_slice(&unscaled_primal[..state.n_state]);
     let stage_lag = ctx.stage_lag_transitions.get(t).copied().unwrap_or(
         cobre_core::temporal::StageLagTransition {
             accumulate_weight: 1.0,
@@ -314,7 +328,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         &mut ws.current_state,
         &ws.scratch.lag_matrix_buf,
         &unscaled_primal,
-        indexer,
+        state,
         &stage_lag,
         &mut crate::noise::LagAccumState {
             accumulator: &mut ws.scratch.lag_accumulator,
@@ -328,26 +342,29 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             par_order: downstream_par_order,
         },
     );
+    // The anticipated-decision column base is n_blks-dependent: read this stage's
+    // decision range, NOT the global stage-0 `indexer`. Empty `geometry_per_stage`
+    // falls back to `0..0` (harmless: the shift early-returns at `n_anticipated == 0`).
+    let anticipated_decision = ctx
+        .geometry_per_stage
+        .get(t)
+        .map_or(0..0, |g| g.anticipated_decision.clone());
     crate::noise::shift_anticipated_state(
         &mut ws.current_state,
         &ws.scratch.anticipated_state_buf,
         &unscaled_primal,
-        indexer,
+        state,
+        &anticipated_decision,
     );
-    // Restore the scratch buffer so the next stage reuses the warmed allocation.
-    // This is the last read of `unscaled_primal`.
+    // Last read of `unscaled_primal`; restore it so the next stage reuses the
+    // warmed allocation.
     ws.scratch.unscaled_primal = unscaled_primal;
     rec.state.clear();
     rec.state.extend_from_slice(&ws.current_state);
-    // Cross-iteration forward warm-start applies to the baked arm only: it
-    // captures the post-solve basis here so the next iteration's forward solve
-    // at this (m, t) slot can warm-start from it. The DCS arm makes no such
-    // capture (it passes `stored_basis = None`) — a DCS-solve basis describes
-    // the lazy resident-subset row layout, not the baked layout the warm-start
-    // reconstruction expects, so the DCS path leaves the (m, t) slot untouched.
-    // A DCS solve never captures a basis at all: every `lazy_solve_preloaded`
-    // call passes `stored_basis = None`, so no DCS solve — forward or
-    // backward — carries a per-opening basis across iterations.
+    // Capture the post-solve basis for next iteration's warm-start — baked arm
+    // ONLY. A DCS-solve basis describes the lazy resident-subset row layout, not
+    // the baked layout the warm-start reconstruction expects, so capturing it
+    // would corrupt the warm-start; the DCS path leaves the (m, t) slot untouched.
     if dcs.is_none() {
         let cut_row_count = basis_row_capacity.saturating_sub(ctx.templates[t].num_rows);
         if let Some(captured) = basis_slice.get_mut(m, t) {
@@ -357,7 +374,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
                 pool,
                 ctx.templates[t].num_rows,
                 cut_row_count,
-                &ws.current_state[..indexer.n_state],
+                &ws.current_state[..state.n_state],
             );
         } else {
             let mut captured = CapturedBasis::new(
@@ -365,7 +382,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
                 basis_row_capacity,
                 ctx.templates[t].num_rows,
                 cut_row_count,
-                indexer.n_state,
+                state.n_state,
             );
             ws.solver.get_basis(&mut captured.basis);
             write_capture_metadata(
@@ -373,7 +390,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
                 pool,
                 ctx.templates[t].num_rows,
                 cut_row_count,
-                &ws.current_state[..indexer.n_state],
+                &ws.current_state[..state.n_state],
             );
             *basis_slice.get_mut(m, t) = Some(captured);
         }

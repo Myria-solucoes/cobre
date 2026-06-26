@@ -1,24 +1,12 @@
-//! Pre-resolved per-block factor and NCS-availability lookup tables.
-//!
-//! Holds the dense factor tables consumed on the LP-building hot path:
-//! `ResolvedLoadFactors` and `ResolvedExchangeFactors` (per-`(entity, stage,
-//! block)` scaling), plus the non-controllable-source family `ResolvedNcsBounds`
-//! (per-`(ncs, stage)` available generation) and `ResolvedNcsFactors`
-//! (per-`(ncs, stage, block)` scaling). Absent entries return the no-scaling
-//! identity (`1.0`, or `(1.0, 1.0)` for exchange) and absent NCS availability
-//! returns `0.0`. Populated by `cobre-io`; never modified after construction.
-
-// ─── Block factor lookup tables ──────────────────────────────────────────────
+//! Pre-resolved per-block factor and NCS-availability lookup tables, consumed on
+//! the LP-building hot path. Absent factor entries return the no-scaling identity
+//! (`1.0`, or `(1.0, 1.0)` for exchange); absent NCS availability returns `0.0`.
+//! Populated by `cobre-io`; never modified after construction.
 
 /// Pre-resolved per-block load scaling factors.
 ///
-/// Provides O(1) lookup of load block factors by `(bus_index, stage_index,
-/// block_index)`. Returns `1.0` for absent entries (no scaling). Populated
-/// by `cobre-io` during the resolution step and stored in [`crate::System`].
-///
-/// Uses dense 3D storage (`n_buses * n_stages * max_blocks`) initialized to
-/// `1.0`. The total size is small (typically < 10K entries) and the lookup is
-/// on the LP-building hot path.
+/// O(1) lookup by `(bus_index, stage_index, block_index)` into dense 3D storage
+/// (`n_buses * n_stages * max_blocks`); `1.0` for absent entries (no scaling).
 ///
 /// # Examples
 ///
@@ -31,19 +19,16 @@
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ResolvedLoadFactors {
-    /// Dense 3D array stored flat: `[bus_idx][stage_idx][block_idx]`.
-    /// Dimensions: `n_buses * n_stages * max_blocks`.
+    /// Flat 3D array indexed `(bus_idx * n_stages + stage_idx) * max_blocks + block_idx`.
     factors: Vec<f64>,
-    /// Number of stages.
     n_stages: usize,
-    /// Maximum number of blocks across all stages.
     max_blocks: usize,
 }
 
 impl ResolvedLoadFactors {
-    /// Create an empty load factors table. All lookups return `1.0`.
+    /// Create an empty load factors table; all lookups return `1.0`.
     ///
-    /// Used as the default when no `load_factors.json` exists.
+    /// The default when no `load_factors.json` exists.
     ///
     /// # Examples
     ///
@@ -88,18 +73,12 @@ impl ResolvedLoadFactors {
     }
 
     /// Look up the load factor for a `(bus_idx, stage_idx, block_idx)` triple.
+    /// Returns `1.0` when the table is empty or the flat index lands past `Vec::len`.
     ///
-    /// Returns `1.0` when the table is empty or the computed flat index falls
-    /// past `Vec::len`.
-    ///
-    /// Contract: the `1.0` identity fallback is only guaranteed when the flat
-    /// index `(bus_idx * n_stages + stage_idx) * max_blocks + block_idx` lands
-    /// past the end of the backing `Vec`. A per-dimension overflow that stays
-    /// within `Vec::len` — e.g. `block_idx >= max_blocks` while `bus_idx` is
-    /// small — aliases into a neighbouring cell rather than returning `1.0`.
-    /// Callers (`lp/builder/matrix.rs`) only pass in-range dimensions, so this
-    /// is unreachable in practice; do not rely on the fallback for arbitrary
-    /// out-of-range dimension combinations.
+    /// The `1.0` fallback only holds for indices past `Vec::len`; a per-dimension
+    /// overflow that stays within `Vec::len` (e.g. `block_idx >= max_blocks` with a
+    /// small `bus_idx`) aliases a neighbouring cell. Callers pass only in-range
+    /// dimensions — do not rely on the fallback for arbitrary out-of-range triples.
     #[inline]
     #[must_use]
     pub fn factor(&self, bus_idx: usize, stage_idx: usize, block_idx: usize) -> f64 {
@@ -113,10 +92,8 @@ impl ResolvedLoadFactors {
 
 /// Pre-resolved per-block exchange capacity factors.
 ///
-/// Provides O(1) lookup of exchange factors by `(line_index, stage_index,
-/// block_index)` returning `(direct_factor, reverse_factor)`. Returns
-/// `(1.0, 1.0)` for absent entries. Populated by `cobre-io` during the
-/// resolution step and stored in [`crate::System`].
+/// O(1) lookup by `(line_index, stage_index, block_index)` returning
+/// `(direct_factor, reverse_factor)`; `(1.0, 1.0)` for absent entries.
 ///
 /// # Examples
 ///
@@ -129,19 +106,17 @@ impl ResolvedLoadFactors {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ResolvedExchangeFactors {
-    /// Dense 3D array stored flat: `[line_idx][stage_idx][block_idx]`.
-    /// Each entry stores `(direct_factor, reverse_factor)`.
+    /// Flat 3D array of `(direct_factor, reverse_factor)` indexed
+    /// `(line_idx * n_stages + stage_idx) * max_blocks + block_idx`.
     data: Vec<(f64, f64)>,
-    /// Number of stages.
     n_stages: usize,
-    /// Maximum number of blocks across all stages.
     max_blocks: usize,
 }
 
 impl ResolvedExchangeFactors {
-    /// Create an empty exchange factors table. All lookups return `(1.0, 1.0)`.
+    /// Create an empty exchange factors table; all lookups return `(1.0, 1.0)`.
     ///
-    /// Used as the default when no `exchange_factors.json` exists.
+    /// The default when no `exchange_factors.json` exists.
     ///
     /// # Examples
     ///
@@ -193,15 +168,9 @@ impl ResolvedExchangeFactors {
     }
 
     /// Look up the exchange factors for a `(line_idx, stage_idx, block_idx)` triple.
-    ///
-    /// Returns `(direct_factor, reverse_factor)`. Returns `(1.0, 1.0)` when the
-    /// table is empty or the computed flat index falls past `Vec::len`.
-    ///
-    /// Contract: the `(1.0, 1.0)` fallback is only guaranteed when the flat
-    /// index lands past the end of the backing `Vec`. A per-dimension overflow
-    /// that stays within `Vec::len` aliases into a neighbouring cell rather than
-    /// returning the identity. Callers only pass in-range dimensions, so this is
-    /// unreachable in practice.
+    /// Returns `(1.0, 1.0)` when the table is empty or the flat index lands past
+    /// `Vec::len`; an in-range per-dimension overflow aliases a neighbouring cell
+    /// (see [`ResolvedLoadFactors::factor`]).
     #[inline]
     #[must_use]
     pub fn factors(&self, line_idx: usize, stage_idx: usize, block_idx: usize) -> (f64, f64) {
@@ -215,13 +184,10 @@ impl ResolvedExchangeFactors {
 
 /// Pre-resolved per-stage NCS available generation bounds.
 ///
-/// Provides O(1) lookup of `available_generation_mw` by `(ncs_index, stage_index)`.
-/// Returns `0.0` for out-of-bounds access. Populated by `cobre-io` during the
-/// resolution step and stored in [`crate::System`].
-///
-/// Uses dense 2D storage (`n_ncs * n_stages`) initialized with each NCS entity's
-/// installed capacity (`max_generation_mw`). Stage-varying overrides from
-/// `constraints/ncs_bounds.parquet` replace individual entries.
+/// O(1) lookup of `available_generation_mw` by `(ncs_index, stage_index)` into
+/// dense 2D storage (`n_ncs * n_stages`); `0.0` for out-of-bounds access. Each NCS
+/// is initialized to its installed capacity (`max_generation_mw`), then
+/// stage-varying entries from `constraints/ncs_bounds.parquet` overwrite individual cells.
 ///
 /// # Examples
 ///
@@ -234,16 +200,15 @@ impl ResolvedExchangeFactors {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ResolvedNcsBounds {
-    /// Dense 2D array: `[ncs_idx * n_stages + stage_idx]`.
+    /// Flat 2D array indexed `ncs_idx * n_stages + stage_idx`.
     data: Vec<f64>,
-    /// Number of stages.
     n_stages: usize,
 }
 
 impl ResolvedNcsBounds {
     /// Create an empty NCS bounds table.
     ///
-    /// Used as the default when no NCS entities exist or no bounds file is provided.
+    /// The default when no NCS entities exist or no bounds file is provided.
     ///
     /// # Examples
     ///
@@ -320,13 +285,8 @@ impl ResolvedNcsBounds {
 
 /// Pre-resolved per-block NCS generation scaling factors.
 ///
-/// Provides O(1) lookup of the generation factor by `(ncs_index, stage_index,
-/// block_index)`. Returns `1.0` for absent entries (no scaling). Populated
-/// by `cobre-io` during the resolution step and stored in [`crate::System`].
-///
-/// Uses dense 3D storage (`n_ncs * n_stages * max_blocks`) initialized to
-/// `1.0`. The total size is small (typically < 10K entries) and the lookup is
-/// on the LP-building hot path.
+/// O(1) lookup by `(ncs_index, stage_index, block_index)` into dense 3D storage
+/// (`n_ncs * n_stages * max_blocks`); `1.0` for absent entries (no scaling).
 ///
 /// # Examples
 ///
@@ -339,19 +299,16 @@ impl ResolvedNcsBounds {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ResolvedNcsFactors {
-    /// Dense 3D array stored flat: `[ncs_idx][stage_idx][block_idx]`.
-    /// Dimensions: `n_ncs * n_stages * max_blocks`.
+    /// Flat 3D array indexed `(ncs_idx * n_stages + stage_idx) * max_blocks + block_idx`.
     factors: Vec<f64>,
-    /// Number of stages.
     n_stages: usize,
-    /// Maximum number of blocks across all stages.
     max_blocks: usize,
 }
 
 impl ResolvedNcsFactors {
-    /// Create an empty NCS factors table. All lookups return `1.0`.
+    /// Create an empty NCS factors table; all lookups return `1.0`.
     ///
-    /// Used as the default when no `non_controllable_factors.json` exists.
+    /// The default when no `non_controllable_factors.json` exists.
     ///
     /// # Examples
     ///
@@ -396,15 +353,9 @@ impl ResolvedNcsFactors {
     }
 
     /// Look up the NCS factor for a `(ncs_idx, stage_idx, block_idx)` triple.
-    ///
-    /// Returns `1.0` when the table is empty or the computed flat index falls
-    /// past `Vec::len`.
-    ///
-    /// Contract: the `1.0` identity fallback is only guaranteed when the flat
-    /// index lands past the end of the backing `Vec`. A per-dimension overflow
-    /// that stays within `Vec::len` aliases into a neighbouring cell rather than
-    /// returning `1.0`. Callers only pass in-range dimensions, so this is
-    /// unreachable in practice.
+    /// Returns `1.0` when the table is empty or the flat index lands past `Vec::len`;
+    /// an in-range per-dimension overflow aliases a neighbouring cell (see
+    /// [`ResolvedLoadFactors::factor`]).
     #[inline]
     #[must_use]
     pub fn factor(&self, ncs_idx: usize, stage_idx: usize, block_idx: usize) -> f64 {

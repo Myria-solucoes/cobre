@@ -1,8 +1,4 @@
 //! Forward-pass scenario sampler construction.
-//!
-//! Owns `build_sampler_from_ctx`: builds the `ForwardSampler` that drives
-//! deterministic scenario assignment, extracted so the training loop can
-//! construct it once and reuse it across iterations without re-allocation.
 
 use cobre_stochastic::context::ClassSchemes;
 use cobre_stochastic::{
@@ -13,11 +9,8 @@ use crate::context::TrainingContext;
 use crate::error::SddpError;
 
 /// Build a [`ForwardSampler`] from the sampler-related fields of a
-/// [`TrainingContext`].
-///
-/// Extracted so callers (e.g. the training loop in `training.rs`) can
-/// construct the sampler once before the iteration loop and reuse it across
-/// all iterations without repeated heap allocation.
+/// [`TrainingContext`], so callers can construct it once and reuse it across all
+/// training iterations without repeated heap allocation.
 ///
 /// # Errors
 ///

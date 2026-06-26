@@ -483,7 +483,6 @@ mod tests {
             "generic_violations must be non-empty"
         );
 
-        // Spot-check field values for each entity type
         assert_eq!(payload.costs[0].stage_id, 3);
         assert_eq!(payload.hydros[0].hydro_id, 1);
         assert_eq!(payload.thermals[0].thermal_id, 1);

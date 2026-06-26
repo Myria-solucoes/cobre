@@ -1,53 +1,20 @@
 //! Horizon mode abstraction for SDDP stage traversal.
 //!
-//! [`HorizonMode`] is a flat enum that controls how the training loop traverses
-//! stages and determines terminal conditions. Only `Finite` horizon is
-//! implemented; `Cyclic` horizon is deferred to a future release.
-//!
-//! Discount factors are computed from the [`PolicyGraph`](cobre_core::PolicyGraph)
-//! at setup time and stored in `StageTemplates`.
-//!
-//! ## Stage indexing convention
-//!
-//! Stages use **1-based** indexing throughout this module, matching the
-//! horizon mode spec convention. Stage 1 is the first stage; stage `T` is
-//! the last stage for `HorizonMode::Finite { num_stages: T }`.
-//!
-//! ## Finite horizon
-//!
-//! The finite horizon forms a linear chain `1 → 2 → ··· → T`. Stage `T` is
-//! the terminal stage and has no successors. The terminal value is implicitly
-//! zero: `V_{T+1} = 0`. Each stage has a unique cut pool.
-//!
-//! ## Examples
-//!
-//! ```rust
-//! use cobre_sddp::horizon_mode::HorizonMode;
-//!
-//! let horizon = HorizonMode::Finite { num_stages: 5 };
-//! assert!(horizon.is_terminal(5));
-//! assert!(!horizon.is_terminal(4));
-//! assert!(horizon.validate().is_ok());
-//! assert_eq!(horizon.num_stages(), 5);
-//! ```
+//! [`HorizonMode`] controls how the training loop traverses stages and
+//! determines terminal conditions. Discount factors are computed from the
+//! [`PolicyGraph`](cobre_core::PolicyGraph) at setup time and stored in
+//! `StageTemplates`.
 
 use crate::SddpError;
 
 /// Horizon mode controlling stage traversal and terminal conditions.
 ///
-/// A single `HorizonMode` value governs the structural topology of the entire
-/// training run. The enum is matched at each forward and backward pass stage to
-/// select the correct traversal behaviour (enum dispatch for closed variant sets, avoiding `Box<dyn>`).
+/// A single value governs the topology of the entire training run, matched at
+/// each forward/backward stage.
 ///
-/// ## Variants
-///
-/// - [`HorizonMode::Finite`]: linear chain `1 → 2 → ··· → T` with terminal
-///   value `V_{T+1} = 0`. The only variant currently implemented.
-///
-/// ## Stage indexing
-///
-/// All methods use **1-based** stage indices. Stage 1 is the first; stage
-/// `num_stages` is the terminal stage for finite horizon.
+/// All methods use **1-based** stage indices: stage 1 is the first; stage
+/// `num_stages` is the terminal stage. Only [`HorizonMode::Finite`] is
+/// currently implemented.
 ///
 /// ## Examples
 ///
@@ -73,10 +40,7 @@ pub enum HorizonMode {
 }
 
 impl HorizonMode {
-    /// Return whether `stage` has no successors.
-    ///
-    /// For `Finite` horizon, exactly the last stage (`stage == num_stages`)
-    /// is terminal.
+    /// Return whether `stage` has no successors (for `Finite`, the last stage).
     ///
     /// # Examples
     ///
@@ -97,20 +61,10 @@ impl HorizonMode {
 
     /// Validate the horizon mode configuration.
     ///
-    /// Called once during study setup (`StudySetup::from_broadcast_params`)
-    /// immediately after the `HorizonMode` is constructed. Returns `Ok(())`
-    /// when the configuration is valid; returns `Err(SddpError::Validation(_))`
-    /// describing the violated rule when invalid.
-    ///
-    /// ## Validation rules
-    ///
-    /// | Rule | Condition | Error |
-    /// |------|-----------|-------|
-    /// | H1   | `num_stages >= 2` | A single-stage finite problem is degenerate |
-    ///
     /// # Errors
     ///
-    /// Returns [`SddpError::Validation`] when `num_stages < 2`.
+    /// Returns [`SddpError::Validation`] when `num_stages < 2` (a single-stage
+    /// finite problem is degenerate).
     ///
     /// # Examples
     ///
@@ -135,8 +89,6 @@ impl HorizonMode {
     }
 
     /// Return the total number of stages in the horizon.
-    ///
-    /// For `Finite` horizon, this is the `num_stages` field.
     ///
     /// # Examples
     ///

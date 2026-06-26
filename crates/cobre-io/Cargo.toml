@@ -25,12 +25,12 @@ slow-tests = []
 flatc-conformance = []
 
 [dependencies]
-cobre-core = { version = "0.8.2", path = "../cobre-core", features = ["serde"] }
-cobre-stochastic = { version = "0.8.2", path = "../cobre-stochastic" }
-arrow = { version = "58", default-features = false, features = ["prettyprint"] }
+cobre-core = { version = "0.9.0", path = "../cobre-core", features = ["serde"] }
+cobre-stochastic = { version = "0.9.0", path = "../cobre-stochastic" }
+arrow = { version = "59", default-features = false, features = ["prettyprint"] }
 chrono = { version = "0.4", features = ["serde"] }
 csv = "1"
-parquet = { version = "58", default-features = false, features = ["arrow", "zstd"] }
+parquet = { version = "59", default-features = false, features = ["arrow", "zstd"] }
 postcard = { version = "1", features = ["alloc"] }
 schemars = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }
@@ -40,7 +40,7 @@ tracing = "0.1"
 flatbuffers = "25"
 
 [dev-dependencies]
-parquet = { version = "58", default-features = false, features = ["arrow", "zstd"] }
+parquet = { version = "59", default-features = false, features = ["arrow", "zstd"] }
 tempfile = "3"
 
 [lints]

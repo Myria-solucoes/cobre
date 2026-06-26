@@ -1,25 +1,10 @@
 //! Integration tests for inflow non-negativity enforcement via the penalty method.
 //!
-//! Verifies end-to-end behaviour for `InflowNonNegativityMethod::Penalty`:
-//!
-//! 1. Training completes without `SddpError::Infeasible` when PAR(p) noise
-//!    produces negative effective inflows.
-//! 2. The inflow non-negativity slack absorbs negative inflow (slack > 0 in
-//!    the LP solution at any stage where inflow is negative).
-//! 3. `SimulationHydroResult.inflow_nonnegativity_slack_m3s` is populated
-//!    (non-zero) in at least one scenario / stage when the system produces
-//!    negative inflows.
-//!
-//! ## System design
-//!
-//! All three tests use a 2-hydro, 1-bus, 3-stage system. The PAR(0) inflow
-//! model has `mean_m3s = 0.0` and `std_m3s = 30.0`, so approximately half of
-//! all sampled noise values produce negative effective inflows. The opening
-//! tree is generated with 10 openings per stage from seed 42, guaranteeing
-//! that multiple openings carry negative noise realisations.
-//!
-//! `ActiveSolver` is used throughout so the LP is actually solved and slack
-//! columns receive non-trivial primal values when inflow is negative.
+//! All tests share a 2-hydro, 1-bus, 3-stage fixture whose PAR(0) inflow model
+//! (`mean_m3s = 0.0`, `std_m3s = 30.0`, 10 openings/stage from seed 42) makes
+//! roughly half of sampled noise values produce negative effective inflows —
+//! the precondition the slack-value assertions rely on. `ActiveSolver` is used
+//! throughout so the LP is solved and slack columns receive real primal values.
 
 #![allow(
     clippy::unwrap_used,
@@ -58,7 +43,7 @@ use cobre_sddp::{
     energy_conversion::{EnergyConversion, EnergyConversionSet},
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
-    indexer::StageIndexer,
+    indexer::StateLayout,
     inflow_method::InflowNonNegativityMethod,
     lp_builder::{PatchBuffer, build_stage_templates},
     risk_measure::RiskMeasure,
@@ -76,7 +61,46 @@ use cobre_stochastic::{
 // Communicator stub
 // ===========================================================================
 
-/// Single-rank communicator that performs identity operations.
+/// Build the role-(a) [`StateLayout`] via the public [`StateLayout::new`] (full
+/// `max_par_order` lag stride per hydro). This external test crate cannot see the
+/// parent's `#[cfg(test)]`/`test-support` surface, so it constructs from explicit
+/// dimensions rather than a test helper.
+fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
+    StateLayout::new(
+        hydro_count,
+        max_par_order,
+        0,
+        0,
+        vec![],
+        &vec![max_par_order; hydro_count],
+    )
+}
+
+/// Build `StudyDimensions` from explicit entity counts. This external test crate
+/// cannot see the parent's `#[cfg(test)]`/`test-support` surface, so it sets the
+/// fields directly; `n_pumping`/`has_ncs`/anticipated are empty for these
+/// single-bus, no-pumping, no-NCS fixtures.
+fn study_dims_for(
+    n_thermals: usize,
+    n_lines: usize,
+    n_buses: usize,
+    hydro_count: usize,
+    has_inflow_penalty: bool,
+) -> cobre_sddp::indexer::StudyDimensions {
+    cobre_sddp::indexer::StudyDimensions {
+        n_thermals,
+        n_lines,
+        n_buses,
+        max_deficit_segments: 1,
+        has_ncs: false,
+        has_inflow_penalty,
+        has_withdrawal: hydro_count > 0,
+        has_operational_violations: hydro_count != 0,
+        anticipated_thermal_indices: vec![],
+        n_pumping: 0,
+    }
+}
+
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -129,18 +153,9 @@ impl Communicator for StubComm {
 const N_STAGES: usize = 3;
 const N_HYDROS: usize = 2;
 
-/// Build a 2-hydro, 1-bus, 3-stage system designed to produce negative inflows.
-///
-/// - `mean_m3s = 0.0` and `std_m3s = 30.0` means roughly half of all sampled
-///   noise values are negative, giving effective inflows < 0 m³/s.
-/// - The opening tree uses 10 openings per stage, guaranteeing multiple
-///   openings carry negative noise realisations for the test to be meaningful.
-/// - 2 hydros ensure the fixture exercises the multi-hydro code path.
-/// - 1 block per stage for simplicity.
-///
-/// `ResolvedBounds` and `ResolvedPenalties` are built manually from the hydro
-/// entity values so that `build_stage_templates` can read them without
-/// `cobre-io` case loading.
+/// Build the 2-hydro, 1-bus, 3-stage negative-inflow fixture. `ResolvedBounds`
+/// and `ResolvedPenalties` are built manually from the hydro entity values so
+/// `build_stage_templates` can read them without `cobre-io` case loading.
 fn build_system() -> cobre_core::System {
     use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::InflowModel;
@@ -261,7 +276,6 @@ fn build_system() -> cobre_core::System {
                         id: EntityId(2),
                     },
                 ],
-                // 2×2 identity: uncorrelated inflows.
                 matrix: vec![vec![1.0, 0.0], vec![0.0, 1.0]],
             }],
         },
@@ -272,8 +286,6 @@ fn build_system() -> cobre_core::System {
         schedule: vec![],
     };
 
-    // Build ResolvedBounds manually from entity field values.
-    // build_stage_templates requires this table to be populated (not empty).
     let hydro_bounds_default = HydroStageBounds {
         min_storage_hm3: 0.0,
         max_storage_hm3: 50.0,
@@ -284,21 +296,17 @@ fn build_system() -> cobre_core::System {
         min_generation_mw: 0.0,
         max_generation_mw: 50.0,
         max_diversion_m3s: None,
-        filling_inflow_m3s: 0.0,
+        filling_min_rate_m3s: 0.0,
         water_withdrawal_m3s: 0.0,
     };
     let resolved_bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
             n_hydros: N_HYDROS,
             n_thermals: 0,
-            n_lines: // n_thermals
-        0,
-            n_pumping: // n_lines
-        0,
-            n_contracts: // n_pumping
-        0,
-            n_stages: // n_contracts
-        N_STAGES,
+            n_lines: 0,
+            n_pumping: 0,
+            n_contracts: 0,
+            n_stages: N_STAGES,
             k_max: 0,
         },
         &BoundsDefaults {
@@ -324,7 +332,6 @@ fn build_system() -> cobre_core::System {
         },
     );
 
-    // Build ResolvedPenalties manually.
     let hydro_penalties_default = HydroStagePenalties {
         spillage_cost: 0.0,
         diversion_cost: 0.0,
@@ -347,12 +354,9 @@ fn build_system() -> cobre_core::System {
         &PenaltiesCountsSpec {
             n_hydros: N_HYDROS,
             n_buses: 1,
-            n_lines: // n_buses
-        0,
-            n_ncs: // n_lines
-        0,
-            n_stages: // n_ncs
-        N_STAGES,
+            n_lines: 0,
+            n_ncs: 0,
+            n_stages: N_STAGES,
         },
         &PenaltiesDefaults {
             hydro: hydro_penalties_default,
@@ -403,7 +407,11 @@ fn build_stochastic() -> StochasticContext {
 struct Fixture {
     stage_templates: cobre_sddp::StageTemplates,
     stochastic: StochasticContext,
-    indexer: StageIndexer,
+    /// Production stage-0 geometry (the role-(b) equipment/slack column ranges),
+    /// cloned from `stage_templates.geometry_per_stage[0]`.
+    geometry: cobre_sddp::lp_builder::StageGeometry,
+    study_dims: cobre_sddp::indexer::StudyDimensions,
+    state: StateLayout,
     initial_state: Vec<f64>,
     horizon: HorizonMode,
     risk_measures: Vec<RiskMeasure>,
@@ -448,37 +456,22 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
     let first_tmpl = stage_templates.templates.first().expect("at least 1 stage");
     let n_blks = system.stages().first().map_or(1, |s| s.blocks.len().max(1));
     let has_inflow_penalty = inflow_method.has_slack_columns() && first_tmpl.n_hydro > 0;
-    let mut indexer = StageIndexer::with_equipment(
-        &cobre_sddp::indexer::EquipmentCounts {
-            hydro_count: first_tmpl.n_hydro,
-            max_par_order: first_tmpl.max_par_order,
-            n_thermals: system.thermals().len(),
-            n_lines: system.lines().len(),
-            n_buses: system.buses().len(),
-            n_blks,
-            has_inflow_penalty,
-            max_deficit_segments: 1,
-            n_anticipated: 0,
-            k_max: 0,
-            anticipated_lead_stages: vec![],
-            anticipated_thermal_indices: vec![],
-        },
-        &cobre_sddp::indexer::FphaColumnLayout {
-            hydro_indices: vec![],
-            planes_per_hydro: vec![],
-        },
+    let _ = n_blks;
+    let study_dims = study_dims_for(
+        system.thermals().len(),
+        system.lines().len(),
+        system.buses().len(),
+        first_tmpl.n_hydro,
+        has_inflow_penalty,
     );
-    // Finalize as production setup does: full-order mask + state→LP-column map.
-    {
-        let lag_counts = vec![indexer.max_par_order; indexer.hydro_count];
-        let anticipated_k = indexer.anticipated_lead_stages.clone();
-        indexer.set_nonzero_mask(&lag_counts, &anticipated_k);
-        indexer.finalize_state_column_map();
-    }
-    // z-inflow column and row ranges are set by StageIndexer::new at
-    // fixed offset N*(1+L), no per-stage wiring needed.
+    let geometry = stage_templates
+        .geometry_per_stage
+        .first()
+        .expect("at least 1 stage geometry")
+        .clone();
 
-    let initial_state = vec![0.0_f64; indexer.n_state];
+    let state = state_layout_for(first_tmpl.n_hydro, first_tmpl.max_par_order);
+    let initial_state = vec![0.0_f64; state.n_state];
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
     };
@@ -498,7 +491,9 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
     Fixture {
         stage_templates,
         stochastic,
-        indexer,
+        geometry,
+        study_dims,
+        state,
         initial_state,
         horizon,
         risk_measures,
@@ -516,7 +511,7 @@ fn train_fixture(
     iterations: u64,
 ) -> Result<cobre_sddp::TrainingOutcome, cobre_sddp::SddpError> {
     let n_stages = fx.stage_templates.templates.len();
-    let mut fcf = FutureCostFunction::new(n_stages, fx.indexer.n_state, 1, 20, &vec![0; n_stages]);
+    let mut fcf = FutureCostFunction::new(n_stages, fx.state.n_state, 1, 20, &vec![0; n_stages]);
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
     let comm = StubComm;
 
@@ -530,6 +525,7 @@ fn train_fixture(
     let max_blocks = block_counts.iter().copied().max().unwrap_or(1);
 
     let stage_ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &fx.stage_templates.templates,
         base_rows: &fx.stage_templates.base_rows,
         noise_scale: &fx.stage_templates.noise_scale,
@@ -538,6 +534,12 @@ fn train_fixture(
         load_balance_row_starts: &fx.stage_templates.load_balance_row_starts,
         load_bus_indices: &fx.stage_templates.load_bus_indices,
         block_counts_per_stage: &block_counts,
+        ncs_col_starts: &[],
+        n_ncs: 0,
+        ncs_stochastic_dense_col: &[],
+        ncs_stochastic_windows: &[],
+        anticipated_windows: &[],
+        study_stage_ids: &[],
         ncs_max_gen: &[],
         ncs_allow_curtailment: &[],
         discount_factors: &[],
@@ -578,7 +580,8 @@ fn train_fixture(
         &stage_ctx,
         &TrainingContext {
             horizon: &fx.horizon,
-            indexer: &fx.indexer,
+            state: &fx.state,
+            study_dims: &fx.study_dims,
             inflow_method: &fx.inflow_method,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -619,11 +622,11 @@ fn simulate_fixture(
         0,
         0,
         ActiveSolver::new().expect("ActiveSolver::new must succeed"),
-        PatchBuffer::new(fx.indexer.hydro_count, fx.indexer.max_par_order, 0, 0, 0, 0),
-        fx.indexer.n_state,
+        PatchBuffer::new(fx.state.hydro_count, fx.state.max_par_order, 0, 0, 0, 0),
+        fx.state.n_state,
         WorkspaceSizing {
-            hydro_count: fx.indexer.hydro_count,
-            max_par_order: fx.indexer.max_par_order,
+            hydro_count: fx.state.hydro_count,
+            max_par_order: fx.state.max_par_order,
             n_load_buses: 0,
             max_blocks: 0,
             downstream_par_order: 0,
@@ -654,6 +657,7 @@ fn simulate_fixture(
     simulate(
         &mut sim_workspaces,
         &StageContext {
+            geometry_per_stage: &[],
             templates: &fx.stage_templates.templates,
             base_rows: &fx.stage_templates.base_rows,
             noise_scale: &fx.stage_templates.noise_scale,
@@ -662,6 +666,12 @@ fn simulate_fixture(
             load_balance_row_starts: &fx.stage_templates.load_balance_row_starts,
             load_bus_indices: &fx.stage_templates.load_bus_indices,
             block_counts_per_stage: &block_counts_sim,
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -673,7 +683,8 @@ fn simulate_fixture(
         fcf,
         &TrainingContext {
             horizon: &fx.horizon,
-            indexer: &fx.indexer,
+            state: &fx.state,
+            study_dims: &fx.study_dims,
             inflow_method: &fx.inflow_method,
             stochastic: &fx.stochastic,
             initial_state: &fx.initial_state,
@@ -701,7 +712,13 @@ fn simulate_fixture(
             entity_counts: &fx.entity_counts,
             generic_constraint_row_entries: &[],
             ncs_col_starts: &[],
-            n_ncs_per_stage: &[],
+            n_ncs: 0,
+            pumping_col_starts: &[],
+            n_pumping: 0,
+            geometry_per_stage: &fx.stage_templates.geometry_per_stage,
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices_per_stage: &[],
+            contract_is_import: &[],
             ncs_entity_ids_per_stage: &[],
             diversion_upstream: &HashMap::new(),
             hydro_productivities_per_stage: &fx.stage_templates.hydro_productivities_per_stage,
@@ -724,11 +741,8 @@ fn simulate_fixture(
 // Test 1: Penalty method prevents LP infeasibility
 // ===========================================================================
 
-/// Verify that training with `InflowNonNegativityMethod::Penalty` completes
-/// without `SddpError::Infeasible` when PAR(0) noise produces negative
-/// effective inflows. With `mean_m3s = 0.0` and `std_m3s = 30.0`, approximately
-/// half of sampled openings carry negative inflow values. The penalty slack
-/// columns keep the LP feasible at every stage.
+/// Training with `Penalty` completes without `SddpError::Infeasible` despite the
+/// fixture's negative effective inflows; the slack columns keep the LP feasible.
 #[test]
 fn test_penalty_method_prevents_infeasibility() {
     let fx = build_fixture();
@@ -743,15 +757,13 @@ fn test_penalty_method_prevents_infeasibility() {
 // Test 2: Penalty slack absorbs negative inflow in simulation
 // ===========================================================================
 
-/// Verify that when the penalty method is active, simulation produces at least one
-/// `SimulationHydroResult` with `inflow_nonnegativity_slack_m3s > 0.0` when negative
-/// inflows occur. With `mean_m3s = 0.0`, `std_m3s = 30.0`, and 20 scenarios,
-/// approximately half of noise draws are negative.
+/// With the penalty method active, simulation produces at least one
+/// `SimulationHydroResult` with `inflow_nonnegativity_slack_m3s > 0.0`.
 #[test]
 fn test_penalty_slack_value_matches_negative_inflow() {
     let fx = build_fixture();
     let n_stages = fx.stage_templates.templates.len();
-    let fcf = FutureCostFunction::new(n_stages, fx.indexer.n_state, 1, 20, &vec![0; n_stages]);
+    let fcf = FutureCostFunction::new(n_stages, fx.state.n_state, 1, 20, &vec![0; n_stages]);
 
     train_fixture(&fx, 3).expect("training must succeed before simulation");
     let scenario_results = simulate_fixture(&fx, &fcf).expect("simulate must succeed");
@@ -776,15 +788,13 @@ fn test_penalty_slack_value_matches_negative_inflow() {
 // Test 3: Simulation slack output field is populated
 // ===========================================================================
 
-/// Verify that `SimulationHydroResult.inflow_nonnegativity_slack_m3s` is
-/// correctly populated in simulation output when the penalty method is active.
-/// The field is wired through the extraction pipeline and produces non-zero
-/// values when inflow is negative.
+/// `SimulationHydroResult.inflow_nonnegativity_slack_m3s` is populated in
+/// simulation output (non-zero in at least one hydro stage) under the penalty method.
 #[test]
 fn test_simulation_slack_output_populated() {
     let fx = build_fixture();
     let n_stages = fx.stage_templates.templates.len();
-    let fcf = FutureCostFunction::new(n_stages, fx.indexer.n_state, 1, 20, &vec![0; n_stages]);
+    let fcf = FutureCostFunction::new(n_stages, fx.state.n_state, 1, 20, &vec![0; n_stages]);
 
     train_fixture(&fx, 3).expect("training must succeed");
     let scenario_results = simulate_fixture(&fx, &fcf).expect("simulate must succeed");
@@ -811,30 +821,22 @@ fn test_simulation_slack_output_populated() {
     );
 }
 
-/// T-015: `TruncationWithPenalty` mode -- training completes and inflow slack columns
-/// are present.
-///
-/// Verifies that the hybrid mode (clamping + penalty slack) works end-to-end:
-/// 1. Training completes without errors (LP is feasible).
-/// 2. The LP template has inflow slack columns (`has_slack_columns() == true`).
-/// 3. Noise is clamped (same as Truncation mode).
+/// `TruncationWithPenalty` (clamping + penalty slack) trains end-to-end and the
+/// LP template carries inflow slack columns.
 #[test]
 fn truncation_with_penalty_training_completes() {
     let fx = build_fixture_with_method(InflowNonNegativityMethod::TruncationWithPenalty);
 
-    // Verify the method has slack columns.
     assert!(
         fx.inflow_method.has_slack_columns(),
         "TruncationWithPenalty must have slack columns"
     );
 
-    // Verify the LP template has inflow slack columns in the indexer.
     assert!(
-        !fx.indexer.inflow_slack.is_empty(),
-        "indexer.inflow_slack must be non-empty for TruncationWithPenalty"
+        !fx.geometry.inflow_slack.is_empty(),
+        "geometry.inflow_slack must be non-empty for TruncationWithPenalty"
     );
 
-    // Train and verify convergence.
     let outcome = train_fixture(&fx, 5).expect("training must succeed");
     assert!(
         outcome.error.is_none(),
@@ -848,21 +850,15 @@ fn truncation_with_penalty_training_completes() {
     );
 }
 
-/// T-012: Per-plant inflow penalty differentiation.
-///
-/// Two hydros with different `inflow_nonnegativity_cost` values produce different
-/// objective coefficients on their inflow slack columns in the LP template.
-/// H1 gets 100 R$/MWh, H2 gets 5000 R$/MWh.
-///
-/// Verified at the LP template level: the objective coefficient for H1's inflow
-/// slack column equals `100 * block_hours`, while H2's equals `5000 * block_hours`.
+/// Per-plant `inflow_nonnegativity_cost` (H1 = 100, H2 = 5000 R$/MWh) produces
+/// distinct inflow-slack objective coefficients in the LP template: H1's equals
+/// `100 * block_hours`, H2's `5000 * block_hours` (justifies the magic asserts).
 #[test]
 fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
     use cobre_core::resolved::{
         HydroStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, ResolvedPenalties,
     };
 
-    // Build modified penalties: H1 (index 0) gets 100, H2 (index 1) gets 5000.
     let hydro_penalties_default = HydroStagePenalties {
         spillage_cost: 0.0,
         diversion_cost: 0.0,
@@ -898,14 +894,12 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
             },
         },
     );
-    // H2 (index 1) gets expensive cost.
     for stage_idx in 0..N_STAGES {
         resolved_penalties
             .hydro_penalties_mut(1, stage_idx)
             .inflow_nonnegativity_cost = 5000.0;
     }
 
-    // Rebuild the system with patched penalties using the base system's data.
     let base_system = build_system();
     let system = cobre_core::SystemBuilder::new()
         .buses(base_system.buses().to_vec())
@@ -918,7 +912,6 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
         .build()
         .unwrap();
 
-    // Build templates.
     let inflow_method = InflowNonNegativityMethod::Penalty;
     let par_lp = PrecomputedPar::build(
         system.inflow_models(),
@@ -944,50 +937,19 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
     )
     .expect("build_stage_templates must succeed");
 
-    // Verify: the objective coefficients for the inflow slack columns differ.
     let tmpl0 = &templates.templates[0];
     let block_hours = 744.0_f64;
 
-    // The inflow slack columns are at indexer positions. With 2 hydros, PAR(0),
-    // and has_penalty=true, the indexer allocates 2 inflow slack columns.
-    let n_blks = 1;
-    let mut indexer = StageIndexer::with_equipment(
-        &cobre_sddp::indexer::EquipmentCounts {
-            hydro_count: tmpl0.n_hydro,
-            max_par_order: tmpl0.max_par_order,
-            n_thermals: 0,
-            n_lines: 0,
-            n_buses: 1,
-            n_blks,
-            has_inflow_penalty: true,
-            max_deficit_segments: 1,
-            n_anticipated: 0,
-            k_max: 0,
-            anticipated_lead_stages: vec![],
-            anticipated_thermal_indices: vec![],
-        },
-        &cobre_sddp::indexer::FphaColumnLayout {
-            hydro_indices: vec![],
-            planes_per_hydro: vec![],
-        },
-    );
-    // Finalize as production setup does: full-order mask + state→LP-column map.
-    {
-        let lag_counts = vec![indexer.max_par_order; indexer.hydro_count];
-        let anticipated_k = indexer.anticipated_lead_stages.clone();
-        indexer.set_nonzero_mask(&lag_counts, &anticipated_k);
-        indexer.finalize_state_column_map();
-    }
+    let geometry = &templates.geometry_per_stage[0];
 
-    // Inflow slack columns: indexer.inflow_slack.start .. indexer.inflow_slack.end
-    assert_eq!(indexer.inflow_slack.len(), N_HYDROS);
-    let h1_col = indexer.inflow_slack.start; // H1 (index 0)
-    let h2_col = indexer.inflow_slack.start + 1; // H2 (index 1)
+    assert_eq!(geometry.inflow_slack.len(), N_HYDROS);
+    let h1_col = geometry.inflow_slack.start; // H1 (index 0)
+    let h2_col = geometry.inflow_slack.start + 1; // H2 (index 1)
 
     let h1_obj = tmpl0.objective[h1_col];
     let h2_obj = tmpl0.objective[h2_col];
 
-    // LP builder divides by COST_SCALE_FACTOR (1_000_000.0) for conditioning.
+    // LP builder divides by COST_SCALE_FACTOR for conditioning.
     let cost_scale = 1_000_000.0_f64;
     let expected_h1 = 100.0 * block_hours / cost_scale;
     let expected_h2 = 5000.0 * block_hours / cost_scale;

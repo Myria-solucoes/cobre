@@ -1,60 +1,42 @@
 //! Slot-tracked basis reconstruction for cut-set-aware warm-start.
 //!
-//! This module provides [`reconstruct_basis`] — the slot-identity-based helper
-//! that correctly handles cut-set churn (drops, reorders, adds) between
-//! iterations.
+//! [`reconstruct_basis`] handles cut-set churn (drops, reorders, adds) between
+//! iterations by keying on [`CapturedBasis::cut_row_slots`] — the
+//! [`CutPool`](crate::cut::pool::CutPool) slot each stored cut row came from.
 //!
 //! ## Why slot identity matters
 //!
-//! Length-keyed basis reconciliation (matching stored row statuses to the
-//! current LP by row count alone) breaks under cut-set churn: when cut
-//! selection replaces one cut with another of equal count, the two bases are
-//! the same length but positionally misaligned. `HiGHS` would then receive a
-//! basis with mismatched row statuses and either reject the basis (cold
-//! start) or warm-start with a corrupted basis.
-//!
-//! [`reconstruct_basis`] takes [`CapturedBasis::cut_row_slots`] as its key:
-//! each stored cut row carries the [`CutPool`](crate::cut::pool::CutPool) slot
-//! that generated it. The reconstruction walks the current LP's cut rows in
-//! order, looks each slot up in an O(1) scratch map, and either copies the
-//! stored status (slot found → preserved) or assigns
-//! [`HIGHS_BASIS_STATUS_BASIC`] (slot not found → new cut).
+//! Matching stored row statuses to the current LP by row **count** breaks under
+//! churn: replacing one cut with another of equal count yields same-length but
+//! positionally misaligned bases, so `HiGHS` rejects the basis (cold start) or
+//! warm-starts a corrupted one. Keying on slot identity, not count, is the
+//! contract.
 //!
 //! ## Why new cuts default to BASIC
 //!
-//! `HiGHS` requires `col_basic + row_basic == num_row` for any warm-start
-//! basis. Assigning `BASIC` to every new cut row preserves the invariant by
-//! construction: each new cut adds exactly one row and exactly one `BASIC`
-//! count, so the equality balances on both sides. Classifying a new cut as
-//! `LOWER` would break the equality and force a compensating demotion
-//! elsewhere.
+//! `HiGHS` requires `col_basic + row_basic == num_row` for any warm-start basis.
+//! A new cut adds one row and one `BASIC`, balancing the equality by
+//! construction; classifying it `LOWER` would break the equality and force a
+//! compensating demotion elsewhere.
 //!
 //! ## DCS path: uniform-BASIC, slot-identity-free
 //!
-//! [`reconstruct_basis_uniform_basic`] is the Dynamic Cut Selection (DCS)
-//! variant used for the initial solve of each (stage, solve). It copies the
-//! column block and template rows exactly as the baked path does, but assigns
-//! **every** resident cut row [`HIGHS_BASIS_STATUS_BASIC`] without consulting
-//! slot identity: it takes no `slot_lookup` and reads none of
-//! [`CapturedBasis::cut_row_slots`]. DCS adds its cut rows fresh each solve and
-//! does not guess which will bind, so slot alignment is unnecessary. As on the
-//! forward path, the uniform-BASIC seeding can leave an excess of basics when
-//! the captured solve had bound cuts; the caller pairs the helper with
-//! [`enforce_basic_count_invariant`] to restore the invariant.
+//! [`reconstruct_basis_uniform_basic`] is the Dynamic Cut Selection (DCS) variant
+//! for the initial solve of each (stage, solve). It takes no `slot_lookup` and
+//! reads none of [`CapturedBasis::cut_row_slots`]: DCS adds its cut rows fresh
+//! each solve and does not guess which will bind, so slot alignment is
+//! unnecessary and every resident cut row is seeded BASIC. As on the forward
+//! path, the seeding can leave an excess of basics; the caller pairs it with
+//! [`enforce_basic_count_invariant`].
 //!
 //! ## Forward-path basic-count invariant
 //!
-//! On the forward path, cut selection may drop cuts whose stored row status
-//! was `HIGHS_BASIS_STATUS_BASIC`. Each such BASIC drop leaves one fewer
-//! BASIC row. [`reconstruct_basis`] still assigns `BASIC` unconditionally to
-//! new cuts, so the reconstructed basis may temporarily carry an `excess`
-//! of basic statuses (`excess = col_basic + row_basic - num_row > 0`).
-//!
-//! [`enforce_basic_count_invariant`] is an unconditional safety net invoked
-//! at the single call site after every reconstruction. It scans
-//! `out.row_status` from the end and demotes trailing `BASIC` cut-row
-//! entries (indices `>= base_row_count`) to `LOWER` until the invariant
-//! holds. It is a no-op when `excess == 0`.
+//! Cut selection may drop cuts whose stored status was BASIC, while
+//! [`reconstruct_basis`] still seeds new cuts BASIC, leaving
+//! `excess = col_basic + row_basic - num_row >= 0`.
+//! [`enforce_basic_count_invariant`] runs unconditionally after every
+//! reconstruction at its single call site, demoting trailing BASIC cut rows to
+//! `LOWER` until the invariant holds (no-op when `excess == 0`).
 //!
 //! ## Usage
 //!
@@ -90,11 +72,10 @@ use crate::workspace::CapturedBasis;
 // Target LP shape
 // ---------------------------------------------------------------------------
 
-/// Dimensions of the target LP that [`reconstruct_basis`] populates a basis
-/// for.
+/// Dimensions of the target LP [`reconstruct_basis`] populates a basis for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReconstructionTarget {
-    /// Number of template (non-cut) rows in the target LP.
+    /// Template (non-cut) row count of the target LP.
     pub base_row_count: usize,
     /// Total column count of the target LP.
     pub num_cols: usize,
@@ -106,20 +87,16 @@ pub struct ReconstructionTarget {
 
 /// Counters returned by [`reconstruct_basis`].
 ///
-/// The invariant `preserved + new_tight + new_slack` equals the number of
-/// elements the iterator passed to [`reconstruct_basis`] yielded (i.e. the
-/// cut-row count of the target LP).
+/// `preserved + new_tight + new_slack` equals the cut-row count of the target LP
+/// (the number of items the iterator yielded).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReconstructionStats {
-    /// Cut rows whose slot was found in the stored basis and whose status
-    /// was copied directly.
+    /// Cut rows whose slot was found in the stored basis; status copied directly.
     pub preserved: u32,
-    /// Always zero with slot-identity classification (kept for telemetry
-    /// stability against downstream consumers).
+    /// Always zero with slot-identity classification; kept for telemetry
+    /// stability against downstream consumers.
     pub new_tight: u32,
-    /// Cut rows whose slot was not present in the stored basis. Each such
-    /// row is assigned `HIGHS_BASIS_STATUS_BASIC` to preserve the
-    /// `col_basic + row_basic == num_row` invariant by construction.
+    /// Cut rows whose slot was absent from the stored basis; each seeded BASIC.
     pub new_slack: u32,
 }
 
@@ -127,36 +104,23 @@ pub struct ReconstructionStats {
 // reconstruct_basis
 // ---------------------------------------------------------------------------
 
-/// Reconstruct a full [`Basis`] for the target LP using slot identity.
-///
-/// Preserves cut rows already present in the stored basis (copies their
-/// stored status verbatim) and assigns [`HIGHS_BASIS_STATUS_BASIC`] to every
-/// new cut row.
+/// Reconstruct a full [`Basis`] for the target LP using slot identity: stored
+/// cut rows keep their status verbatim, new cut rows are seeded
+/// [`HIGHS_BASIS_STATUS_BASIC`].
 ///
 /// ## Parameters
 ///
-/// - `stored` — read-only stored basis from the previous iteration.
-/// - `target` — dimensions of the target LP.
-/// - `current_cut_rows` — iterator of `(slot, intercept, coefficients)` in
-///   target LP row order. The `intercept` and `coefficients` items are
-///   accepted for signature parity with the cut-pool iterator but are not
-///   consulted: classification depends solely on slot identity.
-/// - `out` — destination basis (caller owns; cleared and refilled in place).
-/// - `slot_lookup` — scratch `Vec<Option<u32>>` pre-sized by the caller to
-///   at least `max_slot + 1`. Grown in place if undersized (hot path should
-///   avoid this via `ScratchBuffers::recon_slot_lookup`).
-///
-/// ## Returns
-///
-/// [`ReconstructionStats`] with `preserved + new_tight + new_slack` equal to
-/// the number of items yielded by the iterator. With slot-identity
-/// classification, `new_tight` is always zero.
+/// - `current_cut_rows` — `(slot, intercept, coefficients)` in target LP row
+///   order. `intercept`/`coefficients` are accepted for iterator parity but not
+///   consulted — classification is by slot identity alone.
+/// - `slot_lookup` — caller-presized scratch (`>= max_slot + 1`, via
+///   `ScratchBuffers::recon_slot_lookup`); grown in place if undersized.
 ///
 /// ## Allocation contract
 ///
-/// Allocation-free when `slot_lookup.len() >= max_slot + 1`. The growth
-/// branch triggers `debug_assert!(false)` to surface caller under-sizing
-/// without panicking in release.
+/// Allocation-free when `slot_lookup.len() >= max_slot + 1`; the growth branch
+/// `debug_assert!(false)`s to surface caller under-sizing without panicking in
+/// release.
 pub fn reconstruct_basis<'a, I>(
     stored: &CapturedBasis,
     target: ReconstructionTarget,
@@ -201,36 +165,17 @@ where
 // ---------------------------------------------------------------------------
 
 /// Reconstruct a [`Basis`] for the **Dynamic Cut Selection (DCS)** initial
-/// solve, assigning every cut row a uniform [`HIGHS_BASIS_STATUS_BASIC`].
+/// solve, seeding every cut row uniform [`HIGHS_BASIS_STATUS_BASIC`].
 ///
-/// Unlike [`reconstruct_basis`], this path is **slot-identity-free**: it takes
-/// no `slot_lookup` and consults none of [`CapturedBasis::cut_row_slots`].
-/// Under DCS the cut rows resident at the initial solve are freshly added with
-/// `add_rows`, and DCS does not guess which cuts will bind — so each cut row is
-/// seeded `BASIC` (slack basic = non-binding) rather than aligned by slot. The
-/// column block and the first `target.base_row_count` template rows are copied
-/// from `stored` (reusing the same private helpers as the baked path).
+/// **Slot-identity-free**: takes no `slot_lookup`, reads none of
+/// [`CapturedBasis::cut_row_slots`] — DCS adds cut rows fresh each solve and does
+/// not guess which bind, so each is seeded BASIC rather than slot-aligned. The
+/// column block and first `target.base_row_count` template rows are copied from
+/// `stored`.
 ///
-/// Because each `BASIC` cut row adds one to `row_basic`, the freshly seeded
-/// basis may carry `col_basic + row_basic > num_row` when the captured solve
-/// had bound cuts. This helper does **not** repair that: the caller pairs it
-/// with [`enforce_basic_count_invariant`]`(out, target.base_row_count +
-/// cut_row_count, target.base_row_count)` to restore the
-/// `col_basic + row_basic == num_row` invariant `HiGHS` requires.
-///
-/// ## Parameters
-///
-/// - `stored` — read-only previous-iteration basis (only the column block and
-///   the first `base_row_count` template rows are consulted).
-/// - `target` — dimensions of the current DCS LP at the initial solve.
-/// - `cut_row_count` — number of cut rows currently resident in the DCS LP.
-/// - `out` — caller-owned destination basis, cleared and refilled in place.
-///
-/// ## Allocation contract
-///
-/// Allocation-free beyond `out`'s existing capacity: the column and row buffers
-/// are cleared then re-extended/resized, never reallocated when already sized by
-/// a previous call.
+/// Does **not** repair the basic count: the caller must pair this with
+/// [`enforce_basic_count_invariant`]`(out, target.base_row_count + cut_row_count,
+/// target.base_row_count)` to restore `col_basic + row_basic == num_row`.
 pub fn reconstruct_basis_uniform_basic(
     stored: &CapturedBasis,
     target: ReconstructionTarget,
@@ -240,8 +185,6 @@ pub fn reconstruct_basis_uniform_basic(
     reconstruct_col_statuses(stored, target, out);
     reconstruct_template_row_statuses(stored, target, out);
 
-    // Precondition: the template-row pass must leave exactly `base_row_count`
-    // entries so the resize below appends exactly `cut_row_count` cut rows.
     debug_assert_eq!(
         out.row_status.len(),
         target.base_row_count,
@@ -249,8 +192,6 @@ pub fn reconstruct_basis_uniform_basic(
          cut-row seeding"
     );
 
-    // Seed every resident cut row BASIC. The caller repairs the basic-count
-    // invariant afterward via `enforce_basic_count_invariant`.
     out.row_status.resize(
         target.base_row_count + cut_row_count,
         HIGHS_BASIS_STATUS_BASIC,
@@ -261,12 +202,8 @@ pub fn reconstruct_basis_uniform_basic(
 // Phase helpers (private — not part of the public API)
 // ---------------------------------------------------------------------------
 
-/// Copy column statuses from the stored basis, resizing to match the target
-/// column count.
-///
-/// Copies `stored.basis.col_status` verbatim into `out.col_status`, then
-/// extends or truncates to exactly `target.num_cols` entries, padding with
-/// `HIGHS_BASIS_STATUS_BASIC` if the target is wider than the stored basis.
+/// Copy column statuses from the stored basis into `out`, resized to
+/// `target.num_cols` (padded with `HIGHS_BASIS_STATUS_BASIC` if wider).
 fn reconstruct_col_statuses(stored: &CapturedBasis, target: ReconstructionTarget, out: &mut Basis) {
     out.col_status.clear();
     out.col_status.extend_from_slice(&stored.basis.col_status);
@@ -276,12 +213,10 @@ fn reconstruct_col_statuses(stored: &CapturedBasis, target: ReconstructionTarget
     }
 }
 
-/// Copy the first `target.base_row_count` template row statuses from the
-/// stored basis.
+/// Copy the first `target.base_row_count` template row statuses from the stored
+/// basis (missing rows filled `HIGHS_BASIS_STATUS_BASIC`).
 ///
-/// If the stored basis has fewer template rows than `target.base_row_count`,
-/// missing rows are filled with `HIGHS_BASIS_STATUS_BASIC`. Cut rows
-/// (indices `>= base_row_count`) are not written here; they are assigned by
+/// Cut rows (indices `>= base_row_count`) are not written here — they belong to
 /// the slot-identity loop in [`reconstruct_basis`].
 fn reconstruct_template_row_statuses(
     stored: &CapturedBasis,
@@ -293,25 +228,18 @@ fn reconstruct_template_row_statuses(
         out.row_status
             .extend_from_slice(&stored.basis.row_status[..target.base_row_count]);
     } else {
-        // Stored basis has fewer template rows than the target — fill missing with BASIC.
         out.row_status.extend_from_slice(&stored.basis.row_status);
         out.row_status
             .resize(target.base_row_count, HIGHS_BASIS_STATUS_BASIC);
     }
 }
 
-/// Build the slot → reconcilable-position lookup table.
+/// Fill `slot_lookup[slot] = Some(position)` for each slot in
+/// `reconcilable_slots` (`position` = 0-based index within the slice).
 ///
-/// Fills `slot_lookup` so that `slot_lookup[slot] = Some(position)` for each
-/// slot in `reconcilable_slots` (position is the 0-based index within that
-/// slice). Grows `slot_lookup` defensively if it is undersized (should not
-/// happen on the hot path when the caller pre-sizes via `ScratchBuffers`).
+/// Grows defensively if undersized — should not happen when the caller pre-sizes
+/// via `ScratchBuffers`.
 fn build_slot_lookup(reconcilable_slots: &[u32], slot_lookup: &mut Vec<Option<u32>>) {
-    // Grow the scratch if it is too small for the current stored slots. In
-    // normal operation the caller pre-sizes this to `initial_pool_capacity`
-    // (via `ScratchBuffers`), so growth only occurs on cold paths. When
-    // reconcilable_slots is empty there is nothing to look up — skip the
-    // size check (an empty lookup is correct in that case).
     if let Some(max_slot_val) = reconcilable_slots.iter().copied().max() {
         let max_slot = max_slot_val as usize;
         if slot_lookup.len() <= max_slot {
@@ -322,13 +250,10 @@ fn build_slot_lookup(reconcilable_slots: &[u32], slot_lookup: &mut Vec<Option<u3
                 slot_lookup.len(),
                 max_slot,
             );
-            // Defensive growth in release so the function remains safe.
             slot_lookup.resize(max_slot + 1, None);
         }
     }
     slot_lookup.fill(None);
-    // `position` here is the index within reconcilable_slots (0-based), so the
-    // stored row index is `stored.base_row_count + position`.
     #[allow(clippy::cast_possible_truncation)]
     for (position, &slot) in reconcilable_slots.iter().enumerate() {
         slot_lookup[slot as usize] = Some(position as u32);
@@ -339,44 +264,14 @@ fn build_slot_lookup(reconcilable_slots: &[u32], slot_lookup: &mut Vec<Option<u3
 // enforce_basic_count_invariant
 // ---------------------------------------------------------------------------
 
-/// Restore `col_basic + row_basic == num_row` after [`reconstruct_basis`]
-/// on the forward path.
+/// Restore `col_basic + row_basic == num_row` after [`reconstruct_basis`] on the
+/// forward path. Returns the number of demotions applied.
 ///
-/// ## Algebraic invariant
-///
-/// Let `excess = col_basic + row_basic - num_row` after reconstruction.
-///
-/// On the forward path, cut selection may drop cuts whose stored row status
-/// was `HIGHS_BASIS_STATUS_BASIC`. Each such BASIC drop leaves one fewer
-/// BASIC row, but [`reconstruct_basis`] assigns BASIC unconditionally to
-/// new cuts. If more cuts were preserved with BASIC status than the LP now
-/// has room for, `excess > 0`.
-///
-/// The investigation proved that `excess = dropped_basic >= 0` always.
-/// There is never a deficit. Therefore:
-///
-/// - If `excess == 0`: no-op, return 0.
-/// - If `excess > 0`: scan `out.row_status` from the end, flipping
-///   `HIGHS_BASIS_STATUS_BASIC` to `HIGHS_BASIS_STATUS_LOWER` only for
-///   cut rows (indices `>= base_row_count`) until exactly `excess` demotions
-///   have been applied.
-///
-/// ## Parameters
-///
-/// - `out` — the [`Basis`] returned by [`reconstruct_basis`].
-/// - `num_row` — the total row count of the target LP
-///   (`base_row_count + active_cut_count`).
-/// - `base_row_count` — the number of template (non-cut) rows. Only rows
-///   at indices `>= base_row_count` are eligible for demotion.
-///
-/// ## Returns
-///
-/// The number of demotions applied (0 in the no-op case).
-///
-/// ## Assertions
-///
-/// `debug_assert!` checks that `num_row == out.row_status.len()` and
-/// `base_row_count <= num_row`.
+/// `excess = col_basic + row_basic - num_row` is always `>= 0` — dropping BASIC
+/// cuts while reconstruction seeds new cuts BASIC can only over-count, never
+/// under-count, so there is no deficit path. When `excess > 0`, scans
+/// `out.row_status` from the end and demotes BASIC to `LOWER` **only for cut rows
+/// (indices `>= base_row_count`)** until `excess` demotions are applied.
 pub fn enforce_basic_count_invariant(
     out: &mut Basis,
     num_row: usize,
@@ -406,14 +301,12 @@ pub fn enforce_basic_count_invariant(
 
     let total_basic = col_basic + row_basic;
     if total_basic <= num_row {
-        // Invariant holds (or excess == 0): nothing to do.
         return 0;
     }
 
     let mut excess = total_basic - num_row;
     let mut demotions: u32 = 0;
 
-    // Scan from the end of row_status, touching only cut rows (>= base_row_count).
     for idx in (base_row_count..out.row_status.len()).rev() {
         if excess == 0 {
             break;

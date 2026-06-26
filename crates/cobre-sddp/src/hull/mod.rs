@@ -34,9 +34,8 @@ pub(crate) struct Hyperplane3d {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub(crate) enum HullError {
     /// An input coordinate was non-finite (NaN or ±∞). Guarded in Rust before
-    /// the FFI call so the canonical total order never observes a NaN; the
-    /// total order would otherwise be undefined. Production point clouds are
-    /// finite, so this is a guard, not a feature.
+    /// the FFI call so the canonical total order never observes a NaN (it would
+    /// otherwise be undefined).
     #[error("convex hull input contains a non-finite coordinate")]
     NonFiniteInput,
 
@@ -107,17 +106,12 @@ impl Drop for PlaneBuffer {
 /// - [`HullError::Compute`] / [`HullError::Alloc`] for a qhull internal or
 ///   allocation failure.
 pub(crate) fn convex_hull_3d(points: &[[f64; 3]]) -> Result<Vec<Hyperplane3d>, HullError> {
-    // Guard non-finite coordinates before sorting: total_cmp is defined for
-    // NaN, but a NaN coordinate is meaningless for a hull and the production
-    // contract is finite clouds. Returning a typed error here keeps the
-    // total order observing only finite values.
+    // Guard before sorting so the total order below never observes a NaN.
     if points.iter().any(|p| p.iter().any(|c| !c.is_finite())) {
         return Err(HullError::NonFiniteInput);
     }
 
-    // Canonical sort-in: a NaN-free total order on the (x, y, z) tuple. The
-    // non-finite guard above guarantees total_cmp never observes a NaN, so the
-    // order is a true total order over the input.
+    // Canonical sort-in (the determinism contract above).
     let mut sorted: Vec<[f64; 3]> = points.to_vec();
     sorted.sort_by(|a, b| {
         a[0].total_cmp(&b[0])
@@ -131,9 +125,7 @@ pub(crate) fn convex_hull_3d(points: &[[f64; 3]]) -> Result<Vec<Hyperplane3d>, H
         flat.extend_from_slice(p);
     }
 
-    // `i32` is the shim's count type. Hull point clouds in this crate are far
-    // below i32::MAX; a larger cloud is a caller bug, mapped to Compute rather
-    // than silently truncating the count passed to qhull.
+    // An overflowing count is a caller bug; map it to Compute, never truncate.
     let Ok(n_points_c) = c_int::try_from(n_points) else {
         return Err(HullError::Compute);
     };
@@ -206,12 +198,9 @@ pub(crate) fn convex_hull_3d(points: &[[f64; 3]]) -> Result<Vec<Hyperplane3d>, H
             });
         }
     }
-    // `buffer` drops at end of scope, freeing the shim buffer after the copy.
 
-    // Canonical sort-out: order facets by the (nx, ny, nz, d) tuple via the
-    // same NaN-free total order, so the result is independent of input
-    // ordering. qhull's facet normals are finite (unit-length), so total_cmp
-    // observes only finite values here too.
+    // Canonical sort-out (the determinism contract above); qhull's normals are
+    // finite, so total_cmp observes only finite values here too.
     facets.sort_by(|a, b| {
         a.normal[0]
             .total_cmp(&b.normal[0])
@@ -235,15 +224,11 @@ mod tests {
         [0.0, 0.0, 1.0],
     ];
 
-    /// `SplitMix64`: a tiny, fully deterministic, seedable PRNG used only to
-    /// generate reproducible point-order permutations for the determinism gate.
+    /// Deterministic seedable PRNG for the determinism gate's permutations.
     ///
-    /// A real `rand` RNG / `thread_rng` is deliberately avoided: the gate must
-    /// produce the identical permutation sequence on every machine and every
-    /// run (no wall-clock, no thread-local entropy), otherwise a determinism
-    /// failure could not be reproduced from its reported seed. `SplitMix64` is
-    /// the reference seed-expander from the xoshiro family — a single `u64` of
-    /// state, no external dependency.
+    /// `thread_rng` is deliberately avoided: the gate must produce the identical
+    /// permutation sequence on every machine and run, or a failure could not be
+    /// reproduced from its reported seed.
     struct SplitMix64(u64);
 
     impl SplitMix64 {
@@ -255,9 +240,8 @@ mod tests {
             z ^ (z >> 31)
         }
 
-        /// A uniform `usize` in `0..bound` (`bound > 0`) via Lemire's
-        /// multiply-shift reduction — bias is negligible for the small bounds
-        /// used here and the result is fully determined by the PRNG state.
+        /// A `usize` in `0..bound` (`bound > 0`) via Lemire's multiply-shift
+        /// reduction; fully determined by the PRNG state.
         fn below(&mut self, bound: usize) -> usize {
             usize::try_from((u128::from(self.next_u64()) * (bound as u128)) >> 64)
                 .expect("multiply-shift reduction is < bound, which fits usize")
@@ -265,9 +249,6 @@ mod tests {
     }
 
     /// Fisher–Yates shuffle of `points` in place, driven entirely by `rng`.
-    ///
-    /// Deterministic given the seed: the same seed always yields the same
-    /// permutation, so a failing permutation is reproducible from its seed.
     fn shuffle(points: &mut [[f64; 3]], rng: &mut SplitMix64) {
         for i in (1..points.len()).rev() {
             let j = rng.below(i + 1);
@@ -290,9 +271,7 @@ mod tests {
         const Q_MAX: f64 = 50.0;
         const GRID: u32 = 6;
 
-        // `f64::from(u32)` is an exact, lint-clean widening — preferred over an
-        // `as f64` cast (which trips `clippy::cast_precision_loss`) for the small
-        // grid indices.
+        // `f64::from(u32)`, not `as f64`: the latter trips cast_precision_loss.
         let span = f64::from(GRID - 1);
         let mut cloud = Vec::with_capacity((GRID * GRID + 1) as usize);
         for iv in 0..GRID {
@@ -303,7 +282,6 @@ mod tests {
                 cloud.push([v, q, z]);
             }
         }
-        // Closing point: maximum storage and flow at zero generation head.
         cloud.push([V_MAX, Q_MAX, 0.0]);
         cloud
     }
@@ -340,8 +318,6 @@ mod tests {
         if got_norm == 0.0 || want_norm == 0.0 {
             return false;
         }
-        // Try both orientations: qhull's outward sign may be either way
-        // relative to the hand-written reference.
         for sign in [1.0_f64, -1.0_f64] {
             let normal_matches =
                 (0..3).all(|i| (got[i] / got_norm - sign * want[i] / want_norm).abs() < 1e-9);
@@ -446,26 +422,13 @@ mod tests {
 
     #[test]
     fn representative_cloud_is_bit_identical_across_seeded_shuffles() {
-        // The hull's hyperplane output must be bit-identical regardless of input
-        // point ordering — the declaration-order invariance hard rule. The hull
-        // is a pure function with no MPI surface,
-        // so the project's shuffle/rank-count determinism pattern
-        // (scripts/check-cut-selection-determinism.sh, scripts/mpi_determinism.sh)
-        // is expressed here as a seeded-permutation Rust test.
+        // Bit-identical output regardless of input ordering — the
+        // declaration-order invariance hard rule, here as a seeded-permutation
+        // Rust test (the hull is pure, with no MPI surface).
         //
-        // A non-deterministic result on a supported platform is a BLOCKING
-        // ESCALATION (documented fallback: qhull-sys + own safe wrapper), never a
-        // silent change of qhull options or the sort to force this green.
-        //
-        // Cross-platform coverage of the cc-only qhull build (Linux runs this
-        // gate directly): the `cobre-python` wheel links `cobre-sddp` and so
-        // compiles the qhull shim on every entry of the `release-python.yml`
-        // wheel matrix — `wheel (aarch64-apple-darwin)` and
-        // `wheel (x86_64-apple-darwin)` cover macOS; `wheel
-        // (x86_64-pc-windows-msvc)` covers Windows; the matching
-        // `test (...)` smoke jobs re-import the wheel on each native OS. Those
-        // are the jobs that must stay green to prove the cc-only build needs no
-        // CMake/bindgen/libclang on macOS/Windows.
+        // A non-deterministic result is a BLOCKING ESCALATION (fallback:
+        // qhull-sys + own safe wrapper), never a silent change of qhull options
+        // or the sort to force this green.
         let base = representative_cloud();
         let reference = convex_hull_3d(&base).expect("representative cloud is a valid 3-D hull");
         assert!(
@@ -475,9 +438,7 @@ mod tests {
             reference.len()
         );
 
-        // 32 deterministic seeds (>= the 16+ the gate requires). Each drives a
-        // distinct Fisher–Yates permutation; the seed is reported on mismatch so
-        // a failure is reproducible.
+        // 32 seeds, at or above the 16+ the determinism gate requires.
         for seed in 0u64..32 {
             let mut rng = SplitMix64(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1));
             let mut permuted = base.clone();

@@ -130,7 +130,6 @@ pub fn parse_inflow_seasonal_stats(path: &Path) -> Result<Vec<InflowSeasonalStat
             let mean_m3s = mean_m3s_col.value(i);
             let std_m3s = std_m3s_col.value(i);
 
-            // Validate mean_m3s: must be finite (NaN and ±inf rejected).
             if !mean_m3s.is_finite() {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -139,7 +138,6 @@ pub fn parse_inflow_seasonal_stats(path: &Path) -> Result<Vec<InflowSeasonalStat
                 });
             }
 
-            // Validate std_m3s: must be non-negative and finite.
             if !std_m3s.is_finite() || std_m3s < 0.0 {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),

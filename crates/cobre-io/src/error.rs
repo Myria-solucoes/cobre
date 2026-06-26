@@ -102,8 +102,7 @@ pub enum LoadError {
 impl LoadError {
     /// Construct an [`LoadError::IoError`] wrapping an [`std::io::Error`] with path context.
     ///
-    /// Prefer this helper over constructing the variant directly to ensure consistent
-    /// path handling. Do **not** implement `From<std::io::Error>` — that conversion loses
+    /// Do **not** implement `From<std::io::Error>` instead — that conversion loses
     /// the path context required for diagnostic messages.
     ///
     /// # Examples
@@ -231,9 +230,7 @@ mod tests {
         let err = LoadError::ConstraintError {
             description: "hydro cascade contains a cycle".to_string(),
         };
-        // Verify LoadError can be used as &dyn std::error::Error by calling source() on it.
         let dyn_err: &dyn std::error::Error = &err;
-        // ConstraintError has no source, so source() returns None.
         assert!(dyn_err.source().is_none());
         assert!(err.to_string().contains("hydro cascade contains a cycle"));
     }
@@ -242,7 +239,6 @@ mod tests {
     fn test_load_error_io_helper() {
         let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "permission denied");
         let err = LoadError::io("config.json", io_err);
-        // Verify the helper constructs the IoError variant correctly
         assert!(matches!(err, LoadError::IoError { .. }));
         let display = err.to_string();
         assert!(display.contains("config.json"));

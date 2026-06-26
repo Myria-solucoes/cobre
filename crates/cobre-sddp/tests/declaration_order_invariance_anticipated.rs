@@ -2,10 +2,9 @@
 //!
 //! ## Scope and limitations
 //!
-//! This integration test verifies that `SystemBuilder::build()` produces a
-//! deterministic canonical thermal ordering (by `EntityId`) regardless of the
-//! declaration order in the input, and that training results are bit-for-bit
-//! identical across two declaration orderings.
+//! Verifies that `SystemBuilder::build()` produces a deterministic canonical
+//! thermal ordering (by `EntityId`) regardless of declaration order, and that
+//! training results are bit-for-bit identical across two declaration orderings.
 //!
 //! **It is NOT a declaration-order invariance probe.** Because
 //! `SystemBuilder::build()` sorts thermals by `EntityId`, both configurations
@@ -14,39 +13,12 @@
 //! regression in `SystemBuilder`'s canonical sort but does NOT exercise the
 //! LP-builder code paths that consume `anticipated_thermal_indices` directly.
 //!
-//! The genuine LP-level order-invariance probe lives at
-//! `crates/cobre-sddp/src/lp_builder/template.rs` (the test
+//! The genuine LP-level order-invariance probe is the test
 //! `lp_template_invariant_under_anticipated_index_permutation` in the
-//! internal `mod tests` block). That probe constructs two `TemplateBuildCtx`s
-//! with permuted `anticipated_thermal_indices`/`anticipated_lead_stages` arrays
-//! and asserts LP equivalence under the canonical column/row swap permutation.
-//! See the LP-construction-layer invariance probe in `lp_builder/template.rs`
-//! for the direct structural check.
-//!
-//! ## Fixture description
-//!
-//! - 6 stages, each 744 hours (one calendar month).
-//! - 1 bus (deficit cost 500 $/MWh).
-//! - 1 hydro (storage cap 200 hm³, initial 100 hm³, max_gen 250 MW,
-//!   inflow mean 80 m³/s, spillage cost 0.01 $/hm³) — id=3.
-//! - Anticipated thermal plant 0: K=2, cost 50 $/MWh, max 100 MW — id=2.
-//! - Backup standard thermal: cost 500 $/MWh, max 200 MW — id=4.
-//! - Anticipated thermal plant 1: K=4, cost 40 $/MWh, max 80 MW — id=5.
-//! - Load 150 MW constant across all stages.
-//!
-//! ## Canonical-sort behavior
-//!
-//! Config A declares thermals as `[id=4 (backup), id=2 (ant K=2), id=5 (ant K=4)]`.
-//! Config B declares thermals as `[id=5 (ant K=4), id=2 (ant K=2), id=4 (backup)]`.
-//!
-//! `SystemBuilder::build()` sorts by `EntityId`, so the canonical sorted order
-//! — `[id=2, id=4, id=5]` — is identical in both runs. The LP column layout
-//! is therefore deterministic: the anticipated-state block uses slot-major,
-//! plant-minor indexing relative to the anticipated-local sort order
-//! (id=2 -> local 0, id=5 -> local 1). A regression in `SystemBuilder`'s
-//! canonical sort would surface here as different `final_lb` values; deeper
-//! LP-builder regressions that depend on `anticipated_thermal_indices`
-//! ordering are caught by the LP-construction unit test referenced above.
+//! `#[cfg(test)]` block of the `lp::builder::template` module, which permutes the
+//! `anticipated_thermal_indices`/`anticipated_lead_stages` arrays and asserts LP
+//! equivalence under the canonical swap permutation — the structural check this
+//! test does not perform.
 
 #![allow(
     clippy::unwrap_used,
@@ -94,7 +66,6 @@ use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context
 // StubComm — single-rank communicator for testing
 // ---------------------------------------------------------------------------
 
-/// Single-rank communicator stub for testing.
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -155,7 +126,7 @@ fn default_hydro_bounds() -> HydroStageBounds {
         min_generation_mw: 0.0,
         max_generation_mw: 250.0,
         max_diversion_m3s: None,
-        filling_inflow_m3s: 0.0,
+        filling_min_rate_m3s: 0.0,
         water_withdrawal_m3s: 0.0,
     }
 }
@@ -238,7 +209,6 @@ fn build_system_with_thermal_order(thermal_order: &[EntityId; 3]) -> cobre_core:
         exit_stage_id: None,
     };
 
-    // Build the thermal list in the requested declaration order.
     let thermals: Vec<Thermal> = thermal_order
         .iter()
         .map(|id| match id.0 {
@@ -432,7 +402,6 @@ fn build_system_with_thermal_order(thermal_order: &[EntityId; 3]) -> cobre_core:
 // Config builder
 // ---------------------------------------------------------------------------
 
-/// Build a minimal [`Config`] for 1 forward pass and 8 iterations.
 fn build_config() -> Config {
     Config {
         schema: None,
@@ -463,7 +432,6 @@ fn build_config() -> Config {
 // Setup builder
 // ---------------------------------------------------------------------------
 
-/// Construct a [`StudySetup`] in-process from the given system and config.
 fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
     let stochastic = build_stochastic_context(
         &system,
@@ -489,41 +457,21 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 // Integration test
 // ---------------------------------------------------------------------------
 
-/// Verify that `SystemBuilder::build()` produces deterministic canonical
-/// thermal ordering and that training results are bit-for-bit identical
-/// across two declaration orderings of the same 3 thermals.
-///
-/// **This is a determinism check, not an invariance probe.** See the
-/// module-level docstring for the scope-and-limitations discussion and
-/// the pointer to the genuine LP-level invariance probe that
-/// exercises the `anticipated_thermal_indices` consumer paths directly.
-///
-/// What this test catches:
-/// - A regression in `SystemBuilder::build()` that broke the canonical
-///   sort would produce different `final_lb` values here.
-/// - A change to the LP construction that is sensitive to which canonical
-///   sort `SystemBuilder` uses (e.g., a switch from EntityId to name)
-///   would produce different cached state bitwise.
-///
-/// What this test does NOT catch:
-/// - Order-dependence within the LP builder itself when given different
-///   permutations of `anticipated_thermal_indices`. Both configurations
-///   feed identical canonical input to the LP builder, so any order-
-///   dependent code path downstream of `SystemBuilder` is exercised
-///   identically in both runs.
+/// Verify that `SystemBuilder::build()` produces deterministic canonical thermal
+/// ordering and that training results are bit-for-bit identical across two
+/// declaration orderings of the same 3 thermals. This is a determinism check, not
+/// an invariance probe — see the module docs for the scope-and-limitations
+/// discussion and the pointer to the genuine LP-level probe.
 #[test]
 fn declaration_order_invariance_anticipated_thermals() {
-    // Config A: regular-first, then anticipated ascending.
     let order_a = [EntityId(4), EntityId(2), EntityId(5)];
-    // Config B: reversed — anticipated descending, then regular.
     let order_b = [EntityId(5), EntityId(2), EntityId(4)];
 
     let system_a = build_system_with_thermal_order(&order_a);
     let system_b = build_system_with_thermal_order(&order_b);
 
-    // After SystemBuilder::build(), both systems must have thermals sorted by
-    // EntityId: [id=2, id=4, id=5]. Assert this explicitly so a regression in
-    // the builder is caught here rather than silently producing wrong results.
+    // Assert the canonical sort explicitly so a SystemBuilder regression is caught
+    // here rather than silently producing wrong results downstream.
     assert!(
         system_a
             .thermals()
@@ -579,10 +527,10 @@ fn declaration_order_invariance_anticipated_thermals() {
     let basis_cache_b = &result_b.basis_cache;
     assert_eq!(basis_cache_a.len(), basis_cache_b.len());
 
-    let indexer = setup_a.stage_indexer();
-    let ant_start = indexer.anticipated_state.start;
-    let n_anticipated = indexer.n_anticipated;
-    let k_max = indexer.k_max;
+    let state = setup_a.stage_state();
+    let ant_start = state.anticipated_state.start;
+    let n_anticipated = state.n_anticipated;
+    let k_max = state.k_max;
     let ant_block_len = n_anticipated * k_max;
 
     assert_eq!(n_anticipated, 2);

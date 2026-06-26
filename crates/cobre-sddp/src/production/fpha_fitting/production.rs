@@ -2,124 +2,76 @@
 //!
 //! Owns the head-conversion constant [`K`] and [`ProductionFunction`], the
 //! evaluable bundle of forebay table + tailrace + hydraulic-loss + efficiency that
-//! computes `phi(v, q, s)`. The `hull_fit`, `grid`, `alpha`, and `secant`
-//! submodules evaluate this model over the fitting grid.
+//! computes `phi(v, q, s)`.
 
 use cobre_core::{EfficiencyModel, HydraulicLossesModel, TailraceModel};
 
 use super::geometry::{ForebayTable, evaluate_losses, evaluate_tailrace};
 use super::tailrace::TailraceFamilies;
 
-// ── Tailrace source ───────────────────────────────────────────────────────────
-
-/// Source of the tailrace elevation `tailrace_level(outflow)` the production function reads.
-///
-/// Enum dispatch (no `Box<dyn>`) over a closed two-variant set, so `net_head`
-/// branches on the variant without a vtable. Built once per fit and held by
-/// [`ProductionFunction`]; the grid loop never reconstructs it, keeping
-/// `net_head` allocation-free.
+/// Source of the tailrace elevation `tailrace_level(outflow)` the production
+/// function reads.
 ///
 /// # Contract — the `Entity` arm is the inert fallback (Voice 1)
 ///
-/// A plant WITHOUT a `tailrace_curves` table resolves to [`TailraceSource::Entity`],
-/// which reproduces the pre-families behavior EXACTLY: `net_head` evaluates the
-/// same `evaluate_tailrace(model, q + s)` it always has. This bit-for-bit
-/// equivalence is the load-bearing invariant — a plant with no table must fit to
-/// the same planes as before the families path existed. Routing a table-less plant
-/// through the `Families` arm (e.g. with an empty/synthetic family) would silently
-/// perturb its fitted γ values and is forbidden.
+/// A plant without a `tailrace_curves` table resolves to [`TailraceSource::Entity`]
+/// and must fit bit-for-bit to the same planes as before the families path
+/// existed: `net_head` evaluates the same `evaluate_tailrace(model, q + s)`.
+/// Routing a table-less plant through the `Families` arm would silently perturb
+/// its fitted γ values and is forbidden.
 #[derive(Debug, Clone)]
 pub(crate) enum TailraceSource {
     /// The entity-level [`TailraceModel`]; `None` means constant zero tailrace.
-    /// Preserves the exact pre-families `net_head` value for plants with no table.
     Entity(Option<TailraceModel>),
-    /// The exact piecewise-quartic backwater-coupled families for a plant that has a
-    /// `tailrace_curves` table. `downstream_level_m` is the resolved backwater
-    /// level (`None` when unresolved — the evaluator then falls back to the
-    /// lowest-keyed family).
+    /// Piecewise-quartic backwater-coupled families for a plant with a
+    /// `tailrace_curves` table.
     Families {
-        /// The plant's ordered, validated tailrace families (built once per fit).
+        /// The plant's ordered, validated tailrace families.
         families: TailraceFamilies,
-        /// Resolved downstream reference level (m) keying the backwater coupling.
+        /// Resolved downstream reference level (m) keying the backwater coupling
+        /// (`None` ⇒ the evaluator falls back to the lowest-keyed family).
         downstream_level_m: Option<f64>,
     },
 }
 
-// ── ProductionFunction ────────────────────────────────────────────────────────
-
-/// Gravity times water density over unit conversion: g·ρ / 1000.
-///
-/// Used in the production function `phi = K * eta * q * h_net` to convert
-/// from hydraulic power (W) to megawatts. The factor is `9.81 * 1000 / 1e6 = 9.81e-3`.
+/// Gravity times water density over unit conversion `g·ρ / 1000 = 9.81e-3`,
+/// converting `phi = K·eta·q·h_net` from hydraulic power (W) to MW.
 const K: f64 = 9.81 / 1000.0;
 
-/// Complete hydro production function `phi(v, q, s)` with analytical derivatives.
+/// Complete hydro production function `phi(v, q, s)` with analytical derivatives —
+/// the forebay table, optional tailrace and loss models, and a constant turbine
+/// efficiency bundled into one evaluable object yielding power in MW. All
+/// validation is upstream; [`Self::new`] is infallible.
 ///
-/// Bundles the forebay interpolation table with the optional tailrace and hydraulic
-/// loss models and a constant turbine efficiency into a single evaluable object.
-/// Evaluation produces power output in MW; the FPHA hull fitter samples it on the
-/// `(V, Q)` grid to build the production cloud.
-///
-/// # Construction
-///
-/// Build from a validated [`ForebayTable`] and the optional model fields taken
-/// directly from a hydro plant entity. All validation is done upstream; `new` is
-/// infallible.
-///
-/// # Evaluation
-///
-/// Both public methods (`net_head`, `evaluate`) accept `(v, q, s)` where:
-/// - `v` — reservoir volume \[hm³\]
-/// - `q` — turbined flow \[m³/s\]
-/// - `s` — spillage flow \[m³/s\]
+/// Both `net_head` and `evaluate` take `(v, q, s)`: reservoir volume \[hm³\],
+/// turbined flow \[m³/s\], spillage flow \[m³/s\].
 #[derive(Debug, Clone)]
 pub(crate) struct ProductionFunction {
     /// Forebay height interpolation table.
     forebay: ForebayTable,
-    /// Tailrace elevation source. [`TailraceSource::Entity`] preserves the
-    /// pre-families behavior; [`TailraceSource::Families`] couples the exact
-    /// piecewise-quartic backwater families to a resolved downstream level.
+    /// Tailrace elevation source.
     tailrace: TailraceSource,
     /// Hydraulic losses model. `None` means lossless penstock.
     hydraulic_losses: Option<HydraulicLossesModel>,
-    /// Turbine efficiency (dimensionless, in `(0, 1]`). Defaults to `1.0` when the
-    /// hydro entity has no `EfficiencyModel`.
+    /// Turbine efficiency (dimensionless, in `(0, 1]`); `1.0` when the entity has
+    /// no `EfficiencyModel`.
     efficiency: f64,
-    /// Maximum turbined flow \[m³/s\], carried for grid construction in the fitting
-    /// algorithm.
+    /// Maximum turbined flow \[m³/s\].
     pub(crate) max_turbined_m3s: f64,
-    /// Installed-capacity ceiling \[MW\]. [`Self::evaluate_capped`] clips the
-    /// production output to `[0, max_generation_mw]` — a plant cannot generate
-    /// beyond its installed capacity regardless of head or flow. `f64::INFINITY`
-    /// disables the ceiling (the [`Self::new`] default); [`Self::with_max_generation_mw`]
-    /// sets it from the hydro entity.
+    /// Installed-capacity ceiling \[MW\] that [`Self::evaluate_capped`] clips to
+    /// `[0, max_generation_mw]`. `f64::INFINITY` disables the ceiling (the
+    /// [`Self::new`] default); [`Self::with_max_generation_mw`] sets it.
     max_generation_mw: f64,
     /// Human-readable plant name for error messages.
-    ///
-    /// Retained for diagnostic use in integration tests.
-    // Rationale: the field is populated and read in integration tests for diagnostic error
-    // messages; production code constructs `ProductionFunction` with a name but never reads
-    // it back — removing it would eliminate useful context from test failure output.
+    // Rationale: populated and read in integration-test diagnostics; production
+    // code sets a name but never reads it back.
     #[allow(dead_code)]
     pub(crate) hydro_name: String,
 }
 
 impl ProductionFunction {
-    /// Build a [`ProductionFunction`] from component models.
-    ///
-    /// # Parameters
-    ///
-    /// - `forebay` — pre-validated [`ForebayTable`] for this plant.
-    /// - `tailrace` — the resolved [`TailraceSource`]. [`TailraceSource::Entity`]
-    ///   carries the plant's [`TailraceModel`] (`None` = constant zero tailrace) and
-    ///   preserves the pre-families behavior; [`TailraceSource::Families`] carries
-    ///   the exact backwater families and the resolved downstream level.
-    /// - `hydraulic_losses` — optional reference to the plant's [`HydraulicLossesModel`];
-    ///   copied into the struct. `None` = lossless.
-    /// - `efficiency` — optional reference to the plant's [`EfficiencyModel`]; only
-    ///   [`EfficiencyModel::Constant`] is supported. `None` = 1.0 (100% efficiency).
-    /// - `max_turbined_m3s` — maximum turbined flow from the hydro entity \[m³/s\].
-    /// - `hydro_name` — plant name used in diagnostic messages.
+    /// Build a [`ProductionFunction`] from component models. `efficiency` supports
+    /// only [`EfficiencyModel::Constant`]; `None` = 1.0.
     pub(crate) fn new(
         forebay: ForebayTable,
         tailrace: TailraceSource,
@@ -143,13 +95,10 @@ impl ProductionFunction {
         }
     }
 
-    /// Set the installed-capacity ceiling \[MW\] from the hydro entity.
+    /// Set the installed-capacity ceiling \[MW\].
     ///
-    /// [`Self::evaluate_capped`] then clips the production to `[0, max_generation_mw]`,
-    /// so the cloud flattens at the ceiling and the hull yields a `generation ≤ max_generation_mw`
-    /// plane. A non-positive value leaves the ceiling disabled (`f64::INFINITY`)
-    /// rather than clamping every point to zero — a guard for a malformed entity;
-    /// a real FPHA plant always carries a positive capacity.
+    /// A non-positive value leaves the ceiling disabled (`f64::INFINITY`) rather
+    /// than clamping every point to zero — a guard for a malformed entity.
     pub(crate) fn with_max_generation_mw(mut self, max_generation_mw: f64) -> Self {
         self.max_generation_mw = if max_generation_mw > 0.0 {
             max_generation_mw
@@ -159,32 +108,15 @@ impl ProductionFunction {
         self
     }
 
-    /// Net head available at the turbine \[m\].
-    ///
-    /// Computes `h_net = h_fore(v) - h_tail(q+s) - h_loss(gross_head, q)`, where:
-    /// - `h_fore` is the interpolated forebay surface elevation,
-    /// - `h_tail` is the tailrace elevation at total outflow `q + s` (0 if no model),
-    /// - `h_loss` is the hydraulic head loss (0 if no model).
-    ///
-    /// For the [`HydraulicLossesModel::Factor`] variant, losses are proportional to
-    /// gross head, which simplifies to `h_net = (1 - k) * (h_fore - h_tail)`.
-    ///
-    /// The result is clamped to `max(0.0, h_net)` — negative net head is physically
-    /// impossible and arises only at out-of-range operating points.
-    ///
-    /// # Parameters
-    ///
-    /// - `v` — reservoir volume \[hm³\]
-    /// - `q` — turbined flow \[m³/s\]
-    /// - `s` — spillage flow \[m³/s\]
+    /// Net head at the turbine \[m\]:
+    /// `h_net = h_fore(v) − h_tail(q+s) − h_loss(gross_head, q)`, clamped to
+    /// `max(0.0, h_net)` (negative net head is physically impossible). The
+    /// [`HydraulicLossesModel::Factor`] variant simplifies to
+    /// `(1 − k)·(h_fore − h_tail)`.
     pub(crate) fn net_head(&self, v: f64, q: f64, s: f64) -> f64 {
         let h_fore = self.forebay.height(v);
-        // `q_out = q + s = outflow` is the total downstream flow the tailrace sees;
-        // the secant's `s = lateral_flow` sweep flows in through `s` unchanged, so both
-        // source variants observe the identical `outflow`. The `Entity` arm MUST
-        // call `evaluate_tailrace(model, q_out)` verbatim — the inert-fallback
-        // contract on [`TailraceSource`] — so a table-less plant's net head is
-        // bit-for-bit the pre-families value.
+        // The `Entity` arm MUST call `evaluate_tailrace(model, q_out)` verbatim —
+        // the inert-fallback contract on [`TailraceSource`].
         let q_out = q + s;
         let h_tail = match &self.tailrace {
             TailraceSource::Entity(model) => {
@@ -204,34 +136,23 @@ impl ProductionFunction {
         h_net.max(0.0)
     }
 
-    /// Power output from the production function \[MW\], uncapped.
+    /// Power output \[MW\], uncapped: `phi = K·eta·q·h_net`.
     ///
-    /// Evaluates `phi(v, q, s) = K * eta * q * h_net(v, q, s)` where
-    /// `K = 9.81 / 1000` and `eta` is the turbine efficiency.
-    ///
-    /// The result is always non-negative because `q >= 0` and `h_net >= 0`. The
-    /// installed-capacity ceiling is NOT applied here — see [`Self::evaluate_capped`].
-    /// The lateral secant fits on this uncapped value so the spillage sensitivity
-    /// is read from the raw head curve and not flattened wherever the ceiling binds.
-    ///
-    /// # Parameters
-    ///
-    /// - `v` — reservoir volume \[hm³\]
-    /// - `q` — turbined flow \[m³/s\]
-    /// - `s` — spillage flow \[m³/s\]
+    /// The installed-capacity ceiling is NOT applied here (see
+    /// [`Self::evaluate_capped`]): the lateral secant fits on this uncapped value so
+    /// spillage sensitivity is read from the raw head curve, not flattened where the
+    /// ceiling binds.
     pub(crate) fn evaluate(&self, v: f64, q: f64, s: f64) -> f64 {
         let h_net = self.net_head(v, q, s);
         K * self.efficiency * q * h_net
     }
 
-    /// Production output clipped to the installed-capacity ceiling \[MW\]:
+    /// Production clipped to the installed-capacity ceiling \[MW\]:
     /// `min(evaluate(v, q, s), max_generation_mw)`.
     ///
-    /// The production cloud and the α regression evaluate the model through this
-    /// method so the fitted upper envelope never exceeds installed capacity (the
-    /// hull gains a flat `generation ≤ max_generation_mw` facet where the raw output would
-    /// run past it). The lateral secant deliberately uses the uncapped
-    /// [`Self::evaluate`] instead — see that method.
+    /// The cloud and α regression use this so the fitted envelope gains a flat
+    /// `generation ≤ max_generation_mw` facet; the lateral secant uses the uncapped
+    /// [`Self::evaluate`] instead.
     pub(crate) fn evaluate_capped(&self, v: f64, q: f64, s: f64) -> f64 {
         self.evaluate(v, q, s).min(self.max_generation_mw)
     }

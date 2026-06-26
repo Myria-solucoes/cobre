@@ -1,42 +1,13 @@
 //! Pre-materialised lookup table: `(parameter_id, stage_idx)` → `f64`.
 //!
-//! [`ResolvedParameters`] is built once before LP construction by
-//! [`build_resolved_parameters`]. It resolves all four [`ParameterKind`]
-//! variants — `Constant`, `PerStage`, `Seasonal`, and `Computed` — into a
-//! dense two-dimensional array indexed by parameter slot and stage index.
-//!
-//! The seven [`ComputedParameter`] variants are resolved against
-//! [`EnergyConversionSet`] and [`HydroEnergyProductivityOverride`] for
-//! hydro-indexed quantities, or directly from the [`Hydro`] entity record for
-//! stage-invariant storage limits.
-//!
-//! ## Index layout
-//!
-//! The outer dimension of `per_param` preserves input declaration order so
-//! that the table is deterministic regardless of parameter ordering in the
-//! source file. [`id_to_slot`](ResolvedParameters::id_to_slot) is sorted
-//! ascending by `EntityId.0` and searched with `binary_search` at query time,
-//! giving `O(log n)` lookup with no hashing.
-//!
 //! ## Basis-cache invariance
 //!
-//! Parameter values are resolved once at setup time and baked into
-//! [`StageTemplate`](cobre_solver::StageTemplate) entries during LP construction.
-//! The [`ResolvedParameters`] table itself is never mutated after construction,
-//! and stage templates are never rebuilt during training or simulation.
-//!
-//! The hot-path solver loop patches only **row bounds** via
-//! [`PatchBuffer`](crate::lp_builder::PatchBuffer). The five row categories
-//! that `PatchBuffer` mutates — storage-fixing, AR lag-fixing, AR dynamics,
-//! load-balance, and z-inflow definition — are all distinct from generic-constraint
-//! rows. Consequently, LP matrix coefficients (including those derived from
-//! parameter resolution) remain identical iteration-to-iteration, and the
-//! warm-start basis cache does not need to be invalidated when parameter values
-//! differ across stages.
-//!
-//! Any future change that mutates parameter values across iterations (for example,
-//! adaptive parameter updates) would invalidate this assumption and must explicitly
-//! rebuild or invalidate the affected `StageTemplate` entries.
+//! Resolved values bake into [`StageTemplate`](cobre_solver::StageTemplate)
+//! entries at construction and are never rebuilt; the hot-path solver patches
+//! only row bounds, so LP matrix coefficients stay identical across iterations
+//! and the warm-start basis cache needs no invalidation. A future change that
+//! mutates parameter values across iterations (adaptive updates) breaks this and
+//! must rebuild or invalidate the affected `StageTemplate` entries.
 
 use std::collections::HashMap;
 
@@ -50,9 +21,6 @@ use crate::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverr
 // ---------------------------------------------------------------------------
 
 /// Errors returned by [`build_resolved_parameters`].
-///
-/// Each variant carries the parameter `name` so callers can produce
-/// user-friendly diagnostics without re-looking it up.
 #[derive(Debug, Error, PartialEq)]
 pub enum ResolvedParametersError {
     /// A `PerStage` parameter vector has the wrong length.
@@ -107,40 +75,22 @@ pub enum ResolvedParametersError {
 
 /// Dense lookup table mapping `(parameter_id, stage_idx)` → `f64`.
 ///
-/// Built once before LP construction by [`build_resolved_parameters`] and
-/// queried by the LP builder via [`get`](ResolvedParameters::get).
-///
-/// ## Memory layout
-///
-/// The outer dimension (`per_param`) is indexed by parameter slot in
-/// declaration order. Each inner `Vec<f64>` has length `n_stages` and is
-/// populated contiguously in stage order for cache-friendly sequential access.
-///
-/// ## Lookup
-///
-/// [`id_to_slot`](ResolvedParameters) is a sorted `Vec<(i32, usize)>` that
-/// maps `EntityId.0` to a slot index via `binary_search`. This preserves
-/// declaration-order invariance under postcard serialisation and avoids the
-/// non-determinism of `HashMap`.
+/// `id_to_slot` is sorted ascending by key — for declaration-order invariance
+/// (a `HashMap` would not be deterministic) and `O(log n)` binary-search lookup.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedParameters {
-    /// Outer index: parameter slot (dense, matches `Vec<ScalarParameter>` order).
+    /// Outer index: parameter slot (matches `Vec<ScalarParameter>` order).
     /// Inner index: `stage_idx` in `0..n_stages`.
     pub per_param: Vec<Vec<f64>>,
     /// Maps `EntityId.0` of the parameter to its slot in `per_param`.
-    /// Sorted ascending by key for declaration-order invariance and `O(log n)`
-    /// binary-search lookup.
     pub id_to_slot: Vec<(i32, usize)>,
 }
 
 impl ResolvedParameters {
     /// Return the resolved `f64` value for `(id, stage_idx)`.
     ///
-    /// Performs a binary search over `id_to_slot` and returns
-    /// `per_param[slot][stage_idx]`.
-    ///
-    /// In debug builds, asserts on a miss (unknown `id` or out-of-range
-    /// `stage_idx`) and returns `0.0` — mirroring the LP-build site sentinel.
+    /// On a miss (unknown `id` or out-of-range `stage_idx`) returns `0.0` —
+    /// mirroring the LP-build site sentinel — and `debug_assert`s in debug builds.
     #[must_use]
     pub fn get(&self, id: EntityId, stage_idx: usize) -> f64 {
         if let Ok(pos) = self.id_to_slot.binary_search_by_key(&id.0, |(k, _)| *k) {
@@ -172,10 +122,6 @@ impl ResolvedParameters {
 
 /// Build a [`ResolvedParameters`] table from assembled scalar parameters and
 /// energy-conversion data.
-///
-/// Iterates `parameters` in declaration order, resolves each [`ParameterKind`]
-/// variant, and stores the resulting `Vec<f64>` (length `n_stages`) at the
-/// corresponding slot.
 ///
 /// # Errors
 ///
@@ -223,8 +169,6 @@ pub fn build_resolved_parameters(
     stage_to_season: &[i32],
     n_stages: usize,
 ) -> Result<ResolvedParameters, ResolvedParametersError> {
-    // Build a hydro_id → positional index map for O(1) lookup during Computed
-    // variant resolution. The map is built once and dropped before returning.
     let hydro_index: HashMap<EntityId, usize> = hydros
         .iter()
         .enumerate()
@@ -249,10 +193,8 @@ pub fn build_resolved_parameters(
         id_to_slot.push((param.id.0, slot));
     }
 
-    // Sort by EntityId.0 for O(log n) binary-search lookup. Adjacent-equality
-    // check documents the uniqueness invariant (the JSON reader already enforces
-    // uniqueness upstream, but a debug_assert here makes it observable at the
-    // resolver boundary).
+    // Uniqueness is enforced upstream (the JSON reader); the debug_assert makes
+    // a duplicate observable at the resolver boundary.
     id_to_slot.sort_by_key(|(k, _)| *k);
     debug_assert!(
         id_to_slot.windows(2).all(|w| w[0].0 != w[1].0),
@@ -275,10 +217,8 @@ pub fn build_resolved_parameters(
 // ---------------------------------------------------------------------------
 
 /// Resolve a single [`ParameterKind`] into a `Vec<f64>` of length `n_stages`.
-// Rationale: the parameters carry the energy-conversion, override-table, hydro-slice,
-// and index-map context that every `ParameterKind` variant needs; `resolve_computed`
-// mirrors this arity so the two are interchangeable at the dispatch site, and bundling
-// into a context struct would just move the arity to the struct literal.
+// Rationale: `resolve_computed` mirrors this arity so the two are interchangeable
+// at the dispatch site; a context struct would just move the arity to the literal.
 #[allow(clippy::too_many_arguments)]
 fn resolve_kind(
     kind: &ParameterKind,
@@ -337,11 +277,9 @@ fn resolve_kind(
 }
 
 /// Resolve a [`ComputedParameter`] into a `Vec<f64>` of length `n_stages`.
-// Rationale: the signature mirrors `resolve_kind` exactly so the two functions are
-// interchangeable at the `ParameterKind::Computed` dispatch site; the shared arity
-// carries the same energy-conversion, override-table, hydro-slice, and index-map
-// context that the seven `ComputedParameter` variants all require — bundling them
-// into a context struct would just move the arity to the struct literal.
+// Rationale: the signature mirrors `resolve_kind` so the two are interchangeable
+// at the `ParameterKind::Computed` dispatch site; a context struct would just move
+// the arity to the literal.
 #[allow(clippy::too_many_arguments)]
 fn resolve_computed(
     cp: ComputedParameter,
@@ -353,7 +291,6 @@ fn resolve_computed(
     hydros: &[Hydro],
     hydro_index: &HashMap<EntityId, usize>,
 ) -> Result<Vec<f64>, ResolvedParametersError> {
-    // Extract hydro_id from whichever variant is active (all seven carry it).
     let hydro_id = match cp {
         ComputedParameter::EquivalentProductivity { hydro_id }
         | ComputedParameter::AccumulatedProductivity { hydro_id }
@@ -373,10 +310,8 @@ fn resolve_computed(
 
     let hydro = &hydros[hydro_idx];
 
-    // Stage-invariant variants can be resolved once and replicated.
-    // SpecificProductivity and all remaining variants are handled per-stage below
-    // (SpecificProductivity could be replicated but may have stage-specific overrides,
-    // so correctness requires per-stage resolution).
+    // SpecificProductivity is resolved per-stage below, not replicated once: it may
+    // carry stage-specific overrides.
     match cp {
         ComputedParameter::MinStorage { .. } => {
             return Ok(vec![hydro.min_storage_hm3; n_stages]);
@@ -400,17 +335,10 @@ fn resolve_computed(
                 energy_conversion.accumulated_productivity(hydro_idx, t)
             }
             ComputedParameter::ReferenceVolume { .. } => {
-                // The reference operating volume is JSON-sourced: it flows
-                // `hydro_production_models.json` → resolver → energy-conversion
-                // cell, which is the single owner of the resolved hm³ for every
-                // policy/LP/simulation consumer. There is intentionally NO
-                // parquet `v_ref` override tier here — unlike the sibling
-                // `ReferenceTurbine` below, which still consults the productivity
-                // parquet's `q_ref` override. Re-adding an
-                // `override_table.reference_volume(...).unwrap_or(...)` wrapper
-                // "for symmetry" with `q_ref` would resurrect the retired
-                // second source of truth and silently let a stale parquet column
-                // shadow the JSON value.
+                // Intentionally NO parquet `v_ref` override tier — unlike the
+                // sibling `ReferenceTurbine` below, which consults the `q_ref`
+                // override. Re-adding one "for symmetry" resurrects a retired
+                // second source of truth that silently shadows the JSON value.
                 energy_conversion
                     .conversion(hydro_idx, t)
                     .reference_volume_hm3
@@ -449,41 +377,27 @@ fn resolve_computed(
 
 /// Wire format version for the [`ResolvedParameters`] postcard envelope.
 ///
-/// Bumped to 1 in the same change that introduced struct-form variants for
-/// [`ParameterKind`] and internally-tagged [`ComputedParameter`]. Although
-/// [`ResolvedParameters`] itself only stores pre-resolved `f64` values (no
-/// `ParameterKind` fields), an explicit version guard ensures that a
-/// heterogeneous MPI cluster — where one rank runs a new binary and another
-/// runs an old binary — fails fast with a clear error rather than silently
-/// misinterpreting bytes.
+/// Decoding rejects any mismatch so a heterogeneous MPI cluster (new binary on
+/// one rank, old on another) fails fast rather than misinterpreting bytes. Bump
+/// in lockstep with any envelope-layout change.
 pub const RESOLVED_PARAMETERS_WIRE_VERSION: u32 = 1;
 
-/// Thin envelope that prepends a version tag to a [`ResolvedParameters`]
-/// payload for MPI broadcast.
-///
-/// Encoding always sets `version` to [`RESOLVED_PARAMETERS_WIRE_VERSION`].
-/// Decoding rejects any `version` that does not match, returning
-/// [`crate::SddpError::WireVersionMismatch`].
+/// Version-tagged envelope wrapping a [`ResolvedParameters`] payload for MPI
+/// broadcast; decode rejects a non-matching `version`.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ResolvedParametersWireEnvelope {
     version: u32,
     payload: ResolvedParameters,
 }
 
-/// Serialize a [`ResolvedParameters`] table to a postcard byte buffer for MPI
-/// broadcast.
-///
-/// The returned `Vec<u8>` encodes a versioned envelope — both the dense
-/// `per_param` rows and the sorted `id_to_slot` index — as a single postcard
-/// payload. The caller is responsible for the MPI broadcast call itself; these
-/// helpers are pure serialization/deserialization with no network I/O.
+/// Serialize a [`ResolvedParameters`] table to a versioned postcard envelope for
+/// MPI broadcast. Pure ser/de; the caller owns the broadcast call.
 ///
 /// # Errors
 ///
-/// Returns [`crate::SddpError::Validation`] if postcard serialization fails.  With
-/// the current struct layout (`Vec<Vec<f64>>` + `Vec<(i32, usize)>`) this
-/// cannot occur in practice; the error path exists to satisfy the
-/// `Result<_, SddpError>` contract used by other broadcast helpers.
+/// Returns [`crate::SddpError::Validation`] if postcard serialization fails (not
+/// reachable with the current struct layout; the path satisfies the
+/// `Result<_, SddpError>` contract shared by other broadcast helpers).
 ///
 /// # Examples
 ///
@@ -525,13 +439,10 @@ pub fn serialize_resolved_parameters(
 }
 
 /// Deserialize a [`ResolvedParameters`] table from a postcard byte buffer
-/// received via MPI broadcast.
+/// produced by [`serialize_resolved_parameters`].
 ///
-/// The byte buffer must have been produced by [`serialize_resolved_parameters`].
-/// An empty slice or a corrupted buffer returns an error; this function never
-/// silently discards data. A version mismatch returns
-/// [`crate::SddpError::WireVersionMismatch`] so callers can distinguish format
-/// incompatibility from corruption.
+/// A version mismatch returns a distinct error from corruption, never silently
+/// accepting stale bytes.
 ///
 /// # Errors
 ///

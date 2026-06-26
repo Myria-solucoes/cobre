@@ -41,10 +41,6 @@ use cobre_sddp::{
 };
 use cobre_solver::ActiveSolver;
 
-// ---------------------------------------------------------------------------
-// Stub communicator (single-rank, mirrors parity_hash_d01_d15.rs)
-// ---------------------------------------------------------------------------
-
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -89,10 +85,6 @@ impl Communicator for StubComm {
         std::process::exit(error_code)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Test
-// ---------------------------------------------------------------------------
 
 #[test]
 #[cfg_attr(
@@ -176,9 +168,6 @@ fn d17_evaporation_is_signed_per_month() {
     let _summary = aggregate_simulation(&local_costs.costs, sim_config, &comm)
         .expect("aggregate_simulation must succeed");
 
-    // ------------------------------------------------------------------
-    // Single deterministic scenario.
-    // ------------------------------------------------------------------
     assert_eq!(
         scenario_results.len(),
         1,
@@ -193,12 +182,6 @@ fn d17_evaporation_is_signed_per_month() {
         scenario.stages.len()
     );
 
-    // ------------------------------------------------------------------
-    // Per-stage evaporation sign and slack assertions.
-    //
-    // Stages 0/1/2 -> Oct/Nov/Dec (negative coefficients_mm -> rainfall input).
-    // Stage  3     -> Jan         (positive coefficient    -> evaporation loss).
-    // ------------------------------------------------------------------
     for stage in &scenario.stages {
         assert_eq!(
             stage.hydros.len(),

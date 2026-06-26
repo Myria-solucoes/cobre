@@ -31,12 +31,8 @@ use crate::fpha_fitting::{
 };
 // ── FPHA production model resolution ─────────────────────────────────────────
 
-/// Return type for [`resolve_production_models`]: the model set, productivity
-/// override, provenance vector, and computed-FPHA export rows.
-///
-/// The export rows are non-empty only when at least one hydro uses
-/// `source: "computed"`.  The write site is the calling entry point;
-/// `resolve_production_models` never performs any I/O.
+/// Return type for [`resolve_production_models`]. Export rows are non-empty only
+/// when at least one hydro uses `source: "computed"`; this function never does I/O.
 type ResolveProductionResult = (
     ProductionModelSet,
     crate::energy_conversion::HydroEnergyProductivityOverride,
@@ -49,34 +45,11 @@ type ResolveProductionResult = (
 
 /// Resolve per-hydro per-stage production models from the case directory.
 ///
-/// Reads `system/hydro_production_models.json` when present (optional file).
-/// If absent, all hydros fall back to the [`HydroGenerationModel`] from their
-/// entity definition in `system/hydros.json`. When any hydro is configured as
-/// FPHA with `source: "precomputed"`, also loads `system/fpha_hyperplanes.parquet`.
-/// When any hydro is configured as FPHA with `source: "computed"`, also loads
-/// `system/hydro_geometry.parquet` and runs the FPHA fitting pipeline.
-///
-/// Returns `(ProductionModelSet, productivity_override, provenance_vec,
-/// export_rows)` where the provenance vector records the
-/// [`ProductionModelSource`] for each hydro in canonical ID order, and
-/// `export_rows` carries the computed-FPHA hyperplane rows for export.
-///
-/// # Model resolution per hydro
-///
-/// For each hydro in `system.hydros()` (canonical ID order):
-///
-/// 1. If `hydro_production_models.json` has an entry for this hydro:
-///    - `source: "precomputed"` → load hyperplanes from `fpha_hyperplanes.parquet`,
-///      scale `gamma_0` by `kappa`, record [`ProductionModelSource::PrecomputedHyperplanes`].
-///    - `source: "computed"` → fit hyperplanes from `hydro_geometry.parquet` via the
-///      FPHA fitting pipeline, record [`ProductionModelSource::ComputedFromGeometry`].
-/// 2. Otherwise, use the [`HydroGenerationModel`] from the entity definition:
-///    - [`HydroGenerationModel::ConstantProductivity`] →
-///      [`ResolvedProductionModel::ConstantProductivity`].
-///    - [`HydroGenerationModel::LinearizedHead`] →
-///      [`ResolvedProductionModel::ConstantProductivity`] (uses the productivity field).
-///    - [`HydroGenerationModel::Fpha`] without a config entry →
-///      [`SddpError::Validation`] (no hyperplane source specified).
+/// `hydro_production_models.json` is optional; absent it, every hydro falls back
+/// to its entity [`HydroGenerationModel`]. `fpha_hyperplanes.parquet` is loaded
+/// only when some hydro is FPHA `source: "precomputed"`; `hydro_geometry.parquet`
+/// and the FPHA fitting pipeline run only when some hydro is `source: "computed"`.
+/// The provenance vector is in canonical hydro ID order.
 ///
 /// # Errors
 ///
@@ -104,12 +77,9 @@ pub fn resolve_production_models(
 /// Variant of [`resolve_production_models`] that consumes a pre-parsed
 /// [`cobre_io::CaseArtifacts`] bundle.
 ///
-/// `collect_deviation_points` is the run-level opt-in sourced from
-/// `config.exports.fpha_deviation_points`: when `true`, the returned
-/// per-sampled-point deviation rows are populated; when `false` they are empty
-/// and the fit is bit-identical (zero collection overhead). It is a plain scalar,
-/// not part of `CaseArtifacts`, because it is a run-level export choice rather
-/// than case input data.
+/// `collect_deviation_points` is the run-level opt-in from
+/// `config.exports.fpha_deviation_points`: `false` leaves the deviation rows
+/// empty and the fit bit-identical (zero collection overhead).
 ///
 /// # Errors
 ///
@@ -124,15 +94,9 @@ pub fn resolve_production_models_from_artifacts(
     )
     .map_err(|e| SddpError::Validation(e.to_string()))?;
 
-    // Borrow from the artifacts bundle; no clone of the config rows is
-    // needed because the per-hydro maps below only need references.
     let prod_configs: &[ProductionModelConfig] = &artifacts.production_models;
 
-    // The file-level similar-hyperplane reduction config, applied uniformly to
-    // every computed-FPHA plant after fitting. `None` means no reduction — the
-    // fit then literally skips the merge pass. Threaded by reference into the
-    // per-stage fit; it is fixed for the whole study, so it is never stored
-    // per-entry.
+    // `None` skips the merge pass entirely.
     let plane_reduction: Option<&cobre_io::extensions::PlaneReductionConfig> =
         artifacts.plane_reduction.as_ref();
 
@@ -158,13 +122,7 @@ pub fn resolve_production_models_from_artifacts(
         HashMap::new()
     };
 
-    // The per-plant exact-tailrace families, grouped once from
-    // `tailrace_curves` (mirrors `build_geometry_map`). A plant absent from this
-    // map has no table and falls back to its entity `TailraceModel` — the inert
-    // fallback. Only built when some hydro uses computed FPHA, since the families
-    // feed only the computed fit. A construction error (a malformed family or a
-    // keyless multi-family table) maps to `SddpError::Validation` via the
-    // `FphaFittingError` -> `SddpError` conversion, which carries the hydro id.
+    // A plant absent from this map falls back to its entity `TailraceModel`.
     let families_map: HashMap<EntityId, TailraceFamilies> =
         if uses_computed_fpha && !artifacts.tailrace_curves.is_empty() {
             build_tailrace_families_map(&artifacts.tailrace_curves)?
@@ -172,21 +130,14 @@ pub fn resolve_production_models_from_artifacts(
             HashMap::new()
         };
 
-    // Study stages only (id >= 0), in canonical order.
     let study_stages: Vec<&cobre_core::temporal::Stage> =
         system.stages().iter().filter(|s| s.id >= 0).collect();
     let n_stages = study_stages.len();
     let n_hydros = system.hydros().len();
 
-    // Reference operating volume resolver for the downstream backwater level,
-    // built from the JSON-declared `reference_volume` (or the default) resolved to
-    // absolute hm³ per `(plant, study-stage)` against each plant's own
-    // `[v_min, v_max]` band. The same resolved table feeds the energy-conversion
-    // reference in `setup::build_energy_and_templates`, so the backwater level and
-    // the productivity reference share one source of truth. A plant/stage with no
-    // declared value flows through `resolve_reference_volume_hm3(None, ..)` — the
-    // single owner of the default fraction — keeping the undeclared value
-    // bit-identical to the prior inline `v_min + 0.65·(v_max − v_min)`.
+    // The same resolved table feeds the energy-conversion reference in
+    // `setup::build_energy_and_templates`, so the backwater level and the
+    // productivity reference share one source of truth.
     let reference_volumes_hm3: Vec<(EntityId, usize, f64)> = system
         .hydros()
         .iter()
@@ -197,17 +148,10 @@ pub fn resolve_production_models_from_artifacts(
                     .and_then(|config| find_reference_volume_for_stage(config, stage));
                 let resolved =
                     resolve_reference_volume_hm3(rv, hydro.min_storage_hm3, hydro.max_storage_hm3);
-                // Keyed by the 0-based position within `study_stages`, NOT by
-                // `stage.index` (the global index, offset whenever pre-study
-                // stages precede the horizon). Both consumers — the backwater
-                // `resolve_downstream_level` and `build_energy_conversion_set` —
-                // query this resolver by the same 0-based study position, so the
-                // keying must match theirs; `stage.index` would shift every key by
-                // the pre-study-stage count and make the energy-conversion lookup
-                // (which counts from 0) miss and fall back to the default. The
-                // RESOLVED VALUE already encodes the stage's season via
-                // `find_reference_volume_for_stage`, so a horizon beginning in any
-                // season (not only season 0) carries the right per-stage value.
+                // Key by the 0-based `study_stages` position, NOT `stage.index`:
+                // both consumers (`resolve_downstream_level`,
+                // `build_energy_conversion_set`) query by study position;
+                // `stage.index` shifts every key by the pre-study-stage count.
                 (hydro.id, stage_pos, resolved)
             })
         })
@@ -223,22 +167,12 @@ pub fn resolve_production_models_from_artifacts(
     // canonical-order flatten as `export_rows`. Empty unless the opt-in is on.
     let mut fpha_deviation_point_rows: Vec<cobre_io::FphaDeviationPointRow> = Vec::new();
 
-    // Per-hydro FPHA fit, parallelized over the canonical hydro slice. Each
-    // `fit_one_hydro` reads only shared immutable `&` state (`System` is `Send +
-    // Sync` by the compile-time assert in `cobre_core::System`; every borrowed map
-    // holds `Sync` data) and returns a self-owned `PerHydroFit`, so the fit carries
-    // NO thread/rank/clock input: the per-hydro dedup cache is function-local to
-    // `fit_computed_planes_per_stage`, and the plane-reduction seed is the
-    // pure-identity `fnv1a64(hydro_id, entry_level_bits, tail_slot, candidate_slot)`
-    // (verified in `fpha_fitting::reduction` / `fpha_fitting::rng`). `par_iter()` +
-    // `collect::<Result<Vec<_>, _>>()` therefore reassembles the fits in canonical
-    // (input) hydro order regardless of thread scheduling and short-circuits on the
-    // first error, after which the SEQUENTIAL in-order flatten below preserves the
-    // `(hydro_id, stage_id, plane_id)` export-row ordering bit-for-bit. Collecting
-    // into a shared `Mutex<Vec>` (or pushing rows from worker threads), or keying
-    // the reduction seed on merge history, would reorder the export stream and
-    // break bit-determinism — the same per-entity idiom proven deterministic in
-    // `cobre_stochastic::par::fitting::correlation::compute_hydro_residuals`.
+    // Determinism (D5): `par_iter().collect()` reassembles the fits in canonical
+    // hydro order regardless of thread scheduling, then the SEQUENTIAL flatten
+    // below preserves `(hydro_id, stage_id, plane_id)` export ordering bit-for-bit.
+    // Collecting into a shared `Mutex<Vec>`, pushing rows from worker threads, or
+    // keying the reduction seed on merge history would reorder the stream and break
+    // bit-determinism.
     let fits: Vec<PerHydroFit> = system
         .hydros()
         .par_iter()
@@ -259,31 +193,18 @@ pub fn resolve_production_models_from_artifacts(
             )
         })
         .collect::<Result<Vec<_>, SddpError>>()?;
-    // `fits` is reassembled in canonical `system.hydros()` order by the
-    // `par_iter().collect()` above, so zipping it back with `system.hydros()`
-    // recovers each fit's hydro id in lockstep — the source of `hydro_id` for the
-    // carried deviation entry. Threading the id from this outer zip avoids
-    // widening the parallel-worker `FphaDeviationDiagnostic` with an id it does
-    // not otherwise need.
+    // This SEQUENTIAL flatten is the D5 ordering anchor for the parallel fit above:
+    // it concatenates export rows, deviation-point rows, and deviations in canonical
+    // hydro then stage order, and emits the `tracing::warn!` here (not from a worker)
+    // so the carried vectors and the warning order are declaration-order invariant.
     for (hydro, fit) in system.hydros().iter().zip(fits) {
         provenance.push(fit.provenance);
         export_rows.extend(fit.export_rows);
-        // Concatenate this hydro's per-sampled-point rows in canonical hydro order
-        // (the same SEQUENTIAL flatten as `export_rows`), so the assembled stream
-        // is `(hydro_id, stage_id, grid)`-ordered and declaration-order invariant —
-        // never pushed from a parallel worker. Empty unless the opt-in is on. Each
-        // row already carries its `hydro_id`/`stage_id`, set inside the per-stage
-        // emission.
         fpha_deviation_point_rows.extend(fit.deviation_point_rows);
         all_models.push(fit.stage_models);
-        // Carry EVERY distinct fit's deviation up (the metadata aggregate must
-        // reflect every computed-FPHA plant/stage), while warning ONLY for
-        // warn-worthy entries. The capture and the warn predicate are split: the
-        // push is unconditional, the `tracing::warn!` is guarded by
-        // `exceeds_warn_threshold()`. Both run here — sequentially, in canonical
-        // hydro then stage order — so the carried vector and the warning order are
-        // declaration-order invariant, not a function of the parallel fit's thread
-        // scheduling.
+        // Push every distinct fit's deviation unconditionally (the metadata
+        // aggregate must reflect every computed-FPHA plant/stage); warn only for
+        // warn-worthy entries.
         for diag in fit.fpha_deviations {
             fpha_fit_deviations.push(FphaFitDeviationEntry {
                 hydro_id: hydro.id,
@@ -322,64 +243,34 @@ pub fn resolve_production_models_from_artifacts(
 }
 
 /// One computed-FPHA fit's deviation, recorded once per distinct fit (per
-/// `SelectionMode` entry) — every fit, not only warn-worthy ones.
-///
-/// Collected during the parallel per-hydro fit but NOT consumed there: the
-/// resolver's sequential, canonical-order flatten below both carries it up onto
-/// the result (capture-all) AND emits a `tracing::warn!` for the warn-worthy
-/// subset (`deviation.exceeds_warn_threshold()`). Doing both there keeps the
-/// carried order and the warning order declaration-order invariant rather than
-/// thread-scheduling dependent (the same determinism discipline the export-row
-/// flatten follows). `stage_id` identifies the first study stage the fitted entry
-/// covers — enough to point the operator at the season / stage range.
+/// `SelectionMode` entry). `stage_id` is the first study stage the entry covers.
 struct FphaDeviationDiagnostic {
     hydro_name: String,
     stage_id: i32,
     deviation: FphaFitDeviation,
 }
 
-/// The per-hydro outputs `fit_one_hydro` returns to its caller, kept local
-/// so the per-hydro fit owns no `&mut` of the shared `all_models` / `provenance`
-/// / `export_rows` accumulators. The caller concatenates these in
-/// `system.hydros()` order, so the assembled result is declaration-order
-/// invariant: `stage_models` is one `all_models` entry, `provenance` is this
-/// hydro's `(id, source)` pair, `export_rows` carries only this hydro's
-/// `(stage_id, plane_id)`-ordered FPHA rows, `fpha_deviations` carries this
-/// hydro's per-distinct-fit deviations in stage order (every fit, not just
-/// warn-worthy ones), and `deviation_point_rows` carries this hydro's
-/// `(stage_id, grid)`-ordered per-sampled-point rows (empty unless the opt-in is
-/// on).
+/// One hydro's fit outputs, owned by value so the parallel fit shares no `&mut`
+/// accumulator. Each `Vec` is in this hydro's stage order; the caller concatenates
+/// them in `system.hydros()` order for a declaration-order-invariant result.
 struct PerHydroFit {
     stage_models: Vec<ResolvedProductionModel>,
     provenance: (EntityId, ProductionModelSource),
     export_rows: Vec<cobre_io::FphaHyperplaneRow>,
     fpha_deviations: Vec<FphaDeviationDiagnostic>,
-    /// This hydro's per-sampled-point deviation rows in `(stage_id, grid)` order,
-    /// owned here and returned. Empty unless `collect_deviation_points` is on. The
-    /// caller concatenates per hydro in canonical order, so the assembled stream
-    /// stays `(hydro_id, stage_id, grid)`-ordered.
+    /// Per-sampled-point rows; empty unless `collect_deviation_points` is on.
     deviation_point_rows: Vec<cobre_io::FphaDeviationPointRow>,
 }
 
 /// Resolve every study-stage production model for ONE hydro, returning the
 /// per-hydro result by value with no shared `&mut` capture.
 ///
-/// Pure over its shared/`Copy` inputs: it owns a function-local `export_rows`
-/// `Vec` (the only target the `fit_computed_planes_per_stage` `&mut` now points
-/// at) and returns it, so the caller can concatenate per-hydro results in any
-/// loop shape without aliasing a shared accumulator. `system` stays a shared `&`
-/// (it is `Sync`) — the per-hydro long-term mean inflow is read from it here, never cloned.
-///
 /// # Errors
 ///
 /// Propagates the first [`SddpError`] from `determine_source`,
 /// `fit_computed_planes_per_stage`, or `resolve_stage_model` for this hydro.
-// Rationale: every argument is a distinct, already-resolved upstream-owned datum
-// the per-hydro fit reads (the hydro, the config/geometry/families/reference/
-// hyperplane maps, the productivity override, the study stages, the file-level
-// plane reduction, the system for the long-term mean inflow, the stage count, and the
-// deviation-points opt-in). Bundling them into a context struct would only relocate
-// the same fields; it mirrors the same allowance on `fit_computed_planes_per_stage`.
+// Rationale: each argument is a distinct already-resolved upstream datum; a
+// context struct would only relocate the same fields.
 #[allow(clippy::too_many_arguments)]
 fn fit_one_hydro(
     hydro: &cobre_core::entities::hydro::Hydro,
@@ -399,32 +290,17 @@ fn fit_one_hydro(
 
     let source = determine_source(hydro, config_entry)?;
 
-    // This hydro's export rows only; owned here and returned. The caller
-    // concatenates per hydro in canonical order, so the assembled stream stays
-    // ordered by `(hydro_id, stage_id, plane_id)`.
     let mut export_rows: Vec<cobre_io::FphaHyperplaneRow> = Vec::new();
-    // This hydro's per-distinct-fit deviations, owned here and returned alongside
-    // the export rows. Carried up and conditionally warned by the caller in
-    // canonical order (see `FphaDeviationDiagnostic`), never from this parallel
-    // worker.
     let mut fpha_deviations: Vec<FphaDeviationDiagnostic> = Vec::new();
-    // This hydro's per-sampled-point deviation rows, owned here and returned.
-    // Empty unless `collect_deviation_points` is on. Concatenated by the caller in
-    // canonical order, never pushed from this parallel worker into a shared buffer.
     let mut deviation_point_rows: Vec<cobre_io::FphaDeviationPointRow> = Vec::new();
 
-    // Computed FPHA fits once per `SelectionMode` entry (range or season),
-    // not once per hydro: a hydro whose stages span ranges/seasons with
-    // distinct `fpha_config`s yields a distinct plane set per entry. The
-    // per-stage planes here carry, for each study stage, the plane set of
-    // the entry covering it; a single-config hydro collapses to one fit via
-    // the dedup in `fit_computed_planes_per_stage`.
+    // Fit once per distinct `SelectionMode` entry (via the dedup in
+    // `fit_computed_planes_per_stage`); each study stage carries the plane set of
+    // the entry covering it.
     let computed_planes_per_stage: Option<Vec<Vec<FphaPlane>>> =
         if source == ProductionModelSource::ComputedFromGeometry {
-            // Per-hydro long-term mean inflow drives the lateral-secant
-            // `S_max = 2·long-term mean inflow`; computed here from the shared `system` borrow and
-            // threaded into the fit. A history-less hydro yields `long_term_mean_inflow_m3s = 0.0`,
-            // falling back to `2 × max_turbined`.
+            // Drives the lateral-secant `S_max = 2·long-term mean inflow`; a
+            // history-less hydro yields `0.0`, falling back to `2 × max_turbined`.
             let long_term_mean_inflow_m3s = long_term_mean_inflow(system, hydro.id);
             let per_stage = fit_computed_planes_per_stage(
                 hydro,
@@ -486,34 +362,15 @@ fn build_geometry_map(
     geometry_map
 }
 
-/// Resolve a plant's downstream reservoir level (m) at a representative stage.
+/// Resolve a plant's downstream reservoir level (m): the forebay surface
+/// elevation of the plant `hydro` discharges into, at that plant's stage
+/// reference volume. `None` when there is no downstream plant, or the downstream
+/// plant is absent / has no geometry.
 ///
-/// The downstream level keys the backwater coupling of `hydro`'s tailrace: it is
-/// the forebay surface elevation of the plant `hydro` discharges into, evaluated
-/// at that downstream plant's stage reference volume.
-///
-/// Returns:
-/// - `None` when `hydro.downstream_id` is `None` (the plant's outflow leaves the
-///   system / it is a final plant) — there is no downstream reservoir to couple;
-/// - `None` when the downstream plant is absent from `system` or has no geometry
-///   rows in `geometry_map` — the level cannot be resolved (the caller's family
-///   evaluator then falls back to its lowest-keyed family);
-/// - `Some(level_m)` otherwise: the downstream plant's [`ForebayTable`] evaluated
-///   at its stage reference operating volume `v_ref`, read directly from
-///   [`HydroReferenceVolumeFractions::get`]`(downstream_id, stage_pos)`. The
-///   resolver carries the JSON-declared (or default) reference volume already
-///   resolved to absolute hm³ against the downstream plant's band, so `v_ref` is
-///   consumed verbatim here — the `v_min + fraction·(..)` span formula is applied
-///   once, at resolver construction, never a second time at this call site. The
-///   resolver shares its source with the energy-conversion productivity reference.
-///
-/// `stage_pos` is the 0-based position of the stage within the study horizon —
-/// NOT `stage.index` (the global index, which is offset whenever pre-study stages
-/// precede the horizon). The reference-volume resolver is keyed by this study
-/// position, and `build_energy_conversion_set` queries it by the same 0-based
-/// position, so both consumers agree; the per-stage value already reflects that
-/// stage's season (the study horizon may begin in any season, not only season 0),
-/// because the resolver value was selected per `stage.season_id` at build time.
+/// `stage_pos` is the 0-based study-horizon position (NOT `stage.index`), keyed to
+/// match the reference-volume resolver and `build_energy_conversion_set`. The
+/// resolver already holds `v_ref` resolved to absolute hm³, so it is consumed
+/// verbatim — do NOT re-apply the `v_min + fraction·(..)` span formula here.
 fn resolve_downstream_level(
     hydro: &cobre_core::entities::hydro::Hydro,
     stage_pos: usize,
@@ -524,9 +381,6 @@ fn resolve_downstream_level(
     let downstream_id = hydro.downstream_id?;
     let downstream = system.hydro(downstream_id)?;
 
-    // Build the downstream plant's forebay table from its geometry rows. An
-    // absent or empty entry, or rows that fail forebay validation, all collapse
-    // to `None`: the backwater level is simply unresolved, not an error here.
     let geo_refs = geometry_map.get(&downstream_id)?;
     if geo_refs.is_empty() {
         return None;
@@ -534,31 +388,21 @@ fn resolve_downstream_level(
     let geo_rows: Vec<HydroGeometryRow> = geo_refs.iter().map(|r| (*r).clone()).collect();
     let forebay = ForebayTable::new(&geo_rows, &downstream.name).ok()?;
 
-    // Absolute hm³ from the resolver — already resolved against the downstream
-    // plant's band at construction; do NOT re-apply the `v_min + fraction·(..)`
-    // span formula here (that would resolve the span twice and corrupt `v_ref`).
+    // Already absolute hm³; do NOT re-apply the `v_min + fraction·(..)` span here.
     let v_ref = reference_volume_fractions.get(downstream_id, stage_pos);
 
     Some(forebay.height(v_ref))
 }
 
-/// Per-hydro long-term mean natural inflow (long-term mean inflow) in m³/s, or `0.0` when the hydro
-/// has no inflow history.
+/// Per-hydro long-term mean natural inflow (m³/s), or `0.0` when the hydro has no
+/// inflow history. Feeds the lateral-secant `S_max = 2·mean`; the `0.0` case maps
+/// to the `2 × max_turbined` fallback in `resolve_s_max`.
 ///
-/// long-term mean inflow is the canonical-order mean of the hydro's
-/// `scenarios/inflow_history.parquet` `value_m3s` series. It feeds the
-/// lateral-secant `S_max = 2·long-term mean inflow`; a hydro with no history returns `0.0`, which
-/// the secant's `resolve_s_max` maps to the `2 × max_turbined` fallback.
+/// # Determinism (D5)
 ///
-/// # Determinism — canonical-order mean (Voice 1 / D5)
-///
-/// The sum walks `System::inflow_history()` in its STORED slice order and divides
-/// by the matching-row count. Reordering the rows, or summing per declaration
-/// order of any other entity, must not change the result — `inflow_history()` is
-/// already in a fixed canonical order, so a single sequential pass over the rows
-/// whose `hydro_id` matches yields a value independent of input ordering. Summing
-/// into a partitioned-then-reduced parallel accumulator would reorder the adds and
-/// break bit-determinism; the sequential pass is deliberate.
+/// A single sequential pass over `System::inflow_history()` in its stored
+/// canonical order. A partitioned-then-reduced parallel accumulator would reorder
+/// the adds and break bit-determinism.
 fn long_term_mean_inflow(system: &System, hydro_id: EntityId) -> f64 {
     let mut sum = 0.0_f64;
     let mut count = 0_u64;
@@ -577,35 +421,12 @@ fn long_term_mean_inflow(system: &System, hydro_id: EntityId) -> f64 {
     }
 }
 
-/// Fit FPHA planes for one `SelectionMode` entry's `FphaColumnLayout`.
+/// Fit FPHA planes for one `SelectionMode` entry's `FphaColumnLayout`, after
+/// validating prerequisites (tailrace, losses, efficiency present).
 ///
-/// This is the per-entry fit unit: one call fits the plane set for a single
-/// range or season config. The caller (`fit_computed_planes_per_stage`) invokes
-/// it once per distinct config and expands the result across the stages that
-/// config covers. Validates prerequisites (tailrace, losses, efficiency
-/// present), then calls `fit_fpha_planes`.
-///
-/// `long_term_mean_inflow_m3s` is the per-hydro long-term mean inflow driving the lateral-secant
-/// `S_max`; it is fixed within a hydro, so the per-config dedup in the caller is
-/// unaffected by it.
-///
-/// `tailrace_source` is the resolved [`TailraceSource`] for the (hydro, entry)
-/// pair: [`TailraceSource::Families`] when the plant has a `tailrace_curves`
-/// table, else [`TailraceSource::Entity`] (the inert fallback). It is consumed by
-/// the production-function sampler and changes only the `tailrace_level` the secant reads —
-/// never the hull/α/secant procedure.
-///
-/// `plane_reduction` is the optional file-level similar-hyperplane reduction
-/// config, forwarded verbatim to `fit_fpha_planes`. `None` skips the merge pass.
-///
-/// `entry_level_bits` is the per-entry downstream-level bits (the same dedup-key
-/// component the caller computes), forwarded as the stable seed identity for the
-/// `Distance` reduction arm together with `hydro.id.0`. The angle arm and the
-/// `None` skip ignore it.
-///
-/// `collect_deviation_points` is the run-level opt-in (sourced from
-/// `config.exports.fpha_deviation_points`), forwarded verbatim to
-/// `fit_fpha_planes`. `false` collects no points and leaves the fit bit-identical.
+/// `tailrace_source` changes only the `tailrace_level` the secant reads — never
+/// the hull/α/secant procedure. `plane_reduction` `None` skips the merge pass.
+/// `entry_level_bits` seeds the `Distance` reduction arm (with `hydro.id.0`).
 fn fit_planes_for_hydro(
     hydro: &cobre_core::entities::hydro::Hydro,
     config: &FphaColumnLayout,
@@ -618,7 +439,6 @@ fn fit_planes_for_hydro(
 ) -> Result<FphaFitResult, SddpError> {
     validate_computed_prerequisites(hydro, geometry_map)?;
 
-    // Clone geometry rows from map to satisfy fit_fpha_planes signature.
     let geo_rows_owned: Vec<HydroGeometryRow> = geometry_map
         .get(&hydro.id)
         .map_or(&[][..], Vec::as_slice)
@@ -639,15 +459,9 @@ fn fit_planes_for_hydro(
     )?)
 }
 
-/// Resolve the [`TailraceSource`] for one (hydro, stage) pair.
-///
-/// A plant present in `families_map` uses the exact backwater families coupled to
-/// the downstream level resolved at this stage; a plant absent from the map falls
-/// back to its entity [`cobre_core::TailraceModel`] — the inert fallback that
-/// reproduces the pre-families fit bit-for-bit. The resolution is pure and
-/// deterministic: the families come from the deterministically-grouped map and
-/// the level from the pure [`resolve_downstream_level`] resolver, so no RNG or
-/// hashmap-iteration order enters.
+/// Resolve the [`TailraceSource`] for one (hydro, stage) pair: exact backwater
+/// families coupled to the resolved downstream level when the plant is in
+/// `families_map`, else the entity [`cobre_core::TailraceModel`] fallback.
 fn resolve_tailrace_source(
     hydro: &cobre_core::entities::hydro::Hydro,
     stage_pos: usize,
@@ -673,17 +487,13 @@ fn resolve_tailrace_source(
     }
 }
 
-/// One entry in the per-hydro dedup cache: the `(config, downstream-level bits)`
-/// key paired with the plane set fitted for it AND the per-sampled-point deviation
-/// points of that fit. The `Option<u64>` is the resolved `downstream_level_m`
-/// reduced to `f64::to_bits` (`None` for the entity fallback or an unresolved
-/// level).
+/// One per-hydro dedup-cache entry: the `(config, downstream-level bits)` key, the
+/// fitted plane set, and that fit's per-sampled-point deviation points. The
+/// `Option<u64>` is the resolved `downstream_level_m` as `f64::to_bits` (`None` for
+/// the entity fallback / unresolved level).
 ///
-/// The deviation points are cached beside the planes so a stage that dedups onto
-/// an earlier fit emits the SAME per-point rows that fit produced — the points are
-/// a pure function of the fit (config + level), so reusing the cached vector is
-/// correct and avoids re-walking the grid. The vector is empty unless
-/// `collect_deviation_points` is on, so the off path carries no extra cost.
+/// The deviation points are cached beside the planes so a dedup'd stage reuses the
+/// same per-point rows — they are a pure function of (config + level).
 type FittedCacheEntry<'a> = (
     (&'a FphaColumnLayout, Option<u64>),
     Vec<FphaPlane>,
@@ -691,69 +501,25 @@ type FittedCacheEntry<'a> = (
 );
 
 /// Fit computed-FPHA planes per study stage for one hydro, deduplicating
-/// identical `SelectionMode` entries and emitting per-stage export rows.
-///
-/// Returns one plane set per study stage (parallel to `study_stages` order):
-/// each stage carries the plane set of the `SelectionMode` entry covering it.
-///
-/// # Dedup
-///
-/// Stages whose covering entry resolves to an identical `FphaColumnLayout` AND an
-/// identical resolved downstream level share a single fit.
+/// identical `SelectionMode` entries. Returns one plane set per study stage (in
+/// `study_stages` order) and appends export rows, per-distinct-fit diagnostics,
+/// and (opt-in) per-point rows in canonical `(stage_id, …)` order.
 ///
 /// ## Contract — the dedup key MUST include the downstream level (Voice 1)
 ///
-/// The cache key is `(FphaColumnLayout, Option<u64>)`: the resolved config value
-/// (`PartialEq`) paired with the resolved `downstream_level_m` reduced to its
-/// `f64::to_bits` (`None` for an entity-fallback or unresolved level). Keying on
-/// the `FphaColumnLayout` ALONE is the wrong-but-compiling alternative: two stages
-/// with the same config but different downstream backwater levels would then
-/// collapse to one fit, silently using one stage's tailrace for the other. The
-/// `to_bits` reduction makes the level part of the key EXACT (a `1e-9` difference
-/// forces a distinct fit) and order-invariant (no `f64` `PartialEq`/`PartialOrd`,
-/// so equal-bit levels match regardless of stage order). The geometry and hydro
-/// entity are fixed within a hydro, and `long_term_mean_inflow_m3s` is fixed within a hydro, so config +
-/// level are the only varying fit inputs.
-///
-/// # Export rows
-///
-/// Emits a `FphaHyperplaneRow` with `stage_id = Some(stage.id)` for every
-/// covered study stage, appended in `(stage_id, plane_id)` order. Because the
-/// outer caller iterates hydros in canonical ID order and this function iterates
-/// stages in canonical ID order, `export_rows` ends up ordered by
-/// `(hydro_id, stage_id, plane_id)` — upholding declaration-order invariance.
-///
-/// # Fit-quality deviations
-///
-/// Appends one [`FphaDeviationDiagnostic`] to `diagnostics` per DISTINCT fit
-/// (per `SelectionMode` entry), tagged with the first covered stage —
-/// UNCONDITIONALLY, for every fit, not only warn-worthy ones. Dedup'd stages
-/// reuse the cached planes and do not re-append — the fit ran once, so it is
-/// recorded once. The caller carries every entry up and applies the warn
-/// threshold when deciding whether to log; this function never logs.
-///
-/// # Deviation-point rows
-///
-/// When `collect_deviation_points` is on, emits one `FphaDeviationPointRow` per
-/// `(V, Q)` grid point to `deviation_point_rows` for EVERY covered study stage,
-/// tagged `stage_id = Some(stage.id)`, in the same canonical `(stage_id, grid)`
-/// order as `export_rows`. A dedup'd stage reuses the cached fit's points, so its
-/// block carries the same per-point values the original fit produced. When off,
-/// the cached/fresh point vectors are empty and no rows are appended — zero rows,
-/// bit-identical fit.
+/// The key is `(FphaColumnLayout, Option<u64>)`: the config paired with the
+/// resolved `downstream_level_m` as `f64::to_bits`. Keying on the
+/// `FphaColumnLayout` ALONE is the wrong-but-compiling alternative — two stages
+/// with the same config but different backwater levels would collapse to one fit,
+/// silently using one stage's tailrace for the other. `to_bits` makes the match
+/// exact and order-invariant (no `f64` `PartialEq`).
 ///
 /// # Errors
 ///
-/// - A stage mapping to no `fpha_config` (coverage gap) → [`SddpError::Validation`];
-///   stages are never silently dropped.
-/// - Fitting errors propagate via [`fit_planes_for_hydro`] as
-///   [`SddpError::Validation`], naming the hydro.
-// Rationale: every argument is an independent, already-resolved input the
-// per-stage fit needs (the hydro, its config, the geometry/families/reference
-// maps, the system for downstream resolution, the lateral-secant `long_term_mean_inflow_m3s`, the
-// deviation-points opt-in, and the export-row / fit-quality-warning / deviation-
-// point sinks). Bundling them into a context struct would only relocate the same
-// fields and obscure that each is a distinct upstream-owned datum.
+/// - A stage mapping to no `fpha_config` (coverage gap) → [`SddpError::Validation`].
+/// - Fitting errors propagate via [`fit_planes_for_hydro`], naming the hydro.
+// Rationale: each argument is a distinct already-resolved input; a context struct
+// would only relocate the same fields.
 #[allow(clippy::too_many_arguments)]
 fn fit_computed_planes_per_stage(
     hydro: &cobre_core::entities::hydro::Hydro,
@@ -770,11 +536,8 @@ fn fit_computed_planes_per_stage(
     diagnostics: &mut Vec<FphaDeviationDiagnostic>,
     deviation_point_rows: &mut Vec<cobre_io::FphaDeviationPointRow>,
 ) -> Result<Vec<Vec<FphaPlane>>, SddpError> {
-    // Cache of distinct fits keyed by `(config, downstream-level bits)`. Linear
-    // scan over `PartialEq` rather than a hash map: `FphaColumnLayout` holds f64
-    // fields (no `Eq`/`Hash`), and the entry count per hydro is small. The level
-    // bits widen the key so two entries with the same config but distinct
-    // downstream levels do NOT collapse to one fit.
+    // Linear scan over `PartialEq` rather than a hash map: `FphaColumnLayout` holds
+    // f64 fields (no `Eq`/`Hash`) and the per-hydro entry count is small.
     let mut fitted: Vec<FittedCacheEntry> = Vec::new();
     let mut per_stage: Vec<Vec<FphaPlane>> = Vec::with_capacity(study_stages.len());
 
@@ -789,8 +552,6 @@ fn fit_computed_planes_per_stage(
                 ))
             })?;
 
-        // `stage_pos` is the 0-based study-horizon position — the key the
-        // reference-volume resolver and the energy-conversion build share.
         let tailrace_source = resolve_tailrace_source(
             hydro,
             stage_pos,
@@ -799,9 +560,6 @@ fn fit_computed_planes_per_stage(
             reference_volume_fractions,
             system,
         );
-        // The downstream-level component of the dedup key, reduced to exact bits.
-        // `None` for the entity fallback (or an unresolved level), so entity-path
-        // stages dedup on the config alone.
         let level_bits = match &tailrace_source {
             TailraceSource::Families {
                 downstream_level_m, ..
@@ -821,28 +579,16 @@ fn fit_computed_planes_per_stage(
                     long_term_mean_inflow_m3s,
                     tailrace_source,
                     plane_reduction,
-                    // The dedup-key level bits double as the per-entry seed identity
-                    // for the Distance reduction arm. `None` (entity fallback /
-                    // unresolved level) maps to 0, mirroring the dedup-key `None`.
+                    // Level bits double as the `Distance`-arm seed; `None` → 0.
                     level_bits.unwrap_or(0),
                     collect_deviation_points,
                 )?;
-                // Record this distinct fit's deviation once (this fresh entry),
-                // tagged with the stage that first reached it. The push is
-                // UNCONDITIONAL — every fit is captured so the metadata aggregate
-                // reflects every computed-FPHA plant/stage. The warn-threshold test is
-                // NOT applied here; the resolver's flatten loop applies it when
-                // deciding whether to `tracing::warn!`, so the captured set is the
-                // superset and the warned set is the warn-worthy subset.
+                // One push per distinct fit (the caller applies the warn threshold).
                 diagnostics.push(FphaDeviationDiagnostic {
                     hydro_name: hydro.name.clone(),
                     stage_id: stage.id,
                     deviation: fit_result.deviation,
                 });
-                // Cache the planes AND the per-fit deviation points together so a
-                // later dedup'd stage reuses both. `deviation_points` is empty when
-                // `collect_deviation_points` is off, so the off path caches and
-                // clones an empty vec — no measurable cost.
                 fitted.push((
                     key,
                     fit_result.planes.clone(),
@@ -851,10 +597,6 @@ fn fit_computed_planes_per_stage(
                 (fit_result.planes, fit_result.deviation_points)
             };
 
-        // Per-sampled-point deviation rows for THIS stage, emitted from the
-        // sequential canonical stage loop (never a parallel worker) so the stream
-        // stays `(hydro_id, stage_id, grid)`-ordered like `export_rows`. Empty when
-        // the opt-in is off (no collected points), so this appends nothing.
         for point in &deviation_points {
             deviation_point_rows.push(cobre_io::FphaDeviationPointRow {
                 hydro_id: hydro.id,
@@ -869,20 +611,14 @@ fn fit_computed_planes_per_stage(
         }
 
         for (plane_id, plane) in planes.iter().enumerate() {
-            // The in-memory plane is already the α-scaled whole affine function
-            // α·FPHA_0. The exported row stores those α-scaled coefficients
-            // VERBATIM with `kappa = 1.0`, so the precomputed read-back
-            // (`intercept = gamma_0 * kappa`) reproduces α·FPHA_0 exactly and the
-            // gradients pass through unchanged. The `kappa` column carries 1.0
-            // because the planes are already fully corrected: it keeps the column
-            // inside the validated (0, 1] range even when α > 1, and it must NOT
-            // re-scale the already-α-scaled coefficients on read-back (that would
-            // double-correct).
+            // The in-memory plane already carries the α-scaled coefficients;
+            // exporting with `kappa = 1.0` makes the precomputed read-back
+            // (`intercept = gamma_0 * kappa`) reproduce them verbatim. `kappa` MUST
+            // stay 1.0 — any other value re-scales already-corrected coefficients on
+            // read-back (double-correction).
             //
-            // Rationale: plane_id comes from enumerate() over the fitting
-            // result; plane counts are bounded by max_planes_per_hydro
-            // (default <= 30), far below i32::MAX, so truncation and wrap
-            // are unreachable.
+            // Rationale: plane counts are bounded by max_planes_per_hydro (default
+            // <= 30), far below i32::MAX, so truncation and wrap are unreachable.
             #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
             export_rows.push(cobre_io::FphaHyperplaneRow {
                 hydro_id: hydro.id,
@@ -1019,17 +755,11 @@ fn find_reference_volume_for_stage<'a>(
     }
 }
 
-/// Resolve a [`ReferenceVolume`] to an absolute storage value [hm³] against the
+/// Resolve a [`ReferenceVolume`] to an absolute storage value (`hm³`) against the
 /// plant's `[v_min, v_max]` operating band.
 ///
-/// - `Some(AbsoluteHm3(v))` → `v` unchanged;
-/// - `Some(Percentile(p))` → `v_min + p·(v_max − v_min)`;
-/// - `None` → `v_min + DEFAULT_REFERENCE_VOLUME_FRACTION·(v_max − v_min)`.
-///
-/// The percentile and default arms multiply the span `(v_max − v_min)` rather
-/// than dividing it — multiplication, never division — so a degenerate
-/// `v_max == v_min` band yields `v_min` for any percentile or the default,
-/// instead of a `0/0` NaN.
+/// The percentile and default arms multiply the span `(v_max − v_min)` — never
+/// divide — so a degenerate `v_max == v_min` band yields `v_min`, not a `0/0` NaN.
 pub(crate) fn resolve_reference_volume_hm3(
     rv: Option<&ReferenceVolume>,
     v_min: f64,
@@ -1042,27 +772,19 @@ pub(crate) fn resolve_reference_volume_hm3(
     }
 }
 
-/// Validate that a hydro with `source: "computed"` has all required model fields and geometry.
-///
-/// Checks that `tailrace`, `hydraulic_losses`, and `efficiency` are all `Some`, and
-/// that at least one geometry row exists for this hydro in the geometry map.
+/// Validate that a hydro with `source: "computed"` has `tailrace`,
+/// `hydraulic_losses`, `efficiency`, and at least one geometry row.
 ///
 /// # Policy rationale
 ///
-/// Although the production function math can handle `None` for each of these
-/// fields (zero tailrace, lossless penstock, 100% efficiency as defaults),
-/// requiring all three as `Some` ensures the reservoir geometry was **fully
-/// characterized** before committing to the computed FPHA path.  Accepting
-/// partial geometry risks producing envelopes that are physically inconsistent
-/// with the operator's intent and hard to diagnose after the fact.  Any hydro
-/// that genuinely has no tailrace, lossless penstock, or a perfect turbine
-/// must declare this explicitly by providing the respective model with an
-/// appropriate constant or polynomial value.
+/// The production-function math could default each missing field (zero tailrace,
+/// lossless penstock, 100% efficiency), but requiring all three as `Some` forces
+/// the operator to declare them explicitly rather than silently accept partial
+/// geometry that yields physically inconsistent envelopes.
 ///
 /// # Errors
 ///
-/// Returns `SddpError::Validation` listing the first missing prerequisite found,
-/// including the hydro name and id.
+/// Returns `SddpError::Validation` naming the first missing prerequisite and the hydro.
 fn validate_computed_prerequisites(
     hydro: &cobre_core::entities::hydro::Hydro,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
@@ -1091,20 +813,13 @@ fn validate_computed_prerequisites(
     Ok(())
 }
 
-/// Determine the [`ProductionModelSource`] for one hydro.
-///
-/// This checks only the high-level source classification without building the
-/// per-stage model data; it is called once per hydro before the per-stage loop.
-///
-/// The function also rejects unsupported cases early to give clear errors before
-/// any expensive Parquet loading occurs.
+/// Determine the [`ProductionModelSource`] for one hydro (the high-level
+/// classification only), rejecting unsupported cases before any Parquet load.
 fn determine_source(
     hydro: &cobre_core::entities::hydro::Hydro,
     config_entry: Option<&ProductionModelConfig>,
 ) -> Result<ProductionModelSource, SddpError> {
     if let Some(config) = config_entry {
-        // A "computed" source short-circuits to ComputedFromGeometry, so no
-        // further range/season scan for "precomputed" is needed below.
         let computed_range = match &config.selection_mode {
             SelectionMode::StageRanges { ranges } => ranges
                 .iter()
@@ -1126,7 +841,6 @@ fn determine_source(
         if computed_range.is_some() {
             return Ok(ProductionModelSource::ComputedFromGeometry);
         }
-        // Only "precomputed" FPHA entries remain.
         let has_fpha = match &config.selection_mode {
             SelectionMode::StageRanges { ranges } => ranges.iter().any(|r| r.model == "fpha"),
             SelectionMode::Seasonal { seasons, .. } => seasons.iter().any(|s| s.model == "fpha"),
@@ -1137,7 +851,6 @@ fn determine_source(
             ProductionModelSource::DefaultConstant
         })
     } else {
-        // No config entry: use HydroGenerationModel from entity.
         match &hydro.generation_model {
             HydroGenerationModel::ConstantProductivity | HydroGenerationModel::LinearizedHead => {
                 Ok(ProductionModelSource::DefaultConstant)
@@ -1154,10 +867,9 @@ fn determine_source(
 
 /// Resolve the production model for one (hydro, stage) pair.
 ///
-/// `cached_computed_planes` carries planes already fitted by the outer loop
-/// when `source == ComputedFromGeometry`. Passing pre-fitted planes avoids
-/// running the fitting pipeline once per stage; the outer loop fits once per
-/// hydro and clones for every stage via this parameter.
+/// `cached_computed_planes` carries planes fitted once per hydro by the outer
+/// loop (when `source == ComputedFromGeometry`), so the fitting pipeline does not
+/// re-run per stage.
 fn resolve_stage_model(
     hydro: &cobre_core::entities::hydro::Hydro,
     stage: &cobre_core::temporal::Stage,
@@ -1167,10 +879,8 @@ fn resolve_stage_model(
     cached_computed_planes: Option<&[FphaPlane]>,
     productivity_override: Option<&crate::energy_conversion::HydroEnergyProductivityOverride>,
 ) -> Result<ResolvedProductionModel, SddpError> {
-    // Look up the parquet override for non-FPHA (hydro, stage) productivity.
-    // Cross-file resolution (cobre_io::validation::productivity_resolution)
-    // rejects the case where both JSON and parquet supply a value, so this
-    // lookup never silently masks a JSON-supplied value at load time.
+    // `cobre_io::validation::productivity_resolution` rejects both-JSON-and-parquet
+    // at load time, so this override lookup never silently masks a JSON value.
     let stage_idx = usize::try_from(stage.id.max(0)).unwrap_or(0);
     let parquet_productivity =
         productivity_override.and_then(|o| o.equivalent_productivity(hydro.id, stage_idx));
@@ -1180,7 +890,6 @@ fn resolve_stage_model(
 
         if model_info.as_ref().map(|(name, _)| name.as_str()) == Some("fpha") {
             if source == ProductionModelSource::ComputedFromGeometry {
-                // Use the pre-fitted planes from the outer loop cache.
                 let planes = cached_computed_planes
                     .ok_or_else(|| {
                         SddpError::Validation(format!(
@@ -1195,13 +904,9 @@ fn resolve_stage_model(
                 build_fpha_model(hydro, stage, source, hyperplane_map)
             }
         } else {
-            // "constant_productivity" or "linearized_head" from config.
-            //
             // Resolution order (matches build_energy_conversion_set): parquet
-            // override first, JSON productivity fallback. Load-time validation
-            // in cobre_io::validation::productivity_resolution guarantees that
-            // exactly one source supplies the value, so a None outcome here
-            // would indicate a validator gap.
+            // override first, then JSON. The validator guarantees exactly one
+            // source supplies the value, so a `None` here is a validator gap.
             let productivity = parquet_productivity
                 .or_else(|| model_info.and_then(|(_, p)| p))
                 .unwrap_or_else(|| {
@@ -1216,9 +921,8 @@ fn resolve_stage_model(
             Ok(ResolvedProductionModel::ConstantProductivity { productivity })
         }
     } else {
-        // No JSON config entry at all for this hydro. Use the parquet override
-        // when present; otherwise fall through to the sentinel (validator
-        // already rejected this case at load time).
+        // No JSON entry: the parquet override is the supplier; the sentinel is
+        // unreachable in production (the validator rejects this case at load time).
         let productivity = parquet_productivity.unwrap_or_else(|| {
             debug_assert!(
                 false,
@@ -1258,26 +962,21 @@ fn find_model_for_stage(
         } => {
             if let Some(season_id) = stage.season_id {
                 for season in seasons {
-                    // season.season_id is i32; stage.season_id is usize.
-                    // Convert usize to i32 for comparison to avoid cast_sign_loss.
                     if i32::try_from(season_id).is_ok_and(|sid| sid == season.season_id) {
                         return Some((season.model.clone(), season.productivity_mw_per_m3s));
                     }
                 }
             }
-            // Fall back to default model when no season matches (or no season_id on stage).
-            // Default model has no override.
             Some((default_model.clone(), None))
         }
     }
 }
 
-/// Build an `Fpha` variant `ResolvedProductionModel` for one (hydro, stage) pair.
+/// Build an `Fpha` `ResolvedProductionModel` for one (hydro, stage) pair.
 ///
-/// Looks up hyperplanes for `(hydro_id, Some(stage.id))` first; falls back to
-/// `(hydro_id, None)` when no stage-specific rows exist (global all-stage rows).
-/// Validates each hyperplane's coefficients and `kappa`, then constructs
-/// [`FphaPlane`] with the pre-scaled intercept `gamma_0 * kappa`.
+/// Stage-specific rows `(hydro_id, Some(stage.id))` take priority over the global
+/// `(hydro_id, None)` all-stage rows. Each `FphaPlane` intercept is the pre-scaled
+/// `gamma_0 * kappa`.
 fn build_fpha_model(
     hydro: &cobre_core::entities::hydro::Hydro,
     stage: &cobre_core::temporal::Stage,

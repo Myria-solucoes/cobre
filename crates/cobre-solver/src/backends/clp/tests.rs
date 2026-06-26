@@ -72,12 +72,10 @@ fn test_clp_profile_default_values() {
         DEFAULT_PROFILE_HEURISTIC_SENTINEL
     );
     assert_eq!(p.algorithm, ClpAlgorithm::Dual);
-    // CLP-native, behavior-neutral defaults for the inert pricing/refactor
-    // knobs: mode 3 is CLP's own steepest-edge ctor default; 0 is the
-    // "leave CLP's internal default" sentinel for the factorization cadence.
+    // mode 3 is CLP's steepest-edge ctor default; 0 is the "leave CLP's internal
+    // default" factorization-cadence sentinel.
     assert_eq!(p.dual_pricing_mode, 3);
     assert_eq!(p.factorization_frequency, 0);
-    // ClpProfile must remain Copy + PartialEq + Default after the new fields.
     assert_profile_bounds::<ClpProfile>();
     let copied = p;
     assert_eq!(copied, p);
@@ -87,7 +85,6 @@ fn test_clp_profile_default_values() {
 fn test_clp_solver_create_and_name() {
     let solver = ClpSolver::new().expect("CLP solver creation failed");
     assert_eq!(solver.name(), "CLP");
-    // Drop runs at scope end and frees the handle exactly once.
 }
 
 #[test]
@@ -116,12 +113,10 @@ fn test_clp_load_model_updates_dimensions() {
     let template = make_fixture_stage_template();
     solver.load_model(&template);
 
-    // AC1: dimensions and has_model flag.
     assert_eq!(solver.num_cols, 3);
     assert_eq!(solver.num_rows, 2);
     assert!(solver.has_model);
 
-    // AC2: solution buffer lengths.
     assert_eq!(solver.col_value.len(), 3);
     assert_eq!(solver.col_dual.len(), 3);
     assert_eq!(solver.row_dual.len(), 2);
@@ -133,8 +128,8 @@ fn test_clp_load_model_accepts_infinite_bounds() {
     let mut template = make_fixture_stage_template();
     template.col_upper[1] = f64::INFINITY;
 
-    // AC3: completes without panic; the C wrapper owns the DBL_MAX
-    // translation, so the Rust layer never reads or mutates the infinity.
+    // The C wrapper owns the DBL_MAX translation, so the Rust layer never reads
+    // or mutates the infinity.
     solver.load_model(&template);
 
     assert_eq!(solver.num_cols, 3);
@@ -147,8 +142,8 @@ fn test_clp_load_model_reload_zero_row() {
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
     solver.load_model(&make_fixture_stage_template());
 
-    // AC4: re-load with a zero-row, single-column template replaces the
-    // prior model and resizes buffers accordingly.
+    // Re-load with a zero-row, single-column template replaces the prior model
+    // and resizes buffers.
     let zero_row = StageTemplate {
         num_cols: 1,
         num_rows: 0,
@@ -181,7 +176,6 @@ fn test_clp_load_model_count_accumulates() {
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
     let template = make_fixture_stage_template();
 
-    // AC5: load_model_count increments on each call.
     solver.load_model(&template);
     assert_eq!(solver.stats.load_model_count, 1);
 
@@ -196,15 +190,10 @@ fn test_clp_add_rows_updates_dimensions() {
     let batch = make_fixture_row_batch();
     solver.add_rows(&batch);
 
-    // AC1: the two appended rows grow num_rows to 4, row_dual is resized to
-    // match, and the column count is unchanged.
     assert_eq!(solver.num_rows, 4);
     assert_eq!(solver.row_dual.len(), 4);
     assert_eq!(solver.num_cols, 3);
 
-    // The merged CSC must be structurally consistent: nnz grows by the batch
-    // nnz, col_starts has num_cols + 1 entries, and the final start equals
-    // the total nnz.
     assert_eq!(solver.num_nz, 3 + 4);
     assert_eq!(solver.col_starts.len(), 4);
     assert_eq!(solver.col_starts[3], 7);
@@ -236,8 +225,6 @@ fn test_clp_set_row_bounds_patches_retained() {
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
     solver.load_model(&make_fixture_stage_template());
 
-    // AC2: equality-tighten row 0 to [4.0, 4.0]; the retained vectors reflect
-    // the patch and the call completes without panic.
     solver.set_row_bounds(&[0], &[4.0], &[4.0]);
     assert_eq!(solver.row_lower[0], 4.0);
     assert_eq!(solver.row_upper[0], 4.0);
@@ -250,7 +237,6 @@ fn test_clp_set_col_bounds_patches_retained() {
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
     solver.load_model(&make_fixture_stage_template());
 
-    // AC3: raise the lower bound of col 1 to 10.0 with an infinite upper.
     solver.set_col_bounds(&[1], &[10.0], &[f64::INFINITY]);
     assert_eq!(solver.col_lower[1], 10.0);
     assert!(solver.col_upper[1].is_infinite());
@@ -265,9 +251,8 @@ fn test_clp_set_bounds_empty_no_reload() {
 
     let load_count_before = solver.stats.load_model_count;
 
-    // AC4: empty index slices are a no-op -- no FFI mutation, no panic,
-    // dimensions and bound vectors unchanged. (load_model_count is
-    // unaffected by a bound patch regardless; we assert state invariance.)
+    // Empty index slices are a no-op: no FFI mutation, dimensions and bound
+    // vectors unchanged.
     solver.set_row_bounds(&[], &[], &[]);
     solver.set_col_bounds(&[], &[], &[]);
 
@@ -285,7 +270,6 @@ fn test_clp_add_rows_then_solve_objective() {
     solver.load_model(&make_fixture_stage_template());
     solver.add_rows(&make_fixture_row_batch());
 
-    // Assert the merge produced the expected retained dimensions/state.
     assert_eq!(solver.num_cols, 3);
     assert_eq!(solver.num_rows, 4);
     assert_eq!(solver.num_nz, 7);
@@ -297,7 +281,6 @@ fn test_clp_solve_basic_lp() {
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
     solver.load_model(&make_fixture_stage_template());
 
-    // AC1: cold solve of the SS1.1 LP returns Ok with the expected optimum.
     let view = solver
         .solve(None)
         .expect("SS1.1 LP should solve to optimal");
@@ -319,7 +302,6 @@ fn test_clp_solve_basic_lp() {
         view.primal[2]
     );
 
-    // AC2: view slice lengths match the LP dimensions.
     assert_eq!(view.primal.len(), 3);
     assert_eq!(view.reduced_costs.len(), 3);
     assert_eq!(view.dual.len(), 2);
@@ -328,14 +310,12 @@ fn test_clp_solve_basic_lp() {
 #[test]
 fn test_clp_solve_basic_lp_primal_algorithm() {
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
-    // Configure the solver to dispatch through the primal simplex.
     solver.apply_profile(&ClpProfile {
         algorithm: ClpAlgorithm::Primal,
         ..ClpProfile::default()
     });
     solver.load_model(&make_fixture_stage_template());
 
-    // The primal simplex reaches the same SS1.1 optimum as the dual path.
     let view = solver
         .solve(None)
         .expect("SS1.1 LP should solve to optimal via the primal simplex");
@@ -368,7 +348,7 @@ fn test_clp_solve_infeasible() {
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
     solver.load_model(&make_fixture_stage_template());
 
-    // AC3: pin x0 = 100, which violates the row0 equality x0 = 6.
+    // Pin x0 = 100, violating the row0 equality x0 = 6.
     solver.set_col_bounds(&[0], &[100.0], &[100.0]);
     let result = solver.solve(None);
 
@@ -377,12 +357,9 @@ fn test_clp_solve_infeasible() {
         "expected Err(Infeasible), got {result:?}"
     );
 
-    // A genuinely infeasible LP is routed through the escalation ladder
-    // (PRIMAL_INFEASIBLE), which cannot recover it, so the ORIGINAL
-    // `Infeasible` is surfaced. Stats must reconcile: the failed solve is
-    // counted exactly once as a failure (not double-counted), every rung is
-    // charged to `retry_count`, and neither `success_count` nor
-    // `first_try_successes` moves.
+    // Stats reconcile: the failed solve is counted once as a failure (not
+    // double-counted), every rung is charged to `retry_count`, and neither
+    // `success_count` nor `first_try_successes` moves.
     assert_eq!(solver.stats.solve_count, 1);
     assert_eq!(solver.stats.failure_count, 1);
     assert_eq!(solver.stats.success_count, 0);
@@ -395,13 +372,11 @@ fn test_clp_escalation_restores_floor_after_exhaustion() {
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
     solver.load_model(&make_fixture_stage_template());
 
-    // Snapshot the floor (deterministic) profile applied at construction.
     let floor_perturbation = solver.current_profile.perturbation;
     let floor_scaling = solver.current_profile.scaling;
 
-    // Force an infeasible solve: pin x0 = 100 (violates row0 equality
-    // x0 = 6). This runs the escalation ladder (which turns perturbation and
-    // scaling ON on its inner rungs) and exhausts it.
+    // Pin x0 = 100 (violates row0 equality x0 = 6): the escalation ladder turns
+    // perturbation and scaling ON on its inner rungs and exhausts.
     solver.set_col_bounds(&[0], &[100.0], &[100.0]);
     let infeasible = solver.solve(None);
     assert!(
@@ -409,15 +384,12 @@ fn test_clp_escalation_restores_floor_after_exhaustion() {
         "expected Err(Infeasible), got {infeasible:?}"
     );
 
-    // The ladder must have restored the floor settings: `current_profile`
-    // perturbation/scaling are back at their floor values, so the NEXT solve
-    // starts from the clean deterministic config.
+    // The ladder restored the floor, so the NEXT solve starts clean.
     assert_eq!(solver.current_profile.perturbation, floor_perturbation);
     assert_eq!(solver.current_profile.scaling, floor_scaling);
 
-    // Relax the bound back to feasibility and re-solve. With the floor
-    // restored, this is a clean first-try win — the escalation ladder does
-    // NOT fire again (retry_count unchanged from the exhausted run).
+    // Relax back to feasibility: with the floor restored this is a clean
+    // first-try win — the ladder does NOT fire again (retry_count unchanged).
     solver.set_col_bounds(&[0], &[0.0], &[f64::INFINITY]);
     let view = solver
         .solve(None)
@@ -428,8 +400,7 @@ fn test_clp_escalation_restores_floor_after_exhaustion() {
         view.objective
     );
 
-    // First solve failed (no first-try success); second solve is a first-try
-    // win. The ladder ran only once (during the exhausted first solve), so
+    // The ladder ran only once (during the exhausted first solve), so
     // retry_count stays at exactly one ladder's worth of rungs.
     assert_eq!(solver.stats.solve_count, 2);
     assert_eq!(solver.stats.success_count, 1);
@@ -442,7 +413,7 @@ fn test_clp_escalation_restores_floor_after_exhaustion() {
 fn test_clp_solve_unbounded() {
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
 
-    // AC4: single column, objective -1, lower 0, upper +inf, no rows.
+    // Single column, objective -1, lower 0, upper +inf, no rows.
     let unbounded = StageTemplate {
         num_cols: 1,
         num_rows: 0,
@@ -484,15 +455,13 @@ fn test_clp_solve_twice_stats() {
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
     solver.load_model(&make_fixture_stage_template());
 
-    // AC5: two consecutive cold solves both succeed; the owned-buffer copies
-    // are re-read each solve rather than aliasing stale CLP pointers.
     let _ = solver.solve(None).expect("first solve should be optimal");
     let _ = solver.solve(None).expect("second solve should be optimal");
 
     assert_eq!(solver.stats.solve_count, 2);
     assert_eq!(solver.stats.success_count, 2);
-    // Happy path: both solves are first-try wins, the escalation ladder
-    // never runs, so no retries are charged.
+    // Both solves are first-try wins, the escalation ladder never runs, so no
+    // retries are charged.
     assert_eq!(solver.stats.first_try_successes, 2);
     assert_eq!(solver.stats.retry_count, 0);
     assert_eq!(solver.stats.failure_count, 0);
@@ -545,8 +514,8 @@ fn test_clp_get_basis_dimensions_and_codes() {
         .solve(None)
         .expect("SS1.1 LP should solve to optimal");
 
-    // AC1: get_basis resizes a 0/0 Basis to the LP dimensions and fills it
-    // with raw CLP status codes (all in 0..=5).
+    // get_basis resizes a 0/0 Basis to the LP dimensions and fills it with raw
+    // CLP status codes (all in 0..=5).
     let mut out = Basis::new(0, 0);
     solver.get_basis(&mut out);
 
@@ -570,7 +539,6 @@ fn test_clp_warm_start_roundtrip_objective() {
     let mut captured = Basis::new(0, 0);
     solver.get_basis(&mut captured);
 
-    // AC2: warm-start solve on the unchanged LP returns the same optimum.
     let view = solver
         .solve(Some(&captured))
         .expect("warm-start solve should be optimal");
@@ -580,8 +548,6 @@ fn test_clp_warm_start_roundtrip_objective() {
         view.objective
     );
 
-    // AC3: the offered basis was counted and the set-time accumulated.
-    // This reads the private `stats` field directly, as the sibling tests do.
     assert_eq!(solver.stats.basis_offered, 1);
     assert!(
         solver.stats.total_basis_set_time_seconds >= 0.0,
@@ -590,19 +556,15 @@ fn test_clp_warm_start_roundtrip_objective() {
     );
 }
 
-/// When the offered basis has fewer rows than the current LP (2 vs 4 after
-/// `add_rows`), `solve(Some(&basis))` (via `install_basis`) rejects it with
-/// `Err(SolverError::BasisRowCountMismatch)` rather than silently
-/// short-copying. The rejection increments `basis_consistency_failures` and
-/// leaves `basis_offered` untouched (a rejected basis was never offered to
-/// the solver).
+/// An undersized offered basis (2 rows vs 4 after `add_rows`) is rejected with
+/// `Err(SolverError::BasisRowCountMismatch)`; the rejection increments
+/// `basis_consistency_failures` and leaves `basis_offered` untouched.
 #[test]
 fn test_clp_solve_rejects_undersized_row_basis() {
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
     solver.load_model(&make_fixture_stage_template());
     let _ = solver.solve(None).expect("first solve should be optimal");
 
-    // Capture the 2-row optimal basis.
     let mut captured = Basis::new(0, 0);
     solver.get_basis(&mut captured);
     assert_eq!(
@@ -611,8 +573,7 @@ fn test_clp_solve_rejects_undersized_row_basis() {
         "captured basis must have 2 row statuses"
     );
 
-    // Reload and add 2 cuts to get a 4-row LP; the 2-row basis is now
-    // undersized (basis_rows = 2 < lp_rows = 4).
+    // Reload and add 2 rows to a 4-row LP, leaving the 2-row basis undersized.
     solver.load_model(&make_fixture_stage_template());
     solver.add_rows(&make_fixture_row_batch());
     assert_eq!(solver.num_rows, 4, "LP must have 4 rows after add_rows");
@@ -659,7 +620,6 @@ fn test_clp_solve_rejects_undersized_row_basis() {
 #[should_panic(expected = "loaded model")]
 fn test_clp_get_basis_without_model_panics() {
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
-    // AC4: get_basis on a solver with no loaded model panics.
     solver.get_basis(&mut Basis::new(0, 0));
 }
 
@@ -671,8 +631,8 @@ fn test_clp_basis_roundtrip_identity() {
         .solve(None)
         .expect("SS1.1 LP should solve to optimal");
 
-    // AC5: two get_basis calls into fresh Basis values yield identical vectors
-    // — the round-trip stores exactly the CLP-reported codes with no drift.
+    // Two get_basis calls into fresh Basis values yield identical vectors — the
+    // round-trip stores exactly the CLP-reported codes with no drift.
     let mut first = Basis::new(0, 0);
     solver.get_basis(&mut first);
     let mut second = Basis::new(0, 0);
@@ -684,9 +644,8 @@ fn test_clp_basis_roundtrip_identity() {
 
 #[test]
 fn test_clp_apply_default_profile_then_solve() {
-    // AC1: applying the default profile (perturbation=102, scaling=0, tight
-    // tolerances, heuristic iteration cap) before a solve must not break the
-    // solve — the SS1.1 LP still returns obj 100.0.
+    // Applying the default profile before a solve must not break it — the SS1.1
+    // LP still returns obj 100.0.
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
     solver.apply_profile(&ClpProfile::default());
     assert_eq!(solver.current_profile, ClpProfile::default());
@@ -704,18 +663,15 @@ fn test_clp_apply_default_profile_then_solve() {
 
 #[test]
 fn test_clp_apply_tuned_pricing_profile_then_solve() {
-    // apply_profile now DRIVES the dual_pricing_mode / factorization_frequency
-    // knobs through the shim (the corrected cast makes that fault-free).
-    // Applying a tuned profile (full DSE = 1, refactor cadence = 200) installs
-    // both knobs and must still reach the SS1.1 optimum (obj 100.0): the knobs
-    // change the iteration path, not the optimum.
+    // A tuned profile (full DSE = 1, refactor cadence = 200) drives both knobs
+    // through the shim and must still reach the SS1.1 optimum (obj 100.0): the
+    // knobs change the iteration path, not the optimum.
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
     solver.apply_profile(&ClpProfile {
         dual_pricing_mode: 1,
         factorization_frequency: 200,
         ..ClpProfile::default()
     });
-    // The fields are cached for delta-tracking AND driven into CLP.
     assert_eq!(solver.current_profile.dual_pricing_mode, 1);
     assert_eq!(solver.current_profile.factorization_frequency, 200);
 
@@ -732,9 +688,8 @@ fn test_clp_apply_tuned_pricing_profile_then_solve() {
 
 #[test]
 fn test_clp_hot_start_mark_solve_unmark() {
-    // Hot-start lifecycle on the persistent-factorization instance: solve cold
-    // to leave the rim/factorization alive, snapshot, re-solve from the
-    // snapshot, and release. The re-solve must reach the SS1.1 optimum.
+    // Solve cold to leave the rim/factorization alive, snapshot, re-solve from
+    // the snapshot, and release.
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
     solver.load_model(&make_fixture_stage_template());
     let cold = solver.solve(None).expect("cold solve must be optimal");
@@ -755,9 +710,8 @@ fn test_clp_hot_start_mark_solve_unmark() {
 
 #[test]
 fn test_clp_hot_start_drop_releases_token() {
-    // Marking without an explicit unmark must be released by Drop — no leak,
-    // no double-free. Exercised by simply letting the solver fall out of scope
-    // with a live token.
+    // Marking without an explicit unmark must be released by Drop — no leak, no
+    // double-free.
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
     solver.load_model(&make_fixture_stage_template());
     let _ = solver.solve(None).expect("cold solve must be optimal");
@@ -769,79 +723,56 @@ fn test_clp_hot_start_drop_releases_token() {
 #[test]
 fn test_clp_load_model_releases_live_hot_start_token() {
     // load_model must release a live hot-start snapshot before replacing the
-    // model: the saveStuff token belongs to the OLD model's factorization and
-    // is invalid after Clp_loadProblem. Without the self-heal guard inside
-    // load_model, a later Drop -> unmark would run on the post-load_model
-    // state — a hazard. With the guard, the token is released and nulled at
-    // reload time, so Drop is safe.
+    // model — the saveStuff token belongs to the OLD model's factorization and is
+    // invalid after Clp_loadProblem — so a later Drop -> unmark stays safe.
     //
-    // Path: load_model -> solve -> mark_hot_start -> load_model (live token)
-    // -> Drop. Must not crash. (A `solve` AFTER the reload is deliberately NOT
-    // exercised here: vendored CLP's `unmarkHotStart` leaves the model's own
-    // `factorization_` member dangling and `Clp_loadProblem` does not heal the
-    // ClpSimplex-level rim, so a solve after a reload-following-a-hot-start
-    // dereferences freed memory inside `ClpSimplex::saveData()`. The guard
-    // fixes the Drop hazard it is responsible for; that residual CLP defect is
-    // out of this guard's scope and is not on any real per-(worker, stage)
-    // persistent-solver path, which never reloads a fresh model after marking.)
+    // A `solve` AFTER the reload is deliberately NOT exercised: vendored CLP's
+    // `unmarkHotStart` leaves `factorization_` dangling and `Clp_loadProblem`
+    // does not heal the rim, so such a solve dereferences freed memory inside
+    // `ClpSimplex::saveData()`. That residual CLP defect is out of scope and no
+    // persistent-solver path reloads after marking.
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
     solver.load_model(&make_fixture_stage_template());
     let _ = solver
         .solve(None)
         .expect("first cold solve must be optimal");
     solver.mark_hot_start();
-    // The guard inside load_model releases the live token before reload.
     solver.load_model(&make_fixture_stage_template());
-    // The reloaded model is intact for everything except a hot-start-tainted
-    // solve: the retained mirror and dimensions are correct.
     assert!(solver.has_model);
     assert!(
         solver.hot_start_token.is_null(),
         "load_model must null the hot-start token after releasing it"
     );
-    // Drop here must NOT re-unmark a stale token (the guard already nulled it).
     drop(solver);
 }
 
 #[test]
 fn test_clp_add_rows_releases_live_hot_start_token() {
-    // A non-empty add_rows is a structural change (it bumps the row
-    // dimension), so it must release a live hot-start snapshot just like
-    // load_model: the saveStuff token pins the pre-append factorization/rim
-    // and is stale once rows are appended. With the guard, the token is
-    // released and nulled at append time, so Drop is safe.
+    // A non-empty add_rows bumps the row dimension, so it must release a live
+    // hot-start snapshot just like load_model — the saveStuff pins the pre-append
+    // factorization/rim and is stale once rows are appended — leaving Drop safe.
     //
-    // Path: load_model -> solve -> mark_hot_start -> add_rows (live token)
-    // -> Drop. Must not crash. (A `solve` AFTER the append is deliberately
-    // NOT exercised here: vendored CLP's `unmarkHotStart` leaves the model's
-    // own `factorization_` member dangling, so a solve after a
-    // release-following-a-hot-start dereferences freed memory inside CLP.
-    // That residual CLP defect is out of this guard's scope; the guard fixes
-    // the Drop hazard it is responsible for.)
+    // A `solve` AFTER the append is deliberately NOT exercised: vendored CLP's
+    // `unmarkHotStart` leaves `factorization_` dangling, so such a solve
+    // dereferences freed memory inside CLP. That residual defect is out of scope.
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
     solver.load_model(&make_fixture_stage_template());
     let _ = solver
         .solve(None)
         .expect("first cold solve must be optimal");
     solver.mark_hot_start();
-    // The guard inside add_rows releases the live token before mutating.
     solver.add_rows(&make_fixture_row_batch());
     assert!(
         solver.hot_start_token.is_null(),
         "add_rows must null the hot-start token after releasing it"
     );
-    // Drop here must NOT re-unmark a stale token (the guard already nulled it).
     drop(solver);
 }
 
 #[test]
 fn test_clp_add_rows_empty_batch_preserves_hot_start_token() {
-    // An empty add_rows (num_rows == 0) makes no structural change and hits
-    // the early return before the release guard, so a live hot-start snapshot
-    // must survive untouched.
-    //
-    // Path: load_model -> solve -> mark_hot_start -> add_rows(empty) -> assert
-    // token still live -> unmark_hot_start -> Drop.
+    // An empty add_rows (num_rows == 0) hits the early return before the release
+    // guard, so a live hot-start snapshot must survive untouched.
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
     solver.load_model(&make_fixture_stage_template());
     let _ = solver
@@ -865,15 +796,14 @@ fn test_clp_add_rows_empty_batch_preserves_hot_start_token() {
         !solver.hot_start_token.is_null(),
         "an empty add_rows must preserve the live hot-start token"
     );
-    // Explicitly release the still-live token, then Drop must be a clean no-op.
     solver.unmark_hot_start();
     drop(solver);
 }
 
 #[test]
 fn test_clp_tolerance_setters_cache_profile() {
-    // AC2: apply_profile issues the tolerance FFI calls and caches the values
-    // in current_profile so ProfiledSolver delta-tracking observes the change.
+    // apply_profile caches the tolerance values in current_profile so
+    // ProfiledSolver delta-tracking observes the change.
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
 
     solver.apply_profile(&ClpProfile {
@@ -887,9 +817,8 @@ fn test_clp_tolerance_setters_cache_profile() {
 
 #[test]
 fn test_clp_profiled_solver_default_noop() {
-    // AC3: wrapping in ProfiledSolver and calling set_profile(&default) is a
-    // delta-tracking no-op — the wrapper starts at default, so no
-    // apply_profile is issued and current_profile() is unchanged.
+    // set_profile(&default) is a delta-tracking no-op — the wrapper starts at
+    // default, so no apply_profile is issued and current_profile() is unchanged.
     let solver = ClpSolver::new().expect("CLP solver creation failed");
     let mut profiled = ProfiledSolver::new(solver);
 
@@ -900,8 +829,6 @@ fn test_clp_profiled_solver_default_noop() {
 
 #[test]
 fn test_clp_usable_as_generic_solver_bound() {
-    // AC4: ClpSolver satisfies the full SolverInterface contract and is
-    // usable wherever `S: SolverInterface` is required.
     fn run_solve<S: SolverInterface>(s: &mut S) -> Result<SolutionView<'_>, SolverError> {
         s.solve(None)
     }
@@ -919,8 +846,8 @@ fn test_clp_usable_as_generic_solver_bound() {
 
 #[test]
 fn test_clp_resolve_simplex_cap_sentinel_and_explicit() {
-    // AC5: on a 3-col LP, the sentinel (0) resolves to max(100_000, 3*50) =
-    // 100_000; an explicit 500 resolves to 500 verbatim.
+    // On a 3-col LP, the sentinel (0) resolves to max(100_000, 3*50) = 100_000;
+    // an explicit 500 resolves to 500 verbatim.
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
     solver.load_model(&make_fixture_stage_template());
 

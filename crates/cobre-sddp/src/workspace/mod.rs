@@ -14,24 +14,15 @@
 //!   ([`StageContext`], [`TrainingContext`])
 //!   passed by reference to keep hot-path argument counts down.
 
-// Rationale: the workspace file keeps its established `workspace` basename
-// inside this `workspace/` cluster, so the submodule shares its parent's name.
-// Renaming the submodule would break the `workspace::workspace::{...}` re-export
-// path the crate root uses for `CapturedBasis` / `BASIS_BROADCAST_WIRE_VERSION`
-// for no behavioural gain.
 pub mod context;
+// Rationale: renaming this submodule off its parent's name would break the
+// `workspace::workspace::{...}` re-export path for no behavioural gain.
 #[allow(clippy::module_inception)]
 pub mod workspace;
 
-// Re-export the symbols the in-crate `crate::workspace::Symbol` and
-// `crate::context::Symbol` call sites reach for, so the directory-module move is
-// transparent to them. `BackwardAccumulators` and `ScratchBuffers` are
-// `pub(crate)`, so they are re-exported at the same visibility.
-//
 // Rationale: `BackwardAccumulators` is reached only from in-crate `#[cfg(test)]`
-// modules via `crate::workspace::BackwardAccumulators`, so the re-export reads as
-// unused in the non-test build; the `cfg(not(test))` allow scopes the suppression
-// to that build only, keeping the warning live should a non-test caller drop.
+// modules, so the re-export reads as unused in the non-test build; scoping the
+// allow to `cfg(not(test))` keeps the warning live should a non-test caller land.
 pub use context::{StageContext, TrainingContext};
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use workspace::BackwardAccumulators;

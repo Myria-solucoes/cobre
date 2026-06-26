@@ -74,60 +74,30 @@ use cobre_stochastic::{
     },
 };
 
-// Re-export so the public `cobre_sddp::` surface (`lib.rs`) and external
-// consumers resolve `EstimationReport` through this shell module unchanged.
-// This `pub use` is the sole binding of `EstimationReport` in the shell, so it
-// also serves the module's own references to the type.
+// Re-exported so the public `cobre_sddp::` surface resolves `EstimationReport`
+// through this shell module; also the module's own binding of the type.
 pub use cobre_stochastic::par::fitting::EstimationReport;
 
 /// Classification of the estimation path taken for a given input file manifest.
 ///
-/// Each variant corresponds to one row of the input path matrix documented in
-/// the module-level doc comment. The three boolean flags are:
-/// - `H` — `scenarios_inflow_history_parquet`
-/// - `S` — `scenarios_inflow_seasonal_stats_parquet`
-/// - `R` — `scenarios_inflow_ar_coefficients_parquet`
-///
-/// | Row | H | S | R | Variant |
-/// |-----|---|---|---|---------|
-/// |  1  | 0 | 0 | 0 | `Deterministic` |
-/// |  2  | 0 | 1 | 0 | `UserStatsWhiteNoise` |
-/// |  3  | 0 | 1 | 1 | `UserProvidedNoHistory` |
-/// |  4  | 1 | 0 | 0 | `FullEstimation` |
-/// |  5  | 1 | 0 | 1 | `UserArHistoryStats` |
-/// |  6  | 1 | 1 | 0 | `PartialEstimation` |
-/// |  7  | 1 | 1 | 1 | `UserProvidedAll` |
-///
-/// The combination `(H=0, S=0, R=1)` and `(H=0, S=1, R=1)` (rows with AR but
-/// no history) map to `Deterministic` and `UserProvidedNoHistory` respectively.
-/// AR without history is meaningless for estimation, so the presence of AR
-/// coefficients alone (without history) is treated as row 1.
+/// Each variant is one row of the input-path matrix in the module doc, keyed on
+/// the three flags H (history), S (seasonal stats), R (AR coefficients). AR
+/// without history is meaningless, so `R` alone resolves to a no-history row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EstimationPath {
-    /// Row 1: no history, no stats, no AR (or AR present but no history/stats).
-    /// The system is returned unchanged.
+    /// No history: system returned unchanged (also the fallback for AR-without-history).
     Deterministic,
-    /// Row 2: no history, stats present, no AR.
-    /// The system is returned unchanged (user-provided white-noise stats).
+    /// User-provided white-noise stats, no history: system returned unchanged.
     UserStatsWhiteNoise,
-    /// Row 3: no history, stats present, AR present.
-    /// The system is returned unchanged (user-provided complete model, no history).
+    /// User-provided complete model, no history: system returned unchanged.
     UserProvidedNoHistory,
-    /// Row 4: history present, no stats, no AR.
-    /// Full estimation: seasonal stats and AR coefficients are estimated.
+    /// History only: both seasonal stats (Role 1) and AR coefficients (Role 2) estimated.
     FullEstimation,
-    /// Row 5: history present, no stats, AR present.
-    /// Seasonal stats are estimated from history (Role 1); user AR coefficients
-    /// are preserved bitwise (Role 2). Dispatches to `run_user_ar_estimation`.
+    /// History + user AR: stats estimated from history (Role 1), user AR preserved bitwise (Role 2).
     UserArHistoryStats,
-    /// Row 6: history present, stats present, no AR.
-    /// User stats are used; only AR coefficients are estimated from history.
-    /// Dispatches to `run_partial_estimation`, which preserves `mean_m3s` and
-    /// `std_m3s` from the user-provided stats while estimating AR coefficients
-    /// via periodic Yule-Walker / PACF.
+    /// History + user stats: user stats preserved (Role 1), AR estimated from history (Role 2).
     PartialEstimation,
-    /// Row 7: history present, stats present, AR present.
-    /// All model parameters provided by the user; system is returned unchanged.
+    /// All parameters user-provided: system returned unchanged.
     UserProvidedAll,
 }
 
@@ -144,19 +114,13 @@ impl EstimationPath {
             manifest.scenarios_inflow_seasonal_stats_parquet,
             manifest.scenarios_inflow_ar_coefficients_parquet,
         ) {
-            // No history — AR alone is meaningless; row 1.
+            // `_`: with no history, R is ignored — AR alone cannot drive estimation.
             (false, false, _) => Self::Deterministic,
-            // No history, stats present, no AR — row 2.
             (false, true, false) => Self::UserStatsWhiteNoise,
-            // No history, stats present, AR present — row 3.
             (false, true, true) => Self::UserProvidedNoHistory,
-            // History present, no stats, no AR — row 4.
             (true, false, false) => Self::FullEstimation,
-            // History present, no stats, AR present — row 5.
             (true, false, true) => Self::UserArHistoryStats,
-            // History present, stats present, no AR — row 6.
             (true, true, false) => Self::PartialEstimation,
-            // History present, stats present, AR present — row 7.
             (true, true, true) => Self::UserProvidedAll,
         }
     }
@@ -190,20 +154,8 @@ pub enum EstimationError {
 
 /// Estimate or load PAR(p) model parameters based on the input file manifest.
 ///
-/// Resolves which [`EstimationPath`] applies for `case_dir`, then dispatches:
-///
-/// - **Rows 1, 2, 3, 7** (pass-through): Returns `system` unchanged with
-///   `report = None`. No estimation is performed.
-/// - **Row 4** ([`FullEstimation`](EstimationPath::FullEstimation)): Delegates
-///   to `run_estimation`, which estimates both seasonal stats (Role 1) and AR
-///   coefficients (Role 2) from `inflow_history.parquet`.
-/// - **Row 5** ([`UserArHistoryStats`](EstimationPath::UserArHistoryStats)):
-///   Delegates to `run_user_ar_estimation`, which estimates seasonal stats
-///   (Role 1) from history while preserving user AR coefficients (Role 2).
-/// - **Row 6** ([`PartialEstimation`](EstimationPath::PartialEstimation)):
-///   Delegates to `run_partial_estimation`, which preserves user seasonal
-///   stats (Role 1) while estimating AR coefficients (Role 2) from history
-///   via periodic Yule-Walker / PACF.
+/// Resolves the [`EstimationPath`] for `case_dir` and dispatches to the matching
+/// `run_*` pipeline; pass-through paths return `system` unchanged with `None` report.
 ///
 /// # Errors
 ///
@@ -215,39 +167,32 @@ pub fn estimate_from_history(
     case_dir: &Path,
     config: &Config,
 ) -> Result<(System, Option<EstimationReport>, EstimationPath), EstimationError> {
-    // ── Step 1: resolve file manifest ────────────────────────────────────────
     let mut ctx = ValidationContext::new();
     let manifest = validate_structure(case_dir, &mut ctx);
 
-    // Abort early if structural validation found errors.
+    // Treat structural validation errors as a no-op deterministic path.
     if ctx.into_result().is_err() {
         return Ok((system, None, EstimationPath::Deterministic));
     }
 
-    // ── Step 2: resolve input path and dispatch ──────────────────────────────
     let path = EstimationPath::resolve(&manifest);
 
     match path {
-        // No estimation — return system unchanged.
         EstimationPath::Deterministic
         | EstimationPath::UserStatsWhiteNoise
         | EstimationPath::UserProvidedNoHistory
         | EstimationPath::UserProvidedAll => Ok((system, None, path)),
 
-        // Row 6: history + user stats, no AR — estimate AR from history, preserve user stats.
         EstimationPath::PartialEstimation => {
             let (system, report) = run_partial_estimation(system, case_dir, config, &manifest)?;
             Ok((system, Some(report), path))
         }
 
-        // Row 4: full estimation from history.
         EstimationPath::FullEstimation => {
             let (system, report) = run_estimation(system, case_dir, config, &manifest)?;
             Ok((system, Some(report), path))
         }
 
-        // Row 5: history present, no stats, AR present — estimate stats from history,
-        // preserve user AR coefficients.
         EstimationPath::UserArHistoryStats => {
             let (system, report) = run_user_ar_estimation(system, case_dir, config, &manifest)?;
             Ok((system, Some(report), path))
@@ -262,33 +207,23 @@ fn run_estimation(
     config: &Config,
     manifest: &FileManifest,
 ) -> Result<(System, EstimationReport), EstimationError> {
-    // ── Step 3: load inflow history ──────────────────────────────────────────
     let history_path = case_dir.join("scenarios/inflow_history.parquet");
     let history = parse_inflow_history(&history_path)?;
 
-    // ── Convert InflowHistoryRow to (EntityId, NaiveDate, f64) tuples ────────
     let observations: Vec<(EntityId, NaiveDate, f64)> = history
         .iter()
         .map(|row| (row.hydro_id, row.date, row.value_m3s))
         .collect();
 
-    // ── Collect hydro IDs from system (canonical sorted order) ───────────────
     let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
 
-    // ── Use stages already present in the system (avoids re-parsing stages.json) ──
+    // Use the system's stages, avoiding a re-parse of stages.json.
     let study_stages = system.stages();
-
-    // ── Extract season map for calendar-based date-to-season fallback ────────
     let season_map = system.policy_graph().season_map.as_ref();
     let max_order = config.estimation.max_order as usize;
 
-    // ── Synthesize pre-study stages for the PAR lag window (partial-year only) ──
-    // For a full-year study this is empty, so `stages == study_stages` and the
-    // estimation is bit-identical to before. For a partial-year study the
-    // out-of-window lag seasons gain stages, so the season-aware estimators
-    // compute their stats and the `*_to_rows` expansions attach them to the
-    // synthetic negative stage_ids that `PrecomputedPar::build` resolves via
-    // Tier-1 lag lookup.
+    // Empty for a full-year study, so `stages == study_stages` and the estimation
+    // is bit-identical to the no-prestudy path.
     let prestudy = synthesize_prestudy_stages(study_stages, max_order, season_map);
     let stages: Vec<cobre_core::temporal::Stage> = study_stages
         .iter()
@@ -297,21 +232,17 @@ fn run_estimation(
         .collect();
     let stages = stages.as_slice();
 
-    // ── Step 3b: aggregate observations to season resolution ─────────────────
-    // Aggregation resolves each observation to a season via the season map, so
-    // it uses the study stages only (synthetic pre-study stages would not change
-    // any observation's resolved season).
+    // Aggregate against study_stages, not stages: the synthetic pre-study stages
+    // would not change any observation's resolved season.
     let observations = if let Some(sm) = season_map {
         aggregate_observations_to_season(&observations, study_stages, sm)?
     } else {
         observations
     };
 
-    // ── Step 4: estimate seasonal stats ─────────────────────────────────────
     let seasonal_stats =
         estimate_seasonal_stats_with_season_map(&observations, stages, &hydro_ids, season_map)?;
 
-    // ── Step 5: estimate AR coefficients ────────────────────────────────────
     let (ar_estimates, estimation_report) = estimate_ar_coefficients_with_selection(
         &observations,
         &seasonal_stats,
@@ -328,9 +259,7 @@ fn run_estimation(
         },
     )?;
 
-    // ── Step 6: estimate or preserve correlation ─────────────────────────────
     let correlation = if manifest.scenarios_correlation_json {
-        // Explicit correlation.json is present — keep whatever was loaded by load_case.
         system.correlation().clone()
     } else {
         estimate_correlation_with_season_map(
@@ -343,7 +272,6 @@ fn run_estimation(
         )?
     };
 
-    // ── Step 7: convert results to row types and assemble inflow models ───────
     let stats_rows = seasonal_stats_to_rows(&seasonal_stats, stages);
     let coeff_rows = ar_estimates_to_rows(&ar_estimates, stages);
     let annual_rows = ar_estimates_to_annual_rows(&ar_estimates, stages);
@@ -356,17 +284,12 @@ fn run_estimation(
     ))
 }
 
-/// Inner function that runs the partial estimation pipeline (P1 path).
+/// Partial estimation: history + user seasonal stats present, AR coefficients absent.
 ///
-/// Used when `inflow_history.parquet` and `inflow_seasonal_stats.parquet` are
-/// both present but `inflow_ar_coefficients.parquet` is absent. The user-provided
-/// stats (`mean_m3s`, `std_m3s`) are preserved exactly for LP assembly; only AR
-/// coefficients are estimated from history.
-///
-/// The key distinction vs [`run_estimation`]:
-/// - **Fitting stats** (history-derived, step 4) are used for YW matrix construction.
-/// - **User stats** (from `system.inflow_models()`, step 7) are used for the final
-///   `assemble_inflow_models` call that drives the scenario generator.
+/// User stats (`mean_m3s`, `std_m3s`) are preserved exactly for LP assembly; only
+/// AR coefficients are estimated from history. The distinction vs [`run_estimation`]:
+/// history-derived **fitting stats** drive the YW matrix construction, while
+/// **user stats** drive the final `assemble_inflow_models` call.
 fn run_partial_estimation(
     system: System,
     case_dir: &Path,
@@ -378,9 +301,8 @@ fn run_partial_estimation(
     let season_map = system.policy_graph().season_map.as_ref();
     let max_order = config.estimation.max_order as usize;
 
-    // ── Synthesize pre-study stages for the PAR lag window (partial-year only) ──
     // Empty for a full-year study, so `stages == study_stages` and the partial
-    // estimation is bit-identical to before.
+    // estimation is bit-identical to the no-prestudy path.
     let prestudy = synthesize_prestudy_stages(study_stages, max_order, season_map);
     let stages_owned: Vec<cobre_core::temporal::Stage> = study_stages
         .iter()
@@ -389,11 +311,9 @@ fn run_partial_estimation(
         .collect();
     let stages = stages_owned.as_slice();
 
-    // ── Steps 3-3b: load history and aggregate to season resolution ──────────
-    // Aggregation resolves seasons via the season map, so it uses study stages.
+    // Aggregate against study_stages (the season map resolves observations there).
     let observations = load_and_aggregate_observations(case_dir, study_stages, season_map)?;
 
-    // ── Validate that user stats are present in the loaded system ────────────
     if system.inflow_models().is_empty() {
         return Err(EstimationError::Load(
             cobre_io::LoadError::ConstraintError {
@@ -405,11 +325,10 @@ fn run_partial_estimation(
         ));
     }
 
-    // ── Step 4: estimate seasonal stats (fitting stats — for YW solve only) ──
+    // Fitting stats: used only for the YW solve below, never for LP assembly.
     let fitting_stats =
         estimate_seasonal_stats_with_season_map(&observations, stages, &hydro_ids, season_map)?;
 
-    // ── Step 5: estimate AR coefficients using fitting stats ─────────────────
     let (ar_estimates, mut estimation_report) = estimate_ar_coefficients_with_selection(
         &observations,
         &fitting_stats,
@@ -426,13 +345,10 @@ fn run_partial_estimation(
         },
     )?;
 
-    // ── Steps 5b-5d: coverage validation and advisory warnings ───────────────
-    // Coverage compares user stats against estimated stats over the study
-    // horizon; the synthetic pre-study stages are not part of that comparison.
+    // Coverage compares over study_stages only — pre-study stages are excluded.
     let (white_noise_fallbacks, std_ratio_warnings) =
         validate_partial_estimation_coverage(&system, &fitting_stats, study_stages)?;
 
-    // ── Step 6: estimate or preserve correlation ─────────────────────────────
     let correlation = if manifest.scenarios_correlation_json {
         system.correlation().clone()
     } else {
@@ -446,15 +362,12 @@ fn run_partial_estimation(
         )?
     };
 
-    // ── Step 7: convert to row types using USER stats, not fitting stats ──────
-    // Fitting stats were used only for YW matrix construction above.
-    // User stats (mean_m3s, std_m3s from the input system) drive LP assembly.
+    // LP assembly uses USER stats, not the fitting stats above.
     let mut stats_rows = user_stats_to_rows(&system);
-    // Out-of-window lag seasons (covered only by synthetic pre-study stages)
-    // have no user stat. Source their (mean, std) from the history-fitted
-    // `fitting_stats` so `PrecomputedPar::build` finds a Tier-1 lag hit at the
-    // negative stage_id rather than zeroing the lag. In-window wrap lags are
-    // left to the cycle-correct Tier-2 → user-stat path. Empty for full-year.
+    // Out-of-window lag seasons have no user stat; source their (mean, std) from
+    // fitting_stats so PrecomputedPar::build gets a Tier-1 lag hit at the negative
+    // stage_id rather than zeroing the lag. In-window wrap lags stay on the
+    // Tier-2 → user-stat path. Empty for full-year.
     stats_rows.extend(prestudy_seasonal_rows(&fitting_stats, &prestudy));
     let coeff_rows = ar_estimates_to_rows(&ar_estimates, stages);
     let annual_rows = ar_estimates_to_annual_rows(&ar_estimates, stages);
@@ -470,7 +383,7 @@ fn run_partial_estimation(
 }
 
 /// Load inflow history from the case directory and aggregate observations to
-/// season resolution when a season map is present (steps 3–3b).
+/// season resolution when a season map is present.
 fn load_and_aggregate_observations(
     case_dir: &Path,
     stages: &[cobre_core::temporal::Stage],
@@ -495,10 +408,9 @@ fn load_and_aggregate_observations(
 /// `(white_noise_fallbacks, std_ratio_warnings)`.
 type CoverageCheckResult = (Vec<EntityId>, Vec<StdRatioDivergence>);
 
-/// Validate bidirectional coverage and emit advisory warnings (steps 5b–5d).
+/// Validate bidirectional user-vs-estimated coverage and emit advisory warnings.
 ///
-/// Returns `(white_noise_fallbacks, std_ratio_warnings)`.
-/// Errors only on hard coverage failures (estimated hydro missing user stats).
+/// Errors only on hard coverage failures (an estimated hydro missing user stats).
 fn validate_partial_estimation_coverage(
     system: &System,
     fitting_stats: &[SeasonalStats],
@@ -536,7 +448,7 @@ fn validate_partial_estimation_coverage(
         .collect();
     white_noise_fallbacks.sort();
 
-    // Step 5d: cross-season std ratio divergence check (advisory only).
+    // Cross-season std-ratio divergence check (advisory only).
     let std_ratio_warnings = check_std_ratio_divergence(system, fitting_stats, stages);
     for w in &std_ratio_warnings {
         tracing::warn!(
@@ -554,72 +466,48 @@ fn validate_partial_estimation_coverage(
     Ok((white_noise_fallbacks, std_ratio_warnings))
 }
 
-/// Inner function that runs the P7 (`UserArHistoryStats`) estimation pipeline.
+/// `UserArHistoryStats`: history + user AR coefficients present, seasonal stats absent.
 ///
-/// Used when `inflow_history.parquet` and `inflow_ar_coefficients.parquet` are
-/// both present but `inflow_seasonal_stats.parquet` is absent. Seasonal stats
-/// (`mean_m3s`, `std_m3s`) are estimated from history for LP assembly and for
-/// correlation estimation. AR coefficients are loaded from the user-provided
-/// file and preserved bitwise — **no re-estimation from history is performed**.
-///
-/// The key distinction vs [`run_estimation`]:
-/// - **AR coefficients** come from the user file (not estimated from history).
-/// - **Seasonal stats** (mean, std) come from history estimation and drive both
-///   the final `InflowModel` and the correlation estimation.
-/// - The returned [`EstimationReport`] has an empty `entries` map and method
-///   `"user_provided"` to signal that no AR estimation was performed.
+/// Seasonal stats are estimated from history (driving both LP assembly and
+/// correlation estimation); AR coefficients are loaded from the user file and
+/// preserved bitwise — **no re-estimation from history is performed**. The
+/// returned [`EstimationReport`] carries an empty `entries` map and method
+/// `"user_provided"` to signal that no AR estimation ran.
 fn run_user_ar_estimation(
     system: System,
     case_dir: &Path,
     _config: &Config,
     manifest: &FileManifest,
 ) -> Result<(System, EstimationReport), EstimationError> {
-    // ── Step 3: load inflow history ──────────────────────────────────────────
     let history_path = case_dir.join("scenarios/inflow_history.parquet");
     let history = parse_inflow_history(&history_path)?;
 
-    // ── Convert InflowHistoryRow to (EntityId, NaiveDate, f64) tuples ────────
     let observations: Vec<(EntityId, NaiveDate, f64)> = history
         .iter()
         .map(|row| (row.hydro_id, row.date, row.value_m3s))
         .collect();
 
-    // ── Collect hydro IDs from system (canonical sorted order) ───────────────
     let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
-
-    // ── Use stages already present in the system ─────────────────────────────
     let stages = system.stages();
-
-    // ── Extract season map for calendar-based date-to-season fallback ────────
     let season_map = system.policy_graph().season_map.as_ref();
 
-    // ── Step 3b: aggregate observations to season resolution ─────────────────
     let observations = if let Some(sm) = season_map {
         aggregate_observations_to_season(&observations, stages, sm)?
     } else {
         observations
     };
 
-    // ── Step 4: estimate seasonal stats from history ─────────────────────────
-    // These stats are used for both LP assembly (mean_m3s, std_m3s) and for
-    // correlation estimation. User AR coefficients are NOT re-estimated here.
+    // User AR coefficients are NOT re-estimated here.
     let seasonal_stats =
         estimate_seasonal_stats_with_season_map(&observations, stages, &hydro_ids, season_map)?;
 
-    // ── Load user AR coefficients from file ───────────────────────────────────
-    // system.inflow_models() is empty for this path (assemble_inflow_models
-    // returns an empty vec when stats are absent). Load AR from file directly.
+    // Read AR from file: system.inflow_models() is empty on this path (no user stats).
     let ar_path = case_dir.join("scenarios/inflow_ar_coefficients.parquet");
     let user_ar_rows = parse_inflow_ar_coefficients(&ar_path)?;
 
-    // ── Convert user AR rows to ArCoefficientEstimate for correlation ─────────
-    // ArCoefficientEstimate uses season_id; InflowArCoefficientRow uses stage_id.
-    // The conversion groups by (hydro_id, season_id) using the stage-to-season map.
     let user_ar_estimates = ar_rows_to_estimates(&user_ar_rows, stages);
 
-    // ── Step 6: estimate or preserve correlation ─────────────────────────────
     let correlation = if manifest.scenarios_correlation_json {
-        // Explicit correlation.json is present — keep whatever was loaded by load_case.
         system.correlation().clone()
     } else {
         estimate_correlation_with_season_map(
@@ -632,14 +520,11 @@ fn run_user_ar_estimation(
         )?
     };
 
-    // ── Step 7: convert results to row types and assemble inflow models ───────
-    // History-estimated stats drive mean_m3s / std_m3s; user AR rows drive
-    // ar_coefficients / residual_std_ratio.
+    // History stats drive mean_m3s/std_m3s; user AR rows drive ar_coefficients/residual_std_ratio.
     let stats_rows = seasonal_stats_to_rows(&seasonal_stats, stages);
 
     let inflow_models = assemble_inflow_models(stats_rows, user_ar_rows, vec![])?;
 
-    // Build a minimal report: no AR was estimated, method is "user_provided".
     let estimation_report = EstimationReport {
         entries: BTreeMap::new(),
         method: "user_provided".to_string(),
@@ -671,21 +556,17 @@ fn ar_rows_to_estimates(
     rows: &[InflowArCoefficientRow],
     stages: &[cobre_core::temporal::Stage],
 ) -> Vec<ArCoefficientEstimate> {
-    // Build stage_id -> season_id mapping.
     let stage_id_to_season: HashMap<i32, usize> = stages
         .iter()
         .filter_map(|s| s.season_id.map(|sid| (s.id, sid)))
         .collect();
 
-    // Track the first stage_id seen for each (hydro_id, season_id) key.
-    // Since rows are pre-sorted by (hydro_id, stage_id, lag), the first stage_id
-    // encountered for a given season is the canonical one to use. Subsequent
-    // stages in the same season are duplicates produced by ar_estimates_to_rows
-    // and must be skipped.
+    // Rows are pre-sorted by (hydro_id, stage_id, lag), so the first stage per
+    // season is canonical; later same-season stages are duplicates emitted by
+    // ar_estimates_to_rows and are skipped.
     let mut first_stage: HashMap<(EntityId, usize), i32> = HashMap::new();
 
-    // Groups accumulate coefficients for the canonical (first) stage only.
-    // Use BTreeMap for deterministic (hydro_id, season_id) ordering in output.
+    // BTreeMap for deterministic (hydro_id, season_id) output ordering.
     let mut groups: BTreeMap<(EntityId, usize), (Vec<f64>, f64)> = BTreeMap::new();
 
     for row in rows {
@@ -695,14 +576,11 @@ fn ar_rows_to_estimates(
 
         let key = (row.hydro_id, season_id);
 
-        // Record the first stage_id seen for this key, or skip if a different stage.
         let canonical_stage = first_stage.entry(key).or_insert(row.stage_id);
         if *canonical_stage != row.stage_id {
-            // This row belongs to a duplicate stage for the same season — skip it.
             continue;
         }
 
-        // Accumulate the coefficient for the canonical stage.
         let entry = groups
             .entry(key)
             .or_insert_with(|| (Vec::new(), row.residual_std_ratio));
@@ -743,32 +621,23 @@ fn user_stats_to_rows(system: &System) -> Vec<InflowSeasonalStatsRow> {
         .collect()
 }
 
-/// Check whether consecutive-season std ratios diverge between user and
-/// estimated profiles for each hydro in the partial estimation path (P9).
+/// Flag hydros whose consecutive-season std ratios diverge between the user and
+/// estimated profiles, advisory only.
 ///
-/// For each hydro present in both user stats and `fitting_stats`, iterates
-/// consecutive season pairs `(m, (m+1) % n)` and computes:
-///
-/// - `ratio_user = user_std[m] / user_std[m+1]`
-/// - `ratio_est  = est_std[m]  / est_std[m+1]`
-/// - `divergence = max(ratio_user / ratio_est, ratio_est / ratio_user)`
-///
-/// A [`StdRatioDivergence`] entry is pushed when `divergence > 2.0`. Season
-/// pairs where either denominator is `< 1e-12` are skipped silently. The
-/// result is sorted by `(hydro_id, season_a)`.
+/// For each hydro in both user stats and `fitting_stats`, over consecutive season
+/// pairs `(m, (m+1) % n)`, pushes a [`StdRatioDivergence`] when the symmetric
+/// ratio-of-ratios exceeds `2.0`. Near-zero denominators (`< 1e-12`) are skipped.
 fn check_std_ratio_divergence(
     system: &System,
     fitting_stats: &[SeasonalStats],
     stages: &[cobre_core::temporal::Stage],
 ) -> Vec<StdRatioDivergence> {
-    // Build stage_id -> season_id mapping.
     let stage_id_to_season: HashMap<i32, usize> = stages
         .iter()
         .filter_map(|s| s.season_id.map(|sid| (s.id, sid)))
         .collect();
 
-    // Build (hydro_id, season_id) -> user std.
-    // When multiple stages share a season, any entry will do (same season).
+    // First entry wins: stages sharing a season carry the same std.
     let mut user_std: BTreeMap<(EntityId, usize), f64> = BTreeMap::new();
     for m in system.inflow_models() {
         let Some(&season_id) = stage_id_to_season.get(&m.stage_id) else {
@@ -777,7 +646,6 @@ fn check_std_ratio_divergence(
         user_std.entry((m.hydro_id, season_id)).or_insert(m.std_m3s);
     }
 
-    // Build (hydro_id, season_id) -> estimated std.
     let mut est_std: BTreeMap<(EntityId, usize), f64> = BTreeMap::new();
     for s in fitting_stats {
         let Some(&season_id) = stage_id_to_season.get(&s.stage_id) else {
@@ -786,7 +654,6 @@ fn check_std_ratio_divergence(
         est_std.entry((s.entity_id, season_id)).or_insert(s.std);
     }
 
-    // Collect all hydro IDs that appear in both maps, in sorted order.
     let user_hydros: std::collections::BTreeSet<EntityId> =
         user_std.keys().map(|(h, _)| *h).collect();
     let est_hydros: std::collections::BTreeSet<EntityId> =
@@ -796,7 +663,6 @@ fn check_std_ratio_divergence(
     let mut warnings: Vec<StdRatioDivergence> = Vec::new();
 
     for hydro_id in common_hydros {
-        // Collect sorted distinct season IDs for this hydro from user stats.
         let season_ids: Vec<usize> = {
             let mut ids: Vec<usize> = user_std
                 .keys()
@@ -810,7 +676,6 @@ fn check_std_ratio_divergence(
 
         let n = season_ids.len();
         if n < 2 {
-            // Fewer than 2 seasons: no consecutive pairs exist.
             continue;
         }
 
@@ -831,7 +696,6 @@ fn check_std_ratio_divergence(
                 continue;
             };
 
-            // Skip pairs where either denominator std is near-zero.
             if u_b.abs() < 1e-12 || e_b.abs() < 1e-12 {
                 continue;
             }
@@ -839,8 +703,7 @@ fn check_std_ratio_divergence(
             let ratio_user = u_a / u_b;
             let ratio_est = e_a / e_b;
 
-            // Skip when either ratio is near-zero — would cause division-by-zero
-            // in the divergence computation.
+            // Guard the ratio-of-ratios divergence below against division by zero.
             if ratio_user.abs() < 1e-12 || ratio_est.abs() < 1e-12 {
                 continue;
             }
@@ -877,7 +740,7 @@ fn check_std_ratio_divergence(
 /// out-of-window lag statistics, and the precompute silently zeroes them.
 ///
 /// This helper emits, for each lag `k = 1..=min(max_order, cycle_len-1)`, a
-/// pre-study [`Stage`] with:
+/// pre-study [`Stage`](cobre_core::temporal::Stage) with:
 /// - `id = first_study_stage.id - k` (negative, descending),
 /// - `season_id` = the season `k` calendar positions before the first study
 ///   stage's season (modular on `cycle_len`),
@@ -904,7 +767,6 @@ fn synthesize_prestudy_stages(
         return Vec::new();
     }
 
-    // First study stage = lowest non-negative id with a season_id.
     let Some(first) = stages
         .iter()
         .filter(|s| s.id >= 0 && s.season_id.is_some())
@@ -916,24 +778,20 @@ fn synthesize_prestudy_stages(
         return Vec::new();
     };
 
-    // Seasons already covered by study stages: never synthesize these.
     let study_seasons: HashSet<usize> = stages.iter().filter_map(|s| s.season_id).collect();
 
     let lag_window = max_order.min(cycle_len - 1);
     let mut synthetic = Vec::with_capacity(lag_window);
 
     for k in 1..=lag_window {
-        // Season k calendar positions before the first study stage's season.
+        // The season k calendar positions before first_season (modular on cycle_len).
         let season_k = (first_season + cycle_len - (k % cycle_len)) % cycle_len;
         if study_seasons.contains(&season_k) {
-            // Wrap lags that land back inside the study window are handled by
-            // the cycle-correct Tier-2 lookup / user stats; do not synthesize.
+            // In-window wrap lags are served by the cycle-correct Tier-2 / user-stat path.
             continue;
         }
 
-        // Dates: month k positions before the first study stage's start_date.
-        // `start_k` is the first of that month; `end_k` is the first of the
-        // following month (k-1 positions before), giving a [start, end) span.
+        // [start_k, end_k): k and k-1 months before first.start_date give a half-open span.
         let (Some(start_k), Some(end_k)) = (
             first
                 .start_date
@@ -948,11 +806,9 @@ fn synthesize_prestudy_stages(
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let id = first.id - k as i32;
 
-        // Clone the first study stage and override only identity, dates, and
-        // season; block/state/risk/scenario config are irrelevant for estimation
-        // (which keys off id + season_id) but copying them keeps the stage valid.
+        // Override only identity/dates/season; estimation keys off id + season_id,
+        // so the cloned block/state/risk/scenario config only keeps the stage valid.
         let mut stage = first.clone();
-        // `index` is irrelevant for estimation (reassigned during loading).
         stage.index = 0;
         stage.id = id;
         stage.start_date = start_k;
@@ -998,19 +854,12 @@ fn prestudy_seasonal_rows(
     rows
 }
 
-/// Convert [`SeasonalStats`] to [`InflowSeasonalStatsRow`], expanding
-/// per-season estimates to every stage that shares the same `season_id`.
-///
-/// The `stage_id` in `SeasonalStats` stores the ID of the first stage with
-/// the matching season.  This function looks up that stage's `season_id` and
-/// emits one row for every stage with the same season, so that
+/// Convert [`SeasonalStats`] to [`InflowSeasonalStatsRow`], expanding each
+/// per-season estimate to every stage sharing its `season_id` so that
 /// [`cobre_stochastic::PrecomputedPar`] finds a model at every stage index.
 ///
-/// **Pre-study stages**: When `stages` contains pre-study stages (negative
-/// `id`, valid `season_id`), this function includes them in the expansion.
-/// Pre-study rows are emitted with their negative `stage_id`, which allows
-/// `PrecomputedPar::build` to find direct hits for lag stages without
-/// needing the season-based fallback path.
+/// Pre-study stages (negative `id`) are included in the expansion, emitting rows
+/// at their negative `stage_id` for direct lag-stage hits.
 fn seasonal_stats_to_rows(
     stats: &[SeasonalStats],
     stages: &[cobre_core::temporal::Stage],
@@ -1042,7 +891,7 @@ fn seasonal_stats_to_rows(
             }
             continue;
         }
-        // Fallback: emit just the original stage_id.
+        // No season mapping: emit the stat's own stage_id unexpanded.
         rows.push(InflowSeasonalStatsRow {
             hydro_id: s.entity_id,
             stage_id: s.stage_id,
@@ -1056,16 +905,11 @@ fn seasonal_stats_to_rows(
 }
 
 /// Convert [`ArCoefficientEstimate`] to [`InflowArCoefficientRow`], expanding
-/// per-season AR coefficients to every stage that shares the same `season_id`.
+/// each per-season estimate to every stage sharing its `season_id` (covering the
+/// full horizon, not just the season's first occurrence).
 ///
-/// The `season_id` in `ArCoefficientEstimate` is mapped to ALL stage IDs whose
-/// `season_id` matches, so the resulting coefficient rows cover the full study
-/// horizon (not just the first occurrence of each season).
-///
-/// **Pre-study stages**: When `stages` contains pre-study stages (negative
-/// `id`, valid `season_id`), this function includes them in the expansion.
-/// Pre-study coefficient rows are emitted with their negative `stage_id`,
-/// providing direct model entries for `PrecomputedPar::build` lag lookups.
+/// Pre-study stages (negative `id`) are included, emitting coefficient rows at
+/// their negative `stage_id` for direct lag lookups.
 fn ar_estimates_to_rows(
     ar_estimates: &[ArCoefficientEstimate],
     stages: &[cobre_core::temporal::Stage],

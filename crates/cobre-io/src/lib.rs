@@ -153,12 +153,10 @@ pub struct CaseArtifacts {
     /// optional-file presence.
     pub file_manifest: FileManifest,
 
-    /// Rows from `system/hydro_geometry.parquet`. Empty when the file is
-    /// absent.
+    /// Rows from `system/hydro_geometry.parquet`.
     pub hydro_geometry: Vec<extensions::HydroGeometryRow>,
 
-    /// Entries from `system/hydro_production_models.json`. Empty when the
-    /// file is absent.
+    /// Entries from `system/hydro_production_models.json`.
     pub production_models: Vec<extensions::ProductionModelConfig>,
 
     /// File-level FPHA plane-reduction block from
@@ -167,20 +165,16 @@ pub struct CaseArtifacts {
     /// plane-reduction pass; no behavior depends on it yet.
     pub plane_reduction: Option<extensions::PlaneReductionConfig>,
 
-    /// Rows from `system/hydro_energy_productivity.parquet`. Empty when the
-    /// file is absent.
+    /// Rows from `system/hydro_energy_productivity.parquet`.
     pub hydro_energy_productivity: Vec<extensions::HydroEnergyProductivityRow>,
 
-    /// Rows from `system/fpha_hyperplanes.parquet`. Empty when the file is
-    /// absent.
+    /// Rows from `system/fpha_hyperplanes.parquet`.
     pub fpha_hyperplanes: Vec<extensions::FphaHyperplaneRow>,
 
     /// Assembled scalar parameters from `system/scalar_parameters.json`.
-    /// Empty when the file is absent.
     pub scalar_parameters: Vec<ScalarParameter>,
 
-    /// Rows from `system/tailrace_curves.parquet`. Empty when the file is
-    /// absent.
+    /// Rows from `system/tailrace_curves.parquet`.
     pub tailrace_curves: Vec<extensions::TailraceCurveRow>,
 }
 

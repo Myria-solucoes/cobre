@@ -1,37 +1,16 @@
 //! Pre-resolved RHS bound table for user-defined generic linear constraints.
 //!
-//! Holds `ResolvedGenericConstraintBounds`, a sparse `(constraint_index,
-//! stage_id)`-indexed table backed by a flat `Vec<(Option<i32>, f64)>` of
-//! `(block_id, bound)` pairs. Unlike the dense entity bound tables in `bounds`,
-//! generic-constraint bounds are sparse, so absent `(constraint, stage)` pairs
-//! report inactive rather than panicking. Populated by `cobre-io`; never modified
-//! after construction. The private `serde_generic_bounds` child module owns the
-//! deterministic wire format (sorted keys) because the composite tuple key cannot
-//! be serialized directly.
+//! Unlike the dense entity bound tables in `bounds`, generic-constraint bounds are
+//! sparse, so absent `(constraint, stage)` pairs report inactive rather than
+//! panicking. Populated by `cobre-io`; never modified after construction.
 
 use std::collections::HashMap;
 use std::ops::Range;
 
-// ─── Generic constraint bounds ────────────────────────────────────────────────
-
 /// Pre-resolved RHS bound table for user-defined generic linear constraints.
 ///
-/// Indexed by `(constraint_index, stage_id)` using a sparse `HashMap`. Provides O(1)
-/// lookup of the active bounds for LP row construction.
-///
-/// Entries are stored in a flat `Vec<(Option<i32>, f64)>` of `(block_id, bound)` pairs.
-/// Each `(constraint_index, stage_id)` key maps to a contiguous `Range<usize>` slice
-/// within that flat vec.
-///
-/// When no bounds exist for a `(constraint_index, stage_id)` pair, [`is_active`]
-/// returns `false` and [`bounds_for_stage`] returns an empty slice — there is no
-/// panic or error.
-///
-/// # Construction
-///
-/// Use [`ResolvedGenericConstraintBounds::empty`] as the default (no generic constraints),
-/// or [`ResolvedGenericConstraintBounds::new`] to build from parsed bound rows.
-/// `cobre-io` is responsible for populating the table.
+/// Sparse `(constraint_index, stage_id)` index with O(1) lookup. Absent pairs
+/// report [`is_active`] `false` and [`bounds_for_stage`] empty — no panic.
 ///
 /// # Examples
 ///
@@ -47,18 +26,10 @@ use std::ops::Range;
 /// [`bounds_for_stage`]: ResolvedGenericConstraintBounds::bounds_for_stage
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedGenericConstraintBounds {
-    /// Sparse index: maps `(constraint_idx, stage_id)` to a range in `entries`.
-    ///
-    /// Using `i32` for `stage_id` because domain-level stage IDs are `i32` and may
-    /// be negative for pre-study stages (though generic constraint bounds should only
-    /// reference study stages).
+    /// Maps `(constraint_idx, stage_id)` to a contiguous range in `entries`.
+    /// `stage_id` is `i32` to match domain-level stage IDs, which may be negative.
     index: HashMap<(usize, i32), Range<usize>>,
-    /// Flat storage of `(block_id, bound)` pairs, grouped by `(constraint_idx, stage_id)`.
-    ///
-    /// Entries for each key occupy a contiguous region; the [`index`] map provides
-    /// the `Range<usize>` slice boundaries.
-    ///
-    /// [`index`]: Self::index
+    /// Flat `(block_id, bound)` pairs; each key's entries occupy the range `index` records.
     entries: Vec<(Option<i32>, f64)>,
 }
 
@@ -68,11 +39,9 @@ mod serde_generic_bounds {
 
     use super::ResolvedGenericConstraintBounds;
 
-    /// Wire format for serde: a list of `(constraint_idx, stage_id, pairs)` groups.
-    ///
-    /// JSON/postcard cannot serialize `HashMap<(usize, i32), Range<usize>>` directly
-    /// because composite tuple keys are not strings. This wire format avoids that
-    /// by encoding each group as a tagged list of entries.
+    /// Wire format for serde: a list of `(constraint_idx, stage_id, pairs)` groups,
+    /// because `HashMap<(usize, i32), Range<usize>>` cannot serialize directly
+    /// (composite tuple keys are not strings).
     #[derive(Serialize, Deserialize)]
     struct WireEntry {
         constraint_idx: usize,
@@ -113,11 +82,8 @@ mod serde_generic_bounds {
                 let start = entries.len();
                 entries.extend_from_slice(&entry.pairs);
                 let end = entries.len();
-                // An empty-pairs group indexes no entries and is intentionally
-                // dropped (no key inserted) — mirroring `new`, which likewise
-                // commits a key only when its range is non-empty. Inserting an
-                // empty range would make `is_active` report `true` for a stage
-                // with no bounds, contradicting the sparse-table contract.
+                // Drop empty-pairs groups (no key) — inserting an empty range would
+                // make `is_active` report `true` for a stage with no bounds. Mirrors `new`.
                 if end > start {
                     index.insert((entry.constraint_idx, entry.stage_id), start..end);
                 }
@@ -131,8 +97,8 @@ mod serde_generic_bounds {
 impl ResolvedGenericConstraintBounds {
     /// Return an empty table with no constraints and no bounds.
     ///
-    /// Used as the default value in [`System`](crate::System) when no generic constraints
-    /// are loaded. All queries on the empty table return `false` / empty slices.
+    /// The default value in [`System`](crate::System) when no generic constraints
+    /// are loaded; all queries return `false` / empty slices.
     ///
     /// # Examples
     ///
@@ -153,18 +119,10 @@ impl ResolvedGenericConstraintBounds {
 
     /// Build a resolved table from sorted bound rows.
     ///
-    /// `constraint_id_to_idx` maps domain-level `constraint_id: i32` values to
-    /// positional indices in the constraint collection. Rows whose `constraint_id`
-    /// is not present in that map are silently skipped (they would have been caught
-    /// by referential validation upstream).
-    ///
-    /// `raw_bounds` must be sorted by `(constraint_id, stage_id, block_id)` ascending
-    /// (the ordering produced by `parse_generic_constraint_bounds`).
-    ///
-    /// # Arguments
-    ///
-    /// * `constraint_id_to_idx` — maps domain `constraint_id` to positional index
-    /// * `raw_bounds` — sorted rows from `constraints/generic_constraint_bounds.parquet`
+    /// `constraint_id_to_idx` maps domain `constraint_id: i32` to positional index;
+    /// rows with an absent `constraint_id` are silently skipped (caught upstream by
+    /// referential validation). `raw_bounds` must be sorted by `(constraint_id,
+    /// stage_id, block_id)` ascending — the grouping into contiguous ranges relies on it.
     ///
     /// # Examples
     ///
@@ -198,22 +156,16 @@ impl ResolvedGenericConstraintBounds {
         let mut index: HashMap<(usize, i32), Range<usize>> = HashMap::new();
         let mut entries: Vec<(Option<i32>, f64)> = Vec::new();
 
-        // The input rows are sorted by (constraint_id, stage_id, block_id).
-        // We group consecutive rows with the same (constraint_idx, stage_id) key
-        // into a contiguous range in `entries`.
-
         let mut current_key: Option<(usize, i32)> = None;
         let mut range_start: usize = 0;
 
         for (constraint_id, stage_id, block_id, bound) in raw_bounds {
             let Some(&constraint_idx) = constraint_id_to_idx.get(&constraint_id) else {
-                // Unknown constraint ID — silently skip (referential validation concern).
                 continue;
             };
 
             let key = (constraint_idx, stage_id);
 
-            // When the key changes, commit the range for the previous key.
             if current_key != Some(key) {
                 if let Some(prev_key) = current_key {
                     let range_end = entries.len();
@@ -228,7 +180,6 @@ impl ResolvedGenericConstraintBounds {
             entries.push((block_id, bound));
         }
 
-        // Commit the final key.
         if let Some(last_key) = current_key {
             let range_end = entries.len();
             if range_end > range_start {
@@ -285,8 +236,6 @@ impl ResolvedGenericConstraintBounds {
 mod tests {
     use super::*;
 
-    // ─── ResolvedGenericConstraintBounds tests ────────────────────────────────
-
     /// `empty()` returns a table where all queries return false/empty.
     #[test]
     fn test_generic_bounds_empty() {
@@ -303,7 +252,6 @@ mod tests {
     fn test_generic_bounds_sparse_active() {
         let id_map: HashMap<i32, usize> = [(0, 0), (1, 1)].into_iter().collect();
 
-        // One row: constraint_id=0, stage_id=0, block_id=None, bound=100.0
         let rows = vec![(0i32, 0i32, None::<i32>, 100.0f64)];
         let t = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
@@ -334,7 +282,6 @@ mod tests {
     #[test]
     fn test_generic_bounds_multiple_blocks() {
         let id_map: HashMap<i32, usize> = [(0, 0)].into_iter().collect();
-        // Three rows for constraint 0 at stage 2: block None, block 0, block 1.
         let rows = vec![
             (0i32, 2i32, None::<i32>, 50.0f64),
             (0i32, 2i32, Some(0i32), 60.0f64),
@@ -354,7 +301,6 @@ mod tests {
     #[test]
     fn test_generic_bounds_unknown_constraint_id_skipped() {
         let id_map: HashMap<i32, usize> = [(0, 0)].into_iter().collect();
-        // Row with constraint_id=99 not in id_map.
         let rows = vec![(99i32, 0i32, None::<i32>, 1000.0f64)];
         let t = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 

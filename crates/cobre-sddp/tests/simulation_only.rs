@@ -1,8 +1,5 @@
-//! Integration test for simulation-only round-trip.
-//!
-//! Exercises the full simulation-only pipeline: train a policy, write it to
-//! disk, load it back, and verify that the reconstructed FCF evaluates
-//! identically to the original.
+//! Integration test for simulation-only round-trip: the FCF reconstructed from
+//! a written-then-reloaded policy checkpoint must evaluate identically.
 
 #![allow(
     clippy::unwrap_used,
@@ -29,7 +26,6 @@ use cobre_sddp::{
 };
 use cobre_solver::ActiveSolver;
 
-/// Single-rank communicator stub for testing.
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -75,8 +71,6 @@ impl Communicator for StubComm {
     }
 }
 
-/// Train the D01 case, write the policy checkpoint, load it back, and verify
-/// that the reconstructed FCF evaluates identically to the original.
 #[test]
 fn simulation_only_fcf_round_trip() {
     let case_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -111,21 +105,18 @@ fn simulation_only_fcf_round_trip() {
     assert!(outcome.error.is_none(), "expected no training error");
     let training_result = outcome.result;
 
-    // Capture original FCF state.
     let original_active_cuts = setup.fcf.total_active_cuts();
     assert!(original_active_cuts > 0, "training should produce cuts");
 
     let n_stages = setup.stage_data.stage_templates.templates.len();
     let state_dim = setup.fcf.state_dimension;
 
-    // Evaluate at a representative state point for each stage.
     let test_state: Vec<f64> = vec![50.0; state_dim];
     let mut original_evals = Vec::with_capacity(n_stages);
     for stage in 0..n_stages {
         original_evals.push(setup.fcf.evaluate_at_state(stage, &test_state));
     }
 
-    // Write policy checkpoint to a temporary directory.
     let tmpdir = tempfile::tempdir().expect("tempdir");
     let policy_dir = tmpdir.path().join("policy");
 
@@ -158,10 +149,8 @@ fn simulation_only_fcf_round_trip() {
     write_policy_checkpoint(&policy_dir, &stage_cuts, &stage_bases, &metadata, &[])
         .expect("write checkpoint");
 
-    // Read policy checkpoint back.
     let checkpoint = read_policy_checkpoint(&policy_dir).expect("read checkpoint");
 
-    // Verify metadata round-trip.
     assert_eq!(
         checkpoint.metadata.state_dimension, state_dim as u32,
         "state_dimension must round-trip"
@@ -176,18 +165,15 @@ fn simulation_only_fcf_round_trip() {
         "stage_cuts count must match"
     );
 
-    // Reconstruct FCF from deserialized data.
     let loaded_fcf =
         FutureCostFunction::from_deserialized(&checkpoint.stage_cuts).expect("from_deserialized");
 
-    // Verify active cut count matches.
     assert_eq!(
         loaded_fcf.total_active_cuts(),
         original_active_cuts,
         "active cut count must match after round-trip"
     );
 
-    // Verify evaluate_at_state produces identical results.
     for (stage, &expected_eval) in original_evals.iter().enumerate().take(n_stages) {
         let loaded_eval = loaded_fcf.evaluate_at_state(stage, &test_state);
         assert_eq!(
@@ -196,7 +182,6 @@ fn simulation_only_fcf_round_trip() {
         );
     }
 
-    // Verify basis cache round-trip.
     let loaded_basis_cache = build_basis_cache_from_checkpoint(
         n_stages,
         &checkpoint.stage_bases,
@@ -207,7 +192,6 @@ fn simulation_only_fcf_round_trip() {
         n_stages,
         "basis cache length must match"
     );
-    // At least some stages should have basis data.
     let has_basis = loaded_basis_cache.iter().any(Option::is_some);
     assert!(has_basis, "at least one stage should have basis data");
 }

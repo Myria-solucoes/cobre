@@ -1,7 +1,4 @@
-//! Postcard-serializable types for MPI broadcast.
-//!
-//! Wraps SDDP configuration, stopping rules, row-selection strategy, and opening tree
-//! data for broadcast from rank 0 to all ranks.
+//! Postcard-serializable types for MPI broadcast from rank 0 to all ranks.
 
 use cobre_core::scenario::ScenarioSource;
 use cobre_sddp::{
@@ -39,20 +36,17 @@ pub(crate) struct BroadcastConfig {
     pub(crate) inflow_method: InflowNonNegativityMethod,
     pub(crate) cut_selection: Option<CutSelectionStrategy>,
     pub(crate) cut_activity_tolerance: f64,
-    /// Whether the training phase is enabled. When `false`, all ranks skip
-    /// training and proceed directly to simulation (or exit).
+    /// When `false`, all ranks skip training and proceed to simulation (or exit).
     pub(crate) training_enabled: bool,
     /// Policy initialization mode.
     pub(crate) policy_mode: cobre_io::PolicyMode,
-    /// Whether the visited-states archive should be allocated for export.
+    /// Whether the visited-states archive is allocated for export.
     pub(crate) export_states: bool,
-    /// Maximum number of active rows per stage (hard cap on LP size).
-    ///
-    /// `None` means no cap is enforced. Derived from
+    /// Hard cap on active rows per stage; `None` means no cap. Sourced from
     /// `config.training.cut_selection.max_active_per_stage`.
     pub(crate) budget: Option<u32>,
     /// Scenario source for the training forward pass, broadcast so non-root
-    /// ranks can build the stochastic context with matching sampling schemes.
+    /// ranks build the stochastic context with matching sampling schemes.
     pub(crate) training_source: ScenarioSource,
     /// Scenario source for the post-training simulation forward pass.
     pub(crate) simulation_source: ScenarioSource,
@@ -61,8 +55,8 @@ pub(crate) struct BroadcastConfig {
 impl BroadcastConfig {
     pub(crate) fn from_config(config: &cobre_io::Config) -> Result<Self, CliError> {
         let params = StudyParams::from_config(config).map_err(CliError::from)?;
-        // Use a sentinel path; the scenario source helpers only use the path for
-        // historical-years look-up and error messages, which are not exercised here.
+        // Sentinel path: the scenario-source helpers use it only for historical-years
+        // look-up and error messages, neither exercised here.
         let sentinel_path = std::path::Path::new("config.json");
         let training_source = config
             .training_scenario_source(sentinel_path)
@@ -89,9 +83,8 @@ impl BroadcastConfig {
                     iterations: *iterations,
                     tolerance: *tolerance,
                 },
-                // SimulationBased and GracefulShutdown are evaluated on rank 0
-                // only and are not broadcastable; fold into iteration limit for
-                // non-root ranks. Warn so the user knows the rule was substituted.
+                // SimulationBased and GracefulShutdown evaluate on rank 0 only and are
+                // not broadcastable; non-root ranks fall back to an iteration limit.
                 StoppingRule::SimulationBased { .. } | StoppingRule::GracefulShutdown => {
                     tracing::warn!(
                         "stopping rule not broadcastable, \
@@ -173,8 +166,8 @@ pub(crate) fn stopping_rules_from_broadcast(cfg: &BroadcastConfig) -> StoppingRu
 
 /// Broadcast a serializable value from rank 0 to all ranks.
 ///
-/// Rank 0 serializes and broadcasts length + bytes; non-root ranks deserialize.
-/// Length 0 signals rank 0 failure, allowing all ranks to participate.
+/// A broadcast length of 0 signals rank 0 failure, letting all ranks return an error
+/// in lockstep rather than deadlocking.
 ///
 /// # Errors
 ///
@@ -236,18 +229,12 @@ where
 mod tests {
     use super::{BroadcastOpeningTree, broadcast_value};
 
-    /// A minimal serializable struct for testing the broadcast helper.
     #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
     struct Simple {
         x: f64,
         label: String,
     }
 
-    /// `broadcast_value` with `LocalBackend` (single rank) round-trips a struct.
-    ///
-    /// With `LocalBackend`, broadcast is a no-op and the root-path code path is
-    /// exercised: the function returns the original `Some(value)` unchanged after
-    /// verifying that serialization succeeds (len > 0).
     #[test]
     fn broadcast_value_local_round_trips_simple() {
         let comm = cobre_comm::LocalBackend;
@@ -259,9 +246,6 @@ mod tests {
         assert_eq!(result, original);
     }
 
-    /// `broadcast_value` with `LocalBackend` round-trips a `Vec<f64>`.
-    ///
-    /// Verifies that the helper handles collection types that postcard can serialize.
     #[test]
     fn broadcast_value_local_round_trips_vec() {
         let comm = cobre_comm::LocalBackend;
@@ -270,10 +254,6 @@ mod tests {
         assert_eq!(result, original);
     }
 
-    /// `broadcast_value` with `LocalBackend` round-trips a nested struct matching
-    /// the shape of `cobre_io::config::TrainingConfig`.
-    ///
-    /// Uses a locally defined struct to avoid a test dependency on cobre-io internals.
     #[test]
     fn broadcast_value_local_round_trips_config_like() {
         #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -291,11 +271,6 @@ mod tests {
         assert_eq!(result, original);
     }
 
-    /// `broadcast_value` returns `CliError::Internal` when `None` is passed on root.
-    ///
-    /// Root rank must always supply `Some(value)`. Passing `None` on the only rank
-    /// (`LocalBackend`, rank 0 == root) triggers the internal error path, returning
-    /// [`crate::error::CliError::Internal`] rather than panicking.
     #[test]
     fn broadcast_value_returns_err_when_root_passes_none() {
         let comm = cobre_comm::LocalBackend;
@@ -308,12 +283,7 @@ mod tests {
         );
     }
 
-    /// `broadcast_value` with `LocalBackend` round-trips a `u64` value.
-    ///
-    /// Verifies the broadcast helper serializes and deserializes primitive
-    /// integer types correctly. Gated behind the `mpi` feature because this
-    /// test exercises the same code path invoked by MPI-enabled runs (the
-    /// `LocalBackend` substitutes for the real MPI communicator in tests).
+    /// Gated on `mpi`: exercises via `LocalBackend` the same path MPI runs invoke.
     #[cfg(feature = "mpi")]
     #[test]
     fn broadcast_value_round_trips_u64() {
@@ -327,10 +297,6 @@ mod tests {
     // BroadcastOpeningTree tests
     // ------------------------------------------------------------------
 
-    /// `BroadcastOpeningTree` round-trips through postcard serialization.
-    ///
-    /// Verifies that the wrapper type is fully postcard-compatible and that
-    /// no field is lost during the serialize → deserialize round-trip.
     #[test]
     fn broadcast_opening_tree_round_trips_via_postcard() {
         let original = BroadcastOpeningTree {
@@ -352,14 +318,11 @@ mod tests {
     // BroadcastConfig tests
     // ------------------------------------------------------------------
 
-    /// `BroadcastConfig::from_config()` propagates `config.training.enabled`
-    /// to `training_enabled`. Verifies that the flag defaults to `true` and
-    /// changes to `false` when explicitly set.
     #[test]
     fn broadcast_config_propagates_training_enabled() {
         use super::BroadcastConfig;
 
-        // Config with training.enabled defaulting to true (not specified in JSON).
+        // training.enabled omitted from JSON → defaults to true.
         let enabled_json = r#"{ "training": {} }"#;
         let enabled_config: cobre_io::Config = serde_json::from_str(enabled_json).unwrap();
         let bcast = BroadcastConfig::from_config(&enabled_config).unwrap();
@@ -368,7 +331,6 @@ mod tests {
             "training_enabled should default to true"
         );
 
-        // Config with training.enabled explicitly set to false.
         let disabled_json = r#"{ "training": { "enabled": false } }"#;
         let disabled_config: cobre_io::Config = serde_json::from_str(disabled_json).unwrap();
         let bcast = BroadcastConfig::from_config(&disabled_config).unwrap();
@@ -424,9 +386,8 @@ mod tests {
         );
     }
 
-    /// Guardrail: `BroadcastConfig` postcard bytes exclude stale field names.
-    ///
-    /// If a future serializer switches to named fields, this catches regressions.
+    /// Guardrail: catches a future serializer switching to named fields and
+    /// re-emitting stale field names into the postcard wire bytes.
     #[test]
     fn broadcast_config_wire_excludes_deleted_fields() {
         use super::BroadcastConfig;
@@ -456,23 +417,18 @@ mod tests {
         }
     }
 
-    /// `BroadcastOpeningTree` wrapped in `Option` round-trips via `broadcast_value`
-    /// with `LocalBackend`. Covers both the `None` and `Some` cases.
-    ///
-    /// `Some(None)` represents "no user-supplied tree" and `Some(Some(...))` represents
-    /// a valid user tree. Both must survive the broadcast without data loss.
     #[test]
     fn broadcast_optional_opening_tree_local_round_trips() {
         use cobre_stochastic::context::OpeningTree;
 
         let comm = cobre_comm::LocalBackend;
 
-        // Case 1: no user tree — broadcast Some(None)
+        // Some(None) = no user-supplied tree.
         let no_tree: Option<BroadcastOpeningTree> = None;
         let result = broadcast_value(Some(no_tree), &comm).unwrap();
         assert!(result.is_none(), "Some(None) must round-trip to None");
 
-        // Case 2: user tree present — broadcast Some(Some(...))
+        // Some(Some(..)) = a user-supplied tree.
         let data = vec![1.0, 2.0, 3.0, 4.0];
         let ops = vec![2];
         let dim = 2usize;

@@ -4,7 +4,6 @@
 //!
 //! ## Closed-form derivation
 //!
-//! Reference: the K=3 sign-chain table for the Alternative-A layout.
 //! Fixture: one anticipated thermal (K=3, cost $50/MWh, max 50 MW),
 //! one regular thermal (cost $100/MWh, max 100 MW), loads [5, 10, 15, 30] MW,
 //! seeds [0, 0, 0], one-hour blocks per stage.
@@ -12,11 +11,11 @@
 //! Fishing rows are emitted at every stage [0, n_stages) under the always-active
 //! predicate. The slot `K-1 = 2` state-fixing row is pure identity; decision
 //! coupling moves to the `anticipated_state_out` definition row
-//! (`indexer.rs:state_to_lp_column` Equal branch).
+//! (`state_to_lp_column` Equal branch).
 //!
 //! ## Propagation chain: stage 3 → stage 2 → stage 1 → stage 0
 //!
-//! All three slots at stage 0 receive coefficient -0.1 (= -c_reg/COST_SCALE)
+//! All three slots at stage 0 receive coefficient `-c_reg / COST_SCALE_FACTOR`
 //! via distinct paths:
 //! - **Slot 0**: Direct fishing dual at stage 1 (stage-1 solving stage-2).
 //! - **Slot 1**: Stage-2 fishing dual routed via one Less-branch shift through
@@ -24,13 +23,7 @@
 //! - **Slot 2**: Stage-3 fishing dual routed via two successive Less-branch shifts
 //!   (stage-2 FCF cut, then stage-1 FCF cut) reaching slot 2 at stage 0.
 //!
-//! See `indexer.rs:state_to_lp_column` for the complete algebraic chain.
-//!
-//! ## Why `iterations = 5`
-//!
-//! Within one iteration the backward pass processes stages in reverse,
-//! so stage 0 immediately consumes cuts from stages 1 and 2. Five iterations
-//! provide a safety margin against basis shifts from trial-point variations.
+//! See `state_to_lp_column` for the complete algebraic chain.
 
 #![allow(
     clippy::unwrap_used,
@@ -90,46 +83,27 @@ const C_ANT: f64 = 50.0;
 const MAX_GEN_REG: f64 = 100.0;
 const MAX_GEN_ANT: f64 = 50.0;
 
-// Cuts are stored in scaled cost units; the LP-builder divides every non-theta
-// objective coefficient by `COST_SCALE_FACTOR` (see lp_builder/mod.rs and
-// template.rs). Duals therefore live in scaled units too, and the cut storage
-// at backward.rs preserves that scaling end-to-end (forward.rs consumes them
-// unrescaled).
+// Duals live in scaled cost units: the LP-builder divides every non-theta
+// objective coefficient by COST_SCALE_FACTOR, and cut storage preserves that
+// scaling end-to-end (forward.rs consumes them unrescaled).
 const COST_SCALE_FACTOR: f64 = 1_000_000.0;
 
-// Closed-form expected coefficients at stage 0 FCF, in scaled cost units.
-// All three slots carry the same magnitude: -c_reg / COST_SCALE * BLOCK_HOURS = -0.1.
-//
-// Slot 2: dual flowing through TWO baked FCF cuts (stage-3 fishing dual →
-//   stage-2 FCF cut → stage-1 FCF cut, each routed by successive Less branches
-//   until reaching slot 2 of stage-0's state; see module docstring "Propagation
-//   chain" section for the complete chain). Originates from stage-3's slot-0
-//   fishing dual (indexer.rs:state_to_lp_column Equal/Less branch routing).
-//
-// Slot 1: dual flowing through the baked stage-1 FCF cut (originating from
-//   stage-2's slot-0 fishing dual, routed via one Less-branch ring-buffer shift;
-//   see indexer.rs:state_to_lp_column). Analogous to the K=2 slot-1 result.
-//
-// Slot 0: dual of the same-stage fishing equality at stage 1, which is active
-//   under the always-active fishing predicate (indexer.rs `is_anticipated_fishing_active`).
-//   Analogous to the K=2 slot-0 result.
-const EXPECTED_COEFF_SLOT2: f64 = -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS; // = -0.0001
-const EXPECTED_COEFF_SLOT1: f64 = -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS; // = -0.0001
-const EXPECTED_COEFF_SLOT0: f64 = -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS; // = -0.0001
+const EXPECTED_COEFF_SLOT2: f64 = -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS;
+const EXPECTED_COEFF_SLOT1: f64 = -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS;
+const EXPECTED_COEFF_SLOT0: f64 = -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS;
 const TOL: f64 = 1e-6;
 
-// Thermal column ordering inside the built `System`. `System::build()` sorts
-// thermals by `EntityId::0` ascending. The regular thermal must sort before
-// the anticipated thermal — keep regular at id 2 (sorts first) and anticipated
-// at id 5 (sorts second, distinct from K=2 cut test's EntityId(4)).
+// `System::build()` sorts thermals by `EntityId::0` ascending; the regular
+// thermal must sort before the anticipated one so thermal_idx aligns with the
+// bounds table (regular id 2 < anticipated id 5).
 const THERMAL_IDX_REG: usize = 0;
 const THERMAL_IDX_ANT: usize = 1;
 const REGULAR_ID: EntityId = EntityId(2);
 const ANTICIPATED_ID: EntityId = EntityId(5);
 
 // ---------------------------------------------------------------------------
-// StubComm — single-rank communicator (copied from anticipated_backward_cut_k1
-// per ticket Patterns guidance: test independence over shared modules).
+// StubComm — single-rank communicator (per-file copy: test independence over a
+// shared module).
 // ---------------------------------------------------------------------------
 
 struct StubComm;
@@ -191,7 +165,6 @@ fn build_system() -> cobre_core::System {
         excess_cost: 0.0,
     };
 
-    // thermal_idx 0 — regular thermal (marginal at stages 1-3).
     let thermal_reg = Thermal {
         id: REGULAR_ID,
         name: "T_reg".to_string(),
@@ -204,7 +177,6 @@ fn build_system() -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // thermal_idx 1 — anticipated thermal, K=3.
     let thermal_ant = Thermal {
         id: ANTICIPATED_ID,
         name: "T_ant".to_string(),
@@ -217,7 +189,6 @@ fn build_system() -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // Verify sort order: regular must have smaller EntityId than anticipated.
     assert!(
         thermal_reg.id.0 < thermal_ant.id.0,
         "R7: T_reg.id ({}) must be strictly less than T_ant.id ({}) so that \
@@ -265,7 +236,6 @@ fn build_system() -> cobre_core::System {
         })
         .collect();
 
-    // No hydros — anticipated/regular thermals only. n_anticipated=1, k_max=3.
     let mut bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
             n_hydros: 0,
@@ -287,7 +257,7 @@ fn build_system() -> cobre_core::System {
                 min_generation_mw: 0.0,
                 max_generation_mw: 0.0,
                 max_diversion_m3s: None,
-                filling_inflow_m3s: 0.0,
+                filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 0.0,
             },
             thermal: ThermalStageBounds {
@@ -311,9 +281,8 @@ fn build_system() -> cobre_core::System {
         },
     );
 
-    // Per-thermal per-stage overrides across the full thermal stage axis
-    // (length = n_stages + k_max = 7). K-padded delivery cells are read by
-    // `fill_anticipated_decision_objective` for stage_idx + K_i lookups.
+    // K-padded axis: `fill_anticipated_columns` reads delivery cells at
+    // stage_idx + K_i, so overrides must cover the n_stages + k_max range.
     let thermal_axis = N_STAGES + K_MAX;
     for s in 0..thermal_axis {
         *bounds.thermal_bounds_mut(THERMAL_IDX_REG, s) = ThermalStageBounds {
@@ -363,9 +332,8 @@ fn build_system() -> cobre_core::System {
         },
     );
 
-    // Seed the anticipated ring buffer slots 0, 1, and 2 with zero values.
-    // With K=3 the ring has K_MAX = 3 entries. Seeds are all zero so any
-    // propagated cut coefficient is attributable to in-study decisions.
+    // Zero seeds so any propagated cut coefficient is attributable to in-study
+    // decisions, not the ring-buffer history.
     let initial_conditions = InitialConditions {
         storage: vec![],
         filling_storage: vec![],
@@ -446,8 +414,6 @@ fn four_stage_k3_anticipated_cut_coefficient_propagates_correctly() {
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
 
-    // Run N_ITERATIONS = 5 training iterations so the FCF at stage 0 receives
-    // a non-zero cut propagated from stage 3 via stages 2 and 1.
     let outcome = setup
         .train(
             &mut solver,
@@ -464,7 +430,6 @@ fn four_stage_k3_anticipated_cut_coefficient_propagates_correctly() {
         outcome.error,
     );
 
-    // ── AC-1: at least one active cut at stage 0 FCF ─────────────────────
     let pool0 = &setup.fcf.pools[0];
     let active_count = pool0.active_count();
     assert!(
@@ -473,36 +438,28 @@ fn four_stage_k3_anticipated_cut_coefficient_propagates_correctly() {
          {N_ITERATIONS} iterations; got {active_count}",
     );
 
-    // Locate the anticipated_state indices inside the state vector.
-    // For n_hydros = 0 and max_par_order = 0 the block starts at 0, with
-    // layout `start + slot * n_anticipated + plant`. Here n_anticipated = 1
-    // and plant = 0, so slot 0 lives at `start + 0`, slot 1 at `start + 1`,
-    // and slot 2 at `start + 2`.
-    let indexer = setup.stage_indexer();
-    let ant_state_start = indexer.anticipated_state.start;
-    let slot0_idx = ant_state_start; // slot 0, plant 0
-    let slot1_idx = ant_state_start + 1; // slot 1, plant 0
-    let slot2_idx = ant_state_start + 2; // slot 2, plant 0
+    // Anticipated-state layout is `start + slot * n_anticipated + plant`; with
+    // n_anticipated = 1, plant = 0 the slots are consecutive from `start`.
+    let state = setup.stage_state();
+    let ant_state_start = state.anticipated_state.start;
+    let slot0_idx = ant_state_start;
+    let slot1_idx = ant_state_start + 1;
+    let slot2_idx = ant_state_start + 2;
     assert_eq!(
-        indexer.n_anticipated, 1,
+        state.n_anticipated, 1,
         "fixture must have exactly one anticipated thermal",
     );
-    assert_eq!(indexer.k_max, K_MAX, "fixture must have k_max = {K_MAX}");
+    assert_eq!(state.k_max, K_MAX, "fixture must have k_max = {K_MAX}");
     assert_eq!(
         ant_state_start, 0,
         "with n_hydros=0 and max_par_order=0, anticipated_state.start must \
          be 0; got {ant_state_start}",
     );
 
-    // ── Select the iteration-1 cut (slot 0 under dense packing). ──────────
-    // `active_cuts(stage)` yields `(slot, intercept, &[coeffs])` where `slot`
-    // encodes `warm_start_count + (iteration - iteration_base) * forward_passes
-    // + forward_pass_index` (per CutPool::slot_index). With dense packing
-    // (iteration_base = start_iteration + 1 = 1) and forward_passes = 1, the
-    // iteration-1 cut lands at slot 0. The analytical match is this FIRST cut:
-    // the three-stage propagation chain completes at the end of backward pass
-    // for t=0 in iteration 1. Later iterations add cuts at different trial
-    // points where the active basis differs.
+    // The analytical match is the iteration-1 cut (slot 0 under dense packing,
+    // per CutPool::slot_index): its three-stage propagation chain completes at
+    // backward t=0. Later iterations add cuts at trial points with a different
+    // active basis.
     let analytical = setup
         .fcf
         .active_cuts(0)
@@ -512,14 +469,13 @@ fn four_stage_k3_anticipated_cut_coefficient_propagates_correctly() {
 
     assert_eq!(
         coefficients.len(),
-        indexer.anticipated_state.end,
+        state.anticipated_state.end,
         "coefficient slice length must equal n_state (= anticipated_state.end \
          in this no-hydro fixture); got len={}, expected={}",
         coefficients.len(),
-        indexer.anticipated_state.end,
+        state.anticipated_state.end,
     );
 
-    // ── AC-2: coefficient at slot 2 ─────────────────────────────────────────
     let actual_coeff_slot2 = coefficients[slot2_idx];
     assert!(
         (actual_coeff_slot2 - EXPECTED_COEFF_SLOT2).abs() < TOL,
@@ -527,7 +483,6 @@ fn four_stage_k3_anticipated_cut_coefficient_propagates_correctly() {
          (stage-3 fishing dual via two FCF baked cuts and successive Less-branch shifts)",
     );
 
-    // ── AC-3: coefficient at slot 1 ─────────────────────────────────────────
     let actual_coeff_slot1 = coefficients[slot1_idx];
     assert!(
         (actual_coeff_slot1 - EXPECTED_COEFF_SLOT1).abs() < TOL,
@@ -535,7 +490,6 @@ fn four_stage_k3_anticipated_cut_coefficient_propagates_correctly() {
          (stage-2 fishing dual via one Less-branch shift through stage-1 FCF cut)",
     );
 
-    // ── AC-4: coefficient at slot 0 ─────────────────────────────────────────
     let actual_coeff_slot0 = coefficients[slot0_idx];
     assert!(
         (actual_coeff_slot0 - EXPECTED_COEFF_SLOT0).abs() < TOL,

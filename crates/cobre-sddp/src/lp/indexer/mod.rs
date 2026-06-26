@@ -1,18 +1,22 @@
 //! LP layout index map for SDDP stage subproblems.
 //!
-//! [`StageIndexer`] centralises all column and row offset arithmetic for a
-//! single-stage LP, eliminating magic index numbers throughout the forward
-//! pass, backward pass, and LP construction code.
+//! The state-vector column layout is owned by [`StateLayout`]; the per-stage
+//! equipment column/row geometry is owned by
+//! [`StageLayout`](crate::lp_builder)/[`StageGeometry`](crate::lp_builder::StageGeometry);
+//! the non-state study shape is owned by [`StudyDimensions`]. Together they
+//! eliminate magic index numbers throughout the forward pass, backward pass, and
+//! LP construction code. The full column/row layout is documented below.
 //!
 //! ## Column layout (Solver Abstraction SS2.1)
 //!
 //! ```text
 //! [0, N)                                    storage           — outgoing storage volumes  (N = hydro_count)
 //! [N, N*(1+L))                              inflow_lags       — AR lag variables (L lags per hydro)
-//! [N*(1+L), N*(1+L) + A*K_max)              anticipated_state — anticipated thermal commitment state slots
-//! [N*(1+L) + A*K_max, N*(2+L) + A*K_max)    z_inflow          — realized inflow (auxiliary, not state)
-//! [N*(2+L) + A*K_max, N*(3+L) + A*K_max)    storage_in        — incoming storage volumes
-//! N*(3+L) + A*K_max                         theta             — future cost variable (scalar)
+//! [N*(1+L), N*(1+L) + A*K_max)              anticipated_state     — anticipated thermal commitment state slots (ring buffer)
+//! [N*(1+L) + A*K_max, N*(1+L) + A*K_max + A) anticipated_state_out — relocated cut-target column; state region, stage-invariant (owned by `StateLayout`)
+//! [N*(1+L) + A*K_max + A, N*(2+L) + A*K_max + A) z_inflow          — realized inflow (auxiliary, not state)
+//! [N*(2+L) + A*K_max + A, N*(3+L) + A*K_max + A) storage_in        — incoming storage volumes
+//! N*(3+L) + A*K_max + A                      theta                 — future cost variable (scalar)
 //! ```
 //!
 //! where `A = n_anticipated` is the number of thermals with
@@ -20,8 +24,8 @@
 //! across those plants. When `A == 0` the layout collapses to the
 //! pre-anticipated form: `z_inflow` at `N*(1+L)`, `theta` at `N*(3+L)`.
 //!
-//! When built with [`StageIndexer::with_equipment`], the following equipment
-//! columns follow immediately after `theta`:
+//! The following equipment columns follow immediately after `theta` (laid out
+//! per stage by [`StageLayout`](crate::lp_builder)):
 //!
 //! ```text
 //! [theta+1,                                  theta+1+H*K)                turbine                — turbined flow (m³/s)
@@ -29,21 +33,21 @@
 //! [theta+1+2*H*K,                            theta+1+3*H*K)              diversion              — diverted flow (m³/s)
 //! [theta+1+3*H*K,                            theta+1+3*H*K+T*K)          thermal                — thermal generation (MW)
 //! [theta+1+3*H*K+T*K,                        theta+1+3*H*K+T*K+A)        anticipated_decision   — A = n_anticipated columns
-//! [theta+1+3*H*K+T*K+A,                      theta+1+3*H*K+T*K+2*A)      anticipated_state_out  — A = n_anticipated columns
-//! [theta+1+3*H*K+T*K+2*A,                    …+2*A+2*L_n*K)              line_fwd/rev           — line flows
-//! [theta+1+3*H*K+T*K+2*A+2*L_n*K,           …+2*A+2*L_n*K+B*S*K)        deficit
-//! [theta+1+3*H*K+T*K+2*A+2*L_n*K+B*S*K,     …+2*A+2*L_n*K+B*S*K+B*K)    excess
+//! [theta+1+3*H*K+T*K+A,                      …+A+2*L_n*K)                line_fwd/rev           — line flows
+//! [theta+1+3*H*K+T*K+A+2*L_n*K,             …+A+2*L_n*K+B*S*K)          deficit
+//! [theta+1+3*H*K+T*K+A+2*L_n*K+B*S*K,       …+A+2*L_n*K+B*S*K+B*K)      excess
 //! ```
 //!
 //! The `anticipated_decision` block is stage-level (one column per anticipated
 //! plant, NOT per-block) and has length `A = n_anticipated`. The block collapses
 //! to length 0 when `n_anticipated == 0`, leaving the rest of the layout
-//! byte-identical to the pre-anticipated form.
-//!
-//! The `anticipated_state_out` block immediately follows `anticipated_decision`
-//! and has the same length `A`. It holds the outgoing state variable for the
-//! cut-mapping definition row. Both blocks collapse to length 0
-//! together when `n_anticipated == 0`.
+//! byte-identical to the pre-anticipated form. The control region runs
+//! `anticipated_decision` then `line_fwd` directly — the cut-target
+//! `anticipated_state_out` column does NOT live here: it was relocated into the
+//! stage-invariant state region above (`[N*(1+L)+A*K_max, …+A)`, owned by
+//! [`StateLayout`]), so its address never depends on `n_blks`. The
+//! `anticipated_state_out_def` equality row still pins it to its
+//! `anticipated_decision` column.
 //!
 //! When the inflow non-negativity penalty method is active (`has_inflow_penalty == true`),
 //! `N` additional slack columns are appended after `excess`:
@@ -76,8 +80,8 @@
 //! ## Row layout (Solver Abstraction SS2.2)
 //!
 //! State pinning uses column bounds (`set_col_bounds`) on the incoming-state
-//! columns, so the `storage_fixing`, `lag_fixing`, and `anticipated_state_fixing`
-//! row ranges are always empty (`0..0`). z-inflow rows start at row 0.
+//! columns, so the LP has no state-fixing row range. z-inflow rows start at
+//! row 0.
 //!
 //! ```text
 //! [0, N)   z_inflow_rows — z-inflow definition rows
@@ -110,35 +114,44 @@
 //! theta = 15, n_state = 9
 //! ```
 //!
-//! With 2 anticipated thermals (`K_max = 3`): `anticipated_state = 9..15` inserts
-//! before `z_inflow`, shifting it to `15..18` and `theta` to `21`.
+//! With 2 anticipated thermals (`K_max = 3`): `anticipated_state = 9..15` and the
+//! relocated `anticipated_state_out = 15..17` insert before `z_inflow`, shifting
+//! `z_inflow` to `17..20`, `storage_in` to `20..23`, and `theta` to `23`.
+//!
+//! The per-solve patch sequence layered on top of this geometry is documented in
+//! [`crate::lp_builder`].
 //!
 //! # Submodule layout
 //!
-//! - `layout` — the [`StageIndexer`] struct (with its `0..0` sentinel field
-//!   docs), the satellite types ([`EvaporationIndices`], [`FphaRowRange`],
-//!   [`EquipmentCounts`], [`FphaColumnLayout`], [`EvapConfig`]), the small
-//!   layout accessors, and the compile-time `Send + Sync` assertion.
-//! - `state_mapping` — the state-vector-to-LP-column resolvers
-//!   ([`StageIndexer::state_to_lp_column`], [`StageIndexer::finalize_state_column_map`],
-//!   [`StageIndexer::lp_column_for_state`], and the state-pinning entry point
-//!   [`StageIndexer::state_to_lp_incoming_column`]).
-//! - `anticipated` — the per-stage anticipated-thermal iterators and predicates.
-//! - `sparse_state` — the nonzero-state mask builder `set_nonzero_mask`.
-//! - `constructors` — the three constructors, `from_stage_template`, and the
-//!   private column/row range build helpers (carrying the `0..0` sentinel
-//!   initialisers).
+//! - `layout` — the per-stage geometry satellite types [`EvaporationIndices`]
+//!   and [`FphaRowRange`] (locating one hydro's evaporation columns/row and FPHA
+//!   row block within a stage LP).
+//! - `block_grid` — the [`BlockGrid`] typed block-stride address primitive and
+//!   its three shape methods ([`BlockGrid::flat`], [`BlockGrid::fpha_plane`],
+//!   [`BlockGrid::deficit`]).
+//! - `state_layout` — the [`StateLayout`] type, the sole owner of the role-(a)
+//!   state-vector concern: the stage-invariant state-vector column ranges, the
+//!   two layout-derived caches, and the resolver / mask methods
+//!   ([`StateLayout::state_to_lp_column`],
+//!   [`StateLayout::state_to_lp_incoming_column`],
+//!   [`StateLayout::lp_column_for_state`], [`StateLayout::set_nonzero_mask`]). It
+//!   finalizes both caches in its single constructor; downstream code threads a
+//!   handle to it.
+//! - `study_dimensions` — the [`StudyDimensions`] type, the single owner of the
+//!   study-invariant non-state LP shape.
 //!
-//! Every public symbol is re-exported here so both the curated flat surface in
-//! `lib.rs` and the `cobre_sddp::indexer::Symbol` / `crate::indexer::Symbol`
-//! module path resolve to the same item regardless of which submodule owns it.
+//! Every public symbol is re-exported here so the `cobre_sddp::indexer::Symbol`
+//! and `crate::indexer::Symbol` module paths resolve to the same item regardless
+//! of which submodule owns it.
 
-mod anticipated;
-mod constructors;
+mod block_grid;
 mod layout;
-mod sparse_state;
-mod state_mapping;
+mod state_layout;
+mod study_dimensions;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_fixtures;
 
-pub use layout::{
-    EquipmentCounts, EvapConfig, EvaporationIndices, FphaColumnLayout, FphaRowRange, StageIndexer,
-};
+pub use block_grid::BlockGrid;
+pub use layout::{EvaporationIndices, FphaRowRange};
+pub use state_layout::StateLayout;
+pub use study_dimensions::StudyDimensions;

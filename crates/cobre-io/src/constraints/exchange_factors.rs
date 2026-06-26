@@ -149,11 +149,8 @@ pub struct ExchangeFactorEntry {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Load and validate `constraints/exchange_factors.json` from `path`.
-///
-/// Reads the JSON file, deserialises it through intermediate serde types,
-/// validates all exchange factor values, then converts to `Vec<ExchangeFactorEntry>`.
-/// The result is sorted by `(line_id, stage_id)` ascending.
+/// Load and validate `constraints/exchange_factors.json` from `path`, returning
+/// entries sorted by `(line_id, stage_id)` ascending.
 ///
 /// # Errors
 ///
@@ -248,7 +245,6 @@ fn convert(raw: RawExchangeFactorsFile) -> Vec<ExchangeFactorEntry> {
         })
         .collect();
 
-    // Sort by (line_id, stage_id) ascending.
     result.sort_by(|a, b| {
         a.line_id
             .cmp(&b.line_id)

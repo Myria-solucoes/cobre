@@ -11,16 +11,13 @@ use std::os::raw::{c_double, c_int};
 // Status codes (mirroring csrc/qhull_wrapper.h)
 // ============================================================
 
-/// `COBRE_QHULL_OK` — success; the out-params are populated.
+/// Success; the out-params are populated.
 pub const COBRE_QHULL_OK: c_int = 0;
-/// `COBRE_QHULL_ERR_COMPUTE` — qhull init/computation failure (non-degenerate,
-/// non-allocation internal/precision error).
+/// qhull init/computation failure (neither degenerate input nor allocation).
 pub const COBRE_QHULL_ERR_COMPUTE: c_int = 1;
-/// `COBRE_QHULL_ERR_DEGENERATE` — degenerate or insufficient input (fewer than
-/// 4 affinely-independent points; no full-dimensional 3-D hull).
+/// Degenerate or insufficient input: fewer than 4 affinely-independent points.
 pub const COBRE_QHULL_ERR_DEGENERATE: c_int = 2;
-/// `COBRE_QHULL_ERR_ALLOC` — memory allocation failure (qhull-internal or the
-/// shim's output buffer).
+/// Memory allocation failure (qhull-internal or the shim's output buffer).
 pub const COBRE_QHULL_ERR_ALLOC: c_int = 3;
 
 // ============================================================

@@ -1,11 +1,4 @@
 //! `SystemBuilder` — canonical-order assembly and validation of a [`System`].
-//!
-//! `SystemBuilder::build()` sorts every entity collection into canonical
-//! [`EntityId`] order, runs the construction-time validation pass (duplicate-id,
-//! cross-reference, cascade-cycle, and filling-config checks) accumulating every
-//! error before returning, and assembles the immutable [`System`] via a direct
-//! struct literal. As a child module of `system`, this file reaches `System`'s
-//! ancestor-private fields without any field-visibility promotion.
 
 use std::collections::HashSet;
 
@@ -25,9 +18,7 @@ use crate::{
 
 /// Builder for constructing a validated, immutable [`System`].
 ///
-/// Accepts entity collections, sorts entities by ID, checks for duplicate IDs,
-/// builds topology, and returns the [`System`]. All entity collections default to
-/// empty; only supply the collections your test case requires.
+/// All entity collections default to empty; supply only the ones you need.
 ///
 /// # Examples
 ///
@@ -82,10 +73,7 @@ impl Default for SystemBuilder {
 }
 
 impl SystemBuilder {
-    /// Create a new empty builder. All entity collections start empty.
-    ///
-    /// Omitting a setter leaves the corresponding field at its empty/default
-    /// value — never uninitialized.
+    /// Create a new builder with every collection empty and every field at its default.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -184,8 +172,6 @@ impl SystemBuilder {
     }
 
     /// Set the pre-resolved penalty table.
-    ///
-    /// Populated by `cobre-io` after the three-tier penalty cascade is applied.
     #[must_use]
     pub fn penalties(mut self, penalties: ResolvedPenalties) -> Self {
         self.penalties = penalties;
@@ -193,8 +179,6 @@ impl SystemBuilder {
     }
 
     /// Set the pre-resolved bounds table.
-    ///
-    /// Populated by `cobre-io` after base bounds are overlaid with stage overrides.
     #[must_use]
     pub fn bounds(mut self, bounds: ResolvedBounds) -> Self {
         self.bounds = bounds;
@@ -202,9 +186,6 @@ impl SystemBuilder {
     }
 
     /// Set the pre-resolved generic constraint RHS bound table.
-    ///
-    /// Populated by `cobre-io` after converting raw parsed bound rows into
-    /// the indexed lookup structure.
     #[must_use]
     pub fn resolved_generic_bounds(
         mut self,
@@ -215,8 +196,6 @@ impl SystemBuilder {
     }
 
     /// Set the pre-resolved per-block load scaling factors.
-    ///
-    /// Populated by `cobre-io` after resolving `load_factors.json` entries.
     #[must_use]
     pub fn resolved_load_factors(mut self, resolved_load_factors: ResolvedLoadFactors) -> Self {
         self.resolved_load_factors = resolved_load_factors;
@@ -224,8 +203,6 @@ impl SystemBuilder {
     }
 
     /// Set the pre-resolved per-block exchange capacity factors.
-    ///
-    /// Populated by `cobre-io` after resolving `exchange_factors.json` entries.
     #[must_use]
     pub fn resolved_exchange_factors(
         mut self,
@@ -236,8 +213,6 @@ impl SystemBuilder {
     }
 
     /// Set the pre-resolved per-stage NCS available generation bounds.
-    ///
-    /// Populated by `cobre-io` after resolving `ncs_bounds.parquet` entries.
     #[must_use]
     pub fn resolved_ncs_bounds(mut self, resolved_ncs_bounds: ResolvedNcsBounds) -> Self {
         self.resolved_ncs_bounds = resolved_ncs_bounds;
@@ -245,8 +220,6 @@ impl SystemBuilder {
     }
 
     /// Set the pre-resolved per-block NCS generation scaling factors.
-    ///
-    /// Populated by `cobre-io` after resolving `non_controllable_factors.json` entries.
     #[must_use]
     pub fn resolved_ncs_factors(mut self, resolved_ncs_factors: ResolvedNcsFactors) -> Self {
         self.resolved_ncs_factors = resolved_ncs_factors;
@@ -297,63 +270,41 @@ impl SystemBuilder {
         self
     }
 
-    /// Set the raw historical inflow observations.
-    ///
-    /// Rows should be sorted by `(hydro_id, date)` ascending. When the
-    /// `scenarios/inflow_history.parquet` file is absent, omit this call
-    /// and the field will default to an empty `Vec`.
+    /// Set the raw historical inflow observations; rows must be sorted by
+    /// `(hydro_id, date)` ascending.
     #[must_use]
     pub fn inflow_history(mut self, rows: Vec<InflowHistoryRow>) -> Self {
         self.inflow_history = rows;
         self
     }
 
-    /// Set the raw external inflow scenario rows.
-    ///
-    /// Rows should be sorted by `(stage_id, scenario_id, hydro_id)` ascending.
-    /// When no external inflow scenario file is present, omit this call and the
-    /// field will default to an empty `Vec`.
+    /// Set the raw external inflow scenario rows; rows must be sorted by
+    /// `(stage_id, scenario_id, hydro_id)` ascending.
     #[must_use]
     pub fn external_scenarios(mut self, rows: Vec<ExternalScenarioRow>) -> Self {
         self.external_scenarios = rows;
         self
     }
 
-    /// Set the raw external load scenario rows.
-    ///
-    /// Rows should be sorted by `(stage_id, scenario_id, bus_id)` ascending.
-    /// When no external load scenario file is present, omit this call and the
-    /// field will default to an empty `Vec`.
+    /// Set the raw external load scenario rows; rows must be sorted by
+    /// `(stage_id, scenario_id, bus_id)` ascending.
     #[must_use]
     pub fn external_load_scenarios(mut self, rows: Vec<ExternalLoadRow>) -> Self {
         self.external_load_scenarios = rows;
         self
     }
 
-    /// Set the raw external NCS scenario rows.
-    ///
-    /// Rows should be sorted by `(stage_id, scenario_id, ncs_id)` ascending.
-    /// When no external NCS scenario file is present, omit this call and the
-    /// field will default to an empty `Vec`.
+    /// Set the raw external NCS scenario rows; rows must be sorted by
+    /// `(stage_id, scenario_id, ncs_id)` ascending.
     #[must_use]
     pub fn external_ncs_scenarios(mut self, rows: Vec<ExternalNcsRow>) -> Self {
         self.external_ncs_scenarios = rows;
         self
     }
 
-    /// Build the [`System`].
-    ///
-    /// Sorts all entity collections by [`EntityId`] (canonical ordering).
-    /// Checks for duplicate IDs within each collection.
-    /// Validates all cross-reference fields (e.g., `bus_id`, `downstream_id`) against
-    /// the appropriate index to ensure every referenced entity exists.
-    /// Builds [`CascadeTopology`] and [`NetworkTopology`].
-    /// Validates the cascade graph for cycles and checks hydro filling configurations.
-    /// Constructs lookup indices.
-    ///
-    /// Returns `Err` with a list of all validation errors found across all collections.
-    /// All invalid references across all entity types are collected before returning —
-    /// no short-circuiting on first error.
+    /// Sort every collection into canonical [`EntityId`] order, validate, and assemble
+    /// the immutable [`System`]. All validation errors are collected before returning —
+    /// no short-circuiting on the first error.
     ///
     /// # Errors
     ///
@@ -363,15 +314,9 @@ impl SystemBuilder {
     /// - The hydro cascade graph contains a cycle.
     /// - Any hydro filling configuration is invalid (non-positive inflow or missing
     ///   `entry_stage_id`).
-    ///
-    /// All errors across all collections are reported together.
-    // Rationale: this is a single-pass, ordered validation and construction of the
-    // complete entity graph — sorting, duplicate checks, cross-reference validation,
-    // cascade-graph cycle detection, and final `System` assembly are all tightly
-    // coupled through the shared `errors` accumulator and the intermediate index
-    // maps. Splitting across helper functions would require threading those maps and
-    // the error vector through every call, obscuring the one-shot build contract and
-    // the fail-fast short-circuit that holds when duplicate IDs are found first.
+    // Rationale: sort, duplicate/cross-ref/cycle checks, and `System` assembly share
+    // one `errors` accumulator and the intermediate index maps; splitting them would
+    // thread those through every call and lose the fail-fast-on-duplicates short-circuit.
     #[allow(clippy::too_many_lines)]
     pub fn build(mut self) -> Result<System, Vec<ValidationError>> {
         self.buses.sort_by_key(|e| e.id.0);

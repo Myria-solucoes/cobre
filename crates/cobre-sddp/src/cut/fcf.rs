@@ -1,40 +1,17 @@
 //! Future Cost Function (FCF) — all-stages container for Benders cuts.
 //!
-//! [`FutureCostFunction`] wraps one [`CutPool`] per stage and provides the
-//! high-level interface consumed by the training loop:
-//!
-//! - [`add_cut`] — insert a Benders cut at a given stage.
-//! - [`active_cuts`] — iterate over active cuts at a given stage for LP
-//!   construction.
-//! - [`evaluate_at_state`] — evaluate the FCF at a given state (max over
-//!   active cuts).
-//! - [`total_active_cuts`] — aggregate count across all stages.
-//! - [`deactivate`] — delegate cut deactivation to a specific stage pool.
-//! - [`set_active`] — canonical activation toggle: set a single slot's
-//!   activity flag and keep the cached count consistent.
-//! - [`cuts_in_lp`] — LP-row-count metric for a single stage (populated
-//!   count, independent of activity state).
+//! [`FutureCostFunction`] wraps one [`CutPool`] per stage as a thin orchestration
+//! layer over the training loop's cut operations.
 //!
 //! ## Stage indexing
 //!
-//! The FCF uses **0-based internal stage indices** throughout its API.
-//! The SDDP algorithm specification uses 1-based stage numbers (`t = 1..T`).
-//! Callers are responsible for converting: pass `stage = t - 1` when calling
-//! FCF methods.
+//! FCF methods use **0-based** stage indices; the SDDP spec uses 1-based stage
+//! numbers (`t = 1..T`). Callers convert with `stage = t - 1`.
 //!
 //! ## Memory allocation
 //!
-//! All pool storage is pre-allocated at construction time via
-//! [`FutureCostFunction::new`]. No heap allocation occurs during the training
-//! loop hot path.
-//!
-//! [`add_cut`]: FutureCostFunction::add_cut
-//! [`active_cuts`]: FutureCostFunction::active_cuts
-//! [`evaluate_at_state`]: FutureCostFunction::evaluate_at_state
-//! [`total_active_cuts`]: FutureCostFunction::total_active_cuts
-//! [`deactivate`]: FutureCostFunction::deactivate
-//! [`set_active`]: FutureCostFunction::set_active
-//! [`cuts_in_lp`]: FutureCostFunction::cuts_in_lp
+//! All pool storage is pre-allocated by [`FutureCostFunction::new`] — no heap
+//! allocation on the training-loop hot path.
 //!
 //! ## Example
 //!
@@ -55,54 +32,32 @@
 
 use super::pool::CutPool;
 
-/// All-stages container for the Future Cost Function (FCF).
-///
-/// Holds one [`CutPool`] per stage. All pools share the same
-/// `state_dimension`. The FCF itself is a thin orchestration layer; all
-/// per-cut logic is delegated to [`CutPool`].
-///
-/// ## Stage indexing
-///
-/// FCF methods accept **0-based stage indices** (`0..num_stages`). The SDDP
-/// spec uses 1-based stage numbers. Convert with `stage = t - 1` before
-/// calling.
+/// All-stages container for the Future Cost Function (FCF): one [`CutPool`] per
+/// stage, all sharing `state_dimension`. Per-cut logic is delegated to
+/// [`CutPool`].
 #[derive(Debug, Clone)]
 pub struct FutureCostFunction {
     /// One cut pool per stage, indexed 0-based.
     pub pools: Vec<CutPool>,
 
-    /// Length of the state vector shared across all stages.
+    /// State-vector length shared across all stages.
     pub state_dimension: usize,
 
-    /// Number of forward passes per training iteration. Immutable after
-    /// construction.
+    /// Forward passes per training iteration. Immutable after construction.
     pub forward_passes: u32,
 }
 
 impl FutureCostFunction {
-    /// Construct a new `FutureCostFunction` with pre-allocated pools.
-    ///
-    /// Creates `num_stages` [`CutPool`]s. Each stage `i` is allocated with
-    /// its own capacity:
+    /// Construct a `FutureCostFunction` with pre-allocated pools, one per stage:
     ///
     /// ```text
     /// capacity[i] = warm_start_counts[i] + max_iterations * forward_passes
     /// ```
     ///
-    /// The capacity arithmetic uses `u64` to avoid overflow for large
-    /// `max_iterations` and `forward_passes` values before converting to
-    /// `usize`.
-    ///
     /// # Parameters
     ///
-    /// - `num_stages`: number of stages in the planning horizon.
-    /// - `state_dimension`: length of the state vector (number of coefficients
-    ///   per Benders cut).
-    /// - `forward_passes`: number of forward passes per training iteration.
-    /// - `max_iterations`: maximum number of training iterations.
-    /// - `warm_start_counts`: per-stage number of warm-start cuts pre-loaded
-    ///   before training begins. Length must equal `num_stages`. For the
-    ///   uniform case (no warm-start), pass `&vec![0; num_stages]`.
+    /// - `warm_start_counts`: per-stage warm-start cut counts; length must equal
+    ///   `num_stages`. Pass `&vec![0; num_stages]` for the no-warm-start case.
     ///
     /// # Example
     ///
@@ -130,13 +85,8 @@ impl FutureCostFunction {
             num_stages
         );
 
-        // Use u64 arithmetic to prevent overflow before converting to usize.
-        // The cast cannot realistically truncate on any 64-bit platform:
-        // pool capacity is bounded by available memory, which fits in usize on
-        // all supported targets. Clippy's truncation warning is suppressed here
-        // because the same pattern is used by the underlying CutPool (see
-        // pool.rs slot_index), and both are guarded by debug_assert at
-        // insertion time.
+        // u64 arithmetic guards the capacity product against overflow; the cast
+        // to usize cannot truncate (capacity is memory-bounded on 64-bit targets).
         #[allow(clippy::cast_possible_truncation)]
         let pools = warm_start_counts
             .iter()
@@ -154,17 +104,13 @@ impl FutureCostFunction {
         }
     }
 
-    /// Reconstruct a `FutureCostFunction` from deserialized policy checkpoint data.
-    ///
-    /// Builds one [`CutPool::from_deserialized`] per stage. The pools are
-    /// tightly sized to hold exactly the loaded cuts, with no capacity for
-    /// additional training cuts.
+    /// Reconstruct a `FutureCostFunction` from deserialized policy checkpoint data
+    /// via [`CutPool::from_deserialized`] (tightly sized, no training capacity).
     ///
     /// # Errors
     ///
-    /// Returns [`SddpError::Validation`] if:
-    /// - `stage_results` is empty
-    /// - `state_dimension` is inconsistent across stages
+    /// [`SddpError::Validation`] if `stage_results` is empty or `state_dimension`
+    /// is inconsistent across stages.
     ///
     /// [`SddpError::Validation`]: crate::SddpError::Validation
     pub fn from_deserialized(
@@ -199,16 +145,13 @@ impl FutureCostFunction {
         })
     }
 
-    /// Build an FCF with warm-start cuts plus capacity for new training cuts.
-    ///
-    /// Each pool is constructed with [`CutPool::new_with_warm_start`], giving
-    /// capacity for both the loaded cuts and `max_iterations * forward_passes`
-    /// new training cuts.
+    /// Build an FCF with warm-start cuts plus training capacity via
+    /// [`CutPool::new_with_warm_start`].
     ///
     /// # Errors
     ///
-    /// Returns [`SddpError::Validation`] if `stage_results` is empty or if
-    /// `state_dimension` is inconsistent across stages.
+    /// [`SddpError::Validation`] if `stage_results` is empty or `state_dimension`
+    /// is inconsistent across stages.
     ///
     /// [`SddpError::Validation`]: crate::SddpError::Validation
     pub fn new_with_warm_start(
@@ -252,23 +195,13 @@ impl FutureCostFunction {
         })
     }
 
-    /// Insert a Benders cut at the given stage.
-    ///
-    /// Delegates to `pools[stage].add_cut(...)`.
+    /// Insert a Benders cut at the given (0-based) stage. `coefficients` is the
+    /// state gradient; length must be `state_dimension`.
     ///
     /// # Panics (debug builds only)
     ///
     /// Panics if `stage >= pools.len()` or if `coefficients.len() !=
     /// state_dimension`.
-    ///
-    /// # Parameters
-    ///
-    /// - `stage`: 0-based stage index.
-    /// - `iteration`: training iteration counter (0-based).
-    /// - `forward_pass_index`: index of the forward pass within the iteration.
-    /// - `intercept`: cut intercept value.
-    /// - `coefficients`: cut gradient with respect to the state; must have
-    ///   length `state_dimension`.
     pub fn add_cut(
         &mut self,
         stage: usize,
@@ -285,18 +218,12 @@ impl FutureCostFunction {
         self.pools[stage].add_cut(iteration, forward_pass_index, intercept, coefficients);
     }
 
-    /// Iterate over active cuts at the given stage.
-    ///
-    /// Yields `(slot_index, intercept, coefficient_slice)` for every active
-    /// cut in `pools[stage]`. Used by LP construction to add cut constraints.
+    /// Iterate over active cuts at the given (0-based) stage as
+    /// `(slot_index, intercept, coefficient_slice)`, for LP construction.
     ///
     /// # Panics (debug builds only)
     ///
     /// Panics if `stage >= pools.len()`.
-    ///
-    /// # Parameters
-    ///
-    /// - `stage`: 0-based stage index.
     pub fn active_cuts(&self, stage: usize) -> impl Iterator<Item = (usize, f64, &[f64])> {
         debug_assert!(
             stage < self.pools.len(),
@@ -306,23 +233,14 @@ impl FutureCostFunction {
         self.pools[stage].active_cuts()
     }
 
-    /// Evaluate the FCF at a given state for the specified stage.
-    ///
-    /// Returns the maximum over all active cuts of
-    /// `intercept + coefficients · state`. Returns [`f64::NEG_INFINITY`] if
-    /// the stage has no active cuts.
-    ///
-    /// Delegates to `pools[stage].evaluate_at_state(values)`.
+    /// Evaluate the FCF at `values` for the given (0-based) stage: the max over
+    /// active cuts, or [`f64::NEG_INFINITY`] when the stage has none. `values`
+    /// length must be `state_dimension`.
     ///
     /// # Panics (debug builds only)
     ///
     /// Panics if `stage >= pools.len()` or if `values.len() !=
     /// state_dimension`.
-    ///
-    /// # Parameters
-    ///
-    /// - `stage`: 0-based stage index.
-    /// - `values`: state vector; must have length `state_dimension`.
     #[must_use]
     pub fn evaluate_at_state(&self, stage: usize, values: &[f64]) -> f64 {
         debug_assert!(
@@ -333,48 +251,33 @@ impl FutureCostFunction {
         self.pools[stage].evaluate_at_state(values)
     }
 
-    /// Return the total number of active cuts across all stages.
-    ///
-    /// Sums `active_count()` over every pool in the FCF.
+    /// Return the total active-cut count across all stages.
     #[must_use]
     pub fn total_active_cuts(&self) -> usize {
         self.pools.iter().map(CutPool::active_count).sum()
     }
 
-    /// Return the total number of cuts ever generated across all stages,
-    /// including warm-start cuts. Sums `generated_count` over every pool.
-    ///
-    /// Unlike summing `populated_count`, this excludes reserved-but-unwritten
-    /// slots, so it reflects the true number of policy rows generated.
+    /// Return the total cuts ever generated across all stages (sums
+    /// `generated_count`), excluding reserved-but-unwritten slots — the true
+    /// policy-row count.
     #[must_use]
     pub fn total_generated_cuts(&self) -> usize {
         self.pools.iter().map(|p| p.generated_count).sum()
     }
 
-    /// Set the iteration that maps to each pool's first training slot.
-    ///
-    /// Propagates to every pool (see [`CutPool::set_iteration_base`]). Call once
-    /// before training begins with `start_iteration + 1` so training cuts pack
-    /// densely from the warm-start region instead of leaving the slot block
-    /// `[warm_start_count, warm_start_count + forward_passes)` unused.
+    /// Propagate [`CutPool::set_iteration_base`] to every pool. Call once before
+    /// training with `start_iteration + 1` for dense slot packing.
     pub fn set_iteration_base(&mut self, iteration_base: u64) {
         for pool in &mut self.pools {
             pool.set_iteration_base(iteration_base);
         }
     }
 
-    /// Deactivate the cuts at the given slot indices for the specified stage.
-    ///
-    /// Delegates to `pools[stage].deactivate(indices)`.
+    /// Deactivate the cuts at `indices` for the given (0-based) stage.
     ///
     /// # Panics (debug builds only)
     ///
     /// Panics if `stage >= pools.len()`.
-    ///
-    /// # Parameters
-    ///
-    /// - `stage`: 0-based stage index.
-    /// - `indices`: slice of slot indices (0-based) to deactivate.
     pub fn deactivate(&mut self, stage: usize, indices: &[u32]) {
         debug_assert!(
             stage < self.pools.len(),
@@ -384,19 +287,12 @@ impl FutureCostFunction {
         self.pools[stage].deactivate(indices);
     }
 
-    /// Toggle the activity flag for a single slot at the given stage.
-    ///
-    /// Delegates to [`CutPool::set_active`] for `pools[stage]`.
+    /// Toggle a single slot's activity flag at the given (0-based) stage via
+    /// [`CutPool::set_active`].
     ///
     /// # Panics (debug builds only)
     ///
     /// Panics if `stage >= pools.len()` or if `slot >= pools[stage].populated_count`.
-    ///
-    /// # Parameters
-    ///
-    /// - `stage`: 0-based stage index.
-    /// - `slot`: 0-based slot index within the stage pool.
-    /// - `active`: desired activity state.
     ///
     /// [`CutPool::set_active`]: super::pool::CutPool::set_active
     pub fn set_active(&mut self, stage: usize, slot: u32, active: bool) {
@@ -408,19 +304,12 @@ impl FutureCostFunction {
         self.pools[stage].set_active(slot, active);
     }
 
-    /// Return the LP-row count for the given stage.
-    ///
-    /// Delegates to [`CutPool::cuts_in_lp`] for `pools[stage]`. Returns the
-    /// `populated_count` of the stage pool — the number of slots that have
-    /// been populated at least once, regardless of activity state.
+    /// Return the LP-row count (populated slots, independent of activity) for the
+    /// given (0-based) stage via [`CutPool::cuts_in_lp`].
     ///
     /// # Panics (debug builds only)
     ///
     /// Panics if `stage >= pools.len()`.
-    ///
-    /// # Parameters
-    ///
-    /// - `stage`: 0-based stage index.
     ///
     /// [`CutPool::cuts_in_lp`]: super::pool::CutPool::cuts_in_lp
     #[must_use]
@@ -433,10 +322,7 @@ impl FutureCostFunction {
         self.pools[stage].cuts_in_lp()
     }
 
-    /// Compute sparsity reports for all stages.
-    ///
-    /// Returns a vector of [`SparsityReport`] values, one per stage, in
-    /// stage order. Delegates to [`CutPool::sparsity_report`] for each pool.
+    /// One [`SparsityReport`] per stage, in stage order.
     ///
     /// [`SparsityReport`]: super::pool::SparsityReport
     #[must_use]

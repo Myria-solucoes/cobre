@@ -1,11 +1,7 @@
 //! Integration test: CLI training metadata carries the per-phase setup timings.
 //!
-//! Runs the `cobre` binary on the D01 fixture and asserts that the persisted
-//! `training/metadata.json` has a `setup` object with the five generic timing
-//! fields (`load_seconds`, `stochastic_fit_seconds`, `production_fit_seconds`,
-//! `evaporation_fit_seconds`, `broadcast_seconds`), each a finite, non-negative
-//! number. The `setup` section is informational and never enters any parity
-//! hash, so its presence does not perturb the hashed Parquet output set.
+//! The `setup` section is informational and never enters any parity hash, so its
+//! presence does not perturb the hashed Parquet output set.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -19,9 +15,6 @@ fn cobre() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("cobre"))
 }
 
-/// Absolute path to the D01 fixture (`examples/deterministic/d01-thermal-dispatch`),
-/// resolved relative to this crate's manifest directory (two levels below the
-/// repo root).
 fn d01_case_dir() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let root = manifest
@@ -40,8 +33,7 @@ fn training_metadata_carries_well_formed_setup_timings() {
         case.display()
     );
 
-    // Write outputs to a temp dir so the committed `output/` tree under the
-    // fixture is never disturbed.
+    // Temp output dir so the committed `output/` tree under the fixture is never disturbed.
     let out = TempDir::new().expect("create temp output dir");
 
     cobre()

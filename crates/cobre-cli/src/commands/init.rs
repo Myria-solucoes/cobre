@@ -1,9 +1,7 @@
 //! `cobre init --template <NAME> <DIRECTORY>` subcommand.
 //!
-//! Scaffolds a new case directory from an embedded template. With `--list`,
-//! prints all available template names and descriptions to stdout and exits.
-//! With `--template <NAME> <DIRECTORY>`, writes template files to the given
-//! directory, prints the Cobre banner and a file summary to stderr, and exits.
+//! Scaffolds a new case directory from an embedded template. `--list` prints the
+//! available templates to stdout; the summary and banner go to stderr.
 
 use std::path::PathBuf;
 
@@ -46,10 +44,6 @@ pub struct InitArgs {
 
 /// Execute the `init` subcommand.
 ///
-/// When `--list` is set, prints all template names and descriptions to stdout.
-/// When `--template <NAME> <DIRECTORY>` is provided, looks up the template,
-/// creates the directory tree, writes all template files, and prints a summary.
-///
 /// # Errors
 ///
 /// Returns [`CliError::Validation`] when the template name is not found.
@@ -75,7 +69,6 @@ pub fn execute(args: InitArgs) -> Result<(), CliError> {
     execute_scaffold(&template_name, &directory, args.force)
 }
 
-/// Scaffold the named template into the given directory.
 fn execute_scaffold(
     template_name: &str,
     directory: &std::path::Path,
@@ -83,7 +76,6 @@ fn execute_scaffold(
 ) -> Result<(), CliError> {
     let stderr = Term::stderr();
 
-    // Resolve template — exit code 1 on unknown name.
     let template = templates::find_template(template_name).ok_or_else(|| {
         let available: Vec<&str> = templates::available_templates()
             .iter()
@@ -95,8 +87,7 @@ fn execute_scaffold(
                 template_name,
                 available.join(", ")
             ),
-            // `init` surfaces this error directly; nothing was rendered to stdout,
-            // so the stderr render and hint must remain.
+            // Nothing rendered yet, so the caller still owns the stderr render + hint.
             already_rendered: false,
         }
     })?;
@@ -256,7 +247,6 @@ mod tests {
         }
     }
 
-    /// generated `config.json` contains the correct `$schema` URL.
     #[test]
     fn test_init_config_json_contains_schema_url() {
         let tmp = TempDir::new().unwrap();
@@ -276,7 +266,6 @@ mod tests {
         );
     }
 
-    /// generated `system/buses.json` contains the correct `$schema` URL.
     #[test]
     fn test_init_system_json_files_contain_schema_urls() {
         let tmp = TempDir::new().unwrap();

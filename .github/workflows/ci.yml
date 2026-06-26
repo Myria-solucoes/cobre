@@ -259,43 +259,47 @@ jobs:
         with:
           python-version: "3.12"
       - name: Infra genericity gate
-        run: bash scripts/check-infra-genericity.sh
+        run: bash scripts/ci/check-infra-genericity.sh
       - name: Cut-selection determinism gate
-        run: bash scripts/check-cut-selection-determinism.sh
+        run: bash scripts/ci/check-cut-selection-determinism.sh
       - name: cfg(test) boundary drift guard (shared scan lib)
         # Fails if the holdout gates' cfg(test) boundary desyncs from the shared
-        # scripts/lib/comment_scan.sh definition.
-        run: bash scripts/lib/comment_scan.sh
+        # scripts/ci/lib/comment_scan.sh definition.
+        run: bash scripts/ci/lib/comment_scan.sh
       - name: Check for plan-structure leaks
-        run: bash scripts/check-no-plan-leaks.sh
+        run: bash scripts/ci/check-no-plan-leaks.sh
       - name: Check repo-relative doc paths/links
-        run: bash scripts/check-doc-paths.sh
+        run: bash scripts/ci/check-doc-paths.sh
       - name: Check comment references (un-rottable-ref gate)
-        run: bash scripts/check-comment-refs.sh
+        run: bash scripts/ci/check-comment-refs.sh
       - name: Advisory — drift-prone line references in comments (E2)
         # ADVISORY: exits 0 regardless of hits; its output is informational and
         # never fails the job.
-        run: bash scripts/check-comment-line-refs.sh
+        run: bash scripts/ci/check-comment-line-refs.sh
       - name: Advisory — in-fn box-drawing banners / N5 candidates (E7)
         # ADVISORY: exits 0 regardless of hits; its output is informational and
         # never fails the job.
-        run: bash scripts/check-comment-banners.sh
+        run: bash scripts/ci/check-comment-banners.sh
       - name: Check for doc placeholders (E5 placeholder gate)
-        run: bash scripts/check-doc-placeholders.sh
+        run: bash scripts/ci/check-doc-placeholders.sh
       - name: Check rationale on new suppressions (E4 gate)
         # On pull_request events, diff against the PR base SHA; on push (and any
         # other event) BASE_REF is empty and the gate defaults to origin/main.
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha }}
-        run: bash scripts/check-allow-rationale.sh
+        run: bash scripts/ci/check-allow-rationale.sh
       - name: Check Python parity
-        run: python3 scripts/check_python_parity.py --max 0
+        run: python3 scripts/ci/check_python_parity.py --max 0
       - name: Check book version references
-        run: python3 scripts/check_book_version.py
+        run: python3 scripts/ci/check_book_version.py
+      - name: Check doc voice (no hype / unpinned numbers)
+        run: python3 scripts/ci/check_doc_voice.py
+      - name: Check doc counts (pinned column/field counts match their tables)
+        run: python3 scripts/ci/check_doc_counts.py
       - name: Advisory — code-quality hotspot report
         # ADVISORY: always exits 0. Prints a ranked "where to act first" table
         # (churn x size x suppression density x in-body banners) to the job log.
-        run: bash scripts/quality-report.sh
+        run: bash scripts/ci/quality-report.sh
 
   schemas:
     name: Schema Freshness
@@ -334,7 +338,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Verify schema freshness
-        run: ./scripts/check_schemas.sh --build
+        run: ./scripts/ci/check_schemas.sh --build
 
   # Locks the DOCUMENTED structural invariants of a fresh `cobre init` -> `run`
   # -> `report` (template file count, training/metadata.json keys,
@@ -356,7 +360,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Verify documented init/run/report invariants
-        run: ./scripts/check-docs-examples.sh --build
+        run: ./scripts/ci/check-docs-examples.sh --build
 
   # Docs build once on the primary (HiGHS) backend; NOT duplicated onto CLP.
   docs:

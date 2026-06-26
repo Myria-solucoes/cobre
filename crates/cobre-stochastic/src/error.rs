@@ -1,21 +1,6 @@
 //! Error types for the `cobre-stochastic` crate.
-//!
-//! All public APIs that can fail return [`StochasticError`] or a `Result`
-//! wrapping it. The error variants cover the six failure domains of the
-//! stochastic layer:
-//!
-//! - PAR model parameter validation
-//! - Spectral decomposition of correlation matrices
-//! - Correlation profile validation
-//! - Seed derivation for deterministic noise generation
-//! - Noise method dispatch (tree generation)
-//! - Sampling scheme dispatch (forward sampler factory)
 
 /// Errors that can occur during stochastic model construction or scenario generation.
-///
-/// This type is returned by all fallible methods in `cobre-stochastic`.
-/// It implements [`std::error::Error`] via the `thiserror` derive macro and
-/// is both `Send` and `Sync`, making it safe to propagate across threads.
 #[derive(Debug, thiserror::Error)]
 pub enum StochasticError {
     /// PAR model parameters did not pass validation (e.g., AR order exceeds

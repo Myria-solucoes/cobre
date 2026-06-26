@@ -1,9 +1,7 @@
 //! PAR(p) evaluation and inverse functions.
 //!
-//! This module provides functions for evaluating the Periodic Autoregressive
-//! model equation in both directions: computing the output value at a given
-//! stage from the current lag state and a noise realisation (forward), and
-//! solving for the noise value that produces a desired target output (inverse).
+//! Forward: output from lag state and a noise realisation. Inverse: the noise
+//! that produces a desired target output.
 //!
 //! ## PAR model equation
 //!
@@ -32,30 +30,10 @@
 
 use super::precompute::PrecomputedPar;
 
-/// Evaluate the PAR(p) model equation for a single series element at a single stage.
-///
-/// Computes:
-/// ```text
-/// a_h = deterministic_base + sum_{l=0}^{psi.len()-1} psi[l] * lags[l] + sigma * eta
-/// ```
-///
-/// All entries of `psi` are model coefficients and participate in the sum: with
-/// classical PAR(p), `psi.len()` equals the AR order; with PAR(p)-A annual,
-/// `psi` is widened to 12 and the annual contribution is spread across the
-/// extra positions. The caller must supply at least `psi.len()` lag values.
-///
-/// The returned value may be negative (truncation is the caller's
-/// responsibility).
-///
-/// # Parameters
-///
-/// - `deterministic_base` — the precomputed `b_{h,m(t)} = mu_m - sum psi_{m,l} * mu_{m-l}`
-/// - `psi` — materialised PAR coefficients in original units for this
-///   `(stage, series element)` pair; every entry contributes
-/// - `lags` — observed series values at lags 1..`psi.len()`; `lags[0]` = lag-1
-///   value, `lags[1]` = lag-2 value, etc.; must have `lags.len() >= psi.len()`
-/// - `sigma` — residual standard deviation
-/// - `eta` — standardised noise realisation (post-correlation)
+/// Evaluate the PAR(p) model equation (see the [module docs](self)) for a single
+/// series element at a single stage. Every entry of `psi` contributes; the caller
+/// must supply at least `psi.len()` lag values (`lags[0]` is lag-1). The returned
+/// value may be negative (truncation is the caller's responsibility).
 ///
 /// # Examples
 ///
@@ -139,24 +117,11 @@ pub fn evaluate_par_inflow(
     evaluate_par(deterministic_base, psi, lags, sigma, eta)
 }
 
-/// Evaluate the PAR(p) model equation for all series elements at a given stage.
+/// Evaluate the PAR(p) model equation for all series elements at `stage`, writing
+/// into `output` without allocating (values may be negative).
 ///
-/// Writes the computed output for each series element into `output`. Does not
-/// allocate. Values may be negative (truncation is the caller's responsibility).
-///
-/// The `lag_matrix` is a flat array indexed as `[lag * n_series + element]`:
-/// lag 0 (most recent, i.e. lag-1 value) for all elements is contiguous,
-/// followed by lag 1 for all elements, and so on. This layout is optimal for
-/// sequential element iteration at a fixed lag depth.
-///
-/// # Parameters
-///
-/// - `par_lp` — precomputed PAR cache built by [`PrecomputedPar::build`]
-/// - `stage` — 0-based stage index (must be `< par_lp.n_stages()`)
-/// - `lag_matrix` — flat lag array, length `max_order * n_series`, indexed
-///   as `[lag * n_series + element]`
-/// - `noise` — standardised noise vector, length `n_series`
-/// - `output` — output buffer; filled with computed values, length `n_series`
+/// `lag_matrix` is flat, length `max_order * n_series`, indexed as
+/// `[lag * n_series + element]` (lag 0 = lag-1 value, contiguous across elements).
 ///
 /// # Examples
 ///
@@ -283,39 +248,18 @@ pub fn evaluate_par_inflows(
     evaluate_par_batch(par_lp, stage, lag_matrix, noise, output);
 }
 
-/// Solve the PAR(p) equation for the noise value `η` that produces a given
-/// target output value.
-///
-/// Derived by setting `a_h = target` in the PAR equation and solving for `η`:
+/// Solve the PAR(p) equation for the noise `η` producing a given `target` output
+/// (set `a_h = target` in the PAR equation and solve):
 ///
 /// ```text
 /// η = (target - deterministic_base - Σ psi[l] * lags[l]) / sigma
 /// ```
 ///
-/// Common use cases:
-/// - **Output truncation**: `target = 0.0` gives the noise floor that clamps
-///   the output to zero.
-/// - **Residual recovery**: `target = historical_value` recovers the noise
-///   that would reproduce a historical observation.
+/// When `sigma == 0.0` noise cannot move the output: returns `0.0` if `target`
+/// matches the deterministic output (within `1e-10`), else `f64::NEG_INFINITY`
+/// to signal that no finite noise can reach `target`.
 ///
-/// When `sigma == 0.0`, noise has no effect on the output. Two cases apply:
-///
-/// - If `|target - deterministic_value| < 1e-10` (target matches the
-///   deterministic output), `0.0` is returned — any noise value would work,
-///   and zero is the canonical choice.
-/// - Otherwise `f64::NEG_INFINITY` is returned to signal that no finite noise
-///   can reach the target when sigma is zero.
-///
-/// # Parameters
-///
-/// - `deterministic_base` — the precomputed `b_{h,m(t)} = mu_m - Σ psi_{m,l} * mu_{m-l}`
-/// - `psi` — materialised PAR coefficients in original units; every entry
-///   contributes (`psi.len()` may exceed the AR order when PAR(p)-A annual is in
-///   effect; see [`evaluate_par`])
-/// - `lags` — observed series values at lags 1..`psi.len()`; must have
-///   `lags.len() >= psi.len()`
-/// - `sigma` — residual standard deviation
-/// - `target` — desired output value to solve for
+/// The caller must supply at least `psi.len()` lag values.
 ///
 /// # Examples
 ///
@@ -377,21 +321,9 @@ pub fn solve_par_noise(
     (target - deterministic_value) / sigma
 }
 
-/// Solve the PAR(p) equation for all series elements at a given stage, computing
-/// the noise value that produces each element's target output.
-///
-/// Writes the solved noise values into `output[0..n_series]`. Does not
-/// allocate. The `lag_matrix` uses the same layout as [`evaluate_par_batch`]:
-/// indexed as `[lag * n_series + element]`.
-///
-/// # Parameters
-///
-/// - `par_lp` — precomputed PAR cache built by [`PrecomputedPar::build`]
-/// - `stage` — 0-based stage index (must be `< par_lp.n_stages()`)
-/// - `lag_matrix` — flat lag array, length `max_order * n_series`, indexed
-///   as `[lag * n_series + element]`
-/// - `targets` — desired output values per series element, length `n_series`
-/// - `output` — output buffer; filled with solved noise values, length `n_series`
+/// Solve the PAR(p) equation for each series element's noise at `stage`, writing
+/// into `output` without allocating. `lag_matrix` uses the [`evaluate_par_batch`]
+/// layout `[lag * n_series + element]`.
 ///
 /// # Examples
 ///

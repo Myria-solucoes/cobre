@@ -119,18 +119,12 @@ enum Command {
 fn main() {
     let cli = Cli::parse();
 
-    // Apply color setting before any output is written so that the banner,
-    // progress bars, and error messages all honour the chosen setting.
     resolve_color(cli.color);
 
-    // Install a minimal tracing subscriber so library-level WARN events
-    // (e.g. config deprecation warnings emitted by `StudyParams::from_config`)
-    // reach the user via stderr. `RUST_LOG` honours the standard env-filter
-    // syntax; the default `warn` level keeps quiet for ordinary runs while
-    // ensuring deprecation notices surface. Errors during init are
-    // intentionally ignored — installing the subscriber twice is not
-    // possible after the first call, and a CLI that cannot subscribe must
-    // still execute its command.
+    // The default `warn` level surfaces library deprecation notices on stderr
+    // while staying quiet for ordinary runs; `RUST_LOG` overrides it. Init
+    // errors are ignored — the subscriber can only install once, and a CLI that
+    // cannot subscribe must still run its command.
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_target(false)
@@ -164,8 +158,8 @@ fn main() {
 mod tests {
     use super::{ColorWhen, resolve_color};
 
-    // Unit tests cover only `Always` and `Never` variants (safe without env var mutation).
-    // Environment variable tests are in the integration suite (cli_color.rs).
+    // `Auto` env-var resolution is exercised in the integration suite (cli_color.rs);
+    // these cover only the env-var-free `Always` / `Never` arms.
 
     #[test]
     fn test_resolve_color_always_enables_color() {

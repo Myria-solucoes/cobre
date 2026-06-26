@@ -17,7 +17,7 @@ conditions, generic constraints, and pre-resolved penalty/bound tables.
 
 | Module               | Purpose                                                                                                                                                                                                                                                                                                                                    |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `entities`           | Entity types: Bus, Line, Hydro, Thermal, and stub types                                                                                                                                                                                                                                                                                    |
+| `entities`           | Entity types: Bus, Line, Hydro, Thermal, PumpingStation, NonControllableSource, and EnergyContract                                                                                                                                                                                                                                         |
 | `entity_id`          | `EntityId` newtype wrapper                                                                                                                                                                                                                                                                                                                 |
 | `error`              | `ValidationError` enum                                                                                                                                                                                                                                                                                                                     |
 | `generic_constraint` | User-defined linear constraints over LP variables                                                                                                                                                                                                                                                                                          |
@@ -56,7 +56,7 @@ be shared across threads without synchronization.
 
 ### Fully modeled entities
 
-These four entity types contribute LP variables and constraints in optimization
+These six entity types contribute LP variables and constraints in optimization
 and simulation procedures.
 
 #### Bus
@@ -117,7 +117,7 @@ for thermal units that require advance scheduling).
 #### Hydro
 
 The most complex entity type: a hydroelectric plant with a reservoir, turbines,
-and optional cascade connectivity. It has 22 fields.
+and optional cascade connectivity.
 
 **Identity and connectivity:**
 
@@ -167,31 +167,37 @@ and optional cascade connectivity. It has 22 fields.
 | ----------- | ---------------- | --------------------------------------------------------- |
 | `penalties` | `HydroPenalties` | Pre-resolved penalty costs from the global-entity cascade |
 
-### Stub entities
-
-These three entity types are data-complete but do not contribute LP variables or
-constraints in the minimal viable implementation. Their type definitions exist in
-the registry so analysis code can iterate over all entity types uniformly.
-
 #### PumpingStation
 
-Transfers water between hydro reservoirs while consuming electrical power.
+A pumped-storage or water-transfer installation. Contributes a per-block pumped-flow
+decision variable that is subtracted from the source reservoir water-balance row and
+added to the destination reservoir water-balance row. Power drawn from the bus equals
+`consumption_mw_per_m3s × flow`. Supports commissioning windows via `entry_stage_id`
+and `exit_stage_id`.
 Fields: `id`, `name`, `bus_id`, `source_hydro_id`, `destination_hydro_id`,
 `entry_stage_id`, `exit_stage_id`, `consumption_mw_per_m3s`, `min_flow_m3s`,
 `max_flow_m3s`.
 
+#### NonControllableSource
+
+Intermittent generation (wind, solar, run-of-river) dispatched at available capacity
+with a curtailment penalty. Contributes one generation LP variable per block bounded
+by `[0, available_generation_mw × block_factor]`. Supports stochastic availability
+and commissioning windows.
+Fields: `id`, `name`, `bus_id`, `entry_stage_id`, `exit_stage_id`,
+`max_generation_mw`, `curtailment_cost` (pre-resolved).
+
 #### EnergyContract
 
-A bilateral energy agreement with an entity outside the modeled system.
+A bilateral energy purchase or sale obligation with a counterparty outside the
+modeled system. Contributes one LP column per block per direction (import or
+export) on its `bus_id`, bounded by `[min_mw, max_mw]`. An import column injects
+`+1.0` MW into the bus power-balance row; an export column withdraws `−1.0` MW.
+Supports commissioning windows and stage-varying bound/price overrides. Simulation
+output is written to `simulation/contracts/` per (stage, block, contract) triplet.
 Fields: `id`, `name`, `bus_id`, `contract_type` (`ContractType::Import` or
 `ContractType::Export`), `entry_stage_id`, `exit_stage_id`, `price_per_mwh`,
 `min_mw`, `max_mw`. Negative `price_per_mwh` represents export revenue.
-
-#### NonControllableSource
-
-Intermittent generation (wind, solar, run-of-river) that cannot be dispatched.
-Fields: `id`, `name`, `bus_id`, `entry_stage_id`, `exit_stage_id`,
-`max_generation_mw`, `curtailment_cost` (pre-resolved).
 
 ## Supporting types
 
@@ -206,19 +212,19 @@ Fields: `id`, `name`, `bus_id`, `entry_stage_id`, `exit_stage_id`,
 | `ContractType`         | `Import`, `Export`                                                                  | Energy flow direction for bilateral contracts         |
 
 `ConstantProductivity` is used universally and is the minimal viable model.
-`LinearizedHead` is for high-fidelity analyses where head-dependent terms matter.
-`Fpha` is the full production function with head-area-productivity tables for detailed modeling.
+`LinearizedHead` adds a head-dependent term to the production function.
+`Fpha` is the full production function with head-area-productivity tables.
 
 ### Structs
 
-| Struct              | Fields                                           | Purpose                                                  |
-| ------------------- | ------------------------------------------------ | -------------------------------------------------------- |
-| `TailracePoint`     | `outflow_m3s: f64`, `height_m: f64`              | One breakpoint on a piecewise tailrace curve             |
-| `DeficitSegment`    | `depth_mw: Option<f64>`, `cost_per_mwh: f64`     | One segment of a piecewise deficit cost curve            |
-| `AnticipatedConfig` | `lead_stages: i32`                               | Dispatch anticipation lead for anticipated thermal units |
-| `DiversionChannel`  | `downstream_id: EntityId`, `max_flow_m3s: f64`   | Water diversion bypassing turbines and spillways         |
-| `FillingConfig`     | `start_stage_id: i32`, `filling_inflow_m3s: f64` | Reservoir filling operation from a fixed inflow source   |
-| `HydroPenalties`    | 16 `f64` fields (see Penalty resolution section) | Pre-resolved penalty costs for one hydro plant           |
+| Struct              | Fields                                             | Purpose                                                                                                   |
+| ------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `TailracePoint`     | `outflow_m3s: f64`, `height_m: f64`                | One breakpoint on a piecewise tailrace curve                                                              |
+| `DeficitSegment`    | `depth_mw: Option<f64>`, `cost_per_mwh: f64`       | One segment of a piecewise deficit cost curve                                                             |
+| `AnticipatedConfig` | `lead_stages: i32`                                 | Dispatch anticipation lead for anticipated thermal units                                                  |
+| `DiversionChannel`  | `downstream_id: EntityId`, `max_flow_m3s: f64`     | Water diversion bypassing turbines and spillways                                                          |
+| `FillingConfig`     | `start_stage_id: i32`, `filling_min_rate_m3s: f64` | Reservoir filling configuration; `filling_min_rate_m3s` is the per-stage minimum accumulation rate [m³/s] |
+| `HydroPenalties`    | 16 `f64` fields (see Penalty resolution section)   | Pre-resolved penalty costs for one hydro plant                                                            |
 
 ## EntityId
 
@@ -278,7 +284,7 @@ assert!(system.bus(EntityId(1)).is_some());
 
 `SystemBuilder::build()` runs four validation phases in order:
 
-1. **Duplicate check.** Each of the 7 entity collections is scanned for
+1. **Duplicate check.** Each entity collection is scanned for
    duplicate `EntityId` values. All collections are checked before returning.
    If any duplicates are found, `build()` returns early with the error list.
 
@@ -298,7 +304,7 @@ assert!(system.bus(EntityId(1)).is_some());
    Filling configurations are also validated in this phase.
 
 4. **Filling config validation.** Each hydro with a `FillingConfig` must have
-   a positive `filling_inflow_m3s` and a non-`None` `entry_stage_id`. Violations
+   a non-negative `filling_min_rate_m3s` and a non-`None` `entry_stage_id`. Violations
    produce `ValidationError::InvalidFillingConfig` errors.
 
 If all phases pass, `build()` constructs `NetworkTopology`, builds O(1) lookup
@@ -436,14 +442,14 @@ the resolved `HydroPenalties` (with no `Option`s) is what is stored on each
 
 `ValidationError` is the error type returned by `SystemBuilder::build()`:
 
-| Variant                | Meaning                                                                        |
-| ---------------------- | ------------------------------------------------------------------------------ |
-| `DuplicateId`          | Two entities in the same collection share an `EntityId`                        |
-| `InvalidReference`     | A cross-reference field points to an ID that does not exist                    |
-| `CascadeCycle`         | The hydro `downstream_id` graph contains a cycle                               |
-| `InvalidFillingConfig` | A hydro's filling configuration has non-positive inflow or no `entry_stage_id` |
-| `DisconnectedBus`      | A bus has no lines, generators, or loads (defined but not yet enforced)        |
-| `InvalidPenalty`       | An entity-level penalty value is invalid (e.g., negative cost)                 |
+| Variant                | Meaning                                                                                      |
+| ---------------------- | -------------------------------------------------------------------------------------------- |
+| `DuplicateId`          | Two entities in the same collection share an `EntityId`                                      |
+| `InvalidReference`     | A cross-reference field points to an ID that does not exist                                  |
+| `CascadeCycle`         | The hydro `downstream_id` graph contains a cycle                                             |
+| `InvalidFillingConfig` | A hydro's filling configuration has a negative `filling_min_rate_m3s` or no `entry_stage_id` |
+| `DisconnectedBus`      | A bus has no lines, generators, or loads (defined but not yet enforced)                      |
+| `InvalidPenalty`       | An entity-level penalty value is invalid (e.g., negative cost)                               |
 
 All variants implement `Display` and the standard `Error` trait. The error
 message includes the entity type, the offending ID, and (for reference errors)
@@ -469,7 +475,7 @@ The `temporal` module defines the time structure of a multi-stage stochastic
 optimization problem. These types are loaded from `stages.json` by `cobre-io`
 and stored on `System`.
 
-There are 13 types in total: 5 enums and 8 structs.
+The types fall into two categories: enums and structs.
 
 ### Enums
 
@@ -1006,39 +1012,45 @@ Per-(entity, stage) bound structs:
 
 `HydroStageBounds` has 11 fields:
 
-| Field                  | Unit | Description                                                          |
-| ---------------------- | ---- | -------------------------------------------------------------------- |
-| `min_storage_hm3`      | hm³  | Dead volume (soft lower bound)                                       |
-| `max_storage_hm3`      | hm³  | Physical reservoir capacity (hard upper bound)                       |
-| `min_turbined_m3s`     | m³/s | Minimum turbined flow (soft lower bound)                             |
-| `max_turbined_m3s`     | m³/s | Maximum turbined flow (hard upper bound)                             |
-| `min_outflow_m3s`      | m³/s | Environmental flow requirement (soft lower bound)                    |
-| `max_outflow_m3s`      | m³/s | Flood-control limit (soft upper bound); `None` = unbounded           |
-| `min_generation_mw`    | MW   | Minimum electrical generation (soft lower bound)                     |
-| `max_generation_mw`    | MW   | Maximum electrical generation (hard upper bound)                     |
-| `max_diversion_m3s`    | m³/s | Diversion channel capacity (hard upper bound); `None` = no diversion |
-| `filling_inflow_m3s`   | m³/s | Filling inflow retained during filling stages; default 0.0           |
-| `water_withdrawal_m3s` | m³/s | Water withdrawal per stage; positive = removed, negative = added     |
+| Field                  | Unit | Description                                                                                                                                             |
+| ---------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `min_storage_hm3`      | hm³  | Dead volume (soft lower bound)                                                                                                                          |
+| `max_storage_hm3`      | hm³  | Physical reservoir capacity (hard upper bound)                                                                                                          |
+| `min_turbined_m3s`     | m³/s | Minimum turbined flow (soft lower bound)                                                                                                                |
+| `max_turbined_m3s`     | m³/s | Maximum turbined flow (hard upper bound)                                                                                                                |
+| `min_outflow_m3s`      | m³/s | Environmental flow requirement (soft lower bound)                                                                                                       |
+| `max_outflow_m3s`      | m³/s | Flood-control limit (soft upper bound); `None` = unbounded                                                                                              |
+| `min_generation_mw`    | MW   | Minimum electrical generation (soft lower bound)                                                                                                        |
+| `max_generation_mw`    | MW   | Maximum electrical generation (hard upper bound)                                                                                                        |
+| `max_diversion_m3s`    | m³/s | Diversion channel capacity (hard upper bound); `None` = no diversion                                                                                    |
+| `filling_min_rate_m3s` | m³/s | Per-stage minimum accumulation rate during filling stages; anchors a minimum target-storage trajectory on `min_storage_hm3`. Not an inflow; default 0.0 |
+| `water_withdrawal_m3s` | m³/s | Water withdrawal per stage; positive = removed, negative = added                                                                                        |
 
 ```rust
 use cobre_core::resolved::{
-    ContractStageBounds, HydroStageBounds, LineStageBounds,
-    PumpingStageBounds, ResolvedBounds, ThermalStageBounds,
+    BoundsCountsSpec, BoundsDefaults, ContractStageBounds, HydroStageBounds,
+    LineStageBounds, PumpingStageBounds, ResolvedBounds, ThermalStageBounds,
 };
 
 // Allocate a table for 2 hydros, 1 thermal, 1 line, 0 pumping, 0 contracts, 3 stages.
+// Every (entity, stage) slot is seeded from the per-entity defaults below.
 let table = ResolvedBounds::new(
-    2, 1, 1, 0, 0, 3,
-    HydroStageBounds { min_storage_hm3: 10.0, max_storage_hm3: 200.0,
-                       min_turbined_m3s: 0.0,  max_turbined_m3s: 500.0,
-                       min_outflow_m3s: 5.0,   max_outflow_m3s: None,
-                       min_generation_mw: 0.0, max_generation_mw: 100.0,
-                       max_diversion_m3s: None,
-                       filling_inflow_m3s: 0.0, water_withdrawal_m3s: 0.0 },
-    ThermalStageBounds { min_generation_mw: 50.0, max_generation_mw: 400.0 },
-    LineStageBounds { direct_mw: 1000.0, reverse_mw: 800.0 },
-    PumpingStageBounds { min_flow_m3s: 0.0, max_flow_m3s: 0.0 },
-    ContractStageBounds { min_mw: 0.0, max_mw: 0.0, price_per_mwh: 0.0 },
+    &BoundsCountsSpec {
+        n_hydros: 2, n_thermals: 1, n_lines: 1,
+        n_pumping: 0, n_contracts: 0, n_stages: 3, k_max: 0,
+    },
+    &BoundsDefaults {
+        hydro: HydroStageBounds { min_storage_hm3: 10.0, max_storage_hm3: 200.0,
+                                  min_turbined_m3s: 0.0,  max_turbined_m3s: 500.0,
+                                  min_outflow_m3s: 5.0,   max_outflow_m3s: None,
+                                  min_generation_mw: 0.0, max_generation_mw: 100.0,
+                                  max_diversion_m3s: None,
+                                  filling_min_rate_m3s: 0.0, water_withdrawal_m3s: 0.0 },
+        thermal: ThermalStageBounds { min_generation_mw: 50.0, max_generation_mw: 400.0, cost_per_mwh: 120.0 },
+        line: LineStageBounds { direct_mw: 1000.0, reverse_mw: 800.0 },
+        pumping: PumpingStageBounds { min_flow_m3s: 0.0, max_flow_m3s: 0.0 },
+        contract: ContractStageBounds { min_mw: 0.0, max_mw: 0.0, price_per_mwh: 0.0 },
+    },
 );
 
 // O(1) lookup: hydro 0, stage 2

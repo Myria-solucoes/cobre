@@ -1,32 +1,12 @@
 //! Parsers for scenario data files in the `scenarios/` subdirectory.
 //!
-//! Scenario files carry the stochastic inputs used by multi-stage optimization solvers:
-//! inflow statistics, AR coefficients, historical observations, load statistics,
-//! load scaling factors, spatial correlation profiles, and pre-computed external
-//! scenarios. All files are optional; when absent the loader returns an empty
-//! `Vec` (or default type) via the `load_*` wrapper functions.
+//! Scenario files carry the stochastic inputs used by multi-stage optimization
+//! solvers. All files are optional; when absent the `load_*` wrapper returns an
+//! empty `Vec` (or default type).
 //!
-//! ## Parsing convention
-//!
-//! Parquet parsers follow the canonical pattern:
-//!
-//! 1. Open the file with `std::fs::File::open`.
-//! 2. Build a `ParquetRecordBatchReaderBuilder` and consume all record batches.
-//! 3. Extract typed columns by name; return `SchemaError` for missing or wrong-type columns.
-//! 4. Validate per-row constraints; return `SchemaError` on violation.
-//! 5. Sort the output by the documented sort key and return.
-//!
-//! JSON parsers follow the four-step pipeline:
-//!
-//! 1. Read the file with `std::fs::read_to_string`.
-//! 2. Deserialize with `serde_json::from_str` through intermediate raw types.
-//! 3. Validate with a `validate_raw` function.
-//! 4. Convert raw types to public types and sort the output.
-//!
-//! Cross-reference validation (checking that referenced entity IDs exist in
-//! their registries) is deferred to Layer 3. Dimensional/semantic
-//! constraints (lag contiguity, AR coefficient count matching, block count
-//! matching) are deferred to Layer 3/5.
+//! Cross-reference validation (entity-ID existence) and dimensional/semantic
+//! constraints (lag contiguity, AR coefficient count, block count matching) are
+//! deferred to Layer 3/5.
 
 pub mod annual_component;
 pub mod ar_coefficients;
@@ -279,34 +259,29 @@ pub struct ScenarioData {
     pub inflow_models: Vec<InflowModel>,
     /// Load seasonal statistics, sorted by `(bus_id, stage_id)`.
     pub load_models: Vec<LoadModel>,
-    /// NCS availability noise models, sorted by `(ncs_id, stage_id)`. Empty when absent.
+    /// NCS availability noise models, sorted by `(ncs_id, stage_id)`.
     pub ncs_models: Vec<NcsModel>,
     /// Correlation model (profiles + schedule).
     pub correlation: CorrelationModel,
-    /// Inflow history rows, sorted by `(hydro_id, date)`. Empty when absent.
+    /// Inflow history rows, sorted by `(hydro_id, date)`.
     pub inflow_history: Vec<InflowHistoryRow>,
-    /// External inflow scenario rows, sorted by `(stage_id, scenario_id, hydro_id)`. Empty when absent.
+    /// External inflow scenario rows, sorted by `(stage_id, scenario_id, hydro_id)`.
     pub external_scenarios: Vec<ExternalScenarioRow>,
-    /// External load scenario rows, sorted by `(stage_id, scenario_id, bus_id)`. Empty when absent.
+    /// External load scenario rows, sorted by `(stage_id, scenario_id, bus_id)`.
     pub external_load_scenarios: Vec<ExternalLoadRow>,
-    /// External NCS scenario rows, sorted by `(stage_id, scenario_id, ncs_id)`. Empty when absent.
+    /// External NCS scenario rows, sorted by `(stage_id, scenario_id, ncs_id)`.
     pub external_ncs_scenarios: Vec<ExternalNcsRow>,
-    /// Load factor entries, sorted by `(bus_id, stage_id)`. Empty when absent.
+    /// Load factor entries, sorted by `(bus_id, stage_id)`.
     pub load_factors: Vec<LoadFactorEntry>,
-    /// Noise opening rows, sorted by `(stage_id, opening_index, entity_index)`. Empty when absent.
+    /// Noise opening rows, sorted by `(stage_id, opening_index, entity_index)`.
     pub noise_openings: Vec<NoiseOpeningRow>,
 }
 
 // ── load_scenarios ────────────────────────────────────────────────────────────
 
-/// Orchestrate loading of all eight scenario files and assemble the results.
+/// Load every scenario file present in `manifest` and assemble [`ScenarioData`].
 ///
-/// Reads files indicated as present in `manifest`, calls the corresponding
-/// `load_*` wrappers (passing `None` for absent files), and then assembles the
-/// flat row types into the structured [`ScenarioData`] output.
-///
-/// `case_root` is the root case directory. File paths are constructed as
-/// `case_root.join("scenarios/<filename>")`.
+/// File paths are constructed as `case_root.join("scenarios/<filename>")`.
 ///
 /// # Errors
 ///
@@ -440,42 +415,36 @@ mod tests {
     use crate::validation::structural::FileManifest;
     use tempfile::TempDir;
 
-    /// `load_inflow_seasonal_stats(None)` returns `Ok(Vec::new())` without I/O.
     #[test]
     fn test_load_inflow_seasonal_stats_none_returns_empty() {
         let result = load_inflow_seasonal_stats(None).unwrap();
         assert!(result.is_empty());
     }
 
-    /// `load_inflow_ar_coefficients(None)` returns `Ok(Vec::new())` without I/O.
     #[test]
     fn test_load_inflow_ar_coefficients_none_returns_empty() {
         let result = load_inflow_ar_coefficients(None).unwrap();
         assert!(result.is_empty());
     }
 
-    /// `load_inflow_history(None)` returns `Ok(Vec::new())` without I/O.
     #[test]
     fn test_load_inflow_history_none_returns_empty() {
         let result = load_inflow_history(None).unwrap();
         assert!(result.is_empty());
     }
 
-    /// `load_load_seasonal_stats(None)` returns `Ok(Vec::new())` without I/O.
     #[test]
     fn test_load_load_seasonal_stats_none_returns_empty() {
         let result = load_load_seasonal_stats(None).unwrap();
         assert!(result.is_empty());
     }
 
-    /// `load_load_factors(None)` returns `Ok(Vec::new())` without I/O.
     #[test]
     fn test_load_load_factors_none_returns_empty() {
         let result = load_load_factors(None).unwrap();
         assert!(result.is_empty());
     }
 
-    /// `load_correlation(None)` returns `Ok(CorrelationModel::default())` without I/O.
     #[test]
     fn test_load_correlation_none_returns_default() {
         let result = load_correlation(None).unwrap();
@@ -483,33 +452,28 @@ mod tests {
         assert!(result.schedule.is_empty());
     }
 
-    /// `load_external_inflow_scenarios(None)` returns `Ok(Vec::new())` without I/O.
     #[test]
     fn test_load_external_inflow_scenarios_none_returns_empty() {
         let result = load_external_inflow_scenarios(None).unwrap();
         assert!(result.is_empty());
     }
 
-    /// `load_external_load_scenarios(None)` returns `Ok(Vec::new())` without I/O.
     #[test]
     fn test_load_external_load_scenarios_none_returns_empty() {
         let result = load_external_load_scenarios(None).unwrap();
         assert!(result.is_empty());
     }
 
-    /// `load_external_ncs_scenarios(None)` returns `Ok(Vec::new())` without I/O.
     #[test]
     fn test_load_external_ncs_scenarios_none_returns_empty() {
         let result = load_external_ncs_scenarios(None).unwrap();
         assert!(result.is_empty());
     }
 
-    /// `load_scenarios` with all manifest flags `false` returns empty collections
-    /// and a default `CorrelationModel` without any filesystem access.
     #[test]
     fn test_load_scenarios_all_flags_false_returns_empty() {
         let dir = TempDir::new().unwrap();
-        let manifest = FileManifest::default(); // all flags false
+        let manifest = FileManifest::default();
 
         let data =
             load_scenarios(dir.path(), &manifest).expect("empty manifest should always succeed");
@@ -552,19 +516,16 @@ mod tests {
         );
     }
 
-    /// `load_noise_openings(None)` returns `Ok(Vec::new())` without I/O.
     #[test]
     fn test_load_noise_openings_none_returns_empty() {
         let result = load_noise_openings(None).unwrap();
         assert!(result.is_empty());
     }
 
-    /// `load_scenarios` with `scenarios_noise_openings_parquet` flag `false` produces
-    /// an empty `noise_openings` collection in the resulting [`ScenarioData`].
     #[test]
     fn test_load_scenarios_noise_openings_absent() {
         let dir = TempDir::new().unwrap();
-        let manifest = FileManifest::default(); // all flags false, including noise_openings
+        let manifest = FileManifest::default();
 
         let data =
             load_scenarios(dir.path(), &manifest).expect("empty manifest should always succeed");
@@ -575,20 +536,15 @@ mod tests {
         );
     }
 
-    /// AC #7: when `manifest.scenarios_inflow_annual_component_parquet == false`,
-    /// `load_scenarios` returns `Ok` and every `inflow_models[i].annual.is_none()`.
     #[test]
     fn test_load_scenarios_no_annual_file_yields_none_field() {
         let dir = TempDir::new().unwrap();
-        // Set only the stats flag so we get an inflow model to inspect.
-        // With all flags false the inflow_models vec is empty — also valid.
-        let manifest = FileManifest::default(); // all flags false
+        let manifest = FileManifest::default();
 
         let data =
             load_scenarios(dir.path(), &manifest).expect("empty manifest should always succeed");
 
-        // When no inflow stats are present there are no models; the annual field
-        // is vacuously None for all (zero) entries.
+        // No inflow stats means no models: the assertion holds vacuously.
         assert!(
             data.inflow_models.iter().all(|m| m.annual.is_none()),
             "every inflow model should have annual == None when annual component file is absent"

@@ -39,7 +39,6 @@ mod schema;
 mod study;
 mod version;
 
-/// Sub-module containing data model types for the Cobre power systems solver.
 #[pymodule]
 #[pyo3(name = "model")]
 fn model_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -58,7 +57,6 @@ fn model_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-/// Sub-module containing I/O helpers for loading Cobre case directories.
 #[pymodule]
 #[pyo3(name = "io")]
 fn io_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -68,7 +66,6 @@ fn io_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-/// Sub-module containing solver execution entry points.
 #[pymodule]
 #[pyo3(name = "run")]
 fn run_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -80,7 +77,6 @@ fn run_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-/// Sub-module containing result loading and inspection functions.
 #[pymodule]
 #[pyo3(name = "results")]
 fn results_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -100,14 +96,12 @@ fn results_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-/// Sub-module containing the structured `cobre.errors` exception hierarchy.
 #[pymodule]
 #[pyo3(name = "errors")]
 fn errors_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     errors::register_errors(m)
 }
 
-/// Sub-module containing JSON Schema export helpers.
 #[pymodule]
 #[pyo3(name = "schema")]
 fn schema_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -119,10 +113,8 @@ fn schema_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-/// Register a submodule in `sys.modules` so that `import cobre.foo` works.
-///
-/// `PyO3`'s `add_submodule` attaches a module as an attribute but does not
-/// register it in `sys.modules`. Without this, `import cobre.foo` fails.
+/// Register a submodule in `sys.modules` so `import cobre.foo` works: `PyO3`'s
+/// `add_submodule` only attaches it as an attribute, leaving `import` to fail.
 fn register_submodule<'py>(
     parent: &Bound<'py, PyModule>,
     child: &Bound<'py, PyModule>,
@@ -182,8 +174,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(version::version_info, m)?)?;
 
-    // `Study` and `Policy` are top-level classes (`cobre.Study`,
-    // `cobre.Policy`), not submodule members.
+    // Top-level classes (`cobre.Study`, `cobre.Policy`), not submodule members.
     m.add_class::<study::Study>()?;
     m.add_class::<study::Policy>()?;
 

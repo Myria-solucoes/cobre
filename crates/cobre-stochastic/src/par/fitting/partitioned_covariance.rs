@@ -5,24 +5,19 @@ use super::yw_matrices::{
     solve_linear_system,
 };
 
-/// Partitioned covariance matrices for one `(season, k)` evaluation.
-///
-/// Stores the three sub-matrices used in the conditional FACP formula
-/// `Σ̄ = Σ_11 − Σ_12 · Σ_22⁻¹ · Σ_21`. Sizes depend on the lag `k`:
-/// - `sigma_11`: 2×2 (always four entries).
-/// - `sigma_12`: 2×k row-major (the conditioning set has `k` elements).
-/// - `sigma_22`: k×k row-major symmetric matrix.
+/// The three sub-matrices of the conditional FACP formula
+/// `Σ̄ = Σ_11 − Σ_12 · Σ_22⁻¹ · Σ_21` for one `(season, k)`. All row-major.
 // Rationale: the sigma_11/sigma_12/sigma_22 names mirror the partitioned-covariance
 // notation (Σ_11, Σ_12, Σ_22); dropping the common prefix to silence the lint would
 // break the correspondence with the algorithm documentation.
 #[allow(clippy::struct_field_names)]
 pub(crate) struct PartitionedCov {
-    /// 2×2 auto-covariance of `(Z_t, Z_{t−k})`, row-major.
+    /// 2×2 auto-covariance of `(Z_t, Z_{t−k})`.
     pub(super) sigma_11: [f64; 4],
-    /// 2×k cross-covariance between `(Z_t, Z_{t−k})` and the conditioning
-    /// set `(Z_{t−1}, …, Z_{t−k+1}, A_{t−1})`, row-major.
+    /// 2×k cross-covariance between `(Z_t, Z_{t−k})` and the conditioning set
+    /// `(Z_{t−1}, …, Z_{t−k+1}, A_{t−1})`.
     pub(super) sigma_12: Vec<f64>,
-    /// k×k auto-covariance of the conditioning set, row-major.
+    /// k×k auto-covariance of the conditioning set.
     pub(super) sigma_22: Vec<f64>,
 }
 
@@ -66,17 +61,11 @@ pub(crate) fn assemble_partitioned_covariance(
 ) -> PartitionedCov {
     let prev_season = (season + n_seasons - 1) % n_seasons;
 
-    // Σ_11: 2×2 auto-covariance of (Z_t, Z_{t−k}).
-    // Row-major: [0,0]=1, [0,1]=ρ^season(k), [1,0]=ρ^season(k), [1,1]=1.
     let rho_k = periodic_autocorrelation(season, k, n_seasons, obs_z, stats_z);
     let sigma_11 = [1.0, rho_k, rho_k, 1.0];
 
-    // Σ_22: k×k auto-covariance of conditioning set.
-    // Conditioning set: (Z_{t−1}, …, Z_{t−k+1}, A_{t−1})  (k elements).
     let mut sigma_22 = vec![0.0_f64; k * k];
 
-    // Z-block: rows/cols 0..k−1, all against season prev_season.
-    // Diagonal is always 1.0 (unit variance). Off-diagonal: symmetric.
     for i in 0..k.saturating_sub(1) {
         sigma_22[i * k + i] = 1.0;
         let ref_month = (prev_season + n_seasons - i % n_seasons) % n_seasons;
@@ -88,12 +77,8 @@ pub(crate) fn assemble_partitioned_covariance(
         }
     }
 
-    // Cross-terms between the Z-block and A_{t−1} (column/row k−1).
-    // sigma_22[i, k−1] = Corr(Z_{t−1−i}, A_{t−1}).
-    // Z_{t−1−i} is `i` steps older than A_{t−1}, so lag = i.
-    // for i in 0..k−1 (and symmetrically sigma_22[k−1, i]).
-    // Note: for k=1 there is no Z-block (k.saturating_sub(1)=0), so this
-    // loop body is never entered.
+    // sigma_22[i, k−1] = Corr(Z_{t−1−i}, A_{t−1}): Z_{t−1−i} is `i` steps older
+    // than A_{t−1}, so lag = i — not k−2−i, which only coincides at k=2.
     for i in 0..k.saturating_sub(1) {
         let lag = i;
         let rho = cross_correlation_z_a(
@@ -111,18 +96,14 @@ pub(crate) fn assemble_partitioned_covariance(
         sigma_22[(k - 1) * k + i] = rho;
     }
 
-    // Diagonal entry for A_{t−1}: unit variance by construction.
     sigma_22[(k - 1) * k + (k - 1)] = 1.0;
 
-    // Σ_12: 2×k cross-covariance between (Z_t, Z_{t−k}) and conditioning set.
     let mut sigma_12 = vec![0.0_f64; 2 * k];
 
-    // Row 0 (Z_t) with Z-block of conditioning set.
     for (j, entry) in sigma_12[..k.saturating_sub(1)].iter_mut().enumerate() {
         let rho = periodic_autocorrelation(season, j + 1, n_seasons, obs_z, stats_z);
         *entry = rho;
     }
-    // Row 0 (Z_t) with A_{t−1}.
     sigma_12[k - 1] = cross_correlation_a_z_neg1(
         prev_season,
         n_seasons,
@@ -134,17 +115,14 @@ pub(crate) fn assemble_partitioned_covariance(
         a_year_starts,
     );
 
-    // Row 1 (Z_{t−k}) with Z-block of conditioning set.
-    // Position j (0..k−2) of this row is Corr(Z_{t−k}, Z_{t−1−j}).
-    // Z_{t−1−j} is the **newer** of the two (since j ≤ k−2 < k−1 < k), so
-    // ρ_periodic must be anchored at its season with lag = (k−1) − j.
+    // Row 1, position j = Corr(Z_{t−k}, Z_{t−1−j}): Z_{t−1−j} is the newer of the
+    // two, so ρ_periodic is anchored at its season with lag = (k−1) − j.
     for (j, entry) in sigma_12[k..k + k.saturating_sub(1)].iter_mut().enumerate() {
         let ref_season = (season + n_seasons - 1 - j) % n_seasons;
         let lag = k.saturating_sub(1).saturating_sub(j);
         let rho = periodic_autocorrelation(ref_season, lag, n_seasons, obs_z, stats_z);
         *entry = rho;
     }
-    // Row 1 (Z_{t−k}) with A_{t−1}.
     sigma_12[k + (k - 1)] = cross_correlation_z_a(
         prev_season,
         k - 1,
@@ -166,43 +144,30 @@ pub(crate) fn assemble_partitioned_covariance(
 
 /// Compute the conditional FACP for the PAR-A model up to `max_order`.
 ///
-/// For each candidate lag `k` (`1..=max_order`), the conditioning set is
-/// `(Z_{t−1}, …, Z_{t−k+1}, A_{t−1})` — the `k−1` intermediate standardised
-/// inflow values plus the standardised annual component at season `m−1`. The
-/// conditional correlation is obtained from the partitioned-covariance formula:
-///
-/// ```text
-/// Σ̄ = Σ_11 − Σ_12 · Σ_22⁻¹ · Σ_21
-/// ```
-///
-/// where `Σ_21 = Σ_12ᵀ`. The conditional FACP at lag `k` is
-/// `Σ̄[0,1] / √(Σ̄[0,0] · Σ̄[1,1])`, clamped to `[−1, 1]`.
+/// For each lag `k`, the conditioning set is `(Z_{t−1}, …, Z_{t−k+1}, A_{t−1})`
+/// and the conditional FACP is `Σ̄[0,1] / √(Σ̄[0,0] · Σ̄[1,1])` clamped to
+/// `[−1, 1]`, where `Σ̄ = Σ_11 − Σ_12 · Σ_22⁻¹ · Σ_21` and `Σ_21 = Σ_12ᵀ`.
 ///
 /// # Parameters
 ///
-/// - `season` — 0-based target season (the "current" season `m`).
-/// - `max_order` — maximum lag to evaluate. Returns `Vec::new()` when zero.
+/// - `season` — 0-based target season `m`.
+/// - `max_order` — maximum lag to evaluate; `0` returns `Vec::new()`.
 /// - `n_seasons` — total number of seasons in the periodic cycle.
-/// - `observations_by_season` — periodic inflow series `Z`, grouped by season.
-///   Entry `[s][y]` is the standardised observation for season `s` in year `y`.
+/// - `observations_by_season` — standardised inflow series `Z`, `[s][y]` grouped
+///   by season.
 /// - `stats_by_season` — `(mean, std)` for each `Z` season.
-/// - `z_year_starts` — first PDF year of each `Z` bucket, indexed by season.
-///   Used by the cross-correlation helpers to align `A` and `Z` by absolute
-///   PDF year rather than by bucket index — required for monthly data where
-///   `A` buckets start one year later than `Z` for most seasons.
+/// - `z_year_starts` — first PDF year of each `Z` bucket, used to align `A` and
+///   `Z` by absolute PDF year, not bucket index (required for monthly data where
+///   `A` buckets start a year after `Z` for most seasons).
 /// - `annual_observations_by_season` — annual component `A`, grouped by season.
 /// - `annual_stats_by_season` — `(mean, std)` for each `A` season.
 /// - `a_year_starts` — first PDF year of each `A` bucket, indexed by season.
 ///
 /// # Returns
 ///
-/// A `Vec<f64>` of length `≤ max_order`. Entry `i` is the conditional FACP at
-/// lag `i+1`, clamped to `[−1.0, 1.0]`.
-///
-/// The vector is shorter than `max_order` when `Σ_22` is singular at some lag
-/// `k` — the loop breaks early and entries for lags `≥ k` are omitted.
-/// When `Σ̄[0,0] · Σ̄[1,1] ≤ 0` (numerical degeneracy), the affected entry is
-/// recorded as `0.0`.
+/// Entry `i` is the conditional FACP at lag `i+1`. Shorter than `max_order` when
+/// `Σ_22` is singular at some lag `k` (loop breaks; lags `≥ k` omitted); an entry
+/// is `0.0` when `Σ̄[0,0] · Σ̄[1,1] ≤ 0` (numerical degeneracy).
 #[must_use]
 pub fn conditional_facp_partitioned(
     season: usize,
@@ -221,9 +186,8 @@ pub fn conditional_facp_partitioned(
 
     let mut facp_values = Vec::with_capacity(max_order);
 
-    // Reusable scratch buffers for solve_linear_system calls.
-    // The Σ_22 matrix and RHS column are cloned per solve; the buffers below
-    // hold the cloned working copies so we avoid re-allocating each iteration.
+    // Reused working copies of Σ_22 and the RHS column so each solve avoids a
+    // fresh allocation.
     let mut matrix_buf: Vec<f64> = Vec::new();
     let mut rhs_col: Vec<f64> = Vec::new();
 
@@ -240,18 +204,15 @@ pub fn conditional_facp_partitioned(
             a_year_starts,
         );
 
-        // Solve Σ_22 · X = Σ_21 column-by-column (2 columns, one per row of
-        // Σ_12). Σ_21 = Σ_12ᵀ, so column c of Σ_21 = row c of Σ_12.
-        // X has shape k×2; store solutions as two Vec<f64> of length k.
+        // Solve Σ_22 · X = Σ_21 = Σ_12ᵀ column-by-column, so column c of the RHS
+        // is row c of Σ_12. solve_linear_system mutates in place, hence the copies.
         let mut x_cols: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
         let mut singular = false;
 
         for (col_idx, x_col) in x_cols.iter_mut().enumerate() {
-            // Copy Σ_22 into working buffer (solve_linear_system modifies in-place).
             matrix_buf.clear();
             matrix_buf.extend_from_slice(&cov.sigma_22);
 
-            // Column col_idx of Σ_21 = row col_idx of Σ_12 (k entries).
             rhs_col.clear();
             for row in 0..k {
                 rhs_col.push(cov.sigma_12[col_idx * k + row]);
@@ -266,17 +227,10 @@ pub fn conditional_facp_partitioned(
         }
 
         if singular {
-            // Singular Σ_22 — stop the loop and return results so far.
             break;
         }
 
-        // Compute Σ̄ = Σ_11 − Σ_12 · X  (2×2 result).
-        //
-        // Σ_12 is 2×k, X is k×2.
-        // [Σ_12 · X][r, c] = sum_{j=0}^{k-1} Σ_12[r,j] * X[j,c]
-        //                  = sum_{j=0}^{k-1} sigma_12[r*k + j] * x_cols[c][j]
-        //
-        // sigma_bar is stored row-major: [0,0], [0,1], [1,0], [1,1].
+        // Σ̄ = Σ_11 − Σ_12 · X, row-major 2×2.
         let mut sigma_bar = cov.sigma_11;
         for r in 0..2 {
             for c in 0..2 {
@@ -285,8 +239,6 @@ pub fn conditional_facp_partitioned(
             }
         }
 
-        // Extract conditional FACP: sigma_bar[0,1] / sqrt(sigma_bar[0,0] * sigma_bar[1,1]).
-        // Guard against non-positive product (numerical degeneracy).
         let denom_sq = sigma_bar[0] * sigma_bar[3];
         let facp = if denom_sq <= 0.0 {
             0.0

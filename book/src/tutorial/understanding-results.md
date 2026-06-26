@@ -135,12 +135,12 @@ training. The 1dtoy run produces:
 
 ```json
 {
-  "cobre_version": "0.8.2",
-  "hostname": "fedora",
+  "cobre_version": "0.9.0",
+  "hostname": "<hostname>",
   "solver": "highs",
-  "solver_version": "1.13.1",
-  "started_at": "2026-06-09T14:09:50Z",
-  "completed_at": "2026-06-09T14:09:50Z",
+  "solver_version": "<solver version>",
+  "started_at": "<timestamp>",
+  "completed_at": "<timestamp>",
   "duration_seconds": 0.15,
   "status": "complete",
   "configuration": {
@@ -185,8 +185,8 @@ training. The 1dtoy run produces:
     "first_try": 5632,
     "retried": 0,
     "failed": 0,
-    "forward_solve_seconds": 0.016273423999999915,
-    "backward_solve_seconds": 0.07880944500000037,
+    "forward_solve_seconds": 0.016,
+    "backward_solve_seconds": 0.079,
     "parallelism": 1
   },
   "distribution": {
@@ -195,7 +195,7 @@ training. The 1dtoy run produces:
     "ranks_participated": 1,
     "num_nodes": 1,
     "threads_per_rank": 1,
-    "hosts": [{ "hostname": "fedora", "ranks": [0] }]
+    "hosts": [{ "hostname": "<hostname>", "ranks": [0] }]
   }
 }
 ```

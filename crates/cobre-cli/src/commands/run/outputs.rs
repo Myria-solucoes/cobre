@@ -1,8 +1,7 @@
 //! Output-writing phase for `cobre run`.
 //!
-//! Owns the training and simulation output writers and their argument carriers.
-//! These functions are the Python-parity surface mirrored against
-//! `crates/cobre-python/src/run.rs`.
+//! Python-parity contract: every file written here must also be written by
+//! `cobre-python`'s `run.rs`; the two writers must stay mirrored.
 
 use std::path::Path;
 
@@ -27,9 +26,7 @@ pub(super) struct WriteTrainingArgs<'a> {
     pub(super) stderr: &'a Term,
 }
 
-/// Write training artifacts: policy checkpoint, training results, solver stats,
-/// and row-selection records. Called immediately after training completes, before
-/// simulation starts.
+/// Write the training artifacts (policy checkpoint, results, sidecars, stats).
 pub(super) fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(), CliError> {
     if !args.quiet {
         use std::io::Write;
@@ -70,10 +67,8 @@ pub(super) fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(),
             .map_err(CliError::from)?;
     }
 
-    // Evaporation-model coefficients sidecar, written beside the FPHA export
-    // under `hydro_models/`. Guarded by a non-empty check so a case with no
-    // evaporation-modeled hydro produces no file, matching the FPHA "if-any"
-    // behavior. Mirrored on the Python side by `write_evaporation_models_if_any`.
+    // No evaporation-modeled hydro writes no file (FPHA "if-any" behavior);
+    // mirror on the Python side: `write_evaporation_models_if_any`.
     let evaporation_rows = cobre_sddp::build_evaporation_model_rows(args.hydro_models, args.system);
     if !evaporation_rows.is_empty() {
         let evaporation_path = args
@@ -84,12 +79,8 @@ pub(super) fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(),
             .map_err(CliError::from)?;
     }
 
-    // Per-sampled-point FPHA deviation table, written beside the FPHA export under
-    // `hydro_models/`. Double-guarded: only when the run opts in via
-    // `config.exports.fpha_deviation_points` AND the rows are non-empty (a
-    // non-computed-FPHA run produces none). Off by default, so a default run
-    // writes no file and is byte-identical. Mirrored on the Python side by
-    // `write_fpha_deviation_points_if_any`.
+    // Off by default, so a default run writes no file and stays byte-identical;
+    // mirror on the Python side: `write_fpha_deviation_points_if_any`.
     if args.config.exports.fpha_deviation_points {
         let deviation_point_rows = cobre_sddp::build_fpha_deviation_point_rows(args.hydro_models);
         if !deviation_point_rows.is_empty() {
@@ -105,13 +96,11 @@ pub(super) fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(),
         }
     }
 
-    // Write training solver stats to training/solver/iterations.parquet.
     if !args.training_result.solver_stats_log.is_empty() {
         let rows = cobre_sddp::solver_stats_log_to_rows(&args.training_result.solver_stats_log);
         cobre_io::write_solver_stats(args.output_dir, &rows).map_err(CliError::from)?;
     }
 
-    // Write per-stage row-selection records to training/cut_selection/iterations.parquet.
     if !args.training_output.cut_selection_records.is_empty() {
         let parquet_config = cobre_io::ParquetWriterConfig::default();
         cobre_io::write_row_selection_records(
@@ -140,8 +129,7 @@ pub(super) struct WriteSimulationArgs<'a> {
     pub(super) stderr: &'a Term,
 }
 
-/// Write simulation artifacts: simulation results manifest and solver stats.
-/// Called after simulation completes.
+/// Write the simulation artifacts (results manifest and solver stats).
 pub(super) fn write_simulation_outputs(args: &WriteSimulationArgs<'_>) -> Result<(), CliError> {
     if !args.quiet {
         use std::io::Write;
@@ -153,9 +141,7 @@ pub(super) fn write_simulation_outputs(args: &WriteSimulationArgs<'_>) -> Result
     cobre_io::write_simulation_results(args.output_dir, args.sim_output, args.output_ctx)
         .map_err(CliError::from)?;
 
-    // Write simulation solver stats to simulation/solver/iterations.parquet.
-    // Simulation has no opening dimension and no per-worker dimension;
-    // opening, rank, and worker_id are all None.
+    // Simulation has no opening/rank/worker dimension; those fields are all None.
     if !args.sim_solver_stats.is_empty() {
         let rows: Vec<cobre_io::SolverStatsRow> = args
             .sim_solver_stats

@@ -1,10 +1,10 @@
 # Performance Accelerators
 
 This chapter documents the performance optimization techniques built into
-Cobre's SDDP solver. These accelerators are the result of systematic
-profiling and are active by default unless noted otherwise. Understanding
-them helps users interpret timing statistics, configure cut management
-strategies, and diagnose performance regressions.
+Cobre's SDDP solver. Each accelerator addresses a specific cost driver in
+the training loop and is active by default unless noted otherwise.
+Understanding them helps users interpret timing statistics, configure cut
+management strategies, and diagnose performance regressions.
 
 ---
 
@@ -128,8 +128,8 @@ After solving, duals are unscaled: `dual_original[i] = row_scale[i] * dual_scale
 ### Cost Scale Factor
 
 A constant `COST_SCALE_FACTOR = 1000` is applied to all objective
-coefficients to reduce typical monetary values from ~1e11 to ~1e8,
-improving simplex numerical stability.
+coefficients to reduce the magnitude of objective coefficients, improving
+simplex numerical stability.
 
 Because the prescaler normalizes matrix entries toward 1.0, HiGHS's
 internal scaling (`simplex_scale_strategy`) is disabled (set to 0) in
@@ -222,12 +222,11 @@ by `check_frequency`).
 }
 ```
 
-**Why it matters:** Empirical data from a 118-stage case (2 ranks x 3
-threads) shows that high-parallelism configurations (50 forward passes x
-5 iterations) accumulate 4.7x more active rows than low-parallelism
-configurations (5 forward passes x 50 iterations), making each backward
-LP solve 72% more expensive. Bounding LP size makes high-parallelism
-configurations viable.
+**Why it matters:** High-parallelism configurations (many forward passes,
+few iterations) accumulate more active rows than low-parallelism
+configurations (fewer forward passes, more iterations), making each backward
+LP solve proportionally more expensive. Bounding LP size makes high-parallelism
+configurations viable without unbounded solve-time growth.
 
 ### Observability
 
@@ -251,8 +250,8 @@ The row management pipeline writes per-stage statistics to
 
 ## Basis Warm-Start
 
-Reusing the LP simplex basis from the previous solve dramatically reduces
-the number of simplex pivots needed for subsequent solves.
+Reusing the LP simplex basis from the previous solve reduces the number of
+simplex pivots needed for subsequent solves.
 
 ### BasisStore
 

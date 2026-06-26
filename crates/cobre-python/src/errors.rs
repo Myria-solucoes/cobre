@@ -95,9 +95,8 @@ impl LeafClass {
         self.cell.get_or_try_init(py, || self.build(py))
     }
 
-    /// Build the dual-base class object: `type(name, (CobreError, Builtin), {})`
-    /// with `__module__ = "cobre.errors"` and `__doc__ = doc`, so the qualified
-    /// name reads `cobre.errors.<Name>`.
+    /// Build the dual-base class object with `__module__ = "cobre.errors"`, so the
+    /// qualified name reads `cobre.errors.<Name>`.
     fn build(&self, py: Python<'_>) -> PyResult<Py<PyType>> {
         let cobre_base = py.get_type::<CobreError>();
         let builtin: Bound<'_, PyType> = match self.builtin_base {
@@ -219,13 +218,8 @@ fn new_leaf_err(py: Python<'_>, leaf: &LeafClass, message: &str) -> PyErr {
     }
 }
 
-/// Map an [`ErrorSource`] to the appropriate `cobre.errors` Python exception.
-///
-/// This is the single mapping site for every raising path. The `ErrorSource`,
-/// `LoadError`, and `OutputError` matches are exhaustive with explicit arms (a
-/// new variant fails the build). The `SddpError` match keeps explicit
-/// `Infeasible`/`Simulation` arms plus the documented total `other =>
-/// SolverError(None)` fallthrough.
+/// Map an [`ErrorSource`] to the appropriate `cobre.errors` Python exception —
+/// the single mapping site for every raising path.
 ///
 /// Requires a GIL token internally (it constructs Python exception instances and
 /// `setattr`s structured fields), but its signature takes only Rust enums and
@@ -250,8 +244,8 @@ fn convert_error_with(py: Python<'_>, source: ErrorSource<'_>) -> PyErr {
             }
         },
         ErrorSource::Output(err) => match err {
-            // Preserve today's read-path behavior: a NotFound I/O error maps to
-            // the builtin FileNotFoundError (no typed class for it).
+            // A NotFound I/O error maps to the builtin FileNotFoundError (no typed
+            // class for it).
             OutputError::IoError { source, .. }
                 if source.kind() == std::io::ErrorKind::NotFound =>
             {
@@ -261,7 +255,6 @@ fn convert_error_with(py: Python<'_>, source: ErrorSource<'_>) -> PyErr {
             OutputError::SerializationError { .. } | OutputError::SchemaError { .. } => {
                 new_leaf_err(py, &OUTPUT_ERROR, &err.to_string())
             }
-            // Malformed manifest/metadata JSON -> ValueError.
             OutputError::ManifestError { .. } => validation_error(py, &err.to_string()),
         },
         ErrorSource::Sddp { error, message } => match error {
@@ -271,19 +264,16 @@ fn convert_error_with(py: Python<'_>, source: ErrorSource<'_>) -> PyErr {
                 scenario,
             } => solver_error_infeasible(py, &message, *stage, *iteration, *scenario),
             SddpError::Simulation(_) => new_leaf_err(py, &SIMULATION_ERROR, &message),
-            // Documented total arm: every other SddpError (Solver, Validation,
-            // Io, Stochastic, Communication, WireVersionMismatch) is
-            // RuntimeError-shaped today, so it maps to a SolverError with the
-            // three structured attributes set to None.
+            // Total arm: every other SddpError is RuntimeError-shaped, mapping to
+            // SolverError with the three structured attributes None.
             _other => solver_error_plain(py, &message),
         },
         ErrorSource::Message(msg) => message_prefix_to_pyerr(py, &msg),
     }
 }
 
-/// Reproduce the historical message-prefix dispatch table, mapping the
-/// string-prefixed run/study messages to the typed classes. Every message string
-/// is passed through unchanged.
+/// Map a string-prefixed run/study message to its typed class. Every message
+/// string is passed through unchanged.
 fn message_prefix_to_pyerr(py: Python<'_>, msg: &str) -> PyErr {
     if msg.starts_with("output write error") || msg.starts_with("policy checkpoint error") {
         case_io_error(py, msg)
@@ -297,8 +287,8 @@ fn message_prefix_to_pyerr(py: Python<'_>, msg: &str) -> PyErr {
     } else if msg.starts_with("simulation error") {
         new_leaf_err(py, &SIMULATION_ERROR, msg)
     } else {
-        // "training error" / "training failed after" and every other message
-        // fall through to SolverError, preserving today's PyRuntimeError default.
+        // Unrecognized prefix (e.g. "training error" / "training failed after")
+        // falls through to SolverError.
         solver_error_plain(py, msg)
     }
 }
@@ -360,11 +350,8 @@ fn build_solver_error(
     PyErr::from_value(instance)
 }
 
-/// Register the seven exception classes into the `errors` submodule.
-///
-/// Adds `CobreError` (built by `create_exception!`) and the six dual-base leaves
-/// (built lazily via `type()`), so `from cobre.errors import …` resolves all
-/// seven and `issubclass` reflects the documented hierarchy.
+/// Register the exception classes (`CobreError` plus its dual-base leaves) into
+/// the `errors` submodule so `from cobre.errors import …` resolves them all.
 pub(crate) fn register_errors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
     m.add(
@@ -416,8 +403,7 @@ mod tests {
         assert_eq!(qualname, "cobre.errors", "{} __module__", leaf.name);
     }
 
-    /// The authoritative structured-field assertion (Acceptance Criteria 3):
-    /// an `Infeasible` SDDP error maps to `SolverError` with the three int
+    /// An `Infeasible` SDDP error maps to `SolverError` with the three int
     /// attributes set and the verbatim message preserved.
     #[test]
     fn convert_error_infeasible() {
@@ -458,7 +444,6 @@ mod tests {
     fn convert_error_non_infeasible_arms() {
         Python::initialize();
         Python::attach(|py| {
-            // Simulation -> SimulationError.
             let sim_msg = "simulation error: x".to_string();
             let sim_err = convert_error_with(
                 py,
@@ -471,8 +456,6 @@ mod tests {
             let sim_rendered: String = sim_err.value(py).str().unwrap().extract().unwrap();
             assert_eq!(sim_rendered, sim_msg);
 
-            // Generic non-Infeasible/non-Simulation SddpError -> SolverError with
-            // attributes None.
             let solver_msg = "training error: solver error: numerical failure".to_string();
             let solver_err = convert_error_with(
                 py,

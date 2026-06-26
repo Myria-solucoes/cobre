@@ -1,14 +1,5 @@
-//! Integration tests for `cobre-core`.
-//!
-//! These tests exercise the full `SystemBuilder::build()` pipeline using only
-//! the public API. They verify:
-//!
-//! - Declaration-order invariance: the same entities in any input order produce
-//!   an identical `System`.
-//! - Realistic multi-entity systems: all 7 entity types, counts, ID lookups,
-//!   cascade topology, and network topology.
-//! - Validation rejection: known-invalid configurations produce the correct
-//!   `ValidationError` variants.
+//! Integration tests exercising the full `SystemBuilder::build()` pipeline
+//! through the public API only.
 
 #![allow(
     clippy::unwrap_used,
@@ -24,7 +15,6 @@ use cobre_core::{
     SystemBuilder, Thermal, ValidationError,
 };
 
-// Test helpers (public API only)
 fn zero_hydro_penalties() -> HydroPenalties {
     HydroPenalties {
         spillage_cost: 0.0,
@@ -163,16 +153,12 @@ fn make_ncs(id: i32, bus_id: i32) -> NonControllableSource {
     }
 }
 
-// Integration test: Declaration-order invariance (2 buses, cascade, all 7 entity types)
 #[test]
 fn test_declaration_order_invariance() {
-    // Forward order (ascending ID)
     let buses_fwd = vec![make_bus(1), make_bus(2)];
     let lines_fwd = vec![make_line(10, 1, 2)];
-    // Hydro A(20) -> Hydro B(21); both on bus 1.
     let hydros_fwd = vec![make_hydro(20, 1, Some(21)), make_hydro(21, 1, None)];
     let thermals_fwd = vec![make_thermal(30, 2)];
-    // PS(40) pumps from hydro 20 to hydro 21, on bus 2.
     let pumping_fwd = vec![make_pumping_station(40, 2, 20, 21)];
     let contracts_fwd = vec![make_contract(50, 1)];
     let ncs_fwd = vec![make_ncs(60, 2)];
@@ -188,7 +174,6 @@ fn test_declaration_order_invariance() {
         .build()
         .expect("forward-order system must be valid");
 
-    // Reverse order (descending ID)
     let buses_rev = vec![make_bus(2), make_bus(1)];
     let lines_rev = vec![make_line(10, 1, 2)];
     let hydros_rev = vec![make_hydro(21, 1, None), make_hydro(20, 1, Some(21))];
@@ -208,24 +193,18 @@ fn test_declaration_order_invariance() {
         .build()
         .expect("reverse-order system must be valid");
 
-    // Both systems must be identical -- declaration-order invariance.
     assert_eq!(
         system_fwd, system_rev,
         "System must be identical regardless of input entity ordering"
     );
 }
 
-// Integration test: Realistic multi-entity system with topology verification
 #[test]
 fn test_realistic_multi_entity_system() {
-    // Topology: buses 1,2,3; lines 100->2, 101->3; hydros 10->12, 11->12;
-    // thermals 20,21; PS 30; contract 40; NCS 50.
-
     let mut hydro_10 = make_hydro(10, 1, Some(12));
     let mut hydro_11 = make_hydro(11, 2, Some(12));
     let hydro_12 = make_hydro(12, 3, None);
 
-    // Give hydros distinct names to verify correct construction.
     hydro_10.name = "upstream-A".to_string();
     hydro_11.name = "upstream-B".to_string();
 
@@ -240,7 +219,6 @@ fn test_realistic_multi_entity_system() {
         .build()
         .expect("realistic multi-entity system must be valid");
 
-    // Entity count verification
     assert_eq!(system.n_buses(), 3);
     assert_eq!(system.n_lines(), 2);
     assert_eq!(system.n_hydros(), 3);
@@ -249,7 +227,6 @@ fn test_realistic_multi_entity_system() {
     assert_eq!(system.n_contracts(), 1);
     assert_eq!(system.n_non_controllable_sources(), 1);
 
-    // ID lookup verification
     assert!(system.bus(EntityId(1)).is_some());
     assert!(system.bus(EntityId(2)).is_some());
     assert!(system.bus(EntityId(3)).is_some());
@@ -271,7 +248,6 @@ fn test_realistic_multi_entity_system() {
     assert!(system.contract(EntityId(40)).is_some());
     assert!(system.non_controllable_source(EntityId(50)).is_some());
 
-    // Canonical entity ordering (sorted by ID)
     let buses = system.buses();
     assert_eq!(buses[0].id, EntityId(1));
     assert_eq!(buses[1].id, EntityId(2));
@@ -282,7 +258,6 @@ fn test_realistic_multi_entity_system() {
     assert_eq!(hydros[1].id, EntityId(11));
     assert_eq!(hydros[2].id, EntityId(12));
 
-    // Cascade topology verification
     let cascade = system.cascade();
     assert_eq!(cascade.len(), 3);
 
@@ -322,7 +297,6 @@ fn test_realistic_multi_entity_system() {
         "hydro 11 must precede hydro 12 in topo order"
     );
 
-    // Network topology verification
     let network = system.network();
 
     let conns_bus1 = network.bus_lines(EntityId(1));
@@ -366,10 +340,8 @@ fn test_realistic_multi_entity_system() {
     assert_eq!(loads2.pumping_station_ids, vec![EntityId(30)]);
 }
 
-// Integration test: Invalid cross-reference rejected
 #[test]
 fn test_invalid_cross_reference_rejected() {
-    // Hydro 1 references bus 999, which does not exist.
     let bad_hydro = make_hydro(1, 999, None);
 
     let result = SystemBuilder::new()
@@ -397,13 +369,10 @@ fn test_invalid_cross_reference_rejected() {
     );
 }
 
-// Integration test: Cascade cycle rejected
 #[test]
 fn test_cascade_cycle_rejected() {
-    // Cross-references between the two hydros are valid (they exist), but
-    // the cascade is cyclic: hydro 1 -> hydro 2 -> hydro 1.
-    let hydro_1 = make_hydro(1, 1, Some(2)); // bus=1, downstream=2
-    let hydro_2 = make_hydro(2, 1, Some(1)); // bus=1, downstream=1 (cycle!)
+    let hydro_1 = make_hydro(1, 1, Some(2));
+    let hydro_2 = make_hydro(2, 1, Some(1));
 
     let result = SystemBuilder::new()
         .buses(vec![make_bus(1)])
@@ -421,12 +390,8 @@ fn test_cascade_cycle_rejected() {
     );
 }
 
-// Integration test: Large multi-entity declaration-order invariance
 #[test]
 fn test_large_order_invariance() {
-    // Cascade: hydro 1 -> hydro 3, hydro 2 -> hydro 3 (fork/merge).
-    // All hydros on bus 1; thermals on bus 2 and 3; PS on bus 2.
-
     let make_system = |bus_order: Vec<i32>, hydro_order: Vec<(i32, Option<i32>)>| {
         let buses = bus_order.into_iter().map(make_bus).collect();
         let hydros = hydro_order
@@ -455,15 +420,13 @@ fn test_large_order_invariance() {
     );
 }
 
-// Integration test: Filling config validation rejected
 #[test]
 fn test_invalid_filling_config_rejected() {
     let mut hydro = make_hydro(1, 1, None);
-    // Set a valid entry_stage_id but an invalid filling_inflow_m3s (must be > 0).
     hydro.entry_stage_id = Some(0);
     hydro.filling = Some(FillingConfig {
         start_stage_id: 0,
-        filling_inflow_m3s: 0.0, // invalid: must be positive
+        filling_min_rate_m3s: -5.0,
     });
 
     let result = SystemBuilder::new()
@@ -489,11 +452,9 @@ fn test_invalid_filling_config_rejected() {
     );
 }
 
-// Integration test: Diversion cross-reference validated
 #[test]
 fn test_diversion_invalid_reference_rejected() {
     let mut hydro = make_hydro(1, 1, None);
-    // Diversion points to hydro 999, which does not exist.
     hydro.diversion = Some(DiversionChannel {
         downstream_id: EntityId(999),
         max_flow_m3s: 10.0,

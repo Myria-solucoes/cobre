@@ -59,145 +59,119 @@ use crate::{
 
 /// All parsed file outputs produced by Layer 2 schema validation.
 ///
-/// Fields mirror the 33 input files in the canonical case directory layout.
-/// Required files use direct types; optional files use `Vec<T>` (Parquet row
-/// types) or `Option<T>` (structured JSON types). When an optional file is
-/// absent from the manifest the corresponding field is empty or `None`.
+/// One field per input file (the field doc names the file). Required files use
+/// direct types; optional files use `Vec<T>` (Parquet rows) or `Option<T>`
+/// (structured JSON) and are empty or `None` when the file is absent.
 ///
 /// This type is `pub(crate)` — it is only used within the validation pipeline
 /// and is never exposed to downstream crates.
 pub(crate) struct ParsedData {
-    /// Parsed `config.json`.
-    ///
-    /// Used by semantic validation to check scenario source configuration.
+    /// `config.json`.
     pub(crate) config: Config,
-    /// Parsed `penalties.json`.
-    ///
-    /// Global defaults are already embedded in entity structs by the parsers;
-    /// this field is retained for Layer 5 penalty-ordering checks.
+    /// `penalties.json`.
     // Rationale: the per-entity parsers embed these defaults for resolution, but the
     // Layer 5 penalty-ordering check needs the original global values; retaining the
     // parsed field here avoids re-reading `penalties.json` when that check runs.
     #[allow(dead_code)]
     pub(crate) penalties: GlobalPenaltyDefaults,
-    /// Parsed `stages.json`.
+    /// `stages.json`.
     pub(crate) stages: StagesData,
-    /// Parsed `initial_conditions.json`.
+    /// `initial_conditions.json`.
     pub(crate) initial_conditions: InitialConditions,
 
-    /// Parsed `system/buses.json`.
+    /// `system/buses.json`.
     pub(crate) buses: Vec<Bus>,
-    /// Parsed `system/thermals.json`.
+    /// `system/thermals.json`.
     pub(crate) thermals: Vec<Thermal>,
-    /// Parsed `system/hydros.json`.
+    /// `system/hydros.json`.
     pub(crate) hydros: Vec<Hydro>,
-    /// Parsed `system/lines.json`.
+    /// `system/lines.json`.
     pub(crate) lines: Vec<Line>,
 
-    /// Parsed `system/non_controllable_sources.json`. Empty when absent.
+    /// `system/non_controllable_sources.json`.
     pub(crate) non_controllable_sources: Vec<NonControllableSource>,
-    /// Parsed `system/pumping_stations.json`. Empty when absent.
+    /// `system/pumping_stations.json`.
     pub(crate) pumping_stations: Vec<PumpingStation>,
-    /// Parsed `system/energy_contracts.json`. Empty when absent.
+    /// `system/energy_contracts.json`.
     pub(crate) energy_contracts: Vec<EnergyContract>,
-    /// Parsed `system/hydro_geometry.parquet`. Empty when absent.
+    /// `system/hydro_geometry.parquet`.
     pub(crate) hydro_geometry: Vec<HydroGeometryRow>,
-    /// Parsed `system/hydro_production_models.json`. Empty when absent.
+    /// `system/hydro_production_models.json`.
     pub(crate) production_models: Vec<ProductionModelConfig>,
     /// File-level FPHA plane-reduction block from
     /// `system/hydro_production_models.json`. `None` when absent or unset.
     pub(crate) plane_reduction: Option<PlaneReductionConfig>,
-    /// Parsed `system/hydro_energy_productivity.parquet`. Empty when absent.
-    ///
-    /// Consumed by `validation::productivity_resolution` to enforce that exactly
-    /// one source supplies `productivity_mw_per_m3s` for each `(hydro, stage)`.
+    /// `system/hydro_energy_productivity.parquet`.
     pub(crate) hydro_energy_productivity_rows: Vec<HydroEnergyProductivityRow>,
-    /// Parsed `system/fpha_hyperplanes.parquet`. Empty when absent.
+    /// `system/fpha_hyperplanes.parquet`.
     pub(crate) fpha_hyperplanes: Vec<FphaHyperplaneRow>,
-    /// Parsed `system/scalar_parameters.json`. Empty when absent.
-    ///
-    /// Loaded before `constraints/generic_constraints.json` so that `@name`
-    /// sigils in constraint expressions can be resolved during Layer 2.
+    /// `system/scalar_parameters.json`.
     // Rationale: the field is populated by the schema-validation layer for the expression-resolution
     // step that substitutes `@name` sigils in constraint expressions; removing it would discard
     // the parsed data and require re-parsing from disk at that step.
     #[allow(dead_code)]
     pub(crate) scalar_parameters: Vec<ScalarParameter>,
 
-    /// Parsed `scenarios/inflow_history.parquet`. Empty when absent.
+    /// `scenarios/inflow_history.parquet`.
     pub(crate) inflow_history: Vec<InflowHistoryRow>,
-    /// Parsed `scenarios/inflow_seasonal_stats.parquet`. Empty when absent.
+    /// `scenarios/inflow_seasonal_stats.parquet`.
     pub(crate) inflow_seasonal_stats: Vec<InflowSeasonalStatsRow>,
-    /// Parsed `scenarios/inflow_ar_coefficients.parquet`. Empty when absent.
+    /// `scenarios/inflow_ar_coefficients.parquet`.
     pub(crate) inflow_ar_coefficients: Vec<InflowArCoefficientRow>,
-    /// Parsed `scenarios/inflow_annual_component.parquet`. Empty when absent.
+    /// `scenarios/inflow_annual_component.parquet`.
     pub(crate) inflow_annual_components: Vec<InflowAnnualComponentRow>,
-    /// Parsed `scenarios/external_inflow_scenarios.parquet`. Empty when absent.
+    /// `scenarios/external_inflow_scenarios.parquet`.
     pub(crate) external_scenarios: Vec<ExternalScenarioRow>,
-    /// Parsed `scenarios/external_load_scenarios.parquet`. Empty when absent.
+    /// `scenarios/external_load_scenarios.parquet`.
     pub(crate) external_load_scenarios: Vec<ExternalLoadRow>,
-    /// Parsed `scenarios/external_ncs_scenarios.parquet`. Empty when absent.
+    /// `scenarios/external_ncs_scenarios.parquet`.
     pub(crate) external_ncs_scenarios: Vec<ExternalNcsRow>,
-    /// Parsed `scenarios/load_seasonal_stats.parquet`. Empty when absent.
+    /// `scenarios/load_seasonal_stats.parquet`.
     pub(crate) load_seasonal_stats: Vec<LoadSeasonalStatsRow>,
-    /// Parsed `scenarios/load_factors.json`. Empty when absent.
-    ///
-    /// Parsed for schema validation; not yet forwarded to `System`.
+    /// `scenarios/load_factors.json`.
     pub(crate) load_factors: Vec<LoadFactorEntry>,
-    /// Parsed `scenarios/correlation.json`. `None` when absent.
+    /// `scenarios/correlation.json`. `None` when absent.
     pub(crate) correlation: Option<CorrelationModel>,
-    /// Parsed `scenarios/non_controllable_factors.json`. Empty when absent.
+    /// `scenarios/non_controllable_factors.json`.
     pub(crate) non_controllable_factors: Vec<NcsFactorEntry>,
-    /// Parsed `scenarios/non_controllable_stats.parquet`. Empty when absent.
+    /// `scenarios/non_controllable_stats.parquet`.
     pub(crate) ncs_models: Vec<NcsModel>,
 
-    /// Parsed `constraints/thermal_bounds.parquet`. Empty when absent.
+    /// `constraints/thermal_bounds.parquet`.
     pub(crate) thermal_bounds: Vec<ThermalBoundsRow>,
-    /// Parsed `constraints/hydro_bounds.parquet`. Empty when absent.
+    /// `constraints/hydro_bounds.parquet`.
     pub(crate) hydro_bounds: Vec<HydroBoundsRow>,
-    /// Parsed `constraints/line_bounds.parquet`. Empty when absent.
+    /// `constraints/line_bounds.parquet`.
     pub(crate) line_bounds: Vec<LineBoundsRow>,
-    /// Parsed `constraints/pumping_bounds.parquet`. Empty when absent.
+    /// `constraints/pumping_bounds.parquet`.
     pub(crate) pumping_bounds: Vec<PumpingBoundsRow>,
-    /// Parsed `constraints/contract_bounds.parquet`. Empty when absent.
+    /// `constraints/contract_bounds.parquet`.
     pub(crate) contract_bounds: Vec<ContractBoundsRow>,
-    /// Parsed `constraints/exchange_factors.json`. Empty when absent.
-    ///
-    /// Parsed for schema validation; not yet forwarded to `System`.
+    /// `constraints/exchange_factors.json`.
     // Rationale: the field is populated by the schema-validation layer to confirm the file
     // parses correctly against the schema; dropping the field would silently skip schema
     // validation for this file when no consumer is present.
     #[allow(dead_code)]
     pub(crate) exchange_factors: Vec<ExchangeFactorEntry>,
-    /// Parsed `constraints/generic_constraints.json`. Empty when absent.
+    /// `constraints/generic_constraints.json`.
     pub(crate) generic_constraints: Vec<GenericConstraint>,
-    /// Parsed `constraints/generic_constraint_bounds.parquet`. Empty when absent.
+    /// `constraints/generic_constraint_bounds.parquet`.
     pub(crate) generic_constraint_bounds: Vec<GenericConstraintBoundsRow>,
-    /// Parsed `constraints/penalty_overrides_bus.parquet`. Empty when absent.
+    /// `constraints/penalty_overrides_bus.parquet`.
     pub(crate) penalty_overrides_bus: Vec<BusPenaltyOverrideRow>,
-    /// Parsed `constraints/penalty_overrides_line.parquet`. Empty when absent.
+    /// `constraints/penalty_overrides_line.parquet`.
     pub(crate) penalty_overrides_line: Vec<LinePenaltyOverrideRow>,
-    /// Parsed `constraints/penalty_overrides_hydro.parquet`. Empty when absent.
+    /// `constraints/penalty_overrides_hydro.parquet`.
     pub(crate) penalty_overrides_hydro: Vec<HydroPenaltyOverrideRow>,
-    /// Parsed `constraints/penalty_overrides_ncs.parquet`. Empty when absent.
+    /// `constraints/penalty_overrides_ncs.parquet`.
     pub(crate) penalty_overrides_ncs: Vec<NcsPenaltyOverrideRow>,
-    /// Parsed `constraints/ncs_bounds.parquet`. Empty when absent.
+    /// `constraints/ncs_bounds.parquet`.
     pub(crate) ncs_bounds: Vec<NcsBoundsRow>,
 }
 
 // ── Error mapping helper ──────────────────────────────────────────────────────
 
 /// Maps a [`LoadError`] from a parse call into a [`ValidationContext`] entry.
-///
-/// The `relative_path` argument is the path of the file relative to
-/// `case_root` (e.g., `"system/hydros.json"`), used as the `file` field on
-/// the [`ValidationEntry`].
-///
-/// - [`LoadError::IoError`] maps to [`ErrorKind::FileNotFound`].
-/// - [`LoadError::ParseError`] maps to [`ErrorKind::ParseError`].
-/// - [`LoadError::SchemaError`] maps to [`ErrorKind::SchemaViolation`].
-/// - All other variants map to [`ErrorKind::SchemaViolation`] as a safe
-///   fallback (they should not occur in Layer 2).
 ///
 /// The entry `message` carries only the path-free detail of each variant: the
 /// `ValidationEntry.file` field already holds `relative_path`, and the report
@@ -231,10 +205,9 @@ fn map_load_error(err: &LoadError, relative_path: &str, ctx: &mut ValidationCont
             );
         }
         _ => {
-            // CrossReferenceError, ConstraintError, PolicyIncompatible should
-            // not arise from individual file parsers in Layer 2, but map
-            // conservatively to SchemaViolation. These variants do not embed
-            // `relative_path` as a prefix, so their full Display is safe here.
+            // Layer-2 parsers should not produce these variants; map conservatively.
+            // Unlike the arms above, these do not embed `relative_path`, so their full
+            // Display is safe (no path duplication).
             ctx.add_error(
                 ErrorKind::SchemaViolation,
                 relative_path,
@@ -249,30 +222,13 @@ fn map_load_error(err: &LoadError, relative_path: &str, ctx: &mut ValidationCont
 
 /// Performs Layer 2 schema validation on the case directory at `case_root`.
 ///
-/// For each file marked present in `manifest`, calls the corresponding
-/// `parse_*` or `load_*` function.  Parse and schema errors are mapped to
-/// [`ErrorKind::ParseError`] and [`ErrorKind::SchemaViolation`] entries in
-/// `ctx`.  I/O errors that occur during parsing are mapped to
-/// [`ErrorKind::FileNotFound`].
-///
-/// All errors are collected across all files — the function never
-/// short-circuits on the first failure.
-///
-/// Returns `Some(ParsedData)` only when no parse/schema errors were added to
-/// `ctx` during this call.  Optional files that are absent from `manifest`
-/// produce empty `Vec`s or `None` fields in [`ParsedData`] without adding any
-/// error.
-///
-/// # Arguments
-///
-/// * `case_root` — path to the case directory root.
-/// * `manifest`  — output from [`crate::validation::structural::validate_structure`].
-/// * `ctx`        — mutable validation context that accumulates diagnostics.
-// Rationale: every optional file in the manifest must be attempted in a single
-// sequential pass so that all parse and schema errors are collected before the
-// function returns; splitting the file-loading into smaller helpers would either
-// require threading `ctx` through many call boundaries or short-circuit on the
-// first failure, both of which violate the all-errors-collected contract.
+/// Errors are collected across all files — the function never short-circuits on
+/// the first failure. Returns `Some(ParsedData)` only when no parse/schema errors
+/// were added to `ctx` during this call; optional files absent from `manifest`
+/// produce empty `Vec`s or `None` fields without adding any error.
+// Rationale: every manifest file is attempted in one sequential pass so that all
+// errors are collected before returning; splitting into helpers would thread `ctx`
+// through many boundaries or short-circuit, violating the all-errors-collected contract.
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub(crate) fn validate_schema(
@@ -280,7 +236,6 @@ pub(crate) fn validate_schema(
     manifest: &FileManifest,
     ctx: &mut ValidationContext,
 ) -> Option<ParsedData> {
-    // Track whether any error is added during this call.
     let error_count_before = ctx.error_count();
 
     let config = parse_or_error(
@@ -307,11 +262,8 @@ pub(crate) fn validate_schema(
         ctx,
     );
 
-    // parse_buses, parse_hydros, parse_lines, and parse_non_controllable_sources
-    // require a `&GlobalPenaltyDefaults`. We use the parsed penalties when
-    // available, or a sentinel when penalties failed to parse (so that remaining
-    // files are still attempted and their individual errors collected).
-
+    // Fall back to a sentinel when penalties failed to parse, so penalty-dependent
+    // parsers still run and their own errors are collected in this pass.
     let sentinel = penalties.clone().unwrap_or_else(sentinel_penalties);
 
     let buses = parse_or_error(
@@ -506,8 +458,7 @@ pub(crate) fn validate_schema(
         ctx,
     );
 
-    // correlation.json uses `Option<CorrelationModel>` — `None` when the file
-    // is absent so that callers can distinguish "no file" from "empty model".
+    // `Option` (not `Vec`) so callers distinguish "no file" from "empty model".
     let correlation: Option<CorrelationModel> = if manifest.scenarios_correlation_json {
         match load_correlation(Some(&case_root.join("scenarios/correlation.json"))) {
             Ok(model) => Some(model),
@@ -592,9 +543,8 @@ pub(crate) fn validate_schema(
         ctx,
     );
 
-    // Load scalar_parameters.json BEFORE generic_constraints so that `@name`
-    // sigils in constraint expressions can be resolved.  This must stay ahead
-    // of the `generic_constraints` block below.
+    // Must load BEFORE generic_constraints below: it resolves the `@name` sigils
+    // in constraint expressions. Reordering breaks that resolution.
     let scalar_parameters: Vec<ScalarParameter> = optional_or_error(
         manifest.system_scalar_parameters_json,
         || parse_scalar_parameters_json(&case_root.join("system/scalar_parameters.json")),
@@ -603,9 +553,8 @@ pub(crate) fn validate_schema(
         ctx,
     );
 
-    // Build the name → EntityId map so expression tokens like `@demand_scale`
-    // can be resolved.  When the file was absent or failed to parse, the map is
-    // empty and any @name reference will produce a descriptive schema error.
+    // An empty map (file absent or failed to parse) is fine: any `@name` reference
+    // then produces a descriptive schema error downstream.
     let scalar_name_to_id: std::collections::HashMap<String, EntityId> = scalar_parameters
         .iter()
         .map(|p| (p.name.clone(), p.id))
@@ -692,13 +641,12 @@ pub(crate) fn validate_schema(
         ctx,
     );
 
-    // Only return Some(ParsedData) when no new errors were added during this call.
     if ctx.error_count() > error_count_before {
         return None;
     }
 
-    // All required files must have parsed successfully.  The error count guard
-    // above ensures this, but we destructure to satisfy the type checker.
+    // The guard above already ensures every required file parsed; this destructure
+    // only narrows the Options to satisfy the type checker.
     let (
         Some(config),
         Some(penalties),
@@ -770,8 +718,6 @@ pub(crate) fn validate_schema(
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-/// Call a parser, map any error into `ctx`, and return `Some(value)` on success
-/// or `None` on failure.
 fn parse_or_error<T>(
     result: Result<T, LoadError>,
     relative_path: &str,
@@ -786,8 +732,8 @@ fn parse_or_error<T>(
     }
 }
 
-/// Call a parser only when `present` is `true`, otherwise return the `default`
-/// value.  Maps any error into `ctx` and returns the default on failure.
+/// Like `parse_or_error`, but skips the parser (returning `default_fn()`) when
+/// `present` is `false`; also returns the default on parse failure.
 fn optional_or_error<T, F, D>(
     present: bool,
     parse_fn: F,
@@ -814,10 +760,6 @@ where
 
 /// Build a minimal valid [`GlobalPenaltyDefaults`] sentinel used when
 /// `penalties.json` failed to parse.
-///
-/// The sentinel allows penalty-dependent parsers (`parse_buses`, `parse_hydros`,
-/// `parse_lines`, `parse_non_controllable_sources`) to be attempted so that
-/// their own errors are collected in the same pass.
 fn sentinel_penalties() -> GlobalPenaltyDefaults {
     use cobre_core::entities::{DeficitSegment, HydroPenalties};
     GlobalPenaltyDefaults {

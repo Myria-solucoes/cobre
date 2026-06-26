@@ -4,16 +4,15 @@
 //! disaggregated (K=1000, M=384, D=2080) sizes. Pinned at 1, 8, and
 //! 96 rayon worker threads.
 //!
-//! Disaggregated bench function does NOT include a `slow-` prefix
-//! gate because Criterion already runs benches only on demand (via
-//! `cargo bench`); the bench function is included unconditionally
-//! and the user controls execution.
+//! The disaggregated case is unconditional (no `slow-` gate): Criterion runs
+//! benches only on demand, so the user controls execution.
 
 #![allow(missing_docs, clippy::expect_used, clippy::cast_possible_truncation)]
 
 use cobre_sddp::cut::CutPool;
 use cobre_sddp::cut_selection::CutSelectionStrategy;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);

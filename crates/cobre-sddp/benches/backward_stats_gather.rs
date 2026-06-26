@@ -1,10 +1,7 @@
 //! Criterion micro-benchmark for the per-stage `StageWorkerStatsBuffer` gather.
 //!
-//! Locks in the zero-allocation property of the gather loop.
-//! Target: < 100 microseconds per stage at production sizing
-//! (`n_workers = 10`, `n_openings = 20`).
-//!
-//! Run with: `cargo bench --bench backward_stats_gather`
+//! Guards the zero-allocation property of the gather loop; target < 100µs per
+//! stage at production sizing (`n_workers = 10`, `n_openings = 20`).
 
 #![allow(missing_docs)]
 
@@ -15,18 +12,16 @@ use cobre_solver::{
     SolverInterface,
     types::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate},
 };
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 use cobre_sddp::solver_stats::{SolverStatsDelta, StageWorkerStatsBuffer};
 
-/// Trivial profile type for the bench mock (satisfies the trait's
-/// `Copy + PartialEq + Default + Send` associated-type bounds).
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 struct BenchProfile;
 
-/// Minimal `SolverInterface` impl holding a fixed `SolverStatistics` snapshot
-/// with a non-empty `retry_level_histogram`, used solely to exercise the
-/// `statistics_into` copy path.
+/// `SolverInterface` mock holding a fixed `SolverStatistics` with a non-empty
+/// `retry_level_histogram`, to exercise the `statistics_into` copy path.
 struct BenchStatsMockSolver {
     stats: SolverStatistics,
 }
@@ -81,14 +76,11 @@ fn bench_gather(c: &mut Criterion) {
 }
 
 /// Per-worker `WorkerTiming` event construction + send micro-benchmark.
-/// Locks in the zero-heap-allocation property of the per-worker
-/// emission path: the `[f64; 16]` payload is stack-resident, the channel send
-/// of the variant is amortised across iterations.
 ///
-/// The `mpsc::Sender::send` does internally allocate a node; the focus here is
-/// that the **event construction** path itself never introduces a `Vec` or
-/// `Box` allocation. Inspecting the generated assembly (or running under
-/// `dhat`) on this loop will show only the channel-internal allocations.
+/// Guards that the **event construction** path introduces no `Vec`/`Box`
+/// allocation (the `[f64; 16]` payload is stack-resident); `mpsc::Sender::send`
+/// itself does allocate a node, so the channel-internal allocations are expected
+/// and are not what this bench measures.
 #[allow(clippy::expect_used)]
 fn bench_worker_timing_emit(c: &mut Criterion) {
     let n_workers: i32 = 10;
@@ -108,20 +100,17 @@ fn bench_worker_timing_emit(c: &mut Criterion) {
             }
         });
     });
-    // Drain receiver so the channel does not grow unboundedly between runs.
+    // Drain so the channel does not grow unboundedly across bench runs.
     drop(tx);
     while rx.try_recv().is_ok() {}
 }
 
 /// Per-opening `statistics_into` snapshot micro-benchmark.
 ///
-/// Locks in the steady-state zero-allocation property of the backward hot
-/// loop's solver-statistics snapshot: a reusable [`SolverStatistics`] buffer is
-/// filled via `statistics_into` on every iteration, which `resize`s + copies the
-/// histogram in place rather than cloning a fresh `Vec`. After the first call the
-/// buffer's `retry_level_histogram` capacity is stable, so no further heap
-/// allocation occurs (verifiable by running this loop under `dhat`: only the
-/// one-time pre-loop allocation appears).
+/// Guards the steady-state zero-allocation property of the backward hot loop's
+/// stats snapshot: `statistics_into` resizes + copies the histogram into a
+/// reused buffer rather than cloning a fresh `Vec`, so once its capacity is
+/// stable no further heap allocation occurs.
 fn bench_statistics_snapshot(c: &mut Criterion) {
     let solver = BenchStatsMockSolver {
         stats: SolverStatistics {
@@ -143,8 +132,7 @@ fn bench_statistics_snapshot(c: &mut Criterion) {
         },
     };
 
-    // Reusable buffer: pre-warm its histogram capacity so the timed loop is
-    // strictly the steady-state (zero-alloc) path.
+    // Pre-warm histogram capacity so the timed loop is the steady-state path.
     let mut buf = SolverStatistics::default();
     solver.statistics_into(&mut buf);
 

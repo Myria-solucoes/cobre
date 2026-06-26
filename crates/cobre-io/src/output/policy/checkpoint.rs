@@ -1,8 +1,6 @@
 //! Filesystem write and read entry points for policy checkpoints.
 //!
-//! `write_policy_checkpoint` creates the directory structure and serializes all
-//! per-stage data. `read_policy_checkpoint` reads a previously written checkpoint
-//! back into owned types. Metadata is written last so its presence signals a
+//! `metadata.json` is written last so its presence is the commit signal of a
 //! complete checkpoint.
 
 use std::path::Path;
@@ -19,11 +17,6 @@ use super::records::{
 
 /// Write a complete policy checkpoint to `path`.
 ///
-/// Creates the directory structure required by SS3.2 of the policy schema
-/// specification, serializes all per-stage cut and basis data to `FlatBuffers`
-/// binary files, and writes the metadata as JSON. The metadata file is written
-/// **last** so its presence signals a complete checkpoint.
-///
 /// ## Directory layout produced
 ///
 /// ```text
@@ -39,20 +32,10 @@ use super::records::{
 ///     ...
 /// ```
 ///
-/// ## Commit-point semantics
-///
-/// `metadata.json` is written only after all `.bin` files succeed. If any write
-/// fails, `metadata.json` is absent, signaling an incomplete checkpoint. The
-/// function does not clean up partially written files — the caller uses the
-/// absence of `metadata.json` to detect incomplete checkpoints.
-///
-/// # Parameters
-///
-/// - `path` — root directory for the policy checkpoint.
-/// - `stage_cuts` — one entry per stage, ordered by stage index 0..N.
-/// - `stage_bases` — one entry per stage, ordered by stage index 0..N. An empty
-///   slice means no basis files are written; the `basis/` directory is still created.
-/// - `metadata` — policy metadata, serialized to `metadata.json`.
+/// `metadata.json` is written **last**, only after every `.bin` write succeeds:
+/// its absence is how the caller detects an incomplete checkpoint. Partially
+/// written files are not cleaned up. An empty `stage_bases` writes no basis files
+/// (the `basis/` directory is still created).
 ///
 /// # Errors
 ///
@@ -114,14 +97,12 @@ pub fn write_policy_checkpoint(
     metadata: &PolicyCheckpointMetadata,
     stage_states: &[StageStatesPayload<'_>],
 ) -> Result<(), OutputError> {
-    // Create cuts/ and basis/ subdirectories (and path/ itself if needed).
     let cuts_dir = path.join("cuts");
     std::fs::create_dir_all(&cuts_dir).map_err(|e| OutputError::io(&cuts_dir, e))?;
 
     let basis_dir = path.join("basis");
     std::fs::create_dir_all(&basis_dir).map_err(|e| OutputError::io(&basis_dir, e))?;
 
-    // Write per-stage cut files: cuts/stage_NNN.bin.
     for payload in stage_cuts {
         let filename = format!("stage_{:03}.bin", payload.stage_id);
         let file_path = cuts_dir.join(&filename);
@@ -137,7 +118,6 @@ pub fn write_policy_checkpoint(
         std::fs::write(&file_path, &buf).map_err(|e| OutputError::io(&file_path, e))?;
     }
 
-    // Write per-stage basis files: basis/stage_NNN.bin.
     for record in stage_bases {
         let filename = format!("stage_{:03}.bin", record.stage_id);
         let file_path = basis_dir.join(&filename);
@@ -145,7 +125,6 @@ pub fn write_policy_checkpoint(
         std::fs::write(&file_path, &buf).map_err(|e| OutputError::io(&file_path, e))?;
     }
 
-    // Write per-stage states files: states/stage_NNN.bin (if any).
     if !stage_states.is_empty() {
         let states_dir = path.join("states");
         std::fs::create_dir_all(&states_dir).map_err(|e| OutputError::io(&states_dir, e))?;
@@ -169,9 +148,7 @@ pub fn write_policy_checkpoint(
 
 /// Read a complete policy checkpoint from `path`.
 ///
-/// Reads `metadata.json`, all `cuts/stage_NNN.bin` files, and all
-/// `basis/stage_NNN.bin` files. Results are sorted by `stage_id` in the returned
-/// [`PolicyCheckpoint`].
+/// Per-stage results are sorted by `stage_id` in the returned [`PolicyCheckpoint`].
 ///
 /// # Errors
 ///
@@ -192,25 +169,21 @@ pub fn write_policy_checkpoint(
 /// # }
 /// ```
 pub fn read_policy_checkpoint(path: &Path) -> Result<PolicyCheckpoint, OutputError> {
-    // Read and deserialize metadata.json.
     let meta_path = path.join("metadata.json");
     let meta_bytes = std::fs::read(&meta_path).map_err(|e| OutputError::io(&meta_path, e))?;
     let metadata: PolicyCheckpointMetadata = serde_json::from_slice(&meta_bytes)
         .map_err(|e| OutputError::serialization("policy_metadata", e.to_string()))?;
 
-    // Read all cuts/stage_NNN.bin files.
     let cuts_dir = path.join("cuts");
     let mut stage_cuts: Vec<StageCutsReadResult> =
         read_sorted_bin_files(&cuts_dir, "stage_cuts", deserialize_stage_cuts)?;
     stage_cuts.sort_by_key(|r| r.stage_id);
 
-    // Read all basis/stage_NNN.bin files (may be empty if no bases were written).
     let basis_dir = path.join("basis");
     let mut stage_bases: Vec<OwnedPolicyBasisRecord> =
         read_sorted_bin_files(&basis_dir, "stage_basis", deserialize_stage_basis)?;
     stage_bases.sort_by_key(|r| r.stage_id);
 
-    // Read all states/stage_NNN.bin files (may be empty for older checkpoints).
     let states_dir = path.join("states");
     let stage_states: Vec<StageStatesReadResult> = if states_dir.is_dir() {
         let mut ss = read_sorted_bin_files(&states_dir, "stage_states", deserialize_stage_states)?;

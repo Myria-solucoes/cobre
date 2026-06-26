@@ -36,12 +36,9 @@ use crate::run::{
 };
 
 /// Map a [`PhaseError`] to a Python exception through the single
-/// [`convert_error`] mapping site.
-///
-/// A typed `Sddp` arm routes through [`ErrorSource::Sddp`] so structured fields
-/// (e.g. `Infeasible`'s stage/iteration/scenario) reach Python as `SolverError`
-/// attributes; a `Message` arm routes through [`ErrorSource::Message`]. Both
-/// front ends (`run_via_study` and the `Study` methods) thus map identically.
+/// [`convert_error`] mapping site, so `run_via_study` and the `Study` methods map
+/// identically. The `Sddp` arm preserves the typed error's structured fields (e.g.
+/// `Infeasible`'s stage/iteration/scenario) as `SolverError` attributes.
 fn phase_error_to_pyerr(err: PhaseError) -> PyErr {
     match err {
         PhaseError::Message(msg) => convert_error(ErrorSource::Message(msg)),
@@ -60,40 +57,28 @@ fn phase_error_to_pyerr(err: PhaseError) -> PyErr {
 /// state, and [`Study::validate`] replays the captured warnings.
 /// The `output_dir` is fixed at construction time so every artifact this study
 /// writes lands in the same directory (the always-writes contract).
-// Some fields are stored at construction time but only consumed by the
-// `simulate` method; they are intentionally retained here (the
-// always-load-once contract) and annotated `dead_code`.
+// The `dead_code` fields below are captured once at construction and read only by
+// `simulate`, so it need not re-load the case (the always-load-once contract).
 #[pyclass(name = "Study")]
 pub struct Study {
-    /// The live, fully prepared study setup. Consumed by `train` and
-    /// `simulate`.
+    /// The live, fully prepared study setup; the only field `train`/`simulate`
+    /// mutate.
     setup: StudySetup,
     /// The system after stochastic preprocessing. Shared (not copied) with the
     /// `cobre.model.System` view returned by the `system` getter; `train`/
     /// `simulate` borrow `&*self.system`.
     system: Arc<cobre_core::System>,
-    /// The effective (post-override) configuration. Consumed by `train` and
-    /// `simulate`.
+    /// The effective (post-override) configuration.
     config: cobre_io::Config,
-    /// The resolved tree seed. Consumed by `train` and `simulate`.
+    /// The resolved tree seed.
     seed: u64,
-    /// The model-provenance report. Consumed by `simulate`.
-    // Rationale: stored at construction time under the always-load-once
-    // contract; the `simulate` PyO3 method reads it to populate the simulation
-    // output report. Removing it would force a second expensive case load when
-    // simulate is called.
+    /// The model-provenance report, read by `simulate` for its output report.
     #[allow(dead_code)]
     provenance: ModelProvenanceReport,
-    /// The structural stochastic summary. Consumed by `simulate`.
-    // Rationale: captured once during construction so the `simulate` method
-    // can surface stochastic preprocessing metadata in its output without
-    // re-running the preprocessing pipeline.
+    /// The structural stochastic summary, read by `simulate` for its output report.
     #[allow(dead_code)]
     stochastic_summary: StochasticSummary,
-    /// The structural hydro-model summary. Consumed by `simulate`.
-    // Rationale: captured once during construction so the `simulate` method
-    // can include hydro-model provenance in its output report without
-    // re-running the hydro preprocessing pipeline.
+    /// The structural hydro-model summary, read by `simulate` for its output report.
     #[allow(dead_code)]
     hydro_models_summary: HydroModelSummary,
     /// Validation-pipeline warnings captured during the case load, replayed by
@@ -117,14 +102,11 @@ pub struct Study {
 /// (`iterations`, `final_lower_bound`, `final_upper_bound`).
 #[pyclass(name = "Policy")]
 pub struct Policy {
-    /// The full training result: convergence metrics, basis cache, baked
-    /// templates, solver-stats log. Moved out of the training phase and into
-    /// the handle so `simulate` can warm-start from it.
+    /// The training result (basis cache + baked templates) `simulate` warm-starts
+    /// from.
     training_result: TrainingResult,
-    /// A clone of the trained (or loaded) study FCF (the cut pool).
-    /// `Study::simulate` reads this FCF and `replace_fcf`s it into the study
-    /// before simulating, so a trained `Policy` and a loaded one feed the
-    /// identical simulate path.
+    /// The trained (or loaded) study FCF (the cut pool). `Study::simulate`
+    /// `replace_fcf`s it into the study before simulating.
     fcf: FutureCostFunction,
 }
 
@@ -228,12 +210,9 @@ impl Policy {
         }
         let n_cuts = intercepts.len();
 
-        // Lazy soft import; ImportError propagates verbatim if NumPy is absent.
         let np = py.import("numpy")?;
         let intercepts_arr = np.call_method1("asarray", (intercepts,))?;
-        // Build the (n_cuts, dim) coefficient matrix from the flat C-order
-        // buffer by reshaping the 1-D array. `dim` fixes the column count even
-        // when `n_cuts == 0`, giving shape `(0, dim)`.
+        // `dim` fixes the column count even when `n_cuts == 0`, giving shape `(0, dim)`.
         let coeffs_1d = np.call_method1("asarray", (coeffs_flat,))?;
         let coeffs_arr = coeffs_1d.call_method1("reshape", ((n_cuts, dim),))?;
 
@@ -289,17 +268,14 @@ impl Study {
 
         let resolved_output = output_dir.unwrap_or_else(|| case_dir.join("output"));
 
-        // Convert the override dict UNDER THE GIL, before py.detach releases it.
-        // An unsupported value type or non-str key raises PyValueError here. The
-        // resulting `serde_json::Map` is owned (Send), so it crosses the
-        // py.detach boundary into the GIL-free load.
+        // Convert UNDER THE GIL, before py.detach releases it; the resulting owned
+        // `serde_json::Map` is Send and crosses the py.detach boundary.
         let overrides = config_overrides
             .map(|dict| crate::convert::pydict_to_json_map(&dict))
             .transpose()?;
 
-        // The load runs PAR estimation and can be slow; release the GIL while it
-        // runs. No rayon work happens here, so no scoped pool is created (the
-        // per-call pool is built in `train`/`simulate`).
+        // Release the GIL for the slow PAR estimation. No rayon work runs here, so
+        // no scoped pool (built per-call in `train`/`simulate`).
         let loaded: Result<LoadedStudy, String> =
             py.detach(|| build_study_setup(&case_dir, &resolved_output, overrides.as_ref()));
 
@@ -412,11 +388,7 @@ impl Study {
     ///   re-raised verbatim AFTER the training artifacts are written.
     #[pyo3(signature = (on_iteration=None))]
     fn train(&mut self, py: Python<'_>, on_iteration: Option<Py<PyAny>>) -> PyResult<Policy> {
-        // Training-disabled: explicit no-op that returns a synthetic
-        // zero-iteration policy. The simulation-only path loads a policy
-        // elsewhere (`simulate`/`Policy.load`), so there is nothing to train or
-        // write here. This mirrors the training-disabled branch of
-        // `run_via_study`.
+        // Mirrors the training-disabled branch of `run_via_study`.
         if !self.config.training.enabled {
             let synthetic = TrainingResult::new(
                 0.0,
@@ -437,9 +409,6 @@ impl Study {
             });
         }
 
-        // Borrow the immutable study state for the detached closure. The
-        // mutable `setup` is the only field the training loop mutates; the
-        // rest are read-only.
         let seed = self.seed;
         let output_dir = self.output_dir.clone();
         let threads = self.threads;
@@ -447,42 +416,26 @@ impl Study {
         let system = self.system.as_ref();
         let config = &self.config;
 
-        // `on_iteration` is already a `Py<PyAny>` (a GIL-independent owned
-        // handle), so it can cross the `py.detach` boundary into the drain
-        // thread and be re-bound under `Python::attach`. `Py<PyAny>` and
-        // `PyErr` are `Send`, so returning `(TrainingPhaseResult, Option<PyErr>)`
-        // from the scoped-pool closure is sound.
-        // The closure unifies on `PhaseError`: the two training-phase helpers
-        // yield it directly (carrying a typed `SddpError` for a hard `train`
-        // failure), while the `String`-returning helpers (policy-mode,
-        // artifact/FPHA writes, pool construction) convert via `From<String>`.
-        // The error is mapped through the single `convert_error` site below, so
-        // both front ends (`run_via_study` and this method) map identically.
+        // `on_iteration` (`Py<PyAny>`), `PyErr`, and the returned tuple are all
+        // Send, so crossing the `py.detach` boundary into the drain thread is sound.
         let phase_result: Result<(crate::run::TrainingPhaseResult, Option<PyErr>), PhaseError> = py
             .detach(|| {
-                // `run_in_scoped_pool` returns `Result<closure_output, String>`,
-                // where `closure_output` is itself a `Result<_, PhaseError>`; the
-                // outer `?` surfaces pool-construction failure (a `String`, lifted
-                // to `PhaseError::Message`), the inner result is the
-                // training/artifact outcome.
+                // Outer `?` surfaces pool-construction failure (a `String`);
+                // the inner `Result<_, PhaseError>` is the training/artifact outcome.
                 run_in_scoped_pool(threads, |n| {
-                    // Warm-start / resume / boundary-cut FCF replacement BEFORE
-                    // training — shared verbatim with `run_via_study`.
+                    // FCF replacement BEFORE training — shared verbatim with
+                    // `run_via_study`.
                     apply_training_policy_mode(setup, system, config, &output_dir)?;
 
-                    // Bifurcate on the callback: `None` keeps the historical
-                    // collect-after-return path bit-identical (the no-callback
-                    // golden parity anchor); `Some` uses the streaming drain
-                    // thread.
+                    // `None` keeps the collect-after-return path bit-identical (the
+                    // no-callback golden parity anchor); `Some` uses the drain thread.
                     let (training, callback_error) = match on_iteration {
                         Some(callback) => run_training_phase_py_streaming(setup, n, callback)?,
                         None => (run_training_phase_py(setup, n)?, None),
                     };
 
-                    // Write ALL artifacts FIRST (always-writes), then surface a
-                    // captured callback error — ordering identical to
-                    // `run_via_study`, so a stopped/raising run still persists its
-                    // partial artifacts.
+                    // Write ALL artifacts BEFORE surfacing a captured callback error,
+                    // so a stopped/raising run still persists its partial artifacts.
                     write_training_artifacts(
                         &output_dir,
                         system,
@@ -502,16 +455,12 @@ impl Study {
 
         let (mut training, callback_error) = phase_result.map_err(phase_error_to_pyerr)?;
 
-        // Propagate a captured callback exception (or KeyboardInterrupt) only
-        // now that all training artifacts have been written.
         if let Some(err) = callback_error {
             return Err(err);
         }
 
-        // A genuine training failure becomes a `SolverError` (a `RuntimeError`
-        // subclass), mirroring `run_via_study`'s post-artifacts mapping. The
-        // typed error is moved out of the carrier so its structured fields (e.g.
-        // `Infeasible`) survive to `convert_error`, with the message preserved.
+        // Move the typed error out of the carrier so its structured fields (e.g.
+        // `Infeasible`) survive to `convert_error`.
         if let Some(error) = training.error.take() {
             let iterations = training.result.iterations;
             let message = format!("training failed after {iterations} iterations: {error}");
@@ -521,8 +470,6 @@ impl Study {
             }));
         }
 
-        // Build the policy handle: clone the trained FCF and move the training
-        // result out of the (now owned) phase carrier.
         Ok(Policy {
             training_result: training.result,
             fcf: setup.fcf.clone(),
@@ -564,10 +511,8 @@ impl Study {
         let out_dir = output_dir.unwrap_or_else(|| self.output_dir.clone());
         let policy_dir = out_dir.join(&self.setup.policy_path);
 
-        // Apply the optional validate_compatibility override against a config
-        // clone so the shared helper reads the effective value (the helper keys
-        // off `config.policy.validate_compatibility`). When `None`, the study's
-        // config value (default `true`) is used unchanged.
+        // The helper keys off `config.policy.validate_compatibility`, so the
+        // override is applied to a config clone rather than passed separately.
         let mut config = self.config.clone();
         if let Some(validate) = validate_compatibility {
             config.policy.validate_compatibility = validate;
@@ -633,20 +578,11 @@ impl Study {
     ) -> PyResult<Py<PyAny>> {
         let out_dir = output_dir.unwrap_or_else(|| self.output_dir.clone());
 
-        // Reject a cut-less policy up front. A policy with zero active Benders
-        // cuts — e.g. the synthetic zero-cut handle `train()` returns when
-        // `config.training.enabled` is false — would let `StudySetup::simulate`
-        // run with no future-cost approximation and silently emit a wrong result.
-        // The monolithic `run_via_study` path never hits this because its
-        // training-disabled+simulate branch loads the on-disk FCF via
-        // `reconstruct_policy_from_checkpoint`; this guard covers the direct
-        // `Study.train() -> Study.simulate()` misuse (and any other zero-cut
-        // policy) explicitly.
+        // A zero-cut policy would let `StudySetup::simulate` run with no future-cost
+        // approximation and silently emit a wrong result, so reject it up front.
         if policy.fcf.total_active_cuts() == 0 {
-            // Routed through the single mapping site: the message has no
-            // recognized prefix, so it falls through to `SolverError` (a
-            // `RuntimeError` subclass), so `except RuntimeError` still catches and
-            // the message is preserved verbatim.
+            // No recognized prefix, so the message falls through to `SolverError`
+            // (a `RuntimeError` subclass) with the text preserved verbatim.
             return Err(convert_error(ErrorSource::Message(
                 "Policy has no cuts to simulate; when training is disabled, call \
                  Study.load_policy() to load a trained policy before simulate()"
@@ -654,9 +590,6 @@ impl Study {
             )));
         }
 
-        // Install the policy's FCF into the study so `StudySetup::simulate`
-        // (which reads `self.fcf`) uses the supplied policy. This makes a trained
-        // `Policy` and a loaded `Policy` feed the identical simulate path.
         self.setup.replace_fcf(policy.fcf.clone());
 
         let threads = self.threads;
@@ -664,15 +597,11 @@ impl Study {
         let system = self.system.as_ref();
         let training_result = &policy.training_result;
 
-        // The simulation runs the full scenario sweep; release the GIL for the
-        // entire Rust computation. The scoped rayon pool is built per call so two
-        // sequential `simulate` invocations each honor their own thread count.
+        // Release the GIL for the scenario sweep; the rayon pool is built per call
+        // so sequential `simulate` invocations each honor their own thread count.
         let summary: Result<SimSummary, PhaseError> = py.detach(|| {
-            // `run_in_scoped_pool` returns `Result<closure_output, String>`,
-            // where `closure_output` is itself `Result<SimSummary, PhaseError>`;
-            // the outer `?` surfaces pool-construction failure (a `String`, lifted
-            // to `PhaseError::Message`), the inner result is the simulation
-            // outcome (a typed `Sddp` arm on a hard `simulate` failure).
+            // Outer `?` surfaces pool-construction failure (a `String`); the inner
+            // `Result<SimSummary, PhaseError>` is the simulation outcome.
             run_in_scoped_pool(threads, |n| {
                 run_simulation_phase_py(setup, &out_dir, system, training_result, n)
             })?

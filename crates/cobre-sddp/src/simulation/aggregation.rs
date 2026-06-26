@@ -1,48 +1,11 @@
 //! MPI aggregation and `SimulationSummary` computation.
 //!
-//! After all MPI ranks complete their assigned simulation scenarios,
 //! [`aggregate_simulation`] gathers per-scenario cost data across ranks and
-//! computes the final [`SimulationSummary`].
+//! computes the final [`SimulationSummary`], identical on all ranks.
 //!
-//! ## Aggregation protocol (SS4.4)
-//!
-//! The aggregation proceeds in four steps:
-//!
-//! 1. **Local min/max → global min/max** via two `allreduce` calls
-//!    (`ReduceOp::Min`, `ReduceOp::Max`).
-//!
-//! 2. **Total costs gathered** via two `allgatherv` calls:
-//!    - First `allgatherv` exchanges per-rank `u64` scenario counts so that
-//!      every rank knows the displacement layout for the data gather.
-//!    - Second `allgatherv` gathers the flat `f64` total-cost vector.
-//!      Mean, standard deviation (Bessel-corrected), and `CVaR` are then
-//!      computed locally on every rank from the gathered array.
-//!
-//! 3. **Per-category costs gathered** via an additional `allgatherv` on a
-//!    stride-5 `f64` buffer packed from the five `ScenarioCategoryCosts` fields.
-//!    Per-category mean, max, and frequency are computed from the gathered data.
-//!
-//! 4. **`SimulationSummary` assembled** with operational statistics set to
-//!    `0.0` (deferred — requires per-stage deficit/spillage tracking not yet
-//!    in the cost buffer).
-//!
-//! ## `CVaR` computation
-//!
-//! `CVaR` at confidence level α is the mean of the worst `ceil((1-α)*S)`
-//! scenario costs, where `S` is the total number of scenarios. Costs are
-//! sorted in descending order; the first `tail_size` elements form the tail.
-//! When `S == 1`, `cvar` equals the single cost (tail size clamped to 1).
-//!
-//! ## Standard deviation
-//!
-//! Uses Bessel correction (`n-1` denominator). When `n <= 1`, returns `0.0`
-//! to avoid division by zero, matching the pattern in `sync_forward`.
-//!
-//! ## `allgatherv` vs `gatherv`
-//!
-//! The `Communicator` trait does not expose `gatherv`. `allgatherv` is used
-//! instead: all ranks receive all data, which is slightly more bandwidth but
-//! functionally equivalent and avoids a subsequent broadcast step.
+//! `allgatherv` is used rather than `gatherv` (the `Communicator` trait has no
+//! `gatherv`): every rank receives all data and computes stats locally, avoiding
+//! a subsequent broadcast.
 
 use cobre_comm::{Communicator, ReduceOp};
 
@@ -67,38 +30,16 @@ const CATEGORY_NAMES: [&str; N_CATEGORIES] = [
     "imputed",
 ];
 
-/// Aggregate per-scenario cost data across all MPI ranks and compute the
-/// final [`SimulationSummary`].
+/// Aggregate per-scenario cost data across all MPI ranks into a
+/// [`SimulationSummary`] that is identical on all ranks.
 ///
-/// Uses `allgatherv` to collect all scenario costs on all ranks (the
-/// `Communicator` trait has no `gatherv`), then computes global statistics
-/// locally on each rank from the gathered data. The returned
-/// `SimulationSummary` is identical on all ranks.
-///
-/// # Arguments
-///
-/// - `local_costs` — per-scenario `(scenario_id, total_cost, category_costs)`
-///   from this rank's simulation forward pass.
-/// - `config` — provides `n_scenarios` (total across all ranks).
-/// - `comm` — communicator for collective operations.
-///
-/// # Returns
-///
-/// `Ok(SimulationSummary)` with:
-/// - `min_cost`, `max_cost` — from `allreduce` (identical on all ranks).
-/// - `mean_cost`, `std_cost`, `cvar`, `category_stats` — computed from the
-///   `allgatherv` result (identical on all ranks).
-/// - `n_scenarios` — actual count gathered across all ranks (equals `config.n_scenarios`).
-/// - `cvar_alpha` — hardcoded to `0.95`.
-/// - `deficit_frequency`, `total_deficit_mwh`, `total_spillage_mwh` — `0.0`
-///   (deferred: requires per-stage deficit/spillage accumulation in the
-///   simulation forward pass).
+/// `deficit_frequency`, `total_deficit_mwh`, and `total_spillage_mwh` are `0.0`:
+/// deferred, pending per-stage deficit/spillage accumulation in the forward pass.
 ///
 /// # Errors
 ///
 /// Returns `Err(SimulationError::IoError { message })` if any collective
-/// operation (`allreduce`, `allgatherv`) fails. The `message` includes the
-/// operation name and the underlying `CommError` display string.
+/// operation (`allreduce`, `allgatherv`) fails.
 ///
 /// # Examples
 ///
@@ -134,7 +75,6 @@ pub fn aggregate_simulation<C: Communicator>(
     let num_ranks = comm.size();
     let n_local = local_costs.len();
 
-    // Global min/max via allreduce.
     let (local_min, local_max) = compute_local_min_max(local_costs);
     let mut global_min_buf = [0.0_f64];
     let mut global_max_buf = [0.0_f64];
@@ -149,7 +89,7 @@ pub fn aggregate_simulation<C: Communicator>(
     let global_min = global_min_buf[0];
     let global_max = global_max_buf[0];
 
-    // Gather per-rank scenario counts to compute displacements.
+    // Per-rank scenario counts give the displacement layout for the data gather.
     #[allow(clippy::cast_possible_truncation)]
     let counts_send = [n_local as u64];
     let mut counts_recv = vec![0u64; num_ranks];
@@ -165,7 +105,6 @@ pub fn aggregate_simulation<C: Communicator>(
         message: format!("allgatherv(counts) failed: {e}"),
     })?;
 
-    // Gather total costs across ranks.
     let (cost_displs, total_gathered) = compute_displs_and_total(&counts_recv);
     let cost_send: Vec<f64> = local_costs.iter().map(|(_, c, _)| *c).collect();
     let mut cost_recv = vec![0.0_f64; total_gathered];
@@ -183,12 +122,10 @@ pub fn aggregate_simulation<C: Communicator>(
         "gathered scenario count must match configured n_scenarios"
     );
 
-    // Compute aggregate statistics from gathered costs.
     let n = total_gathered;
     let (mean_cost, std_cost) = compute_mean_std(&cost_recv);
     let cvar = compute_cvar(&cost_recv, CVAR_ALPHA);
 
-    // Gather per-category costs (stride N_CATEGORIES).
     let cat_send = pack_category_costs(local_costs);
     let cat_send_count = n_local * N_CATEGORIES;
     let cat_counts: Vec<usize> = counts_recv
@@ -210,7 +147,6 @@ pub fn aggregate_simulation<C: Communicator>(
             message: format!("allgatherv(categories) failed: {e}"),
         })?;
 
-    // Compute per-category statistics.
     let category_stats = compute_category_stats(&cat_recv, n);
 
     Ok(SimulationSummary {
@@ -250,11 +186,8 @@ fn compute_local_min_max(local_costs: &[(u32, f64, ScenarioCategoryCosts)]) -> (
     (min, max)
 }
 
-/// Compute prefix-sum displacements from per-rank element counts.
-///
-/// Returns `(displs, total)` where `displs[r]` is the offset in the receive
-/// buffer at which rank `r`'s data starts, and `total` is the total number
-/// of elements across all ranks.
+/// Prefix-sum displacements from per-rank counts: `(displs, total)`, where
+/// `displs[r]` is rank `r`'s start offset in the receive buffer.
 fn compute_displs_and_total(counts_recv: &[u64]) -> (Vec<usize>, usize) {
     let mut displs = Vec::with_capacity(counts_recv.len());
     let mut offset = 0usize;
@@ -307,13 +240,10 @@ fn compute_cvar(costs: &[f64], alpha: f64) -> f64 {
         return 0.0;
     }
 
-    // Sort descending (worst first) into a scratch buffer.
     let mut sorted = costs.to_vec();
     sorted.sort_by(|a, b| b.total_cmp(a));
 
-    // Use n - floor(alpha * n) to avoid floating-point imprecision in
-    // ceil((1 - alpha) * n). Both formulas are mathematically equivalent
-    // but this one avoids the double subtraction error.
+    // `n - floor(alpha * n)`, not `ceil((1 - alpha) * n)` — see fn doc.
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_sign_loss,
@@ -331,10 +261,8 @@ fn compute_cvar(costs: &[f64], alpha: f64) -> f64 {
     cvar
 }
 
-/// Pack per-category costs into a flat f64 buffer (stride [`N_CATEGORIES`]).
-///
-/// Layout per scenario (5 consecutive elements):
-/// `[resource_cost, recourse_cost, violation_cost, regularization_cost, imputed_cost]`
+/// Pack per-category costs into a flat f64 buffer, stride [`N_CATEGORIES`] in
+/// `CATEGORY_NAMES` order (the order `compute_category_stats` unpacks).
 fn pack_category_costs(local_costs: &[(u32, f64, ScenarioCategoryCosts)]) -> Vec<f64> {
     let mut buf = Vec::with_capacity(local_costs.len() * N_CATEGORIES);
     for (_, _, cats) in local_costs {
@@ -347,11 +275,9 @@ fn pack_category_costs(local_costs: &[(u32, f64, ScenarioCategoryCosts)]) -> Vec
     buf
 }
 
-/// Compute per-category statistics from a gathered flat buffer.
-///
-/// `cat_buf` has stride [`N_CATEGORIES`]: element `s * N_CATEGORIES + k` is
-/// category `k` for scenario `s`. Returns one [`CategoryCostStats`] per
-/// category in `CATEGORY_NAMES` order. Returns all-zero stats when `n == 0`.
+/// Compute per-category statistics from the gathered flat buffer (stride
+/// [`N_CATEGORIES`]: element `s * N_CATEGORIES + k` is category `k` of scenario
+/// `s`), one [`CategoryCostStats`] per category in `CATEGORY_NAMES` order.
 fn compute_category_stats(cat_buf: &[f64], n: usize) -> Vec<CategoryCostStats> {
     let mut stats = Vec::with_capacity(N_CATEGORIES);
 

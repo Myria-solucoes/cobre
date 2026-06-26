@@ -1,61 +1,23 @@
-//! Probe: measure populated cut counts per stage after a single SDDP
-//! iteration with today's cut-selection kernel.
+//! Probe: print populated (`K`) and active (`A`) cut counts per stage after a
+//! single SDDP iteration. A one-shot diagnostic, not a registered test/CI target.
 //!
-//! The probe is a one-off diagnostic that runs **one** training iteration
-//! against a user-supplied study config and prints, for every stage,
-//! the number of populated cuts (`K`) and the number of active cuts (`A`)
-//! held in the future cost function pool. The output drives sizing decisions
-//! for downstream verification work (disaggregated determinism fixtures
-//! and production-scale benchmarks).
-//!
-//! ## Why one iteration
-//!
-//! Today's kernel makes a multi-iteration disaggregated run prohibitively
-//! expensive — a single iteration's selection cost is bearable (~5–10 s on
-//! a 64-stage disaggregated case) and is enough to populate the pool to its
-//! iter-1 value, which is what the design's `K` estimate is derived from.
-//!
-//! ## Usage
+//! One iteration only: a multi-iteration disaggregated run is prohibitively
+//! expensive under the current cut-selection kernel, and iter-1 already
+//! populates the pool to the value the sizing estimate needs.
 //!
 //! ```text
 //! cargo build --release -p cobre-sddp --example probe_k_disaggregated
 //! ./target/release/examples/probe_k_disaggregated <study-config-path>
 //! ```
 //!
-//! Where `<study-config-path>` is the path to a `config.json` belonging to
-//! a disaggregated study case directory (the probe derives the case
-//! directory by taking the parent of the config path, mirroring the CLI's
-//! `cobre run <CASE_DIR>` convention).
+//! `<study-config-path>` is a `config.json`; the case directory is its parent
+//! (mirroring the CLI's `cobre run <CASE_DIR>` convention).
 //!
-//! ## Output
+//! Output on stdout: one `stage=<t> populated_count=<K> active_count=<A>` line
+//! per stage, then a `summary D=<D> M=<M> max_K=… mean_K=… min_K=…` line.
 //!
-//! One line per stage on stdout:
-//!
-//! ```text
-//! stage=<t> populated_count=<K> active_count=<A>
-//! ```
-//!
-//! Followed by a trailing summary line:
-//!
-//! ```text
-//! summary D=<D> M=<M> max_K=<max> mean_K=<mean> min_K=<min>
-//! ```
-//!
-//! Where `D` is the state dimension, `M` is the configured trial-point
-//! count (forward passes per iteration), and `max/mean/min_K` are the
-//! summary statistics across stages.
-//!
-//! ## Exit codes
-//!
-//! - `0`: success.
-//! - `2`: bad arguments (missing positional or `--help`).
-//! - `3`: training completed but no pools were populated (defensive safety net).
-//! - other: non-zero on any error during loading or training.
-//!
-//! ## Scope
-//!
-//! Not registered as a workspace test or CI target — this is a one-shot
-//! diagnostic, not a regression check.
+//! Exit codes: `0` success; `2` bad arguments; `3` training ran but no pool was
+//! populated; non-zero otherwise.
 
 #![allow(
     clippy::expect_used,
@@ -80,7 +42,7 @@ use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_
 #[cfg(feature = "highs")]
 use cobre_solver::highs::HighsSolver;
 
-/// Force the probe to run exactly one SDDP iteration.
+/// Iteration cap for the probe.
 #[cfg(feature = "highs")]
 const PROBE_MAX_ITERATIONS: u32 = 1;
 
@@ -107,14 +69,9 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Drive the single-iteration probe. Returns an [`ExitCode`] on error so the
-/// caller can propagate it; returns `Ok(())` on success.
+/// Drive the single-iteration probe.
 #[cfg(feature = "highs")]
 fn run_probe(config_path: &Path) -> Result<(), ExitCode> {
-    // The CLI accepts a case directory and looks for `config.json` inside it;
-    // we accept the config path directly and derive the case directory as
-    // the parent of the config file (matching the CLI's `<case_dir>/config.json`
-    // convention).
     let case_dir = match config_path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
         _ => {
@@ -139,12 +96,8 @@ fn run_probe(config_path: &Path) -> Result<(), ExitCode> {
         ExitCode::from(2)
     })?;
 
-    // Force a single SDDP iteration regardless of what the config file
-    // specifies. Overriding the stopping rule (rather than mutating
-    // `setup.loop_params.max_iterations` after construction) ensures the
-    // FCF cut pool is sized for one iteration's worth of cuts instead of
-    // the full configured budget — significantly less memory pressure on
-    // the host running the probe.
+    // Override the stopping rule (not `loop_params.max_iterations` post-construction)
+    // so the FCF cut pool is sized for one iteration's cuts, not the full budget.
     config.training.stopping_rules = Some(vec![StoppingRuleConfig::IterationLimit {
         limit: PROBE_MAX_ITERATIONS,
     }]);
@@ -172,10 +125,8 @@ fn run_probe(config_path: &Path) -> Result<(), ExitCode> {
         ExitCode::from(1)
     })?;
 
-    // Belt-and-suspenders: even though we already capped the stopping rule,
-    // explicitly force `loop_params.max_iterations` to the probe's value so
-    // any future code path that reads it directly cannot accidentally run
-    // a multi-iteration probe.
+    // Redundant with the stopping-rule cap above, guarding any path that reads
+    // max_iterations directly.
     setup.loop_params.max_iterations = u64::from(PROBE_MAX_ITERATIONS);
 
     let comm = LocalBackend;
@@ -208,17 +159,15 @@ fn run_probe(config_path: &Path) -> Result<(), ExitCode> {
     }
 }
 
-/// Outcome of [`print_pool_report`]: either the report printed normally, or
-/// every stage pool was empty (caller should exit with code 3).
+/// Outcome of [`print_pool_report`].
 #[cfg(feature = "highs")]
 enum PoolReport {
     Ok,
     EmptyPools,
 }
 
-/// Format per-stage `populated_count` / `active_count` lines and the trailing
-/// summary line. Returns [`PoolReport::EmptyPools`] if every pool is empty
-/// (which should not happen at disaggregated scale).
+/// Print the per-stage and summary lines. Returns [`PoolReport::EmptyPools`] if
+/// every pool is empty.
 #[cfg(feature = "highs")]
 fn print_pool_report(setup: &StudySetup) -> PoolReport {
     let pools = &setup.fcf.pools;
@@ -249,13 +198,11 @@ fn print_pool_report(setup: &StudySetup) -> PoolReport {
         return PoolReport::EmptyPools;
     }
 
-    // `pools.is_empty()` cannot hold (max_K == 0 path above would have caught it),
-    // so the divisor is non-zero.
+    // Non-zero divisor: the max_K == 0 branch above already returned if empty.
     let n_stages = pools.len() as u64;
     #[allow(clippy::cast_precision_loss)]
     let mean_k = total_k as f64 / n_stages as f64;
-    // If pools is empty min_K would still be usize::MAX — guard against that
-    // for cleaner output, although the max_K == 0 branch above already exits.
+    // Maps the unchanged usize::MAX sentinel to 0 (unreachable here, kept defensive).
     let min_k_out = if min_k == usize::MAX { 0 } else { min_k };
 
     println!("summary D={d} M={m} max_K={max_k} mean_K={mean_k:.2} min_K={min_k_out}");

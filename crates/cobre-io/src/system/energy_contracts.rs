@@ -169,7 +169,6 @@ pub fn parse_energy_contracts(path: &Path) -> Result<Vec<EnergyContract>, LoadEr
     Ok(convert_contracts(raw))
 }
 
-/// Validate all invariants on the raw deserialized contract data.
 fn validate_raw_contracts(raw: &RawContractFile, path: &Path) -> Result<(), LoadError> {
     validate_no_duplicate_contract_ids(&raw.contracts, path)?;
     for (i, contract) in raw.contracts.iter().enumerate() {
@@ -178,7 +177,6 @@ fn validate_raw_contracts(raw: &RawContractFile, path: &Path) -> Result<(), Load
     Ok(())
 }
 
-/// Check that no two contracts share the same `id`.
 fn validate_no_duplicate_contract_ids(
     contracts: &[RawContract],
     path: &Path,
@@ -196,9 +194,6 @@ fn validate_no_duplicate_contract_ids(
     Ok(())
 }
 
-/// Validate limits for contract at `contract_index`.
-///
-/// Checks: `min_mw >= 0.0`, `max_mw >= 0.0`, `max_mw >= min_mw`.
 fn validate_contract_limits(
     limits: &RawContractLimits,
     contract_index: usize,
@@ -231,8 +226,6 @@ fn validate_contract_limits(
     Ok(())
 }
 
-/// Convert validated raw contract data into `Vec<EnergyContract>`, sorted by
-/// `id` ascending.
 fn convert_contracts(raw: RawContractFile) -> Vec<EnergyContract> {
     let mut contracts: Vec<EnergyContract> = raw
         .contracts
@@ -251,7 +244,6 @@ fn convert_contracts(raw: RawContractFile) -> Vec<EnergyContract> {
                 entry_stage_id: raw_contract.entry_stage_id,
                 exit_stage_id: raw_contract.exit_stage_id,
                 price_per_mwh: raw_contract.price_per_mwh,
-                // Flatten nested limits object into flat fields.
                 min_mw: raw_contract.limits.min_mw,
                 max_mw: raw_contract.limits.max_mw,
             }
@@ -315,7 +307,6 @@ mod tests {
 
         assert_eq!(contracts.len(), 2);
 
-        // Contract 0: import
         assert_eq!(contracts[0].id, EntityId(0));
         assert_eq!(contracts[0].name, "Importação Argentina");
         assert_eq!(contracts[0].bus_id, EntityId(5));
@@ -326,7 +317,6 @@ mod tests {
         assert!((contracts[0].min_mw - 0.0).abs() < f64::EPSILON);
         assert!((contracts[0].max_mw - 1000.0).abs() < f64::EPSILON);
 
-        // Contract 1: export with negative price (revenue) and stage bounds
         assert_eq!(contracts[1].id, EntityId(1));
         assert_eq!(contracts[1].name, "Exportação Uruguai");
         assert_eq!(contracts[1].contract_type, ContractType::Export);

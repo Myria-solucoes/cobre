@@ -1,9 +1,7 @@
 //! `cobre schema export [--output-dir DIR]` subcommand.
 //!
-//! Generates JSON Schema files for all user-facing case directory input types
-//! and writes them to the specified output directory. The subcommand uses a
-//! nested `export` sub-subcommand to leave room for future additions such as
-//! `cobre schema validate` or `cobre schema list`.
+//! Generates JSON Schema files for all user-facing case directory input types.
+//! `export` is a sub-subcommand to leave room for future `validate`/`list` siblings.
 
 use std::path::PathBuf;
 
@@ -40,7 +38,7 @@ pub struct ExportArgs {
     pub output_dir: PathBuf,
 }
 
-/// Execute the `schema` subcommand by dispatching to the appropriate operation.
+/// Execute the `schema` subcommand.
 ///
 /// # Errors
 ///
@@ -54,7 +52,6 @@ pub fn execute(args: SchemaArgs) -> Result<(), CliError> {
     }
 }
 
-/// Write all generated schemas to `args.output_dir`.
 fn execute_export(args: &ExportArgs) -> Result<(), CliError> {
     let output_dir = &args.output_dir;
 

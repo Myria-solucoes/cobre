@@ -30,8 +30,8 @@ Transfer strength tracks **(machine reader) × (low teaching mandate)**.
 | **`.claude/rules/*`, architecture-rules.md** | agent + maintainer                                     | **near-total**: machine-consumed contracts; same as code-adjacent docs.                                                                                          |
 | **CHANGELOG / THIRD_PARTY_NOTICES / CoC**    | release / license / community                          | **strong** for Plan-leakage; Provenance **inverted** (CHANGELOG _is_ history — the carve-out); Durability adapted (NOTICES is a maintained single-owner mirror). |
 | **CONTRIBUTING.md**                          | external contributors                                  | **adapted**: every path/command/flag must resolve; Self-executable-instruction applies; teaching repetition is signal, not bloat.                                |
-| **README.md**                                | newcomers / evaluators                                 | **adapted**: Plan-leakage full; Durability in spirit; narrative/promotional voice is the job (Length N/A).                                                       |
-| **book/**                                    | end users (modelers)                                   | **adapted**: executable-claim integrity dominates the real debt; teaching mandate supersedes Length/Voice.                                                       |
+| **README.md**                                | newcomers / evaluators                                 | **adapted**: Plan-leakage full; Durability in spirit; narrative/teaching voice is the job, **promotional/hype voice is not (§5)**; Length N/A.                   |
+| **book/**                                    | end users (modelers)                                   | **adapted**: executable-claim integrity dominates the real debt; teaching mandate supersedes Length; **the §5 anti-hype voice register applies**.                |
 
 ### Which of the six concerns transfer
 
@@ -46,11 +46,16 @@ Transfer strength tracks **(machine reader) × (low teaching mandate)**.
     history by design (the standing carve-out). Forward-looking "planned" status
     prose is a legitimate register but a future stale-snapshot vector.
 - **Does NOT transfer (out of scope for prose):**
-  - **Voice machinery** (Four Voices, Intra-Comment Surgery, banned Narrator) —
-    category error; the prose reader cannot see a contract/rationale seam, and
-    the banned Narrator voice is the _correct_ register for README/book/CoC/CONTRIBUTING.
-    These concerns are governed by `.claude/rules/comments.md` for `.rs` files and
-    do not apply to Markdown prose.
+  - **Voice machinery** (the Four Voices, Intra-Comment Surgery, the contract/
+    rationale-seam distinction) — category error; the prose reader cannot see a
+    code seam. The teaching/narrative register (explaining, second-person
+    instructions, worked examples) is the _correct_ register for README/book/CoC/
+    CONTRIBUTING. These structural concerns are governed by
+    `.claude/rules/comments.md` for `.rs` files and do not apply to Markdown prose.
+  - **Caveat — this does NOT exempt voice.** "Narrative is the correct register"
+    is not a licence for **promotional / marketing voice**. Hype is a distinct,
+    in-scope concern governed by §5 below; it transfers with force to every
+    user-facing doc, README included.
   - **Strict Truth-density / Length** — superseded by the teaching mandate. Prose
     docs legitimately repeat, explain, and elaborate; the Length heuristic from
     `comments.md` does not transfer here.
@@ -145,13 +150,66 @@ A code comment is co-located with one code site, so these cannot arise there:
 ### Directives
 
 - **Do** name the external contract (filename, flag, config field, path).
-- **Do** state the invariant when no machine can pin the count.
+- **Do** default to deleting a number and stating the invariant. Pin a literal
+  with a generator/guard ONLY where one must appear (schema export, version,
+  MSRV). Invariant-first is the strict default, not a preference.
 - **Do** flag audience-bleed: if a reader of this doc would not recognize a term,
   it belongs in a different doc or needs a signpost.
 - **Do not** freeze a COUNT, VERSION, ENUMERATION, or run-snapshot NUMBER without
-  a guard.
+  a guard — this includes a "typical"/"common in practice"/"usually ~N" value, a
+  single-run benchmark (speedup, timing, memory), and a structural census (crate /
+  test / field / option / case counts), **even when correct today**. State the
+  mechanism or rule; cite a regenerable artifact for measurements.
+- **Do not** ship promotional/marketing voice in user-facing prose (§5).
 - **Do not** add prose that only makes sense to a reader familiar with internal
   plan structure (`Epic N`, `ticket-NNN`, `workstream F-NNN`).
 - **Do not** conflate the scope bound: the path/link checker (when wired) checks
   repo-relative prefixes only — treat external `cobre-docs` citations as
   intentionally unresolvable from this repo.
+
+---
+
+## 5. Voice register — sober reference, not marketing
+
+`book/`, `README.md`, and the other narrative docs **teach**; they do not **sell**.
+The teaching/narrative register (§1) is welcome — explain, address the reader
+directly, walk through worked examples. **Promotional / marketing register is
+not.** A reader should never feel pitched to. Capabilities and mechanisms are
+stated as facts; the specifics carry the weight, not the adjectives.
+
+### Banned constructs (delete, or rewrite to a plain factual statement)
+
+- **Hype adjectives / superlatives** — "powerful", "blazing-fast", "seamless",
+  "cutting-edge", "world-class", "production-grade", "robust", "high-fidelity",
+  "Fastest", "smallest possible", and "zero-cost" / "zero-overhead" used as a
+  _claim_. State the concrete property (e.g. "compiles to a no-op after inlining",
+  with the basis) or say nothing.
+- **Contrasting-affirmative / inflation** — "not just X, it's Y", "more than a
+  Z", "isn't merely…", "X reimagined", "delivers a full …".
+- **Unsubstantiated quality claims** — any adjective asserting goodness with no
+  checkable basis _on the same page_. If the basis exists, state it; if it lives
+  elsewhere, link it; otherwise drop the adjective.
+- **Excitement / emotion framing** — "The performance benefit is meaningful:",
+  "the frustrating … cycle", exclamation marks, and branded slogans as headings
+  ("The honest representation principle").
+- **Reader-minimizers** — "simply", "just", "easily", "obviously", "of course",
+  "trivial". They hide difficulty and condescend.
+- **Vague value words** — "modern infrastructure", "best practices",
+  "industry-standard", "leverages" with no specific referent.
+
+### Allowed (these are NOT hype — keep)
+
+- Accurate, checkable technical descriptors: "deterministic", "type-safe",
+  "zero-copy" (when literally true and load-bearing), "single-process",
+  "RAII-managed", "ahead-of-time".
+- Teaching scaffolding and second-person instructions ("run", "you will need").
+- Comparative facts stated **as facts**, with the mechanism or a reference —
+  "warm-starting reuses the prior basis, so subsequent solves do fewer pivots" —
+  not as selling points ("dramatically faster").
+
+### The deletion test for voice
+
+Delete the adjective or clause. If the sentence still states a true, checkable
+fact about _what the software does_, the deletion was correct. If it only lost
+enthusiasm, it was hype. Keep a quality word **only** when its basis sits on the
+page or one link away.

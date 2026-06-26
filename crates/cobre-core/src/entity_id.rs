@@ -1,7 +1,4 @@
 //! Strongly-typed entity identifier used across all entity collections.
-//!
-//! [`EntityId`] wraps an `i32` (the type used in JSON input schemas) and
-//! prevents accidental confusion between entity IDs and collection indices.
 
 use core::fmt;
 

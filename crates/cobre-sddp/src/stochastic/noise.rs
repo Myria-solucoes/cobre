@@ -1,9 +1,7 @@
 //! Shared noise transformation functions for the LP patching hot path.
 //!
-//! Both [`transform_inflow_noise`] and [`transform_load_noise`] convert raw
-//! PAR(p) or normal noise samples into the patched RHS values that are written
-//! into the stage LP before each solve.  Extracting them here eliminates the
-//! class of bugs where one call site receives a fix and others are forgotten.
+//! Single home for the noise→RHS transforms so a fix to one applies to every
+//! call site (forward, backward, lower-bound).
 
 use cobre_core::temporal::StageLagTransition;
 use cobre_stochastic::{StochasticContext, evaluate_par_batch, solve_par_noise_batch};
@@ -16,11 +14,9 @@ use crate::{
 
 /// Compute effective (possibly clamped) eta for each hydro.
 ///
-/// When truncation is active and any PAR(p) inflow is negative, clamps each
-/// negative hydro's eta upward to the floor that produces zero inflow.
-/// Otherwise writes raw eta unchanged.
-///
-/// For non-truncation methods (`None`, `Penalty`), writes raw eta directly.
+/// Under truncation, when any PAR(p) inflow would be negative each negative
+/// hydro's eta is raised to `eta_floor` (the value producing zero inflow);
+/// other methods pass raw eta through.
 pub(crate) fn compute_effective_eta(
     raw_noise: &[f64],
     n_hydros: usize,
@@ -51,13 +47,12 @@ pub(crate) fn compute_effective_eta(
     }
 }
 
-/// Transform raw inflow noise `η` into patched water-balance RHS values.
-///
-/// Writes `noise_buf[h] = base_rhs + noise_scale[stage * n_hydros + h] * η_effective[h]`
-/// for each hydro, where `η_effective` is clamped when truncation is active
-/// and negative inflow would occur.
-///
-/// No heap allocations; all scratch work uses pre-allocated buffers from `scratch`.
+/// Transform raw inflow noise `η` into patched water-balance RHS values,
+/// applying [`compute_effective_eta`] clamping under truncation.
+// Rationale: clippy::similar_names flags the role-(a) `state` handle (bound from
+// `training_ctx.state`) next to the `stage` index; both are established names, so
+// renaming either to satisfy the heuristic would obscure intent.
+#[allow(clippy::similar_names)]
 pub(crate) fn transform_inflow_noise(
     raw_noise: &[f64],
     stage: usize,
@@ -73,38 +68,32 @@ pub(crate) fn transform_inflow_noise(
     let noise_scale = ctx.noise_scale;
     let inflow_method = training_ctx.inflow_method;
     let stochastic = training_ctx.stochastic;
-    let indexer = training_ctx.indexer;
+    let state = training_ctx.state;
 
     scratch.noise_buf.clear();
     scratch.z_inflow_rhs_buf.clear();
 
-    // Pre-fetch PAR parameters for z-inflow RHS computation.
     let par_lp = stochastic.par();
     let has_par = par_lp.n_stages() > 0 && par_lp.n_hydros() == n_hydros;
 
-    // Precompute PAR inflows and eta floor for truncation methods.
-    // For None/Penalty, par_inflow_buf and eta_floor_buf are unused by
-    // compute_effective_eta (it copies raw eta directly).
     match inflow_method {
         InflowNonNegativityMethod::Truncation
         | InflowNonNegativityMethod::TruncationWithPenalty => {
-            let max_order = indexer.max_par_order;
+            let max_order = state.max_par_order;
             let lag_len = max_order * n_hydros;
             scratch.lag_matrix_buf.clear();
             scratch.lag_matrix_buf.resize(lag_len, 0.0);
             for h in 0..n_hydros {
                 for l in 0..max_order {
                     scratch.lag_matrix_buf[l * n_hydros + h] =
-                        current_state[indexer.inflow_lags.start + l * n_hydros + h];
+                        current_state[state.inflow_lags.start + l * n_hydros + h];
                 }
             }
 
             scratch.par_inflow_buf.clear();
             scratch.par_inflow_buf.resize(n_hydros, 0.0);
-            // `evaluate_par_batch` operates on the n_hydros PAR series only;
-            // `raw_noise` carries the full noise dimension (hydros + load buses
-            // + NCS). Slice to the hydro prefix to match the contract, exactly
-            // as the sibling `compute_effective_eta` call below does.
+            // raw_noise is [hydros | load | NCS]; slice the hydro prefix —
+            // evaluate_par_batch expects the n_hydros PAR series only.
             evaluate_par_batch(
                 par_lp,
                 stage,
@@ -130,7 +119,6 @@ pub(crate) fn transform_inflow_noise(
         InflowNonNegativityMethod::None | InflowNonNegativityMethod::Penalty => {}
     }
 
-    // Unified: compute effective eta then build RHS for all methods.
     compute_effective_eta(
         raw_noise,
         n_hydros,
@@ -146,7 +134,7 @@ pub(crate) fn transform_inflow_noise(
             .noise_buf
             .push(base_rhs + noise_scale[stage_offset + h] * eta_eff);
 
-        // Z-inflow RHS: base + sigma * eta_effective (m3/s, no zeta, no withdrawal).
+        // Z-inflow RHS in m3/s: no zeta, no withdrawal (unlike the water-balance RHS above).
         if has_par {
             let base = par_lp.deterministic_base(stage, h);
             let sigma = par_lp.sigma(stage, h);
@@ -157,97 +145,62 @@ pub(crate) fn transform_inflow_noise(
     }
 }
 
-/// Shift the lag portion of the outgoing state vector using realized inflow.
-///
-/// Shifts older lags backward, with newest lag = realized inflow from LP primal.
-/// No-op when `max_par_order == 0`. Zero heap allocations.
+/// Shift the lag portion of the outgoing state vector using realized inflow,
+/// newest lag set to the realized inflow from the LP primal.
 #[cfg(test)]
 pub(crate) fn shift_lag_state(
     state: &mut [f64],
     incoming_lags: &[f64],
     unscaled_primal: &[f64],
-    indexer: &crate::indexer::StageIndexer,
+    layout: &crate::indexer::StateLayout,
 ) {
-    let n_h = indexer.hydro_count;
-    let l_max = indexer.max_par_order;
+    let n_h = layout.hydro_count;
+    let l_max = layout.max_par_order;
     if l_max == 0 || n_h == 0 {
-        return; // No lags to shift
+        return;
     }
-    let lag_start = indexer.inflow_lags.start;
+    let lag_start = layout.inflow_lags.start;
     for h in 0..n_h {
-        let z_t_h = unscaled_primal[indexer.z_inflow.start + h];
-        // Shift older lags down (read from incoming_lags to avoid aliasing).
-        // incoming_lags is in lag-major layout: incoming_lags[lag * n_h + h].
+        let z_t_h = unscaled_primal[layout.z_inflow.start + h];
+        // Read from incoming_lags (lag-major: lag * n_h + h) to avoid aliasing state.
         for lag in (1..l_max).rev() {
             state[lag_start + lag * n_h + h] = incoming_lags[(lag - 1) * n_h + h];
         }
-        // Newest lag = realized inflow from z_h primal.
         state[lag_start + h] = z_t_h;
     }
 }
 
-/// Shift the lag portion of the outgoing state vector using pre-computed monthly inflows.
-///
-/// Private helper used by [`accumulate_and_shift_lag_state`] when finalizing a lag
-/// period. Takes a `monthly_inflows` slice of length `hydro_count` directly, avoiding
-/// the need to read z-inflow offsets from a full primal buffer.
-///
-/// The caller guarantees `monthly_inflows.len() >= indexer.hydro_count`.
-/// No heap allocations.
+/// Shift the lag state using pre-computed monthly inflows, newest lag set to
+/// `monthly_inflows[h]`. Caller guarantees `monthly_inflows.len() >= hydro_count`.
 fn shift_lag_state_from_inflows(
     state: &mut [f64],
     incoming_lags: &[f64],
     monthly_inflows: &[f64],
-    indexer: &crate::indexer::StageIndexer,
+    layout: &crate::indexer::StateLayout,
 ) {
-    let n_h = indexer.hydro_count;
-    let l_max = indexer.max_par_order;
-    let lag_start = indexer.inflow_lags.start;
+    let n_h = layout.hydro_count;
+    let l_max = layout.max_par_order;
+    let lag_start = layout.inflow_lags.start;
     for h in 0..n_h {
-        // Shift older lags down (read from incoming_lags to avoid aliasing).
-        // incoming_lags is in lag-major layout: incoming_lags[lag * n_h + h].
+        // Read from incoming_lags (lag-major: lag * n_h + h) to avoid aliasing state.
         for lag in (1..l_max).rev() {
             state[lag_start + lag * n_h + h] = incoming_lags[(lag - 1) * n_h + h];
         }
-        // Newest lag = weighted-average monthly inflow for this period.
         state[lag_start + h] = monthly_inflows[h];
     }
 }
 
-/// Shift the anticipated-state ring buffer and write the new decision.
+/// Shift the anticipated-state ring buffer down by one and write this stage's
+/// new commitment (MW) at slot `K_i - 1`, zero-padding slots `K_i..k_max`.
 ///
-/// For each anticipated thermal `i` with lead time `K_i`, performs:
+/// ## Inactive plants (horizon boundary and operation window)
 ///
-/// - **Slots `0..K_i-1`**: write `incoming_anticipated[(slot+1) * n_ant + i]`
-///   into `state[anticipated_state.start + slot * n_ant + i]` (shift down by
-///   one).  Slot 0 of the outgoing state holds what was slot 1 of the incoming
-///   state (the second-oldest commitment horizon).  The incoming slot 0
-///   (the oldest) falls out, consumed by the next-stage fishing constraint.
-///   At stage 0, slot 0 of the incoming state may carry a non-zero pre-horizon
-///   seed from `past_anticipated_commitments.values_mw[0]`; this is the normal
-///   case when the study has pre-horizon commitments and the seeding block in
-///   `setup/mod.rs` has populated the initial state.
-/// - **Slot `K_i - 1`**: write `unscaled_primal[anticipated_decision.start + i]`
-///   — the freshly-made commitment from this stage's solve, in MW.
-/// - **Slots `K_i..k_max`**: write `0.0` (deterministic padding for plants
-///   whose lead time is shorter than `k_max`).
-///
-/// No-op when `n_anticipated == 0` or `k_max == 0`.  Zero heap allocations.
-///
-/// ## Inactive plants (horizon boundary)
-///
-/// This function does not gate per-plant on the decision-active predicate
-/// (`stage_idx + K_i < n_stages`, see [`StageIndexer::anticipated_decision_active_at_stage`]).
-/// Inactive plants — those at stages where the LP did not emit a real
-/// decision column — rely on the LP builder pinning their decision column
-/// bounds to `[0.0, 0.0]` (matrix.rs:`fill_anticipated_decision_columns`).
-/// The unscaled primal at that column is therefore `0.0`, and writing `0.0`
-/// into slot `K_i - 1` is the correct ring-buffer transition: no new
-/// commitment was placed, so slot `K_i - 1` should hold zero. If a future
-/// change relaxes the `[0, 0]` invariant for inactive columns, this
-/// function must be updated to gate on the activation predicate.
-///
-/// [`StageIndexer::anticipated_decision_active_at_stage`]: crate::indexer::StageIndexer::anticipated_decision_active_at_stage
+/// This function does NOT gate per-plant on `is_anticipated_decision_active`; it
+/// relies on the LP builder pinning an inactive decision column to `[0, 0]`
+/// (`fill_anticipated_columns`) so the unscaled primal is `0.0` and writing it
+/// into slot `K_i - 1` is the correct no-commitment transition. If a future
+/// change relaxes the `[0, 0]` pin for inactive columns, this function must gate
+/// on the activation predicate instead.
 ///
 /// # Panics (debug only)
 ///
@@ -258,10 +211,11 @@ pub(crate) fn shift_anticipated_state(
     state: &mut [f64],
     incoming_anticipated: &[f64],
     unscaled_primal: &[f64],
-    indexer: &crate::indexer::StageIndexer,
+    layout: &crate::indexer::StateLayout,
+    anticipated_decision: &std::ops::Range<usize>,
 ) {
-    let n_ant = indexer.n_anticipated;
-    let k_max = indexer.k_max;
+    let n_ant = layout.n_anticipated;
+    let k_max = layout.k_max;
     if n_ant == 0 || k_max == 0 {
         return;
     }
@@ -273,26 +227,26 @@ pub(crate) fn shift_anticipated_state(
         incoming_anticipated.len(),
     );
     debug_assert!(
-        unscaled_primal.len() >= indexer.anticipated_decision.end,
+        unscaled_primal.len() >= anticipated_decision.end,
         "unscaled_primal too short for anticipated_decision range",
     );
-    let state_start = indexer.anticipated_state.start;
-    let decision_start = indexer.anticipated_decision.start;
-    for (plant, &k_i) in indexer.anticipated_lead_stages.iter().enumerate() {
+    // `anticipated_decision` must be THIS stage's range (its base is
+    // n_blks-dependent); a global stage-0 base misreads the decision column at
+    // any stage whose block count differs from stage 0's.
+    let state_start = layout.anticipated_state.start;
+    let decision_start = anticipated_decision.start;
+    for (plant, &k_i) in layout.anticipated_lead_stages.iter().enumerate() {
         debug_assert!(
             k_i >= 1,
             "K_i must be >= 1 (enforced by anticipation validation)"
         );
-        // Shift: slot s ← incoming slot s+1, for s in 0..K_i - 1.
         for slot in 0..(k_i - 1) {
             let dst = state_start + slot * n_ant + plant;
             let src = (slot + 1) * n_ant + plant;
             state[dst] = incoming_anticipated[src];
         }
-        // Write new decision at slot K_i - 1.
         let newest = state_start + (k_i - 1) * n_ant + plant;
         state[newest] = unscaled_primal[decision_start + plant];
-        // Zero padding for slots k_i..k_max (plants with K_i < k_max).
         for slot in k_i..k_max {
             let dst = state_start + slot * n_ant + plant;
             state[dst] = 0.0;
@@ -300,101 +254,70 @@ pub(crate) fn shift_anticipated_state(
     }
 }
 
-/// Mutable primary lag-accumulation buffers threaded through the hot path.
-///
-/// Groups `lag_accumulator` and `lag_weight_accum` so that
-/// [`accumulate_and_shift_lag_state`] stays within the 7-parameter budget.
+/// Primary lag-accumulation buffers, grouped to keep
+/// [`accumulate_and_shift_lag_state`] within the 7-parameter budget.
 pub(crate) struct LagAccumState<'a> {
-    /// Weighted-sum buffer, length `>= hydro_count`.
-    /// Holds the partial sum for the current primary lag period.
+    /// Weighted-sum buffer for the current primary lag period, length `>= hydro_count`.
     pub accumulator: &'a mut [f64],
     /// Total weight accumulated so far in the current primary lag period.
     pub weight_accum: &'a mut f64,
 }
 
-/// Mutable downstream accumulation buffers threaded through the hot path.
-///
-/// Groups the five downstream parameters so that
-/// [`accumulate_and_shift_lag_state`] stays within the 7-parameter budget.
+/// Downstream (coarser-resolution) accumulation buffers, grouped to keep
+/// [`accumulate_and_shift_lag_state`] within the 7-parameter budget.
 ///
 /// For uniform-resolution studies pass `accumulator: &mut []` (empty slice);
 /// all downstream code paths short-circuit on `accumulator.is_empty()`.
 pub(crate) struct DownstreamAccumState<'a> {
-    /// Weighted-sum accumulator buffer, length `>= hydro_count`.
-    /// Empty slice when `par_order == 0` — all downstream paths skip on `is_empty()`.
+    /// Weighted-sum accumulator buffer, length `>= hydro_count` (empty when `par_order == 0`).
     pub accumulator: &'a mut [f64],
     /// Accumulated weight for the current downstream lag period.
     pub weight_accum: &'a mut f64,
-    /// Slot-major ring buffer storing completed downstream lags.
-    /// Layout: `completed_lags[slot * n_h + h]`, slot 0 = oldest quarter.
-    /// Length `n_h * par_order` when `par_order > 0`, or empty.
+    /// Slot-major ring buffer (`completed_lags[slot * n_h + h]`, slot 0 = oldest
+    /// quarter), length `n_h * par_order` or empty.
     pub completed_lags: &'a mut [f64],
-    /// Number of completed downstream lags currently stored in the ring buffer
-    /// (capped at `par_order`).
+    /// Number of completed downstream lags in the ring buffer (capped at `par_order`).
     pub n_completed: &'a mut usize,
-    /// PAR order for the downstream (coarser) resolution.  `0` for
-    /// uniform-resolution studies; all downstream code paths are skipped.
+    /// PAR order for the downstream resolution; `0` for uniform-resolution studies.
     pub par_order: usize,
 }
 
-/// Accumulate this stage's inflow and, when a lag period finalizes, shift the lag state.
-///
-/// Replaces the direct `shift_lag_state` call for multi-resolution studies where
-/// stages may be shorter than the lag granularity (for example, weekly stages feeding
-/// a monthly lag slot).  The three-step logic:
-///
-/// 1. **Accumulate**: add `z_inflow[h] * stage_lag.accumulate_weight` to
-///    `lag_accumulator[h]` and `stage_lag.accumulate_weight` to `*lag_weight_accum`.
-/// 2. **Finalize** (only when `stage_lag.finalize_period && *lag_weight_accum > 0.0`):
-///    divide the accumulator by the total weight to get the weighted average, call
-///    [`shift_lag_state_from_inflows`] with those averages, then reset the accumulator.
-///    If `stage_lag.spillover_weight > 0.0`, seed the next period immediately.
-/// 3. **Non-finalizing stages**: `state` is left untouched (lags frozen).
+/// Accumulate this stage's inflow and, when a lag period finalizes, shift the
+/// lag state — supporting multi-resolution studies where stages are shorter than
+/// the lag granularity (e.g. weekly stages feeding a monthly lag slot).
 ///
 /// For the monthly identity case (`accumulate_weight=1.0, spillover_weight=0.0,
-/// finalize_period=true`) the function produces bit-for-bit identical results to
-/// `shift_lag_state`.
-///
-/// **Zero heap allocation.** All scratch work is performed in `lag.accumulator`,
-/// which is overwritten with the monthly averages during finalization before being
-/// reset.
+/// finalize_period=true`) this produces bit-for-bit identical results to
+/// [`shift_lag_state`].
 ///
 /// # Panics (debug only)
 ///
-/// Panics in debug builds if `lag.accumulator.len() < indexer.hydro_count`.
+/// Panics in debug builds if `lag.accumulator.len() < layout.hydro_count`.
 ///
 /// # Downstream accumulation (multi-resolution studies)
 ///
-/// When `ds.accumulator` is non-empty (i.e., `ds.par_order > 0`), the function
-/// additionally maintains a coarser-resolution ring buffer in parallel with the
-/// primary accumulation. See [`DownstreamAccumState`] for field docs.
-///
-/// For uniform-resolution studies pass `ds.accumulator = &mut []` (empty slice).
-/// All downstream code paths are skipped via a single `is_empty()` guard,
-/// producing zero overhead.
+/// When `ds.accumulator` is non-empty, a coarser-resolution ring buffer is
+/// maintained in parallel; see [`DownstreamAccumState`] for the empty-slice
+/// (uniform-resolution) contract.
 ///
 /// # Anticipated-thermal state
 ///
-/// This function does NOT shift the `anticipated_state` ring buffer.
-/// Anticipated commitments advance once per LP stage regardless of
-/// `StageLagTransition.finalize_period` or `accumulate_downstream`,
-/// because the decision cadence equals the LP-stage cadence. The
-/// companion function `shift_anticipated_state` performs the shift; the
-/// stage driver (currently `forward.rs::run_forward_stage`) calls both
-/// functions in sequence, once per stage.
+/// Does NOT shift the `anticipated_state` ring buffer — that cadence equals the
+/// LP-stage cadence, not the lag cadence. The stage driver calls the companion
+/// [`shift_anticipated_state`] separately, once per stage.
 pub(crate) fn accumulate_and_shift_lag_state(
     state: &mut [f64],
     incoming_lags: &[f64],
     unscaled_primal: &[f64],
-    indexer: &crate::indexer::StageIndexer,
+    layout: &crate::indexer::StateLayout,
     stage_lag: &StageLagTransition,
     lag: &mut LagAccumState<'_>,
     ds: &mut DownstreamAccumState<'_>,
 ) {
-    let n_h = indexer.hydro_count;
-    let l_max = indexer.max_par_order;
+    let n_h = layout.hydro_count;
+    let l_max = layout.max_par_order;
     if l_max == 0 || n_h == 0 {
-        return; // No lags to shift — identical early-return guard as shift_lag_state
+        return; // same early-return guard as shift_lag_state
     }
 
     debug_assert!(
@@ -403,19 +326,15 @@ pub(crate) fn accumulate_and_shift_lag_state(
         lag.accumulator.len()
     );
 
-    let z_start = indexer.z_inflow.start;
+    let z_start = layout.z_inflow.start;
 
-    // ── Step 1: Primary accumulate ────────────────────────────────────────────
-    // Must happen unconditionally before finalize check, so this stage's
-    // contribution is included in the average.
+    // Accumulate before the finalize check so this stage is in the average.
     let w = stage_lag.accumulate_weight;
     for h in 0..n_h {
         lag.accumulator[h] += unscaled_primal[z_start + h] * w;
     }
     *lag.weight_accum += w;
 
-    // ── Step 1b: Downstream accumulate (multi-resolution only) ───────────────
-    // Guard on empty slice: zero overhead for uniform studies.
     if !ds.accumulator.is_empty() && stage_lag.accumulate_downstream {
         debug_assert!(
             ds.accumulator.len() >= n_h,
@@ -441,14 +360,11 @@ pub(crate) fn accumulate_and_shift_lag_state(
                 *v *= inv;
             }
 
-            // Push weighted average into the ring buffer.
-            // Slot 0 = oldest completed quarter; slots fill in order.
             let slot = (*ds.n_completed).min(ds.par_order.saturating_sub(1));
             let offset = slot * n_h;
             ds.completed_lags[offset..offset + n_h].copy_from_slice(&ds.accumulator[..n_h]);
             *ds.n_completed = (*ds.n_completed + 1).min(ds.par_order);
 
-            // Reset downstream accumulator, optionally seeding spillover.
             if stage_lag.downstream_spillover_weight > 0.0 {
                 let dsw = stage_lag.downstream_spillover_weight;
                 for h in 0..n_h {
@@ -462,46 +378,37 @@ pub(crate) fn accumulate_and_shift_lag_state(
         }
     }
 
-    // ── Rebuild from downstream (transition stage) ────────────────────────────
-    // At the first quarterly stage, overwrite the primary lag state with the
-    // completed quarterly lags from the downstream ring buffer, then return
-    // (skipping the primary finalize which would overwrite with monthly data).
+    // Rebuild from the downstream ring buffer and return, skipping the primary
+    // finalize below — which would overwrite the lags with monthly data.
     if stage_lag.rebuild_from_downstream && *ds.n_completed > 0 {
         let n_fill = (*ds.n_completed).min(l_max);
         for lag_idx in 0..n_fill {
-            // Ring buffer is slot-major. Slot 0 = oldest. Newest lag = slot n_completed-1.
-            // state lag layout: state[lag_start + lag_idx * n_h + h]
-            //   lag_idx=0 → newest (slot n_completed-1), lag_idx=1 → second newest, …
+            // lag_idx 0 = newest = slot n_completed-1, descending into older slots.
             let src_slot = *ds.n_completed - 1 - lag_idx;
             let src_offset = src_slot * n_h;
-            let dst_offset = indexer.inflow_lags.start + lag_idx * n_h;
+            let dst_offset = layout.inflow_lags.start + lag_idx * n_h;
             state[dst_offset..dst_offset + n_h]
                 .copy_from_slice(&ds.completed_lags[src_offset..src_offset + n_h]);
         }
-        // Reset downstream state — all completed quarterly lags consumed.
         *ds.n_completed = 0;
         ds.completed_lags.fill(0.0);
         if !ds.accumulator.is_empty() {
             ds.accumulator[..n_h].fill(0.0);
         }
         *ds.weight_accum = 0.0;
-        return; // Lag state fully rebuilt; skip primary finalize.
+        return;
     }
 
-    // ── Step 2: Primary finalize (if this stage closes a lag period) ──────────
     if stage_lag.finalize_period && *lag.weight_accum > 0.0 {
-        // Overwrite lag.accumulator[h] with the weighted-average monthly inflow.
-        // The original accumulated sum is not needed after this point.
+        // Overwrite accumulator in place with the weighted average (sum no longer needed).
         let inv = 1.0 / *lag.weight_accum;
         for v in &mut lag.accumulator[..n_h] {
             *v *= inv;
         }
 
-        shift_lag_state_from_inflows(state, incoming_lags, lag.accumulator, indexer);
+        shift_lag_state_from_inflows(state, incoming_lags, lag.accumulator, layout);
 
-        // ── Reset accumulator, then optionally seed spillover ─────────────────
-        // Spillover uses the RAW z_inflow (not the averaged value), because it
-        // is this stage's contribution to the NEXT lag period.
+        // Spillover seeds the NEXT period with RAW z_inflow, not the averaged value.
         if stage_lag.spillover_weight > 0.0 {
             let sw = stage_lag.spillover_weight;
             for h in 0..n_h {
@@ -513,14 +420,11 @@ pub(crate) fn accumulate_and_shift_lag_state(
             *lag.weight_accum = 0.0;
         }
     }
-    // ── Step 3: Non-finalizing stage ─────────────────────────────────────────
-    // Lags frozen — state is not modified. Accumulation already applied above.
+    // Non-finalizing stages leave the lag state frozen (accumulation applied above).
 }
 
-/// Transform raw load noise `η` into patched load-balance RHS values.
-///
-/// Writes `(mean + std * η).max(0.0) * block_factor` for each load bus and block.
-/// Clamped to zero so load demand is never negative. No heap allocations.
+/// Transform raw load noise `η` into patched load-balance RHS values, one per
+/// load bus and block, clamped at zero so load demand is never negative.
 pub(crate) fn transform_load_noise(
     raw_noise: &[f64],
     n_hydros: usize,
@@ -547,10 +451,8 @@ pub(crate) fn transform_load_noise(
     }
 }
 
-/// Noise-vector offsets needed to locate the NCS slice within the raw noise array.
-///
-/// The shared raw noise vector is laid out as `[hydro noise | load noise | NCS noise]`.
-/// `n_hydros + n_load_buses` gives the start offset of the NCS section.
+/// Offsets locating the NCS slice in the raw noise vector, laid out as
+/// `[hydro noise | load noise | NCS noise]`.
 pub(crate) struct NcsNoiseOffsets {
     /// Number of hydro entries that precede the load slice.
     pub n_hydros: usize,
@@ -558,23 +460,18 @@ pub(crate) struct NcsNoiseOffsets {
     pub n_load_buses: usize,
 }
 
-/// Transform raw NCS noise into per-block column lower/upper bound values.
+/// Transform raw NCS noise into per-block column lower/upper bounds.
 ///
-/// For each NCS entity computes a per-scenario availability ratio
-/// `α = clamp(mean + std · η, 0, 1)`, then writes both column bounds:
+/// Availability `α = clamp(mean + std · η, 0, 1)` is a **dimensionless factor**;
+/// the realized cap is `max_gen · α · block_factor`. The parquet `(mean, std)`
+/// are stored as factors, not MW. (Authoritative home of this contract; see
+/// `.claude/rules/sddp.md`.)
 ///
-/// - `ncs_col_upper_buf[blk] = max_gen · α · block_factor`
-/// - `ncs_col_lower_buf[blk] = if allow_curtailment { 0 } else { upper }`
-///
-/// When `allow_curtailment[i] == false` the lower bound matches the upper
-/// bound so the source is dispatched at exactly the realized availability
-/// on every scenario — the **must-run** regime for non-simulated aggregate
-/// generation pre-netted from load. When
-/// `allow_curtailment[i] == true` the lower bound is zero and the LP can
-/// curtail at `curtailment_cost` per `MWh`.
-///
-/// The `offsets` bundle encodes the raw-noise vector layout (`n_hydros +
-/// n_load_buses` gives the start of the NCS slice).
+/// With `allow_curtailment == false` the lower bound equals the upper bound, so
+/// the source must run at exactly the realized availability (aggregate
+/// generation pre-netted from load); with `true` the lower bound is zero and the
+/// LP may curtail. The NCS slice within the raw-noise vector is located via
+/// [`NcsNoiseOffsets`].
 ///
 /// # Panics
 ///
@@ -622,6 +519,77 @@ pub(crate) fn transform_ncs_noise(
     }
 }
 
+/// Rebuild the NCS column-index buffer for one stage's stochastic NCS columns.
+///
+/// Each column index strides by `dense_col[slot]` — the slot's NCS **system
+/// index** (dense column position), not the raw slot index: the dense column
+/// block is system-indexed, so striding by slot misaddresses the column whenever
+/// only a subset of NCS are stochastic or their orders diverge.
+///
+/// Callers rebuild lazily on a stage transition, when the per-stage NCS column
+/// start changes.
+pub(crate) fn build_dense_ncs_col_indices(
+    dense_col: &[usize],
+    ncs_col_start: usize,
+    block_count: usize,
+    indices_out: &mut Vec<usize>,
+) {
+    indices_out.clear();
+    for &col in dense_col {
+        for blk in 0..block_count {
+            indices_out.push(ncs_col_start + col * block_count + blk);
+        }
+    }
+}
+
+/// Gather the stochastic slots' NCS column bounds, forcing dormant slots to `[0, 0]`.
+///
+/// Copies each `transform_ncs_noise` block (one `block_count`-wide block per slot)
+/// into `lower_out` / `upper_out`, EXCEPT a commissioning-dormant slot (whose
+/// `windows[slot]` excludes `stage_id` per `commissioning_active`), whose block is
+/// forced to `[0, 0]`. The forbidden alternative — copying the stochastic cap for a
+/// dormant slot — would let a not-yet-commissioned source dispatch. The output runs
+/// parallel to [`build_dense_ncs_col_indices`] (equal length `windows.len() *
+/// block_count`) and reproduces the source buffers exactly when no slot is dormant.
+/// Refilled every opening (the bounds change each opening, unlike the index buffer).
+///
+/// # Panics
+///
+/// Panics in debug builds when `lower_src` or `upper_src` is shorter than
+/// `windows.len() * block_count`.
+pub(crate) fn gather_dense_ncs_bounds(
+    windows: &[(Option<i32>, Option<i32>)],
+    stage_id: i32,
+    block_count: usize,
+    lower_src: &[f64],
+    upper_src: &[f64],
+    lower_out: &mut Vec<f64>,
+    upper_out: &mut Vec<f64>,
+) {
+    lower_out.clear();
+    upper_out.clear();
+    debug_assert!(
+        lower_src.len() >= windows.len() * block_count,
+        "lower_src too short for windows: every slot strides by block_count",
+    );
+    debug_assert!(
+        upper_src.len() >= windows.len() * block_count,
+        "upper_src too short for windows: every slot strides by block_count",
+    );
+    for (slot, &(entry, exit)) in windows.iter().enumerate() {
+        if crate::lp_builder::commissioning_active(entry, exit, stage_id) {
+            let base = slot * block_count;
+            lower_out.extend_from_slice(&lower_src[base..base + block_count]);
+            upper_out.extend_from_slice(&upper_src[base..base + block_count]);
+        } else {
+            for _ in 0..block_count {
+                lower_out.push(0.0);
+                upper_out.push(0.0);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -654,11 +622,11 @@ mod tests {
     use crate::{
         context::{StageContext, TrainingContext},
         horizon_mode::HorizonMode,
-        indexer::StageIndexer,
         inflow_method::InflowNonNegativityMethod,
+        lp_builder::StageGeometry,
         noise::{
-            compute_effective_eta, shift_anticipated_state, shift_lag_state,
-            transform_inflow_noise, transform_load_noise,
+            build_dense_ncs_col_indices, compute_effective_eta, gather_dense_ncs_bounds,
+            shift_anticipated_state, shift_lag_state, transform_inflow_noise, transform_load_noise,
         },
         workspace::ScratchBuffers,
     };
@@ -705,6 +673,10 @@ mod tests {
             ncs_col_upper_buf: Vec::new(),
             ncs_col_lower_buf: Vec::new(),
             ncs_col_indices_buf: Vec::new(),
+            ncs_col_lower_active_buf: Vec::new(),
+            ncs_col_upper_active_buf: Vec::new(),
+            last_ncs_col_start: usize::MAX,
+            ncs_col_upper_extract_buf: Vec::new(),
             load_rhs_buf: Vec::new(),
             row_lower_buf: Vec::new(),
             z_inflow_rhs_buf: Vec::new(),
@@ -1022,9 +994,10 @@ mod tests {
     #[test]
     fn test_transform_inflow_noise_none_method() {
         let stochastic = make_one_hydro_stochastic(1);
-        // StageIndexer: 1 hydro, 0 PAR lags → n_state = 1
-        let indexer = StageIndexer::new(1, 0);
-        let current_state = vec![0.0; indexer.n_state];
+        // State layout: 1 hydro, 0 PAR lags → n_state = 1
+        let layout = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let current_state = vec![0.0; layout.n_state];
 
         // noise_scale[0] = 1.0, base_rhs = 5.0, eta = -3.0
         // expected: 5.0 + 1.0 * (-3.0) = 2.0
@@ -1037,6 +1010,7 @@ mod tests {
         let inflow_method = InflowNonNegativityMethod::None;
         let horizon = HorizonMode::Finite { num_stages: 1 };
         let ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &noise_scale,
@@ -1045,6 +1019,12 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1053,9 +1033,11 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &study_dims,
             inflow_method: &inflow_method,
             stochastic: &stochastic,
             initial_state: &current_state,
@@ -1097,8 +1079,9 @@ mod tests {
     fn test_transform_inflow_noise_truncation_clamps() {
         let stochastic = make_one_hydro_stochastic(1);
         // 1 hydro, 0 PAR lags
-        let indexer = StageIndexer::new(1, 0);
-        let current_state = vec![0.0; indexer.n_state];
+        let layout = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let current_state = vec![0.0; layout.n_state];
 
         // Very negative eta guarantees negative inflow (AR(0) with sigma=1).
         let raw_noise = vec![-5.0_f64];
@@ -1110,6 +1093,7 @@ mod tests {
         let inflow_method = InflowNonNegativityMethod::Truncation;
         let horizon = HorizonMode::Finite { num_stages: 1 };
         let ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &noise_scale,
@@ -1118,6 +1102,12 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1126,9 +1116,11 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &study_dims,
             inflow_method: &inflow_method,
             stochastic: &stochastic,
             initial_state: &current_state,
@@ -1170,8 +1162,9 @@ mod tests {
     #[test]
     fn test_transform_inflow_noise_truncation_passthrough() {
         let stochastic = make_one_hydro_stochastic(1);
-        let indexer = StageIndexer::new(1, 0);
-        let current_state = vec![0.0; indexer.n_state];
+        let layout = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let current_state = vec![0.0; layout.n_state];
 
         // eta = 3.0 → inflow = 1.0 * 3.0 = 3.0 > 0 → no clamping.
         let raw_noise = vec![3.0_f64];
@@ -1183,6 +1176,7 @@ mod tests {
         let inflow_method = InflowNonNegativityMethod::Truncation;
         let horizon = HorizonMode::Finite { num_stages: 1 };
         let ctx = StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &noise_scale,
@@ -1191,6 +1185,12 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1199,9 +1199,11 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
+        let study_dims = crate::indexer::test_fixtures::study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &study_dims,
             inflow_method: &inflow_method,
             stochastic: &stochastic,
             initial_state: &current_state,
@@ -1295,11 +1297,12 @@ mod tests {
 
     #[test]
     fn shift_lag_state_par0_is_noop() {
-        let indexer = StageIndexer::new(2, 0);
+        let _indexer = crate::indexer::test_fixtures::geom(2, 0);
+        let layout = crate::indexer::test_fixtures::state_layout(2, 0);
         let mut state = vec![100.0, 200.0]; // storage only, no lags
         let incoming_lags: Vec<f64> = vec![];
         let primal = vec![0.0; 10];
-        shift_lag_state(&mut state, &incoming_lags, &primal, &indexer);
+        shift_lag_state(&mut state, &incoming_lags, &primal, &layout);
         assert_eq!(
             state,
             vec![100.0, 200.0],
@@ -1310,26 +1313,28 @@ mod tests {
     #[test]
     fn shift_lag_state_par1_single_hydro() {
         // N=1, L=1: state = [v_out, lag0], inflow_lags.start = 1
-        let indexer = StageIndexer::new(1, 1);
+        let _indexer = crate::indexer::test_fixtures::geom(1, 1);
+        let layout = crate::indexer::test_fixtures::state_layout(1, 1);
         let mut state = vec![500.0, 99.0]; // v_out, stale lag
         let incoming_lags = vec![42.0]; // lag0 (lag-major: lag * n_h + h = 0*1+0 = 0)
         // z_inflow.start = N*(1+L) = 1*(1+1) = 2
         let mut primal = vec![0.0; 10];
-        primal[indexer.z_inflow.start] = 77.0; // Z_t for hydro 0
-        shift_lag_state(&mut state, &incoming_lags, &primal, &indexer);
+        primal[layout.z_inflow.start] = 77.0; // Z_t for hydro 0
+        shift_lag_state(&mut state, &incoming_lags, &primal, &layout);
         assert_eq!(state[1], 77.0, "lag[0] must be Z_t = 77.0");
     }
 
     #[test]
     fn shift_lag_state_par3_single_hydro() {
         // N=1, L=3: state = [v_out, lag0, lag1, lag2]
-        let indexer = StageIndexer::new(1, 3);
+        let _indexer = crate::indexer::test_fixtures::geom(1, 3);
+        let layout = crate::indexer::test_fixtures::state_layout(1, 3);
         let mut state = vec![500.0, 0.0, 0.0, 0.0];
         // incoming_lags in lag-major: [lag0, lag1, lag2] = [10.0, 20.0, 30.0]
         let incoming_lags = vec![10.0, 20.0, 30.0];
         let mut primal = vec![0.0; 20];
-        primal[indexer.z_inflow.start] = 55.0;
-        shift_lag_state(&mut state, &incoming_lags, &primal, &indexer);
+        primal[layout.z_inflow.start] = 55.0;
+        shift_lag_state(&mut state, &incoming_lags, &primal, &layout);
         // After shift: lag[0]=Z_t=55, lag[1]=incoming[0]=10, lag[2]=incoming[1]=20
         assert_eq!(state[1], 55.0, "lag[0] must be Z_t");
         assert_eq!(state[2], 10.0, "lag[1] must be incoming lag[0]");
@@ -1340,13 +1345,14 @@ mod tests {
     fn shift_lag_state_par1_two_hydros() {
         // N=2, L=1: state = [v0, v1, lag0_h0, lag0_h1]
         // inflow_lags.start = 2, lag-major: lag0 * 2 + 0 = 0, lag0 * 2 + 1 = 1
-        let indexer = StageIndexer::new(2, 1);
+        let _indexer = crate::indexer::test_fixtures::geom(2, 1);
+        let layout = crate::indexer::test_fixtures::state_layout(2, 1);
         let mut state = vec![100.0, 200.0, 0.0, 0.0];
         let incoming_lags = vec![10.0, 20.0]; // lag0_h0=10, lag0_h1=20
         let mut primal = vec![0.0; 20];
-        primal[indexer.z_inflow.start] = 33.0; // Z_t for hydro 0
-        primal[indexer.z_inflow.start + 1] = 44.0; // Z_t for hydro 1
-        shift_lag_state(&mut state, &incoming_lags, &primal, &indexer);
+        primal[layout.z_inflow.start] = 33.0; // Z_t for hydro 0
+        primal[layout.z_inflow.start + 1] = 44.0; // Z_t for hydro 1
+        shift_lag_state(&mut state, &incoming_lags, &primal, &layout);
         assert_eq!(state[2], 33.0, "lag[0] for h0 must be Z_t_h0");
         assert_eq!(state[3], 44.0, "lag[0] for h1 must be Z_t_h1");
     }
@@ -1354,61 +1360,63 @@ mod tests {
     #[test]
     fn shift_lag_state_preserves_storage() {
         // Verify storage portion [0..N] is unchanged after shift.
-        let indexer = StageIndexer::new(2, 2);
+        let _indexer = crate::indexer::test_fixtures::geom(2, 2);
+        let layout = crate::indexer::test_fixtures::state_layout(2, 2);
         let mut state = vec![100.0, 200.0, 0.0, 0.0, 0.0, 0.0];
         let incoming_lags = vec![1.0, 2.0, 3.0, 4.0];
         let mut primal = vec![0.0; 20];
-        primal[indexer.z_inflow.start] = 50.0;
-        primal[indexer.z_inflow.start + 1] = 60.0;
-        shift_lag_state(&mut state, &incoming_lags, &primal, &indexer);
+        primal[layout.z_inflow.start] = 50.0;
+        primal[layout.z_inflow.start + 1] = 60.0;
+        shift_lag_state(&mut state, &incoming_lags, &primal, &layout);
         assert_eq!(state[0], 100.0, "storage[0] must be preserved");
         assert_eq!(state[1], 200.0, "storage[1] must be preserved");
     }
 
     // ── shift_anticipated_state tests ────────────────────────────────────────
 
-    /// Build a StageIndexer with anticipated thermals using with_equipment_and_evaporation.
+    /// Build a `StageGeometry` with anticipated thermals.
+    ///
+    /// `_anticipated_lead_stages` is accepted for call-site symmetry but is not
+    /// read: the role-(b) geometry depends only on `n_anticipated` and `k_max`
+    /// (the per-plant lead stages drive the role-(a) `StateLayout`, not the
+    /// anticipated-decision column block).
     fn make_anticipated_indexer(
         n_anticipated: usize,
         k_max: usize,
-        anticipated_lead_stages: Vec<usize>,
-    ) -> StageIndexer {
-        use crate::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout};
-        StageIndexer::with_equipment_and_evaporation(
-            &EquipmentCounts {
-                hydro_count: 0,
-                max_par_order: 0,
-                n_thermals: 0,
-                n_lines: 0,
+        _anticipated_lead_stages: Vec<usize>,
+    ) -> StageGeometry {
+        crate::indexer::test_fixtures::geometry(
+            &crate::indexer::test_fixtures::GeometryDims {
                 n_buses: 1,
                 n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
                 n_anticipated,
                 k_max,
-                anticipated_lead_stages,
                 anticipated_thermal_indices: (0..n_anticipated).collect(),
+                ..Default::default()
             },
-            &FphaColumnLayout {
-                hydro_indices: vec![],
-                planes_per_hydro: vec![],
-            },
-            &EvapConfig {
-                hydro_indices: vec![],
-            },
+            vec![],
+            &[],
+            vec![],
         )
     }
 
     /// AC-1: given n_anticipated == 0, shift_anticipated_state is a no-op.
     #[test]
     fn shift_anticipated_state_no_anticipated_is_noop() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let layout = crate::indexer::test_fixtures::state_layout(1, 0);
         // state: [storage_0]
-        let mut state = vec![42.0_f64; indexer.n_state.max(1)];
+        let mut state = vec![42.0_f64; layout.n_state.max(1)];
         let incoming = vec![];
         let primal = vec![0.0_f64; 10];
         let before = state.clone();
-        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+        shift_anticipated_state(
+            &mut state,
+            &incoming,
+            &primal,
+            &layout,
+            &indexer.anticipated_decision,
+        );
         assert_eq!(
             state, before,
             "state must be unchanged when n_anticipated == 0"
@@ -1423,16 +1431,23 @@ mod tests {
     #[test]
     fn shift_anticipated_state_single_plant_k2() {
         let indexer = make_anticipated_indexer(1, 2, vec![2]);
-        let ant_start = indexer.anticipated_state.start;
+        let layout = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 2, vec![2]);
+        let ant_start = layout.anticipated_state.start;
         let dec_start = indexer.anticipated_decision.start;
 
         // n_state = 0*(1+0) + 1*2 = 2
-        let mut state = vec![0.0_f64; indexer.n_state];
+        let mut state = vec![0.0_f64; layout.n_state];
         let incoming = vec![10.0_f64, 20.0_f64]; // slot 0 = 10.0, slot 1 = 20.0
         let mut primal = vec![0.0_f64; indexer.anticipated_decision.end + 1];
         primal[dec_start] = 99.0;
 
-        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+        shift_anticipated_state(
+            &mut state,
+            &incoming,
+            &primal,
+            &layout,
+            &indexer.anticipated_decision,
+        );
 
         assert_eq!(
             state[ant_start], 20.0,
@@ -1453,16 +1468,23 @@ mod tests {
     #[test]
     fn shift_anticipated_state_single_plant_k1() {
         let indexer = make_anticipated_indexer(1, 1, vec![1]);
-        let ant_start = indexer.anticipated_state.start;
+        let layout = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 1, vec![1]);
+        let ant_start = layout.anticipated_state.start;
         let dec_start = indexer.anticipated_decision.start;
 
         // n_state = 0*(1+0) + 1*1 = 1 single anticipated slot.
-        let mut state = vec![0.0_f64; indexer.n_state];
+        let mut state = vec![0.0_f64; layout.n_state];
         let incoming = vec![100.0_f64]; // slot 0 = 100.0 (will be overwritten)
         let mut primal = vec![0.0_f64; indexer.anticipated_decision.end + 1];
         primal[dec_start] = 42.0;
 
-        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+        shift_anticipated_state(
+            &mut state,
+            &incoming,
+            &primal,
+            &layout,
+            &indexer.anticipated_decision,
+        );
 
         // Shift loop is empty (0..0); the new decision write at slot K_i - 1 = 0
         // is the only operation.
@@ -1481,10 +1503,11 @@ mod tests {
         // n_ant=2, k_max=3. Slot-major layout: slot * 2 + plant.
         // n_state = 0 + 2*3 = 6.
         let indexer = make_anticipated_indexer(2, 3, vec![2, 3]);
-        let ant_start = indexer.anticipated_state.start;
+        let layout = crate::indexer::test_fixtures::state_layout_full(0, 0, 2, 3, vec![2, 3]);
+        let ant_start = layout.anticipated_state.start;
         let dec_start = indexer.anticipated_decision.start;
 
-        let mut state = vec![0.0_f64; indexer.n_state];
+        let mut state = vec![0.0_f64; layout.n_state];
         // incoming[slot * 2 + plant]:
         // slot0_p0=1.0, slot0_p1=2.0, slot1_p0=3.0, slot1_p1=4.0, slot2_p0=5.0, slot2_p1=6.0
         let incoming = vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0];
@@ -1492,7 +1515,13 @@ mod tests {
         primal[dec_start] = 10.0; // decision for plant 0
         primal[dec_start + 1] = 20.0; // decision for plant 1
 
-        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+        shift_anticipated_state(
+            &mut state,
+            &incoming,
+            &primal,
+            &layout,
+            &indexer.anticipated_decision,
+        );
 
         // Plant 0 (K=2): slot 0 = incoming[1*2+0]=3.0, slot 1 = decision[0]=10.0, slot 2 = 0.0
         assert_eq!(state[ant_start + 0 * 2 + 0], 3.0, "plant0 slot0");
@@ -1518,36 +1547,28 @@ mod tests {
     /// and lag regions are preserved unchanged.
     #[test]
     fn shift_anticipated_state_preserves_storage_and_lag() {
-        // Use StageIndexer::new for N=2, L=1 to get storage + lag slots,
-        // then build a combined state vector by padding with anticipated slots.
-        // We must use an indexer that has both hydro state AND anticipated state.
-        use crate::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout};
-        let indexer = StageIndexer::with_equipment_and_evaporation(
-            &EquipmentCounts {
+        // Build a StateLayout (role a: storage + lag + anticipated slots) and a
+        // StageGeometry descriptor (role b: the anticipated_decision column),
+        // then build a combined state vector spanning hydro state AND anticipated state.
+        let indexer = crate::indexer::test_fixtures::geometry(
+            &crate::indexer::test_fixtures::GeometryDims {
                 hydro_count: 2,
                 max_par_order: 1,
-                n_thermals: 0,
-                n_lines: 0,
                 n_buses: 1,
                 n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
                 n_anticipated: 1,
                 k_max: 2,
-                anticipated_lead_stages: vec![2],
                 anticipated_thermal_indices: vec![0],
+                ..Default::default()
             },
-            &FphaColumnLayout {
-                hydro_indices: vec![],
-                planes_per_hydro: vec![],
-            },
-            &EvapConfig {
-                hydro_indices: vec![],
-            },
+            vec![],
+            &[],
+            vec![],
         );
+        let layout = crate::indexer::test_fixtures::state_layout_full(2, 1, 1, 2, vec![2]);
         // n_state = N*(1+L) + A*K = 2*(1+1) + 1*2 = 6
         // storage [0..2), lags [2..4), anticipated [4..6)
-        let ant_start = indexer.anticipated_state.start;
+        let ant_start = layout.anticipated_state.start;
         let dec_start = indexer.anticipated_decision.start;
 
         let mut state = vec![100.0, 200.0, 10.0, 20.0, 0.0, 0.0];
@@ -1555,7 +1576,13 @@ mod tests {
         let mut primal = vec![0.0_f64; dec_start + 2];
         primal[dec_start] = 55.0;
 
-        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+        shift_anticipated_state(
+            &mut state,
+            &incoming,
+            &primal,
+            &layout,
+            &indexer.anticipated_decision,
+        );
 
         // Storage and lag must be untouched.
         assert_eq!(state[0], 100.0, "storage[0] must be preserved");
@@ -1572,12 +1599,19 @@ mod tests {
     #[test]
     fn shift_anticipated_state_zero_k_max_is_noop() {
         // Build a trivial indexer with n_anticipated=0 (which also makes k_max=0).
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = crate::indexer::test_fixtures::geom(1, 0);
+        let layout = crate::indexer::test_fixtures::state_layout(1, 0);
         let mut state = vec![5.0_f64; 3];
         let incoming = vec![];
         let primal = vec![0.0_f64; 5];
         let before = state.clone();
-        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+        shift_anticipated_state(
+            &mut state,
+            &incoming,
+            &primal,
+            &layout,
+            &indexer.anticipated_decision,
+        );
         assert_eq!(state, before, "state must be unchanged when k_max == 0");
     }
 
@@ -1592,6 +1626,7 @@ mod tests {
     fn shift_anticipated_state_invariant_under_stage_lag_transition() {
         // One anticipated thermal, k_max=2, K=2.
         let indexer = make_anticipated_indexer(1, 2, vec![2]);
+        let layout = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 2, vec![2]);
 
         let incoming_anticipated = vec![5.0_f64, 15.0];
         let dec_start = indexer.anticipated_decision.start;
@@ -1603,14 +1638,26 @@ mod tests {
         // state_b represents a non-finalizing stage (accumulate_weight = 0.25).
         // Neither flag is passed to shift_anticipated_state; both calls are
         // therefore identical and must yield bit-for-bit equal results.
-        let mut state_a = vec![0.0_f64; indexer.n_state];
+        let mut state_a = vec![0.0_f64; layout.n_state];
         let mut state_b = state_a.clone();
 
-        shift_anticipated_state(&mut state_a, &incoming_anticipated, &primal, &indexer);
-        shift_anticipated_state(&mut state_b, &incoming_anticipated, &primal, &indexer);
+        shift_anticipated_state(
+            &mut state_a,
+            &incoming_anticipated,
+            &primal,
+            &layout,
+            &indexer.anticipated_decision,
+        );
+        shift_anticipated_state(
+            &mut state_b,
+            &incoming_anticipated,
+            &primal,
+            &layout,
+            &indexer.anticipated_decision,
+        );
 
-        let s = indexer.anticipated_state.start;
-        let n_ant_state = indexer.n_anticipated * indexer.k_max;
+        let s = layout.anticipated_state.start;
+        let n_ant_state = layout.n_anticipated * layout.k_max;
         assert_eq!(
             &state_a[s..s + n_ant_state],
             &state_b[s..s + n_ant_state],
@@ -1739,14 +1786,15 @@ mod tests {
     #[test]
     fn test_accumulate_monthly_identity() {
         // N=1 hydro, L=1 lag order.
-        let indexer = StageIndexer::new(1, 1);
+        let _indexer = crate::indexer::test_fixtures::geom(1, 1);
+        let layout = crate::indexer::test_fixtures::state_layout(1, 1);
 
         // Reference: shift_lag_state result.
         let mut state_ref = vec![500.0, 99.0];
         let incoming_lags = vec![42.0];
         let mut primal = vec![0.0; 10];
-        primal[indexer.z_inflow.start] = 77.0;
-        shift_lag_state(&mut state_ref, &incoming_lags, &primal, &indexer);
+        primal[layout.z_inflow.start] = 77.0;
+        shift_lag_state(&mut state_ref, &incoming_lags, &primal, &layout);
 
         // Accumulate: single stage with identity weights.
         let mut state_acc = vec![500.0, 99.0];
@@ -1770,7 +1818,7 @@ mod tests {
             &mut state_acc,
             &incoming_lags,
             &primal,
-            &indexer,
+            &layout,
             &stage_lag,
             &mut LagAccumState {
                 accumulator: &mut lag_accumulator,
@@ -1799,7 +1847,8 @@ mod tests {
     /// average: (500 + 480 + 520 + 510) / 4 = 502.5.
     #[test]
     fn test_accumulate_four_weeks_then_finalize() {
-        let indexer = StageIndexer::new(1, 1);
+        let _indexer = crate::indexer::test_fixtures::geom(1, 1);
+        let layout = crate::indexer::test_fixtures::state_layout(1, 1);
         let mut state = vec![500.0, 0.0]; // storage, lag0
         let incoming_lags = vec![0.0]; // lag-major: lag0 for hydro 0
         let mut lag_accumulator = vec![0.0_f64; 1];
@@ -1824,12 +1873,12 @@ mod tests {
                 rebuild_from_downstream: false,
             };
             let mut primal = vec![0.0; 10];
-            primal[indexer.z_inflow.start] = z;
+            primal[layout.z_inflow.start] = z;
             accumulate_and_shift_lag_state(
                 &mut state,
                 &incoming_lags,
                 &primal,
-                &indexer,
+                &layout,
                 &stage_lag,
                 &mut LagAccumState {
                     accumulator: &mut lag_accumulator,
@@ -1847,9 +1896,9 @@ mod tests {
         // lag[0] is at inflow_lags.start = 1 (state index).
         let expected = (500.0 + 480.0 + 520.0 + 510.0) / 4.0;
         assert!(
-            (state[indexer.inflow_lags.start] - expected).abs() < 1e-12,
+            (state[layout.inflow_lags.start] - expected).abs() < 1e-12,
             "lag[0] must equal weighted average {expected}, got {}",
-            state[indexer.inflow_lags.start]
+            state[layout.inflow_lags.start]
         );
         // Accumulator reset after finalization.
         assert_eq!(lag_accumulator[0], 0.0);
@@ -1859,13 +1908,14 @@ mod tests {
     /// Spillover seeds the next lag period with raw `z_inflow` * `spillover_weight`.
     #[test]
     fn test_accumulate_spillover_seeds_next_period() {
-        let indexer = StageIndexer::new(1, 1);
+        let _indexer = crate::indexer::test_fixtures::geom(1, 1);
+        let layout = crate::indexer::test_fixtures::state_layout(1, 1);
         let mut state = vec![0.0, 0.0];
         let incoming_lags = vec![0.0];
         let mut lag_accumulator = vec![0.0_f64; 1];
         let mut lag_weight_accum = 0.0_f64;
         let mut primal = vec![0.0; 10];
-        primal[indexer.z_inflow.start] = 200.0;
+        primal[layout.z_inflow.start] = 200.0;
 
         let stage_lag = StageLagTransition {
             accumulate_weight: 0.968, // 1.0 - 0.032 = days in period / days in month
@@ -1885,7 +1935,7 @@ mod tests {
             &mut state,
             &incoming_lags,
             &primal,
-            &indexer,
+            &layout,
             &stage_lag,
             &mut LagAccumState {
                 accumulator: &mut lag_accumulator,
@@ -1915,7 +1965,8 @@ mod tests {
     /// `max_par_order == 0`: function must return immediately, nothing modified.
     #[test]
     fn test_accumulate_noop_for_par0() {
-        let indexer = StageIndexer::new(2, 0); // no lag order
+        let _indexer = crate::indexer::test_fixtures::geom(2, 0); // no lag order
+        let layout = crate::indexer::test_fixtures::state_layout(2, 0);
         let mut state = vec![100.0, 200.0];
         let incoming_lags: Vec<f64> = vec![];
         let primal = vec![0.0; 10];
@@ -1939,7 +1990,7 @@ mod tests {
             &mut state,
             &incoming_lags,
             &primal,
-            &indexer,
+            &layout,
             &stage_lag,
             &mut LagAccumState {
                 accumulator: &mut lag_accumulator,
@@ -1964,12 +2015,13 @@ mod tests {
     #[test]
     fn test_accumulate_preserves_storage() {
         // N=2 hydros, L=2 lag order: state = [v0, v1, lag0_h0, lag0_h1, lag1_h0, lag1_h1]
-        let indexer = StageIndexer::new(2, 2);
+        let _indexer = crate::indexer::test_fixtures::geom(2, 2);
+        let layout = crate::indexer::test_fixtures::state_layout(2, 2);
         let mut state = vec![100.0, 200.0, 0.0, 0.0, 0.0, 0.0];
         let incoming_lags = vec![1.0, 2.0, 3.0, 4.0]; // lag-major: lag0 h0,h1; lag1 h0,h1
         let mut primal = vec![0.0; 20];
-        primal[indexer.z_inflow.start] = 50.0;
-        primal[indexer.z_inflow.start + 1] = 60.0;
+        primal[layout.z_inflow.start] = 50.0;
+        primal[layout.z_inflow.start + 1] = 60.0;
         let mut lag_accumulator = vec![0.0_f64; 2];
         let mut lag_weight_accum = 0.0_f64;
         let stage_lag = StageLagTransition {
@@ -1990,7 +2042,7 @@ mod tests {
             &mut state,
             &incoming_lags,
             &primal,
-            &indexer,
+            &layout,
             &stage_lag,
             &mut LagAccumState {
                 accumulator: &mut lag_accumulator,
@@ -2044,14 +2096,14 @@ mod tests {
         state: &mut [f64],
         incoming_lags: &[f64],
         z_inflow: f64,
-        indexer: &crate::indexer::StageIndexer,
+        layout: &crate::indexer::StateLayout,
         stage_lag: &StageLagTransition,
         lag: &mut LagAccumState<'_>,
         ds: &mut DownstreamAccumState<'_>,
     ) {
-        let mut primal = vec![0.0; indexer.z_inflow.start + indexer.hydro_count + 4];
-        primal[indexer.z_inflow.start] = z_inflow;
-        accumulate_and_shift_lag_state(state, incoming_lags, &primal, indexer, stage_lag, lag, ds);
+        let mut primal = vec![0.0; layout.z_inflow.start + layout.hydro_count + 4];
+        primal[layout.z_inflow.start] = z_inflow;
+        accumulate_and_shift_lag_state(state, incoming_lags, &primal, layout, stage_lag, lag, ds);
     }
 
     /// Drive one stage with two hydros.
@@ -2059,16 +2111,16 @@ mod tests {
         state: &mut [f64],
         incoming_lags: &[f64],
         z_inflows: [f64; 2],
-        indexer: &crate::indexer::StageIndexer,
+        layout: &crate::indexer::StateLayout,
         stage_lag: &StageLagTransition,
         lag: &mut LagAccumState<'_>,
         ds: &mut DownstreamAccumState<'_>,
     ) {
-        let n = indexer.z_inflow.start + indexer.hydro_count + 4;
+        let n = layout.z_inflow.start + layout.hydro_count + 4;
         let mut primal = vec![0.0; n];
-        primal[indexer.z_inflow.start] = z_inflows[0];
-        primal[indexer.z_inflow.start + 1] = z_inflows[1];
-        accumulate_and_shift_lag_state(state, incoming_lags, &primal, indexer, stage_lag, lag, ds);
+        primal[layout.z_inflow.start] = z_inflows[0];
+        primal[layout.z_inflow.start + 1] = z_inflows[1];
+        accumulate_and_shift_lag_state(state, incoming_lags, &primal, layout, stage_lag, lag, ds);
     }
 
     /// Test 1: PAR(1) downstream accumulation with a 3-stage quarterly window.
@@ -2082,8 +2134,9 @@ mod tests {
     #[test]
     fn test_downstream_par1_accumulation_and_rebuild() {
         // N=1 hydro, L=1 lag (primary monthly PAR(1) order).
-        let indexer = StageIndexer::new(1, 1);
-        let lag_start = indexer.inflow_lags.start;
+        let _indexer = crate::indexer::test_fixtures::geom(1, 1);
+        let layout = crate::indexer::test_fixtures::state_layout(1, 1);
+        let lag_start = layout.inflow_lags.start;
 
         // Primary state: storage=500, lag0=old_value_to_be_replaced.
         let mut state = vec![500.0, 42.0];
@@ -2104,7 +2157,7 @@ mod tests {
                 &mut state,
                 &incoming_lags,
                 z,
-                &indexer,
+                &layout,
                 &stage_lag,
                 &mut LagAccumState {
                     accumulator: &mut lag_acc,
@@ -2145,7 +2198,7 @@ mod tests {
             &mut state,
             &incoming_lags,
             999.0, // z_inflow irrelevant — rebuild returns before primary finalize
-            &indexer,
+            &layout,
             &rebuild_lag,
             &mut LagAccumState {
                 accumulator: &mut lag_acc,
@@ -2186,8 +2239,9 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn test_downstream_par2_two_quarters() {
-        let indexer = StageIndexer::new(1, 2); // L=2 lag order
-        let lag_start = indexer.inflow_lags.start;
+        let _indexer = crate::indexer::test_fixtures::geom(1, 2); // L=2 lag order
+        let layout = crate::indexer::test_fixtures::state_layout(1, 2);
+        let lag_start = layout.inflow_lags.start;
 
         let mut state = vec![0.0; 1 + 2]; // storage + lag0 + lag1
         let incoming_lags = vec![0.0, 0.0]; // lag-major: lag0 h0, lag1 h0
@@ -2207,7 +2261,7 @@ mod tests {
                 &mut state,
                 &incoming_lags,
                 z,
-                &indexer,
+                &layout,
                 &stage_lag,
                 &mut LagAccumState {
                     accumulator: &mut lag_acc,
@@ -2238,7 +2292,7 @@ mod tests {
                 &mut state,
                 &incoming_lags,
                 z,
-                &indexer,
+                &layout,
                 &stage_lag,
                 &mut LagAccumState {
                     accumulator: &mut lag_acc,
@@ -2276,7 +2330,7 @@ mod tests {
             &mut state,
             &incoming_lags,
             999.0,
-            &indexer,
+            &layout,
             &rebuild_lag,
             &mut LagAccumState {
                 accumulator: &mut lag_acc,
@@ -2311,7 +2365,8 @@ mod tests {
     /// with no downstream fields accessed.
     #[test]
     fn test_no_downstream_for_uniform_monthly() {
-        let indexer = StageIndexer::new(1, 1);
+        let _indexer = crate::indexer::test_fixtures::geom(1, 1);
+        let layout = crate::indexer::test_fixtures::state_layout(1, 1);
         let mut state_ds = vec![500.0, 0.0]; // with empty downstream
         let mut state_ref = vec![500.0, 0.0]; // with noop downstream
         let incoming_lags = vec![0.0];
@@ -2344,7 +2399,7 @@ mod tests {
                 &mut state_ref,
                 &incoming_lags,
                 z,
-                &indexer,
+                &layout,
                 &stage_lag,
                 &mut LagAccumState {
                     accumulator: &mut lag_acc_ref,
@@ -2367,7 +2422,7 @@ mod tests {
                 &mut state_ds,
                 &incoming_lags,
                 z,
-                &indexer,
+                &layout,
                 &stage_lag,
                 &mut LagAccumState {
                     accumulator: &mut lag_acc_ds,
@@ -2395,7 +2450,8 @@ mod tests {
     /// `downstream_weight_accum == 0.0`.
     #[test]
     fn test_rebuild_resets_downstream_state() {
-        let indexer = StageIndexer::new(1, 1);
+        let _indexer = crate::indexer::test_fixtures::geom(1, 1);
+        let layout = crate::indexer::test_fixtures::state_layout(1, 1);
         let mut state = vec![0.0, 0.0];
         let incoming_lags = vec![0.0];
         let mut lag_acc = vec![0.0_f64; 1];
@@ -2420,7 +2476,7 @@ mod tests {
             &mut state,
             &incoming_lags,
             0.0,
-            &indexer,
+            &layout,
             &rebuild_lag,
             &mut LagAccumState {
                 accumulator: &mut lag_acc,
@@ -2457,7 +2513,8 @@ mod tests {
     /// (b) seed the next quarter's accumulator with `z_inflow * 0.1`.
     #[test]
     fn test_downstream_spillover_seeds_next_quarter() {
-        let indexer = StageIndexer::new(1, 1);
+        let _indexer = crate::indexer::test_fixtures::geom(1, 1);
+        let layout = crate::indexer::test_fixtures::state_layout(1, 1);
         let mut state = vec![0.0, 0.0];
         let incoming_lags = vec![0.0];
         let mut lag_acc = vec![0.0_f64; 1];
@@ -2488,7 +2545,7 @@ mod tests {
             &mut state,
             &incoming_lags,
             z,
-            &indexer,
+            &layout,
             &stage_lag,
             &mut LagAccumState {
                 accumulator: &mut lag_acc,
@@ -2526,8 +2583,9 @@ mod tests {
     #[test]
     fn test_downstream_multi_hydro() {
         // N=2 hydros, L=1 lag order.
-        let indexer = StageIndexer::new(2, 1);
-        let lag_start = indexer.inflow_lags.start;
+        let _indexer = crate::indexer::test_fixtures::geom(2, 1);
+        let layout = crate::indexer::test_fixtures::state_layout(2, 1);
+        let lag_start = layout.inflow_lags.start;
 
         let mut state = vec![0.0; 2 + 2]; // 2 storage + 2 lag entries (lag0 h0, lag0 h1)
         let incoming_lags = vec![0.0, 0.0]; // lag-major: lag0 h0, lag0 h1
@@ -2549,7 +2607,7 @@ mod tests {
                 &mut state,
                 &incoming_lags,
                 [z0, z1],
-                &indexer,
+                &layout,
                 &stage_lag,
                 &mut LagAccumState {
                     accumulator: &mut lag_acc,
@@ -2594,7 +2652,7 @@ mod tests {
             &mut state,
             &incoming_lags,
             [999.0, 888.0],
-            &indexer,
+            &layout,
             &rebuild_lag,
             &mut LagAccumState {
                 accumulator: &mut lag_acc,
@@ -2626,10 +2684,11 @@ mod tests {
     #[test]
     fn shift_anticipated_state_pre_horizon_seed_three_stage_evolution() {
         let indexer = make_anticipated_indexer(1, 2, vec![2]);
-        let ant_start = indexer.anticipated_state.start;
+        let layout = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 2, vec![2]);
+        let ant_start = layout.anticipated_state.start;
         let dec_start = indexer.anticipated_decision.start;
 
-        let mut state = vec![0.0_f64; indexer.n_state];
+        let mut state = vec![0.0_f64; layout.n_state];
         state[ant_start] = 10.0;
         state[ant_start + 1] = 20.0;
 
@@ -2639,22 +2698,161 @@ mod tests {
         // Stage 0: incoming=[10.0, 20.0], decision=30.0 → slot 0=20.0, slot 1=30.0
         incoming.copy_from_slice(&state[ant_start..ant_start + 2]);
         primal[dec_start] = 30.0;
-        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+        shift_anticipated_state(
+            &mut state,
+            &incoming,
+            &primal,
+            &layout,
+            &indexer.anticipated_decision,
+        );
         assert_eq!(state[ant_start], 20.0);
         assert_eq!(state[ant_start + 1], 30.0);
 
         // Stage 1: incoming=[20.0, 30.0], decision=40.0 → slot 0=30.0, slot 1=40.0
         incoming.copy_from_slice(&state[ant_start..ant_start + 2]);
         primal[dec_start] = 40.0;
-        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+        shift_anticipated_state(
+            &mut state,
+            &incoming,
+            &primal,
+            &layout,
+            &indexer.anticipated_decision,
+        );
         assert_eq!(state[ant_start], 30.0);
         assert_eq!(state[ant_start + 1], 40.0);
 
         // Stage 2: incoming=[30.0, 40.0], decision=50.0 → slot 0=40.0, slot 1=50.0
         incoming.copy_from_slice(&state[ant_start..ant_start + 2]);
         primal[dec_start] = 50.0;
-        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+        shift_anticipated_state(
+            &mut state,
+            &incoming,
+            &primal,
+            &layout,
+            &indexer.anticipated_decision,
+        );
         assert_eq!(state[ant_start], 40.0);
         assert_eq!(state[ant_start + 1], 50.0);
+    }
+
+    // ── dense NCS column/bound mapping ───────────────────────────────────────
+
+    /// Dormant stage: slot 0's window excludes the stage, slots 1,2 windowless.
+    /// Under the dense layout every slot keeps a column, so the index buffer
+    /// strides all three by their dense column position (here slot == dense
+    /// column). The gather computes dormancy inline from the windows and the
+    /// stage id, copying the active slots' bounds verbatim and forcing `[0, 0]`
+    /// for the dormant slot — the buffers are full length `n_stochastic_ncs * n_blks`.
+    #[test]
+    fn dense_ncs_dormant_slot_is_zeroed() {
+        let n_blks = 2_usize;
+        let ncs_col_start = 100_usize;
+        let dense_col = vec![0_usize, 1, 2];
+        let stage_id = 0_i32;
+        // slot 0 enters at stage 1 (dormant at stage 0); slots 1,2 windowless.
+        let windows = vec![(Some(1_i32), None), (None, None), (None, None)];
+
+        let mut indices = Vec::new();
+        build_dense_ncs_col_indices(&dense_col, ncs_col_start, n_blks, &mut indices);
+        // Every slot contributes a block: 100,101 | 102,103 | 104,105.
+        assert_eq!(indices, vec![100, 101, 102, 103, 104, 105]);
+        assert_eq!(indices.len(), dense_col.len() * n_blks);
+
+        let lower_src = vec![0.0, 0.0, 10.0, 11.0, 20.0, 21.0];
+        let upper_src = vec![1.0, 2.0, 13.0, 14.0, 23.0, 24.0];
+        let mut lower_out = Vec::new();
+        let mut upper_out = Vec::new();
+        gather_dense_ncs_bounds(
+            &windows,
+            stage_id,
+            n_blks,
+            &lower_src,
+            &upper_src,
+            &mut lower_out,
+            &mut upper_out,
+        );
+        // Slot 0 forced to [0,0]; slots 1,2 copied verbatim.
+        assert_eq!(lower_out, vec![0.0, 0.0, 10.0, 11.0, 20.0, 21.0]);
+        assert_eq!(upper_out, vec![0.0, 0.0, 13.0, 14.0, 23.0, 24.0]);
+        assert_eq!(upper_out.len(), indices.len(), "bounds parallel to indices");
+    }
+
+    /// No-window case: every slot windowless (active at every stage) and slot
+    /// order == dense column order — the gathered bounds and built indices are
+    /// bit-identical to a verbatim full `n_stochastic_ncs` block, the
+    /// hash-neutrality contract for every existing case.
+    #[test]
+    fn dense_ncs_no_dormancy_is_slot_order_identical() {
+        let n_blks = 2_usize;
+        let ncs_col_start = 0_usize;
+        let dense_col = vec![0_usize, 1, 2];
+        let windows = vec![(None, None), (None, None), (None, None)];
+
+        let mut indices = Vec::new();
+        build_dense_ncs_col_indices(&dense_col, ncs_col_start, n_blks, &mut indices);
+        assert_eq!(indices, vec![0, 1, 2, 3, 4, 5]);
+
+        let lower_src = vec![0.0, 0.0, 1.0, 1.0, 2.0, 2.0];
+        let upper_src = vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let mut lower_out = Vec::new();
+        let mut upper_out = Vec::new();
+        gather_dense_ncs_bounds(
+            &windows,
+            7,
+            n_blks,
+            &lower_src,
+            &upper_src,
+            &mut lower_out,
+            &mut upper_out,
+        );
+        // Verbatim copy of the full slot-order buffers.
+        assert_eq!(lower_out, lower_src);
+        assert_eq!(upper_out, upper_src);
+    }
+
+    /// Two stages with **equal** length but **different** `ncs_col_start` must
+    /// rebuild the index buffer on the second stage. This pins the invariant: the
+    /// patch-site guard keys the lazy rebuild on `(last_ncs_col_start, len)`, not
+    /// on `len` alone. A length-only guard (the forbidden alternative) would not
+    /// fire here — both stages have length `2 * 2 = 4` — and would leave the
+    /// previous stage's indices in place, writing `set_col_bounds` onto the wrong
+    /// LP columns.
+    #[test]
+    fn index_buffer_rebuilds_on_ncs_col_start_change_at_equal_length() {
+        let n_blks = 2_usize;
+        // Same dense column set / same length at both stages: 2 slots × 2 blocks.
+        let dense_col = vec![0_usize, 1];
+        let expected_len = dense_col.len() * n_blks;
+        assert_eq!(expected_len, 4);
+
+        // Reproduce the patch-site guard verbatim: rebuild iff the stored start
+        // differs OR the buffer length differs.
+        let mut indices_buf: Vec<usize> = Vec::new();
+        let mut last_ncs_col_start = usize::MAX;
+        let rebuild = |start: usize, buf: &mut Vec<usize>, last: &mut usize| {
+            if *last != start || buf.len() != expected_len {
+                build_dense_ncs_col_indices(&dense_col, start, n_blks, buf);
+                *last = start;
+                true
+            } else {
+                false
+            }
+        };
+
+        // Stage A at start 100: first call always rebuilds (last == usize::MAX).
+        assert!(rebuild(100, &mut indices_buf, &mut last_ncs_col_start));
+        assert_eq!(indices_buf, vec![100, 101, 102, 103]);
+        assert_eq!(last_ncs_col_start, 100);
+
+        // Stage B at start 200, SAME length (4): the start-tracking guard fires and
+        // the buffer tracks the new base. A length-only guard would have skipped
+        // this rebuild and left [100,101,102,103] — the latent bug.
+        assert!(rebuild(200, &mut indices_buf, &mut last_ncs_col_start));
+        assert_eq!(indices_buf, vec![200, 201, 202, 203]);
+        assert_eq!(last_ncs_col_start, 200);
+
+        // Re-entering stage B (same start, same length): no rebuild.
+        assert!(!rebuild(200, &mut indices_buf, &mut last_ncs_col_start));
+        assert_eq!(indices_buf, vec![200, 201, 202, 203]);
     }
 }

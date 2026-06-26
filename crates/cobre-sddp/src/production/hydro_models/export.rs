@@ -1,10 +1,9 @@
 //! Export-row builder for the resolved evaporation models.
 //!
-//! Converts the resolved [`EvaporationModelSet`](super::types::EvaporationModelSet)
-//! plus its reference-volume provenance into a flat `Vec<cobre_io::EvaporationModelRow>`
-//! that the CLI and Python write sites persist to `evaporation_models.parquet`.
-//! The summary builder counts the same models for display; this builder emits the
-//! per-`(hydro, stage)` coefficient rows that capture the actual numbers.
+//! Flattens the resolved [`EvaporationModelSet`](super::types::EvaporationModelSet)
+//! and its reference-volume provenance into the
+//! `Vec<cobre_io::EvaporationModelRow>` the CLI and Python write sites persist to
+//! `evaporation_models.parquet`.
 
 use cobre_core::System;
 use cobre_io::{DeviationSummary, DeviationWorstEntry, EvaporationModelRow};
@@ -13,12 +12,9 @@ use super::types::{
     EvaporationModel, EvaporationReferenceSource, FphaFitDeviationEntry, PrepareHydroModelsResult,
 };
 
-/// Provenance tag string for a [`EvaporationReferenceSource`].
-///
-/// The two literals match the `source` column values the
-/// [`cobre_io::extensions::parse_evaporation_models`] reader round-trips; the
-/// writer carries the string verbatim. Kept as a private mapping so the two
-/// values are defined once and stay in lockstep with the enum variants.
+/// Provenance tag string for a [`EvaporationReferenceSource`]. The literals must
+/// match the `source` column values [`cobre_io::extensions::parse_evaporation_models`]
+/// round-trips.
 fn reference_source_tag(source: EvaporationReferenceSource) -> &'static str {
     match source {
         EvaporationReferenceSource::UserSupplied => "user_supplied",
@@ -28,37 +24,19 @@ fn reference_source_tag(source: EvaporationReferenceSource) -> &'static str {
 
 /// Build the flat evaporation-model export rows from the pipeline result.
 ///
-/// Iterates `system.hydros()` in canonical (declaration) order so the emitted
-/// stream is declaration-order bit-deterministic: hydro position `h` indexes
-/// both `result.evaporation.model(h)` and
-/// `result.provenance.evaporation_reference_sources[h]`, which the resolver
-/// builds in lockstep with `system.hydros()`.
-///
-/// Row shape per hydro:
-///
-/// - [`EvaporationModel::None`] hydros contribute no row.
-/// - A [`EvaporationModel::Linearized`] with a single stage entry emits one row
-///   with `stage_id: None` — the coefficient applies to every stage.
-/// - A [`EvaporationModel::Linearized`] with multiple stage entries emits one
-///   row per stage, `stage_id: Some(stage.id)`, each carrying that stage's
-///   `intercept_m3s`, `volume_slope_m3s_per_hm3`, and `reference_volume_hm3`
-///   from `reference_volumes_hm3[stage]`.
-///
-/// The per-stage `coefficients`/`reference_volumes_hm3` vectors are indexed by
-/// study-stage position; `study_stages[i].id` supplies the domain-level
-/// `stage_id` for index `i`. Study stages are iterated in canonical order
-/// (the `id >= 0` filter on `system.stages()`), so within each hydro the rows
-/// ascend by `stage_id` and the full stream is in `(hydro_id, stage_id)` order
-/// by construction.
+/// Iterates `system.hydros()` in canonical order: position `h` indexes both
+/// `result.evaporation.model(h)` and `evaporation_reference_sources[h]` (the
+/// resolver builds them in lockstep), and study stages are walked in `id >= 0`
+/// order, so the stream is `(hydro_id, stage_id)`-ordered and declaration-order
+/// invariant. A single-entry `Linearized` emits one `stage_id: None` row; a
+/// multi-entry one emits a row per study stage.
 #[must_use]
 pub fn build_evaporation_model_rows(
     result: &PrepareHydroModelsResult,
     system: &System,
 ) -> Vec<EvaporationModelRow> {
-    // Study stages in canonical order; index `i` maps a coefficient slot to its
-    // domain-level `stage.id`. Pre-study stages (`id < 0`) carry no evaporation
-    // coefficients, so they are excluded to keep `study_stages[i]` aligned with
-    // the per-stage `coefficients`/`reference_volumes_hm3` vectors.
+    // Exclude pre-study stages (`id < 0`) so `study_stage_ids[i]` aligns with the
+    // per-stage `coefficients`/`reference_volumes_hm3` vectors.
     let study_stage_ids: Vec<i32> = system
         .stages()
         .iter()
@@ -82,7 +60,6 @@ pub fn build_evaporation_model_rows(
                 .to_string();
 
         if coefficients.len() == 1 {
-            // Single coefficient: one row covering all stages (`stage_id: None`).
             rows.push(EvaporationModelRow {
                 hydro_id: hydro.id,
                 stage_id: None,
@@ -92,8 +69,6 @@ pub fn build_evaporation_model_rows(
                 source: source.clone(),
             });
         } else {
-            // Per-stage coefficients: one row per study stage, tagged with the
-            // domain-level `stage.id` at the matching coefficient position.
             for (i, coeff) in coefficients.iter().enumerate() {
                 rows.push(EvaporationModelRow {
                     hydro_id: hydro.id,
@@ -110,15 +85,11 @@ pub fn build_evaporation_model_rows(
     rows
 }
 
-/// Borrow the canonical-order per-sampled-point FPHA deviation rows from the
-/// pipeline result.
+/// Borrow the per-sampled-point FPHA deviation rows from the pipeline result.
 ///
-/// A thin pass-through: the resolver already built these rows in canonical
-/// `(hydro_id, stage_id, grid)` order during its sequential flatten, so there is
-/// nothing to recompute or re-sort here. It exists beside
-/// [`build_evaporation_model_rows`] so the CLI and Python write sites reach the
-/// rows through one accessor mirroring the evaporation recipe. Empty unless the
-/// run opted in via `config.exports.fpha_deviation_points`.
+/// A pass-through: the resolver already built these in canonical
+/// `(hydro_id, stage_id, grid)` order, so do not re-sort. Empty unless the run
+/// opted in via `config.exports.fpha_deviation_points`.
 #[must_use]
 pub fn build_fpha_deviation_point_rows(
     result: &PrepareHydroModelsResult,
@@ -126,36 +97,22 @@ pub fn build_fpha_deviation_point_rows(
     &result.fpha_deviation_point_rows
 }
 
-/// Roll up the per-`(hydro, stage)` computed-FPHA fit deviations into the generic
-/// run-level [`cobre_io::DeviationSummary`] persisted in `training/metadata.json`.
-///
-/// Returns `None` on an empty slice — a non-computed-FPHA run records no
-/// deviations, and the metadata section is then omitted. Otherwise returns the
-/// rollup:
-///
-/// - `n_entries` — the slice length,
-/// - `mean_abs` — the arithmetic mean of every entry's `mean_abs_mw`,
-/// - `max_abs` — the maximum of every entry's `max_abs_mw`,
-/// - `worst_relative` / `worst_entry` — the entry with the largest `relative`.
+/// Roll up the computed-FPHA fit deviations into the run-level
+/// [`cobre_io::DeviationSummary`] in `training/metadata.json`. `None` on an empty
+/// slice (the metadata section is then omitted).
 ///
 /// # Determinism — first-seen wins on a relative tie (Voice 1 / D5)
 ///
-/// The worst-entry scan keeps the first entry reaching the running maximum
-/// (strict `>`), so a tie resolves to the earliest entry in the slice. `entries`
-/// arrives in canonical `(hydro, stage)` order from the resolver, so the chosen
-/// winner is declaration-order invariant. Using `>=` (last-seen wins) would still
-/// be deterministic but would silently flip which plant is reported on a tie;
-/// the strict `>` pins it to the canonical-first entry. The builder never
-/// re-sorts the slice — that would break the carried canonical order.
+/// The worst-entry scan uses strict `>`, so a tie resolves to the canonical-first
+/// entry (`entries` arrives in canonical `(hydro, stage)` order). `>=` would flip
+/// which plant is reported on a tie. Never re-sort the slice.
 #[must_use]
 pub fn build_deviation_summary(entries: &[FphaFitDeviationEntry]) -> Option<DeviationSummary> {
     if entries.is_empty() {
         return None;
     }
 
-    // `entries` is non-empty here, so `n_entries >= 1` and the mean divisor is
-    // never zero. The count fits a `u32` — the per-distinct-fit entry count is
-    // bounded by hydros × stages, far below `u32::MAX`.
+    // Entry count is bounded by hydros × stages, far below `u32::MAX`.
     #[allow(clippy::cast_possible_truncation)]
     let n_entries = entries.len() as u32;
 
@@ -168,12 +125,9 @@ pub fn build_deviation_summary(entries: &[FphaFitDeviationEntry]) -> Option<Devi
         .map(|e| e.max_abs_mw)
         .fold(f64::NEG_INFINITY, f64::max);
 
-    // First-seen wins on a `relative` tie (strict `>`); see the contract above.
-    // Seed the fold with the first entry and fold the rest, so a one-element slice
-    // yields it directly and there is no fallible `reduce`/`unwrap` path: the
-    // `is_empty()` guard above already makes `entries[0]` safe. Using `reduce(..)
-    // .unwrap_or(entries[0])` would carry an unreachable fallback that misreads as
-    // "the scan can fail".
+    // Fold seeded with `entries[0]` (safe via the `is_empty()` guard above) rather
+    // than `reduce(..).unwrap_or(..)`, which would carry an unreachable fallback
+    // that misreads as "the scan can fail".
     let worst = entries[1..].iter().copied().fold(entries[0], |acc, e| {
         if e.relative > acc.relative { e } else { acc }
     });

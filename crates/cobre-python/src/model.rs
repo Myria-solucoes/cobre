@@ -1,14 +1,10 @@
-//! `PyO3` wrapper classes for the Cobre data model types.
+//! `PyO3` wrapper classes exposing `cobre-core` entity types in `cobre.model`.
 //!
-//! This module exposes the core entity types from `cobre-core` as Python
-//! classes in the `cobre.model` sub-module. All wrappers are immutable:
-//! Python code reads entity data but cannot mutate it. Construction of
-//! `System` objects happens through `cobre.io.load_case()`, not through Python
-//! constructors.
+//! Entity collections are cloned into the wrappers because entity data is small
+//! (strings + floats) and cloning avoids lifetime complexity at the `PyO3` boundary.
 //!
-//! Entity collections are cloned into the wrapper structs because entity data
-//! is small (strings + floats) and cloning avoids lifetime complexity at the
-//! `PyO3` boundary.
+//! Stub entities (`EnergyContract`, `PumpingStation`, `NonControllableSource`) are
+//! data-complete but contribute no LP variables or constraints.
 
 use std::sync::Arc;
 
@@ -19,9 +15,7 @@ use pyo3::types::PyDict;
 
 /// Electrical network node where energy balance is maintained.
 ///
-/// A `Bus` represents a node in the transmission network. Each bus has an
-/// associated power balance constraint that must be satisfied at every stage
-/// and block. The deficit cost curve is stored as pre-resolved segments.
+/// Each bus carries a power balance constraint satisfied at every stage and block.
 #[pyclass(name = "Bus", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyBus {
@@ -80,10 +74,7 @@ impl PyBus {
 
 // ─── Line ────────────────────────────────────────────────────────────────────
 
-/// Transmission interconnection between two buses.
-///
-/// Lines allow bidirectional power transfer subject to capacity limits and
-/// transmission losses.
+/// Transmission interconnection carrying bidirectional power between two buses.
 #[pyclass(name = "Line", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyLine {
@@ -156,9 +147,6 @@ impl PyLine {
 // ─── Thermal ─────────────────────────────────────────────────────────────────
 
 /// Thermal power plant with a scalar marginal cost.
-///
-/// A `Thermal` contributes generation variables and cost objective terms to
-/// each stage LP.
 #[pyclass(name = "Thermal", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyThermal {
@@ -218,8 +206,7 @@ impl PyThermal {
 
 /// Hydroelectric power plant with reservoir storage and cascade topology.
 ///
-/// A `Hydro` plant controls a reservoir and operates turbines and spillways.
-/// Multiple plants may form a cascade via `downstream_id` references.
+/// Plants form a cascade via `downstream_id` references.
 #[pyclass(name = "Hydro", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyHydro {
@@ -274,10 +261,8 @@ impl PyHydro {
 
     /// Power output per unit of turbined flow [MW/(m³/s)].
     ///
-    /// The inline productivity scalar has moved to
-    /// `system/hydro_production_models.json` and is now resolved per-stage.
-    /// This getter retains its signature for ABI continuity but always
-    /// returns `None`.
+    /// Always `None`: the productivity scalar is resolved per-stage from
+    /// `system/hydro_production_models.json`; this getter exists for ABI continuity.
     #[getter]
     fn productivity_mw_per_m3s(&self) -> Option<f64> {
         match self.inner.generation_model {
@@ -303,10 +288,7 @@ impl PyHydro {
 
 // ─── EnergyContract (minimal stub) ───────────────────────────────────────────
 
-/// Bilateral energy contract with an external system (stub entity).
-///
-/// In the minimal viable solver this entity is data-complete but contributes
-/// no LP variables or constraints.
+/// Bilateral energy contract with an external system.
 #[pyclass(name = "EnergyContract", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyEnergyContract {
@@ -341,10 +323,7 @@ impl PyEnergyContract {
 
 // ─── PumpingStation (minimal stub) ───────────────────────────────────────────
 
-/// Pumping station that transfers water between hydro reservoirs (stub entity).
-///
-/// In the minimal viable solver this entity is data-complete but contributes
-/// no LP variables or constraints.
+/// Pumping station that transfers water between hydro reservoirs.
 #[pyclass(name = "PumpingStation", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyPumpingStation {
@@ -379,10 +358,7 @@ impl PyPumpingStation {
 
 // ─── NonControllableSource (minimal stub) ────────────────────────────────────
 
-/// Intermittent generation source that cannot be dispatched (stub entity).
-///
-/// In the minimal viable solver this entity is data-complete but contributes
-/// no LP variables or constraints.
+/// Intermittent generation source that cannot be dispatched.
 #[pyclass(name = "NonControllableSource", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyNonControllableSource {
@@ -419,11 +395,7 @@ impl PyNonControllableSource {
 
 /// Top-level system representation wrapping a loaded Cobre case.
 ///
-/// Produced by `cobre.io.load_case()`. Immutable after construction.
-/// Provides read-only access to entity collections and counts.
-///
-/// Python code cannot construct `System` objects directly — use
-/// `cobre.io.load_case()` to obtain one from a case directory.
+/// Cannot be constructed from Python — use `cobre.io.load_case()` to obtain one.
 #[pyclass(name = "System", frozen)]
 pub struct PySystem {
     inner: Arc<cobre_core::System>,
@@ -431,8 +403,6 @@ pub struct PySystem {
 
 #[pymethods]
 impl PySystem {
-    // ── Entity collection properties ─────────────────────────────────────
-
     /// All buses in canonical ID order.
     #[getter]
     fn buses(&self) -> Vec<PyBus> {
@@ -510,8 +480,6 @@ impl PySystem {
             .collect()
     }
 
-    // ── Count properties ─────────────────────────────────────────────────
-
     /// Number of buses in the system.
     #[getter]
     fn n_buses(&self) -> usize {
@@ -561,10 +529,8 @@ impl PySystem {
         }
     }
 
-    /// Wrap an already-shared [`cobre_core::System`] without copying it.
-    ///
-    /// Used by [`crate::study::Study`]'s `system` getter to hand out a
-    /// `cobre.model.System` view via a refcount bump rather than a full clone.
+    /// Wrap an already-shared [`cobre_core::System`] via a refcount bump rather
+    /// than a full clone (used by [`crate::study::Study`]'s `system` getter).
     pub(crate) fn from_arc(inner: Arc<cobre_core::System>) -> Self {
         Self { inner }
     }

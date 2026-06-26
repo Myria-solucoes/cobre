@@ -126,16 +126,17 @@ then override it for specific buses with different reliability requirements.
 
 ### Choosing Deficit Costs
 
-A typical two-tier configuration uses a moderate cost for the first tier (to allow
+A tiered configuration uses a moderate cost for the first segment (to allow
 partial deficit in extreme scenarios without distorting the optimality cuts too
-much) and a very high cost for the unbounded final tier (to make full deficit a
-last resort). Values of 1000–5000 $/MWh for the first tier and 5000–20000 $/MWh
-for the final tier are common in practice.
+much) and a higher cost for the unbounded final segment (to make full deficit a
+last resort). The relative ordering of segment costs matters more than their
+absolute values: each tier must be higher than the one before it, and the final
+tier must be high enough that the solver prefers dispatching any available
+generation over incurring unbounded deficit.
 
 Setting the deficit cost too low relative to thermal generation costs will cause
 the solver to prefer deficit over building reserves, which misrepresents the cost
-of unserved energy. Setting it too high can cause numerical conditioning issues in
-the LP; in practice, values above 100 000 $/MWh are rarely necessary.
+of unserved energy. Setting the final tier very high can worsen LP conditioning.
 
 ---
 

@@ -74,12 +74,14 @@ def _run_cli(case_dir: pathlib.Path, output_dir: pathlib.Path) -> None:
         )
 
 
-def _make_d02_with_simulation(src: pathlib.Path, dest: pathlib.Path) -> None:
-    """Copy D02 to ``dest`` and enable the simulation pass.
+def _make_case_with_simulation(src: pathlib.Path, dest: pathlib.Path) -> None:
+    """Copy a deterministic case to ``dest`` and enable the simulation pass.
 
-    D02 ships with ``simulation.enabled = false``. The parity tests need the
-    simulation write path exercised, so the config is overwritten with
-    ``simulation.enabled = true``.
+    Several deterministic cases ship with ``simulation.enabled = false`` (the
+    parity harness trains only). The parity tests need the simulation write path
+    exercised, so the copied ``config.json`` is overwritten with
+    ``simulation.enabled = true``. Case-agnostic so any deterministic case
+    (D02, d38, ...) can reuse it.
     """
     for item in src.iterdir():
         dst_item = dest / item.name
@@ -122,7 +124,7 @@ def d02_case_dir(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
     repo_root = pathlib.Path(__file__).parents[3]
     src = repo_root / D02_CASE
     dest = tmp_path_factory.mktemp("d02_case")
-    _make_d02_with_simulation(src, dest)
+    _make_case_with_simulation(src, dest)
     return dest
 
 

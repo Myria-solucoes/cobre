@@ -1,41 +1,19 @@
 //! Regression test: `d_t` must commit to load level for every active
 //! anticipated-decision stage in a K=2 fixture.
 //!
-//! ## Bug being guarded against
+//! ## Economic reasoning (pins the asserted optimum)
 //!
 //! In a 6-stage K=2 study with a 500x cost asymmetry (anticipated thermal at
-//! $10/MWh vs backup at $5000/MWh), the LP should commit the anticipated
-//! thermal to exactly `load = 150 MW` at every stage `t` where `t + K < n_stages`
-//! (i.e. `t in {0, 1, 2, 3}`). Over-committing to `max_gen = 200 MW` costs an
-//! extra 50 MW × $10/MWh × 744 h = $372k/stage with zero offsetting benefit
-//! (excess generation is free), so the LP optimum is `d_t = load = 150 MW`,
-//! not `max_gen = 200 MW`.
+//! $10/MWh vs backup at $5000/MWh), load = 150 MW < max_gen = 200 MW and excess
+//! generation costs $0. The LP optimum is therefore `d_t = load = 150 MW` at every
+//! stage `t` where `t + K < n_stages` (`t in {0,1,2,3}`): over-committing to 200 MW
+//! costs an extra 50 MW × $10/MWh × 744 h = $372k/stage with no offsetting benefit.
+//! The 500x asymmetry only forces the anticipated thermal to dispatch at all
+//! (reaching load level), not to saturate at max_gen.
 //!
-//! Empirical inspection on pre-fix HEAD shows that `d_0 = 150` (approximately
-//! correct) but `d_1 = d_2 = d_3 = 0` (wrong). The LP is discarding the benefit
-//! at all intermediate active stages. This is the symptom of the cut-coefficient
-//! corruption in `state_to_lp_column`'s `Less` branch: the Benders cut
-//! gradients for anticipated-state columns are mapped to the wrong LP column
-//! index for `k >= 2`, so the policy at those stages receives no incentive
-//! to commit anticipated capacity.
-//!
-//! ## What this test asserts
-//!
-//! After training a deterministic single-scenario simulation for 10 iterations:
-//!
-//! - For `t in {0, 1, 2, 3}`: `anticipated_decision_mw` exists (is `Some`) and
-//!   commits to load level `150.0 ± 1e-3 MW`.
-//! - For `t in {4, 5}`: `anticipated_decision_mw` is `None` (the
-//!   strict-boundary predicate `t + K < n_stages` excludes these).
-//!
-//! ## Economic reasoning
-//!
-//! Load = 150 MW < max_gen = 200 MW. Excess generation cost = $0.
-//! LP optimum: `d_t = load = 150 MW` at every active stage.
-//! Committing 200 MW instead would cost an extra 50 MW × $10/MWh × 744 h
-//! = $372k/stage with no benefit — the excess is simply discarded for free.
-//! The 500x cost asymmetry matters only to ensure the anticipated thermal
-//! dispatches at all (reaching load level), not to saturate at max_gen.
+//! A regression in the anticipated-state cut-coefficient mapping
+//! (`state_to_lp_column`'s `Less` branch, for `k >= 2`) drops `d_t` to 0 at the
+//! intermediate active stages, forcing backup at $5000/MWh.
 
 #![allow(
     clippy::unwrap_used,
@@ -143,13 +121,8 @@ impl Communicator for StubComm {
 /// - 1 anticipated thermal (K=2, cost 10 $/MWh, max 200 MW) — id=2
 /// - 1 backup thermal (cost 5000 $/MWh, max 500 MW) — id=4
 /// - Load 150 MW constant across all stages
-/// - `past_anticipated_commitments = [(id=2, [0.0, 0.0])]` — zero seeds so
-///   the test isolates the in-horizon bug, not any seeding artefact.
-///
-/// The LP optimum is `d_t = load = 150 MW` at every active stage. Committing
-/// more (200 MW) costs extra at $10/MWh with no benefit — excess is free.
-/// The 500x cost ratio (10 vs 5000) ensures the anticipated thermal reaches
-/// load level, not that it saturates at max_gen.
+/// - `past_anticipated_commitments = [(id=2, [0.0, 0.0])]` — zero seeds isolate
+///   the in-horizon behaviour from any seeding artefact.
 fn build_system_k2() -> cobre_core::System {
     use chrono::NaiveDate;
 
@@ -166,9 +139,6 @@ fn build_system_k2() -> cobre_core::System {
         excess_cost: 0.0,
     };
 
-    // Anticipated thermal: K=2 lead stages, very cheap so the policy
-    // dispatches to load level. Max 200 MW > load 150 MW, but d_t = 150
-    // is the optimum since over-commitment costs $10/MWh with zero benefit.
     let anticipated_id = EntityId(2);
     let thermal_ant = Thermal {
         id: anticipated_id,
@@ -184,8 +154,6 @@ fn build_system_k2() -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // Backup thermal: very expensive so the LP avoids it wherever anticipated
-    // dispatch is available.
     let thermal_backup = Thermal {
         id: EntityId(4),
         name: "T_backup".to_string(),
@@ -198,9 +166,6 @@ fn build_system_k2() -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // Trivial hydro: 1 hm³ cap, zero inflow, max_gen 1 MW. Present to
-    // satisfy `n_hydros = 1` requirements of `ResolvedBounds` while keeping
-    // the system firmly in the thermal regime.
     let hydro = Hydro {
         id: EntityId(3),
         name: "H1".to_string(),
@@ -270,7 +235,6 @@ fn build_system_k2() -> cobre_core::System {
         })
         .collect();
 
-    // Zero inflow — keeps the model deterministic and purely thermal.
     let inflow_models: Vec<InflowModel> = (0..n_stages)
         .map(|i| InflowModel {
             hydro_id: EntityId(3),
@@ -303,7 +267,7 @@ fn build_system_k2() -> cobre_core::System {
             min_generation_mw: 0.0,
             max_generation_mw: 1.0,
             max_diversion_m3s: None,
-            filling_inflow_m3s: 0.0,
+            filling_min_rate_m3s: 0.0,
             water_withdrawal_m3s: 0.0,
         }
     }
@@ -329,16 +293,12 @@ fn build_system_k2() -> cobre_core::System {
         }
     }
 
-    // Build resolved bounds with default values, then apply per-thermal
-    // overrides. `ResolvedBounds::new` accepts a single default for ALL
-    // thermals; the per-thermal costs must be patched afterwards so the
-    // objective properly distinguishes the cheap anticipated thermal from
-    // the expensive backup.
-    //
-    // The padding region `[n_stages, n_stages + k)` is the delivery-stage
-    // axis read by `fill_anticipated_decision_objective`; it must also
-    // carry the per-thermal cost so the decision column's objective
-    // coefficient is non-zero.
+    // The per-thermal costs must be patched afterwards (ResolvedBounds::new takes
+    // one default for ALL thermals) so the objective distinguishes the cheap
+    // anticipated thermal from the expensive backup. The patch must extend over the
+    // padding region `[n_stages, n_stages + k)` — the delivery-stage axis read by
+    // `fill_anticipated_columns` — or the decision column's objective coefficient
+    // stays zero and the regression is masked.
     let thermal_axis = n_stages + k;
     let mut bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
@@ -397,9 +357,6 @@ fn build_system_k2() -> cobre_core::System {
         },
     );
 
-    // Zero seeds: isolates the in-horizon bug. Pre-horizon commitments play
-    // no role here — what we are testing is whether the cut coefficients
-    // correctly signal the value of anticipated dispatch at stages t >= 1.
     let initial_conditions = InitialConditions {
         storage: vec![HydroStorage {
             hydro_id: EntityId(3),
@@ -433,12 +390,8 @@ fn build_system_k2() -> cobre_core::System {
 // ---------------------------------------------------------------------------
 
 /// Build a [`Config`] for 10-iteration training and 1-scenario deterministic
-/// simulation.
-///
-/// Ten iterations is sufficient to expose the bug: with a 500x cost ratio,
-/// any policy that even partially explores the anticipated commitment creates
-/// cuts whose gradients at the anticipated-state columns reveal the
-/// corruption at `t >= 1`.
+/// simulation. Ten iterations let cuts sharpen enough that the cut gradients at
+/// the anticipated-state columns drive `d_t` to load level at every active stage.
 fn build_config() -> Config {
     Config {
         schema: None,
@@ -500,29 +453,16 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 // Test
 // ---------------------------------------------------------------------------
 
-/// Assert that `anticipated_decision_mw` commits to load level (150 MW) for
-/// every active decision stage in a K=2, 6-stage fixture.
-///
-/// With load = 150 MW < max_gen = 200 MW and excess generation cost = $0,
-/// the LP optimum is `d_t = load = 150 MW` at every active stage `t` where
-/// `t + K < n_stages`. Committing 200 MW instead costs an extra
-/// 50 MW × $10/MWh × 744 h = $372k/stage with no benefit.
-///
-/// **Expected behaviour (post-fix)**: `d_t ≈ 150.0` for `t in {0, 1, 2, 3}`.
-///
-/// **Pre-fix behaviour (historical context)**: `d_0 ≈ 150.0` (approximately
-/// correct at stage 0) but `d_1 = d_2 = d_3 ≈ 0`. The cut coefficients for
-/// the anticipated-state columns are corrupted for `k >= 2` in
-/// `state_to_lp_column`'s `Less` branch, so the policy at those stages
-/// receives no incentive to commit anticipated capacity, forcing backup to
-/// dispatch at $5000/MWh.
+/// Assert `anticipated_decision_mw` commits to load level (150 MW) for every
+/// active decision stage (`t + K < n_stages`, i.e. `t in {0,1,2,3}`) and is
+/// `None` for the boundary stages, in a K=2, 6-stage fixture. The economic
+/// reasoning pinning `d_t = 150` is in the module doc.
 #[test]
 fn d_t_commits_to_load_for_every_active_stage_k2() {
     let k: usize = 2;
     let n_stages: usize = 6;
     // Active decision stages: t + K < n_stages  =>  t in {0, 1, 2, 3}.
     let active_stages: Vec<usize> = (0..n_stages).filter(|&t| t + k < n_stages).collect();
-    // Inactive (boundary) stages where the strict predicate excludes decision.
     let inactive_stages: Vec<usize> = (0..n_stages).filter(|&t| t + k >= n_stages).collect();
 
     let system = build_system_k2();
@@ -531,7 +471,6 @@ fn d_t_commits_to_load_for_every_active_stage_k2() {
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new: must succeed");
 
-    // Train the policy for 10 iterations.
     let outcome = setup
         .train(&mut solver, &comm, 10, ActiveSolver::new, None, None)
         .expect("training error: train() must not return Err");
@@ -541,7 +480,6 @@ fn d_t_commits_to_load_for_every_active_stage_k2() {
         outcome.error,
     );
 
-    // Run a single deterministic simulation to observe the policy decisions.
     let mut pool = setup
         .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("workspace pool error: create_workspace_pool must succeed");
@@ -585,12 +523,6 @@ fn d_t_commits_to_load_for_every_active_stage_k2() {
     };
 
     // ── Active stages: decision must exist and commit to load = 150 MW ──
-    //
-    // With the strict-boundary predicate `t + K < n_stages`, stages 0..3
-    // are active. Load = 150 MW < max_gen = 200 MW; excess is free, so
-    // d_t = load = 150 MW is the optimum — over-committing costs extra with
-    // no benefit. On pre-fix code, the cut-coefficient bug causes d_t = 0
-    // for t in {1, 2, 3}, which this test guards against post-fix.
     let load_mw = 150.0_f64;
     let tol = 1e-3_f64;
     for t in &active_stages {
@@ -609,9 +541,6 @@ fn d_t_commits_to_load_for_every_active_stage_k2() {
     }
 
     // ── Inactive stages: decision must be None (strict-boundary predicate) ──
-    //
-    // For t in {4, 5}: t + K >= n_stages, so the anticipated-decision
-    // variable does not exist in the LP. The simulation must report None.
     for t in &inactive_stages {
         assert!(
             decision_at(*t).is_none(),

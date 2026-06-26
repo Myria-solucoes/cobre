@@ -6,7 +6,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     energy_conversion::EnergyConversionSet,
-    indexer::StageIndexer,
+    indexer::StateLayout,
     simulation::SimulationConfig,
     workspace::CapturedBasis,
 };
@@ -14,10 +14,6 @@ use crate::{
 use super::StudySetup;
 
 impl StudySetup {
-    // -------------------------------------------------------------------------
-    // Mutation setters — remain `pub` (called from cobre-cli or cobre-python)
-    // -------------------------------------------------------------------------
-
     /// Replace the FCF with a pre-loaded policy.
     pub fn replace_fcf(&mut self, fcf: FutureCostFunction) {
         self.fcf = fcf;
@@ -52,15 +48,7 @@ impl StudySetup {
         self.cut_management.budget = budget;
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Context builders — span multiple sub-structs
-    // ─────────────────────────────────────────────────────────────────────
-
     /// Return the pre-computed [`EnergyConversionSet`] for this study.
-    ///
-    /// Provides `ρ_eq`, `V_ref`, `Q_ref`, and `ρ_acum` (accumulated cascade
-    /// productivity) for every `(hydro, stage)` pair. Consumed by the
-    /// energy-balance LP constraints and inflow-energy / stored-energy extraction.
     #[must_use]
     pub fn energy_conversion(&self) -> &EnergyConversionSet {
         &self.energy_conversion
@@ -72,28 +60,43 @@ impl StudySetup {
         &self.simulation_config
     }
 
-    /// Return a reference to the per-stage LP column/row indexer.
+    /// Return a reference to the stage-invariant role-(a) state-vector layout.
     ///
-    /// Provides LP layout constants — column and row ranges for every entity
-    /// class (storage, thermal, anticipated state, etc.) — so that callers can
-    /// locate specific primal or state-vector entries without hard-coding
-    /// offsets.
-    ///
-    /// The same indexer applies to every stage (the layout is uniform across
-    /// stages in a study).
+    /// State-region offsets are pure functions of `(N, L, A, k_max)`, so the
+    /// single layout resolves onto the correct column at every stage regardless
+    /// of per-stage block counts.
     #[must_use]
-    pub fn stage_indexer(&self) -> &StageIndexer {
-        &self.stage_data.indexer
+    pub fn stage_state(&self) -> &StateLayout {
+        &self.stage_data.state
     }
 
     /// Number of stages in the planning horizon.
-    ///
-    /// Used by the CLI summary to express the pool-level active-row total on a
-    /// per-stage basis, so it is directly comparable to the per-solve
-    /// rows-in-LP metric reported for Dynamic Cut Selection.
     #[must_use]
     pub fn num_stages(&self) -> usize {
         self.methodology.horizon.num_stages()
+    }
+
+    /// Per-stage stochastic-NCS dormancy mask, reconstructed for the out-of-crate
+    /// `tests/` harness (the dormancy mask is not stored — the patch path applies
+    /// the commissioning predicate inline to `ncs_stochastic_windows`).
+    ///
+    /// Outer index is the study stage; inner is the stochastic slot (id-sorted
+    /// `StochasticContext::ncs_entity_ids` order). `true` marks a
+    /// commissioning-dormant slot whose dense NCS column is zeroed at that stage.
+    #[must_use]
+    pub fn ncs_stochastic_dormant_for_test(&self) -> Vec<Vec<bool>> {
+        self.stage_data
+            .stages
+            .iter()
+            .map(|stage| {
+                self.ncs_stochastic_windows
+                    .iter()
+                    .map(|&(entry, exit)| {
+                        !crate::lp_builder::commissioning_active(entry, exit, stage.id)
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     /// Construct a [`StageContext`] borrowing from this setup.
@@ -102,19 +105,26 @@ impl StudySetup {
         StageContext {
             templates: &self.stage_data.stage_templates.templates,
             base_rows: &self.stage_data.stage_templates.base_rows,
+            geometry_per_stage: &self.stage_data.stage_templates.geometry_per_stage,
             noise_scale: &self.stage_data.stage_templates.noise_scale,
             n_hydros: self.stage_data.stage_templates.n_hydros,
             n_load_buses: self.stage_data.stage_templates.n_load_buses,
             load_balance_row_starts: &self.stage_data.stage_templates.load_balance_row_starts,
             load_bus_indices: &self.stage_data.stage_templates.load_bus_indices,
             block_counts_per_stage: &self.stage_data.block_counts_per_stage,
+            ncs_col_starts: &self.stage_data.stage_templates.ncs_col_starts,
+            n_ncs: self.stage_data.stage_templates.n_ncs,
+            ncs_stochastic_dense_col: &self.ncs_stochastic_dense_col,
+            ncs_stochastic_windows: &self.ncs_stochastic_windows,
+            anticipated_windows: &self.anticipated_windows,
+            study_stage_ids: &self.study_stage_ids,
             ncs_max_gen: &self.ncs_max_gen,
             ncs_allow_curtailment: &self.ncs_allow_curtailment,
-            discount_factors: &self.stage_data.stage_templates.discount_factors,
-            cumulative_discount_factors: &self
+            discount_factors: self.stage_data.stage_templates.discount_factors(),
+            cumulative_discount_factors: self
                 .stage_data
                 .stage_templates
-                .cumulative_discount_factors,
+                .cumulative_discount_factors(),
             stage_lag_transitions: &self.stage_data.stage_lag_transitions,
             noise_group_ids: &self.stage_data.noise_group_ids,
             downstream_par_order: self.downstream_par_order,
@@ -128,7 +138,8 @@ impl StudySetup {
         let tr = &self.scenario_libraries.training;
         TrainingContext {
             horizon: &self.methodology.horizon,
-            indexer: &self.stage_data.indexer,
+            state: &self.stage_data.state,
+            study_dims: &self.stage_data.study_dims,
             inflow_method: &self.methodology.inflow_method,
             stochastic: &self.stochastic,
             initial_state: &self.initial_state,
@@ -152,16 +163,11 @@ impl StudySetup {
     }
 
     /// Build simulation [`TrainingContext`] with simulation-specific schemes and libraries.
-    ///
-    /// Reuses training libraries when simulation schemes match. Selects per-class
-    /// libraries in this order: simulation-specific, then training (shared).
     #[must_use]
     pub(crate) fn simulation_ctx(&self) -> TrainingContext<'_> {
         let tr = &self.scenario_libraries.training;
         let sim = &self.scenario_libraries.simulation;
 
-        // For each class, prefer the simulation-specific library when present;
-        // fall back to the training library when schemes are identical.
         let historical_library =
             sim.historical
                 .as_ref()
@@ -197,7 +203,8 @@ impl StudySetup {
 
         TrainingContext {
             horizon: &self.methodology.horizon,
-            indexer: &self.stage_data.indexer,
+            state: &self.stage_data.state,
+            study_dims: &self.stage_data.study_dims,
             inflow_method: &self.methodology.inflow_method,
             stochastic: &self.stochastic,
             initial_state: &self.initial_state,
@@ -211,15 +218,11 @@ impl StudySetup {
             external_ncs_library,
             recent_accum_seed: &self.recent_observation_seed.accum_seed,
             recent_weight_seed: self.recent_observation_seed.weight_seed,
-            // When the dynamic cut-selection method is configured, simulation
-            // solves each stage lazily against the cut pool (`Some` only for the
-            // dynamic variant); otherwise it uses the baked all-cuts path.
             dcs: self
                 .cut_management
                 .cut_selection
                 .as_ref()
                 .and_then(crate::dcs::DcsParams::from_strategy),
-            // The backward `noise_key` diagnostic does not apply to simulation.
             noise_key_diag: None,
         }
     }

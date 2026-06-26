@@ -1,35 +1,10 @@
 //! CLP dual-sign convention probe — sign of `cobre_clp_get_row_price` for an
 //! equality row.
 //!
-//! The canonical dual-sign convention in this workspace is fixed by the `HiGHS`
-//! backend, which feeds row duals directly into Benders cut construction
-//! without negation. For the standard solver conformance fixture
-//! (`make_fixture_stage_template` in `conformance.rs`), `HiGHS` solves to
-//! objective `100.0` with the cut-relevant equality row dual `dual[0] == -100.0`.
-//!
-//! Reference LP (verbatim from `make_fixture_stage_template`):
-//! - 3 columns, 2 equality rows.
-//! - CSC: `col_starts = [0, 2, 2, 3]`, `row_indices = [0, 1, 1]`,
-//!   `values = [1.0, 2.0, 1.0]`.
-//! - `col_lower = [0, 0, 0]`, `col_upper = [10, +inf, 8]`.
-//! - `objective = [0, 1, 50]` (minimize).
-//! - `row_lower = row_upper = [6, 14]` (both equality rows).
-//! - `HiGHS` reference solution: objective `100.0`, primals `(6, 0, 2)`,
-//!   `dual[0] == -100.0`.
-//!
-//! This probe runs BEFORE `ClpSolver::solve` exists, so it calls the raw
-//! `cobre_clp_*` FFI directly. It measures CLP's raw `Clp_getRowPrice` sign for
-//! the equality row and records the result as a passing, self-documenting fact.
-//!
-//! ─────────────────────────────────────────────────────────────────────────
-//! `CLP_DUAL_SIGN` CONCLUSION: `cobre_clp_get_row_price()[0] == -100.0` for the
-//! equality-row fixture. The canonical convention (`HiGHS`) is `dual[0] == -100.0`.
-//! CLP produces the SAME sign as `HiGHS`; therefore
-//! `ClpSolver::solve` MUST not negate `cobre_clp_get_row_price`.
-//! ─────────────────────────────────────────────────────────────────────────
-//!
-//! Run with:
-//! `cargo test -p cobre-solver --features clp --test _clp_sign_convention_probe -- --nocapture`
+//! The canonical dual-sign convention is the `HiGHS` one: row duals feed Benders
+//! cut construction without negation. CLP reports `row_price[0] == -100.0` for
+//! the equality-row fixture, the SAME sign as `HiGHS`; therefore `ClpSolver::solve`
+//! MUST not negate `cobre_clp_get_row_price`.
 
 #![cfg(feature = "clp")]
 #![cfg_attr(
@@ -56,13 +31,9 @@ fn clp_sign_convention_row_equality() {
     let model = unsafe { cobre_clp_create() };
     assert!(!model.is_null(), "cobre_clp_create() returned null");
 
-    // Silence CLP's default level-1 progress output (this raw-FFI probe does not
-    // go through `ClpSolver::new`, which silences it for production).
     // SAFETY: `model` is the non-null handle just created above.
     unsafe { cobre_clp_set_log_level(model, 0) };
 
-    // Reference LP — verbatim numeric data from `make_fixture_stage_template`
-    // (conformance.rs). 3 columns, 2 equality rows in CSC form.
     let col_starts: [i32; 4] = [0, 2, 2, 3];
     let row_indices: [i32; 3] = [0, 1, 1];
     let values: [f64; 3] = [1.0, 2.0, 1.0];
@@ -112,12 +83,9 @@ fn clp_sign_convention_row_equality() {
         "expected Optimal status, got {status}"
     );
 
-    // Read the CLP-owned objective value BEFORE destroying the model.
     // SAFETY: `model` is a valid solved CLP model.
     let objective_value = unsafe { cobre_clp_objective_value(model) };
 
-    // Copy the CLP-owned row-price pointer into an owned Vec immediately, before
-    // any further FFI call invalidates it.
     // SAFETY: `model` is a valid solved CLP model. `cobre_clp_get_row_price`
     // returns a pointer into CLP-owned memory of length `num_rows = 2`, valid
     // until the next solve. We copy the 2 elements into an owned Vec and never
@@ -137,22 +105,17 @@ fn clp_sign_convention_row_equality() {
     );
     println!("  HiGHS canonical  : dual[0] == -100.0, objective == 100.0");
 
-    // Solve reached optimality and matches the HiGHS objective baseline.
     assert!(
         (objective_value - 100.0).abs() < 1e-6,
         "objective {objective_value} is not within 1e-6 of HiGHS baseline 100.0"
     );
 
-    // Magnitude matches the HiGHS canonical |dual[0]| == 100.0.
     assert!(
         (row_price[0].abs() - 100.0).abs() < 1e-6,
         "|row_price[0]| = {} is not within 1e-6 of 100.0",
         row_price[0].abs()
     );
 
-    // Observed exact sign: CLP reports row_price[0] == -100.0, the SAME sign as
-    // the HiGHS canonical dual[0] == -100.0. Therefore no negation is required
-    // in ClpSolver::solve.
     assert!(
         (row_price[0] - (-100.0)).abs() < 1e-6,
         "row_price[0] = {} is not within 1e-6 of the observed -100.0",

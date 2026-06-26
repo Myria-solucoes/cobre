@@ -1,13 +1,9 @@
 //! Resolution of parsed load factor entries into a dense lookup table.
 //!
-//! [`resolve_load_factors`] converts `Vec<LoadFactorEntry>` (from
-//! `scenarios/load_factors.json`) into a [`ResolvedLoadFactors`] indexed by
-//! `(bus_index, stage_index, block_index)` for O(1) lookup during LP
-//! construction.
-//!
-//! Resolution is infallible: unknown bus or stage IDs in the factor entries
-//! are silently skipped (they would have been caught by upstream validation).
-//! The default factor is `1.0` (no scaling).
+//! [`resolve_load_factors`] builds a [`ResolvedLoadFactors`] indexed by
+//! `(bus_index, stage_index, block_index)` for O(1) lookup during LP construction.
+//! Unknown bus/stage IDs are silently skipped (already caught upstream); the
+//! default factor is `1.0` (no scaling).
 
 use std::collections::HashMap;
 
@@ -17,15 +13,9 @@ use crate::scenarios::LoadFactorEntry;
 
 /// Build a resolved load factor table from parsed entries.
 ///
-/// Maps domain-level `bus_id` and `stage_id` values to 0-based positional
-/// indices using the provided sorted entity slices. Entries referencing
-/// unknown buses or stages are silently skipped.
-///
-/// # Arguments
-///
-/// * `entries` — parsed load factor entries from `scenarios/load_factors.json`
-/// * `buses` — sorted bus collection (for `bus_id` to index mapping)
-/// * `stages` — sorted stage collection (for `stage_id` to index mapping and max block count)
+/// `buses` and `stages` must be sorted: each entity's slice position becomes its
+/// 0-based table index. The stage axis spans study stages only (`id >= 0`); the
+/// block axis is sized to the largest per-stage block count.
 #[must_use]
 pub fn resolve_load_factors(
     entries: &[LoadFactorEntry],
@@ -36,14 +26,12 @@ pub fn resolve_load_factors(
         return ResolvedLoadFactors::empty();
     }
 
-    // Build bus_id -> bus_index mapping.
     let bus_id_to_idx: HashMap<i32, usize> = buses
         .iter()
         .enumerate()
         .map(|(idx, b)| (b.id.0, idx))
         .collect();
 
-    // Build stage_id -> stage_index mapping (study stages only: id >= 0).
     let stage_id_to_idx: HashMap<i32, usize> = stages
         .iter()
         .filter(|s| s.id >= 0)
@@ -64,10 +52,10 @@ pub fn resolve_load_factors(
 
     for entry in entries {
         let Some(&bus_idx) = bus_id_to_idx.get(&entry.bus_id.0) else {
-            continue; // Unknown bus — skip.
+            continue;
         };
         let Some(&stage_idx) = stage_id_to_idx.get(&entry.stage_id) else {
-            continue; // Unknown stage — skip.
+            continue;
         };
         for bf in &entry.block_factors {
             let Some(block_idx) = usize::try_from(bf.block_id).ok() else {

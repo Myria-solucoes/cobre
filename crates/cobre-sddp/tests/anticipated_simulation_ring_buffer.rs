@@ -1,41 +1,17 @@
-//! Regression test: simulation pipeline must shift the anticipated-state
-//! ring buffer between stages.
+//! Regression: the simulation pipeline (`solve_simulation_stage`) must call
+//! `shift_anticipated_state` once per stage, like the inflow-lag ring buffer.
 //!
-//! ## Bug being guarded against
+//! Without the shift, the next stage's `ws.current_state` carries the post-solve
+//! primal of the unbounded `anticipated_state` columns — `incoming - decision`,
+//! the residual the Category 6 fixing rows leave — instead of the shifted
+//! ring-buffer state, so the fishing constraint at delivery stage `K` reads a
+//! never-advanced slot 0. The contract this pins: with the anticipated thermal
+//! cheaper than the backup, the matured commitment equals the in-study decision
+//! made `K` stages earlier,
 //!
-//! Prior to the fix, `solve_simulation_stage` in
-//! `crates/cobre-sddp/src/simulation/pipeline.rs` advanced the inflow-lag
-//! ring buffer between stages but never called `shift_anticipated_state`.
-//! Because the `anticipated_state` LP columns are unbounded
-//! `[-inf, +inf]` and the Category 6 fixing rows enforce
-//! `state_col + decision_col = incoming_state`, the post-solve primal
-//! value at the `anticipated_state` columns equals `incoming - decision`
-//! (a residual that has no physical meaning) rather than the shifted
-//! ring-buffer state.
+//! `anticipated_committed_mw(t = K) == anticipated_decision_mw(t = 0)`,
 //!
-//! Without the shift, this corrupted value propagated to the next
-//! stage's `ws.current_state`, and the fishing constraint at the
-//! delivery stage `K` read slot 0 of a never-shifted buffer. The
-//! `anticipated_committed_mw` output therefore reflected stale or zero
-//! values rather than the in-study decisions.
-//!
-//! ## What this test asserts
-//!
-//! The fixture deterministically pins the anticipated decision at each
-//! stage to a non-trivial value by making the anticipated thermal much
-//! cheaper than the backup thermal. With a deterministic single-scenario
-//! simulation, every stage's `anticipated_decision_mw` is well-defined,
-//! and the post-shift ring-buffer evolution implies:
-//!
-//! `anticipated_committed_mw(t = K) == anticipated_decision_mw(t = 0)`
-//!
-//! i.e. the freshly-committed MW at stage 0 must equal the matured
-//! commitment at stage K (where K is the lead time).
-//!
-//! On the buggy code this invariant fails because the ring buffer never
-//! advances; the fishing constraint at stage K reads the seeded
-//! `past_anticipated_commitments` (or zero) rather than the in-study
-//! decision.
+//! not the seeded `past_anticipated_commitments` a missing shift would surface.
 
 #![allow(
     clippy::unwrap_used,
@@ -85,7 +61,6 @@ use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context
 // StubComm — single-rank communicator for testing
 // ---------------------------------------------------------------------------
 
-/// Single-rank communicator stub for testing.
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -135,28 +110,14 @@ impl Communicator for StubComm {
 // System builder
 // ---------------------------------------------------------------------------
 
-/// Build a deterministic K-stage system with:
-/// - 1 bus (deficit cost 5000 $/MWh)
-/// - 1 hydro (small capacity, mostly inactive)
-/// - 1 anticipated thermal (K lead stages, cost 10 $/MWh, max 200 MW) — id=2
-/// - 1 backup thermal (cost 5000 $/MWh, max 500 MW) — id=4
-/// - Load 150 MW constant across all stages
-/// - `past_anticipated_commitments` seeded with the given `past_commitments_mw`
+/// Build a deterministic K-stage system: one bus, one mostly-inactive hydro, a
+/// cheap anticipated thermal (id 2) plus an expensive backup (id 4), constant
+/// 150 MW load, and `past_anticipated_commitments` seeded with `past_commitments_mw`.
 ///
-/// **Note on non-zero seeds**: this function constructs the resolved
-/// `cobre_core::System` directly via `SystemBuilder::new()`, bypassing the
-/// `cobre-io` parse-and-validate pipeline. The semantic validator that rejects
-/// non-zero `values_mw` entries therefore does NOT fire here. That is
-/// intentional: the non-zero seed is a deliberate test fixture for the
-/// ring-buffer shift mechanic (see the test doc below), not a user-supplied
-/// pre-horizon commitment. The validator's rejection rule applies to JSON input
-/// through `load_case`; unit tests that construct `System` directly are exempt.
-///
-/// With K=1 and cheap anticipated cost, the optimal policy commits the full
-/// load (150 MW) one stage in advance from stage 0 onward, so:
-/// - `anticipated_decision_mw(t)` should converge to 150 for t in 0..n-1
-/// - `anticipated_committed_mw(t)` at stage t==K must equal the decision
-///   made at stage 0 (a fresh in-study commitment), NOT any seeded value.
+/// The non-zero seed is intentional: building the resolved `System` directly via
+/// `SystemBuilder::new()` bypasses the `cobre-io` parse-and-validate pipeline, so
+/// the semantic validator that rejects non-zero `values_mw` does not fire — that
+/// rule applies to JSON through `load_case`, not to directly-constructed `System`.
 fn build_system(k: usize, past_commitments_mw: Vec<f64>, n_stages: usize) -> cobre_core::System {
     use chrono::NaiveDate;
 
@@ -309,7 +270,7 @@ fn build_system(k: usize, past_commitments_mw: Vec<f64>, n_stages: usize) -> cob
             min_generation_mw: 0.0,
             max_generation_mw: 1.0,
             max_diversion_m3s: None,
-            filling_inflow_m3s: 0.0,
+            filling_min_rate_m3s: 0.0,
             water_withdrawal_m3s: 0.0,
         }
     }
@@ -367,17 +328,12 @@ fn build_system(k: usize, past_commitments_mw: Vec<f64>, n_stages: usize) -> cob
             },
         },
     );
-    // Per-thermal cost overrides: ResolvedBounds::new uses one default
-    // for ALL thermals, but the LP must distinguish the cheap anticipated
-    // thermal (thermal index 0) from the expensive backup (thermal index
-    // 1). Without these per-thermal costs, the policy has no reason to
-    // commit anticipated capacity and decision_at(t) collapses to zero —
-    // which would obscure the regression assertion.
-    //
-    // The padding region `[n_stages, n_stages + k_max)` is the delivery-
-    // stage axis read by `fill_anticipated_decision_objective`; it must
-    // also carry the per-thermal cost so the decision column has a
-    // non-zero objective coefficient.
+    // ResolvedBounds::new applies one default to ALL thermals; without these
+    // per-thermal overrides the cheap anticipated (index 0) and expensive backup
+    // (index 1) are indistinguishable and decision_at(t) collapses to zero,
+    // neutering the regression. The override must span the padding region
+    // `[n_stages, n_stages + k_max)` too — `fill_anticipated_columns` reads the
+    // delivery-stage axis there, so the decision column needs its cost out to K.
     let thermal_axis = n_stages + k;
     for s in 0..thermal_axis {
         bounds.thermal_bounds_mut(0, s).cost_per_mwh = 10.0; // anticipated
@@ -503,38 +459,15 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 // Test
 // ---------------------------------------------------------------------------
 
-/// Verify that the simulation forward walk advances the anticipated-state
-/// ring buffer once per stage.
-///
-/// With K=1 and a non-zero seed `past_anticipated_commitments = [50.0]`,
-/// the LP at stage 1 sees a fishing constraint whose RHS comes from slot 0
-/// of the anticipated-state vector at the start of stage 1. After the
-/// ring-buffer shift performed at the end of stage 0, slot 0 must hold
-/// the LP's stage-0 decision (the freshly-made commitment) — not the
-/// seeded 50.0 and not the residual `incoming - decision` value left in
-/// the unbounded `anticipated_state` columns.
-///
-/// Concretely: with the anticipated thermal at $10/MWh and the backup
-/// thermal at $5000/MWh, the optimal policy is to commit the full 150 MW
-/// of load via the anticipated thermal at every active stage. Therefore:
-///
-/// 1. `anticipated_decision_mw(t = 0)` saturates near 150 MW.
-/// 2. `anticipated_committed_mw(t = 1)` equals the decision from t = 0
-///    (150 MW), NOT the seed 50.0.
-///
-/// On the buggy code path (no shift), `anticipated_committed_mw(t = 1)`
-/// would equal the seed 50.0 (because slot 0 was never advanced), and the
-/// equality assertion `committed(1) == decision(0)` would fail.
+/// K=1 case of the module-doc invariant: stage-1 matured commitment equals the
+/// stage-0 decision, not the non-zero seed a missing ring-buffer shift surfaces.
 #[test]
 fn simulation_ring_buffer_shifts_anticipated_state_k1() {
     let k: usize = 1;
     let n_stages: usize = 5;
-    // Use a seed value the LP is structurally unlikely to reproduce
-    // as a decision. Setting the seed to 7 MW (a value with no special
-    // relationship to load/bounds) maximises the chance that
-    // decision_at(t) != seed[0]. Even if the LP happens to also pick
-    // d_t = 7, the relationship would be coincidental rather than a
-    // fixed-point of the buggy code.
+    // Seed (7 MW) has no relationship to load/bounds, so the LP will not pick it
+    // as a decision — a seed equal to a plausible decision would let the buggy and
+    // fixed paths agree and neuter the test.
     let seed: Vec<f64> = vec![7.0];
 
     let system = build_system(k, seed.clone(), n_stages);
@@ -543,7 +476,6 @@ fn simulation_ring_buffer_shifts_anticipated_state_k1() {
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
 
-    // Train the policy.
     let outcome = setup
         .train(&mut solver, &comm, 50, ActiveSolver::new, None, None)
         .expect("train must not return Err");
@@ -553,7 +485,6 @@ fn simulation_ring_buffer_shifts_anticipated_state_k1() {
         outcome.error
     );
 
-    // Run the simulation (1 deterministic scenario).
     let mut pool = setup
         .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("workspace pool must build");
@@ -594,8 +525,6 @@ fn simulation_ring_buffer_shifts_anticipated_state_k1() {
         "scenario must contain one stage record per study stage",
     );
 
-    // Locate the anticipated thermal (id=2) in each stage's thermal vec.
-    // Helper: pull the anticipated decision and committed values for a stage.
     let anticipated_thermal_id: i32 = 2;
     let decision_at = |t: usize| -> Option<f64> {
         scenario.stages[t]
@@ -612,8 +541,7 @@ fn simulation_ring_buffer_shifts_anticipated_state_k1() {
             .and_then(|th| th.anticipated_committed_mw)
     };
 
-    // ── Sanity: stage 0 has a decision; under always-active fishing the
-    // committed value reads the seed at slot 0 (`values_mw[0] = 7.0`).
+    // Under always-active fishing, stage-0 committed reads the seed at slot 0.
     let d0 =
         decision_at(0).expect("anticipated_decision_mw must exist at stage 0 (t + K < n_stages)");
     let c0 = committed_at(0)
@@ -622,36 +550,11 @@ fn simulation_ring_buffer_shifts_anticipated_state_k1() {
         (c0 - 7.0).abs() < 1e-6,
         "committed_at(0) must equal the K=1 seed values_mw[0]=7.0; got {c0}",
     );
-    // With the cheap anticipated thermal (cost 10 $/MWh) saving expensive
-    // backup dispatch (5000 $/MWh) at the K=1 delivery stage, any policy
-    // that even partially explores the trade-off commits a non-trivial
-    // amount at stage 0.
     assert!(
         d0.abs() > 1e-6,
         "stage-0 decision must be non-zero for the test to be meaningful; got {d0}",
     );
 
-    // ── Regression assertion: stage-1 matured commitment must equal d_0 ──
-    //
-    // Trace:
-    //
-    // - With the FIX: end-of-stage-0 outgoing state slot 0 = d_0 (the
-    //   shift writes d_0 into slot 0). Stage 1 sees Cat 6 RHS = d_0 > 0.
-    //   The fishing constraint `gt_anticipated = state_col` paired with
-    //   Cat 6 `state_col + d_1 = d_0` and `state_col >= 0` gives
-    //   `gt_anticipated_stage_1 = d_0 - d_1`. With cheap thermal cost
-    //   zeroed at delivery, the LP picks d_1 = 0 and gt = d_0.
-    //
-    // - On the BUGGY code path: end-of-stage-0 outgoing state slot 0 =
-    //   the LP primal of the unbounded `anticipated_state` column, which
-    //   equals `seed[0] - d_0`. With seed[0]=7 and d_0=100, the residual
-    //   is -93. Stage 1's Cat 6 RHS = -93. Combined with state_col >= 0
-    //   from fishing, the LP is INFEASIBLE: state_col + d_1 = -93 cannot
-    //   be satisfied with both state_col >= 0 and d_1 >= 0. The
-    //   simulation returns `Err(LpInfeasible{stage_id: 1, ..})`.
-    //
-    // So on the fixed path: simulation succeeds AND committed_at(1) == d_0.
-    // On the buggy path: simulation errors out at stage 1.
     let c1 = committed_at(1).expect("committed at stage 1 must exist (K <= 1)");
     assert!(
         (c1 - d0).abs() < 1e-6,
@@ -664,19 +567,15 @@ fn simulation_ring_buffer_shifts_anticipated_state_k1() {
     );
 }
 
-/// Same invariant, K=2 case. With K=2 and a two-element seed
-/// `[100.0, 50.0]`, the matured commitment at stage 0 is the seed slot 0
-/// (100.0) and at stage 1 is the seed slot 1 (50.0). From stage 2 onward,
-/// the matured commitment must equal the in-study decision made K=2
-/// stages earlier — never the seed values, never zero.
+/// K=2 case of the module-doc invariant: the two pre-horizon stages read the seed
+/// slots, and from stage 2 the matured commitment equals the decision made K=2
+/// stages earlier (two shifts carry it into slot 0), never the seed, never zero.
 #[test]
 fn simulation_ring_buffer_shifts_anticipated_state_k2() {
     let k: usize = 2;
     let n_stages: usize = 6;
-    // Pick seed values that the LP will NOT reproduce as `d_0`. With the
-    // anticipated thermal max=100 and the LP preferring full commitment
-    // when fishing is inactive at stage 0, d_0 saturates near 100 — which
-    // is distinct from both seed slots (50 and 30 respectively).
+    // Seed slots are distinct from d_0 (which saturates near the thermal max of
+    // 100), so neither slot can coincide with a decision and mask a missing shift.
     let seed: Vec<f64> = vec![50.0, 30.0];
 
     let system = build_system(k, seed.clone(), n_stages);
@@ -734,10 +633,8 @@ fn simulation_ring_buffer_shifts_anticipated_state_k2() {
             .and_then(|th| th.anticipated_committed_mw)
     };
 
-    // With K=2 and always-active fishing, slot 0 of the ring buffer is
-    // populated at every stage. Pre-horizon stages read seed values:
-    //   stage 0 -> values_mw[0] = 50.0 (initial slot 0)
-    //   stage 1 -> values_mw[1] = 30.0 (after the stage-0 ring-buffer shift)
+    // Pre-horizon: stage 0 reads seed slot 0; stage 1 reads slot 1 after the
+    // stage-0 shift moves it into slot 0.
     let c0 =
         committed_at(0).expect("committed_at(0) must be Some under always-active fishing with K=2");
     assert!(
@@ -753,26 +650,11 @@ fn simulation_ring_buffer_shifts_anticipated_state_k2() {
 
     let d0 = decision_at(0).expect("decision at stage 0 must exist (0 + K < n_stages)");
 
-    // The non-zero seed and the cheap anticipated thermal should produce
-    // a non-trivial stage-0 commitment under any reasonable policy.
     assert!(
         d0.abs() > 1e-6,
         "stage-0 decision must be non-zero for the test to be meaningful; got {d0}",
     );
 
-    // ── Regression assertion: stage-2 matured commitment must equal d_0 ──
-    //
-    // With K=2, the ring buffer shift at the end of stage 0 places d_0
-    // in slot K-1=1, and the shift at the end of stage 1 moves it into
-    // slot 0. Stage 2 then reads slot 0 (via the fishing constraint), so
-    // committed_at(2) = d_0.
-    //
-    // On the buggy path the simulation pipeline never shifted, so stage 2
-    // would read the stale residual from the unbounded LP column at
-    // stage 1. With seed[1]=50 and stage-1 LP picking some state value,
-    // the residual is typically negative (when d picks above seed) and
-    // the LP at stage 2 becomes infeasible (Cat 6 RHS < 0 paired with
-    // fishing forcing state_col >= 0).
     let c2 = committed_at(2).expect("committed at stage 2 must exist (K <= 2)");
     assert!(
         (c2 - d0).abs() < 1e-6,

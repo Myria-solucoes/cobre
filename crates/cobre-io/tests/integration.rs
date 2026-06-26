@@ -1,11 +1,4 @@
 //! End-to-end integration tests for `cobre_io::load_case`.
-//!
-//! Each test constructs a complete case directory in a [`TempDir`] using the
-//! helpers in [`helpers`], calls [`load_case`], and verifies either the
-//! returned [`System`] entity counts or the returned [`LoadError`] variant.
-//!
-//! These tests exercise the full five-layer validation pipeline and the
-//! `SystemBuilder` assembly step in one shot.
 #![allow(
     clippy::unwrap_used,
     clippy::panic,
@@ -21,8 +14,6 @@ use tempfile::TempDir;
 
 // ── test_minimal_valid_case ────────────────────────────────────────────────────
 
-/// Given the 8 required files for a minimal case, `load_case` must return an
-/// `Ok(System)` with exactly 1 bus, 0 hydros, 0 thermals, 0 lines, and 1 stage.
 #[test]
 fn test_minimal_valid_case() {
     let dir = TempDir::new().unwrap();
@@ -60,8 +51,6 @@ fn test_minimal_valid_case() {
 
 // ── test_multi_entity_case ────────────────────────────────────────────────────
 
-/// Given a richer case with 2 buses, 1 hydro, 1 thermal, 1 line, and 2 stages,
-/// `load_case` must return `Ok(System)` with matching entity counts.
 #[test]
 fn test_multi_entity_case() {
     let dir = TempDir::new().unwrap();
@@ -111,14 +100,11 @@ fn test_multi_entity_case() {
 
 // ── test_missing_required_file ────────────────────────────────────────────────
 
-/// Given a minimal case with `system/buses.json` removed, `load_case` must
-/// return an `Err` whose display representation contains `"buses"`.
 #[test]
 fn test_missing_required_file() {
     let dir = TempDir::new().unwrap();
     helpers::make_minimal_case(&dir);
 
-    // Remove the required buses file after populating the full case.
     std::fs::remove_file(dir.path().join("system/buses.json")).unwrap();
 
     let result = load_case(dir.path());
@@ -137,14 +123,11 @@ fn test_missing_required_file() {
 
 // ── test_malformed_json ───────────────────────────────────────────────────────
 
-/// Given a minimal case with `system/hydros.json` containing invalid JSON,
-/// `load_case` must return an `Err` (parse failure).
 #[test]
 fn test_malformed_json() {
     let dir = TempDir::new().unwrap();
     helpers::make_minimal_case(&dir);
 
-    // Overwrite hydros.json with syntactically invalid content.
     helpers::write_file(
         dir.path(),
         "system/hydros.json",
@@ -155,9 +138,7 @@ fn test_malformed_json() {
 
     match result {
         Err(err) => {
-            // The error must be a parse or constraint error — not an Ok.
-            // We only assert it is an Err; the exact variant is implementation-
-            // defined (ParseError or ConstraintError wrapping the parse failure).
+            // Variant is implementation-defined (ParseError or ConstraintError wrapping the parse); assert only Err.
             let display = err.to_string();
             assert!(
                 !display.is_empty(),
@@ -170,9 +151,6 @@ fn test_malformed_json() {
 
 // ── test_referential_integrity_violation ─────────────────────────────────────
 
-/// Given a case where a hydro references a non-existent bus (id=999),
-/// `load_case` must return an `Err` whose display representation mentions
-/// the invalid reference.
 #[test]
 fn test_referential_integrity_violation() {
     let dir = TempDir::new().unwrap();
@@ -183,9 +161,6 @@ fn test_referential_integrity_violation() {
     match result {
         Err(err) => {
             let display = err.to_string();
-            // The error description must mention that a reference is missing —
-            // the structural format from ValidationContext::into_result is:
-            // "[InvalidReference] system/hydros.json (Hydro 1): ... 999 ..."
             assert!(
                 display.contains("999") || display.contains("bus") || display.contains("Bus"),
                 "error display should mention the invalid bus reference (999), got: {display}"
@@ -197,14 +172,8 @@ fn test_referential_integrity_violation() {
 
 // ── test_inflow_history_wired_into_system ─────────────────────────────────────
 
-/// Given a case directory with `scenarios/inflow_history.parquet` containing
-/// 1 hydro x 10 years of monthly data (120 rows), `load_case` must return a
-/// `System` whose `inflow_history()` slice has exactly 120 entries, all with
-/// finite `value_m3s`.
-///
-/// The case also includes `inflow_seasonal_stats.parquet` (one row per stage for
-/// the single hydro) so that the estimation path is bypassed and no
-/// `season_definitions` are required in `stages.json`.
+/// The seasonal-stats + AR-coefficient parquets bypass the estimation path, so
+/// no `season_definitions` are required in `stages.json`.
 #[test]
 fn test_inflow_history_wired_into_system() {
     use arrow::array::{Date32Array, Float64Array, Int32Array};
@@ -217,7 +186,6 @@ fn test_inflow_history_wired_into_system() {
     let dir = TempDir::new().unwrap();
     helpers::make_multi_entity_case(&dir);
 
-    // Overwrite hydro_production_models.json with entries for all 3 hydros.
     std::fs::write(
         dir.path().join("system/hydro_production_models.json"),
         r#"{ "production_models": [
@@ -234,7 +202,6 @@ fn test_inflow_history_wired_into_system() {
     )
     .unwrap();
 
-    // Overwrite hydros.json with 3 hydros (all on bus_id=1).
     std::fs::write(
         dir.path().join("system/hydros.json"),
         r#"{ "hydros": [
@@ -262,7 +229,6 @@ fn test_inflow_history_wired_into_system() {
 
     std::fs::create_dir_all(dir.path().join("scenarios")).unwrap();
 
-    // ── Write inflow_seasonal_stats.parquet (3 hydros × 2 stages) ────────────
     {
         let stats_schema = Arc::new(Schema::new(vec![
             Field::new("hydro_id", DataType::Int32, false),
@@ -290,7 +256,6 @@ fn test_inflow_history_wired_into_system() {
         writer.close().unwrap();
     }
 
-    // ── Write inflow_ar_coefficients.parquet (3 hydros × 2 stages, lag=1) ────
     // Both stats AND coefficients must be present to skip estimation.
     {
         let ar_schema = Arc::new(Schema::new(vec![
@@ -319,7 +284,6 @@ fn test_inflow_history_wired_into_system() {
         writer.close().unwrap();
     }
 
-    // ── Write inflow_history.parquet (3 hydros × 10 years × 12 months = 360) ─
     let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
     let mut hydro_ids: Vec<i32> = Vec::with_capacity(360);
     let mut dates: Vec<i32> = Vec::with_capacity(360);
@@ -374,9 +338,6 @@ fn test_inflow_history_wired_into_system() {
 
 // ── test_external_scenarios_wired_into_system ─────────────────────────────────
 
-/// Given a case directory with `scenarios/external_inflow_scenarios.parquet` containing
-/// 2 stages × 5 scenarios × 3 hydros (30 rows), `load_case` must return a
-/// `System` whose `external_scenarios()` slice has exactly 30 entries.
 #[test]
 fn test_external_scenarios_wired_into_system() {
     use arrow::array::{Float64Array, Int32Array};
@@ -388,7 +349,6 @@ fn test_external_scenarios_wired_into_system() {
     let dir = TempDir::new().unwrap();
     helpers::make_multi_entity_case(&dir);
 
-    // Overwrite hydro_production_models.json with entries for all 3 hydros.
     std::fs::write(
         dir.path().join("system/hydro_production_models.json"),
         r#"{ "production_models": [
@@ -405,7 +365,6 @@ fn test_external_scenarios_wired_into_system() {
     )
     .unwrap();
 
-    // Overwrite hydros.json with 3 hydros (all on bus_id=1).
     std::fs::write(
         dir.path().join("system/hydros.json"),
         r#"{ "hydros": [
@@ -431,7 +390,6 @@ fn test_external_scenarios_wired_into_system() {
     )
     .unwrap();
 
-    // Build 2 stages × 5 scenarios × 3 hydros = 30 rows.
     let mut stage_ids: Vec<i32> = Vec::with_capacity(30);
     let mut scenario_ids: Vec<i32> = Vec::with_capacity(30);
     let mut hydro_ids: Vec<i32> = Vec::with_capacity(30);
@@ -495,14 +453,11 @@ fn test_external_scenarios_wired_into_system() {
 
 // ── test_inflow_history_absent_returns_empty ──────────────────────────────────
 
-/// Given a case directory without `scenarios/inflow_history.parquet`, `load_case`
-/// must return a `System` whose `inflow_history()` is an empty slice.
 #[test]
 fn test_inflow_history_absent_returns_empty() {
     let dir = TempDir::new().unwrap();
     helpers::make_minimal_case(&dir);
 
-    // No inflow_history.parquet is written — absence is the default.
     let system =
         load_case(dir.path()).unwrap_or_else(|e| panic!("load_case failed for minimal case: {e}"));
 
@@ -514,14 +469,11 @@ fn test_inflow_history_absent_returns_empty() {
 
 // ── test_external_scenarios_absent_returns_empty ──────────────────────────────
 
-/// Given a case directory without `scenarios/external_inflow_scenarios.parquet`, `load_case`
-/// must return a `System` whose `external_scenarios()` is an empty slice.
 #[test]
 fn test_external_scenarios_absent_returns_empty() {
     let dir = TempDir::new().unwrap();
     helpers::make_minimal_case(&dir);
 
-    // No external_inflow_scenarios.parquet is written — absence is the default.
     let system =
         load_case(dir.path()).unwrap_or_else(|e| panic!("load_case failed for minimal case: {e}"));
 
@@ -533,10 +485,6 @@ fn test_external_scenarios_absent_returns_empty() {
 
 // ── test_external_load_scenarios_wired_into_system ───────────────────────────
 
-/// Given a case directory with `scenarios/external_load_scenarios.parquet`
-/// containing 2 stages × 3 scenarios × 1 bus (6 rows), `load_case` must return
-/// a `System` whose `external_load_scenarios()` slice has exactly 6 entries,
-/// all with finite `value_mw`.
 #[test]
 fn test_external_load_scenarios_wired_into_system() {
     use arrow::array::{Float64Array, Int32Array};
@@ -548,7 +496,6 @@ fn test_external_load_scenarios_wired_into_system() {
     let dir = TempDir::new().unwrap();
     helpers::make_minimal_case(&dir);
 
-    // Build 2 stages × 3 scenarios × 1 bus = 6 rows.
     let mut stage_ids: Vec<i32> = Vec::with_capacity(6);
     let mut scenario_ids: Vec<i32> = Vec::with_capacity(6);
     let mut bus_ids: Vec<i32> = Vec::with_capacity(6);
@@ -605,10 +552,6 @@ fn test_external_load_scenarios_wired_into_system() {
 
 // ── test_external_ncs_scenarios_wired_into_system ─────────────────────────────
 
-/// Given a case directory with `scenarios/external_ncs_scenarios.parquet`
-/// containing 2 stages × 4 scenarios × 2 NCS sources (16 rows), `load_case`
-/// must return a `System` whose `external_ncs_scenarios()` slice has exactly
-/// 16 entries, all with finite `value`.
 #[test]
 fn test_external_ncs_scenarios_wired_into_system() {
     use arrow::array::{Float64Array, Int32Array};
@@ -620,9 +563,7 @@ fn test_external_ncs_scenarios_wired_into_system() {
     let dir = TempDir::new().unwrap();
     helpers::make_minimal_case(&dir);
 
-    // The referential validator checks that every ncs_id exists in the NCS
-    // registry.  Write a non_controllable_sources.json declaring NCS 1 and 2
-    // on bus_id=1 (the only bus in the minimal case).
+    // The referential validator rejects any ncs_id absent from the NCS registry, so register 1 and 2.
     helpers::write_file(
         dir.path(),
         "system/non_controllable_sources.json",
@@ -634,7 +575,6 @@ fn test_external_ncs_scenarios_wired_into_system() {
 }"#,
     );
 
-    // Build 2 stages × 4 scenarios × 2 NCS sources = 16 rows.
     let mut stage_ids: Vec<i32> = Vec::with_capacity(16);
     let mut scenario_ids: Vec<i32> = Vec::with_capacity(16);
     let mut ncs_ids: Vec<i32> = Vec::with_capacity(16);
@@ -694,9 +634,6 @@ fn test_external_ncs_scenarios_wired_into_system() {
 
 // ── test_postcard_round_trip ──────────────────────────────────────────────────
 
-/// Given a System produced by `load_case`, serializing it with `serialize_system`
-/// and deserializing with `deserialize_system` must produce a System with the
-/// same entity counts and working O(1) lookups.
 #[test]
 fn test_postcard_round_trip() {
     let dir = TempDir::new().unwrap();
@@ -723,7 +660,6 @@ fn test_postcard_round_trip() {
         "O(1) bus lookup must work after index rebuild on deserialized System"
     );
 
-    // Verify no data was lost for other entity types.
     assert_eq!(
         deserialized.n_hydros(),
         original.n_hydros(),

@@ -348,10 +348,10 @@ pub(crate) struct RawDiversionChannel {
 pub(crate) struct RawFillingConfig {
     /// Stage index at which filling begins (inclusive).
     start_stage_id: i32,
-    /// Constant inflow applied during filling [m³/s].
-    /// Absent = passive filling (no active inflow, defaults to 0.0 per spec).
+    /// Minimum accumulation rate applied during filling [m³/s].
+    /// Absent = passive filling (no minimum rate, defaults to 0.0 per spec).
     #[serde(default)]
-    filling_inflow_m3s: f64,
+    filling_min_rate_m3s: f64,
 }
 
 /// Intermediate type for entity-level hydro penalty overrides.
@@ -439,11 +439,8 @@ pub fn parse_hydros(
 
     let raw: RawHydroFile = serde_json::from_str(&raw_text).map_err(|e| {
         let msg = e.to_string();
-        // Unknown generation model variants and unknown tailrace/efficiency/etc.
-        // types are caught by serde's internally-tagged enum deserialization and
-        // produce a message containing "unknown variant". Treat these as
-        // SchemaError (not ParseError) so callers can distinguish bad JSON syntax
-        // from unknown enum discriminants.
+        // Reclassify unknown-variant / missing-field as SchemaError, not ParseError,
+        // so callers distinguish bad JSON syntax from unknown enum discriminants.
         if msg.contains("unknown variant") || msg.contains("missing field") {
             LoadError::SchemaError {
                 path: path.to_path_buf(),
@@ -462,7 +459,6 @@ pub fn parse_hydros(
 
 // ── Validation ────────────────────────────────────────────────────────────────
 
-/// Validate all invariants on the raw deserialized hydro data.
 fn validate_raw_hydros(raw: &RawHydroFile, path: &Path) -> Result<(), LoadError> {
     validate_no_duplicate_hydro_ids(&raw.hydros, path)?;
     for (i, hydro) in raw.hydros.iter().enumerate() {
@@ -482,7 +478,6 @@ fn validate_raw_hydros(raw: &RawHydroFile, path: &Path) -> Result<(), LoadError>
     Ok(())
 }
 
-/// Check that no two hydros share the same `id`.
 fn validate_no_duplicate_hydro_ids(hydros: &[RawHydro], path: &Path) -> Result<(), LoadError> {
     let mut seen: HashSet<i32> = HashSet::new();
     for (i, hydro) in hydros.iter().enumerate() {
@@ -497,10 +492,6 @@ fn validate_no_duplicate_hydro_ids(hydros: &[RawHydro], path: &Path) -> Result<(
     Ok(())
 }
 
-/// Validate reservoir storage bounds for hydro at `hydro_index`.
-///
-/// Checks: `min_storage_hm3 >= 0`, `max_storage_hm3 >= 0`,
-/// `min_storage_hm3 <= max_storage_hm3`.
 fn validate_reservoir(
     reservoir: &RawReservoir,
     hydro_index: usize,
@@ -539,9 +530,6 @@ fn validate_reservoir(
     Ok(())
 }
 
-/// Validate outflow bounds for hydro at `hydro_index`.
-///
-/// Checks: `min_outflow_m3s >= 0`.
 fn validate_outflow(
     outflow: &RawOutflow,
     hydro_index: usize,
@@ -560,10 +548,6 @@ fn validate_outflow(
     Ok(())
 }
 
-/// Validate generation bounds for hydro at `hydro_index`.
-///
-/// Checks: `min_turbined_m3s >= 0`, `max_turbined_m3s >= 0`,
-/// `max_turbined_m3s >= min_turbined_m3s`, `max_generation_mw >= min_generation_mw`.
 fn validate_generation(
     generation: &RawGeneration,
     hydro_index: usize,
@@ -606,12 +590,6 @@ fn validate_generation(
     Ok(())
 }
 
-/// Validate evaporation sub-object for hydro at `hydro_index`.
-///
-/// Checks:
-/// - `coefficients_mm` must contain exactly 12 elements (one per calendar month).
-/// - `reference_volumes_hm3`, when present, must contain exactly 12 elements,
-///   all finite, and all within `[min_storage_hm3, max_storage_hm3]`.
 fn validate_evaporation(
     evaporation: &RawEvaporation,
     hydro_index: usize,
@@ -677,15 +655,12 @@ fn validate_evaporation(
 
 // ── Conversion ────────────────────────────────────────────────────────────────
 
-/// Convert validated raw hydro data into `Vec<Hydro>`, sorted by `id` ascending.
-///
 /// Precondition: [`validate_raw_hydros`] has returned `Ok(())` for this data.
 fn convert_hydros(raw: RawHydroFile, global: &GlobalPenaltyDefaults) -> Vec<Hydro> {
     let mut hydros: Vec<Hydro> = raw
         .hydros
         .into_iter()
         .map(|raw_hydro| {
-            // Extract generation model and turbine/generation bounds.
             let (
                 generation_model,
                 min_turbined_m3s,
@@ -694,27 +669,21 @@ fn convert_hydros(raw: RawHydroFile, global: &GlobalPenaltyDefaults) -> Vec<Hydr
                 max_generation_mw,
             ) = convert_generation(raw_hydro.generation);
 
-            // Convert optional tailrace model.
             let tailrace = raw_hydro.tailrace.map(convert_tailrace);
 
-            // Convert optional hydraulic losses model.
             let hydraulic_losses = raw_hydro.hydraulic_losses.map(convert_hydraulic_losses);
 
-            // Convert optional efficiency model.
             let efficiency = raw_hydro.efficiency.map(convert_efficiency);
 
-            // Convert optional evaporation coefficients and reference volumes to [f64; 12].
             let (evaporation_coefficients_mm, evaporation_reference_volumes_hm3) =
                 match raw_hydro.evaporation {
                     None => (None, None),
                     Some(evap) => {
-                        // SAFETY: validated to have exactly 12 elements by validate_evaporation.
                         let coeffs: [f64; 12] =
                             evap.coefficients_mm.try_into().unwrap_or_else(|_| {
                                 unreachable!("evaporation length validated to be 12")
                             });
                         let ref_vols: Option<[f64; 12]> = evap.reference_volumes_hm3.map(|v| {
-                            // SAFETY: validated to have exactly 12 elements by validate_evaporation.
                             v.try_into().unwrap_or_else(|_| {
                                 unreachable!("reference_volumes_hm3 length validated to be 12")
                             })
@@ -723,19 +692,16 @@ fn convert_hydros(raw: RawHydroFile, global: &GlobalPenaltyDefaults) -> Vec<Hydr
                     }
                 };
 
-            // Convert optional diversion channel.
             let diversion = raw_hydro.diversion.map(|d| DiversionChannel {
                 downstream_id: EntityId(d.downstream_id),
                 max_flow_m3s: d.max_flow_m3s,
             });
 
-            // Convert optional filling config.
             let filling = raw_hydro.filling.map(|f| FillingConfig {
                 start_stage_id: f.start_stage_id,
-                filling_inflow_m3s: f.filling_inflow_m3s,
+                filling_min_rate_m3s: f.filling_min_rate_m3s,
             });
 
-            // Convert entity-level penalty overrides and resolve against global defaults.
             let entity_overrides: Option<HydroPenaltyOverrides> =
                 raw_hydro.penalties.map(convert_penalty_overrides);
             let penalties = resolve_hydro_penalties(&entity_overrides, global);
@@ -775,8 +741,6 @@ fn convert_hydros(raw: RawHydroFile, global: &GlobalPenaltyDefaults) -> Vec<Hydr
     hydros
 }
 
-/// Convert a `RawGeneration` into the core `HydroGenerationModel` and its bounds.
-///
 /// Returns `(model, min_turbined_m3s, max_turbined_m3s, min_generation_mw, max_generation_mw)`.
 // Clippy flags this as needless_pass_by_value, but the function consumes its
 // argument by destructuring (moving fields out). Taking &RawGeneration would
@@ -825,7 +789,6 @@ fn convert_generation(raw: RawGeneration) -> (HydroGenerationModel, f64, f64, f6
     }
 }
 
-/// Convert a `RawTailrace` into the core `TailraceModel`.
 fn convert_tailrace(raw: RawTailrace) -> TailraceModel {
     match raw {
         RawTailrace::Polynomial { coefficients } => TailraceModel::Polynomial { coefficients },
@@ -841,7 +804,6 @@ fn convert_tailrace(raw: RawTailrace) -> TailraceModel {
     }
 }
 
-/// Convert a `RawHydraulicLosses` into the core `HydraulicLossesModel`.
 // Clippy flags this as needless_pass_by_value; the function consumes its argument
 // by destructuring (no heap allocation involved). Allow here since the by-value
 // API correctly signals ownership transfer.
@@ -853,7 +815,6 @@ fn convert_hydraulic_losses(raw: RawHydraulicLosses) -> HydraulicLossesModel {
     }
 }
 
-/// Convert a `RawEfficiency` into the core `EfficiencyModel`.
 // Clippy flags this as needless_pass_by_value; same rationale as convert_hydraulic_losses.
 #[allow(clippy::needless_pass_by_value)]
 fn convert_efficiency(raw: RawEfficiency) -> EfficiencyModel {
@@ -862,7 +823,6 @@ fn convert_efficiency(raw: RawEfficiency) -> EfficiencyModel {
     }
 }
 
-/// Convert `RawHydroPenaltyOverrides` into `HydroPenaltyOverrides`.
 // Clippy flags this as needless_pass_by_value; the struct fields (Option<f64>) are
 // all Copy, but taking by reference would require dereferencing every field.
 // By-value is idiomatic for this conversion pattern.
@@ -1004,7 +964,7 @@ mod tests {
       "efficiency": { "type": "constant", "value": 0.92 },
       "evaporation": { "coefficients_mm": [150, 130, 120, 90, 60, 40, 30, 40, 70, 100, 130, 150] },
       "diversion": { "downstream_id": 3, "max_flow_m3s": 200.0 },
-      "filling": { "start_stage_id": 48, "filling_inflow_m3s": 100.0 },
+      "filling": { "start_stage_id": 48, "filling_min_rate_m3s": 100.0 },
       "penalties": { "spillage_cost": 0.05 }
     }"#;
 
@@ -1021,7 +981,6 @@ mod tests {
 
         assert_eq!(hydros.len(), 2);
 
-        // Hydro 0 (full) comes first after sorting by id
         let h0 = &hydros[0];
         assert_eq!(h0.id, EntityId(0));
         assert_eq!(h0.name, "FURNAS");
@@ -1044,41 +1003,33 @@ mod tests {
         assert!((h0.max_turbined_m3s - 1692.0).abs() < f64::EPSILON);
         assert!((h0.min_generation_mw - 0.0).abs() < f64::EPSILON);
         assert!((h0.max_generation_mw - 1312.0).abs() < f64::EPSILON);
-        // Tailrace: polynomial with 3 coefficients
         assert!(
             matches!(&h0.tailrace, Some(TailraceModel::Polynomial { coefficients }) if coefficients.len() == 3),
             "expected Polynomial tailrace with 3 coefficients"
         );
-        // Hydraulic losses: factor
         assert!(matches!(
             h0.hydraulic_losses,
             Some(HydraulicLossesModel::Factor { value }) if (value - 0.03).abs() < f64::EPSILON
         ));
-        // Efficiency: constant
         assert!(matches!(
             h0.efficiency,
             Some(EfficiencyModel::Constant { value }) if (value - 0.92).abs() < f64::EPSILON
         ));
-        // Evaporation: 12 elements
         assert!(h0.evaporation_coefficients_mm.is_some());
         assert_eq!(h0.evaporation_coefficients_mm.map(|a| a.len()), Some(12));
-        // Diversion
         assert!(matches!(
             &h0.diversion,
             Some(DiversionChannel { downstream_id, max_flow_m3s })
             if *downstream_id == EntityId(3) && (max_flow_m3s - 200.0).abs() < f64::EPSILON
         ));
-        // Filling
         assert!(matches!(
             &h0.filling,
-            Some(FillingConfig { start_stage_id: 48, filling_inflow_m3s })
-            if (filling_inflow_m3s - 100.0).abs() < f64::EPSILON
+            Some(FillingConfig { start_stage_id: 48, filling_min_rate_m3s })
+            if (filling_min_rate_m3s - 100.0).abs() < f64::EPSILON
         ));
-        // Penalties: spillage_cost overridden to 0.05, rest from global
         assert!((h0.penalties.spillage_cost - 0.05).abs() < f64::EPSILON);
         assert!((h0.penalties.diversion_cost - 0.1).abs() < f64::EPSILON);
 
-        // Hydro 1 (minimal)
         let h1 = &hydros[1];
         assert_eq!(h1.id, EntityId(1));
         assert_eq!(h1.name, "Minimal");
@@ -1092,7 +1043,6 @@ mod tests {
         assert!(h1.evaporation_coefficients_mm.is_none());
         assert!(h1.diversion.is_none());
         assert!(h1.filling.is_none());
-        // Penalties: all from global (no override block)
         assert!((h1.penalties.spillage_cost - 0.01).abs() < f64::EPSILON);
     }
 
@@ -1261,17 +1211,14 @@ mod tests {
         let global = make_global();
         let hydros = parse_hydros(f.path(), &global).unwrap();
 
-        // spillage_cost is overridden to 0.05
         assert!(
             (hydros[0].penalties.spillage_cost - 0.05).abs() < f64::EPSILON,
             "spillage_cost should be 0.05 (entity override)"
         );
-        // diversion_cost falls back to global default (0.1)
         assert!(
             (hydros[0].penalties.diversion_cost - 0.1).abs() < f64::EPSILON,
             "diversion_cost should be 0.1 (global default)"
         );
-        // storage_violation_below_cost falls back to global default (10_000.0)
         assert!(
             (hydros[0].penalties.storage_violation_below_cost - 10_000.0).abs() < f64::EPSILON,
             "storage_violation_below_cost should be 10_000.0 (global default)"
@@ -1335,11 +1282,11 @@ mod tests {
         );
     }
 
-    // ── AC: filling config with absent filling_inflow_m3s ─────────────────────
+    // ── AC: filling config with absent filling_min_rate_m3s ───────────────────
 
-    /// Filling config with no `filling_inflow_m3s` field defaults to 0.0 (passive filling).
+    /// Filling config with no `filling_min_rate_m3s` field defaults to 0.0 (passive filling).
     #[test]
-    fn test_filling_inflow_defaults_to_zero() {
+    fn test_filling_min_rate_defaults_to_zero() {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "Fill", "bus_id": 0,
@@ -1364,8 +1311,8 @@ mod tests {
             &hydros[0].filling,
             Some(FillingConfig {
                 start_stage_id: 10,
-                filling_inflow_m3s,
-            }) if (*filling_inflow_m3s - 0.0).abs() < f64::EPSILON
+                filling_min_rate_m3s,
+            }) if (*filling_min_rate_m3s - 0.0).abs() < f64::EPSILON
         ));
     }
 
@@ -1778,7 +1725,6 @@ mod tests {
     /// `evaporation_reference_volumes_hm3 == Some([f64; 12])`.
     #[test]
     fn test_evaporation_reference_volumes_happy_path() {
-        // Reservoir bounds: [1000, 20000]. All reference volumes within range.
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "ReservoirEvap", "bus_id": 0,
@@ -1906,11 +1852,8 @@ mod tests {
             }
           }]
         }"#;
-        // Note: `null` in JSON for a f64 field will fail to deserialize,
-        // yielding a ParseError. We test a NaN by injecting it directly.
-        // Construct the test via the internal validate_evaporation function,
-        // as JSON has no NaN literal.
-        let _ = json; // JSON path not feasible for NaN; use direct unit test.
+        // NaN is injected via RawEvaporation directly — JSON has no NaN literal.
+        let _ = json;
 
         let evap = RawEvaporation {
             coefficients_mm: vec![0.0; 12],

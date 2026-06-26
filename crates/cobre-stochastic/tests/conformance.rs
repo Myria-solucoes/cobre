@@ -1,9 +1,5 @@
-//! End-to-end pipeline conformance tests for `cobre-stochastic`.
-//!
-//! Exercises the full pipeline from `System` input through to `sample_forward`
-//! output, using a shared fixture matching the sampling-scheme-testing.md spec
-//! (SS1): 3 study stages, 2 hydros, branching factor 5, identity correlation,
-//! AR(1) models with known coefficients, and `base_seed` 42.
+//! End-to-end pipeline conformance tests for `cobre-stochastic`, from `System`
+//! input through `sample_forward` output, over a shared AR(1) fixture.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -158,24 +154,20 @@ fn identity_correlation(entity_ids: &[i32]) -> CorrelationModel {
 fn shared_fixture() -> cobre_core::System {
     let hydros = vec![make_hydro(1), make_hydro(2)];
 
-    // Pre-study stage (id=-1) provides lag-1 inflow statistics only.
-    // Study stages (ids 0, 1, 2) form the optimization horizon.
+    // Stage id=-1 is pre-study (excluded from the opening tree); it supplies the
+    // lag-1 statistics the PAR coefficient conversion needs.
     let stages = vec![
-        make_stage(0, -1, 5), // pre-study — excluded from opening tree
+        make_stage(0, -1, 5),
         make_stage(1, 0, 5),
         make_stage(2, 1, 5),
         make_stage(3, 2, 5),
     ];
 
-    // Pre-study stage inflow models (lag-1 statistics for coefficient conversion).
-    // Same mean and std as the study stages because both hydros are stationary.
     let inflow_models = vec![
-        // Hydro 1 — pre-study and three study stages
         make_inflow_model(1, -1, 100.0, 30.0, vec![], 1.0),
         make_inflow_model(1, 0, 100.0, 30.0, vec![0.3], 0.954),
         make_inflow_model(1, 1, 100.0, 30.0, vec![0.3], 0.954),
         make_inflow_model(1, 2, 100.0, 30.0, vec![0.3], 0.954),
-        // Hydro 2 — pre-study and three study stages
         make_inflow_model(2, -1, 200.0, 40.0, vec![], 1.0),
         make_inflow_model(2, 0, 200.0, 40.0, vec![0.4], 0.917),
         make_inflow_model(2, 1, 200.0, 40.0, vec![0.4], 0.917),
@@ -253,21 +245,21 @@ fn par_lp_coefficients_match_hand_computed() {
     let tol = 1e-10;
 
     // --- Hydro 1 (h_idx = 0, EntityId(1)) at stage 0 ---
-    let expected_base_h1 = 70.0_f64; // 100.0 - (0.3 * 30.0 / 30.0) * 100.0
+    let expected_base_h1 = 70.0_f64;
     assert!(
         (par.deterministic_base(0, 0) - expected_base_h1).abs() < tol,
         "hydro 1 stage 0 deterministic_base: expected {expected_base_h1}, got {}",
         par.deterministic_base(0, 0)
     );
 
-    let expected_sigma_h1 = 30.0 * 0.954; // 28.62
+    let expected_sigma_h1 = 30.0 * 0.954;
     assert!(
         (par.sigma(0, 0) - expected_sigma_h1).abs() < tol,
         "hydro 1 stage 0 sigma: expected {expected_sigma_h1}, got {}",
         par.sigma(0, 0)
     );
 
-    let expected_psi_h1 = 0.3_f64; // 0.3 * 30.0 / 30.0
+    let expected_psi_h1 = 0.3_f64;
     let psi_h1 = par.psi_slice(0, 0);
     assert!(!psi_h1.is_empty(), "psi_slice for AR(1) must not be empty");
     assert!(
@@ -277,21 +269,21 @@ fn par_lp_coefficients_match_hand_computed() {
     );
 
     // --- Hydro 2 (h_idx = 1, EntityId(2)) at stage 0 ---
-    let expected_base_h2 = 120.0_f64; // 200.0 - (0.4 * 40.0 / 40.0) * 200.0
+    let expected_base_h2 = 120.0_f64;
     assert!(
         (par.deterministic_base(0, 1) - expected_base_h2).abs() < tol,
         "hydro 2 stage 0 deterministic_base: expected {expected_base_h2}, got {}",
         par.deterministic_base(0, 1)
     );
 
-    let expected_sigma_h2 = 40.0 * 0.917; // 36.68
+    let expected_sigma_h2 = 40.0 * 0.917;
     assert!(
         (par.sigma(0, 1) - expected_sigma_h2).abs() < tol,
         "hydro 2 stage 0 sigma: expected {expected_sigma_h2}, got {}",
         par.sigma(0, 1)
     );
 
-    let expected_psi_h2 = 0.4_f64; // 0.4 * 40.0 / 40.0
+    let expected_psi_h2 = 0.4_f64;
     let psi_h2 = par.psi_slice(0, 1);
     assert!(!psi_h2.is_empty(), "psi_slice for AR(1) must not be empty");
     assert!(
@@ -301,12 +293,6 @@ fn par_lp_coefficients_match_hand_computed() {
     );
 }
 
-/// Opening tree has the expected structural dimensions.
-///
-/// - 3 stages (pre-study stage excluded)
-/// - 5 openings per stage (uniform `branching_factor` 5)
-/// - dim 2 (two hydros)
-/// - All values are finite
 #[test]
 fn opening_tree_structure_correct() {
     let system = shared_fixture();
@@ -345,7 +331,6 @@ fn opening_tree_structure_correct() {
     }
 }
 
-/// `sample_forward` returns valid `(index, slice)` pairs across multiple calls.
 #[test]
 fn sample_forward_returns_valid_output() {
     let system = shared_fixture();
@@ -395,8 +380,6 @@ fn sample_forward_returns_valid_output() {
     }
 }
 
-/// With identity correlation and 500 openings, the marginal noise distribution
-/// approximates N(0,1) (statistical bounds: `|mean| < 0.15` and `|std - 1| < 0.15`).
 #[test]
 #[allow(clippy::cast_precision_loss)]
 fn opening_tree_marginal_statistics() {

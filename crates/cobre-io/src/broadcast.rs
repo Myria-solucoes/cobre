@@ -14,10 +14,8 @@
 //! `deserialize_parameters` helpers convert through tag-free mirror types
 //! ([`BroadcastScalarParameter`], [`BroadcastParameterKind`],
 //! [`BroadcastComputedParameter`]) on the wire and reconstruct the in-memory
-//! shape on the receiving end. This mirrors the [`BroadcastConfig`] pattern in
+//! shape on the receiving end. This mirrors the `BroadcastConfig` pattern in
 //! `cobre-cli` used for [`crate::Config`].
-//!
-//! [`BroadcastConfig`]: ../../cobre_cli/commands/broadcast/struct.BroadcastConfig.html
 //!
 //! # Usage
 //!
@@ -44,11 +42,8 @@ use crate::LoadError;
 
 // ── Broadcast mirror types (tag-free, postcard-compatible) ──────────────────
 
-/// Postcard-safe mirror of [`ScalarParameter`].
-///
-/// Carries the same data as `ScalarParameter` but with a [`BroadcastParameterKind`]
-/// in place of [`ParameterKind`] (which uses internal serde tagging that postcard
-/// does not support). Convert with `From` in both directions.
+/// Postcard-safe mirror of [`ScalarParameter`], holding a [`BroadcastParameterKind`]
+/// in place of [`ParameterKind`]. Convert with `From` in both directions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BroadcastScalarParameter {
     /// Unique parameter identifier.
@@ -439,29 +434,23 @@ mod tests {
         let bytes = serialize_system(&system).unwrap();
         let restored = deserialize_system(&bytes).unwrap();
 
-        // Verify all entity counts match
         assert_eq!(restored.n_buses(), system.n_buses());
         assert_eq!(restored.n_thermals(), system.n_thermals());
         assert_eq!(restored.n_hydros(), system.n_hydros());
 
-        // Verify O(1) lookups work for all entity types
         assert!(restored.bus(EntityId(1)).is_some());
         assert!(restored.bus(EntityId(2)).is_some());
         assert!(restored.thermal(EntityId(1)).is_some());
         assert!(restored.thermal(EntityId(2)).is_some());
         assert!(restored.hydro(EntityId(1)).is_some());
 
-        // Verify structural equality
         assert_eq!(restored, system);
     }
 
     #[test]
     fn test_round_trip_anticipated_thermal_system() {
-        // Regression guard: ensure a Thermal carrying `anticipated_config: Some(_)`
-        // survives postcard serialize/deserialize byte-for-byte through the
-        // broadcast wire format. Without this, a future Thermal field reorder
-        // or AnticipatedConfig schema change could silently break MPI worker
-        // deserialization with no test failure.
+        // Guards against a future Thermal field reorder or AnticipatedConfig schema
+        // change silently breaking broadcast deserialization of `anticipated_config`.
         let buses = vec![minimal_bus(1), minimal_bus(2)];
         let mut anticipated = minimal_thermal(10, 1);
         anticipated.anticipated_config = Some(AnticipatedConfig { lead_stages: 2 });
@@ -494,7 +483,6 @@ mod tests {
             "non-anticipated thermal must remain None after round-trip"
         );
 
-        // Structural equality covers all other fields including future additions.
         assert_eq!(restored, system);
     }
 

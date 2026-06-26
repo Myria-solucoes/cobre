@@ -36,23 +36,13 @@ use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::stochastic::ensure_parent_dir;
 
-/// Write a slice of [`FphaHyperplaneRow`] to a Parquet file at `path`.
+/// Write a slice of [`FphaHyperplaneRow`] to a Parquet file at `path`,
+/// re-readable as `system/fpha_hyperplanes.parquet` by
+/// [`crate::extensions::parse_fpha_hyperplanes`].
 ///
-/// The output schema is exactly 11 columns matching the input schema of
-/// `system/fpha_hyperplanes.parquet`, enabling round-trip compatibility
-/// with [`crate::extensions::parse_fpha_hyperplanes`].
-///
-/// Rows are written in the order given; the caller is responsible for sorting
-/// into canonical `(hydro_id, stage_id, plane_id)` order before calling if
-/// that ordering is required.
-///
-/// The parent directory is created if it does not already exist. The write is
-/// atomic: data goes to `{path}.tmp` first, then the file is renamed to
-/// `path`. A partial `.tmp` file may remain on disk if the process is killed
-/// mid-write, but the final path is never partially written.
-///
-/// An empty slice produces a valid Parquet file with 0 rows and the correct
-/// 11-column schema.
+/// Rows are written in the order given; the caller sorts into canonical
+/// `(hydro_id, stage_id, plane_id)` order. An empty slice produces a valid
+/// 0-row file. The parent directory is created if absent; the write is atomic.
 ///
 /// # Errors
 ///
@@ -168,23 +158,12 @@ fn build_fpha_hyperplanes_batch(rows: &[FphaHyperplaneRow]) -> Result<RecordBatc
 
 // ── Evaporation models ──────────────────────────────────────────────────────────
 
-/// Write a slice of [`EvaporationModelRow`] to a Parquet file at `path`.
+/// Write a slice of [`EvaporationModelRow`] to a Parquet file at `path`,
+/// re-readable by [`crate::extensions::parse_evaporation_models`].
 ///
-/// The output schema is the six columns `hydro_id, stage_id, intercept_m3s,
-/// volume_slope_m3s_per_hm3, reference_volume_hm3, source`, readable by
-/// [`crate::extensions::parse_evaporation_models`] for round-trip compatibility.
-///
-/// Rows are written in the order given; the caller is responsible for sorting
-/// into canonical `(hydro_id, stage_id)` order before calling if that ordering
-/// is required.
-///
-/// The parent directory is created if it does not already exist. The write is
-/// atomic: data goes to `{path}.tmp` first, then the file is renamed to
-/// `path`. A partial `.tmp` file may remain on disk if the process is killed
-/// mid-write, but the final path is never partially written.
-///
-/// An empty slice produces a valid Parquet file with 0 rows and the correct
-/// six-column schema.
+/// Rows are written in the order given; the caller sorts into canonical
+/// `(hydro_id, stage_id)` order. An empty slice produces a valid 0-row file.
+/// The parent directory is created if absent; the write is atomic.
 ///
 /// # Errors
 ///
@@ -275,22 +254,12 @@ fn build_evaporation_models_batch(
 
 // ── FPHA deviation points ─────────────────────────────────────────────────────
 
-/// Write a slice of [`FphaDeviationPointRow`] to a Parquet file at `path`.
+/// Write a slice of [`FphaDeviationPointRow`] to a Parquet file at `path`,
+/// re-readable by [`crate::extensions::parse_fpha_deviation_points`].
 ///
-/// The output schema is the eight columns `hydro_id, stage_id, v, q, fph_exact,
-/// fpha_fitted, deviation, relative`, readable by
-/// [`crate::extensions::parse_fpha_deviation_points`] for round-trip compatibility.
-///
-/// Rows are written in the order given; the caller is responsible for emitting
-/// them in canonical `(hydro_id, stage_id, grid)` order before calling.
-///
-/// The parent directory is created if it does not already exist. The write is
-/// atomic: data goes to `{path}.tmp` first, then the file is renamed to
-/// `path`. A partial `.tmp` file may remain on disk if the process is killed
-/// mid-write, but the final path is never partially written.
-///
-/// An empty slice produces a valid Parquet file with 0 rows and the correct
-/// eight-column schema.
+/// Rows are written in the order given; the caller emits them in canonical
+/// `(hydro_id, stage_id, grid)` order. An empty slice produces a valid 0-row
+/// file. The parent directory is created if absent; the write is atomic.
 ///
 /// # Errors
 ///
@@ -393,11 +362,8 @@ fn build_fpha_deviation_points_batch(
 
 /// Write a structural hydro-model summary as pretty-printed JSON.
 ///
-/// Accepts any `Serialize`-implementing value to avoid cross-crate type
-/// dependencies (the summary struct is defined in the calling algorithm crate,
-/// keeping this crate algorithm-agnostic).
-///
-/// Uses atomic write: writes to a `.json.tmp` file first, then renames.
+/// Generic over `Serialize` so the summary struct can stay in the calling
+/// algorithm crate, keeping this crate algorithm-agnostic.
 ///
 /// # Errors
 ///
@@ -416,10 +382,9 @@ pub fn write_hydro_model_summary(
 
 /// Read a structural hydro-model summary from a JSON file.
 ///
-/// Generic over any `DeserializeOwned` target so the summary struct can stay
-/// defined in the calling algorithm crate (this crate is algorithm-agnostic).
-/// The caller supplies the concrete type at the call site, mirroring the
-/// `impl Serialize` genericity of [`write_hydro_model_summary`].
+/// Generic over `DeserializeOwned` so the summary struct can stay in the calling
+/// algorithm crate, keeping this crate algorithm-agnostic (mirrors
+/// [`write_hydro_model_summary`]).
 ///
 /// # Errors
 ///

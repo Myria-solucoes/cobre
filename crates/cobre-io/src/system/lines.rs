@@ -149,7 +149,6 @@ pub fn parse_lines(
     Ok(convert_lines(raw, global_penalties))
 }
 
-/// Validate all invariants on the raw deserialized line data.
 fn validate_raw_lines(raw: &RawLineFile, path: &Path) -> Result<(), LoadError> {
     validate_no_duplicate_line_ids(&raw.lines, path)?;
     for (i, line) in raw.lines.iter().enumerate() {
@@ -159,7 +158,6 @@ fn validate_raw_lines(raw: &RawLineFile, path: &Path) -> Result<(), LoadError> {
     Ok(())
 }
 
-/// Check that no two lines share the same `id`.
 fn validate_no_duplicate_line_ids(lines: &[RawLine], path: &Path) -> Result<(), LoadError> {
     let mut seen: HashSet<i32> = HashSet::new();
     for (i, line) in lines.iter().enumerate() {
@@ -174,9 +172,6 @@ fn validate_no_duplicate_line_ids(lines: &[RawLine], path: &Path) -> Result<(), 
     Ok(())
 }
 
-/// Validate capacity values for line at `line_index`.
-///
-/// Checks: `direct_mw >= 0.0`, `reverse_mw >= 0.0`.
 fn validate_line_capacity(
     capacity: &RawLineCapacity,
     line_index: usize,
@@ -199,9 +194,6 @@ fn validate_line_capacity(
     Ok(())
 }
 
-/// Validate `losses_percent` for line at `line_index`.
-///
-/// Checks: `losses_percent >= 0.0`.
 fn validate_losses_percent(
     losses_percent: f64,
     line_index: usize,
@@ -217,13 +209,11 @@ fn validate_losses_percent(
     Ok(())
 }
 
-/// Convert validated raw line data into `Vec<Line>`, sorted by `id` ascending.
 fn convert_lines(raw: RawLineFile, global: &GlobalPenaltyDefaults) -> Vec<Line> {
     let mut lines: Vec<Line> = raw
         .lines
         .into_iter()
         .map(|raw_line| {
-            // Two-tier penalty resolution: entity override wins, else global default.
             let exchange_cost = resolve_line_exchange_cost(raw_line.exchange_cost, global);
 
             Line {
@@ -335,7 +325,6 @@ mod tests {
 
         assert_eq!(lines.len(), 2);
 
-        // Line 0: has entity-level exchange_cost override
         assert_eq!(lines[0].id, EntityId(0));
         assert_eq!(lines[0].name, "SE-S");
         assert_eq!(lines[0].source_bus_id, EntityId(0));
@@ -351,7 +340,6 @@ mod tests {
             lines[0].exchange_cost
         );
 
-        // Line 1: no entity-level override -> uses global default (2.0)
         assert_eq!(lines[1].id, EntityId(1));
         assert_eq!(lines[1].name, "SE-NE");
         assert_eq!(lines[1].entry_stage_id, Some(1));

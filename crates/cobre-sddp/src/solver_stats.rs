@@ -64,10 +64,9 @@ fn ensure_histogram_capacity(result: &mut Vec<u64>, source: &[u64]) {
 }
 
 impl SolverStatsDelta {
-    /// Compute the delta between two monotonic [`SolverStatistics`] snapshots.
+    /// Compute the delta between two [`SolverStatistics`] snapshots.
     ///
-    /// `before` must be taken before the phase starts, `after` immediately after.
-    /// All counters are monotonically increasing, so the difference is non-negative.
+    /// Counters are monotonically increasing, so `after - before` is non-negative.
     #[must_use]
     pub fn from_snapshots(before: &SolverStatistics, after: &SolverStatistics) -> Self {
         Self {
@@ -101,11 +100,8 @@ impl SolverStatsDelta {
         }
     }
 
-    /// Add `rhs` element-wise into `dst` in place.
-    ///
-    /// Equivalent to `*dst = aggregate([dst, rhs])` but avoids an intermediate
-    /// allocation. Used on the hot backward-pass path to accumulate per-opening
-    /// deltas across trial points within a single worker.
+    /// Add `rhs` element-wise into `dst` in place — an allocation-free
+    /// `*dst = aggregate([dst, rhs])` for the hot backward-pass path.
     pub fn accumulate_into(dst: &mut Self, rhs: &Self) {
         dst.lp_solves += rhs.lp_solves;
         dst.lp_successes += rhs.lp_successes;
@@ -130,16 +126,9 @@ impl SolverStatsDelta {
         }
     }
 
-    /// Copy all fields from `self` into `dst`, reusing the destination's
-    /// existing `retry_level_histogram` allocation.
-    ///
-    /// All 13 scalar fields are copied by value. The destination's histogram
-    /// `Vec<u64>` is resized (via `resize`) to match `self`, then overwritten
-    /// with `copy_from_slice`. When `dst` already has a histogram of the same
-    /// length (the common case on iteration ≥ 2), no heap allocation occurs.
-    ///
-    /// Prefer this over `dst = self.clone()` on hot paths where the histogram
-    /// length is stable across calls.
+    /// Copy `self` into `dst`, reusing `dst`'s `retry_level_histogram`
+    /// allocation. Prefer over `dst = self.clone()` on hot paths where the
+    /// histogram length is stable (no heap allocation then).
     pub fn clone_into_reuse(&self, dst: &mut Self) {
         dst.lp_solves = self.lp_solves;
         dst.lp_successes = self.lp_successes;
@@ -160,11 +149,8 @@ impl SolverStatsDelta {
             .copy_from_slice(&self.retry_level_histogram);
     }
 
-    /// Reset all scalar fields to zero and clear the histogram in place.
-    ///
-    /// Equivalent to `*self = SolverStatsDelta::default()` but retains the
-    /// existing `retry_level_histogram` capacity. Use this on hot paths where
-    /// the histogram is known to be refilled immediately after the reset.
+    /// Zero all scalar fields and clear the histogram in place, retaining its
+    /// capacity (unlike `*self = SolverStatsDelta::default()`).
     pub fn reset_in_place(&mut self) {
         self.lp_solves = 0;
         self.lp_successes = 0;
@@ -215,11 +201,8 @@ impl SolverStatsDelta {
     }
 }
 
-/// Aggregate [`SolverStatistics`] from all solver instances in a workspace pool.
-///
-/// Sums all scalar counters across the given iterator of statistics. This is used
-/// to get a single snapshot before/after a phase that distributes work across
-/// multiple solver instances.
+/// Sum [`SolverStatistics`] counters across all solver instances in a workspace
+/// pool, yielding one before/after snapshot for a phase that distributes work.
 #[must_use]
 pub fn aggregate_solver_statistics(
     stats: impl Iterator<Item = SolverStatistics>,
@@ -261,37 +244,28 @@ pub fn aggregate_solver_statistics(
 pub struct SolverStatsLogEntry {
     /// 1-based iteration number (training) or scenario id (simulation).
     pub iteration: u64,
-    /// `"forward"`, `"backward"`, or `"lower_bound"`. A `&'static str` to avoid
-    /// per-iteration heap allocation on the hot push path; a `String` here
-    /// would allocate once per log entry.
+    /// `"forward"`, `"backward"`, or `"lower_bound"`. `&'static str` to avoid
+    /// per-entry heap allocation on the hot push path.
     pub phase: &'static str,
-    /// Stage index `>= 0` for forward/backward; `-1` for the lower-bound phase
-    /// (rank-aggregated, no stage axis). Passed through verbatim to
-    /// [`cobre_io::SolverStatsRow`]`.stage` — the parquet writer maps `-1` to a
-    /// NULL `Int32` column. Kept as `i32`, NOT `Option`, because the `-1 → NULL`
-    /// mapping lives downstream in the writer; converting it here would move the
-    /// mapping and change the column encoding.
+    /// Stage index `>= 0` for forward/backward; `-1` for the lower-bound phase.
+    /// Kept as `i32`, NOT `Option`: the `-1 → NULL Int32` mapping lives in the
+    /// downstream writer; converting here would change the column encoding.
     pub stage: i32,
-    /// Opening index `Some(ω)` for backward rows; `None` for forward,
-    /// lower-bound, and simulation rows (no opening axis). The writer maps `None`
-    /// to a NULL `Int32` column.
+    /// Opening index `Some(ω)` for backward rows; `None` otherwise (writer → NULL).
     pub opening: Option<i32>,
-    /// MPI rank that produced this row. Always present (`>= 0`, never a
-    /// sentinel); the writer wraps it in `Some(rank)`.
+    /// MPI rank that produced this row; never a sentinel (writer wraps in `Some`).
     pub rank: i32,
-    /// rayon worker that produced this row: `Some` for backward rows (from the
-    /// `allgatherv` unpack); `None` for forward/lower-bound rows (no per-worker
-    /// axis yet). The writer maps `None` to a NULL `Int32` column.
+    /// rayon worker for backward rows (from the `allgatherv` unpack); `None`
+    /// otherwise (writer → NULL).
     pub worker_id: Option<i32>,
     /// Solver-counter delta for this entry.
     pub delta: SolverStatsDelta,
 }
 
 impl SolverStatsLogEntry {
-    /// Build an entry from the raw producer-side values, decoding the `-1`
-    /// sentinel on `opening`/`worker_id` into `None` exactly once here.
-    /// `stage` and `rank` are stored verbatim (no sentinel decode): `stage`'s
-    /// `-1 → NULL` mapping is the writer's job, and `rank` is never a sentinel.
+    /// Build an entry from raw producer values, decoding the `-1` sentinel on
+    /// `opening`/`worker_id` into `None` exactly once here. `stage` and `rank`
+    /// are stored verbatim.
     #[must_use]
     pub fn from_raw(
         iteration: u64,
@@ -316,13 +290,8 @@ impl SolverStatsLogEntry {
 
 /// Convert a [`SolverStatsDelta`] into a [`cobre_io::SolverStatsRow`] for Parquet output.
 ///
-/// The `id` parameter is the row identifier: iteration number for training phases,
-/// scenario ID for the simulation phase. `opening` is `Some(ω)` for backward rows
-/// and `None` for forward, `lower_bound`, and simulation rows. `rank` is `Some` for
-/// every training-phase row (forward, backward, and `lower_bound` — [`solver_stats_log_to_rows`]
-/// always supplies the producing rank) and `None` only for simulation rows.
-/// `worker_id` is `Some` for backward rows (from the allgatherv unpack) and `None`
-/// otherwise (no per-worker dimension on forward, `lower_bound`, or simulation rows).
+/// `id` is the row identifier: iteration number for training phases, scenario ID
+/// for simulation.
 #[must_use]
 #[allow(clippy::cast_possible_truncation)]
 pub fn delta_to_stats_row(
@@ -358,10 +327,6 @@ pub fn delta_to_stats_row(
 }
 
 /// Map a per-iteration solver-stats log into Parquet rows.
-///
-/// The `opening`/`worker_id` `None` decode is already resolved on each
-/// [`SolverStatsLogEntry`] (by [`SolverStatsLogEntry::from_raw`]); this consumer
-/// reads the fields directly and does not re-decode any sentinel.
 #[must_use]
 pub fn solver_stats_log_to_rows(log: &[SolverStatsLogEntry]) -> Vec<cobre_io::SolverStatsRow> {
     log.iter()
@@ -413,9 +378,8 @@ pub fn worker_opening_stats_buffer_size(n_workers: usize, n_slots: usize) -> usi
 ///
 /// **The caller is responsible for enforcing the `2^53` ceiling before calling this
 /// function.** This function does not validate counter values. For the CLI training
-/// path the guard is implemented in `check_stats_overflow` in
-/// `crates/cobre-cli/src/commands/run.rs`, which runs before the `[f64; 7]` pack and
-/// returns `Err(CliError::Internal)` if any counter exceeds the limit.
+/// path the guard is `check_stats_overflow`, which runs before the pack and returns
+/// `Err(CliError::Internal)` if any counter exceeds the limit.
 ///
 /// # Timing precision
 ///
@@ -494,9 +458,6 @@ pub fn unpack_scenario_stats(buf: &[f64]) -> Vec<(u32, SolverStatsDelta)> {
     buf.chunks_exact(SCENARIO_STATS_STRIDE)
         .map(|chunk| {
             let scenario_id = chunk[0] as u32;
-            // `chunks_exact(SCENARIO_STATS_STRIDE)` guarantees chunk.len() ==
-            // SCENARIO_STATS_STRIDE = 1 + SOLVER_STATS_DELTA_SCALAR_FIELDS = 14.
-            // Index 1..=13 therefore covers exactly the 13 scalar field slots.
             let arr = [
                 chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7], chunk[8],
                 chunk[9], chunk[10], chunk[11], chunk[12], chunk[13],
@@ -556,12 +517,9 @@ pub fn unpack_worker_opening_stats(
     for w in 0..n_workers {
         for k in 0..n_slots {
             let entry_base = (w * n_slots + k) * WORKER_STATS_ENTRY_STRIDE;
-            // The prefix fields buf[entry_base] (worker_id) and
-            // buf[entry_base + 1] (slot_idx) store the LOCAL rank-relative
-            // indices written by pack_worker_opening_stats on each rank.
-            // When n_workers = n_ranks * n_workers_local, the combined flat
-            // index w does NOT equal the local worker_id for ranks > 0, so
-            // these fields are informational only and not asserted here.
+            // Do not assert the prefix worker_id/slot_idx against w/k: each rank
+            // writes LOCAL indices, so the combined flat w != local worker_id for
+            // ranks > 0. Prefix is informational.
             let scalars: [f64; SOLVER_STATS_DELTA_SCALAR_FIELDS] = buf
                 [entry_base + 2..entry_base + WORKER_STATS_ENTRY_STRIDE]
                 .try_into()
@@ -573,35 +531,13 @@ pub fn unpack_worker_opening_stats(
 
 /// Flat per-(worker, slot) gather buffer for a single training pass.
 ///
-/// Shape: `n_workers × n_slots`. Indexed by `worker_id * n_slots + slot`.
+/// Shape `n_workers × n_slots`, indexed by `worker_id * n_slots + slot`. `n_slots`
+/// is `max_openings` (backward), `n_stages` (forward), or `1` (lower-bound).
+/// Allocated once at `train` and reused; only `new` allocates, so no other method
+/// touches the heap (the no-hot-path-allocation rule).
 ///
-/// Used in three configurations:
-/// - **Backward pass**: `n_slots = max_openings` — each worker writes its
-///   per-opening stats for the current stage. Cleared via [`Self::reset`] between
-///   stages (one stage per backward iteration step).
-/// - **Forward pass**: `n_slots = n_stages` — each worker writes its
-///   per-stage total for the full forward pass. Cleared between iterations.
-/// - **Lower-bound pass**: `n_slots = 1` — each worker writes a single root-stage
-///   delta. Cleared between iterations.
-///
-/// Allocated once at training setup (`train`) and reused across stages and
-/// iterations without any hot-path allocation.
-///
-/// # Zero-allocation guarantee
-///
-/// `new` performs exactly one allocation. `reset`, `get`, `set`, and
-/// `as_slice` perform no allocations. There are no `Vec::push` or
-/// `Vec::new` calls on any path that touches this buffer after
-/// construction.
-///
-/// # Reset cadence
-///
-/// - Backward buffer: call `reset()` at the **start of each backward stage**
-///   (before the parallel region), so that stale data from the previous stage
-///   does not accumulate.
-/// - Forward and lower-bound buffers: call `reset()` at the **start of each
-///   training iteration** (before the parallel region), so that data from the
-///   previous iteration does not accumulate.
+/// Call [`Self::reset`] before the parallel region — per backward stage, or per
+/// training iteration for the forward/lower-bound buffers.
 #[derive(Debug)]
 pub struct StageWorkerStatsBuffer {
     data: Vec<SolverStatsDelta>,
@@ -621,11 +557,8 @@ impl StageWorkerStatsBuffer {
         }
     }
 
-    /// Compute the flat index for `(worker_id, slot)`.
-    ///
-    /// Equivalent to `worker_id * n_slots + slot`. Used by [`Self::get`] and
-    /// [`Self::set`] internally; exposed so callers can do bulk slice arithmetic
-    /// without re-deriving the formula.
+    /// Flat index `worker_id * n_slots + slot`; `pub` so callers can do bulk
+    /// slice arithmetic without re-deriving it.
     ///
     /// # Panics (debug only)
     ///
@@ -667,10 +600,7 @@ impl StageWorkerStatsBuffer {
         self.data[idx] = delta;
     }
 
-    /// Zero all slots.
-    ///
-    /// Call between stages (backward path) or between iterations (forward and
-    /// lower-bound paths). Does not re-allocate; always `O(n_workers * n_slots)`.
+    /// Zero all slots without re-allocating (cadence on the type doc).
     pub fn reset(&mut self) {
         for slot in &mut self.data {
             slot.reset_in_place();
@@ -678,8 +608,6 @@ impl StageWorkerStatsBuffer {
     }
 
     /// Return the flat backing slice of length `n_workers * n_slots`.
-    ///
-    /// Layout: `data[worker_id * n_slots + slot]`.
     #[must_use]
     pub fn as_slice(&self) -> &[SolverStatsDelta] {
         &self.data
@@ -691,10 +619,8 @@ impl StageWorkerStatsBuffer {
         self.n_workers
     }
 
-    /// Number of slots per worker (second dimension).
-    ///
-    /// Equal to `max_openings` on the backward path, `n_stages` on the
-    /// forward path, and `1` on the lower-bound path.
+    /// Number of slots per worker (second dimension); see the type doc for its
+    /// per-pass meaning.
     #[must_use]
     pub fn n_slots(&self) -> usize {
         self.n_slots

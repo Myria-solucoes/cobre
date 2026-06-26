@@ -1,20 +1,11 @@
 //! Closed-form lower-bound canary for anticipated thermals.
 //!
 //! Two-stage, K=1, no hydro, no stochastic noise, single deterministic opening
-//! per stage. The lower bound returned by `train` is hand-derivable in five
-//! minutes from the LP coefficients written by `lp_builder::matrix`. Any
-//! deviation from `EXPECTED_LB` flags a regression in the value-correctness
-//! class (cost-shift, sign flip, missing scaling, broken fishing, etc.).
-//!
-//! ## Why this canary exists
-//!
-//! Larger anticipated-thermals integration tests (`anticipated_5stage_k2_smoke`,
-//! `anticipated_two_plants_smoke`) use structural assertions only — convergence,
-//! basis-cache population, ring-buffer invariants. Those tests do not pin
-//! an `EXPECTED_LB` constant because there is no closed form for the larger
-//! fixtures; any constant pinned there would only certify the converged value
-//! is _stable_, not that it is _correct_. This canary supplies the value-
-//! correctness signal that the structural tests cannot.
+//! per stage. The lower bound returned by `train` is hand-derivable from the LP
+//! coefficients written by the `lp::builder` column/row fill paths, so any
+//! deviation from `EXPECTED_LB` flags a value-correctness regression that the
+//! larger structural-only integration tests cannot pin (no closed form exists
+//! for those fixtures).
 //!
 //! ## Fixture
 //!
@@ -35,20 +26,12 @@
 //!
 //! ## Closed-form derivation
 //!
-//! ### Legacy behaviour (before always-active fishing)
-//!
-//! Under the pre-flip predicate `is_anticipated_fishing_active` returned TRUE
-//! only when `stage_idx >= K_i` (i.e. `stage_idx >= 1` for K=1). Stage 0 had
-//! no fishing row, the anticipated thermal dispatched freely at cost `c_a`, and
-//! the closed form was `T* = 2 · c_a · D = 1000.0`. That constant is now wrong.
-//!
-//! ### Always-active fishing (current behaviour)
-//!
-//! `StageIndexer::is_anticipated_fishing_active` now
-//! returns TRUE at every stage, including stage 0. The fishing row
-//! `g_a_t − x_state_t = 0` is therefore emitted at stage 0 as well, and
-//! `zero_anticipated_delivery_thermal_cost` zeros the per-block cost of the
-//! anticipated column at stage 0 (same always-active path). See the K=1
+//! The fishing constraint is always active for every anticipated plant at
+//! every stage, including stage 0. The fishing row `g_a_t − x_state_t = 0` is
+//! therefore emitted at stage 0 as well, and `fill_thermal_columns` skips the
+//! per-block cost of the anticipated column at stage 0 (never written, leaving
+//! it at zero; the anticipated thermal is detected via
+//! `anticipated_local_by_sys_pos`, same always-active path). See the K=1
 //! sign-chain table for the cut-coefficient sign convention that applies
 //! here.
 //!
@@ -61,8 +44,8 @@
 //!
 //! Stage 0 (always-active fishing; decision predicate `t + K_i < n_stages` is
 //! `0 + 1 < 2` — TRUE, so `d_ant_0` is active; fishing predicate now TRUE at
-//! every stage including 0; per-block anticipated cost zeroed by
-//! `zero_anticipated_delivery_thermal_cost`):
+//! every stage including 0; per-block anticipated cost skipped in
+//! `fill_thermal_columns`, so it stays at zero):
 //!
 //! ```text
 //!   min  0 · g_a_0 + c_b · g_b_0 + c_a · d_ant_0 + θ_0
@@ -85,13 +68,13 @@
 //! `c_a · d_ant_0` now and paying `c_b · max(0, D − d_ant_0)` at stage 1.
 //!
 //! The decision objective coefficient is set by
-//! `fill_anticipated_decision_objective` to
+//! `fill_anticipated_columns` to
 //! `c_a · total_hours_per_stage[delivery=1] · cumulative_discount_factors[1] =
 //! c_a · 1 · 1 = c_a`.
 //!
-//! Stage 1 (delivery; fishing `is_anticipated_fishing_active` — TRUE; decision
+//! Stage 1 (delivery; fishing always active; decision
 //! `1 + 1 < 2` — FALSE, so `d_ant_1 ∈ [0,0]` and per-block anticipated cost
-//! is zeroed by `zero_anticipated_delivery_thermal_cost`):
+//! is skipped in `fill_thermal_columns`, so it stays at zero):
 //!
 //! ```text
 //!   min  c_b · g_b_1 + 0 · g_a_1
@@ -142,10 +125,6 @@
 //!       = (10 + 100) · 50
 //!       = 5500.0  USD
 //! ```
-//!
-//! Legacy value under the pre-flip predicate: `2 · c_a · D = 1000.0`. The
-//! always-active fishing predicate zeroes `g_a_0`'s per-block cost but forces
-//! backup to cover stage-0 load, raising the lower bound by `(c_b − c_a) · D`.
 //!
 //! Sanity checks (independent traversal of the piecewise total under
 //! always-active fishing — stage-0 backup covers D; decision cost = c_a·d_ant_0):
@@ -215,7 +194,7 @@ const N_STAGES: usize = 2;
 const K_MAX: usize = 1;
 const BLOCK_HOURS: f64 = 1.0;
 
-/// Constant load at every stage (MW).
+/// MW.
 const D_LOAD: f64 = 50.0;
 
 /// Anticipated thermal capacity (MW). Strictly above `D_LOAD` so the optimum
@@ -230,7 +209,7 @@ const B_BACK: f64 = 200.0;
 /// stage; the LP would otherwise be indifferent.
 const C_A: f64 = 10.0;
 
-/// Backup marginal cost ($/MWh).
+/// $/MWh.
 const C_B: f64 = 100.0;
 
 /// Deficit cost ($/MWh). Set well above `C_B` so deficit is never preferred
@@ -238,18 +217,8 @@ const C_B: f64 = 100.0;
 const C_DEFICIT: f64 = 1000.0;
 
 /// Closed-form lower bound under always-active fishing:
-/// `T* = (C_A + C_B) · D_LOAD`. See module docs for the full derivation.
-/// Numerical value: `(10 + 100) · 50 = 5500.0` USD.
-///
-/// Legacy value (pre-flip predicate `K_i ≤ stage_idx`): `2 · C_A · D_LOAD = 1000.0`.
-/// The always-active fishing predicate
-/// (`StageIndexer::is_anticipated_fishing_active`) emits a fishing row at stage 0,
-/// forcing `g_a_0 = 0` and requiring backup to cover stage-0 load. See the K=1
-/// sign-chain table for the cut-coefficient convention.
-///
-/// Held to bit-for-bit equality. Sub-ULP noise from a future libhighs upgrade
-/// should be rare for this trivial fixture; if it occurs, demote to a 1e-12
-/// relative-tolerance check.
+/// `T* = (C_A + C_B) · D_LOAD = (10 + 100) · 50 = 5500.0` USD. See module docs
+/// for the full derivation.
 const EXPECTED_LB: f64 = (C_A + C_B) * D_LOAD; // = 5500.0
 
 const ANTICIPATED_ID: EntityId = EntityId(2);
@@ -327,7 +296,6 @@ fn build_system() -> cobre_core::System {
         excess_cost: 0.0,
     };
 
-    // Anticipated thermal: K=1, sorts first by EntityId.
     let thermal_ant = Thermal {
         id: ANTICIPATED_ID,
         name: "T_ant".to_string(),
@@ -340,7 +308,6 @@ fn build_system() -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // Backup standard thermal.
     let thermal_backup = Thermal {
         id: BACKUP_ID,
         name: "T_backup".to_string(),
@@ -387,10 +354,8 @@ fn build_system() -> cobre_core::System {
         })
         .collect();
 
-    // n_hydros = 0; anticipated + backup thermals only. k_max = 1.
-    // Per-thermal per-stage overrides across the full thermal axis (length =
-    // n_stages + k_max = 3) so that `fill_anticipated_decision_objective`
-    // reads a well-defined cost at delivery (stage 1).
+    // Overrides span the full thermal axis (n_stages + k_max) so
+    // `fill_anticipated_columns` reads a well-defined cost at delivery (stage 1).
     let mut bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
             n_hydros: 0,
@@ -412,7 +377,7 @@ fn build_system() -> cobre_core::System {
                 min_generation_mw: 0.0,
                 max_generation_mw: 0.0,
                 max_diversion_m3s: None,
-                filling_inflow_m3s: 0.0,
+                filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 0.0,
             },
             thermal: ThermalStageBounds {
@@ -515,12 +480,9 @@ fn build_system() -> cobre_core::System {
 // Config and setup builders
 // ---------------------------------------------------------------------------
 
-/// Build a deterministic config. Iteration limit = 4 is sufficient to drive
-/// the LB to the closed-form value; the first iteration generates the cut at
-/// `d_ant_0 = 0`, the second probes the saturated region (`d_ant_0 > D`),
-/// and the third confirms the lower envelope at `d_ant_0 = D`. We add a
-/// fourth iteration to give the LP one more chance to settle in case of
-/// degenerate-vertex selection.
+/// Iteration limit = 4: three iterations reach the lower envelope at the kink
+/// `d_ant_0 = D`, plus one to settle degenerate-vertex selection. Pinned by the
+/// `iterations == 4` assertion.
 fn build_config() -> Config {
     Config {
         schema: None,
@@ -573,12 +535,7 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 // ---------------------------------------------------------------------------
 
 /// Closed-form canary: the LP-derived lower bound for the 2-stage K=1 fixture
-/// must equal the hand-derived value `(C_A + C_B) · D_LOAD = 5500.0` under
-/// always-active fishing (`StageIndexer::is_anticipated_fishing_active`).
-///
-/// Bit-for-bit equality is asserted via `f64::to_bits`. The fixture is fully
-/// deterministic (single opening, no noise, single-thread HiGHS), so any
-/// drift indicates a value-correctness regression.
+/// must equal `EXPECTED_LB = (C_A + C_B) · D_LOAD = 5500.0` bit-for-bit.
 #[test]
 fn anticipated_closed_form_lb_k1_single_thermal() {
     let system = build_system();
@@ -600,9 +557,6 @@ fn anticipated_closed_form_lb_k1_single_thermal() {
     let result = &outcome.result;
     assert_eq!(result.iterations, 4, "iterations mismatch");
 
-    // Closed-form LB derived in the module-level docstring. Bit-for-bit
-    // equality is asserted because the fixture has no source of stochastic
-    // noise; any drift indicates a value-correctness regression.
     let actual = result.final_lb;
     assert!(actual.is_finite(), "final_lb must be finite; got {actual}");
     assert_eq!(
@@ -610,14 +564,12 @@ fn anticipated_closed_form_lb_k1_single_thermal() {
         EXPECTED_LB.to_bits(),
         "closed-form LB mismatch: actual = {actual}, expected = {EXPECTED_LB}. \
          Under always-active fishing the answer is `(C_A + C_B) · D_LOAD = 5500.0` \
-         (stage-0 backup covers load; anticipated column cost zeroed by \
-         zero_anticipated_delivery_thermal_cost). \
+         (stage-0 backup covers load; anticipated column cost skipped in \
+         fill_thermal_columns, so it stays at zero). \
          If a libhighs upgrade introduces sub-ULP arithmetic drift, switch to \
          a 1e-12 relative tolerance check.",
     );
 
-    // Final gap should also have closed to zero for this deterministic
-    // fixture: UB and LB coincide on the unique optimum.
     let gap = result.final_gap;
     assert!(
         gap.is_finite() && gap.abs() < 1e-9,

@@ -1,21 +1,9 @@
 //! Risk measure for cut aggregation and risk-adjusted cost evaluation.
 //!
-//! [`RiskMeasure`] is an enum dispatched via `match` (enum dispatch for closed
-//! variant sets, avoiding `Box<dyn>`): `Expectation` and `CVaR` variants.
-//!
-//! ## Aggregation semantics
-//!
-//! The primary method [`RiskMeasure::aggregate_cut`] replaces opening probabilities
-//! `p(ω)` with risk-adjusted weights `μ*_ω` and computes weighted sums of intercepts
-//! and coefficients. For `Expectation`, `μ*_ω = p(ω)`. For `CVaR`, the weights are
-//! computed via a sorting-based greedy allocation that places maximum mass on the
-//! highest-cost scenarios (Risk Measures SS7).
-//!
-//! ## Risk evaluation
-//!
-//! [`RiskMeasure::evaluate_risk`] aggregates a vector of cost realizations into a
-//! scalar risk-adjusted cost. For `CVaR`, the formula is:
-//! `(1 - λ) · E[Z] + λ · CVaR_α[Z]`.
+//! [`RiskMeasure`] aggregation replaces opening probabilities `p(ω)` with
+//! risk-adjusted weights `μ*_ω`. For `Expectation`, `μ*_ω = p(ω)`; for `CVaR`,
+//! a greedy allocation places maximum mass on the highest-cost scenarios
+//! (Risk Measures SS7), realizing `ρ^{λ,α}[Z] = (1 - λ)·E[Z] + λ·CVaR_α[Z]`.
 //!
 //! ## Examples
 //!
@@ -33,31 +21,21 @@
 //! assert!((intercept - 20.0).abs() < 1e-10);
 //! ```
 
-/// Per-worker scratch buffers for `CVaR` weight computation.
-///
-/// Holds the three intermediate `Vec`s that `compute_cvar_weights_into` and
-/// `compute_cvar_weights_from_costs_into` write during each backward pass
-/// stage. By storing them here and passing `&mut RiskMeasureScratch` to those
-/// functions, the allocation is paid once on first use (when capacities grow
-/// to `n_openings`) and then reused for all subsequent calls.
-///
-/// Stored as a field of `BackwardAccumulators` so each
-/// rayon worker owns an exclusive instance — no synchronisation needed.
+/// Per-worker scratch buffers for `CVaR` weight computation, reused across
+/// backward-pass stages so the allocation is paid once. Owned exclusively per
+/// rayon worker (a field of `BackwardAccumulators`), so no synchronisation.
 #[derive(Debug, Default, Clone)]
 pub struct RiskMeasureScratch {
-    /// Per-scenario upper bounds `μ̄_ω = (1-λ)·p_ω + λ·p_ω/α`.
+    /// Per-scenario upper bounds `μ̄_ω`.
     pub upper_bounds: Vec<f64>,
-    /// Sorted indices of scenarios, descending by objective/cost value.
+    /// Scenario indices sorted descending by objective/cost value.
     pub order: Vec<usize>,
-    /// Computed risk weights `μ*_ω` (result of the greedy allocation).
+    /// Computed risk weights `μ*_ω`.
     pub mu: Vec<f64>,
 }
 
 impl RiskMeasureScratch {
-    /// Create an empty scratch with no pre-allocated capacity.
-    ///
-    /// Capacities grow lazily on the first call to `compute_cvar_weights_into`
-    /// or `compute_cvar_weights_from_costs_into` and are retained thereafter.
+    /// Create an empty scratch; capacities grow lazily on first use.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -68,33 +46,25 @@ impl RiskMeasureScratch {
     }
 }
 
-/// Results from solving one backward pass opening at a single stage.
-///
-/// Each opening produces an intercept and a coefficient vector derived
-/// from the LP dual variables as described in Cut Management SS2.
-/// The `objective_value` is used by [`RiskMeasure::CVaR`] to rank scenarios
-/// by cost for the greedy weight allocation (Risk Measures SS7).
+/// Results from solving one backward pass opening at a single stage. The
+/// intercept and coefficients derive from the LP dual variables (Cut Management
+/// SS2); `objective_value` ranks scenarios for `CVaR` allocation (Risk Measures
+/// SS7).
 #[derive(Debug, Clone)]
 pub struct BackwardOutcome {
     /// Per-scenario cut intercept `α_t(ω)`.
     pub intercept: f64,
 
-    /// Per-scenario cut coefficients `π_t(ω)`, one per state variable.
-    ///
-    /// Length equals `state_dimension`. Must be the same length across
-    /// all outcomes passed to a single `aggregate_cut` call.
+    /// Per-scenario cut coefficients `π_t(ω)`, one per state variable. Must be
+    /// the same length across all outcomes in one `aggregate_cut` call.
     pub coefficients: Vec<f64>,
 
-    /// Optimal objective value `Q_t(x̂, ω)` of the stage subproblem.
-    ///
-    /// Used to rank scenarios by cost when computing `CVaR` risk weights.
-    /// A higher value indicates a worse (more expensive) scenario.
+    /// Optimal objective value `Q_t(x̂, ω)`; higher means a worse scenario.
     pub objective_value: f64,
 }
 
-/// Risk measure for stage-level cut aggregation.
-///
-/// Variants determine how opening-level outcomes are weighted into a single cut.
+/// Risk measure for stage-level cut aggregation: how opening-level outcomes are
+/// weighted into a single cut. Enum dispatch over a closed variant set.
 ///
 /// ## Examples
 ///
@@ -109,29 +79,19 @@ pub struct BackwardOutcome {
 /// ```
 #[derive(Debug, Clone)]
 pub enum RiskMeasure {
-    /// Risk-neutral expected value.
-    ///
-    /// Aggregation weights equal the opening probabilities: `μ*_ω = p(ω)`.
-    /// Reduces to the standard single-cut aggregation from Cut Management SS3.
+    /// Risk-neutral expected value: weights equal the opening probabilities
+    /// `μ*_ω = p(ω)` (Cut Management SS3).
     Expectation,
 
     /// Convex combination of expectation and `CVaR`:
-    /// `ρ^{λ,α}[Z] = (1 - λ) E[Z] + λ · CVaR_α[Z]`.
-    ///
-    /// See Risk Measures SS3 for the definition and Risk Measures SS7 for
-    /// the weight computation procedure.
+    /// `ρ^{λ,α}[Z] = (1 - λ) E[Z] + λ · CVaR_α[Z]` (Risk Measures SS3, SS7).
     CVaR {
-        /// `CVaR` confidence level `α ∈ (0, 1]`.
-        ///
-        /// `α = 1` is equivalent to expectation. Smaller `α` values
-        /// produce more risk-averse behaviour by concentrating weight on
-        /// the worst `α`-fraction of scenarios.
+        /// `CVaR` confidence level `α ∈ (0, 1]`; `α = 1` equals expectation,
+        /// smaller `α` concentrates weight on the worst `α`-fraction.
         alpha: f64,
 
-        /// Risk aversion weight `λ ∈ [0, 1]`.
-        ///
-        /// `λ = 0` reduces to `Expectation` (normalised at config load
-        /// time). `λ = 1` gives pure `CVaR`.
+        /// Risk aversion weight `λ ∈ [0, 1]`; `λ = 0` reduces to `Expectation`
+        /// (normalised at config load time), `λ = 1` gives pure `CVaR`.
         lambda: f64,
     },
 }
@@ -146,24 +106,14 @@ impl From<cobre_core::StageRiskConfig> for RiskMeasure {
 }
 
 impl RiskMeasure {
-    /// Aggregate per-opening backward pass results into a single cut.
-    ///
-    /// Replaces the opening probabilities `p(ω)` with risk-adjusted weights
-    /// `μ*_ω` and computes the weighted sum of per-opening intercepts and
-    /// coefficients. This is the only difference from risk-neutral aggregation
-    /// — the cut structure and LP insertion are identical.
+    /// Aggregate per-opening backward pass results into a single cut: the
+    /// weighted sum of per-opening intercepts and coefficients under `μ*_ω`.
     ///
     /// ## Preconditions
     ///
-    /// - `outcomes.len() == probabilities.len()` (one probability per opening)
-    /// - `outcomes.len() > 0` (at least one opening)
+    /// - `outcomes.len() == probabilities.len() > 0`
     /// - `probabilities` sum to `1.0` within floating-point tolerance
-    /// - All `outcomes[i].coefficients` have equal length
-    ///
-    /// ## Returns
-    ///
-    /// `(aggregated_intercept, aggregated_coefficients)` where
-    /// `aggregated_coefficients.len() == state_dimension`.
+    /// - all `outcomes[i].coefficients` have equal length
     #[must_use]
     pub fn aggregate_cut(
         &self,
@@ -189,22 +139,15 @@ impl RiskMeasure {
         }
     }
 
-    /// Aggregate per-opening backward pass results into caller-provided buffers.
-    ///
-    /// Buffer variant of [`aggregate_cut`](RiskMeasure::aggregate_cut) that
-    /// writes results into caller-provided buffers using caller-provided
-    /// scratch. No allocation after warm-up.
-    ///
-    /// For `Expectation`, `scratch` is not accessed. For `CVaR`, the three
-    /// internal `Vec`s of `scratch` are grown lazily on first call and
-    /// reused on subsequent calls to avoid per-call heap allocation.
+    /// No-allocation buffer variant of [`aggregate_cut`](RiskMeasure::aggregate_cut):
+    /// writes into caller-provided buffers and reuses `scratch`. `Expectation`
+    /// does not touch `scratch`.
     ///
     /// ## Preconditions
     ///
-    /// - `outcomes.len() == probabilities.len()` (one probability per opening)
-    /// - `outcomes.len() > 0` (at least one opening)
+    /// - `outcomes.len() == probabilities.len() > 0`
     /// - `coefficients_out.len() == outcomes[0].coefficients.len()`
-    /// - All `outcomes[i].coefficients` have equal length
+    /// - all `outcomes[i].coefficients` have equal length
     pub(crate) fn aggregate_cut_into(
         &self,
         outcomes: &[BackwardOutcome],
@@ -234,21 +177,14 @@ impl RiskMeasure {
         }
     }
 
-    /// Evaluate the risk-adjusted scalar cost from a vector of cost values.
-    ///
-    /// Used for convergence bound computation during the forward pass.
-    /// For risk-neutral, this is the probability-weighted mean. For `CVaR`,
-    /// this is the convex combination `(1-λ) E[Z] + λ · CVaR_α[Z]`.
+    /// Evaluate the risk-adjusted scalar cost from a vector of cost values, used
+    /// for convergence bound computation. `Expectation` is the probability-weighted
+    /// mean; `CVaR` is the convex combination `(1-λ) E[Z] + λ · CVaR_α[Z]`.
     ///
     /// ## Preconditions
     ///
-    /// - `costs.len() == probabilities.len()` (one probability per realization)
-    /// - `costs.len() > 0` (at least one realization)
+    /// - `costs.len() == probabilities.len() > 0`
     /// - `probabilities` sum to `1.0` within floating-point tolerance
-    ///
-    /// ## Returns
-    ///
-    /// The risk-adjusted scalar cost (finite when all inputs are finite).
     #[must_use]
     pub fn evaluate_risk(&self, costs: &[f64], probabilities: &[f64]) -> f64 {
         debug_assert_eq!(
@@ -262,20 +198,11 @@ impl RiskMeasure {
         );
 
         match self {
-            RiskMeasure::Expectation => {
-                // E[Z] = Σ p(ω) · Z(ω)
-                costs.iter().zip(probabilities).map(|(c, p)| c * p).sum()
-            }
+            RiskMeasure::Expectation => costs.iter().zip(probabilities).map(|(c, p)| c * p).sum(),
             RiskMeasure::CVaR { alpha, lambda } => {
-                // EAVaR = (1 - λ)·E[Z] + λ·CVaR_α[Z]
-                //
-                // By the dual representation (Risk Measures SS4.2), EAVaR equals
-                // E_μ*[Z] where μ* maximises the weighted cost subject to the
-                // per-scenario upper bounds μ̄_ω = (1-λ)·p_ω + λ·p_ω/α. The
-                // greedy allocation (continuous knapsack on costs sorted descending)
-                // produces this optimal μ*. Therefore:
-                //   EAVaR = Σ μ*_ω · Z(ω)
-                // where μ* is computed by `compute_cvar_weights_from_costs`.
+                // EAVaR = E_μ*[Z]: by the dual representation (Risk Measures SS4.2)
+                // the greedy allocation in compute_cvar_weights_from_costs is the
+                // optimal μ*, so the weighted sum below equals (1-λ)E[Z]+λCVaR_α[Z].
                 let mu = compute_cvar_weights_from_costs(costs, probabilities, *alpha, *lambda);
                 costs.iter().zip(mu.iter()).map(|(c, w)| c * w).sum()
             }
@@ -283,14 +210,9 @@ impl RiskMeasure {
     }
 }
 
-/// Compute `CVaR` weights into caller-provided scratch (continuous knapsack on objective values).
-///
-/// Writes the per-scenario upper bounds, sorted order, and final weights `μ*_ω`
-/// into `scratch`, reusing existing `Vec` capacity. On first call the three
-/// internal `Vec`s grow to `n = outcomes.len()`; subsequent calls with the
-/// same or smaller `n` incur no allocation.
-///
-/// After this call, `scratch.mu[i]` holds the risk weight for scenario `i`.
+/// Compute `CVaR` weights via continuous-knapsack greedy allocation on objective
+/// values, reusing `scratch`. After this call, `scratch.mu[i]` is scenario `i`'s
+/// risk weight.
 pub fn compute_cvar_weights_into(
     outcomes: &[BackwardOutcome],
     probabilities: &[f64],
@@ -328,12 +250,8 @@ pub fn compute_cvar_weights_into(
     }
 }
 
-/// Compute `CVaR` weights into caller-provided scratch (continuous knapsack on scalar cost values).
-///
-/// Variant of [`compute_cvar_weights_into`] that operates on raw `costs: &[f64]` instead of
-/// `&[BackwardOutcome]`. Used by [`RiskMeasure::evaluate_risk`].
-///
-/// After this call, `scratch.mu[i]` holds the risk weight for scenario `i`.
+/// [`compute_cvar_weights_into`] over raw `costs: &[f64]` rather than
+/// `&[BackwardOutcome]`, used by [`RiskMeasure::evaluate_risk`].
 pub fn compute_cvar_weights_from_costs_into(
     costs: &[f64],
     probabilities: &[f64],
@@ -369,10 +287,8 @@ pub fn compute_cvar_weights_from_costs_into(
     }
 }
 
-/// Compute `CVaR` weights via greedy allocation (continuous knapsack on objective values).
-///
-/// Allocating compatibility wrapper around [`compute_cvar_weights_into`].
-/// Prefer passing an explicit `&mut RiskMeasureScratch` on hot paths.
+/// Allocating wrapper around [`compute_cvar_weights_into`]; prefer the `_into`
+/// form on hot paths.
 fn compute_cvar_weights(
     outcomes: &[BackwardOutcome],
     probabilities: &[f64],
@@ -384,10 +300,8 @@ fn compute_cvar_weights(
     scratch.mu
 }
 
-/// Compute `CVaR` weights via greedy allocation on scalar cost values.
-///
-/// Allocating compatibility wrapper around [`compute_cvar_weights_from_costs_into`].
-/// Prefer passing an explicit `&mut RiskMeasureScratch` on hot paths.
+/// Allocating wrapper around [`compute_cvar_weights_from_costs_into`]; prefer
+/// the `_into` form on hot paths.
 fn compute_cvar_weights_from_costs(
     costs: &[f64],
     probabilities: &[f64],
@@ -410,11 +324,8 @@ fn aggregate_weighted(outcomes: &[BackwardOutcome], weights: &[f64]) -> (f64, Ve
     (agg_intercept, agg_coefficients)
 }
 
-/// Write weighted-aggregation results into caller-provided output buffers.
-///
-/// Produces bit-identical results to [`aggregate_weighted`] while avoiding
-/// the allocation of a new `Vec<f64>` for coefficients. The caller pre-zeros
-/// both buffers; this function accumulates into them from scratch.
+/// Write weighted-aggregation results into caller-provided buffers, bit-identical
+/// to [`aggregate_weighted`] but without allocating.
 ///
 /// ## Preconditions
 ///

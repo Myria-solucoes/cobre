@@ -13,96 +13,64 @@ use crate::{
 };
 
 /// A line connection from a bus perspective.
-///
-/// Describes whether a bus is the source or target end of a transmission line,
-/// and which line it refers to. Used in bus-line incidence lookups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BusLineConnection {
     /// The line's entity ID.
     pub line_id: EntityId,
-    /// True if this bus is the line's source (direct flow direction).
-    /// False if this bus is the line's target (reverse flow direction).
+    /// True when this bus is the line's source (direct flow); false at the target (reverse flow).
     pub is_source: bool,
 }
 
-/// Generator entities connected to a bus.
-///
-/// Groups hydro, thermal, and non-controllable source IDs by type. All ID
-/// lists are in canonical ascending-`i32` order for determinism.
+/// Generator entity IDs at a bus. All lists are in canonical ascending-`i32`
+/// order for determinism.
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BusGenerators {
-    /// Hydro plant IDs connected to this bus.
+    /// Hydro plant IDs.
     pub hydro_ids: Vec<EntityId>,
-    /// Thermal plant IDs connected to this bus.
+    /// Thermal plant IDs.
     pub thermal_ids: Vec<EntityId>,
-    /// Non-controllable source IDs connected to this bus.
+    /// Non-controllable source IDs.
     pub ncs_ids: Vec<EntityId>,
 }
 
-/// Load/demand entities connected to a bus.
-///
-/// Groups energy contract and pumping station IDs. All ID lists are in
-/// canonical ascending-`i32` order for determinism.
+/// Load/demand entity IDs at a bus. All lists are in canonical ascending-`i32`
+/// order for determinism.
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BusLoads {
-    /// Energy contract IDs at this bus.
+    /// Energy contract IDs.
     pub contract_ids: Vec<EntityId>,
-    /// Pumping station IDs consuming power at this bus.
+    /// Pumping station IDs.
     pub pumping_station_ids: Vec<EntityId>,
 }
 
 /// Resolved transmission network topology for buses and lines.
 ///
-/// Provides O(1) lookup for bus-line incidence, bus-to-generator maps,
-/// and bus-to-load maps. Built from entity collections during System
-/// construction and immutable thereafter.
-///
-/// Used for power balance constraint generation.
-// The three private fields all share the `bus_` prefix intentionally: they form a
-// cohesive group keyed by bus identity. The prefix mirrors the public accessor names
-// and the spec's field names, making the code self-documenting.
+/// Built from entity collections during System construction and immutable thereafter.
+// Rationale: the `bus_` prefix groups fields keyed by bus identity and mirrors the
+// public accessor names.
 #[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NetworkTopology {
-    /// Bus-line incidence: `bus_id` -> list of (`line_id`, `is_source`).
-    /// `is_source` is true when the bus is the source (direct flow direction).
     bus_lines: HashMap<EntityId, Vec<BusLineConnection>>,
 
-    /// Bus generation map: `bus_id` -> list of generator IDs by type.
     bus_generators: HashMap<EntityId, BusGenerators>,
 
-    /// Bus load map: `bus_id` -> list of load/demand entity IDs.
     bus_loads: HashMap<EntityId, BusLoads>,
 }
 
-/// Global default for buses with no generators. Used as fallback in `bus_generators`.
 static DEFAULT_BUS_GENERATORS: OnceLock<BusGenerators> = OnceLock::new();
 
-/// Global default for buses with no loads. Used as fallback in `bus_loads`.
 static DEFAULT_BUS_LOADS: OnceLock<BusLoads> = OnceLock::new();
 
 impl NetworkTopology {
     /// Build network topology from entity collections.
     ///
-    /// Constructs bus-line incidence, bus generation maps, and bus load maps
-    /// from the entity collections. Does not validate (no bus existence checks) --
-    /// validation is separate.
-    ///
-    /// All entity slices are assumed to be in canonical ID order.
-    ///
-    /// # Arguments
-    ///
-    /// * `buses` - All bus entities in canonical ID order.
-    /// * `lines` - All line entities in canonical ID order.
-    /// * `hydros` - All hydro plant entities in canonical ID order.
-    /// * `thermals` - All thermal plant entities in canonical ID order.
-    /// * `non_controllable_sources` - All NCS entities in canonical ID order.
-    /// * `contracts` - All energy contract entities in canonical ID order.
-    /// * `pumping_stations` - All pumping station entities in canonical ID order.
+    /// All entity slices are assumed to be in canonical ID order. Does not
+    /// validate bus existence; validation is a separate layer.
     #[must_use]
     pub fn build(
         buses: &[Bus],
@@ -198,17 +166,13 @@ impl NetworkTopology {
         }
     }
 
-    /// Returns the lines connected to a bus.
-    ///
-    /// Returns an empty slice if the bus has no connected lines.
+    /// Returns the lines connected to a bus, or an empty slice if none.
     #[must_use]
     pub fn bus_lines(&self, bus_id: EntityId) -> &[BusLineConnection] {
         self.bus_lines.get(&bus_id).map_or(&[], Vec::as_slice)
     }
 
-    /// Returns the generators connected to a bus.
-    ///
-    /// Returns a reference to an empty `BusGenerators` if the bus has no generators.
+    /// Returns the generators connected to a bus, or an empty `BusGenerators` if none.
     #[must_use]
     pub fn bus_generators(&self, bus_id: EntityId) -> &BusGenerators {
         self.bus_generators
@@ -216,9 +180,7 @@ impl NetworkTopology {
             .unwrap_or_else(|| DEFAULT_BUS_GENERATORS.get_or_init(BusGenerators::default))
     }
 
-    /// Returns the loads connected to a bus.
-    ///
-    /// Returns a reference to an empty `BusLoads` if the bus has no loads.
+    /// Returns the loads connected to a bus, or an empty `BusLoads` if none.
     #[must_use]
     pub fn bus_loads(&self, bus_id: EntityId) -> &BusLoads {
         self.bus_loads
@@ -363,7 +325,6 @@ mod tests {
     fn test_empty_network() {
         let topo = NetworkTopology::build(&[], &[], &[], &[], &[], &[], &[]);
 
-        // Any bus ID returns empty collections.
         assert_eq!(topo.bus_lines(EntityId(0)), &[]);
         assert!(topo.bus_generators(EntityId(0)).hydro_ids.is_empty());
         assert!(topo.bus_generators(EntityId(0)).thermal_ids.is_empty());
@@ -374,18 +335,16 @@ mod tests {
 
     #[test]
     fn test_single_line() {
-        // Line 0 connects bus 0 (source) -> bus 1 (target).
+        // Line 0: bus 0 (source) -> bus 1 (target).
         let buses = vec![make_bus(0), make_bus(1)];
         let lines = vec![make_line(0, 0, 1)];
         let topo = NetworkTopology::build(&buses, &lines, &[], &[], &[], &[], &[]);
 
-        // Bus 0 is the source.
         let conns_0 = topo.bus_lines(EntityId(0));
         assert_eq!(conns_0.len(), 1);
         assert_eq!(conns_0[0].line_id, EntityId(0));
         assert!(conns_0[0].is_source);
 
-        // Bus 1 is the target.
         let conns_1 = topo.bus_lines(EntityId(1));
         assert_eq!(conns_1.len(), 1);
         assert_eq!(conns_1[0].line_id, EntityId(0));
@@ -401,9 +360,7 @@ mod tests {
 
         let conns = topo.bus_lines(EntityId(0));
         assert_eq!(conns.len(), 3);
-        // All connections belong to bus 0 as source.
         assert!(conns.iter().all(|c| c.is_source));
-        // Sorted by line_id inner i32.
         assert_eq!(conns[0].line_id, EntityId(0));
         assert_eq!(conns[1].line_id, EntityId(1));
         assert_eq!(conns[2].line_id, EntityId(2));

@@ -1,14 +1,8 @@
 //! Integration tests for the `cobre summary` subcommand.
 //!
-//! These tests build a hand-crafted output-directory fixture (the four metadata
-//! files) in a tempdir, then run the real `cobre` binary against it and assert
-//! on the live end-block written to stderr, in top-to-bottom order:
-//!
-//!   Execution topology → Hydro models → Model provenance → Training → Simulation
-//!
-//! The fixture is written with the public `cobre_io` writers (training/simulation
-//! metadata) and `serde_json` (the two optional sidecars), so the JSON shapes
-//! stay in sync with the real schemas without needing a full live run.
+//! The fixture is written with the public `cobre_io` writers and `serde_json`
+//! (the two optional sidecars), so the JSON shapes track the real schemas without
+//! a full live run.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -195,7 +189,6 @@ fn write_provenance_fixture(dir: &Path) {
     .unwrap();
 }
 
-/// Assert that `needle_a` appears strictly before `needle_b` in `haystack`.
 fn assert_ordered(haystack: &str, needle_a: &str, needle_b: &str) {
     let pos_a = haystack
         .find(needle_a)
@@ -228,7 +221,6 @@ fn summary_prints_all_five_sections_in_live_order() {
 
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    // All five section headers present, in live top-to-bottom order.
     assert_ordered(&stderr, "Execution", "Hydro models");
     assert_ordered(&stderr, "Hydro models", "Model provenance");
     assert_ordered(&stderr, "Model provenance", "Training complete in");
@@ -242,7 +234,6 @@ fn summary_skips_model_provenance_when_sidecar_absent() {
 
     write_training_fixture(path);
     write_hydro_models_fixture(path);
-    // model_provenance.json deliberately omitted.
     write_simulation_fixture(path);
 
     let output = cobre()
@@ -254,7 +245,6 @@ fn summary_skips_model_provenance_when_sidecar_absent() {
 
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    // The provenance section is skipped, but the surrounding sections remain.
     assert!(!stderr.contains("Model provenance"));
     assert!(stderr.contains("Execution"));
     assert!(stderr.contains("Hydro models"));
@@ -268,7 +258,6 @@ fn summary_skips_hydro_models_when_sidecar_absent() {
     let path = dir.path();
 
     write_training_fixture(path);
-    // hydro_models.json deliberately omitted.
     write_provenance_fixture(path);
 
     let output = cobre()
@@ -291,7 +280,6 @@ fn summary_only_training_required_minimal_dir() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path();
 
-    // Only the required training metadata; all optional sidecars absent.
     write_training_fixture(path);
 
     let output = cobre()
@@ -303,10 +291,8 @@ fn summary_only_training_required_minimal_dir() {
 
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    // Execution topology and Training always render from the required metadata.
     assert!(stderr.contains("Execution"));
     assert!(stderr.contains("Training complete in"));
-    // Every optional section is skipped.
     assert!(!stderr.contains("Hydro models"));
     assert!(!stderr.contains("Model provenance"));
     assert!(!stderr.contains("Simulation complete"));
@@ -319,7 +305,7 @@ fn summary_malformed_provenance_sidecar_is_an_error() {
 
     write_training_fixture(path);
     std::fs::create_dir_all(path.join("training")).unwrap();
-    // A present-but-corrupt sidecar must surface as an error, not be skipped.
+    // A corrupt sidecar must error, not be skipped the way an absent one is.
     std::fs::write(
         path.join("training/model_provenance.json"),
         "{ this is not valid json",

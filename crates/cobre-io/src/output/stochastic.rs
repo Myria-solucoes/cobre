@@ -79,8 +79,10 @@
 //! }
 //! ```
 //!
-//! All writers use atomic file creation: data is first written to a `.tmp`
-//! suffix, then renamed to the final path.
+//! All writers create the parent directory if absent and write atomically:
+//! data goes to a `.tmp` suffix, then is renamed, so the final path is never
+//! partially written (a stale `.tmp` may remain if the process is killed
+//! mid-write).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -101,16 +103,8 @@ use crate::scenarios::{
 
 /// Write an [`OpeningTree`] to a Parquet file at `path`.
 ///
-/// The output schema is exactly 4 columns — `stage_id: Int32`,
-/// `opening_index: UInt32`, `entity_index: UInt32`, `value: Float64` — in
-/// that order, matching the noise openings schema and the input expected by
-/// `parse_noise_openings` / `assemble_opening_tree`. Rows are written in
-/// `(stage_id, opening_index, entity_index)` order.
-///
-/// The parent directory is created if it does not already exist. The write
-/// is atomic: data goes to `{path}.tmp` first, then the file is renamed to
-/// `path`. A partial `.tmp` file may remain on disk if the process is killed
-/// mid-write, but the final path is never partially written.
+/// Rows are written in `(stage_id, opening_index, entity_index)` order, the
+/// input order expected by `parse_noise_openings` / `assemble_opening_tree`.
 ///
 /// # Errors
 ///
@@ -141,15 +135,10 @@ pub fn write_noise_openings(path: &Path, tree: &OpeningTree) -> Result<(), Outpu
     write_parquet_atomic(path, &batch, &config)
 }
 
-/// Write a slice of [`InflowSeasonalStatsRow`] to a Parquet file at `path`.
+/// Write a slice of [`InflowSeasonalStatsRow`] to a Parquet file at `path`,
+/// re-readable as `scenarios/inflow_seasonal_stats.parquet`.
 ///
-/// The output schema is exactly 4 columns — `hydro_id: Int32`, `stage_id: Int32`,
-/// `mean_m3s: Float64`, `std_m3s: Float64` — in that order, matching the schema
-/// of `scenarios/inflow_seasonal_stats.parquet`. Rows are written in the order
-/// given; the caller is responsible for sorting if canonical ordering is required.
-///
-/// The parent directory is created if it does not already exist. The write is
-/// atomic: data goes to `{path}.tmp` first, then the file is renamed to `path`.
+/// Rows are written in the order given; the caller sorts for canonical ordering.
 ///
 /// # Errors
 ///
@@ -190,16 +179,10 @@ pub fn write_inflow_seasonal_stats(
     write_parquet_atomic(path, &batch, &config)
 }
 
-/// Write a slice of [`InflowArCoefficientRow`] to a Parquet file at `path`.
+/// Write a slice of [`InflowArCoefficientRow`] to a Parquet file at `path`,
+/// re-readable as `scenarios/inflow_ar_coefficients.parquet`.
 ///
-/// The output schema is exactly 5 columns — `hydro_id: Int32`, `stage_id: Int32`,
-/// `lag: Int32`, `coefficient: Float64`, `residual_std_ratio: Float64` — in that
-/// order, matching the schema of `scenarios/inflow_ar_coefficients.parquet`.
-/// Rows are written in the order given; the caller is responsible for sorting
-/// if canonical ordering is required.
-///
-/// The parent directory is created if it does not already exist. The write is
-/// atomic: data goes to `{path}.tmp` first, then the file is renamed to `path`.
+/// Rows are written in the order given; the caller sorts for canonical ordering.
 ///
 /// # Errors
 ///
@@ -241,16 +224,11 @@ pub fn write_inflow_ar_coefficients(
     write_parquet_atomic(path, &batch, &config)
 }
 
-/// Write a slice of [`InflowAnnualComponentRow`] to a Parquet file at `path`.
+/// Write a slice of [`InflowAnnualComponentRow`] to a Parquet file at `path`,
+/// re-readable as `scenarios/inflow_annual_component.parquet`.
 ///
-/// The output schema is exactly 5 columns — `hydro_id: Int32`, `stage_id: Int32`,
-/// `annual_coefficient: Float64`, `annual_mean_m3s: Float64`, `annual_std_m3s: Float64` —
-/// in that order, matching the schema of `scenarios/inflow_annual_component.parquet`.
-/// Rows are written in the order given; the caller is responsible for sorting by
-/// `(hydro_id, stage_id)` if canonical ordering is required.
-///
-/// The parent directory is created if it does not already exist. The write is
-/// atomic: data goes to `{path}.tmp` first, then the file is renamed to `path`.
+/// Rows are written in the order given; the caller sorts by `(hydro_id, stage_id)`
+/// for canonical ordering.
 ///
 /// # Errors
 ///
@@ -307,17 +285,13 @@ struct WriteCorrelationFile {
     schedule: Vec<WriteScheduleEntry>,
 }
 
-/// Serialization type for a single named correlation profile.
-///
-/// Uses `correlation_groups` to match the input JSON field name. The
-/// `cobre-core` type uses `groups` internally, so this intermediate type
-/// performs the rename at the serialization boundary.
+/// Field name `correlation_groups` matches the input JSON; the `cobre-core` type
+/// names it `groups`, so this intermediate renames at the serialization boundary.
 #[derive(Serialize)]
 struct WriteProfile {
     correlation_groups: Vec<WriteCorrelationGroup>,
 }
 
-/// Serialization type for a single correlation group.
 #[derive(Serialize)]
 struct WriteCorrelationGroup {
     name: String,
@@ -325,11 +299,8 @@ struct WriteCorrelationGroup {
     matrix: Vec<Vec<f64>>,
 }
 
-/// Serialization type for a single entity reference.
-///
-/// Uses `#[serde(rename = "type")]` to match the input JSON field name.
-/// The `cobre-core` type stores the field as `entity_type`, but the input
-/// schema uses `"type"`.
+/// `#[serde(rename = "type")]` matches the input JSON; the `cobre-core` type
+/// names this field `entity_type`.
 #[derive(Serialize)]
 struct WriteEntity {
     #[serde(rename = "type")]
@@ -337,7 +308,6 @@ struct WriteEntity {
     id: i32,
 }
 
-/// Serialization type for a single schedule entry.
 #[derive(Serialize)]
 struct WriteScheduleEntry {
     stage_id: i32,
@@ -348,8 +318,8 @@ struct WriteScheduleEntry {
 
 /// Convert a [`CorrelationModel`] to its intermediate write representation.
 ///
-/// Profiles are iterated in [`BTreeMap`] order (alphabetical), which preserves
-/// declaration-order invariance across all callers.
+/// Profiles iterate in [`BTreeMap`] (alphabetical) order, upholding
+/// declaration-order invariance.
 fn to_write_format(model: &CorrelationModel) -> WriteCorrelationFile {
     let profiles: BTreeMap<String, WriteProfile> = model
         .profiles
@@ -399,21 +369,12 @@ fn to_write_format(model: &CorrelationModel) -> WriteCorrelationFile {
     }
 }
 
-/// Write a [`CorrelationModel`] to a pretty-printed JSON file at `path`.
+/// Write a [`CorrelationModel`] to a pretty-printed JSON file at `path`,
+/// round-trip-identical when re-parsed as `scenarios/correlation.json`. The
+/// `$schema` field is omitted — informational and not required by the parser.
 ///
-/// The output format matches `scenarios/correlation.json` exactly, using
-/// `"correlation_groups"` (not `"groups"`) and `"type"` (not `"entity_type"`)
-/// as field names, so that copying the output back to `scenarios/` produces
-/// a round-trip-identical model when parsed by [`crate::scenarios::parse_correlation`].
-///
-/// The `$schema` field is omitted — it is informational and not required by
-/// the parser. Profiles appear in alphabetical order (`BTreeMap` iteration
-/// order). Schedule entries preserve the order given in the model.
-///
-/// The parent directory is created if it does not already exist. The write is
-/// atomic: data goes to `{path}.tmp` first, then the file is renamed to
-/// `path`. A partial `.tmp` file may remain on disk if the process is killed
-/// mid-write, but the final path is never partially written.
+/// Profiles appear in alphabetical (`BTreeMap`) order; schedule entries preserve
+/// model order — both upholding declaration-order invariance.
 ///
 /// # Errors
 ///
@@ -443,15 +404,10 @@ pub fn write_correlation_json(path: &Path, model: &CorrelationModel) -> Result<(
 
 // ── Load seasonal stats Parquet writer ───────────────────────────────────────
 
-/// Write a slice of [`LoadSeasonalStatsRow`] to a Parquet file at `path`.
+/// Write a slice of [`LoadSeasonalStatsRow`] to a Parquet file at `path`,
+/// re-readable as `scenarios/load_seasonal_stats.parquet`.
 ///
-/// The output schema is exactly 4 columns — `bus_id: Int32`, `stage_id: Int32`,
-/// `mean_mw: Float64`, `std_mw: Float64` — in that order, matching the schema
-/// of `scenarios/load_seasonal_stats.parquet`. Rows are written in the order
-/// given; the caller is responsible for sorting if canonical ordering is required.
-///
-/// The parent directory is created if it does not already exist. The write is
-/// atomic: data goes to `{path}.tmp` first, then the file is renamed to `path`.
+/// Rows are written in the order given; the caller sorts for canonical ordering.
 ///
 /// # Errors
 ///
@@ -494,7 +450,6 @@ pub fn write_load_seasonal_stats(
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
-/// Ensure the parent directory of `path` exists, creating it if necessary.
 pub(crate) fn ensure_parent_dir(path: &Path) -> Result<(), OutputError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| OutputError::io(parent, e))?;
@@ -731,20 +686,13 @@ pub struct HydroFittingEntry {
     /// `coefficients[s]` contains the AR lag coefficients for season `s`,
     /// with `coefficients[s][k]` being the coefficient for lag `k + 1`.
     pub coefficients: Vec<Vec<f64>>,
-    /// Contribution-based order reductions applied during fitting.
-    ///
-    /// Each entry documents a season where the initial order was reduced
-    /// due to negative contributions from the recursive composition analysis.
-    /// Empty when no reductions were needed.
+    /// Order reductions applied during fitting, one per affected season; empty
+    /// when none were needed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contribution_reductions: Vec<FittingReductionEntry>,
 }
 
 /// A single order reduction event in the fitting report.
-///
-/// Records that a season's AR order was reduced during the estimation
-/// pipeline. The `reason` field identifies the mechanism that triggered
-/// the reduction.
 #[derive(Debug, Clone, serde::Serialize)]
 #[cfg_attr(test, derive(serde::Deserialize))]
 pub struct FittingReductionEntry {
@@ -765,14 +713,9 @@ pub struct FittingReductionEntry {
 
 /// Diagnostic fitting report produced after the AR order selection step.
 ///
-/// Contains one [`HydroFittingEntry`] per hydro plant that was fitted.
-/// Keys are hydro IDs serialized as strings (e.g., `"1"`, `"5"`) so that
-/// JSON output is readable without a custom serializer. The `BTreeMap`
-/// ensures hydro entries appear in ascending key order regardless of
-/// insertion order.
-///
-/// This type is write-only: `fitting_report.json` is a diagnostic artifact
-/// and is not consumed as input on subsequent runs.
+/// Write-only: `fitting_report.json` is a diagnostic artifact, never re-read as
+/// input. `BTreeMap` keys (hydro IDs as strings) order entries ascending,
+/// upholding declaration-order invariance.
 #[derive(Debug, Clone, serde::Serialize)]
 #[cfg_attr(test, derive(serde::Deserialize))]
 pub struct FittingReport {
@@ -782,14 +725,8 @@ pub struct FittingReport {
 
 /// Write a [`FittingReport`] to a pretty-printed JSON file at `path`.
 ///
-/// The output matches the fitting report schema. Hydro IDs appear as
-/// string keys in ascending sort order (`BTreeMap` iteration order). An empty
+/// Hydro IDs appear as string keys in ascending (`BTreeMap`) order. An empty
 /// report produces `{"hydros":{}}`.
-///
-/// The parent directory is created if it does not already exist. The write is
-/// atomic: data goes to `{path}.tmp` first, then the file is renamed to
-/// `path`. A partial `.tmp` file may remain on disk if the process is killed
-/// mid-write, but the final path is never partially written.
 ///
 /// # Errors
 ///

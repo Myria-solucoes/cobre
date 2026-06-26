@@ -1,52 +1,9 @@
 //! Periodic Yule-Walker estimation and seasonal statistics for PAR model fitting.
 //!
-//! This module provides the core primitives for fitting Periodic Autoregressive
-//! models:
-//!
-//! 1. [`periodic_autocorrelation`] — computes the periodic normalised
-//!    autocorrelation `rho(p, k)` with population divisor and cross-year
-//!    lag adjustment.
-//! 2. [`build_periodic_yw_matrix`] — constructs the non-Toeplitz periodic
-//!    Yule-Walker matrix for a given season and AR order.
-//! 3. [`periodic_pacf`] — computes the periodic PACF via progressive matrix
-//!    solves for order selection.
-//! 4. [`estimate_periodic_ar_coefficients`] — solves the periodic YW system
-//!    at the selected order to produce AR coefficients and residual std ratio.
-//! 5. [`estimate_seasonal_stats`] — computes seasonal means and
-//!    population-divisor (1/N) standard deviations from historical
-//!    observations, grouped by `(entity, season)` pair.
-//! 6. [`estimate_ar_coefficients`] — produces white-noise (order-0) estimates
-//!    for all `(entity, season)` pairs; used by the PACF path when
-//!    `max_order == 0`.
-//! 7. [`estimate_correlation`] — computes the Pearson correlation matrix of
-//!    PAR model residuals across entities, returning a
-//!    [`CorrelationModel`](cobre_core::scenario::CorrelationModel)
-//!    suitable for downstream spectral decomposition.
-//!
-//! ## Periodic Yule-Walker equations
-//!
 //! For a periodic AR(p) process the Yule-Walker system is non-Toeplitz because
-//! lags cross season boundaries. [`build_periodic_yw_matrix`] assembles the
-//! correct per-season matrix and [`estimate_periodic_ar_coefficients`] solves it
-//! via LU factorisation with partial pivoting.
-//!
-//! ## Submodules
-//!
-//! The fitter is split into cohesive function families:
-//!
-//! - `seasonal_stats` — seasonal mean/std estimation, history classification,
-//!   and the date-to-season lookup.
-//! - `ar_coefficients` — white-noise AR estimates and the shared season-lookup
-//!   data preparation.
-//! - `correlation` — cross-entity residual correlation matrices.
-//! - `order_selection` — AIC and PACF AR-order selection.
-//! - `yw_matrices` — periodic autocorrelation, the Yule-Walker matrix builders,
-//!   the cross-correlation primitives, and the dense linear solver.
-//! - `partitioned_covariance` — the conditional FACP via partitioned covariance.
-//! - `periodic_ar` — periodic Yule-Walker coefficient estimators.
-//! - `annual` — annual-component seasonal statistics.
-//! - `estimation` — top-level AR coefficient estimation with order selection,
-//!   contribution validation, and the estimation report.
+//! lags cross season boundaries; [`build_periodic_yw_matrix`] assembles the
+//! per-season matrix and [`estimate_periodic_ar_coefficients`] solves it via LU
+//! factorisation with partial pivoting.
 
 mod annual;
 mod ar_coefficients;
@@ -87,10 +44,8 @@ pub use yw_matrices::{
     solve_linear_system,
 };
 
-// Private re-imports so the in-module `mod tests` can reach the items it
-// references through `super::` without rewriting any test import. These names
-// are accessible to the child test module (which can see private items of its
-// ancestor) but introduce no new public path.
+// `#[cfg(test)]` re-imports reachable by the child `mod tests` via `super::`;
+// they add no public path.
 #[cfg(test)]
 use cobre_core::scenario::CorrelationGroup;
 #[cfg(test)]

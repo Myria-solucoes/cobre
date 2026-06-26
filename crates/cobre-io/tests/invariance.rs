@@ -1,15 +1,8 @@
 //! Declaration-order invariance tests for `cobre_io::load_case`.
 //!
-//! Verifies that the full `load_case` pipeline produces bit-for-bit identical
-//! [`System`] values regardless of the order in which entities are declared in
-//! the input JSON files.  This is the core "declaration-order invariance"
-//! guarantee required by the Cobre architecture: all entity collections are
-//! stored in canonical ID-sorted order, so shuffling the input arrays must
-//! produce an equal result.
-//!
-//! Each test creates two [`TempDir`] case directories -- one with canonical
-//! ordering, one with reversed entity arrays -- loads both, and asserts
-//! equality.
+//! `load_case` must produce bit-for-bit identical [`System`] values regardless
+//! of entity declaration order: collections are stored in canonical ID-sorted
+//! order, so a reversed input array must yield an equal result.
 #![allow(
     clippy::unwrap_used,
     clippy::panic,
@@ -25,22 +18,16 @@ use tempfile::TempDir;
 
 // ── make_shuffled_multi_entity_case ───────────────────────────────────────────
 
-/// Populate `dir` with the same logical data as [`helpers::make_multi_entity_case`]
-/// but with entity arrays in reversed ID order:
-///
-/// - `system/buses.json`: `[id=2, id=1]` instead of `[id=1, id=2]`
-/// - `stages.json`: stages array `[id=1, id=0]` instead of `[id=0, id=1]`
-///
-/// Lines, hydros, and thermals each contain a single entity so reversing
-/// them is a no-op -- only buses (2 entities) and stages (2 entities) are
-/// meaningfully reordered.
+/// Same logical data as [`helpers::make_multi_entity_case`], with entity arrays
+/// reversed. Only buses and stages have >1 entity, so only those are
+/// meaningfully reordered; lines, hydros, and thermals are single-entity no-ops.
 fn make_shuffled_multi_entity_case(dir: &TempDir) {
     let root = dir.path();
 
     helpers::write_file(root, "config.json", helpers::VALID_CONFIG_JSON);
     helpers::write_file(root, "penalties.json", helpers::VALID_PENALTIES_JSON);
 
-    // Two-stage finite horizon with stages in REVERSED order (id=1 before id=0).
+    // Stages deliberately reversed (id=1 before id=0) — do not "fix" to canonical order.
     helpers::write_file(
         root,
         "stages.json",
@@ -77,7 +64,7 @@ fn make_shuffled_multi_entity_case(dir: &TempDir) {
         helpers::VALID_INITIAL_CONDITIONS_JSON,
     );
 
-    // Two buses in REVERSED order: id=2 first, id=1 second.
+    // Buses deliberately reversed (id=2 first) — do not "fix" to canonical order.
     helpers::write_file(
         root,
         "system/buses.json",
@@ -89,7 +76,6 @@ fn make_shuffled_multi_entity_case(dir: &TempDir) {
 }"#,
     );
 
-    // One transmission line (single entity -- order is irrelevant).
     helpers::write_file(
         root,
         "system/lines.json",
@@ -106,7 +92,6 @@ fn make_shuffled_multi_entity_case(dir: &TempDir) {
 }"#,
     );
 
-    // One hydro plant (single entity -- order is irrelevant).
     helpers::write_file(
         root,
         "system/hydros.json",
@@ -131,7 +116,6 @@ fn make_shuffled_multi_entity_case(dir: &TempDir) {
 }"#,
     );
 
-    // One thermal plant (single entity -- order is irrelevant).
     helpers::write_file(
         root,
         "system/thermals.json",
@@ -148,7 +132,6 @@ fn make_shuffled_multi_entity_case(dir: &TempDir) {
 }"#,
     );
 
-    // Production model for hydro_id=1 covering both study stages.
     helpers::write_file(
         root,
         "system/hydro_production_models.json",
@@ -173,11 +156,6 @@ fn make_shuffled_multi_entity_case(dir: &TempDir) {
 
 // ── test_bus_ordering_invariance ──────────────────────────────────────────────
 
-/// Given a case with buses ordered `[id=1, id=2]` and a shuffled case with
-/// buses ordered `[id=2, id=1]`, `load_case` must return equal Systems.
-///
-/// This verifies that the parser sorts buses into canonical ID order
-/// regardless of their position in the JSON array.
 #[test]
 fn test_bus_ordering_invariance() {
     let canonical_dir = TempDir::new().unwrap();
@@ -192,14 +170,12 @@ fn test_bus_ordering_invariance() {
     let shuffled = load_case(shuffled_dir.path())
         .unwrap_or_else(|e| panic!("shuffled case should load successfully, got: {e}"));
 
-    // Both Systems must have the same entity counts.
     assert_eq!(
         canonical.n_buses(),
         shuffled.n_buses(),
         "bus count must match between canonical and shuffled cases"
     );
 
-    // O(1) lookup by ID must succeed in both cases and return the same name.
     let canonical_bus1 = canonical
         .bus(EntityId(1))
         .unwrap_or_else(|| panic!("bus id=1 must exist in canonical case"));
@@ -224,7 +200,7 @@ fn test_bus_ordering_invariance() {
         "bus id=2 name must be identical in canonical and shuffled cases"
     );
 
-    // Full System equality via PartialEq (skips HashMap indices, compares sorted vecs).
+    // `==` skips the HashMap indices and compares the sorted entity vecs.
     assert_eq!(
         canonical, shuffled,
         "Systems from canonical and shuffled bus orderings must be equal"
@@ -233,12 +209,6 @@ fn test_bus_ordering_invariance() {
 
 // ── test_stage_ordering_invariance ────────────────────────────────────────────
 
-/// Given a case with stages ordered `[id=0, id=1]` and a shuffled case with
-/// stages ordered `[id=1, id=0]`, `load_case` must return Systems with stages
-/// in the same canonical order `[id=0, id=1]` for both.
-///
-/// This verifies that the temporal parser sorts stages by ID so that
-/// `system.stages()[0].id == 0` regardless of declaration order.
 #[test]
 fn test_stage_ordering_invariance() {
     let canonical_dir = TempDir::new().unwrap();
@@ -259,7 +229,6 @@ fn test_stage_ordering_invariance() {
         "stage count must match between canonical and shuffled cases"
     );
 
-    // Canonical order requires stages[0].id == 0 in both cases.
     let canonical_first = canonical
         .stages()
         .first()
@@ -286,12 +255,6 @@ fn test_stage_ordering_invariance() {
 
 // ── test_full_case_ordering_invariance ────────────────────────────────────────
 
-/// Given a full multi-entity case with all arrays reversed simultaneously
-/// (buses and stages), `load_case` must produce Systems that are equal via `==`.
-///
-/// This is the comprehensive invariance test: it reverses ALL entity arrays
-/// that have more than one element and verifies both the full structural
-/// equality and selected entity-level spot checks.
 #[test]
 fn test_full_case_ordering_invariance() {
     let canonical_dir = TempDir::new().unwrap();
@@ -306,13 +269,11 @@ fn test_full_case_ordering_invariance() {
     let shuffled = load_case(shuffled_dir.path())
         .unwrap_or_else(|e| panic!("shuffled case should load successfully, got: {e}"));
 
-    // Full structural equality via PartialEq.
     assert_eq!(
         canonical, shuffled,
         "Systems built from canonical and fully-shuffled input must be structurally equal"
     );
 
-    // Spot-check: bus id=1 name must be identical.
     let canonical_bus1 = canonical
         .bus(EntityId(1))
         .unwrap_or_else(|| panic!("bus id=1 must exist in canonical case"));
@@ -325,7 +286,6 @@ fn test_full_case_ordering_invariance() {
         "bus(EntityId(1)).name must be identical regardless of declaration order"
     );
 
-    // Spot-check: entity counts are preserved.
     assert_eq!(
         canonical.n_hydros(),
         shuffled.n_hydros(),

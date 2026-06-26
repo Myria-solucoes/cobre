@@ -1,19 +1,5 @@
-//! Integration tests for the `cobre run` subcommand.
-//!
-//! Tests the full execution lifecycle: binary invocation → load → train →
-//! simulate → write output → exit code. Fixtures are built programmatically
-//! in temporary directories.
-//!
-//! # Coverage
-//!
-//! - AC-1: Valid case directory → exit 0, `training/convergence.parquet` and
-//!   `training/metadata.json` exist in the default output directory.
-//! - AC-2: `simulation.enabled: false` in config → exit 0, no `simulation/metadata.json`.
-//! - AC-3: `--output <custom_dir>` → output written to the specified directory.
-//! - AC-4: Invalid case directory (missing required files) → exit 1, stderr
-//!   contains a validation error message.
-//! - AC-5: Nonexistent case directory path → exit 2, stderr contains an I/O
-//!   error message.
+//! Integration tests for the `cobre run` subcommand. Fixtures are built
+//! programmatically in temporary directories.
 //!
 //! Anticipated thermal column assertions (`is_anticipated`, `anticipated_decision_mw`,
 //! `anticipated_committed_mw`) are in `cli_run_anticipated.rs`.
@@ -32,7 +18,6 @@ fn cobre() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("cobre"))
 }
 
-/// Minimal `config.json` with `forward_passes` and `stopping_rules`.
 const CONFIG_JSON: &str = r#"{
     "training": {
         "forward_passes": 1,
@@ -245,10 +230,9 @@ fn missing_required_file_stderr_contains_validation_error() {
         .stderr(predicate::str::contains("error"));
 }
 
-/// On the `run` path a validation failure is surfaced ONLY via stderr (nothing
-/// is printed to stdout first), so both the report and the "run `cobre validate`"
-/// hint must appear there. This is the counterpart to the `validate`-path
-/// suppression: the hint is non-circular and actionable here, so it is kept.
+/// On the `run` path the "run `cobre validate`" hint is non-circular and
+/// actionable, so it is kept on stderr — unlike the `validate` path, which
+/// suppresses it. Removing it here breaks the run-path UX contract.
 #[test]
 fn missing_required_file_stderr_contains_report_and_hint() {
     let dir = TempDir::new().unwrap();
@@ -304,7 +288,6 @@ fn test_run_quiet_suppresses_banner_and_summary() {
         .stderr(predicate::str::contains("Training complete in").not());
 }
 
-/// Config with `exports.stochastic = true` and `estimation.order_selection = "pacf_annual"`.
 const CONFIG_STOCHASTIC_PAR_A_JSON: &str = r#"{
     "training": {
         "forward_passes": 1,
@@ -317,13 +300,11 @@ const CONFIG_STOCHASTIC_PAR_A_JSON: &str = r#"{
     "estimation": { "order_selection": "pacf_annual" }
 }"#;
 
-/// CLI run with `exports.stochastic = true` and `pacf_annual` order selection writes
-/// `output/stochastic/inflow_annual_component.parquet`. On a case with no hydros the
-/// file is written with zero data rows but a valid Arrow schema.
+/// On a case with no hydros the annual-component file is still written, with zero
+/// data rows but a valid Arrow schema.
 #[test]
 fn cli_run_writes_inflow_annual_component_when_par_a_active() {
     let dir = TempDir::new().unwrap();
-    // Reuse the existing fixture helpers; only swap in the stochastic config.
     write_file(dir.path(), "config.json", CONFIG_STOCHASTIC_PAR_A_JSON);
     write_file(dir.path(), "penalties.json", PENALTIES_JSON);
     write_file(dir.path(), "stages.json", STAGES_JSON);
@@ -358,7 +339,6 @@ fn cli_run_writes_inflow_annual_component_when_par_a_active() {
         "stochastic/inflow_annual_component.parquet must exist"
     );
 
-    // Round-trip through the parser: zero rows expected (no hydros in fixture).
     let rows = cobre_io::scenarios::parse_inflow_annual_component(&parquet_path).unwrap();
     assert_eq!(
         rows.len(),

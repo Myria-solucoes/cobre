@@ -1,47 +1,22 @@
 //! Cut synchronization across MPI ranks after the backward pass.
 //!
-//! After the backward pass generates cuts locally on each rank, all ranks must
-//! exchange their newly generated cuts so that every rank has an identical
-//! Future Cost Function (FCF). This is achieved via a per-stage `allgatherv`
-//! of serialized cut records using the wire format defined in [`cut::wire`].
+//! Each rank's newly generated cuts are exchanged via a per-stage `allgatherv`
+//! of serialized records in the [`cut::wire`] format, so the FCF is bit-for-bit
+//! identical across all ranks at the end of each iteration (the next forward
+//! pass rebuilds the LP from it).
 //!
-//! ## Correctness guarantee
+//! `sync_cuts` inserts only **remote** cuts: the backward pass already inserted
+//! the local rank's own cuts, so the local segment of the receive buffer is
+//! skipped — re-inserting it would double-count cuts.
 //!
-//! The FCF must be bit-for-bit identical across all ranks at the end of each
-//! iteration. The next iteration's forward pass rebuilds the LP from the FCF,
-//! and all ranks must see the same cuts to produce consistent lower bound
-//! estimates. This module ensures that after [`CutSyncBuffers::sync_cuts`]
-//! returns, every rank has inserted all remote cuts into its local FCF.
+//! The `allgatherv` acts as an implicit barrier; no explicit `comm.barrier()`
+//! is needed. Buffers pre-allocated in [`CutSyncBuffers::new`] are reused so the
+//! per-stage exchange is allocation-free.
 //!
-//! ## Local vs remote cuts
-//!
-//! The backward pass already inserts the local rank's own cuts
-//! into the FCF before this function is called. `sync_cuts` therefore only
-//! inserts **remote** cuts — i.e., cuts originating from other ranks. The
-//! local rank's segment in the receive buffer is skipped during deserialization.
-//!
-//! ## Barrier semantics
-//!
-//! The `allgatherv` call acts as an implicit barrier: no rank returns from
-//! `sync_cuts` until all ranks have contributed their cuts for the current
-//! stage. No explicit `comm.barrier()` is needed.
-//!
-//! ## Hot-path allocation discipline
-//!
-//! [`CutSyncBuffers::new`] pre-allocates all byte buffers for the maximum
-//! possible exchange size. [`sync_cuts`](CutSyncBuffers::sync_cuts) serializes
-//! cuts directly into the pre-allocated `send_buf` using [`serialize_cut`] to
-//! avoid per-call allocation. The receive-side deserialization writes into the
-//! pre-allocated `deserialize_headers_buf` and `deserialize_coefficients_buf`
-//! scratch buffers, eliminating all per-call heap allocations on the hot path.
-//!
-//! The [`pack_local_records`](CutSyncBuffers::pack_local_records) /
-//! [`sync_packed_records`](CutSyncBuffers::sync_packed_records) pair uses
-//! [`deserialize_cuts_from_buffer_into`] from [`cut::wire`] (wire version 1).
+//! Serialization/version handling is delegated to [`cut::wire`] (wire version 1);
+//! the version-reject contract lives there, not here.
 //!
 //! [`cut::wire`]: crate::cut::wire
-//! [`serialize_cut`]: crate::cut::wire::serialize_cut
-//! [`deserialize_cuts_from_buffer_into`]: crate::cut::wire::deserialize_cuts_from_buffer_into
 
 use cobre_comm::Communicator;
 
@@ -51,13 +26,7 @@ use crate::{
 };
 
 /// Pre-allocated byte buffers for gathering cut wire records across all MPI
-/// ranks.
-///
-/// Holds the send buffer, receive buffer, and the static `counts` and
-/// `displs` arrays needed for [`Communicator::allgatherv`] with `T = u8`.
-/// All allocations happen once in [`CutSyncBuffers::new`] and are reused
-/// across stages and iterations, keeping the per-stage exchange
-/// allocation-free on the send side.
+/// ranks via [`Communicator::allgatherv`] with `T = u8`.
 ///
 /// # Buffer layout
 ///
@@ -94,36 +63,19 @@ use crate::{
 /// ```
 #[derive(Debug, Clone)]
 pub struct CutSyncBuffers {
-    /// Pre-allocated send buffer for this rank's serialized cut records.
-    ///
-    /// Capacity: `max_cuts_per_rank * record_size`. Only the leading
-    /// `actual_cuts * record_size` bytes are sent in each call.
+    /// This rank's serialized records; only the leading
+    /// `actual_cuts * record_size` bytes are sent each call.
     send_buf: Vec<u8>,
 
-    /// Pre-allocated receive buffer for all ranks' serialized cut records.
-    ///
-    /// Capacity: `max_cuts_per_rank * num_ranks * record_size`. After a
-    /// successful `allgatherv`, the slice
-    /// `recv_buf[displs[r]..displs[r] + counts[r]]` holds rank `r`'s cut
-    /// records.
+    /// All ranks' serialized records; rank `r`'s records occupy
+    /// `recv_buf[displs[r]..displs[r] + counts[r]]` after `allgatherv`.
     recv_buf: Vec<u8>,
 
-    /// Per-rank byte count for `allgatherv`.
-    ///
-    /// Updated each call to `sync_cuts` to reflect the actual number of cuts
-    /// the local rank is sending. For the current formulation where all ranks
-    /// generate the same number of cuts, all entries are equal. The API
-    /// supports variable counts for future extensibility.
-    ///
-    /// Length: `num_ranks`.
+    /// Per-rank byte count for `allgatherv`, recomputed each `sync_cuts` call.
     counts: Vec<usize>,
 
-    /// Per-rank byte displacement for `allgatherv`.
-    ///
-    /// Entry `r` = sum of `counts[0..r]`. Updated each call to `sync_cuts`
-    /// together with `counts`.
-    ///
-    /// Length: `num_ranks`.
+    /// Per-rank byte displacement for `allgatherv`: entry `r` = sum of
+    /// `counts[0..r]`.
     displs: Vec<usize>,
 
     /// Length of the state vector (number of cut coefficients).
@@ -135,34 +87,22 @@ pub struct CutSyncBuffers {
     /// Cached wire record size: `cut_wire_size(n_state)`.
     record_size: usize,
 
-    /// Per-rank expected cut counts for non-uniform work distribution.
-    ///
-    /// Entry `r` is the number of cuts rank `r` generates per stage per
-    /// iteration. Used by [`sync_cuts`](Self::sync_cuts) to determine the
-    /// expected byte count from each remote rank during `allgatherv`.
+    /// Per-rank expected cut counts: entry `r` is the number of cuts rank `r`
+    /// generates per stage per iteration, sizing each rank's `allgatherv` slot.
     per_rank_cuts: Vec<usize>,
 
-    /// Scratch buffer for deserialized cut headers, reused across calls.
-    ///
-    /// Grown lazily on demand; never shrunk. Eliminates the per-call
-    /// `Vec<CutWireHeader>` allocation in the deserialization hot path.
+    /// Deserialization scratch for cut headers; grown lazily, never shrunk.
     deserialize_headers_buf: Vec<CutWireHeader>,
 
-    /// Scratch buffer for deserialized cut coefficients (flat layout), reused
-    /// across calls.
-    ///
-    /// Stores all coefficients concatenated: cut 0's `n_state` values, then
-    /// cut 1's, etc. Grown lazily; never shrunk. Eliminates the per-cut
-    /// `Vec<f64>` allocation in the deserialization hot path.
+    /// Deserialization scratch for coefficients (flat layout); grown lazily,
+    /// never shrunk.
     deserialize_coefficients_buf: Vec<f64>,
 }
 
 impl CutSyncBuffers {
     /// Construct pre-allocated cut synchronization buffers for the given
-    /// topology.
-    ///
-    /// All byte buffer allocations occur here. Subsequent calls to
-    /// [`sync_cuts`](Self::sync_cuts) reuse these buffers.
+    /// topology, assuming a uniform distribution of `max_cuts_per_rank` cuts
+    /// per rank.
     ///
     /// # Arguments
     ///
@@ -172,7 +112,6 @@ impl CutSyncBuffers {
     /// - `num_ranks` — total number of MPI ranks (`comm.size()`).
     #[must_use]
     pub fn new(n_state: usize, max_cuts_per_rank: usize, num_ranks: usize) -> Self {
-        // Uniform distribution: every rank produces max_cuts_per_rank cuts.
         Self::with_distribution(
             n_state,
             max_cuts_per_rank,
@@ -234,11 +173,9 @@ impl CutSyncBuffers {
         }
     }
 
-    /// Synchronize locally generated cuts across all MPI ranks for one stage.
-    ///
-    /// Serializes cuts into the pre-allocated send buffer, broadcasts via
-    /// `allgatherv`, then deserializes and inserts remote cuts into the FCF.
-    /// The local rank's cuts are skipped (already inserted by the backward pass).
+    /// Synchronize locally generated cuts across all MPI ranks for one stage,
+    /// inserting only remote cuts into the FCF (local cuts already inserted by
+    /// the backward pass are skipped).
     ///
     /// # Arguments
     ///
@@ -320,10 +257,6 @@ impl CutSyncBuffers {
             );
         }
 
-        // Each rank sends exactly n_local cuts. For multi-rank, other ranks
-        // send per_rank_cuts[r] cuts. Recompute counts based on the actual
-        // local count (which matches per_rank_cuts[my_rank] — validated above)
-        // and the pre-computed per-rank expectations for other ranks.
         for r in 0..self.num_ranks {
             let cuts_for_r = if r == my_rank {
                 n_local
@@ -437,13 +370,9 @@ impl CutSyncBuffers {
         n_cuts
     }
 
-    /// Exchange pre-packed local cut records and apply remote cuts to the FCF.
-    ///
-    /// The caller must have already packed local records into the send buffer
-    /// via [`pack_local_records`](Self::pack_local_records). This method
-    /// broadcasts the packed data via `allgatherv`, then deserializes and
-    /// inserts only remote cut records into the FCF (the local rank's segment
-    /// is skipped).
+    /// Exchange records pre-packed via
+    /// [`pack_local_records`](Self::pack_local_records), inserting only remote
+    /// cuts into the FCF (the local rank's segment is skipped).
     ///
     /// # Arguments
     ///
@@ -608,8 +537,6 @@ mod tests {
 
     #[test]
     fn new_send_buf_capacity_is_max_cuts_times_record_size() {
-        // AC: CutSyncBuffers::new(n_state=2, max_cuts_per_rank=3, num_ranks=1)
-        // send_buf capacity = 3 * cut_wire_size(2) = 3 * 41 = 123
         let bufs = CutSyncBuffers::new(2, 3, 1);
         let expected = 3 * cut_wire_size(2);
         assert_eq!(bufs.send_capacity(), expected);
@@ -617,8 +544,7 @@ mod tests {
 
     #[test]
     fn new_recv_buf_capacity_is_max_cuts_times_num_ranks_times_record_size() {
-        // AC: CutSyncBuffers::new(n_state=3, max_cuts_per_rank=10, num_ranks=4)
-        // recv_buf capacity = 10 * 4 * cut_wire_size(3) = 40 * 49 = 1960
+        // 10 * 4 * cut_wire_size(3) = 40 * 49 = 1960
         let bufs = CutSyncBuffers::new(3, 10, 4);
         let expected = 10 * 4 * cut_wire_size(3);
         assert_eq!(bufs.recv_capacity(), expected);
@@ -627,22 +553,19 @@ mod tests {
 
     #[test]
     fn new_counts_length_equals_num_ranks() {
-        // AC: counts has length num_ranks
         let bufs = CutSyncBuffers::new(3, 10, 4);
         assert_eq!(bufs.counts.len(), 4);
     }
 
     #[test]
     fn new_displs_length_equals_num_ranks() {
-        // AC: displs has length num_ranks
         let bufs = CutSyncBuffers::new(3, 10, 4);
         assert_eq!(bufs.displs.len(), 4);
     }
 
     #[test]
     fn new_counts_and_displs_initialized_to_max_uniform_values() {
-        // Verify that counts and displs are set to maximum uniform capacity at
-        // construction time (they will be recomputed per call to sync_cuts).
+        // Construction sets max uniform capacity; sync_cuts recomputes per call.
         let bufs = CutSyncBuffers::new(2, 3, 2);
         let per_rank = 3 * cut_wire_size(2); // 123
         assert_eq!(bufs.counts[0], per_rank);
@@ -661,9 +584,6 @@ mod tests {
 
     #[test]
     fn send_buf_serialization_round_trip_two_cuts() {
-        // AC: given n_state=2, max_cuts_per_rank=2, when 2 cuts are serialized
-        // into send_buf, the byte length matches 2 * cut_wire_size(2) = 82 and
-        // round-trip deserialization recovers original fields.
         let mut bufs = CutSyncBuffers::new(2, 2, 1);
         let local_cuts: &[(u32, u32, u32, f64, &[f64])] =
             &[(0, 1, 0, 10.0, &[1.0, 2.0]), (1, 1, 1, 20.0, &[3.0, 4.0])];
@@ -687,7 +607,6 @@ mod tests {
             );
         }
 
-        // Round-trip: deserialize from the same buffer.
         let recovered = deserialize_cuts_from_buffer(&bufs.send_buf[..send_len], 2).unwrap();
         assert_eq!(recovered.len(), 2);
 
@@ -708,11 +627,8 @@ mod tests {
 
     #[test]
     fn counts_and_displs_computation_for_various_cut_counts() {
-        // Verify counts and displs are correctly computed for different numbers
-        // of local cuts and ranks.
-        //
-        // With 2 local cuts and n_state=2: per_rank_bytes = 2 * 41 = 82.
-        // For 3 ranks: counts = [82, 82, 82], displs = [0, 82, 164].
+        // 2 local cuts, n_state=2: per_rank_bytes = 2 * 41 = 82; 3 ranks →
+        // counts = [82, 82, 82], displs = [0, 82, 164].
         let mut bufs = CutSyncBuffers::new(2, 5, 3);
 
         let n_local = 2usize;
@@ -751,9 +667,6 @@ mod tests {
 
     #[test]
     fn sync_cuts_single_rank_does_not_insert_local_cuts_into_fcf() {
-        // After sync_cuts with single rank, FCF should have zero cuts —
-        // the local rank's cuts are skipped (they were already inserted by the
-        // backward pass before this function is called).
         let mut bufs = CutSyncBuffers::new(2, 2, 1);
         let mut fcf = FutureCostFunction::new(2, 2, 2, 10, &[0; 2]);
         let comm = LocalBackend;
@@ -773,32 +686,24 @@ mod tests {
 
     #[test]
     fn sync_cuts_serialization_round_trip_via_allgatherv_identity() {
-        // After allgatherv with LocalBackend (identity copy), the recv buffer
-        // must deserialize to the original cut fields. We verify this by
-        // checking FCF state after manually inserting the local cut, then
-        // confirming no additional cuts appear from sync (single rank skips).
         // max_cuts_per_rank=1 matches the 1 cut actually sent (per_rank_cuts[0]=1).
         let mut bufs = CutSyncBuffers::new(2, 1, 1);
         let mut fcf = FutureCostFunction::new(2, 2, 1, 10, &[0; 2]);
         let comm = LocalBackend;
 
-        // Simulate backward pass: insert cut into FCF (this rank's own cut).
+        // The backward pass inserts this rank's own cut before sync_cuts runs.
         fcf.add_cut(0, 1, 0, 10.0, &[1.0, 2.0]);
 
         let local_cuts: &[(u32, u32, u32, f64, &[f64])] = &[(0, 1, 0, 10.0, &[1.0, 2.0])];
 
         let remote_inserted = bufs.sync_cuts(0, local_cuts, &mut fcf, &comm).unwrap();
 
-        // Single rank: zero remotes. FCF still has exactly 1 cut (inserted by
-        // backward pass before sync_cuts was called).
         assert_eq!(remote_inserted, 0);
         assert_eq!(fcf.total_active_cuts(), 1);
     }
 
     #[test]
     fn sync_cuts_zero_local_cuts_returns_zero() {
-        // When no cuts are generated (empty local_cuts), sync_cuts must still
-        // succeed and return Ok(0) for single rank. Use with_distribution with
         // total_forward_passes=0 so per_rank_cuts[0]=0 matches n_local=0.
         let mut bufs = CutSyncBuffers::with_distribution(2, 5, 1, 0);
         let mut fcf = FutureCostFunction::new(2, 2, 5, 10, &[0; 2]);
@@ -811,10 +716,6 @@ mod tests {
 
     #[test]
     fn sync_cuts_error_maps_to_sddp_communication_error() {
-        // AC: Given a communicator that returns Err(CommError::CollectiveFailed)
-        // from allgatherv, when sync_cuts is called, then it returns
-        // Err(SddpError::Communication(_)).
-
         struct FailingComm;
 
         impl Communicator for FailingComm {
@@ -880,19 +781,12 @@ mod tests {
 
     #[test]
     fn sync_cuts_three_ranks_returns_four_remote_cuts() {
-        // AC5: Given sync_cuts completes with 2 cuts from each of 3 ranks
-        // (6 total, 2 local + 4 remote), when inspecting the return value,
-        // then it is Ok(4) (4 remote cuts inserted).
-        //
-        // Strategy: pre-populate the recv_buf with remote rank data at the
-        // correct offsets BEFORE calling sync_cuts. The mock allgatherv only
-        // copies the local segment (rank 0) from send to recv, leaving the
-        // pre-filled remote segments untouched. This avoids unsafe pointer
-        // operations while faithfully testing the deserialization path.
+        // Pre-populate recv_buf with remote data; the mock allgatherv copies
+        // only the local (rank-0) segment, leaving remote segments untouched.
+        // Tests the deserialization path without unsafe pointer operations.
 
-        /// Mock communicator simulating 3 ranks. Rank 0 is the local rank.
-        /// `allgatherv` copies the send buffer into the rank-0 segment only;
-        /// the remote segments are expected to be pre-populated in `recv_buf`.
+        /// 3-rank mock; rank 0 is local. `allgatherv` copies only the rank-0
+        /// segment, relying on remote segments pre-populated in `recv_buf`.
         struct ThreeRankComm;
 
         impl Communicator for ThreeRankComm {
@@ -903,7 +797,6 @@ mod tests {
                 counts: &[usize],
                 _displs: &[usize],
             ) -> Result<(), CommError> {
-                // Only copy rank 0 (local) data; remote segments pre-filled.
                 let r0_len = counts[0];
                 recv[..r0_len].copy_from_slice(&send[..r0_len]);
                 Ok(())
@@ -991,7 +884,6 @@ mod tests {
             &[7.0, 8.0],
         );
 
-        // Local rank 0 has 2 cuts (already inserted by backward pass).
         let local_cuts: &[(u32, u32, u32, f64, &[f64])] =
             &[(0, 1, 0, 50.0, &[0.1, 0.2]), (1, 1, 1, 60.0, &[0.3, 0.4])];
 
@@ -999,16 +891,13 @@ mod tests {
             .sync_cuts(0, local_cuts, &mut fcf, &ThreeRankComm)
             .unwrap();
         assert_eq!(remote_inserted, 4, "expected 4 remote cuts inserted");
-        // FCF should have 4 cuts (only remote ones — local rank skipped).
         assert_eq!(fcf.total_active_cuts(), 4);
     }
 
     #[test]
     fn sync_cuts_preserves_cut_fields_after_deserialization() {
-        // Verify that header fields survive the serialize → allgatherv →
-        // deserialize round trip. For a single-rank test we cannot observe
-        // remote insertions, so we test the wire round-trip directly by
-        // examining the recv_buf contents after the allgatherv identity copy.
+        // Single-rank: no remote insertions to observe, so inspect recv_buf
+        // directly after the allgatherv identity copy.
         let n_state = 2usize;
         let mut bufs = CutSyncBuffers::new(n_state, 1, 1);
         let mut fcf = FutureCostFunction::new(1, n_state, 1, 10, &[0; 1]);
@@ -1039,7 +928,7 @@ mod tests {
 
     #[test]
     fn sync_cuts_invariant_passes_when_local_matches_expected() {
-        // AC1: per_rank_cuts == [3] (single rank), n_local == 3 → Ok(0).
+        // per_rank_cuts == [3] (single rank), n_local == 3 → Ok(0).
         let mut bufs = CutSyncBuffers::new(2, 3, 1);
         let mut fcf = FutureCostFunction::new(1, 2, 3, 10, &[0; 1]);
         let comm = LocalBackend;
@@ -1056,12 +945,7 @@ mod tests {
 
     #[test]
     fn sync_cuts_invariant_rejects_local_mismatch() {
-        // AC2: with_distribution(n_state=2, max_cuts_per_rank=3, num_ranks=2,
-        // total_forward_passes=6) → per_rank_cuts == [3, 3]. Rank 0 supplies
-        // only 2 cuts → sync_cuts must return Err(SddpError::Validation) with
-        // both required substrings.
-
-        // Two-rank stub: rank() == 0, size() == 2.
+        // per_rank_cuts == [3, 3] but rank 0 supplies only 2 cuts.
         // allgatherv is unreachable — the invariant check returns before it.
         struct TwoRankStubComm;
 
@@ -1135,10 +1019,8 @@ mod tests {
 
     #[test]
     fn sync_packed_cuts_invariant_rejects_local_mismatch() {
-        // Same harness as sync_cuts_invariant_rejects_local_mismatch but
-        // exercises sync_packed_cuts. n_local=2 with per_rank_cuts[0]=3 must
-        // return Err(SddpError::Validation) before any allgatherv call.
-
+        // sync_packed_records counterpart of the sync_cuts mismatch test:
+        // n_local=2 with per_rank_cuts[0]=3 rejects before any allgatherv.
         struct TwoRankStubComm;
 
         impl Communicator for TwoRankStubComm {
@@ -1189,7 +1071,6 @@ mod tests {
         let mut bufs = CutSyncBuffers::with_distribution(2, 3, 2, 6);
         let mut fcf = FutureCostFunction::new(1, 2, 6, 10, &[0; 1]);
 
-        // n_local=2 but per_rank_cuts[0]=3.
         let result = bufs.sync_packed_records(0, 2, &mut fcf, &TwoRankStubComm);
         match result {
             Err(SddpError::Validation(ref msg)) => {

@@ -25,29 +25,22 @@ use crate::StochasticError;
 #[must_use]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArCoefficientEstimate {
-    /// Entity (e.g., hydro plant) identifier.
+    /// Entity identifier.
     pub hydro_id: EntityId,
     /// Season ID (maps back to `stage_id` via the stage table).
     pub season_id: usize,
-    /// Standardized AR coefficients ψ*₁..ψ*ₚ (Yule-Walker output).
-    ///
-    /// Empty when the estimated order is 0 (white noise).
+    /// Standardized AR coefficients ψ*₁..ψ*ₚ (Yule-Walker output); empty at order 0.
     pub coefficients: Vec<f64>,
     /// Residual std ratio `σ_m / s_m`, always in (0, 1].
     pub residual_std_ratio: f64,
-    /// Annual-component triple for the PAR(p)-A extension; `None` for
-    /// classical PAR(p). All three sub-fields (`coefficient`, `mean_m3s`,
-    /// `std_m3s`) are present together by construction — they are never
-    /// split into separate optional fields.
+    /// PAR(p)-A annual-component triple; `None` for classical PAR(p). All three
+    /// sub-fields are present together by construction, never split.
     pub annual: Option<AnnualComponent>,
 }
 
-/// Produce white-noise (order-0) AR estimates for all `(entity, season)` pairs.
-///
-/// Every `(hydro_id, season_id)` pair present in `seasonal_stats` that belongs
-/// to `hydro_ids` receives an `ArCoefficientEstimate` with an empty coefficient
-/// vector and `residual_std_ratio = 1.0`. This function delegates to
-/// [`estimate_ar_coefficients_with_season_map`] with `season_map = None`.
+/// Produce white-noise (order-0) AR estimates (empty coefficients,
+/// `residual_std_ratio = 1.0`) for every `(entity, season)` pair in
+/// `seasonal_stats` that belongs to `hydro_ids`.
 ///
 /// # Errors
 ///
@@ -132,12 +125,10 @@ pub(super) struct SeasonLookups<'a> {
 
 /// Build the shared season lookups from observations, seasonal stats, and stages.
 ///
-/// `season_map`, when present, supplies the **true** seasonal cycle length
-/// (`season_map.seasons.len()`) used as the modulus for lag-season wrap-around.
-/// A partial-year study (horizon narrower than the cycle) would otherwise infer
-/// the modulus from the in-window seasons only, mapping out-of-window lag months
-/// to the wrong season. For full-year studies the inferred `max(season_id)+1`
-/// already equals the cycle length, so this is a no-op there.
+/// When present, `season_map` supplies the **true** cycle length as the
+/// lag-season wrap modulus; inferring `max(season_id)+1` from in-window seasons
+/// would map a partial-year study's out-of-window lag months to the wrong season
+/// (a no-op for full-year studies, where the two agree).
 pub(super) fn build_season_lookups<'a>(
     observations: &[(EntityId, NaiveDate, f64)],
     seasonal_stats: &'a [SeasonalStats],
@@ -159,10 +150,6 @@ pub(super) fn build_season_lookups<'a>(
         })
         .collect();
 
-    // Determine the seasonal cycle length (M). Prefer the true cycle length
-    // from the season map; fall back to the in-window `max(season_id)+1`
-    // inference when no season map is available. For full-year studies the two
-    // agree, so this is a determinism no-op for the existing cases.
     let n_seasons: usize = season_map.map_or_else(
         || {
             stage_index
@@ -202,16 +189,12 @@ pub(super) fn build_season_lookups<'a>(
     }
 }
 
-/// Produce white-noise (order-0) AR estimates for every `(entity, season)` pair.
+/// Produce white-noise (order-0) AR estimates (empty coefficients,
+/// `residual_std_ratio = 1.0`) for every `(entity, season)` pair in
+/// `seasonal_stats` that belongs to `hydro_ids`.
 ///
-/// All `(hydro_id, season_id)` pairs found in `seasonal_stats` that belong to
-/// `hydro_ids` receive an `ArCoefficientEstimate` with an empty coefficient
-/// vector and `residual_std_ratio = 1.0`.
-///
-/// This function is called by the PACF estimation path when `max_order == 0`
-/// to populate the estimate vector before returning an empty report. The
-/// `observations`, `stages`, and `season_map` parameters are accepted for
-/// API compatibility but are not used in this implementation.
+/// `observations`, `stages`, and `season_map` are accepted for signature parity
+/// with the order-selecting path but unused here.
 ///
 /// # Errors
 ///

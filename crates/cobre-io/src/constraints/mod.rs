@@ -51,9 +51,6 @@ use std::path::Path;
 /// Load `constraints/thermal_bounds.parquet` when the path is known, or
 /// return an empty `Vec` when the file is absent (optional file).
 ///
-/// When `path` is `None` (the structural validation step found no file at the
-/// expected location), returns `Ok(Vec::new())` without touching the filesystem.
-///
 /// # Errors
 ///
 /// Propagates [`LoadError`] from [`parse_thermal_bounds`] when `path` is `Some`.
@@ -63,7 +60,6 @@ use std::path::Path;
 /// ```
 /// use cobre_io::constraints::load_thermal_bounds;
 ///
-/// // No file present — returns empty vec.
 /// let rows = load_thermal_bounds(None).expect("no file is fine");
 /// assert!(rows.is_empty());
 /// ```
@@ -77,8 +73,6 @@ pub fn load_thermal_bounds(path: Option<&Path>) -> Result<Vec<ThermalBoundsRow>,
 /// Load `constraints/hydro_bounds.parquet` when the path is known, or
 /// return an empty `Vec` when the file is absent (optional file).
 ///
-/// When `path` is `None`, returns `Ok(Vec::new())` without touching the filesystem.
-///
 /// # Errors
 ///
 /// Propagates [`LoadError`] from [`parse_hydro_bounds`] when `path` is `Some`.
@@ -88,7 +82,6 @@ pub fn load_thermal_bounds(path: Option<&Path>) -> Result<Vec<ThermalBoundsRow>,
 /// ```
 /// use cobre_io::constraints::load_hydro_bounds;
 ///
-/// // No file present — returns empty vec.
 /// let rows = load_hydro_bounds(None).expect("no file is fine");
 /// assert!(rows.is_empty());
 /// ```
@@ -102,8 +95,6 @@ pub fn load_hydro_bounds(path: Option<&Path>) -> Result<Vec<HydroBoundsRow>, Loa
 /// Load `constraints/line_bounds.parquet` when the path is known, or
 /// return an empty `Vec` when the file is absent (optional file).
 ///
-/// When `path` is `None`, returns `Ok(Vec::new())` without touching the filesystem.
-///
 /// # Errors
 ///
 /// Propagates [`LoadError`] from [`parse_line_bounds`] when `path` is `Some`.
@@ -113,7 +104,6 @@ pub fn load_hydro_bounds(path: Option<&Path>) -> Result<Vec<HydroBoundsRow>, Loa
 /// ```
 /// use cobre_io::constraints::load_line_bounds;
 ///
-/// // No file present — returns empty vec.
 /// let rows = load_line_bounds(None).expect("no file is fine");
 /// assert!(rows.is_empty());
 /// ```
@@ -127,8 +117,6 @@ pub fn load_line_bounds(path: Option<&Path>) -> Result<Vec<LineBoundsRow>, LoadE
 /// Load `constraints/pumping_bounds.parquet` when the path is known, or
 /// return an empty `Vec` when the file is absent (optional file).
 ///
-/// When `path` is `None`, returns `Ok(Vec::new())` without touching the filesystem.
-///
 /// # Errors
 ///
 /// Propagates [`LoadError`] from [`parse_pumping_bounds`] when `path` is `Some`.
@@ -138,7 +126,6 @@ pub fn load_line_bounds(path: Option<&Path>) -> Result<Vec<LineBoundsRow>, LoadE
 /// ```
 /// use cobre_io::constraints::load_pumping_bounds;
 ///
-/// // No file present — returns empty vec.
 /// let rows = load_pumping_bounds(None).expect("no file is fine");
 /// assert!(rows.is_empty());
 /// ```
@@ -152,8 +139,6 @@ pub fn load_pumping_bounds(path: Option<&Path>) -> Result<Vec<PumpingBoundsRow>,
 /// Load `constraints/contract_bounds.parquet` when the path is known, or
 /// return an empty `Vec` when the file is absent (optional file).
 ///
-/// When `path` is `None`, returns `Ok(Vec::new())` without touching the filesystem.
-///
 /// # Errors
 ///
 /// Propagates [`LoadError`] from [`parse_contract_bounds`] when `path` is `Some`.
@@ -163,7 +148,6 @@ pub fn load_pumping_bounds(path: Option<&Path>) -> Result<Vec<PumpingBoundsRow>,
 /// ```
 /// use cobre_io::constraints::load_contract_bounds;
 ///
-/// // No file present — returns empty vec.
 /// let rows = load_contract_bounds(None).expect("no file is fine");
 /// assert!(rows.is_empty());
 /// ```
@@ -177,8 +161,6 @@ pub fn load_contract_bounds(path: Option<&Path>) -> Result<Vec<ContractBoundsRow
 /// Load `constraints/penalty_overrides_bus.parquet` when the path is known, or
 /// return an empty `Vec` when the file is absent (optional file).
 ///
-/// When `path` is `None`, returns `Ok(Vec::new())` without touching the filesystem.
-///
 /// # Errors
 ///
 /// Propagates [`LoadError`] from [`parse_penalty_overrides_bus`] when `path` is `Some`.
@@ -188,7 +170,6 @@ pub fn load_contract_bounds(path: Option<&Path>) -> Result<Vec<ContractBoundsRow
 /// ```
 /// use cobre_io::constraints::load_penalty_overrides_bus;
 ///
-/// // No file present — returns empty vec.
 /// let rows = load_penalty_overrides_bus(None).expect("no file is fine");
 /// assert!(rows.is_empty());
 /// ```
@@ -204,8 +185,6 @@ pub fn load_penalty_overrides_bus(
 /// Load `constraints/penalty_overrides_line.parquet` when the path is known, or
 /// return an empty `Vec` when the file is absent (optional file).
 ///
-/// When `path` is `None`, returns `Ok(Vec::new())` without touching the filesystem.
-///
 /// # Errors
 ///
 /// Propagates [`LoadError`] from [`parse_penalty_overrides_line`] when `path` is `Some`.
@@ -215,7 +194,6 @@ pub fn load_penalty_overrides_bus(
 /// ```
 /// use cobre_io::constraints::load_penalty_overrides_line;
 ///
-/// // No file present — returns empty vec.
 /// let rows = load_penalty_overrides_line(None).expect("no file is fine");
 /// assert!(rows.is_empty());
 /// ```
@@ -231,8 +209,6 @@ pub fn load_penalty_overrides_line(
 /// Load `constraints/penalty_overrides_hydro.parquet` when the path is known, or
 /// return an empty `Vec` when the file is absent (optional file).
 ///
-/// When `path` is `None`, returns `Ok(Vec::new())` without touching the filesystem.
-///
 /// # Errors
 ///
 /// Propagates [`LoadError`] from [`parse_penalty_overrides_hydro`] when `path` is `Some`.
@@ -242,7 +218,6 @@ pub fn load_penalty_overrides_line(
 /// ```
 /// use cobre_io::constraints::load_penalty_overrides_hydro;
 ///
-/// // No file present — returns empty vec.
 /// let rows = load_penalty_overrides_hydro(None).expect("no file is fine");
 /// assert!(rows.is_empty());
 /// ```
@@ -258,8 +233,6 @@ pub fn load_penalty_overrides_hydro(
 /// Load `constraints/penalty_overrides_ncs.parquet` when the path is known, or
 /// return an empty `Vec` when the file is absent (optional file).
 ///
-/// When `path` is `None`, returns `Ok(Vec::new())` without touching the filesystem.
-///
 /// # Errors
 ///
 /// Propagates [`LoadError`] from [`parse_penalty_overrides_ncs`] when `path` is `Some`.
@@ -269,7 +242,6 @@ pub fn load_penalty_overrides_hydro(
 /// ```
 /// use cobre_io::constraints::load_penalty_overrides_ncs;
 ///
-/// // No file present — returns empty vec.
 /// let rows = load_penalty_overrides_ncs(None).expect("no file is fine");
 /// assert!(rows.is_empty());
 /// ```
@@ -284,8 +256,6 @@ pub fn load_penalty_overrides_ncs(
 
 /// Load `constraints/generic_constraints.json` when the path is known, or
 /// return an empty `Vec` when the file is absent (optional file).
-///
-/// When `path` is `None`, returns `Ok(Vec::new())` without touching the filesystem.
 ///
 /// `name_to_id` maps parameter definition names to their [`cobre_core::EntityId`].
 /// Pass `&HashMap::new()` when no parameters have been loaded; expressions that
@@ -302,7 +272,6 @@ pub fn load_penalty_overrides_ncs(
 /// use cobre_io::constraints::load_generic_constraints;
 /// use std::collections::HashMap;
 ///
-/// // No file present — returns empty vec.
 /// let constraints = load_generic_constraints(None, &HashMap::new()).expect("no file is fine");
 /// assert!(constraints.is_empty());
 /// ```
@@ -320,8 +289,6 @@ pub fn load_generic_constraints(
 /// Load `constraints/generic_constraint_bounds.parquet` when the path is known, or
 /// return an empty `Vec` when the file is absent (optional file).
 ///
-/// When `path` is `None`, returns `Ok(Vec::new())` without touching the filesystem.
-///
 /// # Errors
 ///
 /// Propagates [`LoadError`] from [`parse_generic_constraint_bounds`] when `path` is `Some`.
@@ -331,7 +298,6 @@ pub fn load_generic_constraints(
 /// ```
 /// use cobre_io::constraints::load_generic_constraint_bounds;
 ///
-/// // No file present — returns empty vec.
 /// let rows = load_generic_constraint_bounds(None).expect("no file is fine");
 /// assert!(rows.is_empty());
 /// ```
@@ -347,8 +313,6 @@ pub fn load_generic_constraint_bounds(
 /// Load `constraints/exchange_factors.json` when the path is known, or
 /// return an empty `Vec` when the file is absent (optional file).
 ///
-/// When `path` is `None`, returns `Ok(Vec::new())` without touching the filesystem.
-///
 /// # Errors
 ///
 /// Propagates [`LoadError`] from [`parse_exchange_factors`] when `path` is `Some`.
@@ -358,7 +322,6 @@ pub fn load_generic_constraint_bounds(
 /// ```
 /// use cobre_io::constraints::load_exchange_factors;
 ///
-/// // No file present — returns empty vec.
 /// let entries = load_exchange_factors(None).expect("no file is fine");
 /// assert!(entries.is_empty());
 /// ```
@@ -372,8 +335,6 @@ pub fn load_exchange_factors(path: Option<&Path>) -> Result<Vec<ExchangeFactorEn
 /// Load `constraints/ncs_bounds.parquet` when the path is known, or
 /// return an empty `Vec` when the file is absent (optional file).
 ///
-/// When `path` is `None`, returns `Ok(Vec::new())` without touching the filesystem.
-///
 /// # Errors
 ///
 /// Propagates [`LoadError`] from [`parse_ncs_bounds`] when `path` is `Some`.
@@ -383,7 +344,6 @@ pub fn load_exchange_factors(path: Option<&Path>) -> Result<Vec<ExchangeFactorEn
 /// ```
 /// use cobre_io::constraints::load_ncs_bounds;
 ///
-/// // No file present — returns empty vec.
 /// let rows = load_ncs_bounds(None).expect("no file is fine");
 /// assert!(rows.is_empty());
 /// ```

@@ -273,25 +273,30 @@ All four sections are required. Every scalar cost must be strictly positive (> 0
 Deficit segment costs must be monotonically increasing and the last segment must
 have `depth_mw: null` (unbounded).
 
-| Section                   | Field                             | Type           | Description                                                |
-| ------------------------- | --------------------------------- | -------------- | ---------------------------------------------------------- |
-| `bus`                     | `deficit_segments`                | array          | Piecewise-linear deficit cost tiers                        |
-| `bus`                     | `deficit_segments[].depth_mw`     | number or null | Segment depth (MW); `null` for the final unbounded segment |
-| `bus`                     | `deficit_segments[].cost`         | number         | Cost per MWh of deficit in this tier (USD/MWh)             |
-| `bus`                     | `excess_cost`                     | number         | Cost per MWh of excess injection (USD/MWh)                 |
-| `line`                    | `exchange_cost`                   | number         | Cost per MWh of inter-bus exchange flow (USD/MWh)          |
-| `hydro`                   | `spillage_cost`                   | number         | Spillage penalty                                           |
-| `hydro`                   | `turbined_cost`                   | number         | Turbined flow regularization cost (applied to every hydro) |
-| `hydro`                   | `diversion_cost`                  | number         | Diversion flow penalty                                     |
-| `hydro`                   | `storage_violation_below_cost`    | number         | Storage below-minimum violation penalty                    |
-| `hydro`                   | `filling_target_violation_cost`   | number         | Filling target violation penalty                           |
-| `hydro`                   | `turbined_violation_below_cost`   | number         | Turbined flow below-minimum violation penalty              |
-| `hydro`                   | `outflow_violation_below_cost`    | number         | Total outflow below-minimum violation penalty              |
-| `hydro`                   | `outflow_violation_above_cost`    | number         | Total outflow above-maximum violation penalty              |
-| `hydro`                   | `generation_violation_below_cost` | number         | Generation below-minimum violation penalty                 |
-| `hydro`                   | `evaporation_violation_cost`      | number         | Evaporation violation penalty                              |
-| `hydro`                   | `water_withdrawal_violation_cost` | number         | Water withdrawal violation penalty                         |
-| `non_controllable_source` | `curtailment_cost`                | number         | Curtailment penalty (USD/MWh)                              |
+| Section                   | Field                                 | Type           | Description                                                                                                                            |
+| ------------------------- | ------------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `bus`                     | `deficit_segments`                    | array          | Piecewise-linear deficit cost tiers                                                                                                    |
+| `bus`                     | `deficit_segments[].depth_mw`         | number or null | Segment depth (MW); `null` for the final unbounded segment                                                                             |
+| `bus`                     | `deficit_segments[].cost`             | number         | Cost per MWh of deficit in this tier (USD/MWh)                                                                                         |
+| `bus`                     | `excess_cost`                         | number         | Cost per MWh of excess injection (USD/MWh)                                                                                             |
+| `line`                    | `exchange_cost`                       | number         | Cost per MWh of inter-bus exchange flow (USD/MWh)                                                                                      |
+| `hydro`                   | `spillage_cost`                       | number         | Spillage penalty                                                                                                                       |
+| `hydro`                   | `turbined_cost`                       | number         | Turbined flow regularization cost (applied to every hydro)                                                                             |
+| `hydro`                   | `diversion_cost`                      | number         | Diversion flow penalty                                                                                                                 |
+| `hydro`                   | `storage_violation_below_cost`        | number         | Storage below-minimum violation penalty                                                                                                |
+| `hydro`                   | `filling_target_violation_cost`       | number         | Filling target violation penalty                                                                                                       |
+| `hydro`                   | `turbined_violation_below_cost`       | number         | Turbined flow below-minimum violation penalty                                                                                          |
+| `hydro`                   | `outflow_violation_below_cost`        | number         | Total outflow below-minimum violation penalty                                                                                          |
+| `hydro`                   | `outflow_violation_above_cost`        | number         | Total outflow above-maximum violation penalty                                                                                          |
+| `hydro`                   | `generation_violation_below_cost`     | number         | Generation below-minimum violation penalty                                                                                             |
+| `hydro`                   | `evaporation_violation_cost`          | number         | Symmetric evaporation violation penalty                                                                                                |
+| `hydro`                   | `evaporation_violation_pos_cost`      | number or null | Optional over-evaporation override; supersedes `evaporation_violation_cost` for the positive direction. Omitted = symmetric value      |
+| `hydro`                   | `evaporation_violation_neg_cost`      | number or null | Optional under-evaporation override; supersedes `evaporation_violation_cost` for the negative direction. Omitted = symmetric value     |
+| `hydro`                   | `water_withdrawal_violation_cost`     | number         | Symmetric water withdrawal violation penalty                                                                                           |
+| `hydro`                   | `water_withdrawal_violation_pos_cost` | number or null | Optional over-withdrawal override; supersedes `water_withdrawal_violation_cost` for the positive direction. Omitted = symmetric value  |
+| `hydro`                   | `water_withdrawal_violation_neg_cost` | number or null | Optional under-withdrawal override; supersedes `water_withdrawal_violation_cost` for the negative direction. Omitted = symmetric value |
+| `hydro`                   | `inflow_nonnegativity_cost`           | number or null | Optional inflow non-negativity penalty. Omitted = default `1000.0`                                                                     |
+| `non_controllable_source` | `curtailment_cost`                    | number         | Curtailment penalty (USD/MWh)                                                                                                          |
 
 **Example:**
 
@@ -300,8 +305,8 @@ have `depth_mw: null` (unbounded).
   "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/penalties.schema.json",
   "bus": {
     "deficit_segments": [
-      { "depth_mw": 500.0, "cost": 1000.0 },
-      { "depth_mw": null, "cost": 5000.0 }
+      { "depth_mw": 500.0, "cost": 7000.0 },
+      { "depth_mw": null, "cost": 7500.0 }
     ],
     "excess_cost": 100.0
   },
@@ -311,7 +316,7 @@ have `depth_mw: null` (unbounded).
     "turbined_cost": 0.05,
     "diversion_cost": 0.1,
     "storage_violation_below_cost": 10000.0,
-    "filling_target_violation_cost": 50000.0,
+    "filling_target_violation_cost": 6000.0,
     "turbined_violation_below_cost": 500.0,
     "outflow_violation_below_cost": 500.0,
     "outflow_violation_above_cost": 500.0,
@@ -604,7 +609,7 @@ Key fields:
 | `hydros[].efficiency`                             | No       | Turbine efficiency model: `"constant"`                                                                        |
 | `hydros[].evaporation`                            | No       | Evaporation config: `coefficients_mm` (12 values) and optional `reference_volumes_hm3`                        |
 | `hydros[].diversion`                              | No       | Diversion channel: `downstream_id` and `max_flow_m3s`                                                         |
-| `hydros[].filling`                                | No       | Filling config: `start_stage_id` and `filling_inflow_m3s`                                                     |
+| `hydros[].filling`                                | No       | Filling config: `start_stage_id` and `filling_min_rate_m3s`                                                   |
 | `hydros[].penalties`                              | No       | Entity-level hydro penalty overrides (all fields optional, fall back to global)                               |
 
 All fields within `hydros[].penalties` are optional. When a field is absent the
@@ -644,9 +649,113 @@ Thermal plant registry. Each entry defines a dispatchable generation unit.
 | `thermals[].generation.min_mw`  | Yes      | Minimum dispatch level (MW)                                        |
 | `thermals[].generation.max_mw`  | Yes      | Maximum dispatch level (MW)                                        |
 | `thermals[].cost_per_mwh`       | Yes      | Linear generation cost (USD/MWh)                                   |
-| `thermals[].entry_stage_id`     | No       | Stage when the unit enters service (`null` = present from stage 1) |
+| `thermals[].entry_stage_id`     | No       | Stage when the unit enters service (`null` = present from stage 0) |
 | `thermals[].exit_stage_id`      | No       | Stage when the unit is decommissioned (`null` = never)             |
 | `thermals[].anticipated_config` | No       | Anticipated-dispatch config (object with `lead_stages` ≥ 1)        |
+
+---
+
+### `system/pumping_stations.json`
+
+Pumping station registry. Each entry defines a pumped-storage or water-transfer
+installation that withdraws water from a source hydro reservoir, injects it into a
+destination hydro reservoir, and consumes electrical power from a bus. The file is
+optional; when absent, no pumping stations are modeled.
+
+| Field                                       | Required | Description                                                                     |
+| ------------------------------------------- | -------- | ------------------------------------------------------------------------------- |
+| `pumping_stations[].id`                     | Yes      | Station identifier (integer, unique)                                            |
+| `pumping_stations[].name`                   | Yes      | Human-readable station name (string)                                            |
+| `pumping_stations[].bus_id`                 | Yes      | Bus from which electrical power is consumed                                     |
+| `pumping_stations[].source_hydro_id`        | Yes      | Hydro plant from whose reservoir water is extracted                             |
+| `pumping_stations[].destination_hydro_id`   | Yes      | Hydro plant into whose reservoir water is injected                              |
+| `pumping_stations[].consumption_mw_per_m3s` | Yes      | Power drawn per unit of pumped flow [MW/(m³/s)]; must be >= 0                   |
+| `pumping_stations[].entry_stage_id`         | No       | Stage when the station enters service; `null` or absent = present from stage 0  |
+| `pumping_stations[].exit_stage_id`          | No       | Stage when the station is decommissioned; `null` or absent = never              |
+| `pumping_stations[].flow`                   | Yes      | Nested object with `min_m3s` and `max_m3s` (see below)                          |
+| `pumping_stations[].flow.min_m3s`           | Yes      | Minimum pumped flow [m³/s]; must be >= 0                                        |
+| `pumping_stations[].flow.max_m3s`           | Yes      | Maximum pumped flow (installed pump capacity) [m³/s]; must be >= `flow.min_m3s` |
+
+The pumped flow variable is bounded by `[flow.min_m3s, flow.max_m3s]` in the LP.
+At each stage within `[entry_stage_id, exit_stage_id)`, the flow appears with
+a negative sign in the source reservoir water-balance row and a positive sign in
+the destination reservoir water-balance row. Power consumed equals
+`consumption_mw_per_m3s × flow_m3s` and is charged as load on the station's bus.
+Stage-varying flow bounds can be overridden via `constraints/pumping_bounds.parquet`.
+
+**Minimal valid example:**
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/pumping_stations.schema.json",
+  "pumping_stations": [
+    {
+      "id": 0,
+      "name": "Bombeamento Serra da Mesa",
+      "bus_id": 10,
+      "source_hydro_id": 3,
+      "destination_hydro_id": 5,
+      "consumption_mw_per_m3s": 0.5,
+      "flow": { "min_m3s": 0.0, "max_m3s": 150.0 }
+    }
+  ]
+}
+```
+
+---
+
+### `system/energy_contracts.json`
+
+Energy contract registry. Each entry defines a bilateral energy purchase or sale
+obligation with a counterparty outside the modeled system. The file is optional;
+when absent, no contracts are modeled.
+
+| Field                        | Required | Description                                                                                |
+| ---------------------------- | -------- | ------------------------------------------------------------------------------------------ |
+| `contracts[].id`             | Yes      | Contract identifier (integer, unique)                                                      |
+| `contracts[].name`           | Yes      | Human-readable contract name (string)                                                      |
+| `contracts[].bus_id`         | Yes      | Bus where power is injected (import) or withdrawn (export)                                 |
+| `contracts[].type`           | Yes      | Energy flow direction: `"import"` or `"export"`                                            |
+| `contracts[].price_per_mwh`  | Yes      | Contract price [monetary units/MWh]. Positive = cost (import); negative = revenue (export) |
+| `contracts[].limits.min_mw`  | Yes      | Minimum dispatch level [MW]; use `0.0` unless a take-or-pay floor applies                  |
+| `contracts[].limits.max_mw`  | Yes      | Maximum dispatch level [MW]; must be >= `limits.min_mw`                                    |
+| `contracts[].entry_stage_id` | No       | Stage when the contract enters service; `null` or absent = present from stage 0            |
+| `contracts[].exit_stage_id`  | No       | Stage when the contract is decommissioned; `null` or absent = never                        |
+
+At each active stage within `[entry_stage_id, exit_stage_id)`, the LP adds one
+column per block per direction bounded by `[limits.min_mw, limits.max_mw]`. An
+import column injects `+1.0` MW into the bus power-balance row; an export column
+withdraws `−1.0` MW. At dormant stages the column bounds are pinned to `[0, 0]`
+and the output row is emitted with `power_mw = 0`. Stage-varying bounds and prices
+can be overridden via `constraints/contract_bounds.parquet`.
+
+**Minimal valid example:**
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/energy_contracts.schema.json",
+  "contracts": [
+    {
+      "id": 0,
+      "name": "Import base load",
+      "bus_id": 0,
+      "type": "import",
+      "price_per_mwh": 200.0,
+      "limits": { "min_mw": 0.0, "max_mw": 50.0 }
+    },
+    {
+      "id": 1,
+      "name": "Export revenue (stage 1 only)",
+      "bus_id": 0,
+      "type": "export",
+      "entry_stage_id": 1,
+      "exit_stage_id": 2,
+      "price_per_mwh": -150.0,
+      "limits": { "min_mw": 0.0, "max_mw": 30.0 }
+    }
+  ]
+}
+```
 
 ---
 
@@ -920,7 +1029,7 @@ The quartic is evaluated as `coefficient_0 + coefficient_1*x + coefficient_2*x²
 
 **Validation rules:**
 
-- All twelve columns must be present with the correct Arrow types.
+- All eleven columns must be present with the correct Arrow types.
 - `outflow_min_m3s` and `outflow_max_m3s` must be non-negative and finite.
 - `outflow_max_m3s >= outflow_min_m3s` (segments are non-inverted).
 - `coefficient_0` through `coefficient_4` must be finite.
@@ -1202,21 +1311,21 @@ Stage-varying generation bound overrides for thermal plants.
 
 Stage-varying operational bound overrides for hydro plants.
 
-| Column                 | Type   | Required | Description                     |
-| ---------------------- | ------ | -------- | ------------------------------- |
-| `hydro_id`             | INT32  | Yes      | Hydro plant ID                  |
-| `stage_id`             | INT32  | Yes      | Stage ID                        |
-| `min_turbined_m3s`     | DOUBLE | No       | Minimum turbined flow (m³/s)    |
-| `max_turbined_m3s`     | DOUBLE | No       | Maximum turbined flow (m³/s)    |
-| `min_storage_hm3`      | DOUBLE | No       | Minimum reservoir storage (hm³) |
-| `max_storage_hm3`      | DOUBLE | No       | Maximum reservoir storage (hm³) |
-| `min_outflow_m3s`      | DOUBLE | No       | Minimum total outflow (m³/s)    |
-| `max_outflow_m3s`      | DOUBLE | No       | Maximum total outflow (m³/s)    |
-| `min_generation_mw`    | DOUBLE | No       | Minimum generation (MW)         |
-| `max_generation_mw`    | DOUBLE | No       | Maximum generation (MW)         |
-| `max_diversion_m3s`    | DOUBLE | No       | Maximum diversion flow (m³/s)   |
-| `filling_inflow_m3s`   | DOUBLE | No       | Filling inflow override (m³/s)  |
-| `water_withdrawal_m3s` | DOUBLE | No       | Water withdrawal (m³/s)         |
+| Column                 | Type   | Required | Description                          |
+| ---------------------- | ------ | -------- | ------------------------------------ |
+| `hydro_id`             | INT32  | Yes      | Hydro plant ID                       |
+| `stage_id`             | INT32  | Yes      | Stage ID                             |
+| `min_turbined_m3s`     | DOUBLE | No       | Minimum turbined flow (m³/s)         |
+| `max_turbined_m3s`     | DOUBLE | No       | Maximum turbined flow (m³/s)         |
+| `min_storage_hm3`      | DOUBLE | No       | Minimum reservoir storage (hm³)      |
+| `max_storage_hm3`      | DOUBLE | No       | Maximum reservoir storage (hm³)      |
+| `min_outflow_m3s`      | DOUBLE | No       | Minimum total outflow (m³/s)         |
+| `max_outflow_m3s`      | DOUBLE | No       | Maximum total outflow (m³/s)         |
+| `min_generation_mw`    | DOUBLE | No       | Minimum generation (MW)              |
+| `max_generation_mw`    | DOUBLE | No       | Maximum generation (MW)              |
+| `max_diversion_m3s`    | DOUBLE | No       | Maximum diversion flow (m³/s)        |
+| `filling_min_rate_m3s` | DOUBLE | No       | Filling minimum-rate override (m³/s) |
+| `water_withdrawal_m3s` | DOUBLE | No       | Water withdrawal (m³/s)              |
 
 ---
 

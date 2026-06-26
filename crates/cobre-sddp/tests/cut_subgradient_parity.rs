@@ -3,9 +3,9 @@
 //!
 //! ## What is being verified
 //!
-//! Phase 1 swaps cut-subgradient extraction from row duals of state-fixing
-//! equality rows (`view.dual[..n_state]`) to reduced costs of the incoming-state
-//! columns (`view.reduced_costs[state_to_lp_incoming_column(j)]`).
+//! Cut-subgradient extraction reads the reduced cost of the incoming-state column
+//! (`view.reduced_costs[state_to_lp_incoming_column(j)]`), not the dual of a
+//! state-fixing equality row.
 //!
 //! By KKT optimality, the reduced cost of a column with `lb == ub` equals the
 //! dual of the equivalent equality row — but the same identity holds for the
@@ -25,11 +25,6 @@
 //!
 //! Therefore: `rc[storage_in[0]] = y_wb + (gamma_v/2)*y_fpha + (volume_slope_m3s_per_hm3/2)*y_evap`
 //!
-//! This test solves the LP with column-bound state pinning (Phase 1 approach) and
-//! asserts the algebraic identity holds within 1e-8 absolute tolerance. It covers
-//! the FPHA+evaporation coupled multi-row column-participation case that Q1's
-//! single-row probe left unverified.
-//!
 //! ## System layout
 //!
 //! - N=1 FPHA hydro, L=0 (no lags), A=0 (no anticipated thermals)
@@ -38,7 +33,7 @@
 //! - FPHA: 1 plane with `gamma_v=0.002, gamma_q=0.8, gamma_0=0.0`
 //! - Evaporation: `volume_slope_m3s_per_hm3=0.01, intercept_m3s=0.0`
 //!
-//! ## Column and row indices (Phase 1, with storage_fixing = 0..0)
+//! ## Column and row indices (storage_fixing = 0..0)
 //!
 //! Column layout for N=1, L=0, A=0, K=1 (no penalty, no thermal):
 //! ```text
@@ -60,7 +55,7 @@
 //! col 18: g_fpha (FPHA generation variable)
 //! ```
 //!
-//! Row layout (Phase 1 — storage_fixing = 0..0, z_inflow at row 0):
+//! Row layout (storage_fixing = 0..0, z_inflow at row 0):
 //! ```text
 //! row 0: z_inflow definition (z = RHS)
 //! row 1: water_balance       ← dual = y_wb
@@ -121,15 +116,8 @@ const INTERCEPT_M3S: f64 = 0.0;
 /// Initial (incoming) storage value pinned via column bounds.
 const V_IN_HM3: f64 = 100.0;
 
-/// Number of columns before the FPHA generation column.
-/// For N=1, L=0, A=0, K=1, no penalty, no thermal, no lines, 1 bus, 1 deficit segment:
-/// storage(1) + z_inflow(1) + storage_in(1) + theta(1) = col 0–3 (state)
-/// turbine(1) + spillage(1) + diversion(1) = col 4–6 (flow)
-/// deficit(1) + excess(1) = col 7–8
-/// withdrawal_neg(1) + withdrawal_pos(1) = col 9–10
-/// outflow_below(1) + outflow_above(1) + turbine_below(1) + generation_below(1) = col 11–14
-/// evaporation outflow(1) + f_evap_plus(1) + f_evap_minus(1) = col 15–17
-/// g_fpha(1) = col 18
+/// Indices into the column/row layout documented in the module doc; the
+/// closed-form KKT reference and the post-solve assertions both depend on these.
 const COL_STORAGE_IN: usize = 2;
 const ROW_WATER_BALANCE: usize = 1;
 const ROW_FPHA: usize = 3;
@@ -255,7 +243,7 @@ fn fpha_evap_system() -> cobre_core::System {
                 min_generation_mw: 0.0,
                 max_generation_mw: 100.0,
                 max_diversion_m3s: None,
-                filling_inflow_m3s: 0.0,
+                filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 0.0,
             },
             thermal: ThermalStageBounds {
@@ -349,7 +337,7 @@ fn fpha_evap_evaporation(system: &cobre_core::System) -> EvaporationModelSet {
         }],
         reference_volumes_hm3: vec![100.0],
     }];
-    let _ = system; // system reference for symmetry with other helpers; unused here
+    let _ = system;
     EvaporationModelSet::new(models)
 }
 
@@ -366,7 +354,6 @@ fn cut_subgradient_parity_with_fpha_and_evaporation() {
     let production = fpha_production();
     let evaporation = fpha_evap_evaporation(&system);
 
-    // Build the stage LP template.
     let result = build_stage_templates(
         &system,
         InflowNonNegativityMethod::None,
@@ -380,31 +367,22 @@ fn cut_subgradient_parity_with_fpha_and_evaporation() {
 
     let template = &result.templates[0];
 
-    // Verify the column index we will inspect matches the documented layout.
-    // storage_in.start = N*(2+L) + A*K = 1*(2+0) + 0*0 = 2.
-    // This assertion documents and guards the hardcoded constant above.
+    // Guards the hardcoded COL_STORAGE_IN: storage_in.start = N*(2+L) + A*K = 2.
     assert_eq!(
         template.n_state, 1,
         "N=1, L=0: n_state must be 1 (storage only, no lags)"
     );
 
-    // Verify that Phase 1 removed state-fixing rows: storage_fixing = 0..0.
-    // base_rows[0] is the water-balance row index, which equals N = 1 in Phase 1.
+    // Guards ROW_WATER_BALANCE: with no state-fixing prefix (storage_fixing =
+    // 0..0), water-balance is at row 1 (z_inflow at row 0).
     assert_eq!(
         result.base_rows[0], 1,
         "Phase 1: water-balance must be at row 1 (z_inflow at row 0, no state-fixing prefix)"
     );
 
-    // Verify the FPHA and evap row offsets match the documented layout.
-    // row_fpha_start = row_load_balance_start + n_buses*n_blks = 2 + 1 = 3
-    // row_evap_start = row_fpha_start + n_fpha_planes_per_stage = 3 + 1 = 4
-    // These are validated by the assertions below after the solve.
-
-    // Load the template into HiGHS.
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
     solver.load_model(template);
 
-    // Add an empty cut row batch (no future-cost cuts at this stage).
     let empty_cuts = RowBatch {
         num_rows: 0,
         row_starts: vec![0_i32],
@@ -415,11 +393,9 @@ fn cut_subgradient_parity_with_fpha_and_evaporation() {
     };
     solver.add_rows(&empty_cuts);
 
-    // Phase 1: pin storage_in[0] = V_IN_HM3 via column bounds (lb == ub).
-    // This is the correct Phase-1 approach — NOT set_row_bounds on a storage-fixing row.
+    // Pin storage_in[0] via column bounds (lb == ub) — NOT a state-fixing row.
     solver.set_col_bounds(&[COL_STORAGE_IN], &[V_IN_HM3], &[V_IN_HM3]);
 
-    // Solve the LP.
     let view = solver
         .solve(None)
         .expect("FPHA+evap LP must be feasible and optimal");
@@ -472,9 +448,6 @@ fn cut_subgradient_parity_with_fpha_and_evaporation() {
 fn default_production_is_not_fpha_for_this_system() {
     let system = fpha_evap_system();
     let default_prod = PrepareHydroModelsResult::default_from_system(&system);
-    // A system with `Fpha` generation model still gets a default *constant* model
-    // from `default_from_system` (it is a fallback, not a full FPHA computation).
-    // The real FPHA planes come from `fpha_production()` above.
     assert!(
         matches!(
             default_prod.production.model(0, 0),

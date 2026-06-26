@@ -1,12 +1,9 @@
 //! Resolution of parsed NCS bounds rows into a dense lookup table.
 //!
-//! [`resolve_ncs_bounds`] converts `Vec<NcsBoundsRow>` (from
-//! `constraints/ncs_bounds.parquet`) into a [`ResolvedNcsBounds`] indexed by
-//! `(ncs_index, stage_index)` for O(1) lookup during LP construction.
-//!
-//! Resolution is infallible: unknown NCS or stage IDs in the override rows
-//! are silently skipped (they would have been caught by upstream validation).
-//! The default available generation is the entity's installed capacity
+//! [`resolve_ncs_bounds`] builds a [`ResolvedNcsBounds`] indexed by
+//! `(ncs_index, stage_index)` for O(1) lookup during LP construction. Unknown
+//! NCS/stage IDs are silently skipped (already caught upstream); the default
+//! available generation is the entity's installed capacity
 //! (`NonControllableSource::max_generation_mw`).
 
 use std::collections::HashMap;
@@ -18,19 +15,8 @@ use crate::constraints::NcsBoundsRow;
 
 /// Build a resolved NCS bounds table from parsed override rows.
 ///
-/// Maps domain-level `ncs_id` and `stage_id` values to 0-based positional
-/// indices using the provided sorted entity slices. Rows referencing
-/// unknown NCS IDs or stages are silently skipped.
-///
-/// When `overrides` is empty, the table is still populated with the installed
-/// capacity defaults from each NCS entity.
-///
-/// # Arguments
-///
-/// * `overrides` — parsed NCS bounds rows from `constraints/ncs_bounds.parquet`
-/// * `non_controllable_sources` — sorted NCS collection (for ID to index mapping)
-/// * `n_stages` — total number of study stages
-/// * `stage_index` — mapping from domain-level `stage_id` to positional 0-based index
+/// `non_controllable_sources` must be sorted: slice position becomes the NCS index.
+/// With empty `overrides`, every cell holds the entity's installed-capacity default.
 #[must_use]
 #[allow(clippy::implicit_hasher)]
 pub fn resolve_ncs_bounds(
@@ -43,14 +29,12 @@ pub fn resolve_ncs_bounds(
         return ResolvedNcsBounds::empty();
     }
 
-    // Build ncs_id -> ncs_idx mapping.
     let ncs_id_to_idx: HashMap<i32, usize> = non_controllable_sources
         .iter()
         .enumerate()
         .map(|(idx, ncs)| (ncs.id.0, idx))
         .collect();
 
-    // Collect installed capacities as defaults.
     let default_mw: Vec<f64> = non_controllable_sources
         .iter()
         .map(|ncs| ncs.max_generation_mw)
@@ -60,10 +44,10 @@ pub fn resolve_ncs_bounds(
 
     for row in overrides {
         let Some(&ncs_idx) = ncs_id_to_idx.get(&row.ncs_id.0) else {
-            continue; // Unknown NCS — skip.
+            continue;
         };
         let Some(&stage_idx) = stage_index.get(&row.stage_id) else {
-            continue; // Unknown stage — skip.
+            continue;
         };
         table.set(ncs_idx, stage_idx, row.available_generation_mw);
     }

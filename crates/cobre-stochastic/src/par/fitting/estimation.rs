@@ -1,17 +1,10 @@
 //! Numeric PAR(p) parameter-fitting core: order selection, contribution-based
-//! reduction, and report assembly.
+//! reduction, and report assembly, driving the per-season `fitting/` primitives.
 //!
-//! This module sits one level above the per-season `fitting/` primitives it
-//! drives ([`periodic_pacf`], [`conditional_facp_partitioned`],
-//! [`estimate_periodic_ar_coefficients`], …). It owns the order-selection and
-//! iterative reduction chain that turns raw `(entity, date, value)` observations
-//! plus seasonal stats into a `Vec<ArCoefficientEstimate>` together with an
-//! [`EstimationReport`] of the reductions applied.
-//!
-//! The two public entry points are [`estimate_ar_coefficients_with_selection`]
-//! (the classical and annual dispatch) and [`build_estimation_report`]. The core
-//! fails only with [`StochasticError`]; it never touches case-loading or row
-//! types — that orchestration lives in the I/O shell that calls into this module.
+//! Public entry points: [`estimate_ar_coefficients_with_selection`] (classical
+//! and annual dispatch) and [`build_estimation_report`]. The core fails only with
+//! [`StochasticError`] and never touches case-loading or row types — that
+//! orchestration lives in the I/O shell.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -31,10 +24,7 @@ use crate::par::fitting::{
     select_order_pacf_annual,
 };
 
-/// Reason for an AR order reduction.
-///
-/// Distinguishes the three mechanisms that can reduce a season's AR order
-/// during the estimation pipeline.
+/// Reason a season's AR order was reduced during estimation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReductionReason {
     /// Coefficient exceeds the magnitude-bound safety threshold.
@@ -47,7 +37,7 @@ pub enum ReductionReason {
 }
 
 impl ReductionReason {
-    /// Convert to a stable string representation for diagnostic output.
+    /// Stable string tag for diagnostic output.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -58,84 +48,67 @@ impl ReductionReason {
     }
 }
 
-/// A single contribution-based order reduction event.
-///
-/// Records that a season's AR order was reduced because the contribution
-/// analysis detected negative entries, indicating potential model instability.
+/// A single AR-order reduction event.
 #[derive(Debug, Clone)]
 pub struct ContributionReduction {
     /// Season where the reduction occurred.
     pub season_id: usize,
-    /// Order before reduction (from AIC or previous iteration).
+    /// Order before reduction.
     pub original_order: usize,
-    /// Order after reduction (the maximum valid order from contributions).
+    /// Order after reduction (max valid order from the contribution check).
     pub reduced_order: usize,
-    /// Contribution values at the original order that triggered the reduction.
+    /// Contribution values at the original order; empty for magnitude/`phi_1` reductions.
     pub contributions: Vec<f64>,
-    /// The mechanism that triggered this reduction.
+    /// Mechanism that triggered the reduction.
     pub reason: ReductionReason,
 }
 
-/// Per-hydro AIC diagnostic data captured during AIC-based AR order selection.
-///
-/// Holds the selected order, fitted AR coefficients, and any contribution-based
-/// order reductions for each season at the selected order.
+/// Per-hydro diagnostic data captured during AR order selection.
 #[derive(Debug, Clone)]
 pub struct HydroEstimationEntry {
-    /// The selected AR order for this hydro plant (maximum across all seasons).
-    ///
-    /// This is the maximum of the per-season selected orders, which determines
-    /// the coefficient vector length in the output.
+    /// Selected AR order: the **maximum** per-season order, which sets the
+    /// output coefficient-vector length.
     pub selected_order: u32,
-    /// Fitted AR lag coefficients, one inner vector per season sorted by `season_id` ascending.
-    ///
-    /// Each inner vector holds the coefficients at the selected order for
-    /// that season. Seasons where estimation was skipped (zero std, insufficient
-    /// observations) have an empty coefficient vector.
+    /// Fitted AR lag coefficients, one inner vector per season in `season_id`
+    /// order; empty for seasons where estimation was skipped.
     pub coefficients: Vec<Vec<f64>>,
-    /// Records of contribution-based order reductions applied during fitting.
-    ///
-    /// Each entry documents a season where the initial order (from PACF or fixed
-    /// selection) was reduced due to negative contributions. Empty when no
-    /// reductions were needed.
+    /// Order-reduction records applied during fitting; empty when none occurred.
     pub contribution_reductions: Vec<ContributionReduction>,
 }
 
-/// Computation-side summary of the AR estimation pipeline.
+/// Computation-side summary of the AR estimation pipeline, keyed by [`EntityId`]
+/// for canonical deterministic ordering.
 ///
-/// Contains one [`HydroEstimationEntry`] per hydro plant that was fitted,
-/// keyed by [`EntityId`] for canonical deterministic ordering.
+/// `white_noise_fallbacks` and `std_ratio_warnings` are populated only by the
+/// partial-estimation path; both are empty for other paths.
 #[must_use]
 #[derive(Debug, Clone)]
 pub struct EstimationReport {
-    /// Per-hydro diagnostic entries, keyed by entity ID.
+    /// Per-hydro diagnostic entries.
     pub entries: BTreeMap<EntityId, HydroEstimationEntry>,
-    /// The order selection method used (e.g., `"AIC"`, `"PACF"`, `"fixed"`).
+    /// Order selection method (e.g., `"AIC"`, `"PACF"`, `"fixed"`).
     pub method: String,
-    /// Hydro IDs that have user-provided stats but no estimated AR
-    /// coefficients, resulting in white-noise fallback (empty AR, ratio=1.0).
-    /// Only populated by the partial-estimation path; empty for other paths.
+    /// Hydros with user-provided stats but no estimated AR coefficients
+    /// (white-noise fallback: empty AR, ratio=1.0).
     pub white_noise_fallbacks: Vec<EntityId>,
-    /// Warnings for hydros where consecutive-season std ratios diverge
-    /// significantly between user-provided and history-estimated profiles.
-    /// Only populated by the partial-estimation path; empty for other paths.
+    /// Hydros whose consecutive-season std ratios diverge between the
+    /// user-provided and history-estimated profiles.
     pub std_ratio_warnings: Vec<StdRatioDivergence>,
 }
 
-/// Advisory diagnostic for a (hydro, season pair) where the cross-season
-/// standard deviation ratio diverges significantly between the user-provided
-/// profile and the history-estimated profile.
+/// Advisory diagnostic for a `(hydro, season pair)` whose cross-season std ratio
+/// diverges between the user-provided and history-estimated profiles.
 ///
-/// Produced by the partial-estimation path (P9 diagnostic) when
+/// Produced by the partial-estimation path when
 /// `max(user_ratio / est_ratio, est_ratio / user_ratio) > 2.0` for any
-/// consecutive season pair `(season_a, season_b)`.
+/// consecutive season pair.
 #[derive(Debug, Clone)]
 pub struct StdRatioDivergence {
-    /// The hydro plant for which the divergence was detected.
+    /// Hydro for which the divergence was detected.
     pub hydro_id: EntityId,
-    /// Index of the first season in the consecutive pair.
+    /// First season of the consecutive pair.
     pub season_a: usize,
-    /// Index of the second season in the consecutive pair (wraps around).
+    /// Second season of the consecutive pair (wraps around).
     pub season_b: usize,
     /// `std[season_a] / std[season_b]` from the user-provided profile.
     pub user_ratio: f64,
@@ -146,28 +119,21 @@ pub struct StdRatioDivergence {
 }
 
 /// Result of validating an AR order via contribution analysis.
-///
-/// Captures whether the current order is stable (all contributions non-negative),
-/// the maximum valid order if not, and the computed contribution values for
-/// diagnostic reporting.
 #[derive(Debug, Clone)]
 pub struct ContributionValidationResult {
-    /// Whether the current order passed contribution validation.
+    /// Whether the current order passed (all contributions non-negative).
     pub valid: bool,
-    /// Maximum valid order (same as `current_order` if valid, less otherwise).
+    /// Maximum valid order (equals `current_order` when valid, less otherwise).
     pub max_valid_order: usize,
     /// Computed contribution values for the current order.
     pub contributions: Vec<f64>,
 }
 
-/// Validate an AR order for a single (entity, season) pair via contribution analysis.
+/// Validate an AR order for one `(entity, season)` pair via contribution analysis,
+/// returning stability and the maximum valid order.
 ///
-/// Computes the recursively-composed contributions for the given season at the
-/// current order, then checks for negative entries. Returns a result indicating
-/// whether the order is stable and, if not, the maximum valid order.
-///
-/// When `current_order == 0`, returns immediately with `valid: true` and no
-/// contributions (an order-0 model has no autoregressive dependence to validate).
+/// `current_order == 0` returns `valid: true` with no contributions (an order-0
+/// model has no autoregressive dependence to validate).
 fn validate_order_contributions(
     season_id: usize,
     n_seasons: usize,
@@ -214,17 +180,13 @@ pub struct ArEstimationConfig<'a> {
     pub max_coeff_magnitude: Option<f64>,
     /// Season map for calendar-based date-to-season fallback.
     pub season_map: Option<&'a cobre_core::temporal::SeasonMap>,
-    /// When `true`, the PAR-A path (conditional FACP + extended YW) is used.
-    /// When `false` (the default), the classical PACF path is used.
+    /// `true` selects the PAR-A path (conditional FACP + extended YW); `false`
+    /// (default) the classical PACF path.
     pub use_annual_component: bool,
 }
 
-/// Estimate AR coefficients, dispatching to the classical or PAR-A path.
-///
-/// When `cfg.use_annual_component` is `false` (the default), delegates to
-/// `estimate_ar_with_pacf` (classical periodic Yule-Walker + PACF).
-/// When `cfg.use_annual_component` is `true`, delegates to
-/// `estimate_ar_with_pacf_annual` (extended YW with rolling 12-month average).
+/// Estimate AR coefficients, dispatching to the classical or PAR-A path on
+/// `cfg.use_annual_component`.
 ///
 /// # Errors
 ///
@@ -259,14 +221,8 @@ pub fn estimate_ar_coefficients_with_selection(
     }
 }
 
-/// PACF-based AR order selection using periodic Yule-Walker method.
-///
-/// Selects the AR order using the periodic partial autocorrelation function
-/// (PACF) significance test, then estimates coefficients via the periodic
-/// Yule-Walker matrix solve. The PACF threshold uses a 95% confidence
-/// interval (`z_alpha = 1.96`).
-///
-/// The periodic approach correctly accounts for the non-Toeplitz covariance
+/// Periodic-PACF AR order selection (95% CI significance test) followed by a
+/// periodic Yule-Walker solve, accounting for the non-Toeplitz covariance
 /// structure of periodic autoregressive processes.
 fn estimate_ar_with_pacf(
     observations: &[(EntityId, NaiveDate, f64)],
@@ -278,7 +234,6 @@ fn estimate_ar_with_pacf(
     max_coeff_magnitude: Option<f64>,
 ) -> Result<(Vec<ArCoefficientEstimate>, EstimationReport), StochasticError> {
     if max_order == 0 {
-        // Order-0: produce white-noise estimates for all (entity, season) pairs.
         let estimates = crate::par::fitting::estimate_ar_coefficients_with_season_map(
             observations,
             seasonal_stats,
@@ -299,7 +254,7 @@ fn estimate_ar_with_pacf(
     let (stage_index, stats_map, n_seasons) = build_pacf_stage_lookups(stages, seasonal_stats);
     let group_obs = group_observations_by_season(observations, hydro_ids, &stage_index, season_map);
 
-    // 95% confidence z-score for the PACF significance threshold.
+    // 95% CI z-score for the PACF significance threshold.
     let z_alpha = 1.96_f64;
 
     let mut estimates = estimate_all_hydro_ar_coefficients(
@@ -323,33 +278,22 @@ fn estimate_ar_with_pacf(
     Ok((estimates, report))
 }
 
-/// PAR-A path: extended periodic Yule-Walker with rolling 12-month annual component.
+/// PAR-A path: extended periodic Yule-Walker with rolling 12-month annual
+/// component (report `method = "PACF_ANNUAL"`).
 ///
-/// Mirrors [`estimate_ar_with_pacf`] with three key differences:
-///
-/// 1. Calls [`estimate_annual_seasonal_stats`] to obtain per-(hydro, season)
-///    `(μ^A_m, σ^A_m)`.
-/// 2. Builds rolling-window `A_t` groupings (same windows Part A consumed),
-///    organised by target season.
-/// 3. Per (hydro, season): calls [`conditional_facp_partitioned`] →
-///    [`select_order_pacf_annual`] → [`estimate_periodic_ar_annual_coefficients`].
-///
-/// Every returned [`ArCoefficientEstimate`] has `annual: Some(AnnualComponent { .. })`
-/// when the `(hydro, season)` pair has at least one rolling-window `A_t` observation;
-/// seasons with no rolling-window data fall through to the classical PAR(p) path with
+/// A returned [`ArCoefficientEstimate`] carries `annual: Some(..)` when its
+/// `(hydro, season)` pair has at least one rolling-window `A_t` observation;
+/// seasons without one fall through to the classical PAR(p) path with
 /// `annual: None`.
-/// The estimation report uses `method = "PACF_ANNUAL"`.
 ///
 /// # Errors
 ///
 /// Propagates `StochasticError::InsufficientData` from
 /// [`estimate_annual_seasonal_stats`] when any hydro has fewer than 13
 /// chronological observations (no rolling window can be formed).
-// Rationale: the function encodes a single cohesive PACF estimation pipeline —
-// seasonal stats, stage indexing, Z-score grouping, order reduction, and report
-// assembly — whose six numbered phases share intermediate look-up tables; splitting
-// into sub-functions would require threading those tables as additional arguments
-// and would obscure the sequential data-flow contract of the pipeline.
+// Rationale: a single cohesive PACF estimation pipeline whose phases share
+// intermediate look-up tables; splitting into sub-functions would thread those
+// tables as extra arguments and obscure the sequential data-flow contract.
 #[allow(clippy::too_many_lines)]
 fn estimate_ar_with_pacf_annual(
     observations: &[(EntityId, NaiveDate, f64)],
@@ -360,20 +304,16 @@ fn estimate_ar_with_pacf_annual(
     season_map: Option<&cobre_core::temporal::SeasonMap>,
     max_coeff_magnitude: Option<f64>,
 ) -> Result<(Vec<ArCoefficientEstimate>, EstimationReport), StochasticError> {
-    // 1. Compute (μ^A_m, σ^A_m) per (hydro, season).
     let annual_stats: Vec<AnnualSeasonalStats> =
         estimate_annual_seasonal_stats(observations, stages, hydro_ids, season_map)?;
 
-    // Build a fast lookup: (hydro_id, season_id) → &AnnualSeasonalStats.
     let annual_stats_map: HashMap<(EntityId, usize), &AnnualSeasonalStats> = annual_stats
         .iter()
         .map(|s| ((s.hydro_id, s.season_id), s))
         .collect();
 
-    // 2. Build stage index for date-to-season mapping.
     let (stage_index, stats_map, n_seasons) = build_pacf_stage_lookups(stages, seasonal_stats);
 
-    // 3. Group Z observations by (hydro, season) + per-bucket year start.
     let group_obs = group_observations_by_season(observations, hydro_ids, &stage_index, season_map);
     let group_z_year_starts: HashMap<(EntityId, usize), i32> = {
         let entity_set: HashSet<EntityId> = hydro_ids.iter().copied().collect();
@@ -400,13 +340,10 @@ fn estimate_ar_with_pacf_annual(
         starts
     };
 
-    // 4. Build rolling-window A_t groups by (hydro, season) + year start.
-    //
-    // Reproduce the same chronological grouping as `estimate_annual_seasonal_stats`
-    // so that `annual_observations_by_season[s]` aligns with `obs_by_season[s]`.
+    // Rolling-window A_t groups must reproduce the chronological grouping of
+    // `estimate_annual_seasonal_stats` so A and Z align by season.
     let entity_set: HashSet<EntityId> = hydro_ids.iter().copied().collect();
 
-    // Sort observations per entity chronologically.
     let mut entity_obs: HashMap<EntityId, Vec<(NaiveDate, f64)>> = HashMap::new();
     for &(entity_id, date, value) in observations {
         if entity_set.contains(&entity_id) {
@@ -417,17 +354,10 @@ fn estimate_ar_with_pacf_annual(
         obs_vec.sort_unstable_by_key(|(d, _)| *d);
     }
 
-    // For each entity, build rolling A_t values grouped by target season.
-    //
-    // Indexing convention (must match `estimate_annual_seasonal_stats`):
-    // A_{t-1} = mean(z[t-12..t-1]) is stored under the season of its own
-    // PDF time-index (t-1), i.e., the season of `group[i + 11]` when t = i + 12.
-    // YW callers retrieve it via `prev_season = (m - 1) mod n_seasons`.
-    //
-    // The year of target_date is the PDF year of A_{t-1} for that bucket.
-    // Tracking the minimum across all entries gives the bucket's first PDF
-    // year — needed by `cross_correlation_z_a` to align A and Z by absolute
-    // year rather than by bucket index.
+    // Same storage convention as `estimate_annual_seasonal_stats` (A_{t-1} keyed
+    // under `group[i + 11]`'s season). The per-bucket minimum year is the first
+    // PDF year, which `cross_correlation_z_a` needs to align A and Z by absolute
+    // year, not by bucket index.
     let mut annual_group_obs: HashMap<(EntityId, usize), Vec<f64>> = HashMap::new();
     let mut annual_group_year_starts: HashMap<(EntityId, usize), i32> = HashMap::new();
     for &entity_id in hydro_ids {
@@ -458,7 +388,6 @@ fn estimate_ar_with_pacf_annual(
         }
     }
 
-    // 5. Per (hydro, season): conditional FACP → order → extended YW.
     let z_alpha = 1.96_f64;
     let mut estimates: Vec<ArCoefficientEstimate> = Vec::new();
 
@@ -496,18 +425,14 @@ fn estimate_ar_with_pacf_annual(
         let annual_obs_refs: Vec<&[f64]> = annual_obs_by_season.iter().map(Vec::as_slice).collect();
 
         for season in 0..n_seasons {
-            // The Yule-Walker equation for current month `season` couples
-            // Z_t (at season `season`) with A_{t-1}, whose PDF time-index is
-            // at the previous season. Annual stats and observations for that
-            // A are stored under `prev_season` (see indexing convention in
-            // `estimate_annual_seasonal_stats`).
+            // YW for `season` couples Z_t with A_{t-1}, stored under `prev_season`
+            // (storage convention in `estimate_annual_seasonal_stats`).
             let prev_season = (season + n_seasons - 1) % n_seasons;
             let n_obs = obs_by_season[season].len();
             let n_ann_obs = annual_obs_by_season[prev_season].len();
             let stats_s = stats_by_season[season];
             let annual_stats_s = annual_stats_by_season[prev_season];
 
-            // White-noise fallback: zero std, too few observations, or no annual obs.
             if stats_s.1 == 0.0 || n_obs < 2 || n_ann_obs == 0 || annual_stats_s.1 == 0.0 {
                 estimates.push(ArCoefficientEstimate {
                     hydro_id,
@@ -525,7 +450,6 @@ fn estimate_ar_with_pacf_annual(
                 continue;
             }
 
-            // Conditional FACP → order selection → extended YW solve.
             let facp_values = conditional_facp_partitioned(
                 season,
                 max_order,
@@ -550,11 +474,8 @@ fn estimate_ar_with_pacf_annual(
                 &a_year_starts,
             );
 
-            // Look up annual stats for the AnnualComponent triple. The YW
-            // solver matches Z_t (season `season`) with A_{t-1} (PDF time at
-            // `prev_season`); precompute applies the standardised ψ via
-            // `psi_hat = ψ · σ_m / σ_a`, where σ_a must be the std of A_{t-1}
-            // — i.e., the entry stored at `prev_season`.
+            // σ_a in the runtime `psi_hat = ψ · σ_m / σ_a` must be the std of
+            // A_{t-1} — the entry at `prev_season`, not `season`.
             let (ann_mean, ann_std) = annual_stats_by_season[prev_season];
             estimates.push(ArCoefficientEstimate {
                 hydro_id,
@@ -570,11 +491,6 @@ fn estimate_ar_with_pacf_annual(
         }
     }
 
-    // Magnitude, φ_1, and iterative contribution pre-passes. Mirrors
-    // `iterative_pacf_reduction` for the PAR-A path. The contribution
-    // recursion runs on the φ vector only; ψ is preserved through reductions
-    // and refreshed via re-solves of the extended Yule-Walker system at the
-    // new ceiling.
     let reductions = apply_annual_prepass_reductions(
         &mut estimates,
         n_seasons,
@@ -594,25 +510,12 @@ fn estimate_ar_with_pacf_annual(
     Ok((estimates, report))
 }
 
-/// Apply magnitude-bound, `phi_1`, and contribution pre-passes for the PAR-A path.
+/// Apply magnitude-bound, `phi_1`, and contribution pre-passes for the PAR-A path
+/// (the PAR-A counterpart of [`iterative_pacf_reduction`]).
 ///
-/// Mirrors [`iterative_pacf_reduction`] for the PAR-A flow:
-///
-/// 1. Per-coefficient magnitude bound (drops the season's AR coefficients when
-///    any `|φ| > threshold`; ψ is preserved).
-/// 2. `φ_1 ≥ 0` guard (drops AR coefficients when `φ_1 < 0`; ψ preserved).
-/// 3. Iterative contribution-based reduction via [`reduce_entity_orders_annual`].
-///
-/// **Contribution check scope.** The order `pm` refers to the
-/// autoregressive components alone (the φ vector); the annual term ψ is a
-/// separate parameter that is preserved across AR-order reductions. The
-/// contribution recursion here operates on the φ coefficients (length p),
-/// exactly as in the classical PAR(p) path. When a season's contributions
-/// go negative, the AR ceiling is reduced and the extended Yule-Walker
-/// system is re-solved at the new order — both φ and ψ are updated, but
-/// the AR portion is what shrinks.
-///
-/// Returns a map of reductions for report building.
+/// Reductions act on the AR order alone (the φ vector); the annual term ψ is a
+/// separate parameter preserved across reductions and refreshed via re-solves of
+/// the extended Yule-Walker system at the new ceiling.
 // Rationale: the function threads four independent paired look-up tables (regular and annual
 // variants of observations and year-start maps) plus three independent stat maps and two
 // scalar controls; bundling them into a struct would just displace the arity to the struct
@@ -702,18 +605,13 @@ fn apply_annual_prepass_reductions(
     all_reductions
 }
 
-/// Detect the seasons whose recursively-composed AR contributions have turned
-/// negative at their current order, recording a `NegativeContribution`
-/// reduction for each and returning the failing season ids.
+/// Detect seasons whose AR contributions turned negative at the current order,
+/// recording a `NegativeContribution` reduction for each and returning the
+/// failing season ids.
 ///
-/// Rationale: this is the single genuinely-shared sub-block of the two
-/// iterative reduction loops ([`reduce_entity_orders`] and
-/// [`reduce_entity_orders_annual`]). Both call it at the top of each loop
-/// iteration with the same locals — the regular path and the annual path build
-/// `all_coeffs`/`std_by_season`/`frozen` differently beforehand, but the
-/// detection logic itself is byte-identical, so it is owned here once. The
-/// per-season re-solve bodies that follow legitimately diverge (regular vs
-/// annual Yule-Walker primitives) and stay in their respective callers.
+/// Shared by both reduction loops ([`reduce_entity_orders`] and
+/// [`reduce_entity_orders_annual`]); the per-season re-solve that follows is
+/// path-specific and stays in each caller.
 fn detect_failing_seasons(
     estimates: &[ArCoefficientEstimate],
     indices: &[usize],
@@ -755,30 +653,17 @@ fn detect_failing_seasons(
     failing_seasons
 }
 
-/// Run the iterative contribution-based order reduction for one entity in the
-/// PAR-A path.
+/// Iterative contribution-based AR-order reduction for one entity, PAR-A path
+/// (the annual counterpart of [`reduce_entity_orders`]).
 ///
-/// Mirrors [`reduce_entity_orders`] for the classical path: maintains
-/// per-season `max_orders` ceilings, checks the recursively-composed AR
-/// contributions (φ-only, length p) at each season, and reduces the ceiling
-/// by 1 whenever any contribution turns negative. After each reduction, the
-/// extended Yule-Walker system is re-solved (`conditional_facp_partitioned` →
-/// `select_order_pacf_annual` → `estimate_periodic_ar_annual_coefficients`)
-/// at the new ceiling so both φ and ψ are refreshed; the recorded
-/// `AnnualComponent` triple is updated to match.
-///
-/// When the ceiling reaches 0 the AR coefficients are dropped (ψ retained
-/// via a final order-0 YW solve so the constant term remains consistent
-/// with the per-season annual stats).
-// Rationale: the arguments are four paired look-up tables (regular/annual
-// observations and year-starts) plus two stat maps, a hydro key, season count,
-// and two scalar controls — all independently sourced by the caller; no context
-// struct spans them. The length reflects a per-entity iterative contribution
-// loop that re-solves the annual Yule-Walker system at each ceiling reduction
-// and cannot be decomposed without threading the mutable `estimates` slice
-// across helpers. The one sub-block shared with the regular path — failing-
-// season detection — is extracted into `detect_failing_seasons`; the per-season
-// re-solve body that follows is annual-specific and legitimately stays here.
+/// Each ceiling reduction re-solves the extended Yule-Walker system so both φ
+/// and ψ are refreshed. When the ceiling reaches 0 the AR coefficients are
+/// dropped but ψ is retained via a final order-0 YW solve, keeping the constant
+/// term consistent with the per-season annual stats.
+// Rationale: the arguments are independently-sourced look-up/stat tables spanned
+// by no context struct, and the per-entity reduction loop re-solves the annual
+// Yule-Walker system per ceiling reduction over the mutable `estimates` slice,
+// so it cannot be decomposed without threading that slice across helpers.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn reduce_entity_orders_annual(
     estimates: &mut [ArCoefficientEstimate],
@@ -832,8 +717,7 @@ fn reduce_entity_orders_annual(
         }
     }
 
-    // A season is "frozen" when its AR component has been driven to zero.
-    // ψ is still permitted to update via order-0 re-fits.
+    // `frozen` means the AR component is zero; ψ may still update via order-0 re-fits.
     let mut frozen: Vec<bool> = vec![false; n_seasons];
     for &idx in indices {
         let sid = estimates[idx].season_id;
@@ -846,7 +730,6 @@ fn reduce_entity_orders_annual(
     let annual_obs_refs: Vec<&[f64]> = annual_obs_by_season.iter().map(Vec::as_slice).collect();
 
     loop {
-        // Detect failing seasons (negative contribution among the φ entries).
         let failing_seasons = detect_failing_seasons(
             estimates,
             indices,
@@ -868,16 +751,13 @@ fn reduce_entity_orders_annual(
             }
             max_orders[season_id] -= 1;
 
-            // Re-solve at the (possibly reduced) ceiling. When the ceiling has
-            // dropped to 0 we still solve the 1×1 extended YW so ψ is refreshed
-            // for the new (AR-empty) configuration.
+            // Even at ceiling 0 the 1×1 extended YW is solved so ψ is refreshed.
             let stats_s = stats_by_season[season_id];
             if stats_s.1 == 0.0
                 || obs_by_season[season_id].len() < 2
                 || annual_obs_by_season[season_id].is_empty()
                 || annual_stats_by_season[season_id].1 == 0.0
             {
-                // No data to refit — drop AR entirely and freeze.
                 for &idx in indices {
                     if estimates[idx].season_id == season_id {
                         estimates[idx].coefficients.clear();
@@ -918,8 +798,7 @@ fn reduce_entity_orders_annual(
                 &a_year_starts,
             );
 
-            // Annual stats live at prev_season under the storage convention
-            // (PDF time-index of A_{t-1}).
+            // A_{t-1}'s annual stats are stored at prev_season, not season_id.
             let prev_season = (season_id + n_seasons - 1) % n_seasons;
             let (ann_mean, ann_std) = annual_stats_by_season[prev_season];
             for &idx in indices {
@@ -942,9 +821,8 @@ fn reduce_entity_orders_annual(
                 continue;
             }
 
-            // Re-check φ_1 after the new YW solve. φ_1 < 0 is treated the same
-            // as in the initial prepass: drop AR (ψ retained from the order-0
-            // refit below).
+            // φ_1 < 0 after the re-solve drops AR; ψ is retained via the order-0
+            // refit below.
             if has_negative_phi1(&all_coeffs[season_id]) {
                 let original_order = all_coeffs[season_id].len();
                 all_reductions
@@ -1002,10 +880,8 @@ type PacfStageLookups<'a> = (
     usize,
 );
 
-/// Build the stage-season index, stats map, and season count for PACF estimation.
-///
-/// Returns `(stage_index, stats_map, n_seasons)` where `stage_index` is sorted
-/// by start date and `stats_map` keys are `(EntityId, season_id)`.
+/// Build the PACF stage-season lookups: `stage_index` sorted by start date,
+/// `stats_map` keyed by `(EntityId, season_id)`, and the season count.
 fn build_pacf_stage_lookups<'a>(
     stages: &[cobre_core::temporal::Stage],
     seasonal_stats: &'a [SeasonalStats],
@@ -1073,21 +949,11 @@ fn estimate_all_hydro_ar_coefficients(
     max_order: usize,
     z_alpha: f64,
 ) -> Vec<ArCoefficientEstimate> {
-    // Each hydro's initial fit is computed independently from immutable shared
-    // inputs (`group_obs`, `stats_map`, and the `Copy` scalars), so the outer
-    // per-hydro loop is embarrassingly parallel. Each task owns its local
-    // `obs_by_season` / `stats_by_season` / `obs_refs` working vectors and the
-    // `hydro_estimates` vector it builds; `flat_map_iter`/`collect` reassembles
-    // the per-hydro blocks in canonical `hydro_ids` index order, making thread
-    // scheduling irrelevant to the output ordering (deterministic). The inner
-    // per-season accumulation — the white-noise fallback predicate and the
-    // periodic PACF → Yule-Walker solve — is reproduced verbatim so every output
-    // element is bit-identical to a single-threaded pass. `flat_map_iter` (not
-    // `flat_map`) is used because each hydro's returned `Vec` is small
-    // (`n_seasons`): the parallelism is across hydros, and each hydro's seasons
-    // are flattened sequentially — `flat_map` would nest rayon work-stealing over
-    // a ~12-element vec for no gain. Mirrors the proven [`compute_hydro_residuals`]
-    // idiom in the sibling `correlation` module.
+    // Determinism: `flat_map_iter`/`collect` reassembles the per-hydro blocks in
+    // canonical `hydro_ids` order, and the inner per-season PACF → Yule-Walker
+    // solve is bit-identical to a single-threaded pass — thread scheduling cannot
+    // change the output. `flat_map_iter` (not `flat_map`): each hydro's `Vec` is
+    // small (`n_seasons`), so nesting work-stealing over it would gain nothing.
     hydro_ids
         .par_iter()
         .flat_map_iter(|&hydro_id| {
@@ -1191,10 +1057,8 @@ fn apply_prepass_reductions(
     }
 }
 
-/// Run the iterative PACF order-reduction loop for one entity.
-///
-/// Mutates `estimates` in-place for the seasons indexed by `indices` and appends
-/// `ContributionReduction` records to `all_reductions`.
+/// Iterative PACF order-reduction loop for one entity: mutates `estimates` for
+/// the seasons in `indices` and appends records to `all_reductions`.
 fn reduce_entity_orders(
     estimates: &mut [ArCoefficientEstimate],
     n_seasons: usize,
@@ -1325,11 +1189,9 @@ fn reduce_entity_orders(
 
 /// Iteratively reduce AR orders via PACF re-selection and contribution validation.
 ///
-/// For each entity, maintains per-season `max_order` ceilings. When contribution
-/// analysis detects negative contributions for a season, reduces that season's
-/// ceiling by 1 and re-runs the full PACF selection + YW estimation + `phi_1`
-/// check + contribution validation cycle. Repeats until all seasons pass or
-/// their ceilings reach 0.
+/// Per entity, a failing season's ceiling drops by 1 and the full
+/// PACF-selection / YW-estimation / `phi_1` / contribution cycle re-runs, until
+/// every season passes or its ceiling reaches 0.
 fn iterative_pacf_reduction(
     estimates: &mut [ArCoefficientEstimate],
     n_seasons: usize,
@@ -1366,12 +1228,10 @@ fn iterative_pacf_reduction(
     all_reductions
 }
 
-/// Build an [`EstimationReport`] from AR estimates and contribution validation results.
+/// Build an [`EstimationReport`] (infallible — it only reorganises computed data).
 ///
-/// This function is infallible: it only reorganises already-computed data.
-/// For each hydro plant the selected order is the **maximum** across all
-/// seasons. These choices align with how the I/O layer (`FittingReport`)
-/// expects a single order per hydro.
+/// Each hydro's selected order is the **maximum** across its seasons, matching
+/// the single-order-per-hydro shape the I/O layer (`FittingReport`) expects.
 // Rationale: the `contribution_reductions` map is always built with the default
 // hasher by the in-crate callers and the report consumer; generalising over
 // `BuildHasher` would widen the signature for no caller that uses a custom
@@ -1383,8 +1243,7 @@ pub fn build_estimation_report(
     contribution_reductions: &HashMap<EntityId, Vec<ContributionReduction>>,
     method: &str,
 ) -> EstimationReport {
-    // Group coefficient vectors by hydro_id (estimates are already sorted by
-    // (hydro_id, season_id) from estimate_ar_coefficients).
+    // Estimates arrive sorted by (hydro_id, season_id).
     let mut hydro_coeffs: BTreeMap<EntityId, Vec<(usize, Vec<f64>)>> = BTreeMap::new();
     for est in estimates {
         hydro_coeffs
@@ -1396,19 +1255,14 @@ pub fn build_estimation_report(
     let mut entries: BTreeMap<EntityId, HydroEstimationEntry> = BTreeMap::new();
 
     for (hydro_id, mut season_coeffs) in hydro_coeffs {
-        // Sort by season_id ascending (should already be sorted, but ensure it).
         season_coeffs.sort_by_key(|(season_id, _)| *season_id);
 
-        // Compute max selected_order as the maximum actual coefficient length
-        // across all seasons for this hydro (after all truncations).
         let selected_order = season_coeffs
             .iter()
             .map(|(_, coeffs)| coeffs.len())
             .max()
             .unwrap_or(0);
 
-        // Build per-season coefficient vectors, filling missing seasons with empty vecs.
-        // The season_coeffs may not cover all n_seasons if some were skipped.
         let season_map: HashMap<usize, Vec<f64>> = season_coeffs.into_iter().collect();
         let coefficients: Vec<Vec<f64>> = (0..n_seasons)
             .map(|sid| season_map.get(&sid).cloned().unwrap_or_default())

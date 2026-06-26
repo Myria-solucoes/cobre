@@ -1,13 +1,4 @@
-//! Infrastructure crate genericity gate — integration test.
-//!
-//! Runs `scripts/check-infra-genericity.sh` and asserts it exits successfully.
-//! The script scans the five infrastructure crates (`cobre-core`, `cobre-io`,
-//! `cobre-solver`, `cobre-stochastic`, `cobre-comm`) for algorithm-specific
-//! vocabulary that must not appear in their production source code.
-//!
-//! Failing this test means one of the infra crates has acquired an
-//! algorithm-specific reference (e.g. `Sddp`, `Benders`, `Cut`, `cut pool`).
-//! Fix the violation before committing.
+//! Runs `scripts/ci/check-infra-genericity.sh` and asserts it exits successfully.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -16,18 +7,14 @@ use std::process::Command;
 
 #[test]
 fn infra_genericity_gate() {
-    // Locate the script relative to the workspace root. The test binary is run
-    // from the workspace root by `cargo test`, so we can walk up from CARGO_MANIFEST_DIR.
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    // cobre-core manifest is at <repo>/crates/cobre-core/Cargo.toml, so the
-    // workspace root is two levels up.
     let workspace_root = manifest_dir
-        .parent() // crates/
+        .parent()
         .expect("cobre-core has a parent directory")
-        .parent() // repo root
+        .parent()
         .expect("crates/ has a parent directory");
 
-    let script = workspace_root.join("scripts/check-infra-genericity.sh");
+    let script = workspace_root.join("scripts/ci/check-infra-genericity.sh");
 
     assert!(
         script.exists(),

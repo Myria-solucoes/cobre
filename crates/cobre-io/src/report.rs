@@ -30,13 +30,9 @@ use crate::validation::ValidationContext;
 // ── ReportEntry ───────────────────────────────────────────────────────────────
 
 /// A single diagnostic entry in a [`ValidationReport`].
-///
-/// The `kind` field holds the `Debug` representation of the `ErrorKind`
-/// variant (e.g., `"FileNotFound"`), making it suitable for programmatic
-/// inspection by the CLI, TUI, or MCP server.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReportEntry {
-    /// The `ErrorKind` variant name as a string (e.g., `"FileNotFound"`).
+    /// `Debug` representation of the `ErrorKind` variant (e.g., `"FileNotFound"`).
     pub kind: String,
     /// Path to the file where the problem was detected, as a string.
     pub file: String,
@@ -98,9 +94,8 @@ impl ValidationReport {
 
 /// Convert a [`ValidationContext`] into a [`ValidationReport`].
 ///
-/// Reads all diagnostics from `ctx` and maps them to [`ReportEntry`] values,
-/// separated by severity. The `ctx` is not consumed so the caller can still
-/// call [`ValidationContext::into_result`] afterward.
+/// Borrows `ctx` so the caller can still call
+/// [`ValidationContext::into_result`] afterward.
 ///
 /// # Examples
 ///

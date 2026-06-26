@@ -1,16 +1,7 @@
-//! Reproducibility and invariance integration tests for `cobre-stochastic`.
-//!
-//! Verifies four cross-concern invariants that are not covered by individual
-//! module unit tests:
-//!
-//! 1. **Deterministic reproducibility** — identical inputs and seed produce
-//!    bit-identical opening trees and `sample_forward` results.
-//! 2. **Declaration-order invariance** — reordering hydro entity IDs in the
-//!    input produces identical opening trees, because the pipeline sorts
-//!    entities by `EntityId` internally.
-//! 3. **Seed sensitivity** — different base seeds produce different trees.
-//! 4. **Infrastructure genericity** — the crate source contains zero
-//!    algorithm-specific references.
+//! Reproducibility and invariance integration tests for `cobre-stochastic`:
+//! deterministic reproducibility, declaration-order invariance (the pipeline
+//! sorts entities by `EntityId` internally), seed sensitivity, and infrastructure
+//! genericity (the crate source carries zero algorithm-specific references).
 
 #![allow(
     clippy::unwrap_used,
@@ -275,9 +266,7 @@ fn deterministic_reproducibility() {
 /// tree, because `SystemBuilder` sorts hydros by `EntityId` internally.
 #[test]
 fn declaration_order_invariance() {
-    // Forward order: [EntityId(1), EntityId(2)]
     let hydros_forward = vec![make_hydro(1), make_hydro(2)];
-    // Reversed order: [EntityId(2), EntityId(1)]
     let hydros_reversed = vec![make_hydro(2), make_hydro(1)];
 
     let ctx_forward = build_fixture(hydros_forward, 42);
@@ -309,8 +298,6 @@ fn declaration_order_invariance() {
     }
 }
 
-/// Different base seeds produce at least one differing noise value in the
-/// opening tree.
 #[test]
 fn seed_sensitivity() {
     let hydros = vec![make_hydro(1), make_hydro(2)];
@@ -337,7 +324,6 @@ fn seed_sensitivity() {
     );
 }
 
-/// The crate source contains zero algorithm-specific references.
 #[test]
 fn infrastructure_genericity_no_sddp_references() {
     use std::path::Path;

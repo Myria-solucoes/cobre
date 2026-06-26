@@ -1,13 +1,9 @@
 //! Precomputation of per-stage lag accumulation weights and period
 //! finalization flags from stage date boundaries and season definitions.
 //!
-//! The [`precompute_stage_lag_transitions`] function runs once at setup time
-//! and produces a [`Vec<StageLagTransition>`] indexed by stage. The resulting
-//! slice is consumed read-only on the hot path, eliminating calendar arithmetic
-//! from inner solver loops.
-//!
-//! This precomputation addresses the Temporal Resolution Debts incurred when
-//! stages span heterogeneous calendar resolutions.
+//! [`precompute_stage_lag_transitions`] runs once at setup; the resulting
+//! per-stage slice is consumed read-only on the hot path, keeping calendar
+//! arithmetic out of inner solver loops.
 
 use std::collections::HashMap;
 
@@ -21,23 +17,17 @@ use cobre_core::{
 /// Pre-computed seed values for the lag accumulator, derived from
 /// [`RecentObservation`] data in [`cobre_core::InitialConditions`].
 ///
-/// Computed once at setup time by `compute_recent_observation_seed` and
-/// stored in [`crate::setup::StudySetup`]. Applied at every trajectory start
-/// (forward pass and simulation pipeline) instead of zero-filling the
-/// accumulator.
-///
-/// When `weight_seed == 0.0` (no observations or non-Monthly season cycle),
-/// the behavior is identical to the previous zero-reset.
+/// Applied at every trajectory start (forward pass and simulation pipeline).
+/// `weight_seed == 0.0` (no observations or non-Monthly season cycle) is the
+/// zero-reset behaviour.
 #[derive(Debug, Clone)]
 pub struct RecentObservationSeed {
-    /// Per-hydro accumulated `value_m3s * observation_hours` values.
-    ///
-    /// Length equals `hydro_count`. Zero for hydros without observations.
+    /// Per-hydro accumulated `value_m3s * observation_hours`; zero for hydros
+    /// without observations.
     pub accum_seed: Vec<f64>,
-    /// Fraction of the lag period covered by pre-study observations.
-    ///
-    /// Computed as `total_observation_hours / total_period_hours`. A single
-    /// scalar because all observations share the same calendar period.
+    /// Fraction of the lag period covered by pre-study observations
+    /// (`total_observation_hours / total_period_hours`); one scalar because all
+    /// observations share the same calendar period.
     pub weight_seed: f64,
 }
 
@@ -54,25 +44,10 @@ impl RecentObservationSeed {
 
 /// Compute the lag accumulator seed from pre-study [`RecentObservation`] data.
 ///
-/// Runs once at setup time. Returns a [`RecentObservationSeed`] whose
-/// [`accum_seed`](RecentObservationSeed::accum_seed) and
-/// [`weight_seed`](RecentObservationSeed::weight_seed) values are applied at
-/// every trajectory start.
-///
-/// # Behavior by cycle type
-///
-/// - **`Monthly`**: lag-period boundaries are calendar month boundaries derived
-///   from the first study stage's `season_id` and `start_date`.
-/// - **`Weekly`** and **`Custom`**: not yet implemented; returns a zero seed.
-///
-/// Returns a zero seed when:
-/// - `recent_obs` is empty.
-/// - `first_stage.season_id` is `None`.
-/// - The season cycle type is not `Monthly`.
-/// - `hydros` is empty.
-///
-/// Unknown `hydro_id` values (not found in the `hydros` registry) are silently
-/// skipped, matching the pattern in `build_initial_state`.
+/// Only the `Monthly` cycle is implemented; `Weekly`/`Custom`, an empty
+/// `recent_obs`, a `None` `first_stage.season_id`, or empty `hydros` all return
+/// a zero seed. Unknown `hydro_id` values are silently skipped, matching
+/// `build_initial_state`.
 pub(crate) fn compute_recent_observation_seed(
     recent_obs: &[RecentObservation],
     first_stage: &Stage,
@@ -101,14 +76,9 @@ pub(crate) fn compute_recent_observation_seed(
     let total_period_hours = month_total_hours(year, season_month);
 
     let mut accum_seed = vec![0.0_f64; hydro_count];
-    // Accumulate observation hours per hydro so that the weight reflects the
-    // calendar coverage of a single hydro, not the sum across all hydros.
-    // A hydro may have multiple non-overlapping observations (rolling revisions),
-    // so we sum hours within each hydro, then take the maximum across hydros.
     let mut per_hydro_hours: HashMap<i32, f64> = HashMap::new();
 
     for obs in recent_obs {
-        // Silently skip unknown hydro IDs, same as build_initial_state.
         let Ok(idx) = hydros.binary_search_by_key(&obs.hydro_id.0, |h| h.id.0) else {
             continue;
         };
@@ -121,10 +91,8 @@ pub(crate) fn compute_recent_observation_seed(
         *per_hydro_hours.entry(obs.hydro_id.0).or_insert(0.0) += obs_hours;
     }
 
-    // The weight is the fraction of the season period covered by observations.
-    // All hydros observe the same calendar period, so the max per-hydro total
-    // is the canonical coverage. Summing across hydros would inflate the weight
-    // linearly with hydro count (N * h/H instead of h/H).
+    // max per-hydro total, not the sum: all hydros observe the same period, so
+    // summing would inflate the weight linearly with hydro count.
     let total_obs_hours = per_hydro_hours.values().copied().fold(0.0_f64, f64::max);
     let weight_seed = total_obs_hours / total_period_hours;
 
@@ -142,7 +110,6 @@ pub(crate) fn month_exclusive_end(year: i32, month: u32) -> NaiveDate {
     } else {
         (year, month + 1)
     };
-    // next_month is always in 1..=12 and day 1 always exists.
     NaiveDate::from_ymd_opt(next_year, next_month, 1)
         .unwrap_or_else(|| unreachable!("next-month date is always valid"))
 }
@@ -153,23 +120,17 @@ pub(crate) fn month_total_hours(year: i32, month: u32) -> f64 {
     let first = NaiveDate::from_ymd_opt(year, month, 1)
         .unwrap_or_else(|| unreachable!("month-start date is always valid"));
     let next = month_exclusive_end(year, month);
-    // num_days() returns an i64; days in a month always fit in u32.
     let days = u32::try_from((next - first).num_days())
         .unwrap_or_else(|_| unreachable!("days in a month always fit in u32"));
     f64::from(days) * 24.0
 }
 
-/// Determine the calendar year for the lag period of a stage in a `Monthly`
-/// cycle.
+/// Determine the calendar year whose occurrence of `season_month` overlaps the
+/// stage interval `[start_date, end_date)`, in a `Monthly` cycle.
 ///
-/// The stage's `season_id` maps to a calendar month via `season_def.month_start`.
-/// We find which year's occurrence of that month overlaps the stage interval
-/// `[start_date, end_date)`.
-///
-/// Two candidates are checked in order: `start_date.year()` (the common case
-/// and the pre-study case where the stage starts one month before its season),
-/// then `start_date.year() - 1` (for a December-season stage starting in
-/// January of the next year).
+/// Candidates are checked in order: `start_date.year()`, then the previous year
+/// (a December-season stage starting in January), then the next year as a
+/// fallback against unexpected gaps.
 pub(crate) fn find_season_year_monthly(
     start_date: NaiveDate,
     end_date: NaiveDate,
@@ -180,12 +141,10 @@ pub(crate) fn find_season_year_monthly(
         .unwrap_or_else(|| unreachable!("season month is always valid"));
     let period_end = month_exclusive_end(candidate_year, season_month);
 
-    // Overlap condition: stage_start < period_end AND stage_end > period_start.
     if start_date < period_end && end_date > period_start {
         return candidate_year;
     }
 
-    // Try previous year (December-season stage starting in January).
     let prev_year = candidate_year - 1;
     let period_start_prev = NaiveDate::from_ymd_opt(prev_year, season_month, 1)
         .unwrap_or_else(|| unreachable!("season month with previous year is always valid"));
@@ -195,7 +154,6 @@ pub(crate) fn find_season_year_monthly(
         return prev_year;
     }
 
-    // Fallback: try next year (guards against unexpected gaps).
     candidate_year + 1
 }
 
@@ -235,7 +193,6 @@ pub(crate) fn compute_monthly_transition(
     let days_current = days_in_period(stage.start_date, stage.end_date, period_start, period_end);
     let accumulate_weight = f64::from(days_current) * 24.0 / period_hours;
 
-    // Spillover: days that fall within the next calendar month.
     let next_period_start = period_end;
     let (next_year, next_month) = if season_month == 12 {
         (year + 1, 1u32)
@@ -257,7 +214,6 @@ pub(crate) fn compute_monthly_transition(
         0.0
     };
 
-    // finalize_period: true when no later stage has the same (season_id, year).
     let season_id = season_def.id;
     let is_last_in_period = all_stages
         .iter()
@@ -278,38 +234,18 @@ pub(crate) fn compute_monthly_transition(
 }
 
 /// Precompute one [`StageLagTransition`] per stage from stage date boundaries
-/// and season definitions.
+/// and season definitions; consumed read-only on the forward-pass hot path.
 ///
-/// This function runs once at setup time. The resulting `Vec<StageLagTransition>`
-/// is indexed by stage index and consumed read-only on the forward-pass hot path,
-/// eliminating all calendar arithmetic from inner solver loops.
-///
-/// # Behavior by cycle type
-///
-/// - **`Monthly`**: lag period boundaries are calendar month boundaries. Each
-///   `SeasonDefinition.month_start` identifies the month.
-/// - **`Weekly`** and **`Custom`**: not yet implemented; returns zero-weight
-///   no-op transitions for all stages.
-///
-/// # No-op stages
-///
-/// Stages with `season_id = None` produce a fully zeroed/false
-/// `StageLagTransition` including all downstream fields.
+/// Only `Monthly` is implemented; `Weekly`/`Custom`, a `season_id = None` stage,
+/// or any input outside a season produce a fully zeroed no-op transition.
 ///
 /// # Downstream accumulation
 ///
-/// When `downstream_par_order > 0`, the function detects a resolution
-/// transition (stages whose `season_id` crosses from the monthly range into the
-/// quarterly range, i.e. `season_id >= 12`) and computes downstream fields for
-/// the `downstream_par_order * 3` monthly stages immediately before the
-/// transition. Passing `0` disables downstream computation entirely (all
-/// downstream fields are default).
-///
-/// # Infallible
-///
-/// Invalid inputs (stages outside any season, empty season maps) produce
-/// zero-weight entries. Upstream validation in `cobre-io` rejects structurally
-/// invalid inputs before this function is called.
+/// `downstream_par_order > 0` detects a resolution transition (first stage whose
+/// `season_id >= 12`, i.e. crosses from the monthly into the quarterly range) and
+/// fills downstream fields for the `downstream_par_order * 3` monthly stages
+/// before it. Passing `0` leaves every downstream field at its default — the
+/// downstream fields are inert unless populated here.
 #[must_use]
 pub fn precompute_stage_lag_transitions(
     stages: &[Stage],
@@ -340,8 +276,6 @@ pub fn precompute_stage_lag_transitions(
 
             match season_map.cycle_type {
                 SeasonCycleType::Monthly => compute_monthly_transition(stage, season_def, stages),
-                // Weekly and Custom cycle types will be implemented when the
-                // corresponding solver support is added.
                 SeasonCycleType::Weekly | SeasonCycleType::Custom => noop,
             }
         })
@@ -354,31 +288,24 @@ pub fn precompute_stage_lag_transitions(
     result
 }
 
-/// Detect a resolution transition in `stages` and populate downstream
-/// accumulation fields on the pre-transition window entries in `transitions`.
+/// Populate downstream accumulation fields on the pre-transition window entries
+/// in `transitions`.
 ///
-/// A transition is detected as the first stage whose `season_id` is `>= 12`
-/// (quarterly range). The pre-transition window covers the
-/// `downstream_par_order * 3` monthly stages immediately before that point.
-///
-/// For each stage in the window the downstream weights are computed using
-/// quarterly calendar boundaries: months 1–3 → Q1, 4–6 → Q2, 7–9 → Q3,
-/// 10–12 → Q4. `downstream_finalize` is set on the last monthly stage of
-/// each calendar quarter within the window.
-///
-/// No-ops (no transition found, window is empty, or `downstream_par_order`
-/// is 0) leave `transitions` unchanged.
+/// The transition is the first stage whose `season_id >= 12` (quarterly range);
+/// the window is the `downstream_par_order * 3` monthly stages before it. Weights
+/// use quarterly calendar boundaries (months 1–3 → Q1, 4–6 → Q2, 7–9 → Q3,
+/// 10–12 → Q4); `downstream_finalize` is set on the last monthly stage of each
+/// calendar quarter within the window. No transition / empty window leaves
+/// `transitions` unchanged.
 fn compute_downstream_transitions(
     stages: &[Stage],
     transitions: &mut [StageLagTransition],
     downstream_par_order: usize,
 ) {
-    // Find the index of the first quarterly stage (season_id >= 12).
     let Some(transition_idx) = stages
         .iter()
         .position(|s| s.season_id.is_some_and(|id| id >= 12))
     else {
-        // No quarterly stage found — nothing to do.
         return;
     };
 
@@ -391,19 +318,15 @@ fn compute_downstream_transitions(
             continue;
         };
 
-        // Map the monthly season_id (0-based: 0=Jan … 11=Dec) to a
-        // 1-based calendar month for date arithmetic.
+        // season_id is 0-based (0=Jan … 11=Dec); + 1 makes a 1-based calendar month.
         let month = u32::try_from(season_id % 12 + 1)
             .unwrap_or_else(|_| unreachable!("season_id % 12 always fits in u32"));
 
-        // Determine which calendar quarter this month belongs to and
-        // compute its start/end boundaries.
         let quarter_start_month: u32 = ((month - 1) / 3) * 3 + 1; // 1, 4, 7, or 10
-        let quarter_end_month: u32 = quarter_start_month + 2; // last month of quarter
+        let quarter_end_month: u32 = quarter_start_month + 2;
 
         let year = find_season_year_monthly(stage.start_date, stage.end_date, month);
 
-        // Compute the quarter's total hours (sum of the 3 constituent months).
         let quarter_total_hours: f64 = (quarter_start_month..=quarter_end_month)
             .map(|m| {
                 let (y, mo) = if m > 12 {
@@ -415,7 +338,6 @@ fn compute_downstream_transitions(
             })
             .sum();
 
-        // Period boundaries for the entire quarter.
         let quarter_period_start = NaiveDate::from_ymd_opt(year, quarter_start_month, 1)
             .unwrap_or_else(|| unreachable!("quarter start date is always valid"));
         let last_quarter_month_end = month_exclusive_end(year, quarter_end_month);
@@ -428,7 +350,6 @@ fn compute_downstream_transitions(
         );
         let downstream_accumulate_weight = f64::from(days_current) * 24.0 / quarter_total_hours;
 
-        // Spillover into the next quarter.
         let next_quarter_start_month = quarter_end_month + 1; // may be 13 → wrap to next year
         let (next_q_year, next_q_start_month) = if next_quarter_start_month > 12 {
             (year + 1, next_quarter_start_month - 12)
@@ -466,8 +387,6 @@ fn compute_downstream_transitions(
             0.0
         };
 
-        // downstream_finalize: true when this is the last monthly stage of
-        // its calendar quarter within the pre-transition window.
         let is_last_of_quarter = stages[stage_idx + 1..transition_idx].iter().all(|later| {
             let later_month = later.season_id.map_or(u32::MAX, |id| {
                 u32::try_from(id % 12 + 1).unwrap_or(u32::MAX)
@@ -482,44 +401,22 @@ fn compute_downstream_transitions(
         transitions[stage_idx].downstream_finalize = is_last_of_quarter;
     }
 
-    // Mark the transition stage (first quarterly stage) for lag-state rebuild.
-    // At this stage, the primary lag state is discarded and rebuilt from the
-    // completed quarterly lags in the downstream ring buffer.
+    // rebuild_from_downstream: at the transition the primary lag state is
+    // discarded and rebuilt from the completed quarterly lags in the downstream
+    // ring buffer.
     if transition_idx < transitions.len() {
         transitions[transition_idx].rebuild_from_downstream = true;
     }
 }
 
-/// Precompute a noise group ID for each study stage.
-///
-/// Stages sharing the same `(season_id, year)` pair are assigned the same
-/// group ID, where `year` is derived from `stage.start_date.year()`. This
-/// allows the forward sampler to draw a single noise sample per group and
-/// broadcast it to all stages in that group (noise-group sharing — weekly stages with
+/// Precompute a noise group ID for each study stage, so the forward sampler can
+/// draw one noise sample per group and broadcast it (weekly stages sharing
 /// monthly PAR noise).
 ///
-/// # Assignment rules
-///
-/// - Stages with `season_id = Some(id)` are grouped by the key
-///   `(id, start_date.year())`. The first stage encountered for a new key
-///   defines that key's group ID.
-/// - Stages with `season_id = None` each receive a unique group ID. No
-///   sharing occurs for unassigned stages.
-/// - Group IDs are consecutive integers starting from 0. The first distinct
-///   key encountered in stage-index order receives group 0.
-///
-/// # Backward compatibility
-///
-/// For uniform monthly studies — where every stage has a unique
-/// `(season_id, year)` pair — the returned vector is `[0, 1, 2, ..., n-1]`.
-/// This is equivalent to the existing per-stage indexing used by
-/// `derive_forward_seed`, so no behavioural change is triggered until the
-/// caller switches to `derive_forward_seed_grouped`.
-///
-/// # Infallible
-///
-/// Every stage receives exactly one group ID. The returned `Vec<u32>` has the
-/// same length as `stages`.
+/// Stages with `season_id = Some(id)` group by `(id, start_date.year())`,
+/// consecutive IDs from 0 in stage-index order of first occurrence; a
+/// `season_id = None` stage each receives its own unique ID (no sharing). For a
+/// uniform monthly study the result is `[0, 1, …, n-1]`.
 #[must_use]
 pub fn precompute_noise_groups(stages: &[Stage]) -> Vec<u32> {
     let mut group_map: HashMap<(usize, i32), u32> = HashMap::new();
@@ -1112,7 +1009,6 @@ mod tests {
         let season_map = monthly_season_map();
         let stage = make_stage(0, d(2026, 4, 4), d(2026, 5, 2), Some(3));
         let hydros = vec![make_hydro(0)];
-        // hydro_id = 99 is not in the registry.
         let obs = vec![make_observation(99, 2026, 4, 1, 4, 4, 500.0)];
 
         let seed = compute_recent_observation_seed(&obs, &stage, &season_map, &hydros);

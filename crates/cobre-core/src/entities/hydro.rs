@@ -1,15 +1,8 @@
 //! Hydro plant entity — reservoir, turbine, spillage, and cascade topology.
-//!
-//! A `Hydro` represents a hydroelectric power plant with a reservoir. Hydro plants
-//! have a generation model (constant productivity for optimization), reservoir storage
-//! bounds, turbine and spillage variables, and may participate in a cascade topology
-//! via a downstream reference.
 
 use crate::EntityId;
 
 /// A single point on the piecewise tailrace curve.
-///
-/// Relates total outflow to downstream water level (tailrace height).
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TailracePoint {
@@ -21,8 +14,7 @@ pub struct TailracePoint {
 
 /// A diversion channel that routes water from this plant to a downstream plant.
 ///
-/// Diverted flow bypasses turbines and spillways and is routed directly to
-/// the downstream reservoir identified by `downstream_id`.
+/// Diverted flow bypasses turbines and spillways.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DiversionChannel {
@@ -32,26 +24,40 @@ pub struct DiversionChannel {
     pub max_flow_m3s: f64,
 }
 
-/// Configuration for reservoir filling operations.
+/// Configuration for a commissioned reservoir that impounds water toward its
+/// dead volume before it begins generating.
 ///
-/// Filling is an operational mode where a reservoir is intentionally filled
-/// from a fixed inflow source (e.g., diversion works) during a defined stage
-/// window.
+/// A hydro carrying a `FillingConfig` (paired with [`Hydro::entry_stage_id`])
+/// passes through three phases keyed on the study `stage.id` being evaluated
+/// (the stage's own id, not [`Hydro::id`]):
+///
+/// - `PreFilling` (`start_stage_id > 0` and `id < start_stage_id`): the dam
+///   does not exist yet; the river flows past its site.
+/// - `Filling` (`start_stage_id <= id < entry_stage_id`): the reservoir impounds
+///   water toward the dead volume `min_storage_hm3` but does not yet generate.
+/// - `Operating` (`id >= entry_stage_id`): a normal plant.
+///
+/// The filling target is the dead volume `min_storage_hm3`; there is no separate
+/// target field. A hydro with no `FillingConfig` is Operating at every stage.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FillingConfig {
-    /// Stage index at which filling begins (inclusive).
+    /// Stage id (inclusive) at which the Filling phase begins.
+    ///
+    /// `== 0`: no `PreFilling`; the stage-0 level is seeded by
+    /// `InitialConditions::filling_storage` (a partial level in
+    /// `[0, min_storage_hm3)`). `> 0`: `PreFilling` seeds an empty pit (`0`),
+    /// frozen until this stage.
     pub start_stage_id: i32,
-    /// Constant inflow applied during filling \[m³/s\].
-    pub filling_inflow_m3s: f64,
+    /// Per-stage minimum accumulation rate during Filling \[m³/s\]. Validated `>= 0`.
+    ///
+    /// A storage floor the reservoir must clear, **not** an inflow and **not** a
+    /// cap: it neither alters the natural-inflow RHS nor bounds what is impounded.
+    pub filling_min_rate_m3s: f64,
 }
 
-/// Resolved penalty costs for a hydro plant.
-///
-/// All penalties are pre-resolved from the three-tier cascade (global → entity → stage).
-/// A `HydroPenalties` instance always contains final, ready-to-use values.
-///
-/// Penalties are resolved via the three-tier cascade (global → entity → stage).
+/// Penalty costs for a hydro plant, pre-resolved from the global → entity → stage
+/// cascade to final, ready-to-use values.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HydroPenalties {
@@ -59,9 +65,7 @@ pub struct HydroPenalties {
     pub spillage_cost: f64,
     /// Penalty per m³/s of water diverted beyond diversion channel limits \[$/m³/s\].
     pub diversion_cost: f64,
-    /// Penalty per `MWh` of turbined generation, applied to the turbine
-    /// column in the LP objective for every hydro regardless of production
-    /// model \[$/`MWh`\].
+    /// Penalty per `MWh` of turbined generation \[$/`MWh`\].
     pub turbined_cost: f64,
     /// Penalty per hm³ of storage below minimum bound \[$/hm³\].
     pub storage_violation_below_cost: f64,
@@ -94,65 +98,40 @@ pub struct HydroPenalties {
 
 /// Production function model selector for a hydro plant.
 ///
-/// This enum identifies which generation model applies to a plant. It is a pure
-/// selector: it carries no numeric coefficients. The productivity coefficient
-/// (MW per m³/s) is supplied externally through
-/// `system/hydro_production_models.json`, not by the variant itself.
-///
-/// Selecting the correct variant determines which equations the solver uses to
-/// relate turbined flow to electrical power output.
+/// A pure selector carrying no numeric coefficients: the productivity coefficient
+/// is supplied externally via `system/hydro_production_models.json`, never by the
+/// variant itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum HydroGenerationModel {
     /// Constant power per unit flow, independent of reservoir head.
-    ///
-    /// The linearization equation is `power_mw = ρ_eq · turbined_m3s`, where `ρ_eq`
-    /// is the equivalent productivity coefficient supplied by
-    /// `system/hydro_production_models.json`, NOT by this variant.
     ConstantProductivity,
-    /// Head-dependent productivity linearized around an operating point.
-    ///
-    /// The linearization is computed from the current head at the start of each
-    /// time step. The nominal productivity coefficient used for the linearization
-    /// is supplied by `system/hydro_production_models.json`, NOT by this variant.
+    /// Head-dependent productivity linearized around the head at each time step.
     LinearizedHead,
     /// Full production function with head-area-productivity tables (FPHA model).
     ///
-    /// Requires forebay and tailrace elevation tables for high-fidelity head
-    /// effects. The equivalent productivity coefficient is derived from geometric
-    /// data and is not stored on this variant.
+    /// Requires forebay and tailrace elevation tables for high-fidelity head effects.
     Fpha,
 }
 
-/// Downstream water level computation model.
-///
-/// Models the relationship between total outflow and tailrace elevation,
-/// which affects net head and therefore turbine productivity.
+/// Downstream water level (tailrace elevation) as a function of total outflow.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TailraceModel {
     /// Polynomial tailrace curve: `height = a₀ + a₁·Q + a₂·Q² + …`
-    ///
-    /// `coefficients[i]` is the coefficient for `Q^i`. The vector must have
-    /// at least one element.
     Polynomial {
-        /// Polynomial coefficients in ascending power order \[m, m/(m³/s), …\].
+        /// Coefficients for `Q^i` in ascending power order; must be non-empty.
         coefficients: Vec<f64>,
     },
     /// Piecewise-linear tailrace curve defined by (outflow, height) breakpoints.
-    ///
-    /// The solver interpolates linearly between adjacent [`TailracePoint`] entries.
-    /// Points must be sorted by ascending `outflow_m3s`.
     Piecewise {
-        /// Breakpoints defining the piecewise-linear curve.
+        /// Breakpoints, sorted by ascending `outflow_m3s`.
         points: Vec<TailracePoint>,
     },
 }
 
 /// Model for hydraulic losses in the penstock and draft tube.
-///
-/// Hydraulic losses reduce the effective head available at the turbine.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum HydraulicLossesModel {
@@ -169,8 +148,6 @@ pub enum HydraulicLossesModel {
 }
 
 /// Turbine efficiency model.
-///
-/// Efficiency scales the power output from the hydraulic power available.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum EfficiencyModel {
@@ -183,13 +160,10 @@ pub enum EfficiencyModel {
 
 /// Hydroelectric power plant with reservoir storage and cascade topology.
 ///
-/// A `Hydro` plant controls a reservoir and operates turbines and spillways.
-/// Multiple plants may form a cascade via `downstream_id` references — water
-/// released (turbined + spilled) from an upstream plant flows into the
-/// downstream plant's reservoir.
+/// Plants form a cascade via `downstream_id`: water released (turbined + spilled)
+/// from an upstream plant flows into the downstream plant's reservoir.
 ///
-/// Source: system/hydro.json. See Input System Entities SS3 and
-/// Internal Structures §1.9.4.
+/// See Input System Entities SS3 and Internal Structures §1.9.4.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Hydro {
@@ -222,14 +196,9 @@ pub struct Hydro {
     pub max_turbined_m3s: f64,
     /// Specific productivity `ρ_esp` \[MW / ((m³/s) · m)\].
     ///
-    /// Used to derive the equivalent productivity `ρ_eq` = `ρ_esp` · `h_eq(V_ref, Q_ref)`
-    /// for FPHA hydros during energy-conversion preprocessing. Non-FPHA hydros
-    /// (`ConstantProductivity`, `LinearizedHead`) ignore this field because their
-    /// productivity coefficient is supplied via `system/hydro_production_models.json`.
-    ///
-    /// FPHA hydros may instead supply `ρ_eq` directly through
-    /// `system/hydro_energy_productivity.parquet`. If neither is supplied,
-    /// energy-conversion preprocessing rejects the case.
+    /// FPHA hydros derive `ρ_eq` = `ρ_esp` · `h_eq(V_ref, Q_ref)` from this, or may
+    /// supply `ρ_eq` directly via `system/hydro_energy_productivity.parquet`; if
+    /// neither is supplied the case is rejected. Non-FPHA hydros ignore this field.
     #[cfg_attr(feature = "serde", serde(default))]
     pub specific_productivity_mw_per_m3s_per_m: Option<f64>,
     /// Minimum electrical generation \[MW\].
@@ -381,7 +350,7 @@ mod tests {
             }),
             filling: Some(FillingConfig {
                 start_stage_id: 48,
-                filling_inflow_m3s: 100.0,
+                filling_min_rate_m3s: 100.0,
             }),
             penalties: penalties_all(1.0),
         };
@@ -394,7 +363,6 @@ mod tests {
         assert!(hydro.hydraulic_losses.is_some());
         assert!(hydro.efficiency.is_some());
         assert!(hydro.evaporation_coefficients_mm.is_some());
-        // The fixed-size array always has exactly 12 elements.
         assert_eq!(hydro.evaporation_coefficients_mm.map(|a| a.len()), Some(12));
         assert!(hydro.evaporation_reference_volumes_hm3.is_some());
         assert_eq!(
@@ -462,11 +430,11 @@ mod tests {
     fn test_filling_config() {
         let config = FillingConfig {
             start_stage_id: 48,
-            filling_inflow_m3s: 100.0,
+            filling_min_rate_m3s: 100.0,
         };
 
         assert_eq!(config.start_stage_id, 48);
-        assert!((config.filling_inflow_m3s - 100.0).abs() < f64::EPSILON);
+        assert!((config.filling_min_rate_m3s - 100.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -552,7 +520,7 @@ mod tests {
             }),
             filling: Some(FillingConfig {
                 start_stage_id: 48,
-                filling_inflow_m3s: 100.0,
+                filling_min_rate_m3s: 100.0,
             }),
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
@@ -594,7 +562,7 @@ mod tests {
             hydro.evaporation_reference_volumes_hm3.map(|a| a.len()),
             Some(12)
         );
-        // Spot-check seasonal values: January and June.
+        // Index 0 = January, index 5 = June.
         assert!(
             (hydro.evaporation_reference_volumes_hm3.unwrap()[0] - 12_000.0).abs() < f64::EPSILON
         );
@@ -613,7 +581,7 @@ mod tests {
         let parsed: Hydro = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.specific_productivity_mw_per_m3s_per_m, None);
 
-        // Field is also `None` when the JSON omits the key entirely (serde(default)).
+        // serde(default): a key omitted entirely also deserializes to None.
         let json_without_key = json.replace(",\"specific_productivity_mw_per_m3s_per_m\":null", "");
         let parsed_missing: Hydro =
             serde_json::from_str(&json_without_key).expect("deserialize without key");
@@ -636,12 +604,10 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn hydro_generation_model_serde_tagged_form() {
-        // Unit-like enum with rename_all = "snake_case" serializes as a bare
-        // snake_case string. Internal tagging (#[serde(tag = "model")]) is not
-        // used because postcard (used for MPI broadcast) does not support
-        // internally-tagged enums. The hydros.json input format keeps its
-        // {"model": "..."} object shape via the separate `RawGeneration` mirror
-        // in cobre-io that owns the JSON contract.
+        // Serializes as a bare snake_case string, not internally-tagged
+        // (#[serde(tag = "model")]): postcard, used for MPI broadcast, does not
+        // support internally-tagged enums. The {"model": "..."} input shape lives
+        // on the `RawGeneration` mirror in cobre-io that owns the JSON contract.
         let cp_json =
             serde_json::to_string(&HydroGenerationModel::ConstantProductivity).expect("serialize");
         assert_eq!(cp_json, r#""constant_productivity""#);

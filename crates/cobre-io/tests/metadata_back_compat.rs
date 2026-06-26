@@ -1,14 +1,9 @@
-//! Frozen-fixture back-compatibility and forward-roundtrip tests for the
-//! extended output metadata structs.
+//! Back-compatibility and forward-roundtrip tests for the output metadata structs.
 //!
-//! These tests guard the additive-evolution contract for `training/metadata.json`
-//! and `simulation/metadata.json`: new fields must be `#[serde(default)]` so that
-//! output directories produced by an older cobre still deserialize cleanly.
-//!
-//! The legacy fixtures here are **hand-frozen JSON string literals** that omit the
-//! newer keys (`bounds`, `solve_stats`, `cost`, and `distribution.hosts`). They are
-//! deliberately NOT built by serializing a current struct — a struct-built fixture
-//! always carries every field and therefore could never catch a field that was
+//! Contract: new fields on `training/metadata.json` and `simulation/metadata.json`
+//! must be `#[serde(default)]` so older output directories still deserialize. The
+//! legacy fixtures are hand-frozen JSON literals, NOT struct-serialized — a
+//! struct-built fixture carries every field and so could never catch a field
 //! accidentally made required.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
@@ -23,13 +18,12 @@ use cobre_io::{
 
 // ── Frozen legacy fixtures ─────────────────────────────────────────────────────
 //
-// These literals represent the PRE-CHANGE shapes of the metadata files. They must
-// remain verbatim and must NOT contain the keys `bounds`, `solve_stats`, `cost`,
-// or `hosts`. The dedicated `*_omits_new_keys` tests below assert this property so
-// that an accidental edit cannot quietly defeat the back-compat guarantee.
+// These literals must NOT contain the keys `bounds`, `solve_stats`, `cost`, or
+// `hosts`; adding one defeats the back-compat guarantee. The `*_omits_new_keys`
+// tests below guard this.
 
-/// Legacy `training/metadata.json` as produced before the `bounds`, `solve_stats`,
-/// and `distribution.hosts` fields existed.
+/// Legacy `training/metadata.json` without the `bounds`, `solve_stats`, and
+/// `distribution.hosts` fields.
 const LEGACY_TRAINING_JSON: &str = r#"{
   "cobre_version": "0.1.0",
   "hostname": "legacy-host",
@@ -76,8 +70,8 @@ const LEGACY_TRAINING_JSON: &str = r#"{
   }
 }"#;
 
-/// Legacy `simulation/metadata.json` as produced before the `cost`, `solve_stats`,
-/// and `distribution.hosts` fields existed.
+/// Legacy `simulation/metadata.json` without the `cost`, `solve_stats`, and
+/// `distribution.hosts` fields.
 const LEGACY_SIM_JSON: &str = r#"{
   "cobre_version": "0.1.0",
   "hostname": "legacy-host",
@@ -101,8 +95,7 @@ const LEGACY_SIM_JSON: &str = r#"{
   }
 }"#;
 
-/// Multi-node `DistributionInfo` fixture with a two-host `hosts` array. Frozen to
-/// pin the on-disk shape of per-host rank assignments.
+/// Frozen multi-node `DistributionInfo` pinning the on-disk per-host rank shape.
 const MULTI_NODE_DISTRIBUTION_JSON: &str = r#"{
   "backend": "mpi",
   "world_size": 8,
@@ -125,12 +118,10 @@ fn legacy_training_json_deserializes_with_defaults() {
     let decoded: TrainingMetadata = serde_json::from_str(LEGACY_TRAINING_JSON)
         .expect("legacy training metadata must still deserialize");
 
-    // `bounds` defaults to zeroed lower bound and absent upper bounds.
     assert_eq!(decoded.bounds.final_lower_bound, 0.0);
     assert_eq!(decoded.bounds.final_upper_bound, None);
     assert_eq!(decoded.bounds.final_upper_bound_std, None);
 
-    // `solve_stats` defaults to all-`None`.
     assert_eq!(decoded.solve_stats.total_lp_solves, None);
     assert_eq!(decoded.solve_stats.first_try, None);
     assert_eq!(decoded.solve_stats.retried, None);
@@ -139,16 +130,12 @@ fn legacy_training_json_deserializes_with_defaults() {
     assert_eq!(decoded.solve_stats.backward_solve_seconds, None);
     assert_eq!(decoded.solve_stats.parallelism, None);
 
-    // `distribution.hosts` defaults to an empty vector.
     assert!(decoded.distribution.hosts.is_empty());
 
-    // `setup` and `production_fit_deviation` are optional sections that default to
-    // absent — this fixture is the regression gate that catches an accidental
-    // `#[serde(default)]` removal on either.
+    // Regression gate for an accidental `#[serde(default)]` removal on either optional section.
     assert!(decoded.setup.is_none());
     assert!(decoded.production_fit_deviation.is_none());
 
-    // Sanity: pre-existing fields still load correctly.
     assert_eq!(decoded.iterations.completed, 100);
     assert_eq!(decoded.row_pool.total_generated, 1_250_000);
 }
@@ -158,10 +145,8 @@ fn legacy_simulation_json_deserializes_with_defaults() {
     let decoded: SimulationMetadata = serde_json::from_str(LEGACY_SIM_JSON)
         .expect("legacy simulation metadata must still deserialize");
 
-    // `cost` defaults to `None`.
     assert!(decoded.cost.is_none());
 
-    // `solve_stats` defaults to all-`None`.
     assert_eq!(decoded.solve_stats.total_lp_solves, None);
     assert_eq!(decoded.solve_stats.first_try, None);
     assert_eq!(decoded.solve_stats.retried, None);
@@ -169,10 +154,8 @@ fn legacy_simulation_json_deserializes_with_defaults() {
     assert_eq!(decoded.solve_stats.solve_seconds, None);
     assert_eq!(decoded.solve_stats.parallelism, None);
 
-    // `distribution.hosts` defaults to an empty vector.
     assert!(decoded.distribution.hosts.is_empty());
 
-    // Sanity: pre-existing fields still load correctly.
     assert_eq!(decoded.scenarios.total, 100);
     assert_eq!(decoded.scenarios.completed, 100);
 }
@@ -379,7 +362,6 @@ fn training_metadata_new_fields_survive_write_read_roundtrip() {
     write_training_metadata(&path, &original).expect("write must succeed");
     let decoded = read_training_metadata(&path).expect("read must succeed");
 
-    // `bounds.*` survive.
     assert_eq!(
         decoded.bounds.final_lower_bound,
         original.bounds.final_lower_bound
@@ -393,7 +375,6 @@ fn training_metadata_new_fields_survive_write_read_roundtrip() {
         original.bounds.final_upper_bound_std
     );
 
-    // training `solve_stats.*` survive.
     assert_eq!(
         decoded.solve_stats.total_lp_solves,
         original.solve_stats.total_lp_solves
@@ -417,14 +398,12 @@ fn training_metadata_new_fields_survive_write_read_roundtrip() {
         original.solve_stats.parallelism
     );
 
-    // `distribution.hosts` survive with their rank lists.
     assert_eq!(decoded.distribution.hosts.len(), 2);
     assert_eq!(decoded.distribution.hosts[0].hostname, "node01");
     assert_eq!(decoded.distribution.hosts[0].ranks, vec![0, 1, 2, 3]);
     assert_eq!(decoded.distribution.hosts[1].hostname, "node02");
     assert_eq!(decoded.distribution.hosts[1].ranks, vec![4, 5, 6, 7]);
 
-    // `production_fit_deviation.*` survive, worst entry field-for-field.
     let summary = decoded
         .production_fit_deviation
         .expect("deviation summary must survive round-trip");
@@ -446,7 +425,6 @@ fn simulation_metadata_new_fields_survive_write_read_roundtrip() {
     write_simulation_metadata(&path, &original).expect("write must succeed");
     let decoded = read_simulation_metadata(&path).expect("read must succeed");
 
-    // `cost.*` survive.
     let original_cost = original.cost.expect("fixture must populate cost");
     let decoded_cost = decoded.cost.expect("cost must survive roundtrip");
     assert_eq!(decoded_cost.mean_cost, original_cost.mean_cost);
@@ -454,7 +432,6 @@ fn simulation_metadata_new_fields_survive_write_read_roundtrip() {
     assert_eq!(decoded_cost.cvar, original_cost.cvar);
     assert_eq!(decoded_cost.cvar_alpha, original_cost.cvar_alpha);
 
-    // simulation `solve_stats.*` survive.
     assert_eq!(
         decoded.solve_stats.total_lp_solves,
         original.solve_stats.total_lp_solves
@@ -474,7 +451,6 @@ fn simulation_metadata_new_fields_survive_write_read_roundtrip() {
         original.solve_stats.parallelism
     );
 
-    // `distribution.hosts` survive with their rank lists.
     assert_eq!(decoded.distribution.hosts.len(), 2);
     assert_eq!(decoded.distribution.hosts[0].hostname, "node01");
     assert_eq!(decoded.distribution.hosts[0].ranks, vec![0, 1, 2, 3]);

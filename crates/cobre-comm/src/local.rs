@@ -1,19 +1,9 @@
 //! Local (single-process) communication backend.
 //!
-//! `LocalBackend` is always available without any feature flags. It implements
-//! [`Communicator`](crate::Communicator) and [`LocalCommunicator`](crate::LocalCommunicator)
-//! with identity copy semantics for data-moving operations and no-op semantics for
-//! synchronization operations, formalizing single-process execution mode:
-//!
-//! - `rank()` always returns `0`.
-//! - `size()` always returns `1`.
-//! - `allgatherv` copies `send` to `recv[displs[0]..displs[0]+counts[0]]` (identity copy).
-//! - `allreduce` copies `send` to `recv` unchanged (reduction of a single operand is identity).
-//! - `broadcast` is a no-op (data is already at the only rank).
-//! - `barrier` is a no-op (nothing to synchronize with a single rank).
-//!
-//! This backend imposes zero overhead and zero external dependencies. As a zero-sized
-//! type (ZST), it occupies zero bytes at runtime and has no construction cost.
+//! `LocalBackend` is a zero-sized type, always available without feature flags.
+//! It implements [`Communicator`](crate::Communicator) and
+//! [`LocalCommunicator`](crate::LocalCommunicator) with identity-copy semantics
+//! for data-moving operations and no-op semantics for synchronization.
 
 use crate::{CommData, CommError, Communicator, ReduceOp};
 
@@ -25,9 +15,8 @@ use crate::traits::{LocalCommKind, LocalCommunicator};
 
 /// Single-process communication backend with identity collective semantics.
 ///
-/// Zero-sized type with no runtime state. All collective operations are
-/// identity copies or no-ops, compiling to zero instructions after inlining
-/// in single-feature builds.
+/// Zero-sized type with no runtime state; collectives are identity copies or
+/// no-ops, compiling to zero instructions after inlining.
 ///
 /// # Examples
 ///
@@ -47,9 +36,7 @@ use crate::traits::{LocalCommKind, LocalCommunicator};
 pub struct LocalBackend;
 
 impl Communicator for LocalBackend {
-    /// Copies `send` to `recv[displs[0]..displs[0]+counts[0]]`.
-    ///
-    /// With a single rank, `allgatherv` is an identity copy.
+    /// Identity copy of `send` into `recv[displs[0]..displs[0]+counts[0]]`.
     ///
     /// # Errors
     ///
@@ -99,9 +86,7 @@ impl Communicator for LocalBackend {
         Ok(())
     }
 
-    /// Copies `send` to `recv` unchanged.
-    ///
-    /// With a single rank, reduction of a single operand is the identity.
+    /// Identity copy of `send` into `recv` (single-operand reduction).
     ///
     /// # Errors
     ///
@@ -162,22 +147,9 @@ impl Communicator for LocalBackend {
     }
 }
 
-/// Shared memory region backed by a heap-allocated [`Vec<T>`].
-///
-/// Used by backends without true intra-node shared memory (local, tcp).
-/// Lifecycle phases from the `SharedRegion` trait degenerate to simple
-/// `Vec` operations:
-///
-/// - **Allocation**: `Vec` is allocated with `count` zero-initialized elements.
-/// - **Population**: [`as_mut_slice`](HeapRegion::as_mut_slice) returns the full slice.
-/// - **Synchronization**: [`fence`](HeapRegion::fence) is a no-op (single process).
-/// - **Read-only**: [`as_slice`](HeapRegion::as_slice) returns the full slice.
-/// - **Deallocation**: inner `Vec<T>` is dropped via standard RAII.
-///
-/// # Thread safety
-///
-/// `HeapRegion<T>` is `Send + Sync` when `T: Send + Sync`, which is guaranteed
-/// by the `CommData` bound.
+/// Shared memory region backed by a heap-allocated [`Vec<T>`], for backends
+/// without true intra-node shared memory; [`SharedRegion`] phases degenerate to
+/// plain `Vec` operations and `fence` is a no-op.
 ///
 /// Only available with the `shared-memory` Cargo feature.
 #[cfg(feature = "shared-memory")]
@@ -187,11 +159,8 @@ pub struct HeapRegion<T: CommData> {
 
 #[cfg(feature = "shared-memory")]
 impl<T: CommData> HeapRegion<T> {
-    /// Construct a `HeapRegion` with `count` zero-initialized elements.
-    ///
-    /// Used by backends other than `LocalBackend` (e.g., `FerrompiBackend`)
-    /// that reuse `HeapRegion` as their `Region<T>` type but cannot access the
-    /// private `data` field directly.
+    /// Construct a `HeapRegion` with `count` zero-initialized elements, for
+    /// backends that reuse it as their `Region<T>` but cannot reach `data`.
     #[cfg(feature = "mpi")]
     pub(crate) fn new(count: usize) -> Self {
         Self {
@@ -265,9 +234,8 @@ impl LocalCommunicator for LocalBackend {
 impl crate::TopologyProvider for LocalBackend {
     /// Return the cached single-host, single-rank execution topology.
     ///
-    /// Because `LocalBackend` is a ZST with no per-instance storage, the
-    /// topology is stored in a process-wide `OnceLock` and initialized on
-    /// first call. The topology is always a single host with a single rank.
+    /// Stored in a process-wide `OnceLock` because `LocalBackend` is a ZST with
+    /// no per-instance storage to hold it.
     fn topology(&self) -> &crate::ExecutionTopology {
         use std::sync::OnceLock;
 

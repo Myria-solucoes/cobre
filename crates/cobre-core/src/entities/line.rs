@@ -1,17 +1,13 @@
 //! Line entity — a transmission interconnection between two buses.
-//!
-//! A `Line` represents a transmission line (or interconnection) between a source
-//! bus and a target bus. Lines have MW capacity bounds that limit power flow.
 
 use crate::EntityId;
 
 /// Transmission interconnection between two buses.
 ///
-/// Lines allow bidirectional power transfer subject to capacity limits and
-/// transmission losses. Line flow is a hard constraint (no slack variables) --
-/// the `exchange_cost` is a regularization penalty, not a violation penalty.
+/// Bidirectional flow is a hard constraint (no slack); `exchange_cost` is a
+/// regularization penalty, not a violation penalty.
 ///
-/// Source: system/lines.json. See Input System Entities SS2.
+/// See Input System Entities SS2.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Line {

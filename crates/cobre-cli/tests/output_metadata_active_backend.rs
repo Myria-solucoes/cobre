@@ -1,16 +1,11 @@
 //! Integration test: CLI training-metadata names the active solver backend.
 //!
-//! Runs the `cobre` binary on the D01 fixture and asserts that the persisted
-//! `training/metadata.json` `solver` field equals
-//! [`cobre_solver::active_solver_metadata_id()`] and that `solver_version` is
-//! present and non-empty. The test runs against whichever backend it is built
-//! with: `solver == "highs"` under the default build, `solver == "clp"` under
-//! `--no-default-features --features clp`.
-//!
-//! Combined with the identical struct-literal wiring in `cobre-python/src/run.rs`
-//! and the source-level write-call parity gate (`check_python_parity.py`), this
-//! establishes CLI↔Python output-metadata parity per backend without requiring a
-//! built CLP Python wheel.
+//! The asserted `solver` field tracks the built backend (`highs` by default,
+//! `clp` under `--no-default-features --features clp`). Combined with the
+//! identical struct-literal wiring in `cobre-python/src/run.rs` and the
+//! source-level parity gate (`check_python_parity.py`), this establishes
+//! CLI↔Python output-metadata parity per backend without requiring a built CLP
+//! Python wheel.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -24,9 +19,6 @@ fn cobre() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("cobre"))
 }
 
-/// Absolute path to the D01 fixture (`examples/deterministic/d01-thermal-dispatch`),
-/// resolved relative to this crate's manifest directory (two levels below the
-/// repo root).
 fn d01_case_dir() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let root = manifest
@@ -45,8 +37,7 @@ fn training_metadata_solver_matches_active_backend() {
         case.display()
     );
 
-    // Write outputs to a temp dir so the committed `output/` tree under the
-    // fixture is never disturbed.
+    // Temp output dir so the committed `output/` tree under the fixture is never disturbed.
     let out = TempDir::new().expect("create temp output dir");
 
     cobre()

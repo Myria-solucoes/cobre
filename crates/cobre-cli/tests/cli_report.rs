@@ -2,18 +2,6 @@
 //!
 //! Tests run the compiled `cobre` binary against temporary directories
 //! containing minimal metadata JSON fixtures.
-//!
-//! # Coverage
-//!
-//! - AC-1: Results directory with `training/metadata.json` → exit 0, stdout is
-//!   valid JSON with a `training` key containing `iterations`.
-//! - AC-2: Results directory with both training and simulation metadata →
-//!   exit 0, stdout JSON contains both `training` and `simulation` keys
-//!   (neither is null).
-//! - AC-3: Nonexistent results directory → exit 2, stderr contains error
-//!   message about the missing path.
-//! - AC-4: Valid results directory → `jq .training.status` would yield a valid
-//!   status string (verified by parsing the `status` field from stdout).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -180,13 +168,11 @@ fn write_file(root: &Path, relative: &str, content: &str) {
     fs::write(&full, content).unwrap();
 }
 
-/// Build a minimal results directory with only training metadata.
 fn make_training_only_results(dir: &TempDir) {
     let root = dir.path();
     write_file(root, "training/metadata.json", TRAINING_METADATA_JSON);
 }
 
-/// Build a results directory with both training and simulation metadata.
 fn make_full_results(dir: &TempDir) {
     make_training_only_results(dir);
     write_file(
@@ -196,8 +182,6 @@ fn make_full_results(dir: &TempDir) {
     );
 }
 
-/// Build a results directory whose training and simulation metadata carry
-/// explicit `bounds` and `cost` objects.
 fn make_results_with_bounds_and_cost(dir: &TempDir) {
     let root = dir.path();
     write_file(
@@ -211,8 +195,6 @@ fn make_results_with_bounds_and_cost(dir: &TempDir) {
         SIMULATION_METADATA_WITH_COST_JSON,
     );
 }
-
-// ── AC-1: training metadata → exit 0, valid JSON with `iterations` ────────────
 
 #[test]
 fn training_only_exits_0() {
@@ -275,8 +257,6 @@ fn training_only_simulation_key_is_null() {
     );
 }
 
-// ── AC-2: training + simulation → both keys present ───────────────────────────
-
 #[test]
 fn full_results_exits_0() {
     let dir = TempDir::new().unwrap();
@@ -317,8 +297,6 @@ fn full_results_both_training_and_simulation_present() {
     );
 }
 
-// ── AC-3: nonexistent directory → exit 2 ─────────────────────────────────────
-
 #[test]
 fn nonexistent_directory_exits_2() {
     cobre()
@@ -337,8 +315,6 @@ fn nonexistent_directory_stderr_contains_error() {
         .code(2)
         .stderr(predicate::str::contains("error"));
 }
-
-// ── AC-4: valid results → training.status is a non-empty string ──────────────
 
 #[test]
 fn status_field_is_valid_string() {
@@ -361,14 +337,11 @@ fn status_field_is_valid_string() {
         !status.is_empty(),
         "training.status must be a non-empty string, got empty"
     );
-    // The fixture uses "complete"; verify it is forwarded correctly.
     assert_eq!(
         status, "complete",
         "training.status must match the training metadata"
     );
 }
-
-// ── Additional edge cases ─────────────────────────────────────────────────────
 
 #[test]
 fn output_directory_field_contains_absolute_path() {
@@ -396,7 +369,6 @@ fn output_directory_field_contains_absolute_path() {
 #[test]
 fn missing_training_manifest_exits_2() {
     let dir = TempDir::new().unwrap();
-    // Create the directory but do not write the required training metadata.
     fs::create_dir_all(dir.path().join("training")).unwrap();
 
     cobre()
@@ -405,8 +377,6 @@ fn missing_training_manifest_exits_2() {
         .failure()
         .code(2);
 }
-
-// ── Top-level bounds/cost convenience keys ────────────────────────────────────
 
 #[test]
 fn with_bounds_and_cost_top_level_keys_present() {
@@ -422,7 +392,6 @@ fn with_bounds_and_cost_top_level_keys_present() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
 
-    // Top-level convenience keys.
     assert_eq!(
         value["bounds"]["final_lower_bound"].as_f64(),
         Some(123_456.0),
@@ -434,7 +403,6 @@ fn with_bounds_and_cost_top_level_keys_present() {
         ".cost.mean_cost must match the fixture"
     );
 
-    // Nested dump (e2e gate) must remain populated and consistent.
     assert_eq!(
         value["training"]["bounds"]["final_lower_bound"].as_f64(),
         Some(123_456.0),
@@ -450,7 +418,7 @@ fn with_bounds_and_cost_top_level_keys_present() {
 #[test]
 fn legacy_metadata_cost_is_null_bounds_default() {
     let dir = TempDir::new().unwrap();
-    // The existing fixtures omit `bounds`/`cost`, exercising graceful degradation.
+    // make_full_results omits `bounds`/`cost`, exercising legacy-metadata degradation.
     make_full_results(&dir);
 
     let output = cobre()

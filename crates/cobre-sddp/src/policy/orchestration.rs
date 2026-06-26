@@ -1,18 +1,10 @@
 //! Shared output-writing helpers consumed by both the CLI binary and the
 //! Python bindings.
 //!
-//! Before this module existed, the CLI (`crates/cobre-cli/src/policy_io.rs`
-//! and `crates/cobre-cli/src/commands/run.rs::export_stochastic_artifacts`)
-//! and the Python bindings (`crates/cobre-python/src/run.rs`) maintained two
-//! near-identical implementations of the policy-checkpoint writer and the
-//! stochastic-artifacts exporter. The duplication was the most likely source
-//! of CLI/Python parity drift in future schema changes (CLAUDE.md treats
-//! Python parity as non-negotiable).
-//!
-//! Both functions now live here so there is exactly one implementation. The
-//! callers thread their own diagnostics (CLI uses `console::Term`; Python
-//! uses `eprintln!`) via the `on_warning` callback on
-//! [`export_stochastic_artifacts`].
+//! Both front ends call this one implementation of the policy-checkpoint writer
+//! and the stochastic-artifacts exporter, so their outputs cannot drift (Python
+//! parity is a hard rule). Callers thread their own diagnostics via the
+//! `on_warning` callback on [`export_stochastic_artifacts`].
 
 use std::path::Path;
 
@@ -41,25 +33,20 @@ use cobre_core::scenario::LoadModel;
 
 // ── Policy checkpoint ─────────────────────────────────────────────────────────
 
-/// Inputs to [`write_checkpoint`] that depend on the surrounding run rather
-/// than on the training result itself.
-///
-/// Construct one of these from the caller's parsed config; the field types
-/// match the underlying `PolicyCheckpointMetadata` widths to keep the cast
-/// site here.
+/// Run-derived inputs to [`write_checkpoint`] (independent of the training
+/// result). Stored in the checkpoint metadata for resume validation and
+/// reproducibility; field types match `PolicyCheckpointMetadata` widths to keep
+/// the casts at this site.
 #[derive(Debug, Clone, Copy)]
 pub struct CheckpointParams {
-    /// Maximum iteration count from the active stopping rules. Stored in
-    /// the checkpoint metadata so subsequent runs can resume with matching
-    /// limits.
+    /// Maximum iteration count from the active stopping rules.
     pub max_iterations: u64,
-    /// Number of forward passes per iteration. Stored for resume-validation.
+    /// Number of forward passes per iteration.
     pub forward_passes: u32,
-    /// Random seed used for noise generation. Stored so resumed runs are
-    /// reproducible.
+    /// Random seed used for noise generation.
     pub seed: u64,
-    /// When `false`, the writer omits visited-state payloads even if the
-    /// archive is populated. Controlled by the `exports.states` config flag.
+    /// When `false`, omit visited-state payloads even if the archive is
+    /// populated. Controlled by the `exports.states` config flag.
     pub export_states: bool,
 }
 
@@ -145,10 +132,6 @@ pub fn write_checkpoint(
 /// - `correlation.json` — always
 /// - `load_seasonal_stats.parquet` — only when any load model has `std_mw > 0`
 /// - `fitting_report.json` — only when `estimation_report` is `Some`
-///
-/// The CLI and the Python bindings call this with their own warning sinks
-/// (`console::Term::write_line` and `eprintln!` respectively); the writer
-/// itself never touches stderr.
 pub fn export_stochastic_artifacts(
     output_dir: &Path,
     stochastic: &StochasticContext,

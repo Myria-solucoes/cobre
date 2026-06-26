@@ -1,14 +1,9 @@
 //! Post-run summary block for the `cobre run` command.
 //!
-//! Provides separate printing functions for each phase of the run:
-//! - [`print_execution_topology`] — execution topology (backend, threads, layout)
-//! - [`print_stochastic_summary`] — stochastic preprocessing statistics
-//! - [`print_training_summary`] — training convergence metrics
-//! - [`print_simulation_summary`] — simulation completion stats
-//! - [`print_output_path`] — output directory location
-//!
-//! Each function prints its section independently so the caller can display
-//! results at the right point in the execution flow.
+//! One printing function per run phase, each emitting its section independently
+//! so the caller can place it at the right point in the execution flow. Every
+//! `print_*` writer ignores write errors (fire-and-forget); each has a paired
+//! `format_*_string` returning the same content without ANSI escapes for tests.
 
 use cobre_io::SetupTimings;
 use console::Term;
@@ -24,12 +19,6 @@ pub use cobre_sddp::{
 };
 
 /// Print the hydro model preprocessing summary to `stderr`.
-///
-/// Renders a bold header followed by two indented lines:
-/// - `Production:` — counts of constant and FPHA hydros with plane totals.
-/// - `Evaporation:` — counts of linearized and un-modelled hydro plants.
-///
-/// Write errors are silently ignored (fire-and-forget).
 pub fn print_hydro_model_summary(stderr: &Term, summary: &HydroModelSummary) {
     let _ = stderr.write_line(&format!("{}", console::style("Hydro models").bold()));
     let _ = stderr.write_line(&format!(
@@ -189,7 +178,6 @@ pub fn print_execution_topology(
                 let _ = stderr.write_line(&format!("  SLURM:     {}", slurm_parts.join(", ")));
             }
         }
-        // Auto (unresolved) backend: print minimal info.
         BackendKind::Auto => {
             let _ = stderr.write_line(&format!("  Backend:   {:?}", topology.backend));
             let _ = stderr.write_line(&format!("  Threads:   {n_threads} {thread_word}"));
@@ -199,10 +187,8 @@ pub fn print_execution_topology(
 
 /// Format the production detail line for a [`HydroModelSummary`].
 ///
-/// Shows counts only: the number of FPHA hydros with their total plane count
-/// and the number of constant hydros. The plane-source qualifiers
-/// (precomputed vs. computed from geometry) are not rendered here — they are
-/// owned by the model provenance section.
+/// Counts only — the plane-source qualifiers (precomputed vs. computed from
+/// geometry) belong to the model provenance section, not here.
 fn format_production_line(summary: &HydroModelSummary) -> String {
     match (summary.n_constant, summary.n_fpha) {
         (0, 0) => "0 hydros".to_string(),
@@ -217,11 +203,9 @@ fn format_production_line(summary: &HydroModelSummary) -> String {
 
 /// Format the evaporation detail line for a [`HydroModelSummary`].
 ///
-/// Shows counts only: the number of hydros with a linearized evaporation model
-/// and the number without. No pluralized noun is inserted between the count and
-/// the `linearized`/`without` keywords. The reference-volume source qualifiers
-/// (user-supplied vs. midpoint) are not rendered here — they are owned by the
-/// model provenance section.
+/// Counts only, with no noun between the count and the `linearized`/`without`
+/// keywords (`"1 linearized"`). The reference-volume source qualifiers
+/// (user-supplied vs. midpoint) belong to the model provenance section.
 fn format_evaporation_line(summary: &HydroModelSummary) -> String {
     format!(
         "{} linearized, {} without",
@@ -230,11 +214,6 @@ fn format_evaporation_line(summary: &HydroModelSummary) -> String {
 }
 
 /// Render the hydro model preprocessing summary as a plain-text `String`.
-///
-/// The returned string contains no ANSI escape sequences. Color and styling
-/// are applied by [`print_hydro_model_summary`] when writing to the terminal.
-/// This function exists to allow unit tests to assert on summary content
-/// without requiring a real terminal.
 #[cfg(test)]
 pub fn format_hydro_model_summary_string(summary: &HydroModelSummary) -> String {
     let mut lines: Vec<String> = Vec::new();
@@ -251,13 +230,6 @@ pub fn format_hydro_model_summary_string(summary: &HydroModelSummary) -> String 
 }
 
 /// Print the per-phase setup timing summary to `stderr`.
-///
-/// Renders a bold `Setup` header followed by one indented line per setup phase
-/// (`Load`, `Stochastic fit`, `Production fit`, `Evaporation fit`, `Broadcast`),
-/// each value formatted with [`format_split_duration`]. The labels are display
-/// strings; the underlying values come from the generic [`SetupTimings`] fields.
-///
-/// Write errors are silently ignored (fire-and-forget).
 pub fn print_setup_summary(stderr: &Term, timings: &SetupTimings) {
     let _ = stderr.write_line(&format!("{}", console::style("Setup").bold()));
     let _ = stderr.write_line(&format!(
@@ -283,11 +255,6 @@ pub fn print_setup_summary(stderr: &Term, timings: &SetupTimings) {
 }
 
 /// Render the per-phase setup timing summary as a plain-text `String`.
-///
-/// The returned string contains no ANSI escape sequences. Color and styling
-/// are applied by [`print_setup_summary`] when writing to the terminal. This
-/// function exists to allow unit tests to assert on summary content without
-/// requiring a real terminal.
 #[cfg(test)]
 pub fn format_setup_summary_string(timings: &SetupTimings) -> String {
     let mut lines: Vec<String> = Vec::new();
@@ -327,14 +294,6 @@ fn provenance_ar_detail(report: &ModelProvenanceReport) -> String {
 }
 
 /// Print the model provenance summary to `stderr`.
-///
-/// Renders a bold header followed by indented lines covering the estimation
-/// path, seasonal stats source, AR coefficients source, correlation source,
-/// and opening tree source.
-///
-/// The AR line includes a parenthetical detail (`(method, max order N)`) when
-/// `ar_method` is `Some`; this detail is omitted when AR is `NotApplicable`.
-/// Write errors are silently ignored (fire-and-forget).
 pub fn print_provenance_summary(stderr: &Term, report: &ModelProvenanceReport) {
     let _ = stderr.write_line(&format!("{}", console::style("Model provenance").bold()));
     let _ = stderr.write_line(&format!(
@@ -361,11 +320,6 @@ pub fn print_provenance_summary(stderr: &Term, report: &ModelProvenanceReport) {
 }
 
 /// Render the model provenance summary as a plain-text `String`.
-///
-/// The returned string contains no ANSI escape sequences. Color and styling
-/// are applied by [`print_provenance_summary`] when writing to the terminal.
-/// This function exists to allow unit tests to assert on summary content
-/// without requiring a real terminal.
 #[cfg(test)]
 pub fn format_provenance_summary_string(report: &ModelProvenanceReport) -> String {
     let mut lines: Vec<String> = Vec::new();
@@ -442,9 +396,8 @@ pub struct TrainingSummary {
     pub total_rows_generated: u64,
 
     /// Sum of resident rows-in-LP over every lazy-selection solve (reduced across
-    /// ranks). With [`Self::rows_in_lp_solve_count`], the mean rows-in-LP per
-    /// solve. Zero for pool-deactivating methods (no lazy solves), which the
-    /// renderer uses to gate the line: only Dynamic Cut Selection populates it.
+    /// ranks). Zero for pool-deactivating methods — the renderer uses zero to gate
+    /// the rows-in-LP line; only Dynamic Cut Selection populates it.
     pub rows_in_lp_total: u64,
 
     /// Number of lazy-selection solves (reduced across ranks); the mean
@@ -552,8 +505,6 @@ pub struct SimulationSummary {
 }
 
 /// All data needed to render the complete post-run summary block.
-///
-/// Used only in tests; the production code calls the individual print functions.
 #[cfg(test)]
 pub struct RunSummary {
     pub training: TrainingSummary,
@@ -585,9 +536,6 @@ fn format_convergence_detail(converged: bool, converged_at: Option<u64>, reason:
 }
 
 /// Format a duration for the time-split breakdown lines.
-///
-/// Sub-second values get `Xms`; values up to 60s get `X.Xs`; values up
-/// to one hour get `Xm Ys`; longer values fall back to `Xh Ym`.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn format_split_duration(seconds: f64) -> String {
     if seconds < 1.0 {
@@ -604,15 +552,10 @@ fn format_split_duration(seconds: f64) -> String {
     }
 }
 
-/// Compute a per-worker average wall time from cumulative solve time and
-/// parallelism, capped at the total wall-clock budget.
-///
-/// `cumulative_seconds` is summed across all `(rank, worker)` pairs;
-/// `parallelism = n_ranks * n_workers_local`; `cap_seconds` is the
-/// total run wall time. Cumulative / parallelism is the per-worker
-/// average solve wall time, which is bounded by the parallel-region
-/// wall time and therefore by the total run wall time. The cap is
-/// applied defensively in case of arithmetic edge cases.
+/// Per-worker average wall time = `cumulative_seconds / parallelism`, where
+/// `cumulative_seconds` is summed across all `(rank, worker)` pairs. Bounded by
+/// `cap_seconds` (the total run wall time) defensively against arithmetic edge
+/// cases.
 fn solver_wall_seconds(cumulative_seconds: f64, parallelism: u32, cap_seconds: f64) -> f64 {
     if parallelism == 0 {
         return 0.0;
@@ -623,11 +566,6 @@ fn solver_wall_seconds(cumulative_seconds: f64, parallelism: u32, cap_seconds: f
 }
 
 /// Render the complete post-run summary as a plain-text `String`.
-///
-/// The returned string contains no ANSI escape sequences. Color and styling
-/// are applied by [`print_summary`] when writing to the terminal. This design
-/// allows unit tests to assert on summary content without requiring a real
-/// terminal.
 ///
 /// # Format
 ///
@@ -696,20 +634,16 @@ pub fn format_summary_string(summary: &RunSummary) -> String {
 /// Render the "Policy rows" summary line, plus a "Rows in LP/solve" line for runs
 /// that used lazy per-solve selection (Dynamic Cut Selection).
 ///
-/// The pool-level `active / generated` counts are kept — they report pool size /
-/// memory footprint — while the rows-in-LP line surfaces the per-solve LP size
-/// the lazy selector actually carried, which (unlike the pool active count, that
-/// equals `generated` under DCS) is the figure reflecting DCS's work. Both gated
-/// on `rows_in_lp_solve_count > 0`: zero for pool-deactivating methods, so they
-/// appear only when lazy selection ran.
+/// The pool-level `active / generated` counts report footprint; the rows-in-LP
+/// line surfaces the per-solve LP size the lazy selector carried (under DCS the
+/// pool active count equals `generated`, so it does not reflect DCS's work).
+/// Both gated on `rows_in_lp_solve_count > 0` — zero for pool-deactivating
+/// methods, so they appear only when lazy selection ran.
 ///
-/// For lazy runs the pool total is also annotated with its per-stage average
-/// (`active / num_stages`), because the pool count sums all stages whereas the
-/// rows-in-LP figures are per-solve (one stage each) — the annotation puts both
-/// on the same per-stage basis for comparison.
+/// For lazy runs the pool total is annotated with its per-stage average
+/// (`active / num_stages`) so it sits on the same per-solve (one-stage) basis as
+/// the rows-in-LP figures.
 fn policy_rows_lines(t: &TrainingSummary) -> Vec<String> {
-    // Per-stage average of the pool total, shown only for lazy runs so it sits
-    // beside (and on the same basis as) the per-solve rows-in-LP line.
     let per_stage = if t.rows_in_lp_solve_count > 0 && t.num_stages > 0 {
         #[allow(clippy::cast_precision_loss)]
         let avg = t.total_rows_active as f64 / f64::from(t.num_stages);
@@ -733,9 +667,6 @@ fn policy_rows_lines(t: &TrainingSummary) -> Vec<String> {
 }
 
 /// Print the training completion summary to `stderr`.
-///
-/// Rendered bold header with convergence metrics, bounds, policy rows, and LP solves.
-/// Write errors are silently ignored (fire-and-forget).
 pub fn print_training_summary(stderr: &Term, t: &TrainingSummary) {
     let duration = format_duration(t.total_time_ms);
     let convergence_detail = format_convergence_detail(t.converged, t.converged_at, &t.reason);
@@ -816,8 +747,6 @@ pub fn print_training_summary(stderr: &Term, t: &TrainingSummary) {
 }
 
 /// Print the simulation completion summary to `stderr`.
-///
-/// Rendered bold header with scenario counts. Write errors are silently ignored.
 pub fn print_simulation_summary(stderr: &Term, sim: &SimulationSummary) {
     let duration = format_duration(sim.total_time_ms);
     let _ = stderr.write_line(&format!(
@@ -883,8 +812,6 @@ pub fn print_simulation_summary(stderr: &Term, sim: &SimulationSummary) {
 }
 
 /// Print the output directory path and write duration to `stderr`.
-///
-/// Rendered with bold label and dim path. Write errors are silently ignored.
 pub fn print_output_path(stderr: &Term, output_dir: &std::path::Path, write_secs: f64) {
     let _ = stderr.write_line(&format!(
         "{} {}/ {}",
@@ -895,12 +822,6 @@ pub fn print_output_path(stderr: &Term, output_dir: &std::path::Path, write_secs
 }
 
 /// Write the complete post-run summary block to `stderr`.
-///
-/// Convenience wrapper that calls [`print_training_summary`],
-/// [`print_simulation_summary`] (if present), and [`print_output_path`]
-/// in sequence.
-///
-/// Used only in tests; the production code calls the individual print functions.
 #[cfg(test)]
 pub fn print_summary(stderr: &Term, summary: &RunSummary) {
     print_training_summary(stderr, &summary.training);
@@ -981,8 +902,6 @@ mod tests {
             lines[1]
         );
 
-        // Non-lazy run (solve_count == 0): only the pool line, no rows-in-LP line,
-        // and no per-stage annotation.
         t.rows_in_lp_total = 0;
         t.rows_in_lp_solve_count = 0;
         t.rows_in_lp_max = 0;
@@ -1507,11 +1426,6 @@ mod tests {
     }
 
     // ── format_evaporation_line count-only tests ─────────────────────────────
-    //
-    // The reference-volume source qualifiers (user-supplied vs. midpoint
-    // `v_ref`) have been relocated to the model provenance section; the
-    // structural-summary display shows counts only. These tests assert the
-    // count wording and the absence of every relocated source string.
 
     /// AC: all-midpoint refs — line shows counts only, no `v_ref` qualifier.
     #[test]
@@ -1783,7 +1697,6 @@ mod tests {
             s.contains("n/a"),
             "output must contain 'n/a' for NotApplicable sources, got: {s}"
         );
-        // No parenthetical when AR is NotApplicable.
         assert!(
             !s.contains("max order"),
             "output must NOT contain 'max order' for deterministic case, got: {s}"
@@ -1850,10 +1763,8 @@ mod tests {
             n_evaporation_ref_default_midpoint: 3,
         });
         let s = format_provenance_summary_string(&report);
-        // The inflow section is still present.
         assert!(s.contains("Model provenance"), "got: {s}");
         assert!(s.contains("Estimation path:"), "got: {s}");
-        // The hydro-production sub-section is gone entirely.
         assert!(
             !s.contains("Hydro production"),
             "hydro-production sub-section must not be rendered, got: {s}"
@@ -1862,8 +1773,6 @@ mod tests {
         assert!(!s.contains("Evaporation ref:"), "got: {s}");
     }
 
-    /// `print_provenance_summary` does not panic for a report carrying non-zero
-    /// hydro-production counts (which are simply not displayed).
     #[test]
     fn print_provenance_summary_with_hydro_counts_does_not_panic() {
         let report = make_provenance_report_with_hydro_production(HydroProductionProvenance {

@@ -134,7 +134,6 @@ pub fn parse_buses(
     Ok(convert_buses(raw, global_penalties))
 }
 
-/// Validate all invariants on the raw deserialized bus data.
 fn validate_raw_buses(raw: &RawBusFile, path: &Path) -> Result<(), LoadError> {
     validate_no_duplicate_bus_ids(&raw.buses, path)?;
     for (i, bus) in raw.buses.iter().enumerate() {
@@ -145,7 +144,6 @@ fn validate_raw_buses(raw: &RawBusFile, path: &Path) -> Result<(), LoadError> {
     Ok(())
 }
 
-/// Check that no two buses share the same `id`.
 fn validate_no_duplicate_bus_ids(buses: &[RawBus], path: &Path) -> Result<(), LoadError> {
     let mut seen: HashSet<i32> = HashSet::new();
     for (i, bus) in buses.iter().enumerate() {
@@ -160,10 +158,8 @@ fn validate_no_duplicate_bus_ids(buses: &[RawBus], path: &Path) -> Result<(), Lo
     Ok(())
 }
 
-/// Validate entity-level deficit segments for bus `bus_index`.
-///
-/// Checks: all costs > 0, last segment has `depth_mw: null`, costs monotonically
-/// increasing. Mirrors the global deficit segment validation in `penalties.rs`.
+/// Mirrors the global deficit segment validation in `penalties.rs`; the two
+/// must stay consistent.
 fn validate_deficit_segments(
     segments: &[RawDeficitSegment],
     bus_index: usize,
@@ -219,13 +215,11 @@ fn validate_deficit_segments(
     Ok(())
 }
 
-/// Convert validated raw bus data into `Vec<Bus>`, sorted by `id` ascending.
 fn convert_buses(raw: RawBusFile, global: &GlobalPenaltyDefaults) -> Vec<Bus> {
     let mut buses: Vec<Bus> = raw
         .buses
         .into_iter()
         .map(|raw_bus| {
-            // Convert optional entity-level deficit segments to core types.
             let entity_segments: Option<Vec<DeficitSegment>> =
                 raw_bus.deficit_segments.map(|segs| {
                     segs.into_iter()
@@ -236,9 +230,7 @@ fn convert_buses(raw: RawBusFile, global: &GlobalPenaltyDefaults) -> Vec<Bus> {
                         .collect()
                 });
 
-            // Two-tier penalty resolution: entity override wins, else global default.
             let deficit_segments = resolve_bus_deficit_segments(&entity_segments, global);
-            // Excess cost has no entity-level override in SS1 spec — always global.
             let excess_cost = resolve_bus_excess_cost(None, global);
 
             Bus {
@@ -338,7 +330,6 @@ mod tests {
 
         assert_eq!(buses.len(), 2);
 
-        // Bus 0: no entity-level override -> uses global defaults
         assert_eq!(buses[0].id, EntityId(0));
         assert_eq!(buses[0].name, "South");
         assert_eq!(buses[0].deficit_segments.len(), 2);
@@ -356,7 +347,6 @@ mod tests {
         );
         assert!((buses[0].excess_cost - 100.0).abs() < f64::EPSILON);
 
-        // Bus 1: has entity-level override -> uses entity segments
         assert_eq!(buses[1].id, EntityId(1));
         assert_eq!(buses[1].name, "North");
         assert_eq!(buses[1].deficit_segments.len(), 2);
@@ -372,7 +362,6 @@ mod tests {
             "bus 1 segment 1 cost: expected 8000.0, got {}",
             buses[1].deficit_segments[1].cost_per_mwh
         );
-        // Excess cost is always from global — no entity-level override in spec.
         assert!((buses[1].excess_cost - 100.0).abs() < f64::EPSILON);
     }
 

@@ -1,7 +1,6 @@
 //! `cobre version` subcommand.
 //!
 //! Prints the binary version, active solver backend, and build profile.
-//! Useful for bug reports and HPC environment debugging.
 
 use crate::error::CliError;
 
@@ -9,8 +8,7 @@ use crate::error::CliError;
 ///
 /// # Errors
 ///
-/// This function is currently infallible; the `Result` return type is kept
-/// consistent with all other subcommand execute functions for uniform dispatch.
+/// Currently infallible; the `Result` is kept for uniform subcommand dispatch.
 #[allow(clippy::unnecessary_wraps)]
 pub fn execute() -> Result<(), CliError> {
     let version = env!("CARGO_PKG_VERSION");

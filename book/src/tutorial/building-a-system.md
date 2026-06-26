@@ -26,7 +26,7 @@ cd my_study
 mkdir system
 ```
 
-You will need 8 JSON files. By the end of this guide your directory will look like:
+You will need the JSON files listed below. By the end of this guide your directory will look like:
 
 ```
 my_study/
@@ -73,8 +73,8 @@ Create `my_study/config.json`:
 ```
 
 `forward_passes` controls how many scenario trajectories are drawn per training
-iteration. Start with 1 for fast iteration during case development; increase to
-50 or more for production runs where you want lower variance per iteration.
+iteration. Start with 1 for fast iteration during case development; raise it for
+production runs, where more trajectories lower the per-iteration variance.
 
 `stopping_rules` must contain at least one `iteration_limit` entry. The solver
 will run until one of the configured rules triggers. Here it stops after 128
@@ -197,11 +197,11 @@ Create `my_study/penalties.json`:
     "deficit_segments": [
       {
         "depth_mw": 500.0,
-        "cost": 1000.0
+        "cost": 7000.0
       },
       {
         "depth_mw": null,
-        "cost": 5000.0
+        "cost": 7500.0
       }
     ],
     "excess_cost": 100.0
@@ -214,7 +214,7 @@ Create `my_study/penalties.json`:
     "turbined_cost": 0.05,
     "diversion_cost": 0.1,
     "storage_violation_below_cost": 10000.0,
-    "filling_target_violation_cost": 50000.0,
+    "filling_target_violation_cost": 6000.0,
     "turbined_violation_below_cost": 500.0,
     "outflow_violation_below_cost": 500.0,
     "outflow_violation_above_cost": 500.0,
@@ -440,7 +440,7 @@ It must be present even when empty.
 
 ## Step 9: Validate Your Case
 
-With all 8 files in place, validate the case to confirm every layer passes:
+With those files in place, validate the case to confirm every layer passes:
 
 ```bash
 cobre validate my_study
@@ -472,14 +472,13 @@ Fix each reported error and re-run `cobre validate` until the exit code is 0.
 
 ## What's Next
 
-Your hand-built case is functionally identical to the `1dtoy` template. You can
-run it directly:
+Run the case directly:
 
 ```bash
 cobre run my_study --output my_study/results
 ```
 
-To compare your files against the template at any point:
+Your hand-built case should match the `1dtoy` template; verify with the diff below:
 
 ```bash
 cobre init --template 1dtoy 1dtoy_reference

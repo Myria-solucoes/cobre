@@ -1,13 +1,8 @@
 //! Provenance report types and builder for the SDDP preprocessing pipeline.
 //!
-//! [`ModelProvenanceReport`] is a JSON-serializable summary of which data
-//! sources were used for each role in the stochastic preprocessing pipeline:
-//! seasonal statistics, AR coefficients, spatial correlation, and the opening
-//! scenario tree.
-//!
-//! [`build_provenance_report`] constructs a [`ModelProvenanceReport`] from
-//! the outputs already available after [`crate::setup::prepare_stochastic`]
-//! returns.
+//! [`ModelProvenanceReport`] is a JSON-serializable summary of which data source
+//! fed each preprocessing role (seasonal stats, AR coefficients, spatial
+//! correlation, opening tree).
 
 use std::fmt;
 
@@ -23,9 +18,6 @@ use crate::hydro_models::{
 // ── ProvenanceSource ──────────────────────────────────────────────────────────
 
 /// Origin of a single data role in the preprocessing pipeline.
-///
-/// Used by [`ModelProvenanceReport`] to describe where seasonal stats, AR
-/// coefficients, spatial correlation, and the opening tree came from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProvenanceSource {
@@ -52,11 +44,8 @@ impl fmt::Display for ProvenanceSource {
 
 // ── ModelProvenanceReport ─────────────────────────────────────────────────────
 
-/// Provenance of the **inflow** model's data sources.
-///
-/// Each field records the origin of one inflow-model data role: seasonal
-/// statistics, AR coefficients, spatial correlation, and the opening scenario
-/// tree. Carried as the `inflow` sub-section of [`ModelProvenanceReport`].
+/// Provenance of the **inflow** model's data sources; the `inflow` sub-section
+/// of [`ModelProvenanceReport`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InflowProvenance {
     /// Stable string label of the estimation path taken (from [`EstimationPath::as_str`]).
@@ -81,25 +70,17 @@ pub struct InflowProvenance {
     /// `residual_std_ratio = 1.0`). Populated only by
     /// [`EstimationPath::PartialEstimation`]; empty otherwise.
     pub white_noise_fallbacks: Vec<i32>,
-    /// SipHash-1-3 fingerprint of the `initial_conditions.past_inflows` values
-    /// used to seed the rolling η-inversion chain of the historical scenario
-    /// library, when one was built.
-    ///
-    /// `None` when the historical inflow scheme is not active (no
-    /// `HistoricalScenarioLibrary` was built). When `Some(d)`, a stale-library
-    /// detector can fingerprint the current `past_inflows` and compare; a
-    /// mismatch means η was inverted against a different x₀ and replay is no
-    /// longer exact.
+    /// SipHash-1-3 fingerprint of the `initial_conditions.past_inflows` that
+    /// seeded the historical library's rolling η-inversion chain; `None` when no
+    /// `HistoricalScenarioLibrary` was built. A mismatch against the current
+    /// `past_inflows` means η was inverted against a different x₀, so replay is
+    /// no longer exact.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub historical_library_past_inflows_digest: Option<u64>,
 }
 
 /// Provenance of the **hydro-production** model's data sources (FPHA and
-/// evaporation).
-///
-/// Carried as the `hydro_production` sub-section of [`ModelProvenanceReport`].
-/// All counts default to `0`; they are populated downstream from the
-/// hydro-model provenance.
+/// evaporation); the `hydro_production` sub-section of [`ModelProvenanceReport`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HydroProductionProvenance {
     /// Count of hydro plants whose FPHA hyperplanes were computed from geometry.
@@ -114,13 +95,7 @@ pub struct HydroProductionProvenance {
 }
 
 /// Structured summary of which data sources were used in the preprocessing
-/// pipeline, split by model.
-///
-/// Intended for JSON output via `serde_json::to_writer_pretty`. The report
-/// nests an [`InflowProvenance`] sub-section under `"inflow"` and a
-/// [`HydroProductionProvenance`] sub-section under `"hydro_production"`.
-/// Callers (CLI, Python bindings) pass this struct directly to `serde_json`
-/// without additional transformation.
+/// pipeline, split by model, for JSON output.
 ///
 /// # Example
 ///
@@ -169,11 +144,9 @@ fn component_to_source(cp: ComponentProvenance) -> ProvenanceSource {
 
 /// Aggregate a [`HydroModelProvenance`] into the four hydro-production counts.
 ///
-/// The FPHA counts are pure tallies over `production_sources`. The evaporation
-/// reference counts are restricted to hydros whose evaporation is actually
-/// modeled: for [`EvaporationSource::NotModeled`] hydros the reference source is
-/// a meaningless placeholder, so it is excluded by zipping with
-/// `evaporation_sources`. All four counts are declaration-order invariant.
+/// Evaporation reference counts are restricted to modeled-evaporation hydros:
+/// for [`EvaporationSource::NotModeled`] the reference source is a meaningless
+/// placeholder. All four counts are declaration-order invariant.
 fn aggregate_hydro_production(hp: &HydroModelProvenance) -> HydroProductionProvenance {
     let n_fpha_computed_from_geometry = hp
         .production_sources
@@ -186,9 +159,8 @@ fn aggregate_hydro_production(hp: &HydroModelProvenance) -> HydroProductionProve
         .filter(|(_, source)| matches!(source, ProductionModelSource::PrecomputedHyperplanes))
         .count();
 
-    // Only count reference sources for hydros whose evaporation is modeled; the
-    // reference value is a placeholder for `NotModeled` hydros. Zipping (rather
-    // than indexing) stays panic-free even if the vectors disagree in length.
+    // Zipping (rather than indexing) stays panic-free if the vectors disagree
+    // in length.
     let modeled_refs = || {
         hp.evaporation_sources
             .iter()
@@ -215,31 +187,9 @@ fn aggregate_hydro_production(hp: &HydroModelProvenance) -> HydroProductionProve
 
 /// Build a [`ModelProvenanceReport`] from preprocessing outputs.
 ///
-/// This function is infallible: all required inputs are guaranteed to be
-/// available after [`crate::setup::prepare_stochastic`] returns.
-///
-/// The mapping from [`EstimationPath`] to per-role [`ProvenanceSource`] is:
-///
-/// | Path                  | Seasonal stats | AR coefficients |
-/// |-----------------------|---------------|-----------------|
-/// | `Deterministic`       | N/A           | N/A               |
-/// | `UserStatsWhiteNoise` | `UserFile`    | N/A               |
-/// | `UserProvidedNoHistory` | `UserFile`  | `UserFile`        |
-/// | `FullEstimation`      | `Estimated`   | `Estimated`       |
-/// | `UserArHistoryStats`  | `Estimated`   | `UserFile`        |
-/// | `PartialEstimation`   | `UserFile`    | `Estimated`       |
-/// | `UserProvidedAll`     | `UserFile`    | `UserFile`        |
-///
-/// Correlation and opening-tree sources are derived from the
-/// [`StochasticProvenance`] embedded in the stochastic context.
-///
-/// When `estimation_report` is `Some`, `ar_method` and `ar_max_order` are
-/// populated from its fields; otherwise both are `None`.
-///
-/// The `hydro_production` section is aggregated from `hydro_provenance` via
-/// `aggregate_hydro_production`: the FPHA counts tally `production_sources`,
-/// and the evaporation reference counts tally `evaporation_reference_sources`
-/// restricted to hydros with modeled evaporation.
+/// Infallible: all required inputs are available once
+/// [`crate::setup::prepare_stochastic`] returns. The `EstimationPath` → per-role
+/// [`ProvenanceSource`] mapping is the match below.
 #[must_use]
 pub fn build_provenance_report(
     estimation_path: EstimationPath,

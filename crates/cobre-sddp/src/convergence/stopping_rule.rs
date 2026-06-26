@@ -45,11 +45,7 @@ pub const RULE_GRACEFUL_SHUTDOWN: &str = "graceful_shutdown";
 // MonitorState
 // ---------------------------------------------------------------------------
 
-/// Read-only snapshot of convergence monitor quantities consumed by stopping
-/// rule evaluation.
-///
-/// The convergence monitor populates this struct after each iteration's
-/// forward synchronization step, before calling
+/// Read-only snapshot of convergence-monitor quantities consumed by
 /// [`StoppingRuleSet::evaluate`].
 #[derive(Debug, Clone)]
 pub struct MonitorState {
@@ -62,21 +58,14 @@ pub struct MonitorState {
     /// Current lower bound (stage-1 LP objective value).
     pub lower_bound: f64,
 
-    /// History of lower bounds from past iterations (chronological order).
-    ///
-    /// `lower_bound_history[i]` is the lower bound at iteration `i + 1`.
-    /// Populated by the convergence monitor; appended each iteration.
+    /// Lower bounds from past iterations, chronological: `[i]` is iteration `i + 1`.
     pub lower_bound_history: Vec<f64>,
 
-    /// Whether an external shutdown signal has been received.
-    ///
-    /// Set by an OS signal handler (SIGTERM / SIGINT) and read atomically.
+    /// Whether an external shutdown signal (SIGTERM / SIGINT) has been received.
     pub shutdown_requested: bool,
 
-    /// Per-stage mean costs from the most recent simulation evaluation.
-    ///
-    /// `None` if no simulation has been run yet, or if the convergence
-    /// monitor has not yet run a [`StoppingRule::SimulationBased`] check.
+    /// Per-stage mean costs from the most recent simulation, or `None` if no
+    /// [`StoppingRule::SimulationBased`] check has run yet.
     pub simulation_costs: Option<Vec<f64>>,
 }
 
@@ -87,17 +76,12 @@ pub struct MonitorState {
 /// Combination mode for [`StoppingRuleSet`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoppingMode {
-    /// Stop when **any** configured rule triggers (OR logic).
-    ///
-    /// The first rule (in configuration order) whose condition is satisfied
-    /// causes termination. `GracefulShutdown` always takes precedence regardless
-    /// of mode.
+    /// Stop when **any** configured rule triggers (OR logic). `GracefulShutdown`
+    /// takes precedence regardless of mode.
     Any,
 
-    /// Stop when **all** configured rules trigger simultaneously (AND logic).
-    ///
-    /// All rules must be satisfied at the same iteration. `GracefulShutdown`
-    /// always takes precedence regardless of mode.
+    /// Stop when **all** configured rules trigger at the same iteration (AND
+    /// logic). `GracefulShutdown` takes precedence regardless of mode.
     All,
 }
 
@@ -105,22 +89,14 @@ pub enum StoppingMode {
 // StoppingRule
 // ---------------------------------------------------------------------------
 
-/// Individual stopping rule for the SDDP training loop.
-///
-/// Each variant encapsulates a single termination criterion and its parameters.
-/// Rules are composed into a [`StoppingRuleSet`] for evaluation. The
-/// [`StoppingRule::GracefulShutdown`] variant is special: it is always
-/// evaluated first and bypasses the composition logic.
-///
-/// The `IterationLimit` variant must always be present in the rule set as a
-/// safety bound against infinite loops.
+/// Individual stopping rule for the SDDP training loop, composed into a
+/// [`StoppingRuleSet`]. [`StoppingRule::GracefulShutdown`] is always evaluated
+/// first and bypasses composition; every set must contain at least one
+/// `IterationLimit` (the safety bound against infinite loops, validated at
+/// config load).
 #[derive(Debug, Clone)]
 pub enum StoppingRule {
     /// Terminate when the iteration count reaches a fixed limit.
-    ///
-    /// This is the mandatory safety bound. Every [`StoppingRuleSet`] must
-    /// contain at least one `IterationLimit` rule, validated at configuration
-    /// load time.
     IterationLimit {
         /// Maximum iteration count. Training stops when `iteration >= limit`.
         limit: u64,
@@ -148,13 +124,10 @@ pub enum StoppingRule {
         iterations: u64,
     },
 
-    /// Terminate when both the lower bound and simulated policy costs
-    /// have stabilized. Evaluated only every `period` iterations.
-    ///
-    /// Evaluation is two-stage: a bound stability check (cheap pre-filter),
-    /// followed by comparison of per-stage mean simulation costs between
-    /// consecutive evaluations (computed by the convergence monitor before
-    /// `evaluate` is called).
+    /// Terminate when both the lower bound and simulated policy costs have
+    /// stabilized, evaluated every `period` iterations. Two-stage: a cheap bound
+    /// stability pre-filter, then comparison of per-stage mean simulation costs
+    /// between consecutive evaluations.
     SimulationBased {
         /// Evaluate this rule every `period` iterations.
         period: u64,
@@ -171,26 +144,16 @@ pub enum StoppingRule {
         bound_stability_window: u64,
     },
 
-    /// Terminate when an external shutdown signal (SIGTERM / SIGINT) is
-    /// received.
-    ///
-    /// Not configured via JSON — always implicitly present and evaluated
-    /// unconditionally before the composition logic. The training loop
-    /// checkpoints the last completed iteration before exiting.
+    /// Terminate when an external shutdown signal (SIGTERM / SIGINT) is received.
+    /// Not JSON-configured — always implicitly present and evaluated before the
+    /// composition logic.
     GracefulShutdown,
 }
 
 impl StoppingRule {
-    /// Evaluate this rule against the current monitor state.
-    ///
-    /// Returns a [`StoppingRuleResult`] with the rule's identifier, whether
-    /// the rule's termination condition is satisfied, and a human-readable
-    /// description of the current state.
-    ///
-    /// All evaluation is pure — this method reads from `state` but does not
-    /// modify it. For [`StoppingRule::SimulationBased`], the convergence
-    /// monitor is responsible for running simulations and storing results in
-    /// `state.simulation_costs` before this method is called.
+    /// Evaluate this rule against the current monitor state (pure; reads `state`
+    /// only). For [`StoppingRule::SimulationBased`], the monitor must have stored
+    /// results in `state.simulation_costs` beforehand.
     #[must_use]
     pub fn evaluate(&self, state: &MonitorState) -> StoppingRuleResult {
         match self {
@@ -243,17 +206,12 @@ impl StoppingRule {
     }
 
     /// Evaluate the [`StoppingRule::BoundStalling`] condition.
-    ///
-    /// Computes the relative improvement in the lower bound over the last
-    /// `iterations` iterations and compares it against `tolerance`.
     fn evaluate_bound_stalling(
         state: &MonitorState,
         tolerance: f64,
         iterations: u64,
     ) -> StoppingRuleResult {
-        // Need at least `iterations` entries in history to compare.
-        // `iterations` is a config-validated u64 that fits in usize on
-        // any supported platform (validated <= u32::MAX at config load).
+        // `iterations` is config-validated <= u32::MAX, so the cast cannot truncate.
         #[allow(clippy::cast_possible_truncation)]
         let window = iterations as usize;
         if state.lower_bound_history.len() < window {
@@ -268,12 +226,10 @@ impl StoppingRule {
             };
         }
 
-        // lb_window_start is the lower bound from `iterations` steps ago.
         let history_len = state.lower_bound_history.len();
         let lb_window_start = state.lower_bound_history[history_len - window];
         let lb_current = state.lower_bound;
 
-        // Δ = (lb_current - lb_window_start) / max(1.0, |lb_current|)
         let denominator = lb_current.abs().max(1.0_f64);
         let delta = (lb_current - lb_window_start) / denominator;
 
@@ -291,16 +247,11 @@ impl StoppingRule {
     }
 
     /// Evaluate the [`StoppingRule::SimulationBased`] condition.
-    ///
-    /// Checks that the current iteration is a check iteration (`iteration % period == 0`),
-    /// that simulation costs are available in the monitor state, and then computes
-    /// the normalised L2 distance of the cost vector against the zero baseline.
     fn evaluate_simulation_based(
         state: &MonitorState,
         period: u64,
         distance_tolerance: f64,
     ) -> StoppingRuleResult {
-        // Only evaluate at multiples of `period`.
         if period == 0 || !state.iteration.is_multiple_of(period) {
             return StoppingRuleResult {
                 rule_name: RULE_SIMULATION_BASED,
@@ -312,9 +263,8 @@ impl StoppingRule {
             };
         }
 
-        // Simulation costs must be available from the current evaluation.
-        // The convergence monitor populates `simulation_costs` if and only if
-        // the bound stability pre-filter passed and simulations were run.
+        // `simulation_costs` is populated iff the bound-stability pre-filter
+        // passed and simulations were run.
         let Some(ref current_costs) = state.simulation_costs else {
             return StoppingRuleResult {
                 rule_name: RULE_SIMULATION_BASED,
@@ -325,14 +275,9 @@ impl StoppingRule {
             };
         };
 
-        // `simulation_costs` carries the NEW costs; the convergence monitor
-        // stores the PREVIOUS costs externally. At this stage we only have
-        // one snapshot — triggered = false (requires two consecutive snapshots).
-        // Full two-snapshot comparison is deferred (requires two consecutive snapshots).
-        // For now: if costs are available, compute distance against a zero
-        // baseline (conservative: never triggers on first evaluation).
-        // This stub is correct: the simulation cost comparison requires two
-        // consecutive snapshots; the convergence monitor is responsible for managing them.
+        // Distance is measured against a zero baseline, not the previous
+        // snapshot: the full two-snapshot comparison is deferred, so this is
+        // deliberately conservative (it cannot trigger on a first evaluation).
         let distance: f64 = current_costs
             .iter()
             .map(|&c| {
@@ -358,11 +303,7 @@ impl StoppingRule {
 // StoppingRuleSet
 // ---------------------------------------------------------------------------
 
-/// Composed set of stopping rules with configurable combination logic.
-///
-/// Holds a list of [`StoppingRule`] variants and a [`StoppingMode`] that
-/// determines how their evaluations combine. The [`StoppingRule::GracefulShutdown`]
-/// rule is always evaluated first and bypasses composition logic.
+/// Composed set of [`StoppingRule`] variants combined under a [`StoppingMode`].
 ///
 /// # Examples
 ///
@@ -395,44 +336,33 @@ impl StoppingRule {
 #[derive(Debug, Clone)]
 pub struct StoppingRuleSet {
     /// The individual stopping rules. Must contain at least one
-    /// [`StoppingRule::IterationLimit`], validated at configuration load time.
-    /// [`StoppingRule::GracefulShutdown`] is always evaluated unconditionally
-    /// regardless of position in this list.
+    /// [`StoppingRule::IterationLimit`] (validated at config load);
+    /// [`StoppingRule::GracefulShutdown`] is evaluated unconditionally regardless
+    /// of its position here.
     pub rules: Vec<StoppingRule>,
 
-    /// Combination mode: `Any` (OR logic) or `All` (AND logic).
+    /// Combination mode for the rules.
     pub mode: StoppingMode,
 }
 
 impl StoppingRuleSet {
-    /// Evaluate all stopping rules against the current monitor state.
+    /// Evaluate all stopping rules, returning `(should_stop, all_results)`.
     ///
-    /// Returns `(should_stop, all_results)` where `should_stop` is the combined
-    /// termination decision and `all_results` lists the evaluation result for
-    /// every rule.
-    ///
-    /// [`StoppingRule::GracefulShutdown`] is always evaluated first. If the
-    /// shutdown flag is set, the method returns `(true, results)` immediately,
-    /// regardless of the configured `mode`.
-    ///
-    /// For the remaining rules:
-    /// - [`StoppingMode::Any`]: stop if any rule triggered (OR logic).
-    /// - [`StoppingMode::All`]: stop if all rules triggered (AND logic).
+    /// A set shutdown flag returns `(true, results)` immediately, regardless of
+    /// `mode`. Otherwise [`StoppingMode::Any`] stops if any rule triggered,
+    /// [`StoppingMode::All`] stops only if all did.
     #[must_use]
     pub fn evaluate(&self, state: &MonitorState) -> (bool, Vec<StoppingRuleResult>) {
-        // Step 1: Evaluate GracefulShutdown unconditionally first.
-        // If the shutdown flag is set, bypass all composition logic.
         if state.shutdown_requested {
             let results: Vec<StoppingRuleResult> =
                 self.rules.iter().map(|r| r.evaluate(state)).collect();
             return (true, results);
         }
 
-        // Step 2: Evaluate all configured rules.
         let results: Vec<StoppingRuleResult> =
             self.rules.iter().map(|r| r.evaluate(state)).collect();
 
-        // Step 3: Apply combination logic (GracefulShutdown already handled).
+        // GracefulShutdown is excluded here — already handled above.
         let non_shutdown_triggered: Vec<bool> = self
             .rules
             .iter()

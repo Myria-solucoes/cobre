@@ -1,25 +1,17 @@
 //! Captured-basis metadata population after a forward stage solve.
-//!
-//! Owns `write_capture_metadata`: records the active-cut slot identities and the
-//! state at capture into a `CapturedBasis` so the next iteration's warm-start can
-//! match stored cut rows to current LP rows by slot identity.
 
 use crate::cut::pool::CutPool;
 use crate::workspace::CapturedBasis;
 
 /// Populate `CapturedBasis` metadata after a stage solve.
 ///
-/// `cut_row_count` is the number of cut rows actually in the LP (derived from
-/// `basis_row_capacity - base_row_count`). Under the active-only bake model
-/// the baked template carries one row per active cut in `active_cuts()`
-/// iteration order; LP row `k` corresponds to the k-th active slot. The
-/// metadata captures that identity by pushing each active `slot as u32` in
-/// iteration order.
+/// Records each active cut's slot as `u32` in `active_cuts()` order so the next
+/// iteration's warm-start matches stored cut rows to LP rows by slot identity,
+/// not row count (the append-only-pool warm-start contract; `reconstruct_basis`).
 ///
-/// `row_status` is defensively resized to `base_row_count + cut_row_count` so
-/// the metadata invariant holds even when the underlying solver's `get_basis`
-/// is a no-op (e.g. test mocks). For real solvers this is a no-op since they
-/// write the correct length.
+/// `row_status` is resized to `base_row_count + cut_row_count` so the invariant
+/// holds even when `get_basis` is a no-op (test mocks); real solvers write the
+/// correct length, making this a no-op.
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) fn write_capture_metadata(
     captured: &mut CapturedBasis,

@@ -259,10 +259,8 @@ pub struct NcsPenaltyOverrideRow {
 
 /// Validate that a present (non-null) optional float value is finite and positive.
 ///
-/// Returns `SchemaError` when the value is NaN, infinite, or <= 0.0. The `file_label`
-/// is used in the field path: `"<file_label>[{row_idx}].<column>"`.
-///
-/// Penalties must be strictly positive (> 0.0); a value of exactly 0.0 is rejected.
+/// Penalties are strictly positive: a value of exactly 0.0 is rejected (`<= 0.0`, not
+/// `< 0.0`).
 fn validate_optional_positive(
     value: Option<f64>,
     file_label: &str,
@@ -291,13 +289,11 @@ fn validate_optional_positive(
 
 // ── Parsers ───────────────────────────────────────────────────────────────────
 
-/// Parse `constraints/penalty_overrides_bus.parquet` and return a sorted row table.
+/// Parse `constraints/penalty_overrides_bus.parquet`, returning rows sorted by
+/// `(bus_id, stage_id)` ascending.
 ///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(bus_id, stage_id)` ascending.
-///
-/// The `excess_cost` column is optional. If absent from the file schema, all rows
-/// will have `excess_cost: None` (not a schema error — this is the sparse-override design).
+/// The `excess_cost` column is optional; absent from the file schema yields
+/// `excess_cost: None` in all rows (the sparse-override design, not a schema error).
 ///
 /// # Errors
 ///
@@ -334,11 +330,9 @@ pub fn parse_penalty_overrides_bus(path: &Path) -> Result<Vec<BusPenaltyOverride
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required key columns ──────────────────────────────────────────────
         let bus_id_col = extract_required_int32(&batch, "bus_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
 
-        // ── Optional penalty columns ──────────────────────────────────────────
         let excess_cost_col = extract_optional_float64(&batch, "excess_cost", path)?;
 
         let n = batch.num_rows();
@@ -381,13 +375,11 @@ pub fn parse_penalty_overrides_bus(path: &Path) -> Result<Vec<BusPenaltyOverride
     Ok(rows)
 }
 
-/// Parse `constraints/penalty_overrides_line.parquet` and return a sorted row table.
+/// Parse `constraints/penalty_overrides_line.parquet`, returning rows sorted by
+/// `(line_id, stage_id)` ascending.
 ///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(line_id, stage_id)` ascending.
-///
-/// The `exchange_cost` column is optional. If absent from the file schema, all rows
-/// will have `exchange_cost: None` (not a schema error — this is the sparse-override design).
+/// The `exchange_cost` column is optional; absent from the file schema yields
+/// `exchange_cost: None` in all rows (the sparse-override design, not a schema error).
 ///
 /// # Errors
 ///
@@ -424,11 +416,9 @@ pub fn parse_penalty_overrides_line(path: &Path) -> Result<Vec<LinePenaltyOverri
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required key columns ──────────────────────────────────────────────
         let line_id_col = extract_required_int32(&batch, "line_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
 
-        // ── Optional penalty columns ──────────────────────────────────────────
         let exchange_cost_col = extract_optional_float64(&batch, "exchange_cost", path)?;
 
         let n = batch.num_rows();
@@ -471,14 +461,12 @@ pub fn parse_penalty_overrides_line(path: &Path) -> Result<Vec<LinePenaltyOverri
     Ok(rows)
 }
 
-/// Parse `constraints/penalty_overrides_hydro.parquet` and return a sorted row table.
+/// Parse `constraints/penalty_overrides_hydro.parquet`, returning rows sorted by
+/// `(hydro_id, stage_id)` ascending.
 ///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(hydro_id, stage_id)` ascending.
-///
-/// The Parquet file may contain any subset of the sixteen optional penalty columns.
-/// Columns absent from the file schema produce `None` in all rows (not a schema
-/// error — this is the intended sparse-override design).
+/// The file may contain any subset of the sixteen optional penalty columns; columns
+/// absent from the file schema produce `None` in all rows (the sparse-override design,
+/// not a schema error).
 ///
 /// # Errors
 ///
@@ -500,10 +488,8 @@ pub fn parse_penalty_overrides_line(path: &Path) -> Result<Vec<LinePenaltyOverri
 ///     .expect("valid hydro penalty overrides file");
 /// println!("loaded {} hydro penalty override rows", rows.len());
 /// ```
-// Rationale: all 16 optional penalty columns are extracted from a single Parquet record batch
-// and validated for positivity and finiteness in one sequential pass; splitting would require
-// multiple passes over the batch or would conceal the invariant that every column is validated
-// for every row before any result is returned.
+// Rationale: a single sequential pass validates every column for every row before returning;
+// splitting would require multiple passes over the batch.
 #[allow(clippy::too_many_lines)]
 pub fn parse_penalty_overrides_hydro(
     path: &Path,
@@ -522,11 +508,9 @@ pub fn parse_penalty_overrides_hydro(
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required key columns ──────────────────────────────────────────────
         let hydro_id_col = extract_required_int32(&batch, "hydro_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
 
-        // ── Optional penalty columns (all 16) ────────────────────────────────
         let spillage_cost_col = extract_optional_float64(&batch, "spillage_cost", path)?;
         let turbined_cost_col = extract_optional_float64(&batch, "turbined_cost", path)?;
         let diversion_cost_col = extract_optional_float64(&batch, "diversion_cost", path)?;
@@ -546,7 +530,6 @@ pub fn parse_penalty_overrides_hydro(
             extract_optional_float64(&batch, "evaporation_violation_cost", path)?;
         let water_withdrawal_violation_cost_col =
             extract_optional_float64(&batch, "water_withdrawal_violation_cost", path)?;
-        // Directional overrides (5 additional columns).
         let water_withdrawal_violation_pos_cost_col =
             extract_optional_float64(&batch, "water_withdrawal_violation_pos_cost", path)?;
         let water_withdrawal_violation_neg_cost_col =
@@ -763,13 +746,11 @@ pub fn parse_penalty_overrides_hydro(
     Ok(rows)
 }
 
-/// Parse `constraints/penalty_overrides_ncs.parquet` and return a sorted row table.
+/// Parse `constraints/penalty_overrides_ncs.parquet`, returning rows sorted by
+/// `(source_id, stage_id)` ascending.
 ///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(source_id, stage_id)` ascending.
-///
-/// The `curtailment_cost` column is optional. If absent from the file schema, all rows
-/// will have `curtailment_cost: None` (not a schema error — this is the sparse-override design).
+/// The `curtailment_cost` column is optional; absent from the file schema yields
+/// `curtailment_cost: None` in all rows (the sparse-override design, not a schema error).
 ///
 /// # Errors
 ///
@@ -806,11 +787,9 @@ pub fn parse_penalty_overrides_ncs(path: &Path) -> Result<Vec<NcsPenaltyOverride
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required key columns ──────────────────────────────────────────────
         let source_id_col = extract_required_int32(&batch, "source_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
 
-        // ── Optional penalty columns ──────────────────────────────────────────
         let curtailment_cost_col = extract_optional_float64(&batch, "curtailment_cost", path)?;
 
         let n = batch.num_rows();

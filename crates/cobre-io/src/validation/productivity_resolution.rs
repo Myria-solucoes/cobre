@@ -35,22 +35,17 @@ use super::schema::ParsedData;
 /// established referential and dimensional consistency. All conflicts and
 /// coverage gaps are collected before returning — no short-circuiting.
 pub(crate) fn validate_productivity_resolution(data: &ParsedData, ctx: &mut ValidationContext) {
-    // Build the parquet lookup: (hydro_id, stage_id) -> rho_eq.
-    // Only rows where equivalent_productivity_mw_per_m3s is Some(_) count.
     let parquet_map = build_parquet_map(&data.hydro_energy_productivity_rows);
 
-    // Build the JSON config lookup: hydro_id -> &ProductionModelConfig.
     let json_map: HashMap<EntityId, &ProductionModelConfig> = data
         .production_models
         .iter()
         .map(|c| (c.hydro_id, c))
         .collect();
 
-    // Iterate all non-FPHA hydros × all study stages.
     let study_stages: Vec<&Stage> = data.stages.stages.iter().filter(|s| s.id >= 0).collect();
 
     for hydro in &data.hydros {
-        // Skip FPHA hydros — their ρ_eq resolution path is different.
         if hydro.generation_model == HydroGenerationModel::Fpha {
             continue;
         }
@@ -134,13 +129,10 @@ fn parquet_lookup(
 /// Find the `productivity_mw_per_m3s` from the JSON config for a given stage.
 ///
 /// The matching logic is reimplemented locally so this crate carries no
-/// dependency on downstream solver crates and no algorithm-specific
-/// identifiers.
+/// dependency on downstream solver crates and no algorithm-specific identifiers.
 ///
-/// For `StageRanges`: the match is `start_stage_id <= stage.id <= end_stage_id`.
-/// For `Seasonal`: the match is `season_id == stage.season_id`; stages with no
-/// matching season entry fall back to the `default_model`, which carries no
-/// explicit productivity (returns `None`).
+/// For `Seasonal`, a stage with no matching season entry falls back to the
+/// `default_model`, which carries no explicit productivity (returns `None`).
 fn find_productivity_for_stage(config: &ProductionModelConfig, stage: &Stage) -> Option<f64> {
     match &config.selection_mode {
         SelectionMode::StageRanges { ranges } => ranges

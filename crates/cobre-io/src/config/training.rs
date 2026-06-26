@@ -60,9 +60,6 @@ impl TrainingConfig {
     pub(super) fn default_stopping_mode() -> String {
         "any".to_string()
     }
-
-    // Note: Default impl is not provided for TrainingConfig because forward_passes
-    // and stopping_rules are mandatory and have no sensible defaults.
 }
 
 /// Row-selection settings (`config.json → training.cut_selection`).

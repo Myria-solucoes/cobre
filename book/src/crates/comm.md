@@ -10,8 +10,8 @@ future TCP or shared-memory configurations.
 
 The crate currently provides two concrete backends:
 
-- **`local`** — single-process backend, always available, zero overhead, zero
-  external dependencies.
+- **`local`** — single-process backend, always available, zero external
+  dependencies.
 - **`mpi`** — MPI backend via [ferrompi](https://github.com/cobre-rs/ferrompi),
   feature-gated behind `features = ["mpi"]`.
 
@@ -52,9 +52,8 @@ function once and the compiler generates one concrete instantiation per backend.
 
 Since a Cobre binary uses exactly one communicator backend (MPI for distributed
 execution, `LocalBackend` for single-process mode), the binary contains only
-one instantiation per generic call site. The performance benefit is meaningful:
-`LocalBackend`'s no-op implementations compile to zero instructions after
-inlining.
+one instantiation per generic call site. `LocalBackend`'s no-op implementations
+compile to zero instructions after inlining.
 
 ### Method summary
 
@@ -137,7 +136,7 @@ fn determine_leader(local_comm: &dyn LocalCommunicator) -> bool {
 intra-node communicator used only during initialization (leader/follower role
 assignment). Because this is an initialization-only operation far off the hot
 path, dynamic dispatch is the correct trade-off, and `LocalCommunicator` is the
-bridge that makes it possible without compromising the zero-cost static dispatch
+bridge that makes it possible without compromising the static dispatch
 of the hot-path `Communicator` trait.
 
 ## `LocalBackend`

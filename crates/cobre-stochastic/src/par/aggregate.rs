@@ -1,23 +1,14 @@
 //! Observation aggregation from fine-grained to coarser season resolution.
 //!
-//! When the season resolution of a study is coarser than the resolution of
-//! the available observation history (e.g., quarterly seasons with monthly
-//! observations), each `(entity, season, year)` group contains multiple
-//! observations that must be collapsed into a single representative value
-//! before passing them to the PAR fitting pipeline.
-//!
-//! This module provides [`aggregate_observations_to_season`], which performs
-//! duration-weighted averaging over each group. The formula preserves the
-//! physical meaning of volumetric average flow rate across unequal month
-//! lengths within a coarser period:
+//! When the season cycle is coarser than the observation history (e.g.
+//! quarterly seasons with monthly observations), each `(entity, season, year)`
+//! group is collapsed by duration-weighted averaging before PAR fitting. The
+//! day-count weights preserve volumetric average flow rate across unequal month
+//! lengths:
 //!
 //! ```text
 //! agg_value = sum(value_i * days_i) / sum(days_i)
 //! ```
-//!
-//! where `days_i` is the number of calendar days in the observation's month.
-//!
-//! Groups with exactly one observation pass through unchanged (identity case).
 
 use std::collections::HashMap;
 
@@ -30,36 +21,8 @@ use cobre_core::{
 use crate::StochasticError;
 use crate::par::fitting::find_season_for_date;
 
-/// Aggregate fine-grained observations into one observation per
-/// `(entity, season, year)` group using duration-weighted averaging.
-///
-/// # Purpose
-///
-/// When the season cycle of a study is coarser than the observation
-/// frequency (e.g., quarterly seasons derived from monthly inflow history),
-/// calling the PAR fitting functions directly would result in multiple
-/// observations per group, distorting the estimated parameters. This
-/// function collapses each group into a single value before fitting.
-///
-/// # Date-to-season resolution
-///
-/// For each observation date the function first attempts to locate a
-/// matching stage in `stages` via binary search (`find_season_for_date`).
-/// If no stage covers the date, it falls back to a calendar-based lookup
-/// via `season_map.season_for_date`. This two-tier strategy handles both
-/// in-study and pre-study historical observations.
-///
-/// # Duration weights
-///
-/// The weight for each observation is the number of calendar days in its
-/// month (e.g., January = 31, February = 28 or 29 in a leap year). This
-/// preserves volumetric correctness when averaging mean flow rates measured
-/// over periods of different lengths.
-///
-/// # Representative date
-///
-/// The aggregated observation inherits the earliest (chronologically first)
-/// date within each group.
+/// Aggregate fine-grained observations into one duration-weighted observation
+/// per `(entity, season, year)` group; each group inherits its earliest date.
 ///
 /// # Errors
 ///
@@ -106,22 +69,18 @@ pub fn aggregate_observations_to_season(
         return Ok(Vec::new());
     }
 
-    // Build stage index sorted by start_date for binary-search based range
-    // lookup. Only stages with a season_id contribute.
     let mut stage_index: Vec<(NaiveDate, NaiveDate, i32, usize)> = stages
         .iter()
         .filter_map(|s| s.season_id.map(|sid| (s.start_date, s.end_date, s.id, sid)))
         .collect();
     stage_index.sort_unstable_by_key(|(start, _, _, _)| *start);
 
-    // Group observations by (entity_id, season_id, year).
-    // Value: Vec<(date, value)> — dates kept for choosing the representative.
     let mut group_map: HashMap<(EntityId, usize, i32), Vec<(NaiveDate, f64)>> =
         HashMap::with_capacity(observations.len());
 
     for &(entity_id, date, value) in observations {
-        // Two-tier date-to-season resolution: stage index first, then
-        // SeasonMap calendar mapping for out-of-range historical observations.
+        // Stage index first, then SeasonMap calendar fallback for out-of-study
+        // historical dates.
         let season_id = find_season_for_date(&stage_index, date)
             .or_else(|| season_map.season_for_date(date))
             .ok_or_else(|| StochasticError::InsufficientData {
@@ -138,21 +97,16 @@ pub fn aggregate_observations_to_season(
             .push((date, value));
     }
 
-    // For each group compute the duration-weighted average and pick the
-    // earliest date as the representative.
     let mut result: Vec<(EntityId, NaiveDate, f64)> = Vec::with_capacity(group_map.len());
 
     for ((entity_id, _season_id, _year), mut entries) in group_map {
-        // Sort entries by date so the minimum date is entries[0].
+        // Sort by date so entries[0] is the representative (earliest) date.
         entries.sort_unstable_by_key(|(d, _)| *d);
 
         if entries.len() == 1 {
-            // Identity case: pass through unchanged.
             let (date, value) = entries[0];
             result.push((entity_id, date, value));
         } else {
-            // Duration-weighted average.
-            // Weight for each observation = number of calendar days in its month.
             let mut weighted_sum = 0.0_f64;
             let mut total_days = 0_u32;
 
@@ -162,36 +116,30 @@ pub fn aggregate_observations_to_season(
                 total_days += days;
             }
 
-            // total_days is always >= 28 per entry, so > 0. The cast to f64
-            // is safe: total_days fits well within the exact-integer range of
-            // f64 (max ~12 months * 31 days = 372, far below 2^53).
+            // total_days ≤ ~372 fits exactly in f64; cast cannot lose precision.
             #[allow(clippy::cast_precision_loss)]
             let agg_value = weighted_sum / f64::from(total_days);
 
-            // Representative date is the earliest (entries[0] after sort).
             let rep_date = entries[0].0;
             result.push((entity_id, rep_date, agg_value));
         }
     }
 
-    // Sort by (entity_id, date) ascending to match parser convention.
+    // Sort by (entity_id, date) to match parser convention (declaration-order
+    // invariance: output must not depend on group_map iteration order).
     result.sort_unstable_by_key(|(eid, date, _)| (eid.0, *date));
 
     Ok(result)
 }
 
-/// Return the number of calendar days in the month containing `date`.
-///
-/// Uses `chrono::Months` arithmetic to compute the first day of the next
-/// month and then takes the difference. This handles February in both leap
-/// years (29 days) and non-leap years (28 days) correctly.
+/// Return the number of calendar days in the month containing `date`
+/// (leap-year aware).
 fn days_in_month(date: NaiveDate) -> u32 {
     let first_of_month = NaiveDate::from_ymd_opt(date.year(), date.month(), 1).unwrap_or(date);
     let first_of_next = first_of_month
         .checked_add_months(Months::new(1))
         .unwrap_or(first_of_month);
     let diff = first_of_next.signed_duration_since(first_of_month);
-    // Duration is always in [28, 31] days — cast to u32 is safe.
     u32::try_from(diff.num_days()).unwrap_or(30)
 }
 

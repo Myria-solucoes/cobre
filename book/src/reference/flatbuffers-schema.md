@@ -80,8 +80,7 @@ flatc --ts crates/cobre-io/schemas/policy.fbs
 # emits TypeScript modules under cobre/io/policy/
 ```
 
-For other targets see `flatc --help`; the schema is plain enough to
-work with all of them.
+For other targets see `flatc --help`.
 
 ## Field-by-field reference
 

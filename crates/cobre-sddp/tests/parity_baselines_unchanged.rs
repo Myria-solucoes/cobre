@@ -1,21 +1,12 @@
-//! Guard test: verify that no parity baseline file was silently modified.
+//! Fast guard: the committed parity baselines match the digests pinned in
+//! [`EXPECTED_HASHES`], so a baseline cannot change silently.
 //!
-//! Reads each baseline file in a fixed hard-coded order, trims its hex
-//! digest, and compares it byte-for-byte against the expected value pinned
-//! in [`EXPECTED_HASHES`]. Any change to a baseline file will cause this
-//! test to fail with a message pointing at the offending case.
-//!
-//! The original implementation hashed all baselines into a single
-//! meta-hash via `sha2::Sha256`. That was a double-hash (the baseline
-//! files are already SHA-256 digests) and gave weak diagnostics — a
-//! meta-hash mismatch tells you *something* changed but not which file.
-//! The per-file table here uses plain string equality and identifies the
-//! offending case directly. The `sha2` crate is still a dev-dependency
-//! because `parity_hash_d01_d15.rs` legitimately uses it to compute the
-//! baselines themselves from training output.
-//!
-//! This test is NOT slow-gated: the total I/O is 15 × 64 bytes and the
-//! test runs in milliseconds.
+//! This is the third pin of every HiGHS baseline (the other two are the
+//! checked-in `parity_baselines/<case>.sha256` file and the slow-gated
+//! `parity_hash_*` end-to-end run); a re-baseline must update all three together
+//! or this guard rots silently. Per-file string equality (not a meta-hash) names
+//! the offending case directly. NOT slow-gated — each baseline is one 64-byte
+//! digest.
 
 #![allow(
     clippy::unwrap_used,
@@ -28,83 +19,110 @@
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
-// Expected hex digests — one entry per baseline file
+// Expected hex digests — one entry per HiGHS baseline file
 // ---------------------------------------------------------------------------
 //
-// Updating this table: re-run the relevant deterministic case end-to-end
-// (e.g., `just regression-baseline D06`) and paste the new hash here, in the
-// commit that intentionally changes the baseline.
+// Each entry pins only the HiGHS `<case>.sha256`; the CLP baseline is verified
+// by the slow-gated CLP `parity_hash_<case>`. To intentionally change a
+// baseline, re-run the case end-to-end (e.g. `just regression-baseline D06`) and
+// paste the new hash here in the same commit.
 
 const EXPECTED_HASHES: &[(&str, &str)] = &[
     (
         "D01",
-        "6f754531715e6e574c0a3d96664fecdf650cc6ecb07abde124ea73e49588750f",
+        "afafd3ebbde7f276cb42b1c50203f67122af3208d76be90437a3f005839ea305",
     ),
     (
         "D02",
-        "274974027bf192c228697e40c0fb3da30e29606885caf27d8ec38e41e8f65f1f",
+        "885d47ceda6daef4e00b024d89637dacdb6971eb3d32eb2dccbe2c3360689a2b",
     ),
     (
         "D03",
-        "66b60e4138c51346f76ec1f062fcfc6f194014a47b901c4f6254bf7b33364dc7",
+        "ed19139d277bb7affa95ada515f0a1e933d6e275fcf70588b26207ca9234d47c",
     ),
     (
         "D04",
-        "0ac2a66bdf85b8f6b566720fc6492f82820d84f144b474d5ac186e7d40837327",
+        "7834243cd6e85e8fa0728500ee0663752f0c82c98dfb3f70c17a528657916a9e",
     ),
     (
         "D05",
-        "a0f4602ec0e2f2872456a5685622ef877c18947072c9e22cdbc81ff9785803db",
+        "d21eec148c510eadc76be65296548e1c6ba3a32f6f324dcf19a86d016b73c9a7",
     ),
     (
         "D06",
-        "4d2631c0f6aeb966f181b213bbf952064e6efca20d7e2a2c0ddf2be5e8d0bace",
+        "f618d2a4331f075f5d1aea64b1598aa5569b6086dcab9ff48a750f392b970ca6",
     ),
     (
         "D07",
-        "8181b12c2e0d527cf246cb77dfab169b4c39e9875c7adf3d43e0ebafa7b0cb5a",
+        "01bbf84d0482a57f0fc35a18a8e24e3fa79e502aca9747b41630f7c554565b68",
     ),
     (
         "D08",
-        "9a6784527cdc180ac3b03d2d29f4d436e19bf10c55924dc6893996a5fb344de5",
+        "143e98dd6ee7fdcb23f2fdea2ce435d370a3e566caea25724b130ecdf542e5d3",
     ),
     (
         "D09",
-        "b459b9dc1b63fd540308445ff1016deee2dc05de872cb0b2381d7b0c74b57254",
+        "e6f151f5cbdafa61544861b1b2ff6df96887325cdffc0ba8a12b3244bc019c5a",
     ),
     (
         "D10",
-        "82702f68338b80e34d0690d70b017738e5019ffd2cf71e63201c031e82d41347",
+        "b43d45e83217d64837bf0f68206a82fb9f9fe32c080abc389bc8c79b15da0417",
     ),
     (
         "D11",
-        "6ac8e25e9fe811c70390c3e148b1f9f1dab897fc2b75389aed40a1628315d943",
+        "189d12201db87e68105e513e25ffda36edf161dada977d82693e5860c31b551d",
     ),
     (
         "D13",
-        "037e7bc27e5711085cae9fc8124934fd688ed7b41313b3cf040f1ea9f4126b58",
+        "7c1c95e542cd358cd524c827d852a616d1d8a906a7f111112704123f22905de5",
     ),
     (
         "D14",
-        "fd861a800d99ab10cc6520f491d3688e9d7e8c76f8342b7ca1df52e059a22fd8",
+        "932f1c97f15257c048d5131e051af0a174bf168de0ec1f61f6a7d9481160ce87",
     ),
     (
         "D15",
-        "5e08b53a627715aee52efa23b6a06a3db541bcc520cfdad49fcbac720830aade",
+        "16701a7b7f6554794989f4bb0f3ce339693777edef873abfb60471d25112df7f",
     ),
     (
         "D17",
-        "01033bd40ad2d858eb0c03b2efd462ea43c6854e1a557b274b8a6e9001278a9a",
+        "c23607d2088fd6901d92c7688a6a28233f598082ac632586bc8c6125396f598a",
     ),
-    // Cascade case whose downstream plant declares a `reference_volume`. The
-    // reference-volume *default* (0.65) path is covered by the unchanged
-    // D05/D06/D07 baselines (none declare a `reference_volume`); D31 exercises the
-    // *declared* path. This fast guard only pins the checked-in `D31.sha256`
-    // against EXPECTED_HASHES; the full train+sim parity hash for D31 is verified
-    // by the slow-gated `parity_hash_d31` (HiGHS and CLP).
     (
         "D31",
-        "29ef7566025ab1938b2d66bfbc2b4139c258ff940d0ed79cce57aedc51bd4086",
+        "08bd760f3718196fa9324a56dc08cab8f725365a28267c0218a37ac884ab94b3",
+    ),
+    (
+        "D32",
+        "be72c5faf5881687792dcd4939750906f61b984dc3209c7f8da97269d13a9e29",
+    ),
+    (
+        "D35",
+        "ebd271e4504810723f9a380130d5ca20662ddfd88194c5418555b26d3a80d977",
+    ),
+    (
+        "D36",
+        "ea73313186c94b872aa8a755c1c00d9537688be74971dd1bebb6bb0d35376e62",
+    ),
+    (
+        "D37",
+        "c709a7433e5a2f1ceac3bb0030806ccdd85ee3ecbc2578e66a156dd3bfce7bd0",
+    ),
+    (
+        "D38",
+        "7e02e0cfd3d7cbf27ec4d1939a9e6957e52eecaa3e20ccdb2ef2be03426de352",
+    ),
+    (
+        "D39",
+        "7a29931dcd7e678c3e0ce83820508c97c9419e620669f98ae25b17292c8ad7e8",
+    ),
+    (
+        "D40",
+        "e9e2508363c3d2cd6524fc822849f8d35ca76a3909f51f48fd7325d53c6d1968",
+    ),
+    (
+        "D41",
+        "a6093e62935c6ace5fadb9970de58f390f46602bdaddbe85870dc02a0e30b988",
     ),
 ];
 

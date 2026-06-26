@@ -1,20 +1,15 @@
 //! Input and output record types for policy checkpoint serialization.
 //!
 //! Input types (`PolicyCutRecord`, `PolicyBasisRecord`, `StageStatesPayload`,
-//! `StageCutsPayload`) borrow their data from caller-owned buffers. Owned output
-//! types (`OwnedPolicyCutRecord`, `OwnedPolicyBasisRecord`, `StageCutsReadResult`,
-//! `StageStatesReadResult`, `PolicyCheckpoint`) are returned from deserialization
-//! and own their vectors.
+//! `StageCutsPayload`) borrow from caller-owned buffers; owned output types
+//! (`Owned*`, `*ReadResult`, `PolicyCheckpoint`) own their vectors. All use
+//! generic names to maintain infrastructure crate genericity; conversion from
+//! algorithm-specific types is the calling crate's responsibility. Field names
+//! correspond to the tables in `schemas/policy.fbs`.
 
 /// One cut record for policy checkpoint serialization.
 ///
-/// Conversion from algorithm-specific cut pool structures is handled by the calling
-/// algorithm crate. This type uses generic names to maintain infrastructure crate
-/// genericity. The lifetime parameter `'a` allows borrowing the coefficient slice
-/// without copying (coefficient vectors can reach 2,080 `f64` values at production
-/// scale).
-///
-/// Field names correspond to the `Cut` table in `schemas/policy.fbs`.
+/// `'a` borrows the coefficient slice without copying (vectors can be large).
 #[derive(Debug, Clone)]
 pub struct PolicyCutRecord<'a> {
     /// Unique identifier for this cut across all iterations.
@@ -27,11 +22,10 @@ pub struct PolicyCutRecord<'a> {
     pub forward_pass_index: u32,
     /// Pre-computed cut intercept: `alpha - beta' * x_hat`.
     pub intercept: f64,
-    /// Gradient coefficient vector, length must equal `state_dimension`.
+    /// Gradient coefficients, length must equal `state_dimension`.
     ///
-    /// Coefficient vector is positional only — index `i` refers to the
-    /// i-th state-vector dimension as defined by
-    /// `state_dictionary.json`. No labels are stored inline.
+    /// Positional only: index `i` is the i-th state-vector dimension per
+    /// `state_dictionary.json`; no labels are stored inline.
     pub coefficients: &'a [f64],
     /// Whether this cut is currently active in the LP.
     pub is_active: bool,
@@ -39,10 +33,7 @@ pub struct PolicyCutRecord<'a> {
 
 /// One stage's solver basis for policy checkpoint serialization.
 ///
-/// Conversion from solver-specific basis structures is handled by the calling crate.
-/// The lifetime parameter `'a` allows borrowing the status arrays without copying.
-///
-/// Field names correspond to the `StageBasis` table in `schemas/policy.fbs`.
+/// `'a` borrows the status arrays without copying.
 #[derive(Debug, Clone)]
 pub struct PolicyBasisRecord<'a> {
     /// Stage index (0-based).
@@ -73,12 +64,8 @@ pub struct StageStatesPayload<'a> {
     pub data: &'a [f64],
 }
 
-/// Per-stage cut data payload for [`crate::write_policy_checkpoint`].
-///
-/// Groups all fields required by [`crate::serialize_stage_cuts`] into a single struct so
-/// the checkpoint writer can iterate over stages without unpacking individual
-/// arguments at each call site. The lifetime parameter `'a` allows borrowing
-/// coefficient slices and index arrays without copying.
+/// Per-stage cut data payload for [`crate::write_policy_checkpoint`], grouping the
+/// arguments of [`crate::serialize_stage_cuts`]. `'a` borrows slices without copying.
 #[derive(Debug)]
 pub struct StageCutsPayload<'a> {
     /// Stage index (0-based), used as the file name index in `cuts/stage_NNN.bin`.
@@ -100,8 +87,7 @@ pub struct StageCutsPayload<'a> {
 /// Policy metadata for checkpoint resume and warm-start.
 ///
 /// Serialized to JSON (not `FlatBuffers`) because it is small, human-readable, and
-/// may be edited by operators. The `serde::Serialize` derive enables
-/// `serde_json::to_string_pretty` in the checkpoint writer.
+/// may be edited by operators.
 ///
 /// # Examples
 ///
@@ -158,12 +144,8 @@ pub struct PolicyCheckpointMetadata {
     pub warm_start_counts: Vec<u32>,
     /// RNG seed used by the scenario sampler.
     ///
-    /// The noise sampling architecture derives per-draw seeds from
-    /// `(rng_seed, iteration, scenario, stage)` via SipHash-1-3. This
-    /// makes noise at any given iteration deterministic from the seed
-    /// alone — no accumulated RNG state is needed for resume. A resumed
-    /// training run with the same `rng_seed` and `forward_passes` will
-    /// produce identical noise sequences at each iteration.
+    /// Per-draw seeds are derived from `(rng_seed, iteration, scenario, stage)`,
+    /// so resume needs only the seed — no accumulated RNG state is persisted.
     pub rng_seed: u64,
     /// Total visited states across all stages.
     ///
@@ -192,11 +174,10 @@ pub struct OwnedPolicyCutRecord {
     pub forward_pass_index: u32,
     /// Pre-computed cut intercept.
     pub intercept: f64,
-    /// Gradient coefficient vector, length equals `state_dimension` of the stage.
+    /// Gradient coefficients, length equals the stage's `state_dimension`.
     ///
-    /// Coefficient vector is positional only — index `i` refers to the
-    /// i-th state-vector dimension as defined by
-    /// `state_dictionary.json`. No labels are stored inline.
+    /// Positional only: index `i` is the i-th state-vector dimension per
+    /// `state_dictionary.json`; no labels are stored inline.
     pub coefficients: Vec<f64>,
     /// Whether this cut is currently active in the LP.
     pub is_active: bool,

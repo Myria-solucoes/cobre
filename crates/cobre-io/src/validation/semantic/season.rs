@@ -1,7 +1,4 @@
 //! Layer 5b — season-domain semantic validation.
-//!
-//! Season-id consistency, observation-season alignment, season
-//! observation coverage, and season-definition contiguity.
 
 use std::collections::{HashMap, HashSet};
 
@@ -132,7 +129,7 @@ pub(super) fn check_observation_season_alignment(data: &ParsedData, ctx: &mut Va
         return;
     };
 
-    // Stages are sorted by id (canonical order), which matches date order.
+    // Stages are sorted by id, which matches date order — partition_point relies on it.
     let stage_index: Vec<(chrono::NaiveDate, chrono::NaiveDate, usize)> = data
         .stages
         .stages
@@ -140,7 +137,6 @@ pub(super) fn check_observation_season_alignment(data: &ParsedData, ctx: &mut Va
         .filter_map(|s| s.season_id.map(|sid| (s.start_date, s.end_date, sid)))
         .collect();
 
-    // Build counts: (hydro_id, season_id, year) -> observation count.
     let mut counts: HashMap<(i32, usize, i32), usize> = HashMap::new();
     for row in &data.inflow_history {
         let pos = stage_index.partition_point(|(start, _, _)| *start <= row.date);
@@ -158,7 +154,6 @@ pub(super) fn check_observation_season_alignment(data: &ParsedData, ctx: &mut Va
         }
     }
 
-    // ── Finer-than-season: warn when count > 1 (observations will be aggregated) ──
     let mut finer_violations: Vec<(i32, usize, i32, usize)> = counts
         .iter()
         .filter(|&(_, &n)| n > 1)
@@ -178,37 +173,22 @@ pub(super) fn check_observation_season_alignment(data: &ParsedData, ctx: &mut Va
         );
     }
 
-    // ── Coarser-than-season: error when a hydro has observations in a year but
-    // is missing an entire (season_id, year) group that the season map defines ──
-    //
-    // Collect the distinct season IDs defined in the season map.
     let defined_season_ids: Vec<usize> = season_map.seasons.iter().map(|s| s.id).collect();
 
-    // For each hydro, collect the set of years where it has at least one observation.
     let mut hydro_years: HashMap<i32, HashSet<i32>> = HashMap::new();
     for &(hid, _sid, yr) in counts.keys() {
         hydro_years.entry(hid).or_default().insert(yr);
     }
 
-    // Detect missing (hydro, season, year) groups: the hydro has history in
-    // that year, but the counts map has no entry for that (hydro, season, year).
-    //
-    // Boundary years (the first and last calendar year each hydro has any
-    // observation) are excluded from this check. Partial coverage in a boundary
-    // year is expected — real-world history commonly starts in April and ends in
-    // September, giving incomplete first/last calendar years.  Interior years
-    // that are missing a season ARE genuine coarser-than-season indicators and
-    // are still reported.
-    //
-    // Edge case: a hydro with only 1 or 2 years of data has no interior years at
-    // all, so the check is skipped entirely for that hydro.  Other validation
-    // rules (minimum observation count) will surface insufficient data.
+    // Boundary years (each hydro's first and last with any observation) are
+    // skipped: partial coverage there is expected (history often starts mid-year),
+    // so a missing season is not a coarser-than-season signal. Only interior years
+    // are checked; a hydro with <3 years has none.
     let mut coarser_violations: Vec<(i32, usize, i32)> = Vec::new();
     for (&hid, years) in &hydro_years {
         let min_yr = years.iter().copied().min().unwrap_or(0);
         let max_yr = years.iter().copied().max().unwrap_or(0);
         for &yr in years {
-            // Skip boundary years — partial coverage is expected there.
             if yr == min_yr || yr == max_yr {
                 continue;
             }
@@ -268,7 +248,7 @@ pub(super) fn check_season_observation_coverage(
         return;
     }
 
-    // Stages are sorted by id (canonical order), which matches date order.
+    // Stages are sorted by id, which matches date order — partition_point relies on it.
     let stage_index: Vec<(chrono::NaiveDate, chrono::NaiveDate, usize)> = data
         .stages
         .stages
@@ -1307,7 +1287,7 @@ mod tests {
         let mut ctx = ValidationContext::new();
         check_observation_season_alignment(&data, &mut ctx);
 
-        // Must produce no errors — finer-than-season is now a warning only.
+        // Must produce no errors — finer-than-season is a warning, not an error.
         assert!(
             ctx.errors().is_empty(),
             "finer-than-season observations must not produce errors; got: {:?}",

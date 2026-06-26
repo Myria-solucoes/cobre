@@ -1,16 +1,8 @@
-//! End-to-end declaration-order invariance test for energy columns.
-//!
-//! Verifies that the five energy columns produced by the simulation pipeline
+//! Declaration-order invariance: the five energy columns
 //! (`equivalent_productivity_mw_per_m3s`, `accumulated_productivity_mw_per_m3s`,
 //! `incremental_inflow_energy_mw`, `stored_energy_initial_mwh`,
-//! `stored_energy_final_mwh`) are bit-for-bit identical regardless of the order
+//! `stored_energy_final_mwh`) must be bit-for-bit identical regardless of the order
 //! in which hydro plants are declared in the input JSON.
-//!
-//! The test stages two copies of the D03 two-hydro cascade fixture in temporary
-//! directories. In the second copy the `"hydros"` array is reversed so that H1
-//! (terminal) appears before H0 (upstream). Both copies are run through the full
-//! `train + simulate` pipeline and the energy columns are compared keyed by
-//! logical entity ID — not by slice position.
 
 #![allow(
     clippy::unwrap_used,
@@ -35,7 +27,6 @@ use cobre_sddp::{
 };
 use cobre_solver::ActiveSolver;
 
-/// Single-rank communicator stub for deterministic testing (no MPI).
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -81,8 +72,6 @@ impl Communicator for StubComm {
     }
 }
 
-/// Build a [`StudySetup`] for a case directory, loading
-/// `system/hydro_energy_productivity.parquet` when present.
 fn build_setup_for_case(
     case_dir: &Path,
     config: &cobre_io::Config,
@@ -90,7 +79,7 @@ fn build_setup_for_case(
     stochastic: cobre_stochastic::StochasticContext,
     hydro_models: cobre_sddp::PrepareHydroModelsResult,
 ) -> StudySetup {
-    let _ = case_dir; // override now flows via hydro_models.productivity_override
+    let _ = case_dir; // productivity override rides on hydro_models, not case_dir
     let sentinel = Path::new("config.json");
     let training_source = config
         .training_scenario_source(sentinel)
@@ -113,7 +102,6 @@ fn build_setup_for_case(
     .expect("StudySetup::from_broadcast_params must build")
 }
 
-/// Train and simulate a case directory, returning the per-scenario results.
 fn run_with_simulation(case_dir: &Path) -> Vec<SimulationScenarioResult> {
     let config_path = case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path).expect("config must parse");
@@ -179,9 +167,7 @@ fn run_with_simulation(case_dir: &Path) -> Vec<SimulationScenarioResult> {
     scenario_results
 }
 
-/// Recursively copy `src_dir` into `dst_dir`, creating subdirectories as needed.
-///
-/// Only regular files are copied; symlinks and other special files are skipped.
+/// Copies only regular files; symlinks and other special files are skipped.
 fn copy_dir_recursive(src_dir: &Path, dst_dir: &Path) {
     std::fs::create_dir_all(dst_dir)
         .expect("staging temp dir must be writable: create_dir_all failed");
@@ -207,8 +193,6 @@ fn copy_dir_recursive(src_dir: &Path, dst_dir: &Path) {
     }
 }
 
-/// Read `system/hydros.json` from `case_dir`, reverse the `"hydros"` array,
-/// and write it back using `serde_json::to_string_pretty`.
 fn reverse_hydros_json(case_dir: &Path) {
     let hydros_path = case_dir.join("system").join("hydros.json");
     let content = std::fs::read_to_string(&hydros_path)
@@ -231,24 +215,17 @@ fn reverse_hydros_json(case_dir: &Path) {
         .expect("staging temp dir must be writable: write hydros.json failed");
 }
 
-/// Key type for per-(hydro, stage, block) record indexing.
-///
-/// Using `(i32, u32, Option<u32>)` matches the field types in
-/// [`cobre_sddp::SimulationHydroResult`].
+/// Tuple types match the field types in [`cobre_sddp::SimulationHydroResult`].
 type RecordKey = (i32, u32, Option<u32>);
 
-/// The five energy column values stored as raw bits for bit-exact comparison.
-///
-/// Layout: `[equivalent_productivity, accumulated_productivity,
-/// incremental_inflow_energy, stored_energy_initial, stored_energy_final]`
+/// Raw float bits for bit-exact comparison, positionally parallel to
+/// [`ENERGY_COLUMN_NAMES`]: `[equivalent_productivity, accumulated_productivity,
+/// incremental_inflow_energy, stored_energy_initial, stored_energy_final]`.
 type EnergyBits = [u64; 5];
 
-/// Flatten a set of scenario results into a sorted vector of
-/// `(RecordKey, EnergyBits)` pairs, keyed by (`hydro_id`, `stage_id`, `block_id`).
-///
-/// Sorting is essential: the two runs may emit hydro records in a different
-/// slice order (because the input declaration order differs). Keyed comparison
-/// by logical entity ID is the semantically correct invariance check.
+/// Sorting by (`hydro_id`, `stage_id`, `block_id`) is essential: the two runs emit
+/// hydro records in different slice order, so comparison must key on logical entity
+/// ID, not slice position.
 fn collect_energy_records(
     scenario_results: &[SimulationScenarioResult],
 ) -> Vec<(RecordKey, EnergyBits)> {
@@ -284,16 +261,9 @@ const ENERGY_COLUMN_NAMES: [&str; 5] = [
     "stored_energy_final_mwh",
 ];
 
-/// Verify that the five energy columns produced by the full train+simulate
-/// pipeline are bit-for-bit identical when the D03 `hydros.json` array is
-/// declared in the original order (`[H0, H1]`) versus reversed (`[H1, H0]`).
-///
-/// Declaration-order invariance is a hard project rule: results must be
-/// bit-for-bit identical regardless of the order in which entities appear in
-/// input files. This test exercises the full pipeline end-to-end — parquet
-/// loading, `StudySetup::from_broadcast_params`, training, simulation, and
-/// energy-column extraction — to prove that no stage introduces order-dependent
-/// state.
+/// Declaration-order invariance is a hard project rule: the energy columns must be
+/// bit-for-bit identical for `hydros.json` in original (`[H0, H1]`) versus reversed
+/// (`[H1, H0]`) order, end-to-end through train + simulate.
 #[cfg_attr(
     not(feature = "slow-tests"),
     ignore = "slow: run with --features slow-tests"
@@ -313,22 +283,17 @@ fn declaration_order_invariance_d03_energy_columns() {
         d03_src.display()
     );
 
-    // Stage two isolated copies of the D03 fixture in temporary directories.
     let tmp_original = tempfile::tempdir().expect("original temp dir must be created");
     let tmp_reversed = tempfile::tempdir().expect("reversed temp dir must be created");
 
     copy_dir_recursive(&d03_src, tmp_original.path());
     copy_dir_recursive(&d03_src, tmp_reversed.path());
 
-    // Mutate only the reversed copy — the original is left untouched.
     reverse_hydros_json(tmp_reversed.path());
 
-    // Run the full train+simulate pipeline for both orderings.
     let results_original = run_with_simulation(tmp_original.path());
     let results_reversed = run_with_simulation(tmp_reversed.path());
 
-    // Flatten and sort by (hydro_id, stage_id, block_id) so that comparison is
-    // keyed by logical entity ID, not by slice position.
     let records_original = collect_energy_records(&results_original);
     let records_reversed = collect_energy_records(&results_reversed);
 
@@ -346,8 +311,6 @@ fn declaration_order_invariance_d03_energy_columns() {
         "simulation must produce at least one hydro result record"
     );
 
-    // Compare bit-by-bit.  Any mismatch is reported with the entity key, the
-    // column name, and the raw bit patterns in hexadecimal.
     for ((key_o, bits_o), (key_r, bits_r)) in records_original.iter().zip(records_reversed.iter()) {
         assert_eq!(
             key_o, key_r,

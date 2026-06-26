@@ -1,8 +1,4 @@
 //! Error types produced during `System` construction and validation.
-//!
-//! [`ValidationError`] is returned by the system builder when entity cross-references
-//! are invalid, duplicate IDs are detected, topology is malformed, or penalty
-//! configuration is invalid.
 
 use core::fmt;
 
@@ -10,9 +6,7 @@ use crate::EntityId;
 
 /// Errors produced during System construction and validation.
 ///
-/// Returned by the `System` builder when loading and validating entity collections.
-/// Each variant captures enough context to pinpoint the invalid input without
-/// requiring the caller to re-inspect the data.
+/// Each variant carries enough context to pinpoint the invalid input.
 ///
 /// # Examples
 ///
@@ -30,22 +24,22 @@ pub enum ValidationError {
     /// A cross-reference field (e.g., `bus_id`, `downstream_id`) refers to
     /// an entity ID that does not exist in the system.
     InvalidReference {
-        /// The entity type containing the invalid reference.
+        /// Entity type holding the dangling reference.
         source_entity_type: &'static str,
-        /// The ID of the entity containing the invalid reference.
+        /// ID of the entity holding the dangling reference.
         source_id: EntityId,
-        /// The name of the field containing the invalid reference.
+        /// Field holding the dangling reference.
         field_name: &'static str,
-        /// The referenced ID that does not exist.
+        /// Referenced ID that does not exist.
         referenced_id: EntityId,
-        /// The entity type that was expected.
+        /// Entity type the reference was expected to resolve to.
         expected_type: &'static str,
     },
     /// Duplicate entity ID within a single entity collection.
     DuplicateId {
-        /// The entity type with the duplicated ID.
+        /// Entity type carrying the duplicate.
         entity_type: &'static str,
-        /// The duplicated entity ID.
+        /// The duplicated ID.
         id: EntityId,
     },
     /// The hydro cascade contains a cycle.
@@ -55,29 +49,29 @@ pub enum ValidationError {
     },
     /// A hydro's filling configuration is invalid.
     InvalidFillingConfig {
-        /// The hydro whose filling configuration is invalid.
+        /// Hydro with the invalid configuration.
         hydro_id: EntityId,
-        /// Human-readable explanation of why the configuration is invalid.
+        /// Why the configuration is invalid.
         reason: String,
     },
     /// A bus has no connections (no lines, generators, or loads).
     ///
     /// Emitted by `cobre-io` validation.
     DisconnectedBus {
-        /// The ID of the disconnected bus.
+        /// The disconnected bus.
         bus_id: EntityId,
     },
     /// Entity-level penalty value is invalid (e.g., negative cost).
     ///
     /// Emitted by `cobre-io` validation.
     InvalidPenalty {
-        /// The entity type with the invalid penalty.
+        /// Entity type with the invalid penalty.
         entity_type: &'static str,
-        /// The ID of the entity with the invalid penalty.
+        /// ID of the entity with the invalid penalty.
         entity_id: EntityId,
-        /// The name of the penalty field that is invalid.
+        /// Penalty field that is invalid.
         field_name: &'static str,
-        /// Human-readable explanation of why the penalty is invalid.
+        /// Why the penalty is invalid.
         reason: String,
     },
 }
@@ -181,7 +175,6 @@ mod tests {
         let err = ValidationError::DisconnectedBus {
             bus_id: EntityId(7),
         };
-        // Verify ValidationError can be used as &dyn std::error::Error
         let _: &dyn std::error::Error = &err;
     }
 }

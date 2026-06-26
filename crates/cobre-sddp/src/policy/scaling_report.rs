@@ -43,9 +43,8 @@ pub struct StageScalingReport {
 
 /// LP matrix and objective dimensions.
 //
-// `clippy::struct_field_names` flags the common `num_` prefix; the field
-// names are the canonical LP terminology (`num_cols`, `num_rows`, `num_nz`)
-// matching what the solver layer uses, so we keep them as-is.
+// Rationale: the `num_` prefix is canonical LP terminology matching the solver
+// layer; renaming to silence `struct_field_names` would diverge from it.
 #[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, Serialize)]
 pub struct LpDimensions {
@@ -107,10 +106,8 @@ pub struct ScalingReportSummary {
     pub num_stages: usize,
 }
 
-/// Compute the min and max absolute values over nonzero entries.
-///
-/// Returns `(min_abs, max_abs)`. For an empty or all-zero slice, returns
-/// `(f64::INFINITY, 0.0)` which produces a ratio of 0.
+/// Compute `(min_abs, max_abs)` over nonzero entries. An empty or all-zero slice
+/// returns `(f64::INFINITY, 0.0)`, which downstream yields a ratio of 0.
 fn compute_abs_range(values: &[f64]) -> (f64, f64) {
     let mut min_abs = f64::INFINITY;
     let mut max_abs = 0.0_f64;
@@ -149,17 +146,14 @@ pub fn compute_coefficient_range(tmpl: &StageTemplate) -> CoefficientRange {
     }
 }
 
-/// Compute the median of a slice by sorting a copy.
-///
-/// Returns 0.0 for an empty slice.
+/// Compute the median of a slice; returns 0.0 for an empty slice.
 fn median(values: &[f64]) -> f64 {
     if values.is_empty() {
         return 0.0;
     }
     let mut sorted = values.to_vec();
-    // `total_cmp` provides IEEE-754 total ordering on f64; required so that
-    // NaN inputs land in a deterministic position and the sort is
-    // declaration-order-invariant (Cobre hard rule).
+    // total_cmp, not partial_cmp: NaN lands in a deterministic position so the
+    // sort upholds declaration-order invariance (Cobre hard rule).
     sorted.sort_by(f64::total_cmp);
     let n = sorted.len();
     if n.is_multiple_of(2) {

@@ -1,13 +1,13 @@
 # Installation
 
-Cobre is a statically linked binary available for five platforms.
+Cobre is a statically linked binary available for the platforms listed below.
 Choose the method that best fits your environment.
 
 ---
 
 ## Pre-built Binaries (Recommended)
 
-Fastest for end users. No Rust toolchain or C compiler required.
+No Rust toolchain or C compiler required.
 
 ### Linux and macOS
 
@@ -46,7 +46,7 @@ cobre version
 Expected output (exact versions and arch will vary):
 
 ```
-cobre   v0.8.2
+cobre   v0.9.0
 solver: HiGHS
 comm:   local
 zstd:   enabled
@@ -153,7 +153,7 @@ explicitly. The default build (no extra flags) uses HiGHS.
 The `cobre version` banner shows which backend is compiled in:
 
 ```
-cobre   v0.8.2
+cobre   v0.9.0
 solver: CLP 1.17.11
 comm:   local
 ...

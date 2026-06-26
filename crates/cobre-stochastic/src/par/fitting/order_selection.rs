@@ -3,53 +3,31 @@
 
 use super::yw_matrices::{build_periodic_yw_matrix_into, solve_linear_system};
 
-// ---------------------------------------------------------------------------
-// AIC-based AR order selection
-// ---------------------------------------------------------------------------
-
 /// Result of AIC-based AR order selection.
-///
-/// Produced by [`select_order_aic`]. Contains the selected AR order and the
-/// AIC value for each candidate order from 0 (white noise) through `p_max`.
 #[must_use]
 #[derive(Debug, Clone, PartialEq)]
 pub struct AicSelectionResult {
-    /// Selected AR order (1-based index into `sigma2_per_order`).
-    ///
-    /// `0` when no AR order improves over white noise (white noise is optimal
-    /// or `sigma2_per_order` is empty).
+    /// Selected AR order; `0` when white noise is optimal or `sigma2_per_order`
+    /// is empty.
     pub selected_order: usize,
-    /// AIC value for each candidate order `0..=p_max`.
-    ///
-    /// `aic_values[0]` is the AIC for order 0 (white noise baseline = `0.0`).
-    /// `aic_values[k]` is the AIC for AR order `k`, for `k >= 1`.
+    /// AIC per candidate order `0..=p_max`; `aic_values[0]` is the order-0
+    /// white-noise baseline (`0.0`).
     pub aic_values: Vec<f64>,
 }
 
-/// Select the AR order that minimises the Akaike Information Criterion (AIC).
+/// Select the AR order that minimises the Akaike Information Criterion
+/// `AIC(p) = N * ln(σ²_p) + 2p` over `p` in `1..=p_max`.
 ///
-/// For each candidate order `p` in `1..=p_max`, the AIC is:
-///
-/// ```text
-/// AIC(p) = N * ln(σ²_p) + 2p
-/// ```
-///
-/// where `N = n_observations` and `σ²_p = sigma2_per_order[p-1]`.
-///
-/// The white-noise baseline (order 0) has `AIC(0) = 0.0` by convention
-/// (`σ²_0 = 1.0` in the normalised Yule-Walker formulation, so
-/// `N * ln(1) + 0 = 0`).
-///
-/// On ties the lower order wins (parsimony). Non-positive `sigma2` values
-/// (which can arise from near-singular Levinson-Durbin truncation) are
-/// excluded by assigning `AIC = f64::INFINITY`.
+/// The white-noise baseline (order 0) is `AIC(0) = 0.0` by convention
+/// (`σ²_0 = 1.0` in the normalised Yule-Walker formulation). On ties the lower
+/// order wins (parsimony). Non-positive `sigma2` values are excluded via
+/// `AIC = f64::INFINITY`.
 ///
 /// # Parameters
 ///
-/// - `sigma2_per_order` — prediction error variances from
-///   `LevinsonDurbinResult::sigma2_per_order`. `sigma2_per_order[k]`
-///   corresponds to AR order `k+1`. Length = `p_max`.
-/// - `n_observations` — number of historical observations for this season (`N_m`).
+/// - `sigma2_per_order` — prediction error variances; `sigma2_per_order[k]`
+///   corresponds to AR order `k+1`.
+/// - `n_observations` — number of historical observations for this season.
 ///
 /// # Examples
 ///
@@ -70,7 +48,7 @@ pub fn select_order_aic(sigma2_per_order: &[f64], n_observations: usize) -> AicS
     let p_max = sigma2_per_order.len();
 
     let mut aic_values = Vec::with_capacity(p_max + 1);
-    aic_values.push(0.0_f64); // order 0: N*ln(1) + 0 = 0
+    aic_values.push(0.0_f64);
 
     #[allow(clippy::cast_precision_loss)]
     let n = n_observations as f64;
@@ -86,8 +64,8 @@ pub fn select_order_aic(sigma2_per_order: &[f64], n_observations: usize) -> AicS
         aic_values.push(aic);
     }
 
-    // Find the index of the minimum AIC. Use `enumerate` with a fold so that
-    // ties naturally resolve to the first (lower-order) occurrence.
+    // Strict `<` in the fold resolves ties to the first (lower-order) index —
+    // the parsimony tie-break; `min_by` would not guarantee it.
     let selected_order = aic_values
         .iter()
         .enumerate()
@@ -109,45 +87,25 @@ pub fn select_order_aic(sigma2_per_order: &[f64], n_observations: usize) -> AicS
     }
 }
 
-// ---------------------------------------------------------------------------
-// PACF-based AR order selection
-// ---------------------------------------------------------------------------
-
 /// Result of PACF-based AR order selection.
-///
-/// Produced by [`select_order_pacf`]. Contains the selected AR order, the
-/// PACF values for each lag, and the significance threshold used.
 #[must_use]
 #[derive(Debug, Clone, PartialEq)]
 pub struct PacfSelectionResult {
-    /// Selected AR order.
-    ///
-    /// The maximum lag `k` where `|parcor[k-1]| > threshold`.
-    /// `0` when no lag exceeds the significance threshold.
+    /// Selected AR order; `0` when no lag exceeds the significance threshold.
     pub selected_order: usize,
-    /// PACF values (partial autocorrelation coefficients) for lags `1..=p_max`.
-    ///
-    /// `pacf_values[k]` is the PACF at lag `k+1`. Same as
-    /// `LevinsonDurbinResult::parcor`.
+    /// PACF values for lags `1..=p_max`; `pacf_values[k]` is the PACF at lag `k+1`.
     pub pacf_values: Vec<f64>,
-    /// Significance threshold: `z_alpha / sqrt(n_observations)`.
+    /// Significance threshold `z_alpha / sqrt(n_observations)`.
     pub threshold: f64,
 }
 
-/// Select the AR order using partial autocorrelation function (PACF)
-/// significance testing.
-///
-/// For each lag `k` in `1..=p_max`, tests whether the partial
-/// autocorrelation coefficient (reflection coefficient from Levinson-Durbin)
-/// exceeds the significance threshold `z_alpha / sqrt(N)`. Selects the
-/// **maximum** lag with a significant PACF value.
-///
-/// If no lag exceeds the threshold, order 0 is selected (white noise).
+/// Select the AR order by PACF significance testing: the **maximum** lag whose
+/// `|PACF|` exceeds `z_alpha / sqrt(N)`, or order 0 (white noise) when none do.
 ///
 /// # Parameters
 ///
-/// - `parcor` -- partial autocorrelation coefficients from
-///   `LevinsonDurbinResult::parcor`. `parcor[k]` is the PACF at lag `k+1`.
+/// - `parcor` -- partial autocorrelation coefficients; `parcor[k]` is the PACF
+///   at lag `k+1`.
 /// - `n_observations` -- number of historical observations for this season.
 /// - `z_alpha` -- z-score for the desired confidence level (e.g., `1.96`
 ///   for 95% two-sided).
@@ -177,7 +135,6 @@ pub fn select_order_pacf(
         f64::INFINITY
     };
 
-    // Find the maximum lag with |PACF| > threshold.
     let selected_order = parcor
         .iter()
         .enumerate()
@@ -192,39 +149,24 @@ pub fn select_order_pacf(
     }
 }
 
-/// Select the AR order for a PAR(p)-A model using the conditional FACP
-/// significance test, with two extensions over the classical PACF rule.
+/// Select the AR order for a PAR(p)-A model from the conditional FACP, with two
+/// extensions over the classical "largest lag exceeding `z_alpha / sqrt(N)`"
+/// rule for cases the classical rule leaves undefined:
 ///
-/// The classical rule is a single 95% confidence interval on the number
-/// of historical years (`z_alpha / sqrt(N)`, no lag-dependent deflation):
-/// the largest lag whose `|FACP|` exceeds the threshold is attributed
-/// as `p_m`. The classical rule is silent on the cases where (a) lag 1
-/// is exactly zero or (b) no lag is significant; the rules below cover
-/// those cases:
+/// 1. **Structural-zero short-circuit at lag 1.** `conditional_facp[0] == 0.0`
+///    exactly forces order 0: it marks a degenerate (Z, A) bucket, and the
+///    convention refuses any AR structure on top of it. A structural zero at a
+///    **higher** lag does not short-circuit — lag 1 being non-degenerate keeps
+///    the AR(1) base (e.g. `[+0.37, 0, 0, 0, 0, 0]` -> order 1, not 0).
+/// 2. **Minimum order 1 when lag 1 is non-zero.** Selected order is
+///    `max(1, max_significant_lag)`, so a well-defined lag 1 defaults to AR(1)
+///    even when no lag exceeds the threshold.
 ///
-/// 1. **Structural-zero short-circuit at lag 1.** If
-///    `conditional_facp[0] == 0.0` exactly, the model is forced to
-///    order 0. A structural zero at lag 1 indicates a degenerate (Z, A)
-///    bucket — typically a single-observation season or a numerically
-///    singular partitioned-covariance solve — and the convention refuses
-///    to fit any auto-regressive structure on top of it. Structural
-///    zeros at higher lags do **not** trigger the short-circuit; the
-///    convention proceeds with the AR(1) base whenever lag 1 itself is
-///    non-degenerate (e.g., `[+0.37, 0, 0, 0, 0, 0]` -> order 1, not 0).
-/// 2. **Minimum order of 1 when lag 1 is non-zero.** If the conditional
-///    FACP at lag 1 is not a structural zero, the selected order is
-///    `max(1, max_significant_lag)` — the model defaults to AR(1)
-///    whenever no lag exceeds the threshold but lag 1 is well defined.
+/// The order returned is tentative: the Maceira-Damazio iterative order
+/// reduction runs across the whole periodic cycle and is the caller's
+/// responsibility.
 ///
-/// The Maceira-Damazio iterative order-reduction step is **not** applied
-/// here; the order returned by this function is the tentative
-/// pre-validation order. The reduction runs across all seasons of the
-/// periodic cycle and is the caller's responsibility within the
-/// PAR(p)-A estimation pipeline.
-///
-/// `pacf_values[k]` in the returned struct is the conditional FACP at lag
-/// `k+1`, conditioned on the intermediate standardised annual noise series
-/// `Z` and the previous annual innovation `A_{t-1}`.
+/// `pacf_values[k]` is the conditional FACP at lag `k+1`.
 ///
 /// # Parameters
 ///
@@ -265,9 +207,7 @@ pub fn select_order_pacf_annual(
         f64::INFINITY
     };
 
-    // Rule 1 — Structural-zero short-circuit at lag 1.
-    // A structural zero at lag 1 (FACP exactly 0.0 from a degenerate
-    // bucket) forces white-noise selection.
+    // Rule 1 (doc): a structural zero at lag 1 forces order 0.
     if conditional_facp.first().copied() == Some(0.0) {
         return PacfSelectionResult {
             selected_order: 0,
@@ -276,7 +216,6 @@ pub fn select_order_pacf_annual(
         };
     }
 
-    // Find the maximum lag with |conditional FACP| > threshold.
     let max_significant = conditional_facp
         .iter()
         .enumerate()
@@ -284,10 +223,7 @@ pub fn select_order_pacf_annual(
         .find(|&(_, p)| p.abs() > threshold)
         .map_or(0, |(k, _)| k + 1);
 
-    // Rule 2 — Min-order-1 when lag 1 is non-zero (not a structural zero).
-    // When no lag exceeds the significance threshold but lag 1 is well
-    // defined, the model defaults to AR(1) rather than a pure white-noise
-    // (order-0) fit.
+    // Rule 2 (doc): a non-zero lag 1 floors the order at AR(1).
     let selected_order = match conditional_facp.first() {
         Some(&p1) if p1 != 0.0 => max_significant.max(1),
         _ => max_significant,
@@ -300,20 +236,12 @@ pub fn select_order_pacf_annual(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Periodic PACF
-// ---------------------------------------------------------------------------
-
-/// Compute the periodic PACF for a given season up to `max_order`.
+/// Compute the periodic PACF for a given season up to `max_order`, extracting
+/// `PACF(k) = phi[k-1]` from the order-`k` periodic Yule-Walker solve.
 ///
-/// For each candidate order k (`1..=max_order`), builds the periodic Yule-Walker
-/// matrix of dimension k, solves `R * phi = rhs`, and extracts the last
-/// coefficient `phi[k-1]` as `PACF(k)`.
-///
-/// This is the correct periodic PACF computation that accounts for the
-/// non-Toeplitz covariance structure of periodic autoregressive processes.
-/// It replaces the stationary Levinson-Durbin reflection coefficients which
-/// assume a Toeplitz (stationary) covariance matrix.
+/// Accounts for the non-Toeplitz covariance of periodic processes — the
+/// stationary Levinson-Durbin reflection coefficients assume a Toeplitz matrix
+/// and are wrong here.
 ///
 /// # Parameters
 ///
@@ -338,9 +266,8 @@ pub fn periodic_pacf(
 ) -> Vec<f64> {
     let mut pacf_values = Vec::with_capacity(max_order);
 
-    // Reuse two scratch buffers across the loop to avoid allocating a new
-    // Vec pair per order k. build_periodic_yw_matrix_into resizes them in
-    // place (no-alloc when capacity already covers the new size).
+    // Reused across the loop so build_periodic_yw_matrix_into resizes in place
+    // rather than allocating a Vec pair per order k.
     let mut matrix_buf: Vec<f64> = Vec::new();
     let mut rhs_buf: Vec<f64> = Vec::new();
 
@@ -357,7 +284,7 @@ pub fn periodic_pacf(
 
         match solve_linear_system(&mut matrix_buf, &mut rhs_buf, k) {
             Some(phi) => pacf_values.push(phi[k - 1]),
-            None => break, // Singular matrix, stop.
+            None => break,
         }
     }
 

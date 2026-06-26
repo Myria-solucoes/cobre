@@ -26,11 +26,11 @@ applies the negation.
 ## State pinning uses column bounds, not equality rows
 
 Incoming state is pinned with `set_col_bounds` on the incoming-state LP column.
-The `storage_fixing`, `lag_fixing`, and `anticipated_state_fixing` ranges in
-`StageIndexer` are permanent empty sentinels (`0..0`). Always resolve the LP
+There is no state-fixing row range in the LP; incoming state is pinned entirely
+via column bounds. Always resolve the LP
 column — for both pinning and dual extraction — via
-`StageIndexer::state_to_lp_incoming_column`; never assume a fixing-row index.
-Read: `lp/indexer/state_mapping.rs` (`lp/indexer/layout.rs` for the `0..0` sentinel field docs).
+`StateLayout::state_to_lp_incoming_column`; never assume a fixing-row index.
+Read: `lp/indexer/state_layout.rs`.
 
 ## FPHA uses average storage
 
@@ -38,7 +38,9 @@ The FPHA generation constraint is
 `g ≤ γ₀ + (γᵥ/2)·(V_in + V_out) + γ_q·q (+ γ_s·s)`. The `−γᵥ/2` coefficient
 appears on **both** the incoming and outgoing storage columns — not on `V_out`
 alone. (Discovered during deterministic case D06.)
-Read: `lp/builder/matrix.rs`, `lp/builder/template.rs`.
+Read: `lp/builder/entries.rs` (`fill_fpha_entries` — pushes `−γᵥ/2` onto both the
+incoming- and outgoing-storage columns), `lp/builder/rows.rs` (`fill_fpha_rows`),
+and `lp/builder/template.rs`.
 
 ## Cut pool is append-only; basis matches by slot identity
 

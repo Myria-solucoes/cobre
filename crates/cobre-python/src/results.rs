@@ -238,13 +238,8 @@ pub fn load_results(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> 
 /// for row in rows:
 ///     print(row["iteration"], row["lower_bound"], row["upper_bound_mean"])
 /// ```
-// Rationale: the function projects every convergence Parquet column into a
-// Python dict row-by-row inside a single batch loop; each of the 13 columns
-// requires its own typed `get_column_by_name` call and nullable-field handling.
-// Splitting the projection into sub-functions would not reduce overall line
-// count and would require passing the batch, row index, and dict through
-// additional call frames — obscuring the flat one-pass column projection that
-// is the function's entire contract.
+// too_many_lines: a flat one-pass per-column projection into a Python dict;
+// splitting it would only thread the batch/index/dict through extra call frames.
 #[pyfunction]
 #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 pub fn load_convergence(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> {
@@ -384,7 +379,6 @@ pub fn load_convergence_arrow(py: Python<'_>, output_dir: PathBuf) -> PyResult<P
 
     let parquet_path = output_dir.join("training").join("convergence.parquet");
 
-    // Read all RecordBatches from the Parquet file with the GIL released.
     let ipc_bytes = py.detach(|| -> PyResult<Vec<u8>> {
         let file = fs::File::open(&parquet_path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -406,7 +400,6 @@ pub fn load_convergence_arrow(py: Python<'_>, output_dir: PathBuf) -> PyResult<P
             .build()
             .map_err(|e| PyOSError::new_err(format!("failed to build Parquet reader: {e}")))?;
 
-        // Serialise all batches into a single Arrow IPC stream buffer.
         let mut buf = Vec::new();
         let mut writer = StreamWriter::try_new(&mut buf, &schema)
             .map_err(|e| PyOSError::new_err(format!("failed to create IPC writer: {e}")))?;
@@ -426,8 +419,6 @@ pub fn load_convergence_arrow(py: Python<'_>, output_dir: PathBuf) -> PyResult<P
         Ok(buf)
     })?;
 
-    // Import pyarrow.ipc and reconstruct the Table from the IPC bytes.
-    // ImportError propagates naturally if pyarrow is not installed.
     let pa_ipc = py.import("pyarrow.ipc")?;
     let py_bytes = pyo3::types::PyBytes::new(py, &ipc_bytes);
     let reader = pa_ipc.call_method1("open_stream", (py_bytes,))?;
@@ -487,7 +478,7 @@ fn open_stochastic_parquet(path: &Path) -> PyResult<fs::File> {
 }
 
 /// Extract a typed column from `batch` by name, mapping a missing column or a
-/// type mismatch to `OSError` (a parquet-decode failure, per the ticket).
+/// type mismatch to `OSError`.
 fn stochastic_column<'a, T: Array + 'static>(
     batch: &'a RecordBatch,
     file: &str,
@@ -533,7 +524,7 @@ fn read_stochastic_parquet<A>(
 ///
 /// GIL-free: takes a `&Path` and returns owned vectors, raising `PyErr` only on
 /// the not-found / decode paths. Columns are read by name so the read is robust
-/// to schema column reordering; rows are appended in on-disk order.
+/// to schema column reordering.
 fn read_par_rows(path: &Path) -> PyResult<ParRows> {
     let file = "inflow_ar_coefficients.parquet";
     read_stochastic_parquet(
@@ -568,9 +559,8 @@ fn read_par_rows(path: &Path) -> PyResult<ParRows> {
 /// Read `stochastic/noise_openings.parquet` into [`OpeningRows`].
 ///
 /// GIL-free: takes a `&Path` and returns owned vectors, raising `PyErr` only on
-/// the not-found / decode paths. The writer emits rows in
-/// `(stage_id, opening_index, entity_index)` order; this is asserted in debug
-/// builds so `opening_tree`'s reshape cannot silently scramble.
+/// the not-found / decode paths. Enforces the `(stage_id, opening_index,
+/// entity_index)` sort order that `opening_tree`'s reshape relies on.
 fn read_opening_rows(path: &Path) -> PyResult<OpeningRows> {
     let file = "noise_openings.parquet";
     let rows = read_stochastic_parquet(
@@ -597,11 +587,9 @@ fn read_opening_rows(path: &Path) -> PyResult<OpeningRows> {
         },
     )?;
 
-    // `opening_tree` slices each stage's contiguous block and reshapes it, so the
-    // reshape is only correct when rows are sorted by (stage_id, opening_index,
-    // entity_index). The standard writer always emits this order, but enforce it at
-    // load time (once) so a corrupted or third-party parquet fails loudly here rather
-    // than silently returning a scrambled array in a release build.
+    // `opening_tree`'s reshape is only correct on sorted rows; enforce it here so
+    // a corrupted or third-party parquet fails loudly rather than returning a
+    // scrambled array in a release build (a debug_assert would not fire there).
     if !is_opening_order_sorted(&rows) {
         return Err(PyOSError::new_err(
             "noise_openings.parquet rows are not sorted by \
@@ -697,9 +685,8 @@ impl Stochastic {
             )));
         };
 
-        // Rows are sorted by (stage_id, opening_index, entity_index), so the
-        // matching rows form a contiguous block; dim/n_openings derive from the
-        // maxima within that block (every opening in a stage shares `dim`).
+        // Rows are sorted, so the matching rows form a contiguous block; dim and
+        // n_openings derive from the maxima within it.
         let opening_slice = &rows.opening_index[start..end];
         let entity_slice = &rows.entity_index[start..end];
         let value_slice = &rows.value[start..end];
@@ -809,10 +796,9 @@ fn get_column_by_name<'a, T: Array + 'static>(
 
 /// Convert an Arrow column value at row `i` to a Python object based on the array's data type.
 ///
-/// Handles the Arrow types present in simulation output schemas:
-/// `Float64`, `Int32`, `Int64`, `Int8`, and `Boolean`. Nullable columns
-/// return `None` when the cell is null. Unsupported types fall back to a
-/// string representation via `format!("{:?}", data_type)`.
+/// Handles the Arrow types present in simulation output schemas (`Float64`,
+/// `Int32`, `Int64`, `Int8`, `Boolean`); a null cell returns `None` and an
+/// unsupported type falls back to a string placeholder.
 fn arrow_value_to_py(py: Python<'_>, col: &dyn Array, i: usize) -> PyResult<Py<PyAny>> {
     if col.is_null(i) {
         return Ok(py.None());
@@ -890,16 +876,9 @@ where
         .map(|b| b.into_any().unbind())
 }
 
-/// Convert a [`cobre_io::OutputError`] to an appropriate Python exception.
-///
-/// A thin shim over the single [`crate::errors::convert_error`] mapping site,
-/// which folds in the read-path `NotFound` branch:
-///
-/// - [`cobre_io::OutputError::IoError`] with `NotFound` kind → `FileNotFoundError`
-/// - [`cobre_io::OutputError::IoError`] (other) → `cobre.errors.CaseIoError` (`OSError`)
-/// - [`cobre_io::OutputError::SerializationError`] / `SchemaError` →
-///   `cobre.errors.OutputError` (`OSError`)
-/// - [`cobre_io::OutputError::ManifestError`] → `cobre.errors.ValidationError` (`ValueError`)
+/// Convert a [`cobre_io::OutputError`] to an appropriate Python exception via the
+/// single [`crate::errors::convert_error`] mapping site (which owns the per-variant
+/// mapping and the read-path `NotFound` fold).
 fn output_error_to_py(err: &cobre_io::OutputError) -> PyErr {
     crate::errors::convert_error(crate::errors::ErrorSource::Output(err))
 }
@@ -945,12 +924,10 @@ fn read_optional_simulation_metadata(
 /// - `ValueError` when a metadata file contains malformed JSON.
 /// - `OSError` for other I/O failures.
 fn build_report_value(output_dir: &Path) -> PyResult<serde_json::Value> {
-    // training/metadata.json is required; absence is a FileNotFoundError.
     let training_metadata_path = output_dir.join("training/metadata.json");
     let training = cobre_io::read_training_metadata(&training_metadata_path)
         .map_err(|e| output_error_to_py(&e))?;
 
-    // simulation/metadata.json is optional (absent when simulation was skipped).
     let simulation_metadata_path = output_dir.join("simulation/metadata.json");
     let simulation = read_optional_simulation_metadata(&simulation_metadata_path)?;
 
@@ -959,7 +936,6 @@ fn build_report_value(output_dir: &Path) -> PyResult<serde_json::Value> {
         |p| p.display().to_string(),
     );
 
-    // Hoist the headline convenience values before serializing the full structs.
     let bounds = serde_json::to_value(&training.bounds)
         .map_err(|e| PyValueError::new_err(format!("failed to serialize bounds: {e}")))?;
     let cost = match simulation.as_ref().and_then(|s| s.cost.as_ref()) {
@@ -1086,12 +1062,8 @@ fn read_parquet_partition_into(
     Ok(())
 }
 
-/// Load simulation output rows for one entity type directory.
-///
-/// Enumerates `scenario_id=NNNN` subdirectories under `entity_dir`,
-/// parses the `scenario_id` integer from the directory name, reads each
-/// `data.parquet` file, and appends all rows (with the `scenario_id` field
-/// injected) to a newly-allocated `PyList`.
+/// Load simulation output rows for one entity type directory into a `PyList` of
+/// dicts (with the `scenario_id` field injected), ordered by `scenario_id`.
 ///
 /// Returns an empty list if the directory exists but contains no scenario
 /// subdirectories.
@@ -1112,7 +1084,7 @@ fn load_entity_type(py: Python<'_>, entity_dir: &std::path::Path) -> PyResult<Py
         }
     })?;
 
-    // Collect entries so we can sort them by scenario_id for deterministic order.
+    // Sorted below by scenario_id for deterministic output order.
     let mut entries: Vec<(i64, std::path::PathBuf)> = Vec::new();
 
     for dir_entry in read_dir {
@@ -1123,7 +1095,6 @@ fn load_entity_type(py: Python<'_>, entity_dir: &std::path::Path) -> PyResult<Py
         let file_name = dir_entry.file_name();
         let name = file_name.to_string_lossy();
 
-        // Only process directories matching `scenario_id=NNNN`.
         if !name.starts_with("scenario_id=") {
             continue;
         }
@@ -1240,13 +1211,10 @@ pub fn load_simulation(
 }
 
 /// Read one `scenario_id=NNNN/data.parquet` partition into `RecordBatch`es with a
-/// prepended `scenario_id` column.
+/// leading `scenario_id` (Int64) column, appending them to `out_batches`.
 ///
-/// Each batch from the file is extended with a leading `scenario_id` (Int64) column
-/// whose value is `scenario_id_val` for every row. The extended batches are appended
-/// to `out_batches`. The extended schema is written to `out_schema` on the first call
-/// (i.e. when `out_schema` is `None`); subsequent calls assert the schema is
-/// consistent within the entity type.
+/// `out_schema` is the extended schema, written on the first call (when `None`)
+/// and reused by later calls so all batches share one schema for concatenation.
 fn read_parquet_partition_as_batches(
     parquet_path: &std::path::Path,
     scenario_id_val: i64,
@@ -1316,11 +1284,8 @@ fn read_parquet_partition_as_batches(
     Ok(())
 }
 
-/// Load simulation output for one entity type as a concatenated `RecordBatch`.
-///
-/// Enumerates `scenario_id=NNNN` subdirectories under `entity_dir` sorted by
-/// `scenario_id` ascending, reads each `data.parquet`, prepends a `scenario_id`
-/// column, and concatenates all batches into a single `RecordBatch`.
+/// Load simulation output for one entity type as a single `RecordBatch`
+/// concatenated across scenarios (ordered by `scenario_id` ascending).
 ///
 /// Returns `None` when the directory exists but contains no scenario subdirectories.
 fn load_entity_type_as_batch(
@@ -1493,14 +1458,12 @@ pub fn load_simulation_arrow(
     if let Some(ref et) = entity_type {
         let entity_dir = simulation_dir.join(et);
 
-        // Read all partitions with the GIL released.
         let ipc_bytes = py.detach(|| -> PyResult<Vec<u8>> {
             if let Some((batch, schema)) = load_entity_type_as_batch(&entity_dir)? {
                 batch_to_ipc_bytes(&batch, &schema)
             } else {
-                // Empty entity directory: return an empty IPC stream.
-                // Build an empty schema with only the scenario_id column since
-                // there are no Parquet files to discover the entity schema from.
+                // Empty directory: scenario_id-only schema, since no Parquet file
+                // exists to discover the entity schema from.
                 let empty_schema =
                     Schema::new(vec![Field::new("scenario_id", DataType::Int64, false)]);
                 let empty_batch = RecordBatch::new_empty(std::sync::Arc::new(empty_schema.clone()));
@@ -1511,7 +1474,6 @@ pub fn load_simulation_arrow(
         let table = ipc_bytes_to_py_table(py, &ipc_bytes)?;
         Ok(table.unbind())
     } else {
-        // Build a dict mapping each available entity type to its pyarrow.Table.
         let result = PyDict::new(py);
 
         for et in ENTITY_TYPES {
@@ -1636,7 +1598,6 @@ pub fn load_policy(
     let checkpoint =
         cobre_io::read_policy_checkpoint(&policy_dir).map_err(|e| output_error_to_py(&e))?;
 
-    // Convert metadata via serde_json (it derives Serialize).
     let metadata_json = serde_json::to_value(&checkpoint.metadata)
         .map_err(|e| PyValueError::new_err(format!("failed to serialize policy metadata: {e}")))?;
     let metadata_py = json_value_to_py(py, &metadata_json)?;

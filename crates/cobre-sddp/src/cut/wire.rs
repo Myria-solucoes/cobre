@@ -33,14 +33,6 @@
 //! Receivers reject any record whose version byte does not equal
 //! `CUT_WIRE_VERSION`. No compatibility shim is provided; redeploy all
 //! nodes when upgrading.
-//!
-//! ## Functions
-//!
-//! - [`cut_wire_size`] — compute the byte size for one cut record.
-//! - [`serialize_cut`] — write one cut record into a byte buffer.
-//! - [`deserialize_cut`] — read one cut record from a byte buffer.
-//! - [`deserialize_cuts_from_buffer`] — unpack cut records from a buffer.
-//! - [`deserialize_cuts_from_buffer_into`] — unpack cuts into caller-provided buffers.
 
 use crate::SddpError;
 
@@ -52,11 +44,7 @@ use crate::SddpError;
 /// in a backward-incompatible way.
 pub const CUT_WIRE_VERSION: u8 = 1;
 
-/// Record-tag value at offset 13 of every cut record.
-///
-/// In v1 this byte is zero (padding). The constant is documented here so that
-/// future record-tag dispatch can extend the format without breaking the byte
-/// layout.
+/// Record-tag value at offset 13 of every cut record. Zero in v1 (padding).
 pub const RECORD_TAG_CUT: u8 = 0;
 
 // ---------------------------------------------------------------------------
@@ -65,9 +53,8 @@ pub const RECORD_TAG_CUT: u8 = 0;
 
 /// Parsed header from a [`cut wire record`](self).
 ///
-/// This struct holds the decoded header fields of a cut wire record.
-/// It is a plain Rust struct (not `#[repr(C)]`); byte conversion is handled
-/// explicitly by [`serialize_cut`] and [`deserialize_cut`].
+/// Not `#[repr(C)]`: byte conversion is explicit in [`serialize_cut`] /
+/// [`deserialize_cut`], never a transmute.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CutWireHeader {
     /// Deterministic slot index in the target [`CutPool`].
@@ -91,9 +78,6 @@ pub struct CutWireHeader {
 
 /// Return the byte size of one cut wire record with `n_state` coefficients.
 ///
-/// The layout is a 25-byte fixed header (1 version byte + 24 bytes of fields)
-/// followed by `n_state * 8` bytes for the coefficient array:
-///
 /// ```
 /// use cobre_sddp::cut::wire::cut_wire_size;
 ///
@@ -108,13 +92,7 @@ pub fn cut_wire_size(n_state: usize) -> usize {
     25 + n_state * 8
 }
 
-/// Serialize one cut record into `buf` starting at offset 0.
-///
-/// Writes the version byte (`CUT_WIRE_VERSION`) at offset 0, then the header
-/// as three `u32` values (12 bytes) at offsets 1–12, then the record tag
-/// `RECORD_TAG_CUT` at offset 13 followed by 3 zero padding bytes at offsets
-/// 14–16, then one `f64` intercept (8 bytes) at offsets 17–24. Coefficients
-/// follow immediately as native-endian `f64` bytes starting at offset 25.
+/// Serialize one cut record into `buf` starting at offset 0 (module-doc layout).
 ///
 /// # Panics (debug builds only)
 ///
@@ -152,15 +130,6 @@ pub fn serialize_cut(
 
 /// Deserialize one cut record from `buf`, expecting `n_state` coefficients.
 ///
-/// Reads the version byte at offset 0 and returns an error if it does not
-/// match [`CUT_WIRE_VERSION`]. Reads the record tag at offset 13 and returns
-/// an error if it does not equal [`RECORD_TAG_CUT`]. Then reads the 24-byte
-/// header from fixed offsets starting at 1 and recovers `n_state` `f64`
-/// values starting at offset 25.
-///
-/// After the length `debug_assert`, all slice-to-array conversions use direct
-/// fixed-length indexing, which is infallible for the exact sizes used here.
-///
 /// # Errors
 ///
 /// Returns `Err(SddpError::Validation(_))` if:
@@ -194,9 +163,6 @@ pub fn deserialize_cut(buf: &[u8], n_state: usize) -> Result<(CutWireHeader, Vec
         )));
     }
 
-    // All slice-to-array conversions below are infallible: the debug_assert
-    // above guarantees buf.len() >= 25 + n_state*8, so the fixed offsets 1..5,
-    // 5..9, 9..13, and 17..25 are all within bounds.
     let slot_index = u32::from_ne_bytes([buf[1], buf[2], buf[3], buf[4]]);
     let iteration = u32::from_ne_bytes([buf[5], buf[6], buf[7], buf[8]]);
     let forward_pass_index = u32::from_ne_bytes([buf[9], buf[10], buf[11], buf[12]]);
@@ -233,23 +199,17 @@ pub fn deserialize_cut(buf: &[u8], n_state: usize) -> Result<(CutWireHeader, Vec
 /// Serialize multiple cuts into a freshly allocated contiguous byte buffer.
 ///
 /// Each element of `cuts` is a tuple `(slot_index, iteration,
-/// forward_pass_index, intercept, coefficients)`.  All cuts must have the
-/// same `n_state` coefficient count; `n_state` is passed explicitly so the
-/// caller controls the layout without iterating over the slice.
+/// forward_pass_index, intercept, coefficients)`; all must have the same
+/// `n_state` coefficient count.
 ///
-/// Returns a `Vec<u8>` of length `cuts.len() * cut_wire_size(n_state)`.
-///
-/// # Allocation
-///
-/// This function allocates `cuts.len() * cut_wire_size(n_state)` bytes on
-/// every call. It is intended for off-hot-path use: tests, policy export, and
-/// one-shot serialization. The production MPI hot path uses
-/// `CutSyncBuffers::pack_local_cuts_into` which writes into a pre-allocated
-/// buffer instead.
+/// Allocates on every call: off-hot-path only (tests, policy export). The
+/// MPI hot path serializes into a pre-allocated buffer via [`CutSyncBuffers`].
 ///
 /// # Panics (debug builds only)
 ///
 /// Panics if any coefficient slice has length != `n_state`.
+///
+/// [`CutSyncBuffers`]: crate::cut::CutSyncBuffers
 #[cold]
 #[must_use]
 pub fn serialize_cuts_to_buffer(cuts: &[(u32, u32, u32, f64, &[f64])], n_state: usize) -> Vec<u8> {
@@ -278,11 +238,7 @@ pub fn serialize_cuts_to_buffer(cuts: &[(u32, u32, u32, f64, &[f64])], n_state: 
     buf
 }
 
-/// Deserialize all cuts from a contiguous byte buffer.
-///
-/// The buffer must contain a whole number of cut records: its length must be
-/// `0` or a multiple of `cut_wire_size(n_state)`. Returns a `Vec` of
-/// `(header, coefficients)` pairs in the same order they appear in the buffer.
+/// Deserialize all cuts from a contiguous byte buffer, preserving record order.
 ///
 /// # Errors
 ///
@@ -320,15 +276,10 @@ pub fn deserialize_cuts_from_buffer(
 /// Deserialize all cuts from a contiguous byte buffer into caller-provided
 /// pre-allocated scratch buffers.
 ///
-/// On return, `headers_out` contains one [`CutWireHeader`] per cut record and
-/// `coefficients_flat_out` contains all coefficients concatenated in order:
-/// cut 0's `n_state` values, then cut 1's, and so on (flat `SoA` layout).
-///
-/// Both output buffers are cleared at the start of each call so they can be
-/// reused across iterations without releasing their heap allocation.
-///
-/// The buffer must contain a whole number of cut records: its length must be
-/// `0` or a multiple of `cut_wire_size(n_state)`.
+/// On return, `coefficients_flat_out` holds all coefficients concatenated as a
+/// flat `SoA` layout (cut `i`'s values at `[i * n_state .. (i+1) * n_state]`),
+/// `headers_out` one [`CutWireHeader`] per record. Both buffers are cleared at
+/// the start of each call and retain their heap allocation for reuse.
 ///
 /// # Errors
 ///
@@ -454,40 +405,33 @@ mod tests {
 
         serialize_cut(&mut buf, 5, 3, 7, 42.0, &coefficients);
 
-        // version at offset 0
         assert_eq!(buf[0], CUT_WIRE_VERSION, "version at offset 0");
-        // slot_index at offset 1-4
         assert_eq!(
             u32::from_ne_bytes(buf[1..5].try_into().unwrap()),
             5u32,
             "slot_index at offset 1"
         );
-        // iteration at offset 5-8
         assert_eq!(
             u32::from_ne_bytes(buf[5..9].try_into().unwrap()),
             3u32,
             "iteration at offset 5"
         );
-        // forward_pass_index at offset 9-12
         assert_eq!(
             u32::from_ne_bytes(buf[9..13].try_into().unwrap()),
             7u32,
             "forward_pass_index at offset 9"
         );
-        // record tag at offset 13 (RECORD_TAG_CUT = 0) and padding at 14-16.
         assert_eq!(buf[13], RECORD_TAG_CUT, "record tag at offset 13");
         assert_eq!(
             &buf[14..17],
             &[0u8; 3],
             "padding at offsets 14-16 must be zero"
         );
-        // intercept at offset 17-24
         assert_eq!(
             f64::from_ne_bytes(buf[17..25].try_into().unwrap()),
             42.0_f64,
             "intercept at offset 17"
         );
-        // first coefficient at offset 25
         assert_eq!(
             f64::from_ne_bytes(buf[25..33].try_into().unwrap()),
             1.0_f64,
@@ -753,7 +697,6 @@ mod tests {
             buf[0], CUT_WIRE_VERSION,
             "version byte at offset 0 must equal CUT_WIRE_VERSION"
         );
-        // AC6: padding at new offset 13-16 is preserved as zeroed
         assert_eq!(
             &buf[13..17],
             &[0u8; 4],
@@ -784,7 +727,6 @@ mod tests {
 
     #[test]
     fn cut_wire_size_matches_25_plus_n_state_times_8_spec() {
-        // AC3: assert the four canonical sizes.
         assert_eq!(cut_wire_size(0), 25);
         assert_eq!(cut_wire_size(1), 33);
         assert_eq!(cut_wire_size(9), 97);
@@ -815,11 +757,11 @@ mod tests {
         let mut buf = vec![0u8; cut_wire_size(n_state)];
         // Write a structurally valid cut record but stamp it as wire version 2 (old format).
         buf[0] = 2; // wrong wire version
-        buf[1..5].copy_from_slice(&10u32.to_ne_bytes()); // slot_index
-        buf[5..9].copy_from_slice(&1u32.to_ne_bytes()); // iteration
-        buf[9..13].copy_from_slice(&0u32.to_ne_bytes()); // forward_pass_index
+        buf[1..5].copy_from_slice(&10u32.to_ne_bytes());
+        buf[5..9].copy_from_slice(&1u32.to_ne_bytes());
+        buf[9..13].copy_from_slice(&0u32.to_ne_bytes());
         buf[13] = RECORD_TAG_CUT;
-        buf[17..25].copy_from_slice(&1.0f64.to_ne_bytes()); // intercept
+        buf[17..25].copy_from_slice(&1.0f64.to_ne_bytes());
 
         let result = deserialize_cut(&buf, n_state);
         match result {

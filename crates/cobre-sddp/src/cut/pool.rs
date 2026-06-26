@@ -1,39 +1,29 @@
 //! Per-stage cut pool for the Future Cost Function (FCF).
 //!
-//! The [`CutPool`] is the central data structure for cut storage in the SDDP
-//! training loop. Each stage owns one pool. Cuts are stored in pre-allocated
-//! slots with a deterministic assignment formula so that results are
-//! bit-for-bit identical regardless of execution timing or ordering.
+//! Each stage owns one [`CutPool`]. Cuts occupy pre-allocated slots with a
+//! deterministic slot-assignment formula so results are bit-for-bit identical
+//! regardless of execution timing or ordering (the declaration-order hard rule).
 //!
 //! ## Slot assignment
-//!
-//! Each cut inserted during the training loop is assigned a deterministic
-//! slot index:
 //!
 //! ```text
 //! slot = warm_start_count + iteration * forward_passes + forward_pass_index
 //! ```
 //!
-//! This guarantees that every run with the same parameters produces the same
-//! pool layout, which is required for reproducibility and checkpointing.
-//!
 //! ## Activity tracking
 //!
-//! Each slot carries an `active` flag. Inactive cuts are retained in the pool
-//! for reproducibility but excluded from LP construction and from
-//! [`evaluate_at_state`] queries. The [`CutSelectionStrategy`] determines
-//! which cuts to activate or deactivate; [`set_active`] is the canonical
-//! toggle that sets the flag and keeps [`active_count`] consistent.
-//! [`deactivate`] is a convenience wrapper that calls `set_active(slot, false)`
-//! for each index. [`cuts_in_lp`] returns the number of populated slots —
-//! the LP-row-count metric for append-only LP tracking.
+//! The pool is append-only: deactivated cuts are retained at their stable slot
+//! (never removed), so the slot layout stays deterministic. Inactive cuts are
+//! excluded from LP construction and [`evaluate_at_state`]. [`set_active`] is the
+//! canonical toggle that keeps [`active_count`] consistent; [`deactivate`] wraps
+//! `set_active(slot, false)`. [`cuts_in_lp`] is the populated-slot count — the
+//! LP-row metric for append-only LP tracking.
 //!
 //! [`evaluate_at_state`]: CutPool::evaluate_at_state
 //! [`set_active`]: CutPool::set_active
 //! [`deactivate`]: CutPool::deactivate
 //! [`active_count`]: CutPool::active_count
 //! [`cuts_in_lp`]: CutPool::cuts_in_lp
-//! [`CutSelectionStrategy`]: crate::cut_selection::CutSelectionStrategy
 //!
 //! ## Example
 //!
@@ -56,54 +46,27 @@ use crate::cut_selection::CutMetadata;
 
 /// Pre-allocated per-stage cut pool for the Future Cost Function (FCF).
 ///
-/// All storage is allocated at construction time to avoid heap allocation
-/// during the training loop hot path. The pool holds `capacity` slots;
-/// each slot stores:
-///
-/// - A coefficient vector of length `state_dimension`
-/// - A scalar intercept
-/// - [`CutMetadata`] for cut selection bookkeeping
-/// - An `active` flag that controls LP participation
-///
-/// Slots are addressed by a deterministic formula derived from the iteration
-/// counter and forward pass index. The pool tracks a `populated_count`
-/// high-water mark to avoid scanning unpopulated slots.
-///
-/// A `cached_active_count` field is maintained incrementally by [`add_cut`]
-/// (increment), [`set_active`] (increment or decrement), and [`deactivate`]
-/// (decrement via `set_active`), making [`active_count`] an O(1) query.
-/// [`cuts_in_lp`] returns the `populated_count` — the number of slots that
-/// have been populated at least once, regardless of activity state.
-///
-/// [`add_cut`]: CutPool::add_cut
-/// [`set_active`]: CutPool::set_active
-/// [`deactivate`]: CutPool::deactivate
-/// [`active_count`]: CutPool::active_count
-/// [`cuts_in_lp`]: CutPool::cuts_in_lp
+/// All storage is allocated at construction time — no heap allocation on the
+/// training-loop hot path. Slots are addressed by a deterministic formula of the
+/// iteration counter and forward-pass index.
 #[derive(Debug, Clone)]
 pub struct CutPool {
-    /// Flat coefficient storage. Coefficients for slot `i` occupy the range
-    /// `i * state_dimension .. (i + 1) * state_dimension`. Length is always
-    /// `capacity * state_dimension`.
+    /// Flat coefficient storage. Slot `i` occupies
+    /// `i * state_dimension .. (i + 1) * state_dimension`.
     pub coefficients: Vec<f64>,
 
     /// Per-slot intercept values.
     pub intercepts: Vec<f64>,
 
-    /// Per-slot cut tracking metadata for cut selection strategies.
+    /// Per-slot cut-selection bookkeeping.
     pub metadata: Vec<CutMetadata>,
 
-    /// Per-slot activity flags. `false` means the cut is excluded from LP
-    /// construction and evaluations. Inactive cuts are still retained in the
-    /// pool so that their slots remain deterministic.
+    /// Per-slot activity flags. `false` excludes the cut from LP construction and
+    /// evaluation; the slot is retained so the layout stays deterministic.
     pub active: Vec<bool>,
 
-    /// High-water mark: the number of slots that have been populated at least
-    /// once. Iteration over the pool uses this bound to skip trailing
-    /// unpopulated slots. Updated by [`add_cut`] when the new slot index
-    /// is at or beyond the current mark.
-    ///
-    /// [`add_cut`]: CutPool::add_cut
+    /// High-water mark of populated slots; bounds iteration so trailing
+    /// unpopulated slots are skipped.
     pub populated_count: usize,
 
     /// Total number of pre-allocated slots. Fixed after construction.
@@ -112,68 +75,44 @@ pub struct CutPool {
     /// Length of each coefficient vector. Fixed after construction.
     pub state_dimension: usize,
 
-    /// Number of forward passes per SDDP iteration. Used by the slot
-    /// assignment formula. Fixed after construction.
+    /// Forward passes per iteration; a factor in the slot formula. Fixed after
+    /// construction.
     pub forward_passes: u32,
 
-    /// Number of warm-start cuts loaded before training begins. Acts as a
-    /// base offset in the slot assignment formula. Fixed after construction.
+    /// Warm-start cuts loaded before training; the base offset in the slot
+    /// formula. Fixed after construction.
     pub warm_start_count: u32,
 
-    /// Training-iteration number that maps to the first training slot
-    /// (`warm_start_count`). The slot formula subtracts it so that 1-based
-    /// iterations pack densely from `warm_start_count` with no reserved leading
-    /// block. Defaults to 0 (legacy layout, where slot grows with the raw
-    /// iteration and the block `[warm_start_count, +forward_passes)` is unused);
-    /// production sets it to `start_iteration + 1` via [`set_iteration_base`].
-    /// Both layouts are correct; dense is tighter.
+    /// Iteration that maps to the first training slot (`warm_start_count`). The
+    /// slot formula subtracts it so 1-based iterations pack densely. Default 0 is
+    /// the legacy layout that leaves the block `[warm_start_count, +forward_passes)`
+    /// unused; production sets `start_iteration + 1` via [`set_iteration_base`].
+    /// Both are correct; dense is tighter.
     ///
     /// [`set_iteration_base`]: CutPool::set_iteration_base
     pub iteration_base: u64,
 
-    /// Cached count of active cuts, maintained incrementally by [`add_cut`]
-    /// (increment) and [`deactivate`] (decrement). Makes [`active_count`]
-    /// O(1) instead of O(`populated_count`).
+    /// Active-cut count, maintained incrementally so [`active_count`] is O(1).
     ///
-    /// [`add_cut`]: CutPool::add_cut
-    /// [`deactivate`]: CutPool::deactivate
     /// [`active_count`]: CutPool::active_count
     pub cached_active_count: usize,
 
-    /// Cumulative count of cuts ever generated (written via [`add_cut`]),
-    /// including warm-start cuts loaded at construction. Unlike
-    /// [`populated_count`] — a slot high-water mark that includes any reserved
-    /// but unwritten leading slots — this counts only real cut insertions, so
-    /// it is the true number of policy rows generated over the run.
+    /// Cuts ever inserted (including warm-start cuts). Unlike [`populated_count`]
+    /// — a slot high-water mark that includes reserved-but-unwritten leading slots
+    /// — this counts only real insertions: the true policy-row count.
     ///
-    /// [`add_cut`]: CutPool::add_cut
     /// [`populated_count`]: CutPool::populated_count
     pub generated_count: usize,
 
-    /// Scratch buffer for [`enforce_budget`] candidate collection.
-    ///
-    /// Reused across calls to avoid per-call `Vec<u32>` allocation. Cleared
-    /// at the start of each `enforce_budget` invocation and populated with
-    /// active slot indices that are eligible for eviction.
+    /// Scratch buffer for [`enforce_budget`] candidate collection, reused across
+    /// calls to avoid per-call allocation.
     ///
     /// [`enforce_budget`]: CutPool::enforce_budget
     pub(crate) candidates_buf: Vec<u32>,
 }
 
 impl CutPool {
-    /// Create a new `CutPool` with all slots pre-allocated and initialized
-    /// to zero / inactive.
-    ///
-    /// # Parameters
-    ///
-    /// - `capacity`: total number of cut slots to allocate.
-    /// - `state_dimension`: length of the state vector (number of coefficients
-    ///   per cut).
-    /// - `forward_passes`: number of forward passes per training iteration.
-    ///   Used by the slot formula: `slot = warm_start_count + iteration *
-    ///   forward_passes + forward_pass_index`.
-    /// - `warm_start_count`: number of warm-start cuts that occupy the first
-    ///   slots. Offsets slot indices for iteration-generated cuts.
+    /// Create a `CutPool` with all slots pre-allocated and zero / inactive.
     ///
     /// # Example
     ///
@@ -219,15 +158,11 @@ impl CutPool {
 
     /// Compute the deterministic slot index for a cut.
     ///
-    /// Formula:
     /// ```text
     /// slot = warm_start_count
     ///      + (iteration - iteration_base) * forward_passes
     ///      + forward_pass_index
     /// ```
-    ///
-    /// `iteration_base` (default 0) lets 1-based iterations pack densely from
-    /// `warm_start_count`; see [`iteration_base`](CutPool::iteration_base).
     #[inline]
     fn slot_index(&self, iteration: u64, forward_pass_index: u32) -> usize {
         debug_assert!(
@@ -235,10 +170,7 @@ impl CutPool {
             "slot_index: iteration {iteration} < iteration_base {}",
             self.iteration_base
         );
-        // Slot indices are bounded by `capacity` (a usize), so the result
-        // always fits in usize. The intermediate cast of `iteration` to usize
-        // cannot realistically truncate: any platform capable of running SDDP
-        // at scale is 64-bit, and pool capacity is enforced to be < usize::MAX.
+        // Cast cannot truncate: SDDP runs only on 64-bit targets and capacity < usize::MAX.
         #[allow(clippy::cast_possible_truncation)]
         let iter_usize = (iteration - self.iteration_base) as usize;
         self.warm_start_count as usize
@@ -248,30 +180,18 @@ impl CutPool {
 
     /// Set the iteration that maps to the first training slot.
     ///
-    /// Pass `start_iteration + 1` so the first training iteration's cuts land at
-    /// slot `warm_start_count` (dense packing). The default of 0 reproduces the
-    /// legacy layout where the slot block
-    /// `[warm_start_count, warm_start_count + forward_passes)` is left unused.
+    /// Pass `start_iteration + 1` for dense packing from slot `warm_start_count`;
+    /// default 0 leaves the block `[warm_start_count, +forward_passes)` unused.
     ///
-    /// Should be called before the first [`add_cut`](CutPool::add_cut) of a
-    /// training run: with a fresh or warm-started pool this gives dense slots.
-    /// Changing the base on a pool that still holds *active* training cuts is
-    /// caught downstream by `add_cut`'s no-overwrite guard; re-setting on a pool
-    /// whose cuts are all inactive (e.g. multi-phase tests) safely reuses slots.
+    /// Call before the first [`add_cut`](CutPool::add_cut) of a run. Changing the
+    /// base while the pool still holds *active* training cuts is caught by
+    /// `add_cut`'s no-overwrite guard; re-setting when all cuts are inactive
+    /// safely reuses slots.
     pub fn set_iteration_base(&mut self, iteration_base: u64) {
         self.iteration_base = iteration_base;
     }
 
-    /// Insert a Benders cut into the pool at the deterministic slot.
-    ///
-    /// The slot is computed from `warm_start_count + iteration *
-    /// forward_passes + forward_pass_index`. The cut is marked active
-    /// immediately. [`CutMetadata`] is initialized with `iteration_generated`
-    /// and `forward_pass_index`; activity tracking fields start at zero /
-    /// `iteration_generated`.
-    ///
-    /// `populated_count` is updated if the slot index is at or beyond the
-    /// current high-water mark.
+    /// Insert a Benders cut at its deterministic `slot_index`, marked active.
     ///
     /// # Panics (debug builds only)
     ///
@@ -332,11 +252,7 @@ impl CutPool {
         self.generated_count += 1;
     }
 
-    /// Iterate over active cuts in the populated range.
-    ///
-    /// Yields `(slot_index, intercept, coefficient_slice)` for every slot
-    /// where `active[slot]` is `true`. Only scans up to `populated_count`
-    /// to avoid touching uninitialized slots.
+    /// Iterate over active cuts as `(slot_index, intercept, coefficient_slice)`.
     ///
     /// # Example
     ///
@@ -374,21 +290,12 @@ impl CutPool {
             .flatten()
     }
 
-    /// Iterate over active cuts generated in a specific training iteration.
+    /// Iterate over active cuts whose `iteration_generated == current_iteration`,
+    /// in insertion order (declaration-order invariance).
     ///
-    /// Yields `(slot_index, intercept, coefficient_slice)` for every slot
-    /// where `active[slot]` is `true` AND
-    /// `metadata[slot].iteration_generated == current_iteration`.
-    ///
-    /// Warm-start cuts (whose `iteration_generated` is
-    /// [`WARM_START_ITERATION`]) are always excluded, even if
-    /// `current_iteration` were to equal the sentinel numerically — the
-    /// sentinel is chosen as `u64::MAX` to make such a collision impossible
-    /// in practice, but the explicit guard is retained for clarity.
-    ///
-    /// Only scans up to `populated_count` to avoid touching uninitialized
-    /// slots. Iterates in insertion order, preserving declaration-order
-    /// invariance.
+    /// Warm-start cuts ([`WARM_START_ITERATION`]) are always excluded — the
+    /// explicit guard prevents them being repacked as new training cuts in cut
+    /// sync even if `current_iteration` collided with the sentinel.
     pub(crate) fn active_delta_cuts(
         &self,
         current_iteration: u64,
@@ -423,10 +330,7 @@ impl CutPool {
             })
     }
 
-    /// Count the number of active cuts.
-    ///
-    /// Returns the cached count in O(1). A debug assertion verifies consistency
-    /// with the computed count in debug builds.
+    /// Count the active cuts (cached, O(1)).
     ///
     /// # Example
     ///
@@ -456,14 +360,8 @@ impl CutPool {
         self.cached_active_count
     }
 
-    /// Return the number of populated slots — the LP-row-count metric.
-    ///
-    /// Each call to [`add_cut`] increments `populated_count` when the slot
-    /// index is at or beyond the current high-water mark. This count is the
-    /// total number of cut rows that have ever been inserted into the pool,
-    /// regardless of whether they are currently active or inactive.
-    ///
-    /// [`add_cut`]: CutPool::add_cut
+    /// Return the populated-slot count — the LP-row metric, independent of
+    /// activity state.
     ///
     /// # Example
     ///
@@ -486,21 +384,14 @@ impl CutPool {
         self.populated_count
     }
 
-    /// Deactivate the cuts at the given slot indices.
+    /// Deactivate the cuts at the given slot indices via [`set_active`].
     ///
-    /// Sets `active[i] = false` for each index in `indices`. Indices are
-    /// zero-based slot positions. Out-of-bounds indices are silently ignored
-    /// in release builds; a debug assertion fires for out-of-bounds access.
+    /// [`set_active`]: CutPool::set_active
     ///
     /// # Idempotency
     ///
-    /// Passing an index that is already inactive is a silent no-op: the
-    /// `active` flag stays `false` and `cached_active_count` is not
-    /// decremented a second time, preventing underflow. This means passing
-    /// the same index more than once in `indices` is safe — only the first
-    /// occurrence takes effect. In debug builds a `debug_assert!` fires on
-    /// the second occurrence to surface accidental duplicate-index calls
-    /// during testing.
+    /// An already-inactive index is a no-op (no second decrement → no underflow),
+    /// so a duplicate index is safe.
     ///
     /// # Example
     ///
@@ -523,20 +414,12 @@ impl CutPool {
 
     /// Apply a batch of activity changes from a [`CutActivityUpdates`] result.
     ///
-    /// Deactivates every slot in `updates.updates` and reactivates every slot
-    /// in `updates.reactivations` via [`set_active`]. This is the canonical
-    /// way to apply the output of [`CutSelectionStrategy::select_for_stage`]
-    /// to a pool — it folds both deactivations and reactivations into a single
-    /// call so the training loop never silently drops reactivation entries.
-    ///
-    /// Idempotency follows [`set_active`]: applying the same change twice (or
-    /// requesting a state that already holds) is a no-op. Out-of-bounds slot
-    /// indices are silently ignored in release builds; a debug assertion
-    /// fires in debug builds.
+    /// Deactivates `updates.updates` and reactivates `updates.reactivations` via
+    /// [`set_active`]. Folding both into one call is why the training loop never
+    /// silently drops reactivation entries. Idempotency follows [`set_active`].
     ///
     /// [`set_active`]: CutPool::set_active
     /// [`CutActivityUpdates`]: crate::cut_selection::CutActivityUpdates
-    /// [`CutSelectionStrategy::select_for_stage`]: crate::cut_selection::CutSelectionStrategy::select_for_stage
     ///
     /// # Example
     ///
@@ -573,22 +456,12 @@ impl CutPool {
         }
     }
 
-    /// Toggle the activity flag for a single slot.
-    ///
-    /// Sets `active[slot] = active` and keeps `cached_active_count` consistent:
-    ///
-    /// - If `active == false` and the slot is currently active, `active[slot]`
-    ///   is set to `false` and `cached_active_count` is decremented by 1.
-    /// - If `active == true` and the slot is currently inactive, `active[slot]`
-    ///   is set to `true` and `cached_active_count` is incremented by 1.
-    /// - If the slot already has the requested state, the call is a no-op.
-    ///
-    /// [`deactivate`]: CutPool::deactivate
+    /// Toggle a single slot's activity flag, keeping `cached_active_count`
+    /// consistent. A no-op when the slot already holds the requested state.
     ///
     /// # Panics (debug builds only)
     ///
-    /// Panics if `slot >= populated_count`. In release builds the bounds check
-    /// is skipped, matching the existing [`deactivate`] debug-assert pattern.
+    /// Panics if `slot >= populated_count`.
     ///
     /// # Example
     ///
@@ -627,11 +500,8 @@ impl CutPool {
         }
     }
 
-    /// Evaluate the FCF at the given state vector.
-    ///
-    /// Returns the maximum over all active cuts of `intercept + coefficients
-    /// · state`. Returns [`f64::NEG_INFINITY`] if no active cuts exist (the
-    /// pool is empty or all cuts have been deactivated).
+    /// Evaluate the FCF: the max over active cuts of `intercept + coefficients ·
+    /// state`, or [`f64::NEG_INFINITY`] when no cut is active.
     ///
     /// # Panics (debug builds only)
     ///
@@ -670,15 +540,10 @@ impl CutPool {
             .fold(f64::NEG_INFINITY, f64::max)
     }
 
-    /// Diagnostic: count exact-zero coefficients across all active cuts.
+    /// Diagnostic: count exact-zero coefficients (`value == 0.0`) across active
+    /// cuts into a [`SparsityReport`].
     ///
-    /// Walks every coefficient of every active cut and tallies exact
-    /// zeros (`value == 0.0`). Returns a [`SparsityReport`] with the
-    /// aggregate count, fraction, and per-dimension breakdown.
-    ///
-    /// Not on the hot path: allocates one `Vec<usize>` of length
-    /// `state_dimension` per call. Intended for offline analysis or
-    /// pre-release diagnostics, not per-iteration use.
+    /// Allocates per call (one `Vec<usize>`); offline use, not per-iteration.
     ///
     /// # Example
     ///
@@ -726,15 +591,11 @@ impl CutPool {
         }
     }
 
-    /// Construct a `CutPool` from deserialized cut records.
+    /// Construct a `CutPool` from deserialized cut records for FCF evaluation
+    /// during simulation.
     ///
-    /// The pool capacity is set to `records.len()` (no room for new training
-    /// cuts). All loaded cuts are populated and their active flags are set
-    /// from the deserialized records.
-    ///
-    /// `forward_passes` is set to 0 and `warm_start_count` is set to
-    /// `records.len()` since this pool is not intended for incremental
-    /// training addition (only for FCF evaluation during simulation).
+    /// Capacity is exactly `records.len()` with `forward_passes = 0` — this pool
+    /// takes no new training cuts.
     ///
     /// # Example
     ///
@@ -812,11 +673,9 @@ impl CutPool {
 
     /// Construct a `CutPool` with warm-start cuts plus capacity for training.
     ///
-    /// The loaded cuts occupy the first `records.len()` slots. The remaining
-    /// `max_iterations * forward_passes` slots are allocated for new training
-    /// cuts. The slot formula `warm_start_count + iteration * forward_passes +
-    /// forward_pass_index` correctly offsets training cuts past the warm-start
-    /// region.
+    /// Loaded cuts occupy the first `records.len()` slots; the remaining
+    /// `max_iterations * forward_passes` slots take new training cuts (offset past
+    /// the warm-start region by the slot formula).
     ///
     /// # Example
     ///
@@ -875,10 +734,9 @@ impl CutPool {
             if record.is_active {
                 cached_active_count += 1;
             }
-            // Use WARM_START_ITERATION as the iteration_generated sentinel so
-            // warm-start cuts are never matched by pack_local_cuts (which
-            // filters on the current training iteration).  This prevents
-            // double-counting warm-start cuts as new training cuts in cut sync.
+            // WARM_START_ITERATION sentinel keeps warm-start cuts out of
+            // pack_local_cuts (filters on current iteration), so cut sync never
+            // double-counts them as new training cuts.
             metadata[i] = CutMetadata {
                 iteration_generated: WARM_START_ITERATION,
                 forward_pass_index: record.forward_pass_index,
@@ -908,9 +766,7 @@ impl CutPool {
 
 /// Diagnostic report of exact-zero coefficients across active cuts in a [`CutPool`].
 ///
-/// Produced by [`CutPool::sparsity_report`]. Counts only exact
-/// zeros (`value == 0.0`); near-zero values are not collapsed to
-/// zero by this report.
+/// Counts exact zeros (`value == 0.0`) only; near-zero values are not collapsed.
 #[derive(Debug, Clone)]
 pub struct SparsityReport {
     /// Total number of coefficients scanned (`active_count * state_dimension`).
@@ -925,9 +781,6 @@ pub struct SparsityReport {
 }
 
 /// Result of a [`CutPool::enforce_budget`] call.
-///
-/// Reports how many cuts were evicted and the active-cut counts before and
-/// after the enforcement pass.
 #[derive(Debug, Clone)]
 pub struct BudgetEnforcementResult {
     /// Number of cuts deactivated during this enforcement pass.
@@ -939,31 +792,16 @@ pub struct BudgetEnforcementResult {
 }
 
 impl CutPool {
-    /// Enforce a hard cap on the number of active cuts per stage.
+    /// Enforce a hard cap on active cuts per stage, evicting by
+    /// `(last_active_iter ASC, active_count ASC)` — stalest, least-used first.
     ///
-    /// If `active_count() <= budget`, returns immediately with zero evictions.
-    ///
-    /// Otherwise, collects all active slots where
-    /// `metadata[slot].iteration_generated != current_iteration` (protecting
-    /// cuts from the current backward pass), sorts them by
-    /// `(last_active_iter ASC, active_count ASC)` — stalest and least-used
-    /// first — and deactivates the first `active_count - budget` of them.
-    ///
-    /// Uses `select_nth_unstable_by` (partial sort) when the number of excess
-    /// cuts is small relative to the candidate set, otherwise `sort_unstable_by`.
-    ///
-    /// Cuts generated in `current_iteration` are **never** evicted. If the
-    /// current-iteration cuts alone exceed the budget, all current-iteration
-    /// cuts are preserved and `active_count()` may remain above `budget` after
-    /// the call.
+    /// Cuts generated in `current_iteration` are **never** evicted; if they alone
+    /// exceed `budget`, `active_count()` may remain above it after the call.
     ///
     /// # Parameters
     ///
-    /// - `budget`: maximum number of active cuts allowed.
-    /// - `current_iteration`: cuts generated in this iteration are protected.
-    /// - `forward_passes`: unused by the method; present for call-site
-    ///   uniformity with the training loop (which uses it for the warning
-    ///   validation in `StudyParams::from_config`).
+    /// - `forward_passes`: unused; present for call-site uniformity with the
+    ///   training loop.
     pub fn enforce_budget(
         &mut self,
         budget: u32,
@@ -984,8 +822,6 @@ impl CutPool {
 
         let excess = self.cached_active_count - budget_usize;
 
-        // Collect eviction candidates into the reused scratch buffer:
-        // active slots not from current_iteration.
         self.candidates_buf.clear();
         #[allow(clippy::cast_possible_truncation)]
         self.candidates_buf.extend(
@@ -999,7 +835,6 @@ impl CutPool {
         );
 
         if self.candidates_buf.is_empty() {
-            // All active cuts are from the current iteration; preserve them all.
             return BudgetEnforcementResult {
                 evicted_count: 0,
                 active_before,
@@ -1007,8 +842,6 @@ impl CutPool {
             };
         }
 
-        // Eviction key: (last_active_iter ASC, active_count ASC).
-        // Stalest, least-frequently-used cuts are evicted first.
         let evict_count = excess.min(self.candidates_buf.len());
 
         let key = |&slot: &u32| {
@@ -1016,19 +849,16 @@ impl CutPool {
             (meta.last_active_iter, meta.active_count)
         };
 
-        // Use partial sort when only a small fraction of candidates need
-        // evicting; fall back to full sort otherwise.
+        // Partial sort partitions the evict_count smallest into [..evict_count]
+        // (any order); full sort when that fraction is large.
         if evict_count < self.candidates_buf.len() / 2 {
-            // select_nth_unstable_by partitions so that candidates_buf[..evict_count]
-            // contains the evict_count smallest elements (in any order).
             self.candidates_buf
                 .select_nth_unstable_by(evict_count, |a, b| key(a).cmp(&key(b)));
         } else {
             self.candidates_buf.sort_unstable_by_key(|a| key(a));
         }
 
-        // Copy the eviction slice into a local Vec to release the borrow on
-        // self.candidates_buf before calling deactivate, which takes &mut self.
+        // Local copy releases the candidates_buf borrow before deactivate(&mut self).
         let to_evict: Vec<u32> = self.candidates_buf[..evict_count].to_vec();
         self.deactivate(&to_evict);
 

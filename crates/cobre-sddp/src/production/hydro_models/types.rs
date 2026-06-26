@@ -23,12 +23,8 @@ use serde::{Deserialize, Serialize};
 
 // ── Hyperplane types ──────────────────────────────────────────────────────────
 
-/// A single FPHA hyperplane with a pre-scaled intercept.
-///
-/// The intercept stored here is `gamma_0 * kappa` (the intercept coefficient
-/// multiplied by the nominal head factor). The LP builder adds this directly
-/// to the right-hand side of the hyperplane inequality constraint without
-/// further scaling.
+/// A single FPHA hyperplane. The intercept is the pre-scaled `gamma_0 * kappa`,
+/// added to the constraint RHS verbatim — the LP builder must not re-scale it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FphaPlane {
     /// Pre-scaled intercept (`gamma_0 * kappa`).
@@ -44,13 +40,6 @@ pub struct FphaPlane {
 // ── Resolved production model ─────────────────────────────────────────────────
 
 /// A fully-resolved hydro production model for one (hydro, stage) pair.
-///
-/// The enum has two variants:
-///
-/// - [`ConstantProductivity`](ResolvedProductionModel::ConstantProductivity) —
-///   generation is modelled as `g = rho * q` with a fixed productivity scalar.
-/// - [`Fpha`](ResolvedProductionModel::Fpha) — generation is bounded by `M`
-///   linear hyperplane constraints derived from the FPHA approximation.
 #[derive(Debug, Clone)]
 pub enum ResolvedProductionModel {
     /// Constant productivity: generation = `productivity * turbined_flow`.
@@ -67,15 +56,8 @@ pub enum ResolvedProductionModel {
 
 // ── Production model set ──────────────────────────────────────────────────────
 
-/// Resolved production models for all (hydro, stage) combinations.
-///
-/// Indexed as `stage_models[hydro_index][stage_index]`. Access via the
-/// [`model`](ProductionModelSet::model) accessor.
-///
-/// # Layout
-///
-/// The inner `Vec<ResolvedProductionModel>` at index `h` covers all stages for
-/// hydro `h`. Access to a given (hydro, stage) pair is `O(1)`.
+/// Resolved production models for all (hydro, stage) combinations, indexed
+/// `stage_models[hydro][stage]`. Access via [`model`](ProductionModelSet::model).
 #[derive(Debug, Clone)]
 pub struct ProductionModelSet {
     /// `stage_models[h][t]` is the resolved production model for hydro `h` at stage `t`.
@@ -87,10 +69,7 @@ pub struct ProductionModelSet {
 }
 
 impl ProductionModelSet {
-    /// Construct a `ProductionModelSet` from a 2-D grid of models.
-    ///
-    /// `models` must be indexed as `models[hydro][stage]` and must have
-    /// dimensions `n_hydros × n_stages`.
+    /// Construct a `ProductionModelSet` from `models[hydro][stage]`.
     ///
     /// # Panics
     ///
@@ -118,7 +97,7 @@ impl ProductionModelSet {
         }
     }
 
-    /// Return the resolved production model for hydro `hydro` at stage `stage`.
+    /// Resolved production model at `(hydro, stage)`.
     ///
     /// # Panics
     ///
@@ -178,13 +157,6 @@ pub struct LinearizedEvaporation {
 // ── Evaporation model ─────────────────────────────────────────────────────────
 
 /// Resolved evaporation model for a single hydro plant.
-///
-/// The enum has two variants:
-///
-/// - [`None`](EvaporationModel::None) — evaporation is not modelled for this
-///   hydro plant; the LP builder adds no evaporation term.
-/// - [`Linearized`](EvaporationModel::Linearized) — per-stage linearized
-///   evaporation coefficients derived from reservoir geometry.
 #[derive(Debug, Clone)]
 pub enum EvaporationModel {
     /// No evaporation for this hydro plant.
@@ -204,10 +176,6 @@ pub enum EvaporationModel {
 // ── Evaporation model set ─────────────────────────────────────────────────────
 
 /// Evaporation models for all hydro plants, indexed by hydro position.
-///
-/// Access individual models via [`model`](EvaporationModelSet::model).
-/// Use [`has_evaporation`](EvaporationModelSet::has_evaporation) to gate
-/// evaporation-related LP setup without iterating the full set.
 #[derive(Debug, Clone)]
 pub struct EvaporationModelSet {
     /// `models[h]` is the evaporation model for hydro plant at position `h`.
@@ -236,7 +204,7 @@ impl EvaporationModelSet {
         &self.models[hydro]
     }
 
-    /// Return `true` if at least one hydro plant has a [`Linearized`](EvaporationModel::Linearized) model.
+    /// `true` if any hydro plant has a [`Linearized`](EvaporationModel::Linearized) model.
     #[must_use]
     pub fn has_evaporation(&self) -> bool {
         self.models
@@ -272,12 +240,16 @@ pub enum EvaporationSource {
     NotModeled,
     /// Evaporation coefficients were linearized from reservoir geometry.
     LinearizedFromGeometry,
+    /// Evaporation coefficients were supplied, but the reservoir has no usable
+    /// surface-area data (no geometry rows, or every `area_km2` is zero), so
+    /// evaporation is disabled for this hydro and a `tracing::warn!` is emitted
+    /// at resolution. Zero surface area yields zero evaporation, so disabling is
+    /// the physically-correct degradation rather than a hard error — a new or
+    /// being-filled reservoir legitimately may not have an area-volume curve yet.
+    DisabledNoArea,
 }
 
 /// Source of the reference volume used for evaporation linearization.
-///
-/// Tracked per hydro plant and included in [`HydroModelProvenance`] for
-/// display and auditing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvaporationReferenceSource {
     /// User-supplied per-season reference volumes from the entity definition.
@@ -304,10 +276,7 @@ pub struct HydroModelProvenance {
 
 // ── Summary types ─────────────────────────────────────────────────────────────
 
-/// Per-hydro detail for FPHA production models.
-///
-/// Included in [`HydroModelSummary`] for display and auditing. Contains the
-/// entity identity, source, and the number of linearisation planes.
+/// Per-hydro detail for FPHA production models, carried in [`HydroModelSummary`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FphaHydroDetail {
     /// Entity identifier of the hydro plant.
@@ -320,11 +289,7 @@ pub struct FphaHydroDetail {
     pub n_planes: usize,
 }
 
-/// Aggregated summary of the hydro model preprocessing pipeline.
-///
-/// Produced by the summary builder in the hydro models module and consumed by
-/// `cobre-cli` for display. Contains counts for both production and evaporation
-/// models.
+/// Aggregated production- and evaporation-model counts for `cobre-cli` display.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HydroModelSummary {
     /// Number of hydro plants using [`ResolvedProductionModel::ConstantProductivity`].
@@ -347,19 +312,13 @@ pub struct HydroModelSummary {
 
 // ── FPHA fit deviation ──────────────────────────────────────────────────────────
 
-/// One computed-FPHA fit's deviation magnitudes, carried up the pipeline for one
-/// `(hydro, stage)` pair.
+/// One computed-FPHA fit's deviation magnitudes, one entry per DISTINCT fit
+/// (tagged with the first study stage it covers), in canonical `(hydro, stage)`
+/// order.
 ///
-/// The four magnitudes are plain `f64`s lifted out of the `pub(crate)`
-/// `crate::fpha_fitting::FphaFitDeviation` rather than embedding it: that type is
-/// crate-internal (an algorithm detail of the fit) and must not cross into
-/// `cobre-io`'s generic metadata aggregate. The export builder maps these fields
-/// into the generic [`cobre_io::DeviationSummary`].
-///
-/// One entry per DISTINCT fit, tagged with `stage_id` = the first study stage the
-/// fitted `SelectionMode` entry covers — not one entry per covered stage. The
-/// resolver populates these in canonical `(hydro, stage)` order, so the carried
-/// vector is declaration-order invariant.
+/// The magnitudes are plain `f64`s rather than the `pub(crate)`
+/// `crate::fpha_fitting::FphaFitDeviation`: that crate-internal type must not cross
+/// into `cobre-io`'s generic metadata aggregate.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FphaFitDeviationEntry {
     /// Entity id of the hydro plant this fit belongs to.
@@ -379,96 +338,59 @@ pub struct FphaFitDeviationEntry {
 
 // ── Pipeline result ───────────────────────────────────────────────────────────
 
-/// Result of the hydro model preprocessing pipeline.
+/// Result of the hydro model preprocessing pipeline, consumed by `StudySetup`
+/// construction and the summary builder.
 ///
-/// Bundles the three outputs so that callers do not need to handle them as
-/// separate return values. Consumed by `StudySetup` construction and the
-/// hydro model summary builder.
+/// Every computed-FPHA-only field below is non-empty only when some hydro uses
+/// `source: "computed"`; the resolver builds each in canonical `(hydro, stage)`
+/// order, so all are declaration-order invariant.
 #[derive(Debug)]
 pub struct PrepareHydroModelsResult {
-    /// Resolved production models for all (hydro, stage) pairs.
-    ///
-    /// For non-FPHA hydros, the per-stage `productivity` already reflects the
-    /// `system/hydro_energy_productivity.parquet` override when supplied.
-    /// Downstream consumers (LP builder, energy conversion) read `productivity`
-    /// from this set as the single source of truth.
+    /// Resolved production models for all (hydro, stage) pairs. For non-FPHA
+    /// hydros, `productivity` already reflects the
+    /// `hydro_energy_productivity.parquet` override — the single source of truth
+    /// for downstream consumers.
     pub production: ProductionModelSet,
-    /// Per-`(hydro, stage)` override table parsed from
-    /// `system/hydro_energy_productivity.parquet`. Empty when the file is absent.
-    ///
-    /// Carried alongside `production` because the FPHA derivation in
-    /// [`crate::energy_conversion::build_energy_conversion_set`] still needs the
-    /// raw override entries (`equivalent_productivity`, `reference_volume`,
-    /// `reference_outflow`) to override its VHA + `ρ_esp` derivation. For
-    /// non-FPHA hydros the override is already baked into `production`.
+    /// Per-`(hydro, stage)` override table from `hydro_energy_productivity.parquet`
+    /// (empty when absent). Carried because the FPHA derivation in
+    /// [`crate::energy_conversion::build_energy_conversion_set`] still needs the raw
+    /// override entries to override its VHA + `ρ_esp` derivation; for non-FPHA
+    /// hydros the override is already baked into `production`.
     pub productivity_override: crate::energy_conversion::HydroEnergyProductivityOverride,
     /// Resolved evaporation models for all hydro plants.
     pub evaporation: EvaporationModelSet,
     /// Provenance records for all hydro plants.
     pub provenance: HydroModelProvenance,
-    /// Hyperplane rows produced by the computed-FPHA fitting pipeline.
-    ///
-    /// Non-empty only when at least one hydro uses `source: "computed"`.
-    /// The write site lives in the calling entry point (CLI or Python),
-    /// which writes to the run-scoped output directory under
-    /// `hydro_models/fpha_hyperplanes.parquet`.  Non-root MPI ranks never
-    /// reach the write site; they receive an identical copy of these rows
-    /// via the same deterministic preprocessing path.
+    /// Computed-FPHA hyperplane rows. The CLI/Python entry point writes these to
+    /// `hydro_models/fpha_hyperplanes.parquet`; non-root MPI ranks reach no write
+    /// site but hold an identical copy via the deterministic preprocessing path.
     pub fpha_export_rows: Vec<cobre_io::FphaHyperplaneRow>,
-    /// Per-`(hydro, study-stage)` reference operating volume resolved to absolute
-    /// hm³ against each plant's own `[v_min, v_max]` band.
-    ///
-    /// Carries the JSON-declared `reference_volume` (or the case default) already
-    /// resolved, so the energy-conversion build in study setup and the FPHA
-    /// backwater path read one identical source. Each tuple is
-    /// `(hydro_id, stage_index, volume_hm3)`; `stage_index` is the 0-based
-    /// study-stage index. Built deterministically in plant-then-stage canonical
-    /// order, so it is declaration-order invariant.
+    /// Per-`(hydro, study-stage)` reference operating volume in absolute hm³
+    /// (`(hydro_id, stage_index, volume_hm3)`, 0-based `stage_index`). The
+    /// energy-conversion build and the FPHA backwater path read this one source.
     pub reference_volumes_hm3: Vec<(EntityId, usize, f64)>,
-    /// Per-hydro VHA geometry rows (volume → forebay height), grouped by hydro id
-    /// and sorted by ascending volume.
-    ///
-    /// Carried so the energy-conversion build can derive `ρ_eq` from VHA geometry +
-    /// `ρ_esp` for an FPHA plant that has no parquet `equivalent_productivity`
-    /// override — making that override genuinely optional. The parquet value still
-    /// takes priority when present; this is only the fallback source. Empty when
-    /// the case ships no `hydro_geometry`, in which case the derivation never fires
-    /// and the override remains required for FPHA plants.
+    /// Per-hydro VHA geometry (volume → forebay height), sorted by ascending
+    /// volume. The energy-conversion build derives `ρ_eq` from this + `ρ_esp` for an
+    /// FPHA plant with no parquet `equivalent_productivity` override (the parquet
+    /// value takes priority). Empty when the case ships no `hydro_geometry`, leaving
+    /// the override required.
     pub vha_geometry_by_hydro: HashMap<EntityId, Vec<cobre_io::HydroGeometryRow>>,
-    /// Per-`(hydro, stage)` computed-FPHA fit deviations, one entry per distinct
-    /// fit, in canonical `(hydro, stage)` order.
-    ///
-    /// Non-empty only when at least one hydro uses `source: "computed"`. The
-    /// CLI/Python training write site rolls these up into the generic
-    /// [`cobre_io::DeviationSummary`] persisted in `training/metadata.json`; an
-    /// empty vector yields no metadata section. Built deterministically by the
-    /// resolver's sequential canonical-order flatten, so it is declaration-order
-    /// invariant.
+    /// Computed-FPHA fit deviations, one entry per distinct fit. The CLI/Python
+    /// write site rolls these into the [`cobre_io::DeviationSummary`] in
+    /// `training/metadata.json`; an empty vector yields no metadata section.
     pub fpha_fit_deviations: Vec<FphaFitDeviationEntry>,
-    /// Per-sampled-point computed-FPHA fit deviations, one row per
-    /// `(hydro, stage, V, Q)` grid point at spillage = 0, in canonical
-    /// `(hydro_id, stage_id, grid)` order.
-    ///
-    /// Empty unless the run opts in via `config.exports.fpha_deviation_points`
-    /// (and at least one hydro uses `source: "computed"`). The CLI/Python training
-    /// write site emits these to `hydro_models/fpha_deviation_points.parquet` only
-    /// when the opt-in flag is on AND the vector is non-empty; an empty vector
-    /// writes no file. Built deterministically by the resolver's sequential
-    /// canonical-order flatten, so it is declaration-order invariant.
+    /// Per-sampled-point computed-FPHA deviations, one row per `(hydro, stage, V, Q)`
+    /// grid point at spillage = 0. Empty unless the run opts in via
+    /// `config.exports.fpha_deviation_points`; the write site emits
+    /// `hydro_models/fpha_deviation_points.parquet` only for a non-empty vector.
     pub fpha_deviation_point_rows: Vec<cobre_io::FphaDeviationPointRow>,
 }
 
 impl PrepareHydroModelsResult {
     /// Build a default result for a system with no FPHA and no evaporation data.
     ///
-    /// All hydros receive [`ResolvedProductionModel::ConstantProductivity`] using
-    /// the productivity from their entity definition, and [`EvaporationModel::None`].
-    /// Provenance is set to [`ProductionModelSource::DefaultConstant`] and
-    /// [`EvaporationSource::NotModeled`] for every hydro.
-    ///
-    /// This factory is used in tests and in entry points where the full
-    /// `prepare_hydro_models` pipeline is not available (e.g., non-root MPI ranks
-    /// that reconstruct the result independently).
+    /// Used in tests and where the full `prepare_hydro_models` pipeline is not
+    /// available (e.g. non-root MPI ranks reconstructing the result independently).
     #[must_use]
     pub fn default_from_system(system: &System) -> Self {
         let n_stages = system.stages().iter().filter(|s| s.id >= 0).count();
@@ -478,10 +400,8 @@ impl PrepareHydroModelsResult {
             .hydros()
             .iter()
             .map(|_hydro| {
-                // Non-FPHA entity models carry no inline productivity; the coefficient
-                // lives solely in hydro_production_models.json. Use 0.0 as a placeholder —
-                // this factory is only used in tests and on non-root MPI ranks that
-                // reconstruct the result from a broadcast payload (not from scratch).
+                // 0.0 placeholder: the real coefficient lives in
+                // hydro_production_models.json, which this factory does not read.
                 vec![ResolvedProductionModel::ConstantProductivity { productivity: 0.0 }; n_stages]
             })
             .collect();
@@ -512,12 +432,9 @@ impl PrepareHydroModelsResult {
             .map(|h| (h.id, EvaporationReferenceSource::DefaultMidpoint))
             .collect();
 
-        // No JSON config on this path, so every `(hydro, stage)` resolves through
-        // `resolve_reference_volume_hm3(None, ..)` — the single owner of the
-        // default-fraction reference volume — against the plant's own band. Using
-        // that resolver (not an inline formula) keeps the undeclared value
-        // bit-identical to the JSON-fed path. Built in plant-then-stage canonical
-        // order, so the table is declaration-order invariant.
+        // Resolve through `resolve_reference_volume_hm3(None, ..)` — the single
+        // owner of the default fraction — not an inline formula, so the undeclared
+        // value stays bit-identical to the JSON-fed path.
         let study_stage_count = n_stages;
         let reference_volumes_hm3: Vec<(EntityId, usize, f64)> = system
             .hydros()
@@ -544,12 +461,8 @@ impl PrepareHydroModelsResult {
             },
             fpha_export_rows: Vec::new(),
             reference_volumes_hm3,
-            // This factory models a system with no FPHA, so no plant consults the
-            // VHA-geometry ρ_eq derivation; an empty map is correct.
             vha_geometry_by_hydro: HashMap::new(),
-            // No computed FPHA on this path, so no fit deviation is measured.
             fpha_fit_deviations: Vec::new(),
-            // No computed FPHA on this path, so no per-point deviations either.
             fpha_deviation_point_rows: Vec::new(),
         }
     }

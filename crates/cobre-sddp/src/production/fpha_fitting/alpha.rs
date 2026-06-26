@@ -1,71 +1,40 @@
 //! Least-squares `α_FPHA` correction on the spill = 0 grid.
 //!
-//! Owns [`compute_alpha_fpha`] and [`scale_plane_affine`]. The raw upper-envelope
-//! hull (`FPHA_0`) is optimistic where the true production function is non-concave
-//! and pessimistic where it is concave; this bias is corrected with a single
-//! scalar `α_FPHA` chosen to minimise the mean-squared error between `α·FPHA_0` and
-//! the exact `FPH` over the `(V, Q)` fit grid. The closed form is
-//!
-//! ```text
-//! α_FPHA = ( Σ_i Σ_j FPHA_0(V_i,Q_j)·FPH(V_i,Q_j) ) / ( Σ_i Σ_j FPHA_0(V_i,Q_j)² )
-//! FPHA(V,Q) = α_FPHA · FPHA_0(V,Q)
-//! ```
-//!
-//! All grid iteration reaches the single grid-formula owner via
-//! `super::grid::build_grid`, so the regression grid never drifts from the cloud
-//! and selection grids.
+//! The raw upper-envelope hull (`FPHA_0`) is biased; a single scalar `α_FPHA`
+//! minimising `Σ (α·FPHA_0 − FPH)²` over the `(V, Q)` fit grid corrects it, and
+//! the emitted plane is `α·FPHA_0`. Grid iteration reaches the single owner via
+//! `super::grid::build_grid`, so the regression grid never drifts from the cloud.
 
 use super::geometry::FittingBounds;
 use super::grid::build_grid;
 use super::hull_fit::RawPlane;
 use super::production::ProductionFunction;
 
-// ── α_FPHA least-squares correction ───────────────────────────────────────────
-
 /// Compute the least-squares `α_FPHA` correction factor for a raw hull envelope.
-///
-/// Iterates the `(V, Q)` fit grid once, accumulating `Σ FPHA_0·FPH` and
-/// `Σ FPHA_0²`, then returns their ratio.
 ///
 /// # Contract — regress the MIN envelope, the one the LP consumes (Voice 1)
 ///
-/// `FPHA_0(V_i,Q_j)` is the pointwise **min** over the raw hull planes, NOT the
-/// max. The LP applies the planes as `g ≤ plane_k` for every plane, so the binding
-/// cap is the minimum over planes — and for a concave production surface the
-/// upper-envelope facets already satisfy `min ≈ φ` (each facet bounds φ from above;
-/// the min is the tightest). Regressing the **max** envelope is the
-/// wrong-but-compiling alternative: for a concave φ the max envelope runs ≈1.5–1.8×φ,
-/// so the least-squares α collapses to ≈0.6 and, applied to every coefficient,
-/// shrinks the LP's min cap to ≈0.6·φ — a systematic ~30–40% under-generation that
-/// vanishes for run-of-river plants (where `min == max`, so the bug is invisible).
-/// Fitting the min envelope yields α ≈ 1 and lands the LP cap on φ.
+/// `FPHA_0` is the pointwise **min** over the raw hull planes, not the max: the LP
+/// applies `g ≤ plane_k` for every plane, so the binding cap is the minimum.
+/// Regressing the max envelope is the wrong-but-compiling alternative — for a
+/// concave φ it runs ≈1.5–1.8×φ, collapsing α to ≈0.6 and shrinking the LP cap to
+/// ≈0.6·φ (a ~30–40% under-generation, invisible for run-of-river where
+/// `min == max`).
 ///
-/// # Contract — the regression is spillage = 0, lateral = 0 only (Voice 1)
+/// # Contract — spillage = 0, lateral = 0 only (Voice 1)
 ///
-/// Both `FPHA_0(V_i,Q_j)` (the pointwise min over the raw hull planes) and
-/// `FPH(V_i,Q_j)` (`pf.evaluate(v, q, 0.0)`) are evaluated at **spillage = 0** and
-/// lateral = 0 — there is no spill axis in the regression. The wrong-but-compiling
-/// alternative is to fold the `build_grid` spillage axis into the sum: that pulls
-/// `α` toward the larger-deviation spill region and degrades the dominant no-spill
-/// region that governs operation. The `s_points` axis is
-/// therefore deliberately ignored here, exactly as `super::hull_fit::build_cloud`
-/// ignores it.
+/// Both `FPHA_0` and `FPH` are evaluated at `s = 0`; the `s_points` axis is
+/// deliberately not iterated (as `super::hull_fit` build also ignores it). Folding
+/// the spillage axis into the sum pulls α toward the spill region and degrades the
+/// dominant no-spill region that governs operation.
 ///
 /// # Contract — degenerate denominator returns the neutral `α = 1.0` (Voice 1)
 ///
-/// When `Σ FPHA_0² == 0` (an all-zero-production hydro, e.g. net head ≤ 0 over the
-/// whole grid) the ratio is undefined. This returns the neutral `α = 1.0` rather
-/// than dividing by zero or returning a typed error: `α = 1.0` leaves the (already
-/// zero) planes unchanged, so a degenerate hydro does not hard-error the fit; the
-/// downstream `NoHyperplanesProduced` / sign validation still rejects a genuinely
-/// unusable envelope. Returning an error here would abort the whole fitting loop
-/// for a hydro whose zero planes are harmless to scale.
-///
-/// # Parameters
-///
-/// - `planes` — raw hull planes (`FPHA_0`), pre-scaling.
-/// - `pf` — production function supplying `FPH` and the grid axes.
-/// - `bounds` — resolved fitting bounds supplying the volume range and grid counts.
+/// `Σ FPHA_0² == 0` (all-zero-production hydro, net head ≤ 0 over the grid) leaves
+/// the ratio undefined; return `α = 1.0` rather than dividing by zero or
+/// hard-erroring — it leaves the already-zero planes unchanged, and downstream
+/// `NoHyperplanesProduced` / sign validation still rejects a genuinely unusable
+/// envelope.
 pub(crate) fn compute_alpha_fpha(
     planes: &[RawPlane],
     pf: &ProductionFunction,
@@ -80,13 +49,8 @@ pub(crate) fn compute_alpha_fpha(
     let mut sum_fpha0_fph = 0.0_f64;
     let mut sum_fpha0_sq = 0.0_f64;
 
-    // Spillage = 0, lateral = 0: the s axis is intentionally not iterated (see the
-    // spillage-only contract above). `RawPlane::evaluate(v, q, 0.0)` and
-    // `pf.evaluate_capped(v, q, 0.0)` both pin spillage to 0. The regression uses
-    // the capped output — the same the cloud hull was built from — so the α scale
-    // balances the envelope against the model it actually approximates. `fpha0` is
-    // the MIN over planes — the envelope the LP applies (`g ≤ plane_k`) — not the
-    // max (see the min-envelope contract above).
+    // `fpha0` is the MIN over planes (the LP cap), evaluated at s = 0 against the
+    // capped output — both contracts above.
     for &v in &grid.v_points {
         for &q in &grid.q_points {
             let fpha0 = planes
@@ -110,12 +74,9 @@ pub(crate) fn compute_alpha_fpha(
 ///
 /// # Contract — `α` scales every coefficient, not just the intercept (Voice 1)
 ///
-/// `FPHA(V,Q) = α·FPHA_0(V,Q) = α·γ₀ + α·γ_V·V + α·γ_Q·Q (+ α·γ_S)`, so `α`
-/// multiplies `γ₀`, `γ_V`, `γ_Q`, and the provisional `γ_S = 0` alike. The
-/// wrong-but-compiling alternative is to scale only the intercept (`α·γ₀` with raw
-/// gradients) — that was the role of the old `kappa` shrink and is NOT equivalent
-/// to scaling the affine function. This whole-affine scaling is exactly why
-/// `α ≠ kappa`.
+/// `α` multiplies `γ₀`, `γ_V`, `γ_Q`, and `γ_S` alike, since
+/// `FPHA = α·FPHA_0`. Scaling only the intercept (`α·γ₀` with raw gradients) is the
+/// wrong-but-compiling alternative — not equivalent to scaling the affine function.
 pub(crate) fn scale_plane_affine(plane: &RawPlane, alpha: f64) -> RawPlane {
     RawPlane {
         gamma_0: plane.gamma_0 * alpha,
@@ -188,15 +149,11 @@ mod tests {
         )
     }
 
-    /// A flat-head production function whose net head is forced to 0 everywhere:
-    /// the forebay sits below the constant tailrace, so `pf.evaluate` clamps to 0
-    /// at every grid point. `FPHA_0` over an all-zero cloud is 0, exercising the
-    /// degenerate `Σ FPHA_0² == 0` denominator.
+    /// Net head 0 everywhere (forebay below the constant tailrace), so every grid
+    /// point clamps to 0 — exercising the degenerate `Σ FPHA_0² == 0` denominator.
     fn zero_production_function() -> ProductionFunction {
         let rows = vec![row(0.0, 100.0), row(30_000.0, 100.0)];
         let forebay = ForebayTable::new(&rows, "Zero").expect("valid VHA curve");
-        // Constant tailrace at 200 m > forebay 100 m → gross head negative → net
-        // head clamped to 0 → production 0 everywhere.
         let tailrace = TailraceModel::Polynomial {
             coefficients: vec![200.0],
         };
@@ -219,7 +176,6 @@ mod tests {
         let pf = concave_production_function();
         let bounds = small_bounds();
 
-        // One raw plane: FPHA_0 = gamma_0 + gamma_v*V + gamma_q*Q.
         let planes = vec![RawPlane {
             gamma_0: 50.0,
             gamma_v: 0.01,
@@ -228,8 +184,6 @@ mod tests {
         }];
 
         // Independent reference accumulation over the same (V, Q) grid at s = 0.
-        // The flow axis runs from 0 to max_turbined; the regression uses the capped
-        // output, mirroring `compute_alpha_fpha`.
         let v_pts = [0.0_f64, 30_000.0];
         let q_pts = [0.0_f64, pf.max_turbined_m3s];
         let mut num = 0.0_f64;
@@ -264,8 +218,6 @@ mod tests {
             gamma_q: 0.3,
             gamma_s: 0.0,
         };
-        // Same plane but with a spurious spill gradient. Because the regression
-        // pins s = 0, evaluate(v, q, 0.0) ignores gamma_s, so α is unchanged.
         let with_spill = RawPlane {
             gamma_s: -0.5,
             ..base
@@ -278,10 +230,8 @@ mod tests {
             "alpha must be independent of gamma_s (regression is spillage = 0)"
         );
 
-        // And FPH is the s = 0 term: this production function's tailrace rises
-        // with total outflow, so evaluating at s > 0 lowers net head and yields a
-        // strictly smaller FPH than at s = 0. The regression uses pf.evaluate(.,.,0),
-        // never the s > 0 value — confirming spillage is pinned to 0 in FPH too.
+        // FPH is also the s = 0 term: a rising tailrace makes s > 0 strictly
+        // smaller, so the regression's use of pf.evaluate(.,.,0) is observable.
         let v = 30_000.0_f64;
         let q = pf.max_turbined_m3s;
         let fph_s0 = pf.evaluate(v, q, 0.0);
@@ -305,7 +255,6 @@ mod tests {
         let alpha = 0.83_f64;
         let scaled = scale_plane_affine(&raw, alpha);
 
-        // Every coefficient scaled.
         assert!((scaled.gamma_0 - alpha * raw.gamma_0).abs() < 1e-12);
         assert!((scaled.gamma_v - alpha * raw.gamma_v).abs() < 1e-12);
         assert!((scaled.gamma_q - alpha * raw.gamma_q).abs() < 1e-12);
@@ -332,8 +281,7 @@ mod tests {
         let pf = zero_production_function();
         let bounds = small_bounds();
 
-        // All-zero raw planes (an all-zero-production hull). FPHA_0 = 0 everywhere,
-        // so Σ FPHA_0² = 0 — the degenerate denominator.
+        // All-zero planes ⇒ FPHA_0 = 0 everywhere ⇒ Σ FPHA_0² = 0.
         let planes = vec![RawPlane {
             gamma_0: 0.0,
             gamma_v: 0.0,

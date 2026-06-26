@@ -5,11 +5,12 @@
 //! This directory module groups the three pieces that own the LP's structure,
 //! kept together because each depends on the column layout the next encodes:
 //!
-//! - [`indexer`] — [`StageIndexer`] maps every entity to its LP column/row
-//!   range. The `storage_fixing` / `lag_fixing` / `anticipated_state_fixing`
-//!   ranges are permanent empty `0..0` sentinels: state is pinned via
-//!   [`StageIndexer::state_to_lp_incoming_column`] column bounds, never a fixing
-//!   row.
+//! - [`indexer`] — [`StateLayout`](indexer::StateLayout) owns the state-vector
+//!   column layout and [`StudyDimensions`](indexer::StudyDimensions) the
+//!   non-state study shape. The LP has no state-fixing row range: state is
+//!   pinned via [`crate::indexer::StateLayout::state_to_lp_incoming_column`]
+//!   column bounds, never a fixing row. The per-stage equipment geometry lives
+//!   on [`StageGeometry`].
 //! - `generic_constraints` — lowers user-declared generic constraints onto the
 //!   indexed column layout. Crate-private: it has no external raw-path consumer.
 //! - [`builder`] — [`build_stage_templates`] assembles the CSC structural LP,
@@ -21,7 +22,4 @@ pub mod builder;
 pub(crate) mod generic_constraints;
 pub mod indexer;
 
-// Re-exported here so the crate-root curated surface in `lib.rs` can re-point
-// through this cluster.
-pub use builder::{StageTemplates, build_stage_templates};
-pub use indexer::{EquipmentCounts, FphaColumnLayout, StageIndexer};
+pub use builder::{StageGeometry, StageTemplates, build_stage_templates};

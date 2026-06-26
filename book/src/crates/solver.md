@@ -4,7 +4,7 @@
 
 `cobre-solver` is the LP solver abstraction layer for the Cobre ecosystem. It
 defines a backend-agnostic interface for constructing, solving, and querying
-linear programs, with a production-grade [HiGHS](https://highs.dev) backend as
+linear programs, with a [HiGHS](https://highs.dev) backend as
 the default implementation.
 
 The crate has no dependency on any other Cobre crate. It is infrastructure
@@ -19,7 +19,7 @@ dispatch overhead on the hot path where iterative LP solving occurs.
 | ----------- | --------------------------------------------------------------------------------------------------------------------------- |
 | `ffi`       | Raw `unsafe` FFI bindings to the `cobre_highs_*` C wrapper functions                                                        |
 | `types`     | Canonical data types: `StageTemplate`, `RowBatch`, `Basis`, `LpSolution`, `SolutionView`, `SolverError`, `SolverStatistics` |
-| `trait_def` | `SolverInterface` trait definition with all 10 method contracts                                                             |
+| `trait_def` | `SolverInterface` trait definition with the method contracts                                                                |
 | `highs`     | `HighsSolver` — the HiGHS backend implementing `SolverInterface`                                                            |
 | (root)      | Re-exports: `SolverInterface`, `HighsSolver`, and all public types                                                          |
 
@@ -65,7 +65,7 @@ lives in `crates/cobre-solver/vendor/HiGHS/` as a git submodule. The build scrip
 (`crates/cobre-solver/build.rs`) invokes cmake with a fixed Release
 configuration and links the resulting static library. HiGHS is always built in
 Release mode regardless of the Cargo profile, because a debug HiGHS build is
-roughly 10x slower and would produce misleading performance results.
+substantially slower and would produce misleading performance results.
 
 ### Per-crate `unsafe` override
 
@@ -82,7 +82,7 @@ justify it.
 pub trait SolverInterface: Send { ... }
 ```
 
-The trait defines 10 methods that together constitute the full LP lifecycle for
+The trait defines the methods that together constitute the full LP lifecycle for
 one solver instance. Implementations must satisfy the pre- and post-condition
 contracts documented in each method's rustdoc. See the
 [`trait_def` rustdoc](https://docs.rs/cobre-solver/latest/cobre_solver/trait.SolverInterface.html) for the
@@ -242,7 +242,7 @@ pub fn new() -> Result<Self, SolverError>
 ```
 
 `HighsSolver::new()` allocates a HiGHS handle via `cobre_highs_create()` and
-applies seven performance-tuned default options before returning:
+applies the performance-tuned default options below before returning:
 
 | Option                         | Value       | Rationale                                                       |
 | ------------------------------ | ----------- | --------------------------------------------------------------- |

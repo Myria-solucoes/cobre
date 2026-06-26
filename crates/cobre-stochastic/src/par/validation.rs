@@ -1,22 +1,8 @@
 //! Validation of PAR model parameters.
 //!
-//! Checks that PAR model parameters satisfy the quality conditions required for
-//! sound scenario generation. Returns [`StochasticError::InvalidParParameters`]
-//! on fatal failures and accumulates non-fatal issues as [`ParWarning`]s in a
-//! [`ParValidationReport`].
-//!
-//! ## Checks performed
-//!
-//! 1. **Positive sample std** (fatal): `std_m3s > 0` for every [`InflowModel`]
-//!    with `ar_order() > 0`. A zero standard deviation with a nonzero AR order
-//!    is pathological: the AR model cannot normalize its coefficients.
-//! 2. **Low residual variance ratio** (warning): `residual_std_ratio^2 < 0.01`.
-//!    When the AR model explains more than 99% of the variance the fit may be
-//!    overfitted, which can degrade out-of-sample scenario quality.
-//! 3. **Stationarity** (deferred): root-of-polynomial stationarity checks are
-//!    deferred for the minimal viable implementation.
-//!    [`ParWarning::NearUnitCircleRoot`] is retained in the enum for future use
-//!    but is never emitted here.
+//! Fatal failures return [`StochasticError::InvalidParParameters`]; non-fatal
+//! issues accumulate as [`ParWarning`]s in a [`ParValidationReport`]. See
+//! [`validate_par_parameters`] for the checks performed.
 //!
 //! [`StochasticError::InvalidParParameters`]: crate::StochasticError::InvalidParParameters
 
@@ -28,11 +14,7 @@ use crate::StochasticError;
 // ParValidationReport
 // ---------------------------------------------------------------------------
 
-/// Result of PAR parameter validation.
-///
-/// Contains a list of warnings (non-fatal issues) and a pass/fail status.
-/// Errors are returned via `Result`; warnings are accumulated in
-/// `ParValidationReport`.
+/// Result of PAR parameter validation: the accumulated non-fatal warnings.
 ///
 /// # Examples
 ///
@@ -72,9 +54,7 @@ pub struct ParValidationReport {
 pub enum ParWarning {
     /// AR polynomial has roots near the unit circle (potential instability).
     ///
-    /// This variant is defined for future use. The stationarity check is
-    /// deferred per design doc section 8; no code emits this warning in the
-    /// current implementation.
+    /// Reserved for a future stationarity check; not emitted yet.
     NearUnitCircleRoot {
         /// Identifier of the hydro plant whose AR polynomial has near-unit roots.
         hydro_id: i32,
@@ -84,11 +64,8 @@ pub enum ParWarning {
         min_root_magnitude: f64,
     },
 
-    /// Residual variance is very small relative to the sample variance,
-    /// suggesting potential overfitting.
-    ///
-    /// Emitted when `residual_std_ratio^2 < 0.01`, meaning the AR model
-    /// explains more than 99% of the seasonal variance.
+    /// Residual variance very small relative to sample variance, suggesting the
+    /// AR fit may be overfitted (see [`validate_par_parameters`] for the threshold).
     LowResidualVariance {
         /// Identifier of the hydro plant with low residual variance.
         hydro_id: i32,
@@ -103,24 +80,12 @@ pub enum ParWarning {
 // validate_par_parameters
 // ---------------------------------------------------------------------------
 
-/// Validate PAR parameters for consistency and model quality.
+/// Validate PAR parameters for consistency and model quality:
 ///
-/// Iterates over all [`InflowModel`] entries and applies the following checks:
-///
-/// 1. **Positive sample std** (fatal): for each model with `ar_order() > 0`,
-///    `std_m3s` must be strictly positive. A zero standard deviation with a
-///    nonzero AR order is pathological because the AR model cannot normalize
-///    its coefficients. Returns [`StochasticError::InvalidParParameters`] on
-///    the first violation found.
-///
-/// 2. **Low residual variance ratio** (warning): if `residual_std_ratio^2 < 0.01`
-///    (the AR model explains > 99% of variance), a [`ParWarning::LowResidualVariance`]
-///    is appended to the report. This is a model quality indicator that the
-///    calling algorithm may inspect and log.
-///
-/// 3. **Stationarity** (deferred): root-of-polynomial stationarity checks are
-///    not performed in this implementation. [`ParWarning::NearUnitCircleRoot`]
-///    is never emitted here.
+/// 1. **Positive sample std** (fatal): a model with `ar_order() > 0` must have
+///    `std_m3s > 0` — zero std cannot normalize the AR coefficients.
+/// 2. **Low residual variance** (warning): `residual_std_ratio^2 < 0.01` (AR fit
+///    explains > 99% of variance) appends a [`ParWarning::LowResidualVariance`].
 ///
 /// # Errors
 ///

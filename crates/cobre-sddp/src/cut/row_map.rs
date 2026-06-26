@@ -12,11 +12,9 @@
 //!
 //! ## Append-only semantics
 //!
-//! Cuts are added to the LB LP via [`CutRowMap::insert`] and never removed.
-//! This keeps the lower bound monotonically non-decreasing across iterations.
-//! Cut selection (strategy-based or budget-based) runs on the shared cut pool
-//! and does not affect the LB LP; pool-deactivated cuts remain as LP rows in
-//! the LB solver.
+//! Cuts are inserted via [`CutRowMap::insert`] and never removed, keeping the
+//! lower bound monotonically non-decreasing. Cut selection runs on the shared
+//! pool and does not affect the LB LP: pool-deactivated cuts remain as LP rows.
 //!
 //! [`CutPool`]: super::pool::CutPool
 //!

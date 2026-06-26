@@ -21,13 +21,9 @@ use crate::SddpError;
 
 /// Resolve per-hydro linearized evaporation models from reservoir geometry.
 ///
-/// Scans `system.hydros()` for plants with `evaporation_coefficients_mm` set.
-/// When none are found, returns `EvaporationModel::None` for every hydro
-/// without touching the filesystem. When any hydros have evaporation
-/// coefficients, loads `system/hydro_geometry.parquet` and computes a
-/// first-order Taylor linearization around the operating midpoint.
-///
-/// The linearized evaporation model for stage `t` is:
+/// Plants without `evaporation_coefficients_mm` get `EvaporationModel::None`; if
+/// no plant has them, the filesystem is never touched. Otherwise the model is a
+/// first-order Taylor linearization around the reference volume:
 ///
 /// ```text
 /// evaporation_outflow = intercept_m3s + volume_slope_m3s_per_hm3 * v
@@ -50,15 +46,16 @@ use crate::SddpError;
 ///
 /// | Condition                                                        | Error variant             |
 /// | ---------------------------------------------------------------- | ------------------------- |
-/// | Hydro has evaporation coefficients but no geometry rows          | [`SddpError::Validation`] |
-/// | All geometry `area_km2` values are zero                          | [`SddpError::Validation`] |
 /// | Computed slope or intercept is NaN or infinite                   | [`SddpError::Validation`] |
 /// | Stage has no `season_id` (cannot map to a month)                 | [`SddpError::Validation`] |
 /// | I/O failure loading geometry Parquet                             | [`SddpError::Io`]         |
-// Rationale: the return tuple carries three independently typed outputs of the
-// evaporation resolution step — the model set, the per-hydro source provenance,
-// and the per-hydro reference-source provenance; a type alias would obscure the
-// concrete types that callers destructure immediately at every call site.
+///
+/// A hydro with evaporation coefficients but no usable surface-area data — no
+/// geometry rows, or every `area_km2` zero — does NOT error: evaporation is
+/// disabled for that hydro ([`EvaporationSource::DisabledNoArea`]) with a
+/// `tracing::warn!`, because zero surface area yields zero evaporation.
+// Rationale: a type alias for this three-output tuple would hide the concrete
+// types callers destructure at every call site.
 #[allow(clippy::type_complexity)]
 pub fn resolve_evaporation_models(
     system: &System,
@@ -81,11 +78,8 @@ pub fn resolve_evaporation_models(
 /// # Errors
 ///
 /// Same conditions as [`resolve_evaporation_models`].
-// Rationale: the return tuple names the three independently typed outputs of the
-// evaporation resolution step — the model set, the per-hydro source provenance, and
-// the per-hydro reference-source provenance; a type alias would hide the concrete types
-// that callers destructure immediately, making the three-way split less readable at
-// the call sites.
+// Rationale: a type alias for this three-output tuple would hide the concrete
+// types callers destructure at every call site.
 #[allow(clippy::type_complexity)]
 pub fn resolve_evaporation_models_from_artifacts(
     system: &System,
@@ -133,8 +127,7 @@ pub fn resolve_evaporation_models_from_artifacts(
     for row in geometry_rows {
         geometry_map.entry(row.hydro_id).or_default().push(row);
     }
-    // Sort each hydro's rows by volume_hm3 ascending (should already be sorted,
-    // but guarantee it here since we rely on sorted order for interpolation).
+    // Interpolation below assumes ascending volume order.
     for rows in geometry_map.values_mut() {
         rows.sort_by(|a, b| a.volume_hm3.total_cmp(&b.volume_hm3));
     }
@@ -145,22 +138,15 @@ pub fn resolve_evaporation_models_from_artifacts(
     resolve_evaporation_core(system.hydros(), &geometry_map, &study_stages)
 }
 
-/// Core evaporation linearization logic, operating on pre-loaded data.
-///
-/// Separated from [`resolve_evaporation_models`] so that unit tests can exercise
-/// the resolution logic without loading files from disk. Takes pre-loaded, grouped
-/// geometry rows and the ordered set of study stages.
+/// Core evaporation linearization over pre-loaded data, split from
+/// [`resolve_evaporation_models`] so unit tests can run without disk I/O.
 ///
 /// # Errors
 ///
 /// Same error conditions as [`resolve_evaporation_models`].
-// Rationale: the function produces three independently typed outputs (same
-// three-tuple as [`resolve_evaporation_models`]); a type alias would obscure the
-// concrete types that callers destructure immediately.  The length is necessary
-// because the per-stage linearization loop must handle two interleaved
-// reference-volume paths (user-supplied vs. computed midpoint) together with
-// geometry interpolation, unit-conversion, and finite-value validation; splitting
-// would require threading several computed intermediates across helper boundaries.
+// Rationale: a type alias would hide the three concrete output types; splitting
+// the per-stage loop would thread several computed intermediates across helper
+// boundaries.
 #[allow(clippy::type_complexity, clippy::too_many_lines)]
 fn resolve_evaporation_core(
     hydros: &[cobre_core::entities::hydro::Hydro],
@@ -191,37 +177,45 @@ fn resolve_evaporation_core(
         let geo_rows: &[&cobre_io::extensions::HydroGeometryRow] =
             geometry_map.get(&hydro.id).map_or(&[], Vec::as_slice);
 
+        // Evaporation needs a usable area-volume curve. A new or being-filled
+        // reservoir legitimately may have none (no geometry rows, or a single
+        // dead-volume point with zero area). Zero surface area yields zero
+        // evaporation, so disable it for this hydro and warn rather than failing
+        // the whole run — DisabledNoArea is the provenance the summary surfaces.
         if geo_rows.is_empty() {
-            return Err(SddpError::Validation(format!(
+            tracing::warn!(
                 "hydro {} (id={}) has evaporation_coefficients_mm but no geometry data \
-                 in hydro_geometry.parquet. Evaporation linearization requires \
-                 area-volume curve data.",
-                hydro.name, hydro.id.0
-            )));
+                 in hydro_geometry.parquet; disabling evaporation for this hydro",
+                hydro.name,
+                hydro.id.0
+            );
+            all_models.push(EvaporationModel::None);
+            provenance.push((hydro.id, EvaporationSource::DisabledNoArea));
+            reference_provenance.push((hydro.id, EvaporationReferenceSource::DefaultMidpoint));
+            continue;
         }
 
-        let all_zero_area = geo_rows.iter().all(|r| r.area_km2 == 0.0);
-        if all_zero_area {
-            return Err(SddpError::Validation(format!(
-                "hydro {} (id={}) has evaporation_coefficients_mm but all area_km2 \
-                 values in hydro_geometry.parquet are zero. \
-                 Evaporation linearization requires non-zero surface area data.",
-                hydro.name, hydro.id.0
-            )));
+        if geo_rows.iter().all(|r| r.area_km2 == 0.0) {
+            tracing::warn!(
+                "hydro {} (id={}) has evaporation_coefficients_mm but every area_km2 in \
+                 hydro_geometry.parquet is zero; disabling evaporation for this hydro \
+                 (zero surface area produces zero evaporation)",
+                hydro.name,
+                hydro.id.0
+            );
+            all_models.push(EvaporationModel::None);
+            provenance.push((hydro.id, EvaporationSource::DisabledNoArea));
+            reference_provenance.push((hydro.id, EvaporationReferenceSource::DefaultMidpoint));
+            continue;
         }
 
-        // When the hydro supplies per-season reference volumes, use them per
-        // stage (compute A and dA/dv inside the loop). Otherwise fall back to
-        // the midpoint once outside the loop.
         let ref_source = if hydro.evaporation_reference_volumes_hm3.is_some() {
             EvaporationReferenceSource::UserSupplied
         } else {
             EvaporationReferenceSource::DefaultMidpoint
         };
 
-        // For the midpoint path, pre-compute reference_volume / A(reference_volume) / dA/dv once.
-        // These are only accessed when evaporation_reference_volumes_hm3 is None,
-        // so the values are always initialised before use.
+        // Midpoint-path values, read only when there are no per-season volumes.
         let midpoint_v = f64::midpoint(hydro.min_storage_hm3, hydro.max_storage_hm3);
         let midpoint_area = if hydro.evaporation_reference_volumes_hm3.is_none() {
             interpolate_area(geo_rows, midpoint_v)
@@ -258,10 +252,8 @@ fn resolve_evaporation_core(
 
             let monthly_evaporation_mm = coefficients_mm[month_index];
 
-            // Resolve reference_volume, a_ref, da_dv for this stage.
             let (reference_volume, a_ref, da_dv) =
                 if let Some(ref_vols) = hydro.evaporation_reference_volumes_hm3 {
-                    // Per-season path: look up the reference volume for this month.
                     let v = ref_vols[month_index];
                     (
                         v,
@@ -269,21 +261,18 @@ fn resolve_evaporation_core(
                         area_derivative(geo_rows, v),
                     )
                 } else {
-                    // Midpoint path: use the values pre-computed outside the loop.
                     (midpoint_v, midpoint_area, midpoint_slope)
                 };
 
-            // Total stage duration in hours (sum of all block durations).
             let stage_hours: f64 = stage.blocks.iter().map(|b| b.duration_hours).sum();
 
-            // mm·km²/month → m³/s unit-conversion factor: 1 / (3.6 · stage_hours).
+            // mm·km²/month → m³/s.
             let mm_km2_to_m3s = 1.0 / (3.6 * stage_hours);
 
             let volume_slope_m3s_per_hm3 = mm_km2_to_m3s * monthly_evaporation_mm * da_dv;
             let intercept_m3s = mm_km2_to_m3s * monthly_evaporation_mm * a_ref
                 - volume_slope_m3s_per_hm3 * reference_volume;
 
-            // Validate finiteness (catches degenerate geometry or zero-duration stages).
             if !volume_slope_m3s_per_hm3.is_finite() {
                 return Err(SddpError::Validation(format!(
                     "hydro {} (id={}) stage {}: computed volume_slope_m3s_per_hm3 = \
@@ -325,15 +314,9 @@ fn resolve_evaporation_core(
 // ── Evaporation geometry helpers ──────────────────────────────────────────────
 
 /// Linearly interpolate reservoir surface area at volume `v` from the sorted
-/// geometry table.
-///
-/// When `v` is below the first point or above the last point, returns the
-/// area at the first or last point respectively (clamping, not extrapolation).
-/// When `v` falls exactly on a geometry point, returns that point's area.
-/// Between two points, performs linear interpolation.
-///
-/// Assumes `geometry` is sorted by `volume_hm3` ascending and non-empty.
-/// Returns `0.0` for an empty geometry slice.
+/// geometry table. Out-of-range `v` clamps to the first/last point's area (no
+/// extrapolation). Assumes `geometry` is ascending by `volume_hm3`; returns `0.0`
+/// for an empty slice.
 fn interpolate_area(geometry: &[&cobre_io::extensions::HydroGeometryRow], v: f64) -> f64 {
     if geometry.is_empty() {
         return 0.0;
@@ -341,18 +324,14 @@ fn interpolate_area(geometry: &[&cobre_io::extensions::HydroGeometryRow], v: f64
 
     let n = geometry.len();
 
-    // Clamp below the first point.
     if v <= geometry[0].volume_hm3 {
         return geometry[0].area_km2;
     }
 
-    // Clamp above the last point.
     if v >= geometry[n - 1].volume_hm3 {
         return geometry[n - 1].area_km2;
     }
 
-    // Binary search for the interval [i, i+1] that straddles v.
-    // We know v is strictly between geometry[0] and geometry[n-1].
     let mut lo = 0usize;
     let mut hi = n - 1;
     while hi - lo > 1 {
@@ -369,8 +348,7 @@ fn interpolate_area(geometry: &[&cobre_io::extensions::HydroGeometryRow], v: f64
     let a0 = geometry[lo].area_km2;
     let a1 = geometry[hi].area_km2;
 
-    // Linear interpolation: A(v) = A0 + (A1 - A0) * (v - v0) / (v1 - v0).
-    // Guard against identical volume points (degenerate geometry).
+    // Guard against degenerate (identical-volume) points.
     let dv = v1 - v0;
     if dv == 0.0 {
         return a0;
@@ -379,32 +357,22 @@ fn interpolate_area(geometry: &[&cobre_io::extensions::HydroGeometryRow], v: f64
     a0 + (a1 - a0) * (v - v0) / dv
 }
 
-/// Compute the finite-difference derivative `dA/dv` at volume `v` from the
-/// sorted geometry table.
-///
-/// Uses the slope of the enclosing interval `[i, i+1]`. When `v` is at or
-/// below the first point, uses the slope between the first and second points.
-/// When `v` is at or above the last point, uses the slope between the last two
-/// points. For a single-point geometry, returns `0.0` (no gradient information).
-///
-/// Assumes `geometry` is sorted by `volume_hm3` ascending.
+/// Finite-difference derivative `dA/dv` at volume `v` from the sorted geometry
+/// table, using the enclosing interval's slope (the edge interval when `v` is
+/// out of range). Returns `0.0` for a single-point geometry. Assumes `geometry`
+/// is ascending by `volume_hm3`.
 fn area_derivative(geometry: &[&cobre_io::extensions::HydroGeometryRow], v: f64) -> f64 {
     let n = geometry.len();
 
     if n < 2 {
-        // Single-point or empty geometry: no gradient information.
         return 0.0;
     }
 
-    // Determine the interval to use for the finite difference.
     let (lo, hi) = if v <= geometry[0].volume_hm3 {
-        // At or below the first point: use the first interval.
         (0, 1)
     } else if v >= geometry[n - 1].volume_hm3 {
-        // At or above the last point: use the last interval.
         (n - 2, n - 1)
     } else {
-        // Binary search for the enclosing interval.
         let mut l = 0usize;
         let mut r = n - 1;
         while r - l > 1 {
@@ -421,7 +389,7 @@ fn area_derivative(geometry: &[&cobre_io::extensions::HydroGeometryRow], v: f64)
     let dv = geometry[hi].volume_hm3 - geometry[lo].volume_hm3;
     let da = geometry[hi].area_km2 - geometry[lo].area_km2;
 
-    // Guard against identical volume points (degenerate geometry).
+    // Guard against degenerate (identical-volume) points.
     if dv == 0.0 {
         return 0.0;
     }
@@ -867,10 +835,10 @@ mod tests {
         }
     }
 
-    /// resolve_evaporation_models core logic: hydro with evaporation but no geometry rows
-    /// returns SddpError::Validation containing "geometry".
+    /// A hydro with evaporation coefficients but no geometry rows degrades to
+    /// disabled evaporation (`DisabledNoArea`) instead of erroring.
     #[test]
-    fn resolve_evaporation_missing_geometry_returns_validation_error() {
+    fn resolve_evaporation_missing_geometry_disables_evaporation() {
         let evap_mm = [5.0f64; 12];
         let hydro = make_hydro_with_evaporation(0, 100.0, 500.0, Some(evap_mm));
 
@@ -881,18 +849,53 @@ mod tests {
         let study_stages = [make_stage_with_month(0, 0)];
         let stage_refs: Vec<_> = study_stages.iter().collect();
 
-        let err = super::resolve_evaporation_core(&[hydro], &geometry_map, &stage_refs)
-            .expect_err("missing geometry must return an error");
+        let (models, provenance, _ref_provenance) =
+            super::resolve_evaporation_core(&[hydro], &geometry_map, &stage_refs)
+                .expect("missing geometry must degrade, not error");
 
-        match err {
-            crate::SddpError::Validation(msg) => {
-                assert!(
-                    msg.to_lowercase().contains("geometry"),
-                    "error message must mention 'geometry', got: {msg}"
-                );
-            }
-            other => panic!("expected Validation error, got {other:?}"),
-        }
+        assert!(
+            matches!(models.model(0), EvaporationModel::None),
+            "hydro 0 evaporation must be disabled (None)"
+        );
+        assert_eq!(
+            provenance[0].1,
+            EvaporationSource::DisabledNoArea,
+            "provenance must record DisabledNoArea"
+        );
+    }
+
+    /// A hydro with evaporation coefficients but a geometry whose areas are all
+    /// zero — e.g. a new/being-filled reservoir with only a dead-volume point,
+    /// as JURUENA in cobre_rodada_2001 — degrades to disabled evaporation
+    /// instead of failing the whole run.
+    #[test]
+    fn resolve_evaporation_all_zero_area_disables_evaporation() {
+        let evap_mm = [5.0f64; 12];
+        let hydro = make_hydro_with_evaporation(0, 100.0, 500.0, Some(evap_mm));
+
+        // Single dead-volume point with zero surface area (no area-volume curve).
+        let geo_rows = make_geo_rows(&[(2.93, 0.0)]);
+        let refs: Vec<_> = geo_rows.iter().collect();
+        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
+            HashMap::new();
+        geometry_map.insert(EntityId::from(0), refs);
+
+        let study_stages = [make_stage_with_month(0, 0)];
+        let stage_refs: Vec<_> = study_stages.iter().collect();
+
+        let (models, provenance, _ref_provenance) =
+            super::resolve_evaporation_core(&[hydro], &geometry_map, &stage_refs)
+                .expect("all-zero area must degrade, not error");
+
+        assert!(
+            matches!(models.model(0), EvaporationModel::None),
+            "hydro 0 evaporation must be disabled (None) when all areas are zero"
+        );
+        assert_eq!(
+            provenance[0].1,
+            EvaporationSource::DisabledNoArea,
+            "provenance must record DisabledNoArea"
+        );
     }
 
     /// resolve_evaporation_models core logic: 4 hydros where 2 have evaporation and 2 do not.

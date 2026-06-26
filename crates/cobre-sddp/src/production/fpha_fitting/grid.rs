@@ -1,59 +1,31 @@
 //! Single authoritative owner of the uniform `(V, Q)` FPHA fitting grid.
 //!
-//! Owns [`GridParams`] and [`build_grid`]. The grid formula is shared by the
-//! `hull_fit` cloud builder, the `alpha` least-squares regression, and the
-//! `secant` representative-point scan; all reach it via `super::grid::build_grid`.
-//! Duplicating the formula in any caller would let the cloud grid and the
-//! regression grid drift apart, silently invalidating the outer-approximation
-//! guarantee.
+//! The grid formula lives here only; every caller (`hull_fit` cloud builder,
+//! `alpha` regression, `secant` scan) reaches it via `build_grid`. A second copy
+//! of the axis formula would let the cloud grid and the regression grid drift
+//! apart, silently invalidating the outer-approximation guarantee.
 
 use super::geometry::FittingBounds;
 use super::production::ProductionFunction;
 
-// ── Grid construction ─────────────────────────────────────────────────────────
-
-/// Precomputed grid axis values for the fitting `(V, Q)` grid.
-///
-/// Computed once by [`build_grid`] and reused across all pipeline steps that
-/// iterate the same grid (the `hull_fit` cloud builder, the `alpha` regression,
-/// and the `secant` representative-point scan). Centralising the formula here
-/// eliminates the risk of the call-sites diverging.
-//
-// Rationale: promoted to `pub(crate)` (with its axis fields) so it remains the
-// single grid-formula owner shared across the cloud, regression, and secant
-// steps. Inlining a second copy of the axis formula into any caller to avoid the
-// cross-submodule call would let the cloud grid and the regression grid drift
-// apart — the lint that would force this back to private is the price of keeping
-// exactly one owner.
+/// Precomputed axis values for the fitting `(V, Q)` grid, built once by
+/// [`build_grid`].
 #[allow(clippy::struct_field_names)]
 pub(crate) struct GridParams {
-    /// Volume axis: `n_volume_points` values from `v_min` to `v_max` (inclusive).
+    /// Volume axis (hm³).
     pub(crate) v_points: Vec<f64>,
-    /// Flow axis: `n_flow_points` values from `q_min` to `q_max` (inclusive).
+    /// Turbined-flow axis (m³/s).
     pub(crate) q_points: Vec<f64>,
 }
 
-/// Build the uniform `(V, Q)` grid for FPHA fitting.
+/// Build the uniform `(V, Q)` grid for FPHA fitting (both axes inclusive at both
+/// endpoints).
 ///
-/// Constructs two uniform axis vectors that define the grid used consistently
-/// across the `hull_fit` cloud builder, the `alpha` regression, and the `secant`
-/// representative-point scan.
-///
-/// ## Axis formulas
-///
-/// - **Volume**: `n_volume_points` values from `bounds.v_min` to `bounds.v_max`.
-/// - **Flow**: `n_flow_points` values from `0` to `pf.max_turbined_m3s`.
-///   The axis starts at `q = 0`, where production is zero (`generation = 0`): that column
-///   anchors the cloud at the zero-flow origin and forms its lower closure, so
-///   `hull_fit` needs no synthetic closing point.
-///
-/// Both axes are inclusive at both endpoints. Spillage is not a grid axis: the
-/// cloud and the α regression fix `s = 0`, and the lateral secant sweeps its own
-/// `S_max` sample independent of `bounds.n_spillage_points`.
-//
-// Rationale: promoted to `pub(crate)` so the cloud, regression, and secant steps
-// call this single definition instead of each holding a private copy of the
-// axis formula — see [`GridParams`] for the drift hazard a second copy creates.
+/// The flow axis starts at `q = 0` (zero production): that column anchors the
+/// cloud at the zero-flow origin and forms its lower closure, so `hull_fit` needs
+/// no synthetic closing point. Spillage is not a grid axis — the cloud and the α
+/// regression fix `s = 0`, and the lateral secant sweeps its own `S_max` sample
+/// independent of `bounds.n_spillage_points`.
 pub(crate) fn build_grid(pf: &ProductionFunction, bounds: &FittingBounds) -> GridParams {
     let n_v = bounds.n_volume_points;
     let n_q = bounds.n_flow_points;

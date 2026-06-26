@@ -49,7 +49,9 @@ use crate::EntityId;
 /// For operating hydros, `value_hm3` must be within
 /// `[min_storage_hm3, max_storage_hm3]` (validated by `cobre-io`).
 /// For filling hydros (present in [`InitialConditions::filling_storage`]),
-/// `value_hm3` must be within `[0.0, min_storage_hm3]`.
+/// `value_hm3` must be within `[0.0, min_storage_hm3)` — strictly below the
+/// dead volume (validated by `cobre-io`). Equality with `min_storage_hm3`
+/// belongs to neither the filling range nor the operating range.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HydroStorage {
@@ -72,63 +74,43 @@ pub struct HydroPastInflows {
     /// Past inflow values in m³/s, ordered from most recent (index 0 = lag 1)
     /// to oldest (index p-1 = lag p).
     pub values_m3s: Vec<f64>,
-    /// Optional season IDs corresponding to each lag entry in `values_m3s`.
-    ///
-    /// When present, `season_ids.len()` must equal `values_m3s.len()`. Each
-    /// element is a season ID (as defined in `season_definitions`) identifying
-    /// the temporal period of the corresponding lag entry. When absent, no
-    /// temporal validation of lag entries is performed.
-    ///
-    /// In JSON: the field is optional (`serde(default)` fills `None` when the
-    /// key is absent). Backward-compatible with existing JSON files.
+    /// Optional season ID per lag entry. When present, `season_ids.len()` must
+    /// equal `values_m3s.len()`; when absent, lag entries get no temporal
+    /// validation.
     #[cfg_attr(feature = "serde", serde(default))]
     pub season_ids: Option<Vec<u32>>,
 }
 
 /// Past externally-decided anticipated commitments for a single thermal plant.
 ///
-/// For an anticipated thermal plant with `lead_stages = K`, each `values_mw[k]`
-/// is the MW output the LP dispatches at study stage `k` (0-indexed,
-/// `0 <= k < lead_stages`). The decisions were priced externally (sunk cost):
-/// the per-MWh cost of these deliveries does not contribute to the study
-/// objective. The LP imposes a fishing equality at every pre-horizon stage `k`:
+/// `values_mw[k]` is the MW output the LP dispatches at study stage `k`
+/// (`0 <= k < lead_stages`). The decisions are sunk cost: their per-MWh cost
+/// does not enter the study objective. The LP imposes a fishing equality at
+/// every pre-horizon stage `k`:
 /// `sum_b gen[i][b] * block_hours_b == values_mw[k] * stage_total_hours`.
-///
-/// Every `values_mw[k]` must lie in
-/// `[thermal.min_generation_mw, thermal.max_generation_mw]`; out-of-bounds
-/// values are rejected by `cobre-io` because an out-of-bounds entry would
-/// make the LP's fishing equality at stage `k` infeasible.
-///
-/// `values_mw` must have exactly `lead_stages` entries; the length check is
-/// enforced by the structural validator
-/// (`cobre-io::validation::semantic::thermal::check_anticipated_thermals`).
 ///
 /// # Sorting invariant
 ///
 /// Callers MUST sort the containing `Vec<AnticipatedCommitmentHistory>` by
-/// `thermal_id` ascending before passing it to
-/// `SystemBuilder::initial_conditions` to satisfy declaration-order invariance.
+/// `thermal_id` ascending before `SystemBuilder::initial_conditions`, to satisfy
+/// declaration-order invariance.
 ///
 /// # Division of responsibility
 ///
-/// Construction-time invariants (enforced by `cobre-io`, **not** by
-/// `cobre-core`):
-/// - `values_mw.len() == thermal.anticipated_config.lead_stages as usize`.
-/// - Every `values_mw[k]` in `[min_generation_mw, max_generation_mw]`.
+/// `cobre-core` has no view of the entity registry, so the `cobre-io` semantic
+/// validator (not `cobre-core`) enforces:
+/// - `values_mw.len() == lead_stages`.
+/// - Every `values_mw[k]` in `[min_generation_mw, max_generation_mw]` (an
+///   out-of-bounds entry makes the stage-`k` fishing equality infeasible).
 /// - `thermal_id` references a thermal whose `anticipated_config` is `Some`.
 /// - Exactly one entry per anticipated thermal in the system.
-///
-/// `cobre-core` does not enforce these because it has no view of the system
-/// entity registry. Validation lives in the `cobre-io` semantic validator.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AnticipatedCommitmentHistory {
     /// Thermal plant identifier. Must reference an anticipated thermal entity.
     pub thermal_id: EntityId,
-    /// Externally-decided MW delivered at each study stage, in MW.
-    /// `values_mw[k]` is the committed output at study stage `k` (0-indexed).
-    /// Length must equal the plant's `lead_stages`. Every entry must lie in
-    /// `[thermal.min_generation_mw, thermal.max_generation_mw]`.
+    /// Externally-decided MW delivered at each study stage (`values_mw[k]` at
+    /// stage `k`).
     pub values_mw: Vec<f64>,
 }
 
@@ -157,28 +139,13 @@ pub struct RecentObservation {
 
 /// Initial system state at the start of the optimization study.
 ///
-/// Produced by parsing `initial_conditions.json` (in `cobre-io`) and stored
-/// inside [`crate::System`]. All arrays are sorted by the respective entity ID
-/// after loading to satisfy the declaration-order invariance requirement.
+/// All arrays are sorted by their entity ID after loading to satisfy
+/// declaration-order invariance.
 ///
-/// A hydro must appear in exactly one of the two storage arrays, never both.
-/// Hydros with a `filling` configuration belong in [`filling_storage`]; all
-/// other hydros (including late-entry hydros) belong in
+/// A hydro must appear in exactly one of the two storage arrays, never both:
+/// hydros with a `filling` configuration belong in [`filling_storage`], all
+/// others (including late-entry hydros) in
 /// [`storage`](InitialConditions::storage).
-///
-/// # Fields
-///
-/// - [`storage`](InitialConditions::storage): initial reservoir volumes for
-///   operating hydros, sorted by `hydro_id`.
-/// - [`filling_storage`](InitialConditions::filling_storage): initial volumes
-///   for filling hydros (below dead volume), sorted by `hydro_id`.
-/// - [`past_inflows`](InitialConditions::past_inflows): PAR(p) lag history per
-///   hydro, sorted by `hydro_id`.
-/// - [`past_anticipated_commitments`](InitialConditions::past_anticipated_commitments):
-///   externally-decided pending commitments per anticipated thermal plant, sorted
-///   by `thermal_id`.
-/// - [`recent_observations`](InitialConditions::recent_observations): observed
-///   inflows for partial periods, sorted by `(hydro_id, start_date)`.
 ///
 /// [`filling_storage`]: InitialConditions::filling_storage
 #[derive(Debug, Clone, PartialEq)]
@@ -187,46 +154,31 @@ pub struct InitialConditions {
     /// Initial storage for operating hydros, in hm³ per hydro.
     pub storage: Vec<HydroStorage>,
     /// Initial storage for filling hydros (below dead volume), in hm³ per hydro.
+    ///
+    /// Tied to the hydro's
+    /// [`FillingConfig::start_stage_id`](crate::FillingConfig::start_stage_id):
+    /// `start_stage_id == 0` means a partially-filled stage-0 level in
+    /// `[0, min_storage_hm3)`; `> 0` means `0` (empty pit), frozen through the
+    /// `PreFilling` phase until Filling begins.
     pub filling_storage: Vec<HydroStorage>,
     /// Past inflow values for PAR(p) lag initialization, in m³/s per hydro.
+    /// Absent when no lag init is needed (no PAR models or `inflow_lags: false`).
     ///
-    /// For each hydro, `values_m3s[0]` is the most recent past inflow (lag 1)
-    /// and `values_m3s[p-1]` is the oldest (lag p). Absent when lag
-    /// initialization is not required (no PAR models or `inflow_lags: false`).
-    ///
-    /// In JSON: the field is optional on input (`serde(default)` fills an empty
-    /// `Vec` when the key is absent). The field is always emitted on output —
-    /// omitting it would break postcard round-trips used by MPI broadcast.
+    /// Always emitted on output even when empty — omitting it would break the
+    /// postcard round-trip used by MPI broadcast.
     #[cfg_attr(feature = "serde", serde(default))]
     pub past_inflows: Vec<HydroPastInflows>,
     /// Past externally-decided anticipated commitments per anticipated thermal
-    /// plant. Empty for studies without anticipated thermal plants. Sorted by
-    /// `thermal_id` ascending to satisfy declaration-order invariance.
+    /// plant; empty without any. See [`AnticipatedCommitmentHistory`] for the
+    /// per-entry contract and sunk-cost semantics.
     ///
-    /// Each entry covers one anticipated thermal plant. The length of
-    /// `values_mw` must equal the plant's `lead_stages` (validated in
-    /// `cobre-io`). Every `values_mw[k]` must lie in
-    /// `[thermal.min_generation_mw, thermal.max_generation_mw]` — out-of-bounds
-    /// entries are rejected by the semantic validator. See
-    /// [`AnticipatedCommitmentHistory`] for the sunk-cost semantics.
-    ///
-    /// In JSON: the field is optional (`serde(default)` fills an empty `Vec`
-    /// when the key is absent). Backward-compatible with existing JSON files
-    /// that predate anticipated thermal support.
-    ///
-    /// Field declaration order is part of the postcard wire format used by
-    /// MPI broadcast: reordering or inserting a field above this one would
-    /// silently break broadcast round-trips. Append new fields at the end.
+    /// Field declaration order is part of the postcard wire format used by MPI
+    /// broadcast: append new fields at the end, never above this one.
     #[cfg_attr(feature = "serde", serde(default))]
     pub past_anticipated_commitments: Vec<AnticipatedCommitmentHistory>,
-    /// Observed inflow data for partial periods before the study start.
-    ///
-    /// Used to seed the lag accumulator when a study begins mid-season (i.e.,
-    /// before the first lag-period boundary). Each entry covers one hydro over
-    /// a specific date range. Sorted by `(hydro_id, start_date)` after loading.
-    ///
-    /// In JSON: the field is optional (`serde(default)` fills an empty `Vec`
-    /// when the key is absent). Backward-compatible with existing JSON files.
+    /// Observed inflow data for partial periods before the study start, to seed
+    /// the lag accumulator when a study begins mid-season. See
+    /// [`RecentObservation`] for the per-entry contract.
     #[cfg_attr(feature = "serde", serde(default))]
     pub recent_observations: Vec<RecentObservation>,
 }
@@ -352,8 +304,6 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn test_initial_conditions_serde_roundtrip_empty_past_inflows() {
-        // Empty past_inflows is always serialized as [] (never omitted) to keep
-        // postcard round-trips used by MPI broadcast working correctly.
         let ic = InitialConditions {
             storage: vec![HydroStorage {
                 hydro_id: EntityId(0),
@@ -368,7 +318,6 @@ mod tests {
         let json = serde_json::to_string(&ic).unwrap();
         let deserialized: InitialConditions = serde_json::from_str(&json).unwrap();
         assert_eq!(ic, deserialized);
-        // Verify the field round-trips correctly (may or may not be present in JSON).
         assert_eq!(deserialized.past_inflows.len(), 0);
     }
 
@@ -449,7 +398,6 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn test_initial_conditions_serde_default_recent_observations_absent() {
-        // When recent_observations is absent from JSON, it defaults to an empty Vec.
         let json = r#"{"storage":[],"filling_storage":[]}"#;
         let ic: InitialConditions = serde_json::from_str(json).unwrap();
         assert!(ic.recent_observations.is_empty());
@@ -465,7 +413,6 @@ mod tests {
         assert_eq!(hpi.hydro_id, EntityId(5));
         assert_eq!(hpi.values_m3s, vec![600.0, 500.0]);
         assert_eq!(hpi.season_ids, Some(vec![3, 2]));
-        // Clone preserves season_ids
         let cloned = hpi.clone();
         assert_eq!(cloned, hpi);
     }
@@ -487,7 +434,6 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn test_hydro_past_inflows_serde_default_season_ids_absent() {
-        // When season_ids is absent from JSON, it defaults to None.
         let json = r#"{"hydro_id":0,"values_m3s":[600.0,500.0]}"#;
         let hpi: HydroPastInflows = serde_json::from_str(json).unwrap();
         assert_eq!(hpi.hydro_id, EntityId(0));
@@ -513,7 +459,6 @@ mod tests {
         let json = serde_json::to_string(&ach).unwrap();
         let deserialized: AnticipatedCommitmentHistory = serde_json::from_str(&json).unwrap();
         assert_eq!(ach, deserialized);
-        // The serialized JSON must NOT contain a season_ids field.
         assert!(
             !json.contains("season_ids"),
             "JSON must not contain 'season_ids', got: {json}"

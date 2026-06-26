@@ -1,20 +1,15 @@
 //! `FlatBuffers` serializers, wire-format helpers, and deserializers for policy data.
 //!
-//! ## `FlatBuffers` schema
+//! Wire layout follows the policy schema specification (spec SS3.2).
 //!
-//! The canonical wire-format description is `schemas/policy.fbs` in this
-//! crate (namespace `Cobre.IO.Policy`, tables `StageCuts`, `Cut`,
-//! `StageBasis`, `StageStates`). The `*_FIELD_*: u16` slot constants below
-//! mirror the `(id: N)` attributes in the schema via the formula
-//! `slot = (id + 2) * 2`. They MUST stay in sync; the `flatc-conformance`
-//! cargo feature gates a round-trip test in
+//! This module is the sole owner of the policy `FlatBuffers` byte layout. The
+//! `*_FIELD_*: u16` slot constants below mirror the `(id: N)` attributes in
+//! `schemas/policy.fbs` via `slot = (id + 2) * 2` and MUST stay in sync; the
+//! `flatc-conformance` feature gates the round-trip test in
 //! `tests/flatbuffers_schema_conformance.rs` that fails when they diverge.
 //!
-//! ## Safe raw-byte parsing
-//!
-//! Reader functions use **safe raw byte parsing** of the `FlatBuffers` wire
-//! format instead of the generated `Table::get` API (which is `unsafe fn`).
-//! This is required because the workspace forbids `unsafe_code`.
+//! Reader functions parse raw bytes rather than the generated `Table::get` API
+//! (an `unsafe fn`) because the workspace forbids `unsafe_code`.
 
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
 
@@ -26,12 +21,9 @@ use super::records::{
 
 // ── FlatBuffers vtable slot offsets ──────────────────────────────────────────
 //
-// Each constant pairs with one `(id: N)` attribute in `schemas/policy.fbs`
-// via the formula slot = (id + 2) * 2 (the +2 accounts for the two vtable
-// header fields). Editing either side without the other breaks the
-// `flatc-conformance` round-trip; the slot 12 gap on `Cut` is the historical
-// `domination_count` field, marked `deprecated` in the schema and intentionally
-// never reused.
+// The slot 12 gap on `Cut` is the deprecated `domination_count` field; it MUST
+// NOT be reused — `flatc` keeps the slot reserved, so reusing it diverges the
+// hand-written layout from the schema.
 
 const CUT_FIELD_CUT_ID: u16 = 4;
 const CUT_FIELD_SLOT_INDEX: u16 = 6;
@@ -63,13 +55,9 @@ const STATES_FIELD_STATE_DIMENSION: u16 = 6;
 const STATES_FIELD_COUNT: u16 = 8;
 const STATES_FIELD_DATA: u16 = 10;
 
-// ── Helper: build a single cut table ─────────────────────────────────────────
-
-/// Build a single cut table inside `builder` and return its offset.
-///
 /// All nested objects (coefficient vector, `state_at_generation` vector) must be
-/// created before the table `start_table`/`end_table` pair, per the `FlatBuffers`
-/// requirement that nested objects precede the enclosing table in the buffer.
+/// created before the `start_table`/`end_table` pair — `FlatBuffers` requires
+/// nested objects to precede the enclosing table in the buffer.
 fn build_cut_table(
     builder: &mut FlatBufferBuilder<'_>,
     cut: &PolicyCutRecord<'_>,
@@ -93,26 +81,11 @@ fn build_cut_table(
 
 // ── Serializers ───────────────────────────────────────────────────────────────
 
-/// Serialize all cuts for one stage into a `FlatBuffers` buffer.
+/// Serialize all cuts for one stage into a root `StageCuts` `FlatBuffers` buffer,
+/// ready to write directly to a `.bin` policy file.
 ///
-/// Produces a buffer containing a root `StageCuts` table. The buffer is ready
-/// for writing directly to a `.bin` policy file. Field layout matches the
-/// `StageCuts` and `Cut` tables in `schemas/policy.fbs`.
-///
-/// The function is infallible: the `FlatBuffers` builder API only allocates and
-/// writes, never returns errors. Any I/O error is the caller's responsibility.
-///
-/// # Parameters
-///
-/// - `stage_id` — stage index (0-based) stored in the root table.
-/// - `state_dimension` — number of state variables; determines coefficient vector
-///   length per cut.
-/// - `capacity` — total preallocated cut slots in the pool.
-/// - `warm_start_count` — number of slots `[0..warm_start_count)` loaded from a
-///   prior policy.
-/// - `cuts` — slice of cut records to serialize; length equals `populated_count`.
-/// - `active_cut_indices` — indices of cuts currently active in the LP.
-/// - `populated_count` — number of filled slots in the pool.
+/// Infallible: the builder only allocates and writes. Any I/O error is the
+/// caller's responsibility.
 ///
 /// # Examples
 ///
@@ -143,9 +116,6 @@ pub fn serialize_stage_cuts(
     populated_count: u32,
 ) -> Vec<u8> {
     // Pre-size the builder to avoid reallocation.
-    // Each cut occupies roughly: vtable overhead (32 B) + scalar fields (48 B)
-    // + coefficient vector (state_dimension * 8 B) + state_at_generation (4 B empty).
-    // Plus the StageCuts wrapper and two u32 index vectors.
     let estimated = 64
         + cuts.len() * (96usize + state_dimension as usize * std::mem::size_of::<f64>())
         + std::mem::size_of_val(active_cut_indices);
@@ -157,13 +127,9 @@ pub fn serialize_stage_cuts(
         .map(|c| build_cut_table(&mut builder, c))
         .collect();
 
-    // Create the cuts vector from the collected offsets.
     let cuts_vec = builder.create_vector(&cut_offsets);
-
-    // Create the active_cut_indices vector.
     let active_vec = builder.create_vector(active_cut_indices);
 
-    // Build the root StageCuts table.
     let root = builder.start_table();
 
     builder.push_slot_always::<u32>(STAGE_CUTS_FIELD_STAGE_ID, stage_id);
@@ -180,21 +146,11 @@ pub fn serialize_stage_cuts(
     builder.finished_data().to_vec()
 }
 
-/// Serialize one stage's solver basis into a `FlatBuffers` buffer.
+/// Serialize one stage's solver basis into a root `StageBasis` `FlatBuffers`
+/// buffer, ready to write directly to a `.bin` policy file under `basis/`.
 ///
-/// Produces a buffer containing a root `StageBasis` table. The buffer is ready
-/// for writing directly to a `.bin` policy file under `basis/`. Field layout
-/// matches the `StageBasis` table in `schemas/policy.fbs`.
-///
-/// The `num_columns` and `num_rows` fields are inferred from the status slice
-/// lengths and do not need to be supplied separately.
-///
-/// The function is infallible: the `FlatBuffers` builder API only allocates and
-/// writes, never returns errors.
-///
-/// # Parameters
-///
-/// - `record` — a reference to the basis record to serialize.
+/// `num_columns` and `num_rows` are inferred from the status slice lengths, not
+/// supplied separately. Infallible: the builder only allocates and writes.
 ///
 /// # Examples
 ///
@@ -214,13 +170,12 @@ pub fn serialize_stage_cuts(
 #[must_use]
 #[allow(clippy::cast_possible_truncation)]
 pub fn serialize_stage_basis(record: &PolicyBasisRecord<'_>) -> Vec<u8> {
-    // Pre-size: scalar fields (~32 B) + two byte vectors + headers.
     let estimated =
         64 + std::mem::size_of_val(record.column_status) + std::mem::size_of_val(record.row_status);
 
     let mut builder = FlatBufferBuilder::with_capacity(estimated);
 
-    // Create nested vectors before opening the table.
+    // Nested vectors must be created before opening the table.
     let col_vec = builder.create_vector(record.column_status);
     let row_vec = builder.create_vector(record.row_status);
 
@@ -240,12 +195,8 @@ pub fn serialize_stage_basis(record: &PolicyBasisRecord<'_>) -> Vec<u8> {
     builder.finished_data().to_vec()
 }
 
-/// Serialize one stage's visited states into a `FlatBuffers` buffer.
-///
-/// Produces a buffer containing a root `StageStates` table with fields
-/// `stage_id`, `state_dimension`, `count`, and `data` (a flat `[f64]`
-/// vector). The buffer is ready for writing directly to a `.bin` policy
-/// file under `states/`.
+/// Serialize one stage's visited states into a root `StageStates` `FlatBuffers`
+/// buffer, ready to write directly to a `.bin` policy file under `states/`.
 #[must_use]
 #[allow(clippy::cast_possible_truncation)]
 pub fn serialize_stage_states(payload: &StageStatesPayload<'_>) -> Vec<u8> {
@@ -288,6 +239,8 @@ pub fn serialize_stage_states(payload: &StageStatesPayload<'_>) -> Vec<u8> {
 //
 //   Nested table / vector fields store a u32 forward uoffset at their data position:
 //     nested_pos = field_data_pos + u32_at(field_data_pos)
+//
+//   Vector at vec_pos: [u32 length][length × element_size bytes of element data].
 
 #[inline]
 fn read_u16_le(buf: &[u8], offset: usize) -> Option<u16> {
@@ -325,30 +278,20 @@ fn read_bool_byte(buf: &[u8], offset: usize) -> Option<bool> {
     buf.get(offset).map(|&b| b != 0)
 }
 
-/// Resolve the root table position from a finished `FlatBuffers` buffer.
-///
-/// Returns the byte offset of the root table within `buf`.
 fn resolve_root(buf: &[u8]) -> Option<usize> {
     let offset = read_u32_le(buf, 0)? as usize;
-    // The root offset must point inside the buffer (at minimum for the soffset).
     if offset.checked_add(4)? > buf.len() {
         return None;
     }
     Some(offset)
 }
 
-/// Resolve the vtable position for the table at `table_pos`.
-///
-/// Returns the byte offset of the vtable within `buf`.
 fn resolve_vtable_pos(buf: &[u8], table_pos: usize) -> Option<usize> {
     let soffset = read_i32_le(buf, table_pos)?;
-    // vtable_pos = table_pos - soffset (soffset is signed; positive = vtable before table).
-    // Avoid lossy `as i64` casts (clippy::cast_possible_wrap / cast_possible_truncation).
+    // soffset is signed: positive = vtable precedes the table, negative = follows.
     let vtable_pos = if soffset >= 0 {
-        // Vtable precedes the table: table_pos - soffset (as a non-negative offset).
         table_pos.checked_sub(u32::try_from(soffset).ok()? as usize)?
     } else {
-        // Vtable follows the table: table_pos + |soffset|.
         let abs = u32::try_from(soffset.wrapping_neg()).ok()? as usize;
         table_pos.checked_add(abs)?
     };
@@ -358,24 +301,18 @@ fn resolve_vtable_pos(buf: &[u8], table_pos: usize) -> Option<usize> {
     Some(vtable_pos)
 }
 
-/// Read the data offset for field slot `slot` from the vtable at `vtable_pos`.
-///
-/// Returns `None` if the slot is beyond the vtable, or `Some(0)` if the field
-/// is absent (the `FlatBuffers` convention for optional fields).
+/// `Some(0)` means the field is absent — the `FlatBuffers` optional-field
+/// convention. A slot past the vtable end is a field added in a later schema
+/// version (forward compatibility): treat it as absent, not as an error.
 fn field_data_offset(buf: &[u8], vtable_pos: usize, slot: u16) -> Option<u16> {
     let vtable_size = read_u16_le(buf, vtable_pos)?;
     let slot_pos = vtable_pos.checked_add(slot as usize)?;
     if slot_pos.checked_add(2)? > vtable_pos.checked_add(vtable_size as usize)? {
-        // Slot is past end of vtable — field was added in a later schema version.
         return Some(0);
     }
     read_u16_le(buf, slot_pos)
 }
 
-/// Resolve the absolute position of field `slot` data in a table at `table_pos`.
-///
-/// Returns `None` if the field is absent (vtable offset is 0) or if the buffer
-/// is truncated.
 fn field_pos(buf: &[u8], table_pos: usize, vtable_pos: usize, slot: u16) -> Option<usize> {
     let data_off = field_data_offset(buf, vtable_pos, slot)?;
     if data_off == 0 {
@@ -384,19 +321,14 @@ fn field_pos(buf: &[u8], table_pos: usize, vtable_pos: usize, slot: u16) -> Opti
     table_pos.checked_add(data_off as usize)
 }
 
-/// Follow a `uoffset` stored at `pos` to reach a nested table or vector.
-///
-/// `FlatBuffers` stores forward offsets: the referenced object is at
-/// `pos + u32_at(pos)`. The offset is relative to the position of the u32 itself.
+/// `FlatBuffers` uoffsets are forward and self-relative: the referenced nested
+/// table or vector is at `pos + u32_at(pos)`, not `0 + u32_at(pos)`.
 fn follow_uoffset(buf: &[u8], pos: usize) -> Option<usize> {
     let off = read_u32_le(buf, pos)?;
     pos.checked_add(off as usize)
 }
 
 /// Read a `f32` vector stored at `vec_pos` and return its elements as `f64`.
-///
-/// `FlatBuffers` vector layout: `u32 length` followed by `length × 4` bytes.
-/// This function is not used currently but kept for completeness.
 // Rationale: the f32 vector reader is the symmetric counterpart to `read_f64_vector`; retaining
 // it keeps the codec complete against the full FlatBuffers type palette and avoids re-deriving
 // the safe byte-level parsing pattern from scratch when an f32 field is added to the schema.
@@ -417,9 +349,6 @@ fn read_f32_vector_as_f64(buf: &[u8], vec_pos: usize) -> Option<Vec<f64>> {
     Some(out)
 }
 
-/// Read a `f64` vector stored at `vec_pos`.
-///
-/// `FlatBuffers` vector layout: `u32 length` followed by `length × 8` bytes.
 fn read_f64_vector(buf: &[u8], vec_pos: usize) -> Option<Vec<f64>> {
     let len = read_u32_le(buf, vec_pos)? as usize;
     let data_start = vec_pos.checked_add(4)?;
@@ -435,9 +364,6 @@ fn read_f64_vector(buf: &[u8], vec_pos: usize) -> Option<Vec<f64>> {
     Some(out)
 }
 
-/// Read a `u8` vector stored at `vec_pos`.
-///
-/// `FlatBuffers` vector layout: `u32 length` followed by `length × 1` bytes.
 fn read_u8_vector(buf: &[u8], vec_pos: usize) -> Option<Vec<u8>> {
     let len = read_u32_le(buf, vec_pos)? as usize;
     let data_start = vec_pos.checked_add(4)?;
@@ -448,10 +374,8 @@ fn read_u8_vector(buf: &[u8], vec_pos: usize) -> Option<Vec<u8>> {
     Some(buf[data_start..data_end].to_vec())
 }
 
-/// Read a vector of nested tables stored at `vec_pos`.
-///
-/// Returns a `Vec` of absolute buffer positions, one per element. Each element
-/// stores a `u32` uoffset from its own position to the nested table.
+/// Returns one absolute buffer position per element; each element stores a `u32`
+/// uoffset from its own position to the nested table (self-relative, not from 0).
 fn read_table_vector_positions(buf: &[u8], vec_pos: usize) -> Option<Vec<usize>> {
     let len = read_u32_le(buf, vec_pos)? as usize;
     let data_start = vec_pos.checked_add(4)?;
@@ -471,9 +395,6 @@ fn read_table_vector_positions(buf: &[u8], vec_pos: usize) -> Option<Vec<usize>>
 // ── Deserializers ─────────────────────────────────────────────────────────────
 
 /// Deserialize a `StageCuts` `FlatBuffers` buffer into an owned [`StageCutsReadResult`].
-///
-/// Reads the root `StageCuts` table and each nested cut record table using safe
-/// raw byte parsing of the `FlatBuffers` wire format. No `unsafe` code is used.
 ///
 /// # Errors
 ///
@@ -510,7 +431,6 @@ pub fn deserialize_stage_cuts(buf: &[u8]) -> Result<StageCutsReadResult, OutputE
     let vtable_pos = resolve_vtable_pos(buf, table_pos)
         .ok_or_else(|| OutputError::serialization(ctx, "invalid soffset_to_vtable"))?;
 
-    // Read scalar fields from StageCuts root table.
     let stage_id = field_pos(buf, table_pos, vtable_pos, STAGE_CUTS_FIELD_STAGE_ID)
         .and_then(|p| read_u32_le(buf, p))
         .unwrap_or(0);
@@ -536,7 +456,6 @@ pub fn deserialize_stage_cuts(buf: &[u8]) -> Result<StageCutsReadResult, OutputE
         .and_then(|p| read_u32_le(buf, p))
         .unwrap_or(0);
 
-    // Read the cuts vector of nested tables.
     let cuts = if let Some(cuts_field_pos) =
         field_pos(buf, table_pos, vtable_pos, STAGE_CUTS_FIELD_CUTS)
     {
@@ -569,7 +488,6 @@ pub fn deserialize_stage_cuts(buf: &[u8]) -> Result<StageCutsReadResult, OutputE
     })
 }
 
-/// Deserialize a single cut record nested table at `cut_table_pos`.
 fn deserialize_cut_table(buf: &[u8], cut_table_pos: usize) -> Option<OwnedPolicyCutRecord> {
     let vtable_pos = resolve_vtable_pos(buf, cut_table_pos)?;
 
@@ -618,8 +536,6 @@ fn deserialize_cut_table(buf: &[u8], cut_table_pos: usize) -> Option<OwnedPolicy
 }
 
 /// Deserialize a `StageBasis` `FlatBuffers` buffer into an owned [`OwnedPolicyBasisRecord`].
-///
-/// Reads the root `StageBasis` table using safe raw byte parsing. No `unsafe` code is used.
 ///
 /// # Errors
 ///
@@ -698,10 +614,7 @@ pub fn deserialize_stage_basis(buf: &[u8]) -> Result<OwnedPolicyBasisRecord, Out
     })
 }
 
-/// Deserialize one stage's visited states from a `FlatBuffers` buffer.
-///
-/// Parses the `StageStates` root table produced by [`serialize_stage_states`]
-/// and returns an owned [`StageStatesReadResult`].
+/// Deserialize one stage's visited states from a `StageStates` `FlatBuffers` buffer.
 ///
 /// # Errors
 ///
@@ -749,10 +662,8 @@ pub fn deserialize_stage_states(buf: &[u8]) -> Result<StageStatesReadResult, Out
 
 /// Read all `*.bin` files from `dir`, deserialize each with `deser_fn`, and return a `Vec`.
 ///
-/// Files are enumerated via [`std::fs::read_dir`]. The returned `Vec` is unsorted —
-/// callers should sort by the appropriate `stage_id` field after this call.
-///
-/// If `dir` exists but contains no `.bin` files, an empty `Vec` is returned.
+/// The returned `Vec` is unsorted — callers must sort by `stage_id` after this call
+/// (`read_dir` order is not guaranteed; sorting upholds declaration-order invariance).
 pub(super) fn read_sorted_bin_files<T, F>(
     dir: &std::path::Path,
     ctx: &str,
@@ -774,7 +685,6 @@ where
         let file_path = entry.path();
         let bytes = std::fs::read(&file_path).map_err(|e| OutputError::io(&file_path, e))?;
         let record = deser_fn(&bytes).map_err(|e| {
-            // Re-wrap with file context for better diagnostics.
             OutputError::serialization(
                 ctx,
                 format!("failed to deserialize {}: {e}", file_path.display()),

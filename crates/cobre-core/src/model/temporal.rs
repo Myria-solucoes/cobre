@@ -27,14 +27,12 @@ use chrono::{Datelike, NaiveDate};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BlockMode {
-    /// Blocks are independent sub-periods solved simultaneously.
-    /// Water balance is aggregated across all blocks in the stage.
-    /// This is the default and most common mode.
+    /// Independent sub-periods solved simultaneously; water balance is
+    /// aggregated across all blocks in the stage.
     Parallel,
 
-    /// Blocks are sequential within the stage, with inter-block
-    /// state transitions (intra-stage storage dynamics).
-    /// Enables modeling of daily cycling patterns within monthly stages.
+    /// Sequential blocks with inter-block state transitions (intra-stage
+    /// storage dynamics), e.g. daily cycling within a monthly stage.
     Chronological,
 }
 
@@ -53,14 +51,10 @@ pub enum SeasonCycleType {
     Custom,
 }
 
-/// Opening tree noise generation algorithm for a stage.
+/// Opening-tree noise generation algorithm for a stage.
 ///
-/// Controls which algorithm is used to generate noise vectors for
-/// the opening tree at this stage. This is orthogonal to
-/// `SamplingScheme`, which selects the forward-pass noise *source*
-/// (in-sample, external, historical). `NoiseMethod` governs *how*
-/// the noise vectors are produced (SAA, LHS, QMC-Sobol, QMC-Halton,
-/// Selective, or `HistoricalResiduals`).
+/// Orthogonal to `SamplingScheme`: that selects the forward-pass noise *source*,
+/// this governs *how* the opening-tree noise vectors are produced.
 ///
 /// See [Input Scenarios §1.8](input-scenarios.md) for the
 /// full method catalog and use cases.
@@ -77,23 +71,15 @@ pub enum NoiseMethod {
     QmcHalton,
     /// Selective/Representative Sampling. Clustering on historical data.
     Selective,
-    /// Historical residuals from the `HistoricalScenarioLibrary`.
-    /// Copies pre-computed eta (residual) vectors from actual historical
-    /// observations. Skips the parametric Cholesky correlation step since
-    /// empirical cross-entity correlation is embedded in the residuals.
-    /// Year pool configuration is sourced from the system-level
-    /// `HistoricalYears` config (same as the Historical forward sampling
-    /// scheme).
+    /// Historical residuals from the `HistoricalScenarioLibrary`: copies
+    /// pre-computed eta vectors and skips the parametric Cholesky step, since
+    /// empirical cross-entity correlation is already embedded in the residuals.
+    /// Year pool from the system-level `HistoricalYears`.
     HistoricalResiduals,
 }
 
-/// Horizon type tag for the policy graph.
-///
-/// Determines whether the study horizon is finite (acyclic linear chain or DAG)
-/// or cyclic (infinite periodic horizon with at least one back-edge). The
-/// solver-level `HorizonMode` enum in downstream solver crates is built from a
-/// [`PolicyGraph`] that carries this tag — it precomputes transition maps,
-/// cycle detection, and discount factors for efficient runtime dispatch.
+/// Horizon type tag for the policy graph: finite (acyclic chain/DAG) or cyclic
+/// (infinite periodic, at least one back-edge).
 ///
 /// Cross-reference: [Horizon Mode Trait SS3.1](../architecture/horizon-mode-trait.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,13 +98,10 @@ pub enum PolicyGraphType {
 // Block (SS12.2)
 // ---------------------------------------------------------------------------
 
-/// A load block within a stage, representing a sub-period with uniform
-/// demand and generation characteristics.
+/// A load block within a stage — a sub-period with uniform demand and
+/// generation characteristics.
 ///
-/// Blocks partition the stage duration into sub-periods (e.g., peak,
-/// off-peak, shoulder). Block IDs are contiguous within each stage,
-/// starting at 0. The block weight (fraction of stage duration) is
-/// derived from `duration_hours` and is not stored — it is computed
+/// The block weight (fraction of stage duration) is not stored; it is computed
 /// on demand as `duration_hours / sum(all block hours in stage)`.
 ///
 /// Source: `stages.json` `stages[].blocks[]`.
@@ -126,18 +109,14 @@ pub enum PolicyGraphType {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Block {
-    /// 0-based index within the parent stage.
-    /// Matches the `id` field from `stages.json`, validated to be
-    /// contiguous (0, 1, 2, ..., n-1) during loading.
+    /// 0-based index within the parent stage, validated contiguous during loading.
     pub index: usize,
 
     /// Human-readable block label (e.g., "LEVE", "MEDIA", "PESADA").
     pub name: String,
 
-    /// Duration of this block in hours. Must be positive.
-    /// Validation: the sum of all block hours within a stage must
-    /// equal the total stage duration in hours.
-    /// See [Input Scenarios §1.10](input-scenarios.md), rule 3.
+    /// Block duration in hours. Must be positive; the block hours within a stage
+    /// must sum to the stage duration ([Input Scenarios §1.10](input-scenarios.md), rule 3).
     pub duration_hours: f64,
 }
 
@@ -153,14 +132,11 @@ pub struct Block {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct StageStateConfig {
-    /// Whether reservoir storage volumes are state variables.
-    /// Default: true. Mandatory in most applications but kept as an
-    /// explicit flag for transparency.
+    /// Whether reservoir storage volumes are state variables (default true).
     pub storage: bool,
 
-    /// Whether past inflow realizations (AR model lags) are state
-    /// variables. Default: false. Required when PAR model order `p > 0`
-    /// and inflow lag state tracking is enabled.
+    /// Whether past inflow realizations (AR lags) are state variables (default
+    /// false); required when PAR order `p > 0`.
     pub inflow_lags: bool,
 }
 
@@ -179,89 +155,45 @@ pub struct StageStateConfig {
 ///
 /// A `Vec<StageLagTransition>` indexed by stage index is the canonical way
 /// to carry this information alongside the stage vector.
-// Four boolean flags encode orthogonal hot-path conditions; a state machine enum
-// would require 2^4 = 16 variants with no semantic benefit. Each flag is
-// independently set by the precomputation algorithm and tested by separate
-// if-guards in `accumulate_and_shift_lag_state`.
+///
+/// Weights are validated to be consistent with the stage's temporal position by
+/// the precomputation algorithm, not here. The `downstream_*` fields are inert
+/// (`0.0` / `false`) unless `accumulate_downstream` is set, so uniform-resolution
+/// studies carry zero hot-path overhead.
+// Rationale: the bools encode orthogonal hot-path conditions independently
+// tested in `accumulate_and_shift_lag_state`; an enum would need 2^N variants.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct StageLagTransition {
-    /// Fraction of this stage's realized value that is added to the
-    /// current lag accumulator bucket.
-    ///
-    /// A value of `1.0` means the stage contributes its full realized value
-    /// to the accumulator. A value between `0.0` and `1.0` indicates a
-    /// partial contribution (for example, a weekly stage that covers only
-    /// part of a monthly lag period). Validation that this value lies in
-    /// `[0.0, 1.0]` is the responsibility of the precomputation algorithm.
+    /// Fraction of this stage's realized value added to the current lag bucket.
     pub accumulate_weight: f64,
 
-    /// Fraction of this stage's realized value that carries over into the
-    /// next lag accumulator bucket when `finalize_period` is `true`.
-    ///
-    /// When a stage straddles the boundary between two lag periods, the
-    /// portion of the stage value that belongs to the next period is
-    /// captured here. For stages that fall entirely within one lag period,
-    /// this is `0.0`. Validation that `accumulate_weight + spillover_weight`
-    /// is consistent with the stage's temporal position is the
-    /// responsibility of the precomputation algorithm.
+    /// Fraction carried into the next lag bucket when `finalize_period`; `0.0` when
+    /// the stage falls entirely within one lag period.
     pub spillover_weight: f64,
 
-    /// Whether this stage marks the end of a complete lag accumulation
-    /// period.
-    ///
-    /// When `true`, the accumulator bucket for the current lag period is
-    /// considered finalized after processing this stage: the accumulated
-    /// value is committed to the lag state vector and the accumulator is
-    /// reset (possibly seeded with the `spillover_weight` contribution).
-    /// When `false`, accumulation continues into the next stage.
+    /// When `true`, the current lag bucket is committed to the lag state vector and
+    /// reset (seeded with `spillover_weight`); otherwise accumulation continues.
     pub finalize_period: bool,
 
-    /// Whether this stage should also accumulate into a downstream
-    /// (coarser-resolution) ring buffer.
-    ///
-    /// Set to `true` for stages in the pre-transition window when the study
-    /// transitions from a finer to a coarser temporal resolution (for example,
-    /// the last `L_q * 3` monthly stages before a monthly-to-quarterly
-    /// boundary). `false` for all stages in uniform-resolution studies,
-    /// producing zero overhead on the hot path.
+    /// Whether this stage also accumulates into the downstream (coarser) ring
+    /// buffer — `true` only in the pre-transition window before a resolution change.
     pub accumulate_downstream: bool,
 
-    /// Fraction of this stage's realized value to accumulate into the
-    /// downstream lag period bucket.
-    ///
-    /// Analogous to `accumulate_weight` but relative to the downstream
-    /// (coarser) lag period boundaries. `0.0` when `accumulate_downstream`
-    /// is `false`.
+    /// `accumulate_weight` against the downstream (coarser) lag boundaries.
     pub downstream_accumulate_weight: f64,
 
-    /// Fraction of this stage's realized value carrying over into the next
-    /// downstream lag period when `downstream_finalize` is `true`.
-    ///
-    /// Analogous to `spillover_weight` but for the downstream period
-    /// boundary. `0.0` when `accumulate_downstream` is `false`.
+    /// `spillover_weight` against the downstream lag boundary.
     pub downstream_spillover_weight: f64,
 
-    /// Whether this stage marks the end of a complete downstream lag
-    /// accumulation period.
-    ///
-    /// When `true`, the downstream accumulator bucket is finalized and
-    /// pushed to the downstream ring buffer. For example, the last monthly
-    /// stage of a calendar quarter has `downstream_finalize = true` when the
-    /// study transitions to quarterly resolution. `false` when
-    /// `accumulate_downstream` is `false`.
+    /// When `true`, the downstream lag bucket is finalized and pushed to the
+    /// downstream ring buffer.
     pub downstream_finalize: bool,
 
-    /// Whether the lag state must be rebuilt from the downstream ring buffer
-    /// at this stage.
-    ///
-    /// Set to `true` on the first quarterly stage (the transition stage) when
-    /// `downstream_par_order > 0`. When `true`, `accumulate_and_shift_lag_state`
-    /// overwrites `state[lag_start..]` with the completed quarterly lags from the
-    /// downstream ring buffer before resuming primary accumulation at quarterly
-    /// resolution. `false` for all stages in uniform-resolution studies and all
-    /// pre-transition monthly stages, producing zero overhead on the hot path.
+    /// When `true` (first coarse stage with a downstream PAR order),
+    /// `accumulate_and_shift_lag_state` overwrites `state[lag_start..]` with the
+    /// completed downstream lags before resuming primary accumulation.
     pub rebuild_from_downstream: bool,
 }
 
@@ -269,14 +201,10 @@ pub struct StageLagTransition {
 // StageRiskConfig (SS12.4)
 // ---------------------------------------------------------------------------
 
-/// Per-stage risk measure configuration, representing the parsed and
-/// validated risk parameters for a single stage.
+/// Per-stage risk measure configuration stored in the [`Stage`] struct.
 ///
-/// This is the clarity-first representation stored in the [`Stage`] struct.
-/// The solver-level `RiskMeasure` enum in
-/// [Risk Measure Trait](../architecture/risk-measure-trait.md) is the
-/// dispatch type built FROM this configuration during the variant
-/// selection pipeline.
+/// The solver-level `RiskMeasure` dispatch enum is built from this.
+/// See [Risk Measure Trait](../architecture/risk-measure-trait.md).
 ///
 /// Source: `stages.json` `stages[].risk_measure`.
 /// See [Input Scenarios §1.7](input-scenarios.md).
@@ -313,16 +241,10 @@ pub enum StageRiskConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ScenarioSourceConfig {
-    /// Number of noise realizations per stage for both the opening
-    /// tree and forward pass.
-    /// Must be positive. Controls the per-stage branching factor.
+    /// Noise realizations per stage (opening tree and forward pass). Must be positive.
     pub branching_factor: usize,
 
-    /// Algorithm for generating noise vectors in the opening tree.
-    /// Orthogonal to `SamplingScheme`, which selects the noise
-    /// source (in-sample, external, historical).
-    /// Can vary per stage, allowing adaptive strategies (e.g., LHS
-    /// for near-term, SAA for distant stages).
+    /// Opening-tree noise algorithm; may vary per stage.
     pub noise_method: NoiseMethod,
 }
 
@@ -351,55 +273,35 @@ pub struct ScenarioSourceConfig {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Stage {
-    // -- Identity and temporal extent --
-    /// 0-based index of this stage in the canonical-ordered stages
-    /// vector. Used for array indexing into per-stage data structures
-    /// (cuts, results, penalty arrays). Assigned during loading after
-    /// sorting by `id`.
+    /// 0-based array position in the canonical-ordered stages vector, assigned
+    /// during loading after sorting by `id`.
     pub index: usize,
 
-    /// Unique stage identifier from `stages.json`.
-    /// Non-negative for study stages, negative for pre-study stages.
-    /// The `id` is the domain-level identifier; `index` is the
-    /// internal array position.
+    /// Unique domain-level stage identifier from `stages.json`; non-negative for
+    /// study stages, negative for pre-study stages.
     pub id: i32,
 
-    /// Stage start date (inclusive). Parsed from ISO 8601 string.
-    /// Uses `chrono::NaiveDate` — timezone-free calendar date, which
-    /// is appropriate because stage boundaries are calendar concepts,
-    /// not instants in time.
+    /// Stage start date (inclusive), a timezone-free calendar date.
     pub start_date: NaiveDate,
 
-    /// Stage end date (exclusive). Parsed from ISO 8601 string.
-    /// The stage duration is `end_date - start_date`.
+    /// Stage end date (exclusive); duration is `end_date - start_date`.
     pub end_date: NaiveDate,
 
-    /// Season index linking to [`SeasonDefinition`]. Maps this stage to
-    /// a position in the seasonal cycle (e.g., month 0-11 for monthly).
-    /// Required for PAR model coefficient lookup and inflow history
-    /// aggregation. `None` for stages without seasonal structure.
+    /// Season index into [`SeasonDefinition`]; `None` for stages without
+    /// seasonal structure.
     pub season_id: Option<usize>,
 
-    // -- Block structure --
-    /// Ordered list of load blocks within this stage.
-    /// Sorted by block index (0, 1, ..., n-1). The sum of all block
-    /// `duration_hours` must equal the total stage duration in hours.
+    /// Load blocks, sorted by index; their `duration_hours` sum to the stage duration.
     pub blocks: Vec<Block>,
 
-    /// Block formulation mode for this stage.
-    /// Can vary per stage (e.g., chronological for near-term,
-    /// parallel for distant stages).
+    /// Block formulation mode; may vary per stage.
     /// See [Block Formulations](../math/block-formulations.md).
     pub block_mode: BlockMode,
 
-    // -- State, risk, and sampling --
-    /// State variable flags controlling which variables carry state
-    /// from this stage to the next.
+    /// Flags for which variables carry state to the next stage.
     pub state_config: StageStateConfig,
 
-    /// Risk measure configuration for this stage.
-    /// Can vary per stage (e.g., `CVaR` for near-term, Expectation
-    /// for distant stages).
+    /// Risk measure configuration; may vary per stage.
     pub risk_config: StageRiskConfig,
 
     /// Scenario source configuration (branching factor and noise method).
@@ -412,36 +314,31 @@ pub struct Stage {
 
 /// A single season entry mapping a season ID to a calendar period.
 ///
-/// Season definitions are required when deriving AR parameters from
-/// inflow history — the season determines how history values are
-/// aggregated into seasonal means and standard deviations.
+/// Required when deriving AR parameters from inflow history (the season governs
+/// how history aggregates into seasonal means/stds). The `day_start`, `month_end`,
+/// and `day_end` fields are read only for the `Custom` cycle type.
 ///
 /// Source: `stages.json` `season_definitions.seasons[]`.
 /// See [Input Scenarios §1.1](input-scenarios.md).
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SeasonDefinition {
-    /// Season index (0-based). For monthly cycles: 0 = January, ...,
-    /// 11 = December. For weekly cycles: 0-51 (ISO week numbers).
+    /// 0-based season index: 0–11 (Monthly, Jan–Dec) or 0–51 (Weekly, ISO weeks).
     pub id: usize,
 
     /// Human-readable label (e.g., "January", "Q1", "Wet Season").
     pub label: String,
 
-    /// Calendar month where this season starts (1-12).
-    /// For monthly `cycle_type`, this uniquely identifies the month.
+    /// Calendar start month (1-12); for Monthly cycles this identifies the month.
     pub month_start: u32,
 
-    /// Calendar day where this season starts (1-31).
-    /// Only used when `cycle_type` is `Custom`. Default: 1.
+    /// Calendar start day (1-31). Default: 1.
     pub day_start: Option<u32>,
 
-    /// Calendar month where this season ends (1-12).
-    /// Only used when `cycle_type` is `Custom`.
+    /// Calendar end month (1-12).
     pub month_end: Option<u32>,
 
-    /// Calendar day where this season ends (1-31).
-    /// Only used when `cycle_type` is `Custom`.
+    /// Calendar end day (1-31).
     pub day_end: Option<u32>,
 }
 
@@ -476,11 +373,9 @@ impl SeasonMap {
     /// if they share the same calendar position. This is essential for PAR
     /// model estimation from historical inflow data that predates the study.
     ///
-    /// Returns `None` only for `Custom` cycle types where the date does not
-    /// fall within any defined season range. For a well-formed `Monthly` or
-    /// `Weekly` map every in-range calendar date resolves; in particular a
-    /// `Weekly` map treats the year as 52 buckets and folds the ISO-8601 53rd
-    /// week into week 52 (see the `Weekly` arm), so it never returns `None`.
+    /// Returns `None` only for `Custom` cycle types whose ranges leave the date
+    /// uncovered; well-formed `Monthly`/`Weekly` maps always resolve (the `Weekly`
+    /// arm folds ISO week 53 into week 52).
     #[must_use]
     pub fn season_for_date(&self, date: NaiveDate) -> Option<usize> {
         match self.cycle_type {
@@ -492,15 +387,9 @@ impl SeasonMap {
                     .map(|s| s.id)
             }
             SeasonCycleType::Weekly => {
-                // Weekly seasons are a fixed 52-bucket year (`id` 0..=51). ISO-8601
-                // long years (2020, 2026, …) carry a 53rd week of trailing
-                // late-December days; `.min(51)` deliberately folds those into week
-                // 52 — the adjacent same-time-of-year bucket. This is a contract,
-                // NOT `None` and NOT week 1: returning `None` would silently drop
-                // those end-of-year observations from PAR estimation (every caller
-                // skips `None` dates), and week 1 (early January) is the wrong
-                // season for a late-December date. `saturating_sub(1)` guards the
-                // unreachable week-0 case so the index can never underflow.
+                // 52-bucket year (`id` 0..=51); `.min(51)` folds ISO week 53 into
+                // week 52 — NOT `None` (callers skip None, dropping the observation
+                // from PAR estimation) and NOT week 1 (wrong season for late December).
                 let iso_week = date.iso_week().week();
                 let week_idx = (iso_week.saturating_sub(1)).min(51) as usize;
                 self.seasons.iter().find(|s| s.id == week_idx).map(|s| s.id)
@@ -557,11 +446,8 @@ pub struct Transition {
     /// must sum to 1.0 (within tolerance).
     pub probability: f64,
 
-    /// Per-transition annual discount rate override.
-    /// When `None`, the global `annual_discount_rate` from the
-    /// [`PolicyGraph`] is used. When `Some(r)`, this rate is converted to
-    /// a per-transition factor using the source stage duration:
-    /// `d = 1 / (1 + r)^dt`.
+    /// Per-transition annual discount rate override; `None` uses the
+    /// [`PolicyGraph`] global rate.
     /// See [Discount Rate §3](../math/discount-rate.md).
     pub annual_discount_rate_override: Option<f64>,
 }
@@ -573,15 +459,9 @@ pub struct Transition {
 /// Parsed and validated policy graph defining stage transitions,
 /// horizon type, and global discount rate.
 ///
-/// This is the `cobre-core` clarity-first representation loaded from
-/// `stages.json`. It stores the graph topology as specified by the
-/// user. The solver-level `HorizonMode` enum (see Horizon Mode Trait
-/// SS1) is built from this struct during initialization — it
-/// precomputes transition maps, cycle detection, and discount factors
-/// for efficient runtime dispatch.
-///
-/// Cross-reference: [Horizon Mode Trait](../architecture/horizon-mode-trait.md)
-/// defines the `HorizonMode` enum that interprets this graph structure.
+/// The clarity-first graph topology loaded from `stages.json`; the solver-level
+/// `HorizonMode` enum is built from it at initialization.
+/// See [Horizon Mode Trait](../architecture/horizon-mode-trait.md).
 ///
 /// Source: `stages.json` `policy_graph`.
 /// See [Input Scenarios §1.2](input-scenarios.md).
@@ -589,37 +469,24 @@ pub struct Transition {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PolicyGraph {
     /// Horizon type: finite (acyclic chain) or cyclic (infinite periodic).
-    /// Determines which `HorizonMode` variant will be constructed at
-    /// solver initialization.
     pub graph_type: PolicyGraphType,
 
-    /// Global annual discount rate.
-    /// Converted to per-transition factors using source stage durations:
-    /// `d = 1 / (1 + annual_discount_rate)^dt`.
-    /// A value of 0.0 means no discounting (`d = 1.0` for all transitions).
-    /// For cyclic graphs, must be > 0 for convergence (validation rule 7).
+    /// Global annual discount rate; `0.0` disables discounting. Must be `> 0`
+    /// for cyclic graphs to converge (validation rule 7).
     /// See [Discount Rate §3](../math/discount-rate.md).
     pub annual_discount_rate: f64,
 
-    /// Stage transitions with probabilities and optional per-transition
-    /// discount rate overrides. For finite horizon, these form a linear
-    /// chain or DAG. For cyclic horizon, at least one transition has
-    /// `source_id >= target_id` (the back-edge).
+    /// Stage transitions. Finite horizon: a linear chain or DAG. Cyclic: at least
+    /// one back-edge (`source_id >= target_id`).
     pub transitions: Vec<Transition>,
 
-    /// Season definitions loaded from `season_definitions` in
-    /// `stages.json`. Required when PAR models or inflow history
-    /// aggregation are used. `None` when no season definitions are
-    /// provided and none are required.
+    /// Season definitions; `None` when none are provided or required.
     pub season_map: Option<SeasonMap>,
 }
 
 impl Default for PolicyGraph {
-    /// Returns a finite-horizon policy graph with no transitions and no discounting.
-    ///
-    /// This is the minimal-viable-solver default: a finite study horizon with
-    /// zero terminal value and no discount factor. `cobre-io` replaces this
-    /// with the fully specified graph loaded from `stages.json`.
+    /// A finite-horizon graph with no transitions and no discounting; `cobre-io`
+    /// replaces it with the graph loaded from `stages.json`.
     fn default() -> Self {
         Self {
             graph_type: PolicyGraphType::FiniteHorizon,
@@ -767,8 +634,7 @@ mod tests {
 
     #[test]
     fn test_weekly_season_iso_week_53_folds_into_week_52() {
-        // 52-bucket weekly map (ids 0..=51). `month_start` is unused for `Weekly`
-        // resolution but must be a valid month.
+        // `month_start` is unused for `Weekly` resolution but must be a valid month.
         let seasons: Vec<SeasonDefinition> = (0..52)
             .map(|i| SeasonDefinition {
                 id: i,
@@ -784,8 +650,7 @@ mod tests {
             seasons,
         };
 
-        // 2020 is an ISO long year: 2020-12-30 falls in ISO week 53. The contract
-        // folds week 53 into week 52 (id 51) — explicitly NOT `None` and NOT week 1.
+        // 2020 is an ISO long year, so 2020-12-30 falls in ISO week 53.
         let week53_date = NaiveDate::from_ymd_opt(2020, 12, 30).unwrap();
         assert_eq!(
             week53_date.iso_week().week(),
@@ -829,7 +694,6 @@ mod tests {
 
         let json = serde_json::to_string(&graph).unwrap();
 
-        // Acceptance criterion: JSON must contain both key-value pairs.
         assert!(
             json.contains("\"graph_type\":\"FiniteHorizon\""),
             "JSON did not contain expected graph_type: {json}"
@@ -839,7 +703,6 @@ mod tests {
             "JSON did not contain expected annual_discount_rate: {json}"
         );
 
-        // Round-trip must produce an equal value.
         let deserialized: PolicyGraph = serde_json::from_str(&json).unwrap();
         assert_eq!(graph, deserialized);
     }

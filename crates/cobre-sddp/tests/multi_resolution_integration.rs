@@ -1,18 +1,5 @@
-//! End-to-end integration test for the multi-resolution stage-transition pipeline.
-//!
-//! Exercises all multi-resolution feature components together on the D30 test case
-//! (6 monthly stages Jan-Jun 2024 + 4 quarterly stages Q3 2024 – Q2 2025),
-//! confirming they compose correctly:
-//!
-//! - `Custom` cycle type `SeasonMap` with 12 monthly + 4 quarterly seasons
-//! - `inflow_lags: true` for all stages with PAR(1) at both resolutions
-//! - `noise_group_ids` precomputation (one unique ID per stage)
-//! - Downstream lag transition fields:
-//!   - Monthly stages in the pre-transition window (stages 3-5) have
-//!     `accumulate_downstream == true`
-//!   - First quarterly stage (stage index 6) has `rebuild_from_downstream == true`
-//! - Training completes with `iterations > 0` and `final_lb > 0.0`
-//! - Simulation completes with 1 scenario without error
+//! End-to-end integration test for the multi-resolution stage-transition pipeline
+//! on the D30 case (6 monthly stages followed by 4 quarterly stages).
 
 #![allow(
     clippy::unwrap_used,
@@ -36,7 +23,6 @@ use cobre_solver::ActiveSolver;
 // StubComm — single-rank communicator for testing
 // ---------------------------------------------------------------------------
 
-/// Single-rank communicator stub for testing.
 struct StubComm;
 
 impl Communicator for StubComm {
@@ -86,7 +72,6 @@ impl Communicator for StubComm {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Return the path to the d30-multi-resolution-monthly-quarterly example case.
 fn d30_case_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -96,12 +81,8 @@ fn d30_case_dir() -> std::path::PathBuf {
         .join("examples/deterministic/d30-multi-resolution-monthly-quarterly")
 }
 
-/// Build a `StudySetup` for the D30 case using the config's declared scenario
-/// source (`OutOfSample` inflow with seed 42).
-///
-/// Uses `config.training_scenario_source()` so the `OutOfSample` noise method and
-/// seed are correctly propagated. Using [`ScenarioSource::default()`] would
-/// silently fall back to `InSample` and bypass the `PAR(1)` noise pipeline.
+/// Uses `config.training_scenario_source()`, not [`ScenarioSource::default()`]:
+/// the default silently falls back to `InSample` and bypasses the PAR(1) pipeline.
 fn build_setup(case_dir: &Path, config: &cobre_io::Config) -> StudySetup {
     let system = cobre_io::load_case(case_dir).expect("load_case");
     let config_path = case_dir.join("config.json");
@@ -119,15 +100,6 @@ fn build_setup(case_dir: &Path, config: &cobre_io::Config) -> StudySetup {
 // Test: structural properties, training, and simulation
 // ---------------------------------------------------------------------------
 
-/// Verify multi-resolution structural properties, downstream lag transition
-/// fields, training correctness, and simulation completion for the D30 case.
-///
-/// D30 has 6 monthly stages (Jan-Jun 2024, stage indices 0-5) followed by
-/// 4 quarterly stages (Q3 2024 – Q2 2025, stage indices 6-9). The season map
-/// is `Custom` with 16 seasons: ids 0-11 (monthly) + ids 12-15 (quarterly).
-///
-/// This test confirms that the multi-resolution pipeline components compose
-/// correctly into a functioning end-to-end multi-resolution workflow.
 #[test]
 fn multi_resolution_structural_properties_and_training() {
     let case_dir = d30_case_dir();
@@ -138,7 +110,7 @@ fn multi_resolution_structural_properties_and_training() {
 
     let system = cobre_io::load_case(&case_dir).expect("load_case D30");
 
-    // Filter to study stages only (id >= 0); pre-study stages have negative IDs.
+    // Pre-study stages carry negative IDs; the study count is the non-negative set.
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
 
     assert_eq!(
@@ -148,7 +120,6 @@ fn multi_resolution_structural_properties_and_training() {
         study_stages.len()
     );
 
-    // Monthly stages 0-5 must have branching_factor == 5.
     for (t, stage) in study_stages.iter().enumerate().take(6) {
         assert_eq!(
             stage.scenario_config.branching_factor, 5,
@@ -156,7 +127,6 @@ fn multi_resolution_structural_properties_and_training() {
         );
     }
 
-    // Quarterly stages 6-9 must also have branching_factor == 5.
     for (t, stage) in study_stages.iter().enumerate().skip(6) {
         assert_eq!(
             stage.scenario_config.branching_factor, 5,
@@ -164,7 +134,6 @@ fn multi_resolution_structural_properties_and_training() {
         );
     }
 
-    // Season map: Custom cycle with 16 seasons (12 monthly + 4 quarterly).
     let season_map = system
         .policy_graph()
         .season_map
@@ -182,7 +151,6 @@ fn multi_resolution_structural_properties_and_training() {
         season_map.seasons.len()
     );
 
-    // Monthly season IDs 0-11 must be present in the season map.
     for expected_id in 0..12_usize {
         assert!(
             season_map.seasons.iter().any(|s| s.id == expected_id),
@@ -190,7 +158,6 @@ fn multi_resolution_structural_properties_and_training() {
         );
     }
 
-    // Quarterly season IDs 12-15 must be present.
     for expected_id in 12..16_usize {
         assert!(
             season_map.seasons.iter().any(|s| s.id == expected_id),
@@ -202,7 +169,6 @@ fn multi_resolution_structural_properties_and_training() {
 
     let mut setup = build_setup(&case_dir, &config);
 
-    // AC: noise_group_ids must return exactly 10 elements (one per study stage).
     let groups = &setup.stage_data.noise_group_ids;
     assert_eq!(
         groups.len(),
@@ -211,8 +177,8 @@ fn multi_resolution_structural_properties_and_training() {
         groups.len()
     );
 
-    // Monthly stages 0-5 each have a unique season_id (0-5) with a unique year
-    // (2024), so they each get their own group ID. Verify they are 6 distinct values.
+    // Monthly stages 0-5 each pair a unique season_id with a unique year, so each
+    // gets its own group ID — hence 6 distinct values.
     let monthly_groups: Vec<u32> = groups[..6].to_vec();
     let mut unique_monthly: Vec<u32> = monthly_groups.clone();
     unique_monthly.sort_unstable();
@@ -235,9 +201,8 @@ fn multi_resolution_structural_properties_and_training() {
         lag_transitions.len()
     );
 
-    // PAR(1) with downstream_par_order == 1: the pre-transition window covers
-    // 1 * 3 = 3 monthly stages immediately before the quarterly boundary.
-    // Monthly stages 3, 4, 5 (Apr, May, Jun 2024) must have accumulate_downstream == true.
+    // downstream_par_order == 1 → the pre-transition window is the 1*3 = 3 monthly
+    // stages (3, 4, 5) immediately before the quarterly boundary.
     for (t, transition) in lag_transitions.iter().enumerate().take(6).skip(3) {
         assert!(
             transition.accumulate_downstream,
@@ -245,7 +210,7 @@ fn multi_resolution_structural_properties_and_training() {
         );
     }
 
-    // Monthly stages 0-2 are outside the window; they must not accumulate downstream.
+    // Stages 0-2 are outside the window: no downstream accumulation.
     for (t, transition) in lag_transitions.iter().enumerate().take(3) {
         assert!(
             !transition.accumulate_downstream,
@@ -253,8 +218,6 @@ fn multi_resolution_structural_properties_and_training() {
         );
     }
 
-    // Stage index 6 is the first quarterly stage (Q3, season_id 12). It must
-    // have rebuild_from_downstream == true.
     assert!(
         lag_transitions[6].rebuild_from_downstream,
         "D30: first quarterly stage (index 6) must have rebuild_from_downstream == true; \
@@ -262,7 +225,6 @@ fn multi_resolution_structural_properties_and_training() {
         lag_transitions[6]
     );
 
-    // Subsequent quarterly stages (7-9) must not rebuild from downstream.
     for (t, transition) in lag_transitions.iter().enumerate().skip(7) {
         assert!(
             !transition.rebuild_from_downstream,

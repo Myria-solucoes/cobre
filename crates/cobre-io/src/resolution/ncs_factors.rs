@@ -1,13 +1,9 @@
 //! Resolution of parsed NCS factor entries into a dense lookup table.
 //!
-//! [`resolve_ncs_factors`] converts `Vec<NcsFactorEntry>` (from
-//! `scenarios/non_controllable_factors.json`) into a [`ResolvedNcsFactors`]
-//! indexed by `(ncs_index, stage_index, block_index)` for O(1) lookup during
-//! LP construction.
-//!
-//! Resolution is infallible: unknown NCS or stage IDs in the factor entries
-//! are silently skipped (they would have been caught by upstream validation).
-//! The default factor is `1.0` (no scaling).
+//! [`resolve_ncs_factors`] builds a [`ResolvedNcsFactors`] indexed by
+//! `(ncs_index, stage_index, block_index)` for O(1) lookup during LP construction.
+//! Unknown NCS/stage IDs are silently skipped (already caught upstream); the
+//! default factor is `1.0` (no scaling).
 
 use std::collections::HashMap;
 
@@ -19,15 +15,9 @@ use crate::scenarios::NcsFactorEntry;
 
 /// Build a resolved NCS factor table from parsed entries.
 ///
-/// Maps domain-level `ncs_id` and `stage_id` values to 0-based positional
-/// indices using the provided sorted entity slices. Entries referencing
-/// unknown NCS IDs or stages are silently skipped.
-///
-/// # Arguments
-///
-/// * `entries` — parsed NCS factor entries from `scenarios/non_controllable_factors.json`
-/// * `non_controllable_sources` — sorted NCS collection (for `ncs_id` to index mapping)
-/// * `stages` — sorted stage collection (for `stage_id` to index mapping and max block count)
+/// `non_controllable_sources` and `stages` must be sorted: each entity's slice
+/// position becomes its 0-based table index. The stage axis spans study stages
+/// only (`id >= 0`); the block axis is sized to the largest per-stage block count.
 #[must_use]
 pub fn resolve_ncs_factors(
     entries: &[NcsFactorEntry],
@@ -38,14 +28,12 @@ pub fn resolve_ncs_factors(
         return ResolvedNcsFactors::empty();
     }
 
-    // Build ncs_id -> ncs_idx mapping.
     let ncs_id_to_idx: HashMap<i32, usize> = non_controllable_sources
         .iter()
         .enumerate()
         .map(|(idx, ncs)| (ncs.id.0, idx))
         .collect();
 
-    // Build stage_id -> stage_idx mapping (study stages only: id >= 0).
     let stage_id_to_idx: HashMap<i32, usize> = stages
         .iter()
         .filter(|s| s.id >= 0)
@@ -66,10 +54,10 @@ pub fn resolve_ncs_factors(
 
     for entry in entries {
         let Some(&ncs_idx) = ncs_id_to_idx.get(&entry.ncs_id.0) else {
-            continue; // Unknown NCS — skip.
+            continue;
         };
         let Some(&stage_idx) = stage_id_to_idx.get(&entry.stage_id) else {
-            continue; // Unknown stage — skip.
+            continue;
         };
         for bf in &entry.block_factors {
             let Some(block_idx) = usize::try_from(bf.block_id).ok() else {

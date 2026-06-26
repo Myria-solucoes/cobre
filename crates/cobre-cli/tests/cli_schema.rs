@@ -17,9 +17,6 @@ fn cobre() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("cobre"))
 }
 
-/// `cobre schema export --output-dir <tmpdir>` writes a set of `.schema.json`
-/// files whose basenames exactly match the schemas committed under
-/// `book/src/schemas/`, and prints the expected summary line to stderr.
 #[test]
 fn test_schema_export_writes_files() {
     let tmp = TempDir::new().unwrap();
@@ -43,10 +40,8 @@ fn test_schema_export_writes_files() {
         .filter(|e| e.file_name().to_string_lossy().ends_with(".schema.json"))
         .collect();
 
-    // The set of emitted `.schema.json` basenames must exactly equal the set of
-    // `.schema.json` basenames committed under `book/src/schemas/`. The committed
-    // set is derived from the directory at test time (never a hard-coded count),
-    // so a dropped, added, or renamed schema fails on whichever side diverges.
+    // Compare emitted vs committed `book/src/schemas/` basenames as sets derived
+    // at test time — never a hard-coded count — so a dropped/added/renamed schema fails.
     let emitted: BTreeSet<String> = schema_files
         .iter()
         .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -69,7 +64,6 @@ fn test_schema_export_writes_files() {
         committed.difference(&emitted).collect::<Vec<_>>(),
     );
 
-    // Parse config.schema.json and verify it is valid JSON with expected keys.
     let config_path = output_dir.join("config.schema.json");
     assert!(config_path.exists(), "config.schema.json must exist");
 
@@ -106,8 +100,6 @@ fn test_schema_export_writes_files() {
     );
 }
 
-/// `cobre schema export` without `--output-dir` writes files to the current
-/// working directory.
 #[test]
 fn test_schema_export_default_dir() {
     let tmp = TempDir::new().unwrap();
@@ -131,8 +123,6 @@ fn test_schema_export_default_dir() {
     );
 }
 
-/// `cobre schema export --output-dir <non-existent sub-dir>` creates the
-/// directory and writes files successfully.
 #[test]
 fn test_schema_export_creates_dir() {
     let tmp = TempDir::new().unwrap();
@@ -165,9 +155,8 @@ fn test_schema_export_creates_dir() {
     );
 }
 
-/// `cobre schema export --output-dir /nonexistent/deeply/nested/path` exits
-/// non-zero when intermediate parent directories do not exist and cannot be
-/// created (the root `/nonexistent` does not exist on any standard filesystem).
+/// The root `/nonexistent` is absent on any standard filesystem, so the parent
+/// directories cannot be created and the export exits non-zero.
 #[test]
 fn test_schema_export_unwritable_dir_exits_nonzero() {
     cobre()

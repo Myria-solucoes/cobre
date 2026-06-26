@@ -1,7 +1,4 @@
 //! Training phase for `cobre run`.
-//!
-//! Runs the SDDP training loop, collects events, aggregates solver stats across
-//! MPI ranks, and prints the training summary.
 
 use std::sync::mpsc;
 
@@ -23,10 +20,9 @@ pub(super) struct TrainingPhaseResult {
     pub(super) error: Option<cobre_sddp::SddpError>,
 }
 
-/// Single owner of the globally-reduced training solve-stats values that both the
-/// printed [`TrainingSummary`] and the persisted [`cobre_io::MetadataTrainingSolveStats`]
-/// read from. Constructed once from the `allreduce(Sum)` receive buffer; the two
-/// downstream literals must read identical values, so they share this one source.
+/// Single owner of the globally-reduced training solve-stats: the printed
+/// [`TrainingSummary`] and the persisted [`cobre_io::MetadataTrainingSolveStats`]
+/// must read identical values, so both read from this one source.
 struct GlobalTrainingStats {
     first_try: u64,
     retried: u64,
@@ -36,12 +32,9 @@ struct GlobalTrainingStats {
 }
 
 /// Run training and collect results, events, and summary stats.
-// Rationale: training orchestration is inherently sequential — solver init,
-// progress thread launch, the blocking train() call, event collection,
-// MPI allreduces for LP-solve counts and solver stats, summary construction,
-// and output routing all depend on each other's results in order. Splitting
-// would require threading shared mutable state (solver, channel endpoints,
-// allreduce buffers) across function boundaries with no correctness benefit.
+// Rationale: an inherently sequential orchestration whose steps each depend on
+// the prior's result; splitting would thread shared mutable state across
+// boundaries for no benefit.
 #[allow(clippy::too_many_lines)]
 pub(super) fn run_training_phase(
     ctx: &RunContext<impl Communicator>,
@@ -114,11 +107,9 @@ pub(super) fn run_training_phase(
         message: format!("post-training barrier error: {e}"),
     })?;
 
-    // Aggregate solver stats from the stats log and allreduce across ranks.
-    // Every rank's backward entries cover *all* ranks (allgatherv in backward.rs
-    // populates the full set so rank 0 can write them to parquet). Filter to this
-    // rank's own contribution here so the subsequent allreduce(Sum) produces
-    // correct global totals instead of multiplying backward by world_size.
+    // Backward entries are allgatherv-replicated across every rank, so filter to
+    // this rank's own contribution before allreduce(Sum); summing the replicated
+    // entries would multiply backward stats by world_size.
     let my_rank = i32::try_from(ctx.comm.rank()).unwrap_or(i32::MAX);
     let (
         local_first_try,
@@ -128,8 +119,6 @@ pub(super) fn run_training_phase(
         local_backward_solve_s,
     ) = aggregate_solver_stats(&training_result.solver_stats_log, my_rank);
 
-    // Guard the three u64 counters cast to f64 in the training allreduce
-    // buffer below.
     let training_guard_delta = cobre_sddp::SolverStatsDelta {
         lp_successes: local_first_try.saturating_add(local_retried),
         first_try_successes: local_first_try,
@@ -161,10 +150,8 @@ pub(super) fn run_training_phase(
         backward_solve_seconds: recv_stats[4],
     };
 
-    // Pull iter-1 gap from the in-memory convergence records. Used in the
-    // summary line "Gap: X% (started at Y%)". The records are not yet
-    // persisted to parquet at this point in the run flow, so reading them
-    // from disk would return None; the in-memory copy is authoritative.
+    // The convergence records are not yet persisted at this point, so the
+    // in-memory copy is authoritative; reading from disk would return None.
     let initial_gap_percent = training_output
         .convergence_records
         .first()
@@ -206,10 +193,8 @@ pub(super) fn run_training_phase(
         crate::summary::print_training_summary(&ctx.stderr, &training_summary);
     }
 
-    // Route the MPI-aggregated training solve totals into the output carrier so
-    // the cobre-io writer persists them in `training/metadata.json`. The carrier
-    // is constructed by cobre-sddp with these stats left at their defaults;
-    // `final_upper_bound_std` is already populated upstream and is left untouched.
+    // Assign only this field; `final_upper_bound_std` is populated upstream and
+    // must stay untouched.
     training_output.training_solve_stats = cobre_io::MetadataTrainingSolveStats {
         total_lp_solves: Some(global_lp_solves),
         first_try: Some(global_stats.first_try),
@@ -229,12 +214,9 @@ pub(super) fn run_training_phase(
 
 /// Aggregate this rank's own contribution from the training stats log.
 ///
-/// Backward entries are replicated across ranks (allgatherv in `backward.rs`
-/// populates the full set on every rank so rank 0 can write them to parquet).
-/// Filtering by the entry's originating rank yields the per-rank local totals
-/// that can then be correctly summed across ranks via `allreduce(Sum)`.
-/// Forward and `lower_bound` entries carry this rank's MPI rank, so they pass
-/// through unchanged.
+/// Backward entries are allgatherv-replicated across ranks, so filtering by
+/// originating rank is required for the per-rank totals that `allreduce(Sum)`
+/// then sums correctly.
 fn aggregate_solver_stats(
     stats_log: &[cobre_sddp::SolverStatsLogEntry],
     my_rank: i32,
@@ -249,10 +231,8 @@ fn aggregate_solver_stats(
             continue;
         }
         let delta = &entry.delta;
-        // lower_bound LP solve counts (first_try/retried/failed) are included in
-        // these totals; their solve_time_ms is intentionally excluded by the
-        // `_ => {}` arm below. lower-bound wall time is tracked separately, and
-        // there is no lower_bound_solve_seconds output field to receive it.
+        // lower_bound solve counts are included, but its solve_time_ms is
+        // deliberately dropped by the `_ => {}` arm: no output field receives it.
         first_try += delta.first_try_successes;
         retried += delta.lp_successes.saturating_sub(delta.first_try_successes);
         failed += delta.lp_failures;

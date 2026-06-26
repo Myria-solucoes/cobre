@@ -27,7 +27,7 @@ where
         .max()
         .unwrap_or(0);
     let real_states_capacity =
-        inputs.exchange.real_total_scenarios() * inputs.training_ctx.indexer.n_state;
+        inputs.exchange.real_total_scenarios() * inputs.training_ctx.state.n_state;
     let mut bwd_state = crate::backward_pass_state::BackwardPassState::new(
         n_workers_local,
         n_ranks,
@@ -51,7 +51,6 @@ use crate::{
     cut::FutureCostFunction,
     cut_sync::CutSyncBuffers,
     horizon_mode::HorizonMode,
-    indexer::StageIndexer,
     inflow_method::InflowNonNegativityMethod,
     risk_measure::RiskMeasure,
     solver_stats::SolverStatsDelta,
@@ -275,7 +274,7 @@ fn minimal_template_1_0() -> StageTemplate {
 }
 
 fn solution_1_0(objective: f64, dual_storage: f64) -> LpSolution {
-    // For StageIndexer::new(1, 0): storage_in.start = N*(2+L) = 1*(2+0) = 2.
+    // For the N=1, L=0 state layout: storage_in.start = N*(2+L) = 1*(2+0) = 2.
     // state_to_lp_incoming_column(0) = storage_in.start + 0 = 2.
     // Cut subgradients are read from reduced_costs[storage_in_col], so
     // reduced_costs[2] must hold the same value as the storage-fixing dual.
@@ -322,6 +321,10 @@ fn single_workspace(solver: MockSolver, n_state: usize) -> Vec<SolverWorkspace<M
             ncs_col_upper_buf: Vec::new(),
             ncs_col_lower_buf: Vec::new(),
             ncs_col_indices_buf: Vec::new(),
+            ncs_col_lower_active_buf: Vec::new(),
+            ncs_col_upper_active_buf: Vec::new(),
+            last_ncs_col_start: usize::MAX,
+            ncs_col_upper_extract_buf: Vec::new(),
             load_rhs_buf: Vec::new(),
             row_lower_buf: Vec::new(),
             z_inflow_rhs_buf: Vec::new(),
@@ -638,15 +641,11 @@ fn single_stage_system_produces_no_cuts() {
     // A 1-stage system has no stages with a successor, so the backward
     // sweep (0..0) is empty — zero cuts are generated.
     let stochastic = make_stochastic_context(1, 2);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0()];
     let base_rows = vec![1_usize];
 
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
     let n_stages = 1_usize;
     let forward_passes = 2_u32;
     let mut fcf =
@@ -669,6 +668,7 @@ fn single_stage_system_produces_no_cuts() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -677,6 +677,12 @@ fn single_stage_system_produces_no_cuts() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -690,7 +696,8 @@ fn single_stage_system_produces_no_cuts() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -733,15 +740,11 @@ fn two_stage_system_two_trial_points_generates_two_cuts_at_stage_0() {
     let n_stages = 2_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    }; // N=1, L=0
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
-    let n_state = indexer.n_state; // 1
+    let n_state = state.n_state; // 1
     let forward_passes = 2_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
@@ -768,6 +771,7 @@ fn two_stage_system_two_trial_points_generates_two_cuts_at_stage_0() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -776,6 +780,12 @@ fn two_stage_system_two_trial_points_generates_two_cuts_at_stage_0() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -789,7 +799,8 @@ fn two_stage_system_two_trial_points_generates_two_cuts_at_stage_0() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -835,15 +846,11 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
     let n_stages = 2_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
     let forward_passes = 3_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 20, &vec![0; n_stages]);
@@ -867,6 +874,7 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -875,6 +883,12 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -888,7 +902,8 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -932,15 +947,11 @@ fn no_cuts_generated_at_last_stage() {
     let n_stages = 5_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
@@ -962,6 +973,7 @@ fn no_cuts_generated_at_last_stage() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -970,6 +982,12 @@ fn no_cuts_generated_at_last_stage() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -983,7 +1001,8 @@ fn no_cuts_generated_at_last_stage() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1027,15 +1046,11 @@ fn no_cuts_generated_at_last_stage() {
 fn elapsed_ms_is_non_negative() {
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 2);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
@@ -1057,6 +1072,7 @@ fn elapsed_ms_is_non_negative() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1065,6 +1081,12 @@ fn elapsed_ms_is_non_negative() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1078,7 +1100,8 @@ fn elapsed_ms_is_non_negative() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1119,15 +1142,11 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
     // backward solve → SddpError::Infeasible is returned.
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
@@ -1150,6 +1169,7 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1158,6 +1178,12 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1171,7 +1197,8 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1257,15 +1284,11 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
     //   coefficients = [-3.0]
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
@@ -1288,6 +1311,7 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1296,6 +1320,12 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1309,7 +1339,8 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1372,15 +1403,11 @@ fn cut_gradient_sign_physically_correct() {
     //   (more storage → higher cut value → wrong incentive).
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
@@ -1404,6 +1431,7 @@ fn cut_gradient_sign_physically_correct() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1412,6 +1440,12 @@ fn cut_gradient_sign_physically_correct() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1425,7 +1459,8 @@ fn cut_gradient_sign_physically_correct() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1492,15 +1527,11 @@ fn cut_is_tight_at_trial_point() {
     // This test verifies the tightness property.
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
@@ -1525,6 +1556,7 @@ fn cut_is_tight_at_trial_point() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1533,6 +1565,12 @@ fn cut_is_tight_at_trial_point() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1546,7 +1584,8 @@ fn cut_is_tight_at_trial_point() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1602,15 +1641,11 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
     let n_stages = 3_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
     let forward_passes = 2_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
@@ -1632,6 +1667,7 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1640,6 +1676,12 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1653,7 +1695,8 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1707,15 +1750,11 @@ fn forward_pass_index_matches_global_scenario_index() {
     // The key invariant: forward_pass_index = m = 5.
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
     let forward_passes = 6_u32; // 6 scenarios on a single rank
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 20, &vec![0; n_stages]);
@@ -1749,6 +1788,7 @@ fn forward_pass_index_matches_global_scenario_index() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1757,6 +1797,12 @@ fn forward_pass_index_matches_global_scenario_index() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1770,7 +1816,8 @@ fn forward_pass_index_matches_global_scenario_index() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1826,15 +1873,11 @@ fn warm_start_uses_prepopulated_forward_basis() {
     let n_stages = 2_usize;
     let n_openings = 1_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
@@ -1860,6 +1903,7 @@ fn warm_start_uses_prepopulated_forward_basis() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1868,6 +1912,12 @@ fn warm_start_uses_prepopulated_forward_basis() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1881,7 +1931,8 @@ fn warm_start_uses_prepopulated_forward_basis() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1933,15 +1984,11 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
     let n_stages = 2_usize;
     let n_openings = 3_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
@@ -1965,6 +2012,7 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -1973,6 +2021,12 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1986,7 +2040,8 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -2043,15 +2098,11 @@ fn backward_solver_error_propagates() {
     let n_stages = 2_usize;
     let n_openings = 1_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
@@ -2077,6 +2128,7 @@ fn backward_solver_error_propagates() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -2085,6 +2137,12 @@ fn backward_solver_error_propagates() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -2098,7 +2156,8 @@ fn backward_solver_error_propagates() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -2160,15 +2219,11 @@ fn test_backward_pass_parallel_cut_determinism() {
     let n_trial_points = 8_usize;
 
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
     #[allow(clippy::cast_possible_truncation)]
     let forward_passes = n_trial_points as u32;
 
@@ -2203,6 +2258,10 @@ fn test_backward_pass_parallel_cut_determinism() {
             ncs_col_upper_buf: Vec::new(),
             ncs_col_lower_buf: Vec::new(),
             ncs_col_indices_buf: Vec::new(),
+            ncs_col_lower_active_buf: Vec::new(),
+            ncs_col_upper_active_buf: Vec::new(),
+            last_ncs_col_start: usize::MAX,
+            ncs_col_upper_extract_buf: Vec::new(),
             load_rhs_buf: Vec::new(),
             row_lower_buf: Vec::new(),
             z_inflow_rhs_buf: Vec::new(),
@@ -2227,6 +2286,7 @@ fn test_backward_pass_parallel_cut_determinism() {
     }];
     let mut basis_store_1 = empty_basis_store(exchange.local_count(), n_stages);
     let ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &[],
@@ -2235,6 +2295,12 @@ fn test_backward_pass_parallel_cut_determinism() {
         load_balance_row_starts: &[],
         load_bus_indices: &[],
         block_counts_per_stage: &[],
+        ncs_col_starts: &[],
+        n_ncs: 0,
+        ncs_stochastic_dense_col: &[],
+        ncs_stochastic_windows: &[],
+        anticipated_windows: &[],
+        study_stage_ids: &[],
         ncs_max_gen: &[],
         ncs_allow_curtailment: &[],
         discount_factors: &[],
@@ -2253,7 +2319,8 @@ fn test_backward_pass_parallel_cut_determinism() {
         cut_batches: &mut empty_cut_batches(n_stages),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -2304,6 +2371,10 @@ fn test_backward_pass_parallel_cut_determinism() {
                 ncs_col_upper_buf: Vec::new(),
                 ncs_col_lower_buf: Vec::new(),
                 ncs_col_indices_buf: Vec::new(),
+                ncs_col_lower_active_buf: Vec::new(),
+                ncs_col_upper_active_buf: Vec::new(),
+                last_ncs_col_start: usize::MAX,
+                ncs_col_upper_extract_buf: Vec::new(),
                 load_rhs_buf: Vec::new(),
                 row_lower_buf: Vec::new(),
                 z_inflow_rhs_buf: Vec::new(),
@@ -2338,7 +2409,8 @@ fn test_backward_pass_parallel_cut_determinism() {
         cut_batches: &mut empty_cut_batches(n_stages),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -2595,11 +2667,7 @@ fn backward_pass_load_patches_applied() {
     let n_openings = 2_usize;
     // mean_mw=300 guarantees a positive realization for any reasonable eta draw.
     let stochastic = make_stochastic_context_with_load(n_stages, n_openings, 300.0, 30.0);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    }; // N=1, L=0, n_state=1
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
 
     // PatchBuffer: n_hydros=1, max_par_order=0, n_load_buses=1, max_blocks=1.
     let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1, 0, 0);
@@ -2631,7 +2699,7 @@ fn backward_pass_load_patches_applied() {
     let base_rows = vec![1_usize; n_stages];
     let noise_scale = vec![1.0_f64; n_stages]; // one per (stage, hydro)
 
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
@@ -2661,6 +2729,10 @@ fn backward_pass_load_patches_applied() {
             ncs_col_upper_buf: Vec::new(),
             ncs_col_lower_buf: Vec::new(),
             ncs_col_indices_buf: Vec::new(),
+            ncs_col_lower_active_buf: Vec::new(),
+            ncs_col_upper_active_buf: Vec::new(),
+            last_ncs_col_start: usize::MAX,
+            ncs_col_upper_extract_buf: Vec::new(),
             load_rhs_buf: Vec::with_capacity(1),
             row_lower_buf: Vec::new(),
             z_inflow_rhs_buf: Vec::new(),
@@ -2698,6 +2770,7 @@ fn backward_pass_load_patches_applied() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &noise_scale,
@@ -2706,6 +2779,12 @@ fn backward_pass_load_patches_applied() {
             load_balance_row_starts: &load_balance_row_starts,
             load_bus_indices: &load_bus_indices,
             block_counts_per_stage: &block_counts_per_stage,
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -2719,7 +2798,8 @@ fn backward_pass_load_patches_applied() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -2774,11 +2854,7 @@ fn backward_pass_no_load_buses_unchanged() {
     let n_stages = 2_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    }; // N=1, L=0
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
 
     // PatchBuffer with no load buses: n_load_buses=0, max_blocks=1.
     let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 0, 0, 0, 0);
@@ -2807,7 +2883,7 @@ fn backward_pass_no_load_buses_unchanged() {
     let base_rows = vec![1_usize; n_stages];
     let noise_scale = vec![1.0_f64; n_stages];
 
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
@@ -2835,6 +2911,10 @@ fn backward_pass_no_load_buses_unchanged() {
             ncs_col_upper_buf: Vec::new(),
             ncs_col_lower_buf: Vec::new(),
             ncs_col_indices_buf: Vec::new(),
+            ncs_col_lower_active_buf: Vec::new(),
+            ncs_col_upper_active_buf: Vec::new(),
+            last_ncs_col_start: usize::MAX,
+            ncs_col_upper_extract_buf: Vec::new(),
             load_rhs_buf: Vec::new(),
             row_lower_buf: Vec::new(),
             z_inflow_rhs_buf: Vec::new(),
@@ -2866,6 +2946,7 @@ fn backward_pass_no_load_buses_unchanged() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &noise_scale,
@@ -2874,6 +2955,12 @@ fn backward_pass_no_load_buses_unchanged() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1_usize; 2],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -2887,7 +2974,8 @@ fn backward_pass_no_load_buses_unchanged() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -2944,11 +3032,7 @@ fn backward_pass_cut_coefficients_unaffected() {
     let n_stages = 2_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context_with_load(n_stages, n_openings, 200.0, 20.0);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    }; // N=1, L=0, n_state=1
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
 
     let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1, 0, 0);
 
@@ -2976,7 +3060,7 @@ fn backward_pass_cut_coefficients_unaffected() {
     let base_rows = vec![1_usize; n_stages];
     let noise_scale = vec![1.0_f64; n_stages];
 
-    let n_state = indexer.n_state; // 1
+    let n_state = state.n_state; // 1
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
@@ -3004,6 +3088,10 @@ fn backward_pass_cut_coefficients_unaffected() {
             ncs_col_upper_buf: Vec::new(),
             ncs_col_lower_buf: Vec::new(),
             ncs_col_indices_buf: Vec::new(),
+            ncs_col_lower_active_buf: Vec::new(),
+            ncs_col_upper_active_buf: Vec::new(),
+            last_ncs_col_start: usize::MAX,
+            ncs_col_upper_extract_buf: Vec::new(),
             load_rhs_buf: Vec::with_capacity(1),
             row_lower_buf: Vec::new(),
             z_inflow_rhs_buf: Vec::new(),
@@ -3039,6 +3127,7 @@ fn backward_pass_cut_coefficients_unaffected() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &noise_scale,
@@ -3047,6 +3136,12 @@ fn backward_pass_cut_coefficients_unaffected() {
             load_balance_row_starts: &load_balance_row_starts,
             load_bus_indices: &load_bus_indices,
             block_counts_per_stage: &block_counts_per_stage,
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -3060,7 +3155,8 @@ fn backward_pass_cut_coefficients_unaffected() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -3132,15 +3228,11 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
     let n_stages = 4_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
     let forward_passes = 3_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 20, &vec![0; n_stages]);
@@ -3162,6 +3254,7 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -3170,6 +3263,12 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -3183,7 +3282,8 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -3260,15 +3360,11 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
     let n_stages = 3_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
     let forward_passes = 3_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 20, &vec![0; n_stages]);
@@ -3294,6 +3390,7 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -3302,6 +3399,12 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -3315,7 +3418,8 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -3397,14 +3501,10 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
     let local_work = 6_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
-    let n_state = indexer.n_state; // 1
+    let n_state = state.n_state; // 1
 
     // Use forward_passes = local_work so the FCF pool is large enough for
     // all trial points in a single iteration (iteration 0, slots 0..5).
@@ -3446,6 +3546,10 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
                 ncs_col_upper_buf: Vec::new(),
                 ncs_col_lower_buf: Vec::new(),
                 ncs_col_indices_buf: Vec::new(),
+                ncs_col_lower_active_buf: Vec::new(),
+                ncs_col_upper_active_buf: Vec::new(),
+                last_ncs_col_start: usize::MAX,
+                ncs_col_upper_extract_buf: Vec::new(),
                 load_rhs_buf: Vec::new(),
                 row_lower_buf: Vec::new(),
                 z_inflow_rhs_buf: Vec::new(),
@@ -3478,6 +3582,7 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -3486,6 +3591,12 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -3499,7 +3610,8 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -3772,14 +3884,10 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
     let n_workers = 2_usize;
     let local_work = 4_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
 
     let solution = solution_1_0(100.0, -5.0);
     let states: Vec<Vec<f64>> = (0..local_work).map(|i| vec![(i + 1) as f64]).collect();
@@ -3807,6 +3915,10 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
                 ncs_col_upper_buf: Vec::new(),
                 ncs_col_lower_buf: Vec::new(),
                 ncs_col_indices_buf: Vec::new(),
+                ncs_col_lower_active_buf: Vec::new(),
+                ncs_col_upper_active_buf: Vec::new(),
+                last_ncs_col_start: usize::MAX,
+                ncs_col_upper_extract_buf: Vec::new(),
                 load_rhs_buf: Vec::new(),
                 row_lower_buf: Vec::new(),
                 z_inflow_rhs_buf: Vec::new(),
@@ -3840,6 +3952,7 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -3848,6 +3961,12 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -3861,7 +3980,8 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -3995,14 +4115,10 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
     let n_workers = 1_usize;
     let local_work = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
 
     let solution = solution_1_0(100.0, -5.0);
     let states: Vec<Vec<f64>> = (0..local_work).map(|i| vec![(i + 1) as f64]).collect();
@@ -4030,6 +4146,10 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
                 ncs_col_upper_buf: Vec::new(),
                 ncs_col_lower_buf: Vec::new(),
                 ncs_col_indices_buf: Vec::new(),
+                ncs_col_lower_active_buf: Vec::new(),
+                ncs_col_upper_active_buf: Vec::new(),
+                last_ncs_col_start: usize::MAX,
+                ncs_col_upper_extract_buf: Vec::new(),
                 load_rhs_buf: Vec::new(),
                 row_lower_buf: Vec::new(),
                 z_inflow_rhs_buf: Vec::new(),
@@ -4063,6 +4183,7 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -4071,6 +4192,12 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -4084,7 +4211,8 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -4157,11 +4285,7 @@ fn run_one_trial_point_with_stores(
     let n_openings = 1_usize;
     let n_state = 1_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let indexer = {
-        let mut ix = StageIndexer::new(n_state, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(n_state, 0);
 
     let solver = MockSolver::always_ok(solution_1_0(100.0, -5.0));
     let mut workspaces = single_workspace(solver, n_state);
@@ -4186,6 +4310,7 @@ fn run_one_trial_point_with_stores(
     ]));
     let base_rows: &'static _ = Box::leak(Box::new(vec![1_usize, 1_usize]));
     let ctx: StageContext<'static> = StageContext {
+        geometry_per_stage: &[],
         templates,
         base_rows,
         noise_scale: Box::leak(Box::new(vec![])),
@@ -4194,6 +4319,12 @@ fn run_one_trial_point_with_stores(
         load_balance_row_starts: Box::leak(Box::new(vec![])),
         load_bus_indices: Box::leak(Box::new(vec![])),
         block_counts_per_stage: Box::leak(Box::new(vec![])),
+        ncs_col_starts: &[],
+        n_ncs: 0,
+        ncs_stochastic_dense_col: &[],
+        ncs_stochastic_windows: &[],
+        anticipated_windows: &[],
+        study_stage_ids: &[],
         ncs_max_gen: Box::leak(Box::new(vec![])),
         ncs_allow_curtailment: Box::leak(Box::new(vec![])),
         discount_factors: Box::leak(Box::new(vec![])),
@@ -4207,9 +4338,11 @@ fn run_one_trial_point_with_stores(
         num_stages: n_stages,
     };
     let risk_measures = vec![RiskMeasure::Expectation; n_stages];
+    let study_dims = crate::indexer::test_fixtures::study_dims();
     let training_ctx = TrainingContext {
         horizon: &horizon,
-        indexer: &indexer,
+        state: &state,
+        study_dims: &study_dims,
         inflow_method: &InflowNonNegativityMethod::None,
         stochastic: &stochastic,
         initial_state: &[],
@@ -4444,14 +4577,10 @@ fn handshake_passes_with_local_backend() {
     let n_stages = 1_usize;
     let n_workers = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0()];
     let base_rows = vec![1_usize];
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
@@ -4480,6 +4609,10 @@ fn handshake_passes_with_local_backend() {
                 ncs_col_upper_buf: Vec::new(),
                 ncs_col_lower_buf: Vec::new(),
                 ncs_col_indices_buf: Vec::new(),
+                ncs_col_lower_active_buf: Vec::new(),
+                ncs_col_upper_active_buf: Vec::new(),
+                last_ncs_col_start: usize::MAX,
+                ncs_col_upper_extract_buf: Vec::new(),
                 load_rhs_buf: Vec::new(),
                 row_lower_buf: Vec::new(),
                 z_inflow_rhs_buf: Vec::new(),
@@ -4512,6 +4645,7 @@ fn handshake_passes_with_local_backend() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -4520,6 +4654,12 @@ fn handshake_passes_with_local_backend() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -4533,7 +4673,8 @@ fn handshake_passes_with_local_backend() {
         cut_batches: &mut empty_cut_batches(n_stages),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -4643,14 +4784,10 @@ fn handshake_rejects_nonuniform_workers() {
 
     let n_stages = 1_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let templates = vec![minimal_template_1_0()];
     let base_rows = vec![1_usize];
-    let n_state = indexer.n_state;
+    let n_state = state.n_state;
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
@@ -4671,6 +4808,7 @@ fn handshake_rejects_nonuniform_workers() {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
+            geometry_per_stage: &[],
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[],
@@ -4679,6 +4817,12 @@ fn handshake_rejects_nonuniform_workers() {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -4692,7 +4836,8 @@ fn handshake_rejects_nonuniform_workers() {
         cut_batches: &mut empty_cut_batches(n_stages),
         training_ctx: &TrainingContext {
             horizon: &horizon,
-            indexer: &indexer,
+            state: &state,
+            study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -4747,52 +4892,18 @@ fn handshake_rejects_nonuniform_workers() {
     }
 }
 
-/// Minimal anticipated `StageIndexer` for sign-convention tests.
-fn make_anticipated_indexer_local(
-    n_anticipated: usize,
-    k_max: usize,
-    anticipated_lead_stages: Vec<usize>,
-) -> StageIndexer {
-    use crate::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout};
-    let mut indexer = StageIndexer::with_equipment_and_evaporation(
-        &EquipmentCounts {
-            hydro_count: 0,
-            max_par_order: 0,
-            n_thermals: 0,
-            n_lines: 0,
-            n_buses: 1,
-            n_blks: 1,
-            has_inflow_penalty: false,
-            max_deficit_segments: 1,
-            n_anticipated,
-            k_max,
-            anticipated_lead_stages,
-            anticipated_thermal_indices: (0..n_anticipated).collect(),
-        },
-        &FphaColumnLayout {
-            hydro_indices: vec![],
-            planes_per_hydro: vec![],
-        },
-        &EvapConfig {
-            hydro_indices: vec![],
-        },
-    );
-    // Finalize the nonzero-state mask + state_to_lp_column map as production
-    // setup does, so the indexer can drive the mask-only forward cut-row loop.
-    indexer.finalize_for_test();
-    indexer
-}
-
-/// Verify cut sign convention: dual 7.5 → batch -7.5 at correct column.
+/// Verify cut sign convention: the matured anticipated slot's coefficient 7.5 is
+/// negated to -7.5 at the cut-target column. Drives the cut-row builder against a
+/// finalized anticipated [`StateLayout`] (the role-(a) owner of the resolver).
 #[test]
 fn cut_coefficient_sign_convention_slot_zero_k2() {
-    let indexer = make_anticipated_indexer_local(1, 2, vec![2]);
-    assert_eq!(indexer.anticipated_state.start, 0);
-    assert_eq!(indexer.n_state, 2);
+    let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 2, vec![2]);
+    assert_eq!(state.anticipated_state.start, 0);
+    assert_eq!(state.n_state, 2);
 
-    let mut fcf = FutureCostFunction::new(3, indexer.n_state, 1, 10, &[0; 3]);
-    let mut coefficients = vec![0.0_f64; indexer.n_state];
-    coefficients[indexer.anticipated_state.start] = 7.5;
+    let mut fcf = FutureCostFunction::new(3, state.n_state, 1, 10, &[0; 3]);
+    let mut coefficients = vec![0.0_f64; state.n_state];
+    coefficients[state.anticipated_state.start] = 7.5;
     fcf.add_cut(1, 0, 0, 0.0, &coefficients);
 
     let mut batch = RowBatch {
@@ -4803,9 +4914,11 @@ fn cut_coefficient_sign_convention_slot_zero_k2() {
         row_lower: Vec::new(),
         row_upper: Vec::new(),
     };
-    crate::cut::row::build_cut_row_batch_into(&mut batch, &fcf, 1, &indexer, &[]);
+    crate::cut::row::build_cut_row_batch_into(&mut batch, &fcf, 1, &state, &[]);
 
-    let lp_col = indexer.state_to_lp_column(indexer.anticipated_state.start);
+    // Slot 0 (j = anticipated_state.start) is the matured slot (K=2, slot+1==K via
+    // the Equal branch), so it maps to anticipated_state_out.start == 1.
+    let lp_col = state.state_to_lp_column(state.anticipated_state.start);
     assert_eq!(lp_col, 1);
 
     let pos = batch
@@ -4813,11 +4926,9 @@ fn cut_coefficient_sign_convention_slot_zero_k2() {
         .iter()
         .position(|&c| c == lp_col as i32)
         .expect("lp_col must appear in batch.col_indices");
-
-    assert!(
-        (batch.values[pos] - (-7.5_f64)).abs() < f64::EPSILON,
-        "expected batch.values[pos]=-7.5 for lp_col={lp_col}, got {}",
-        batch.values[pos]
+    assert_eq!(
+        batch.values[pos], -7.5,
+        "stored subgradient 7.5 must be negated to -7.5 in the cut row"
     );
 }
 
@@ -4831,7 +4942,7 @@ use crate::lp_builder::PatchBuffer;
 use crate::workspace::WorkspaceSizing;
 use cobre_solver::ActiveSolver;
 
-/// Cut-free successor core for `StageIndexer::new(1, 0)`:
+/// Cut-free successor core for a 1-hydro, no-lag stage:
 /// columns `[storage_out=0, z_inflow=1, storage_in=2, theta=3]`.
 /// Minimize `theta`. `patch_opening_bounds` pins `storage_in` (col 2, the
 /// incoming-state column) to `x_hat`. A single coupling row
@@ -4945,12 +5056,8 @@ fn run_dcs_backward_trial_point_at(
     iteration: u64,
     x_hat: f64,
 ) -> (super::StagedCut, Vec<f64>, Vec<u64>) {
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
-    let n_state = indexer.n_state;
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let n_state = state.n_state;
     let core = dcs_core_template();
     let templates = vec![core.clone(), core.clone()];
     let base_rows = vec![0_usize, 0_usize];
@@ -4960,7 +5067,7 @@ fn run_dcs_backward_trial_point_at(
 
     let mut fcf = dcs_two_stage_fcf();
     // All-cuts batch for the baked path (delta == all cuts here).
-    let cut_batch = crate::cut::row::build_cut_row_batch(&fcf, 1, &indexer, &[]);
+    let cut_batch = crate::cut::row::build_cut_row_batch(&fcf, 1, &state, &[]);
     let successor_active_slots: Vec<usize> = (0..fcf.pools[1].populated_count).collect();
     let num_cuts = successor_active_slots.len();
 
@@ -4969,6 +5076,7 @@ fn run_dcs_backward_trial_point_at(
     let mut basis_store = empty_basis_store(exchange.local_count(), 2);
 
     let ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &[],
@@ -4977,6 +5085,12 @@ fn run_dcs_backward_trial_point_at(
         load_balance_row_starts: &[],
         load_bus_indices: &[],
         block_counts_per_stage: &[],
+        ncs_col_starts: &[],
+        n_ncs: 0,
+        ncs_stochastic_dense_col: &[],
+        ncs_stochastic_windows: &[],
+        anticipated_windows: &[],
+        study_stage_ids: &[],
         ncs_max_gen: &[],
         ncs_allow_curtailment: &[],
         discount_factors: &[],
@@ -4985,9 +5099,11 @@ fn run_dcs_backward_trial_point_at(
         noise_group_ids: &[],
         downstream_par_order: 0,
     };
+    let study_dims = crate::indexer::test_fixtures::study_dims();
     let training_ctx = TrainingContext {
         horizon: &horizon,
-        indexer: &indexer,
+        state: &state,
+        study_dims: &study_dims,
         inflow_method: &InflowNonNegativityMethod::None,
         stochastic: &stochastic,
         initial_state: &[],
@@ -5416,12 +5532,8 @@ fn dcs_baked_template_with_one_cut() -> StageTemplate {
 #[test]
 fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
     let iteration = 5;
-    let indexer = {
-        let mut ix = StageIndexer::new(1, 0);
-        ix.finalize_for_test();
-        ix
-    };
-    let n_state = indexer.n_state;
+    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let n_state = state.n_state;
 
     // Cut-free base (loaded by the DCS path) and the baked successor
     // template that carries the binding cut as a structural row.
@@ -5439,7 +5551,7 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
     // binding cut, the delta is the remaining (non-baked) cuts. For the DCS
     // exactness comparison we only need the all-cuts reference, computed
     // from the full pool against the cut-free base below.
-    let cut_batch = crate::cut::row::build_cut_row_batch(&fcf, 1, &indexer, &[]);
+    let cut_batch = crate::cut::row::build_cut_row_batch(&fcf, 1, &state, &[]);
     let successor_active_slots: Vec<usize> = (0..fcf.pools[1].populated_count).collect();
     let num_cuts = successor_active_slots.len();
 
@@ -5448,6 +5560,7 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
     let mut basis_store = empty_basis_store(exchange.local_count(), 2);
 
     let ctx = StageContext {
+        geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
         noise_scale: &[],
@@ -5456,6 +5569,12 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
         load_balance_row_starts: &[],
         load_bus_indices: &[],
         block_counts_per_stage: &[],
+        ncs_col_starts: &[],
+        n_ncs: 0,
+        ncs_stochastic_dense_col: &[],
+        ncs_stochastic_windows: &[],
+        anticipated_windows: &[],
+        study_stage_ids: &[],
         ncs_max_gen: &[],
         ncs_allow_curtailment: &[],
         discount_factors: &[],
@@ -5464,9 +5583,11 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
         noise_group_ids: &[],
         downstream_par_order: 0,
     };
+    let study_dims = crate::indexer::test_fixtures::study_dims();
     let training_ctx = TrainingContext {
         horizon: &horizon,
-        indexer: &indexer,
+        state: &state,
+        study_dims: &study_dims,
         inflow_method: &InflowNonNegativityMethod::None,
         stochastic: &stochastic,
         initial_state: &[],

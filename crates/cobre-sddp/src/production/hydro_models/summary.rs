@@ -13,27 +13,11 @@ use super::types::{
 };
 // ── Summary builder ───────────────────────────────────────────────────────────
 
-/// Build a [`HydroModelSummary`] from the pipeline result and the system.
+/// Build a [`HydroModelSummary`] from the pipeline result and the system;
+/// infallible (all fields derive from the already-validated inputs).
 ///
-/// Called after the hydro model preprocessing pipeline completes and before
-/// training starts. All fields are derived from the already-validated inputs;
-/// construction is infallible.
-///
-/// # Counting logic
-///
-/// - `n_constant`: hydros whose production provenance is
-///   [`ProductionModelSource::DefaultConstant`].
-/// - `n_fpha`: hydros whose production provenance is
-///   [`ProductionModelSource::PrecomputedHyperplanes`] or
-///   [`ProductionModelSource::ComputedFromGeometry`].
-/// - `total_planes`: sum of plane counts from the first study stage across all
-///   FPHA hydros. Stages beyond the first use the same hyperplanes in the
-///   common case; the first stage is taken as representative for display.
-/// - `fpha_details`: one [`FphaHydroDetail`] per FPHA hydro in canonical order.
-/// - `n_evaporation`: hydros whose evaporation provenance is
-///   [`EvaporationSource::LinearizedFromGeometry`].
-/// - `n_no_evaporation`: hydros whose evaporation provenance is
-///   [`EvaporationSource::NotModeled`].
+/// `total_planes` sums plane counts from the first study stage only — taken as
+/// representative for display.
 #[must_use]
 pub fn build_hydro_model_summary(
     result: &PrepareHydroModelsResult,
@@ -44,9 +28,7 @@ pub fn build_hydro_model_summary(
     let mut total_planes = 0usize;
     let mut fpha_details: Vec<FphaHydroDetail> = Vec::new();
 
-    // Plane counts are read from the first study stage (id >= 0); skip if none exist.
     let has_study_stage = system.stages().iter().any(|s| s.id >= 0);
-    // Production models are indexed by hydro position within `system.hydros()`.
     let representative_stage = 0usize;
 
     for (hydro_pos, (entity_id, source)) in result.provenance.production_sources.iter().enumerate()
@@ -92,14 +74,15 @@ pub fn build_hydro_model_summary(
     for (_, source) in &result.provenance.evaporation_sources {
         match source {
             EvaporationSource::LinearizedFromGeometry => n_evaporation += 1,
-            EvaporationSource::NotModeled => n_no_evaporation += 1,
+            EvaporationSource::NotModeled | EvaporationSource::DisabledNoArea => {
+                n_no_evaporation += 1;
+            }
         }
     }
 
     let mut n_user_supplied_ref = 0usize;
     let mut n_default_midpoint_ref = 0usize;
 
-    // Count reference source only for hydros that actually have evaporation.
     for ((_, evap_src), (_, ref_src)) in result
         .provenance
         .evaporation_sources

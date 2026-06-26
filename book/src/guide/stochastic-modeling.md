@@ -16,7 +16,9 @@ The stochastic models are driven by historical statistics provided by the user
 in the `scenarios/` directory of the case. If no `scenarios/` directory is
 present, Cobre falls back to white-noise generation using only the stage
 definitions in `stages.json`. For any study with real hydro plants, providing
-historical inflow statistics is strongly recommended.
+historical inflow statistics gives the PAR(p) model the seasonal means, standard
+deviations, and AR structure it needs; without it, Cobre falls back to white
+noise, which does not reflect real inflow dynamics.
 
 ---
 
@@ -161,7 +163,7 @@ that reflect the seasonal autocorrelation structure. A wet period is
 followed by another wet period with the probability implied by the
 coefficients. Higher AR orders capture longer-range dependencies: order 1
 captures month-to-month persistence, order 2 adds two-month memory, and so
-on. Most hydro inflow series are well-described by order 1 or 2.
+on. Monthly inflow series often show strong order-1 or order-2 autocorrelation; validate against your data.
 
 ### AR coefficients file
 
@@ -650,7 +652,7 @@ many scenario branches are pre-generated for the opening scenario tree used
 during the backward pass. A larger value gives the backward pass more
 diverse inflow realizations to evaluate cuts against, at the cost of a
 proportionally larger opening tree in memory. For the `1dtoy` example this
-is set to 10. Production studies typically use 50 to 200.
+is set to 10. Larger values increase scenario-tree diversity at proportional memory cost.
 
 ### `forward_passes` in `config.json`
 
@@ -755,11 +757,10 @@ uniformity: when you project all `N` noise vectors onto any single dimension,
 the resulting samples cover the entire range of the standard-normal
 distribution uniformly, with no stratum left empty.
 
-LHS is the recommended choice for moderate branching factors (50 to 200
-scenarios per stage). It reduces the variance of sample-average estimates
-compared to SAA for the same `N`, which typically means a better-converged
-backward-pass cut approximation for the same computational budget. LHS works
-for any dimension count.
+LHS reduces the variance of sample-average estimates compared to SAA for the
+same `N`, which typically means a better-converged backward-pass cut
+approximation for the same computational budget. It is well-suited to moderate
+branching factors and works for any dimension count.
 
 Configure LHS by setting `"sampling_method": "lhs"` in the stage entry.
 
@@ -902,8 +903,8 @@ and Halton fill the space with low-discrepancy sequences.
 | Method              | Convergence rate  | Dimension limit | Scenario count            | Best for                                        |
 | ------------------- | ----------------- | --------------- | ------------------------- | ----------------------------------------------- |
 | SAA                 | O(N^{-1/2})       | None            | Any                       | General use, small branching factors            |
-| LHS                 | Better than SAA   | None            | Any (50–200 typical)      | Moderate scenario counts, any dimension         |
-| QMC-Sobol           | O(N^{-1} log^d N) | 21,201          | Powers of 2 preferred     | Best convergence, low-to-medium dimension       |
+| LHS                 | Lower variance than SAA (same order) | None | Any          | Moderate scenario counts, any dimension         |
+| QMC-Sobol           | O(N^{-1} log^d N) | 21,201          | Powers of 2 preferred     | Faster asymptotic convergence for smooth integrands, low-to-medium dimension |
 | QMC-Halton          | O(N^{-1} log^d N) | None            | Any                       | High-dimension alternative to Sobol             |
 | HistoricalResiduals | N/A (empirical)   | None            | Limited by history length | Preserving empirical correlation, short history |
 | Selective           | N/A               | N/A             | N/A                       | Not implemented; reserved for future use        |
@@ -1320,8 +1321,7 @@ balance constraint. The penalty cost is configurable via the
 high enough that the slack is used only when necessary.
 
 In practice, the penalty is rarely activated in well-specified studies. It acts
-as a backstop for low-probability tail realisations. This method is
-**Recommended** for production use.
+as a backstop for low-probability tail realisations. It is the default method.
 
 ### Truncation method
 
@@ -1389,7 +1389,7 @@ sub-monthly stages (for example, four weekly stages all assigned
 `season_id = 3` for April) does not create additional information — it
 reproduces the same monthly-scale noise for each week.
 
-**The honest representation principle.** Sub-monthly stages sharing a
+**Why sub-monthly stages share noise.** Sub-monthly stages sharing a
 `season_id` receive the same PAR parameters and, for the HistoricalResiduals
 noise method, the same noise realizations. This is not a limitation of the
 implementation — it is an honest representation of what monthly-resolution

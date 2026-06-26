@@ -17,14 +17,6 @@
 //!
 //! This module defines only the structural types — it contains no I/O, no
 //! resolution logic, and no LP wiring.
-//!
-//! # Future work
-//!
-//! The [`ComputedParameter`] enum currently supports seven hydro-indexed
-//! quantities. Two duration-based variants — `Computed(BlockDuration)` and
-//! `Computed(StageDuration)` — are deferred. When added, they will carry no
-//! entity ID (they are study-level scalars), so a new variant shape will be
-//! required.
 
 use crate::EntityId;
 
@@ -199,10 +191,8 @@ pub enum ComputedParameter {
 ///     ParameterKind::Seasonal { values: vec![(1, 0.5), (2, 1.5)] }
 /// );
 /// ```
-// Serialization: derive Serialize with the `into` shim so the JSON wire format
-// uses `ParameterKindJson` (which carries `PerStage` as `[[stage_id, value], ...]`).
-// Deserialization: NOT derived here; a manual `impl Deserialize` below applies
-// the PerStage contiguity-from-0 validation before accepting the value.
+// Deserialize is NOT derived: the manual impl below applies the PerStage
+// contiguity-from-0 validation that `#[serde(from = ...)]` could not surface.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(into = "ParameterKindJson"))]
@@ -297,17 +287,8 @@ pub struct ScalarParameter {
     pub kind: ParameterKind,
 }
 
-// ── Serde shim: ParameterKindJson ─────────────────────────────────────────────
-//
-// `ParameterKind::PerStage` stores a dense `Vec<f64>` in memory but the JSON
-// form uses `[[stage_id, value], ...]` pairs.  The other three variants have
-// identical in-memory and JSON shapes.  `ParameterKindJson` is a private
-// serde-only intermediate that carries `PerStage` as `Vec<(i32, f64)>`.
-//
-// The `#[serde(into = "ParameterKindJson")]` attribute on `ParameterKind`
-// routes serialization through this shim so the public type is never exposed
-// in serde output; deserialization goes through the manual `Deserialize` impl
-// below, which also deserializes via `ParameterKindJson`.
+// Serde intermediate: `PerStage` is a dense `Vec<f64>` in memory but
+// `[[stage_id, value], ...]` on the wire; the other variants are shape-identical.
 
 #[cfg(feature = "serde")]
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -329,8 +310,7 @@ impl From<ParameterKind> for ParameterKindJson {
                     .into_iter()
                     .enumerate()
                     .map(|(i, v)| {
-                        // Stage counts are always < i32::MAX in practice;
-                        // saturate rather than panic on a theoretically impossible overflow.
+                        // saturate rather than panic on the impossible >i32::MAX stage count
                         (i32::try_from(i).unwrap_or(i32::MAX), v)
                     })
                     .collect(),
@@ -343,18 +323,8 @@ impl From<ParameterKind> for ParameterKindJson {
     }
 }
 
-// ── Manual Deserialize impl for ParameterKind ────────────────────────────────
-//
-// We cannot use `#[serde(from = "ParameterKindJson")]` for deserialization
-// because `From<ParameterKindJson> for ParameterKind` cannot return a serde
-// error — `From` is infallible.  The PerStage contiguity validation requires
-// surfacing an error during deserialization.
-//
-// The manual impl:
-//   1. Deserializes `ParameterKindJson` (which handles the JSON tag + shape).
-//   2. Validates the PerStage pairs (sort, check no duplicate keys, check
-//      contiguity from 0, then convert to dense Vec<f64>).
-//   3. Constructs the appropriate ParameterKind variant.
+// Manual (not `#[serde(from = "ParameterKindJson")]`): infallible `From` cannot
+// surface the PerStage contiguity/duplicate-key error this validation requires.
 
 #[cfg(feature = "serde")]
 impl<'de> serde::Deserialize<'de> for ParameterKind {
@@ -366,10 +336,8 @@ impl<'de> serde::Deserialize<'de> for ParameterKind {
         match json {
             ParameterKindJson::Constant { value } => Ok(ParameterKind::Constant { value }),
             ParameterKindJson::PerStage { mut values } => {
-                // Sort ascending by stage_id for deterministic validation.
                 values.sort_by_key(|(k, _)| *k);
 
-                // Check for duplicate stage_ids.
                 for window in values.windows(2) {
                     if window[0].0 == window[1].0 {
                         return Err(serde::de::Error::custom(format!(
@@ -379,7 +347,6 @@ impl<'de> serde::Deserialize<'de> for ParameterKind {
                     }
                 }
 
-                // Check that stage_ids form a contiguous range starting at 0.
                 for (expected, (actual, _)) in values.iter().enumerate() {
                     let expected_i32 = i32::try_from(expected).unwrap_or(i32::MAX);
                     if *actual != expected_i32 {
@@ -390,13 +357,11 @@ impl<'de> serde::Deserialize<'de> for ParameterKind {
                     }
                 }
 
-                // Convert to dense Vec<f64>.
                 let dense: Vec<f64> = values.into_iter().map(|(_, v)| v).collect();
                 Ok(ParameterKind::PerStage { values: dense })
             }
             ParameterKindJson::Seasonal { values } => {
-                // Reject duplicate season_ids explicitly before calling new_seasonal,
-                // which silently dedups.  Duplicates in authored JSON are errors.
+                // new_seasonal silently dedups; reject duplicate season_ids first.
                 let mut seen: std::collections::HashSet<i32> = std::collections::HashSet::new();
                 for &(season_id, _) in &values {
                     if !seen.insert(season_id) {
@@ -416,10 +381,9 @@ impl<'de> serde::Deserialize<'de> for ParameterKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{CoefficientRef, ComputedParameter, EntityId, ParameterKind};
-    // `ScalarParameter` is used only by the serde round-trip tests below.
     #[cfg(feature = "serde")]
     use super::ScalarParameter;
+    use super::{CoefficientRef, ComputedParameter, EntityId, ParameterKind};
 
     #[test]
     fn seven_computed_parameter_variants() {
@@ -453,7 +417,7 @@ mod tests {
             "ComputedParameter must have exactly 7 variants"
         );
 
-        // Exhaustive match — no _ arm — compile error if a variant is added without updating here.
+        // No `_` arm: adding a variant without updating here is a compile error.
         for variant in &variants {
             let _name = match variant {
                 ComputedParameter::EquivalentProductivity { .. } => "EquivalentProductivity",
@@ -484,7 +448,7 @@ mod tests {
             },
         ];
 
-        // Exhaustive match — no _ arm — compile error if a variant is added without updating here.
+        // No `_` arm: adding a variant without updating here is a compile error.
         for variant in &variants {
             let _name = match variant {
                 ParameterKind::Constant { .. } => "Constant",
@@ -497,7 +461,6 @@ mod tests {
 
     #[test]
     fn seasonal_constructor_sorts_and_dedups() {
-        // Key 1 appears twice; first occurrence (0.5) must be kept.
         let input = vec![(3, 1.5), (1, 0.5), (1, 0.9), (2, 1.0)];
         let result = ParameterKind::new_seasonal(input);
         assert_eq!(
@@ -588,7 +551,6 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn parameter_kind_per_stage_rejects_non_contiguous_stage_ids() {
-        // stage_id 1 is missing — the range [0, 2] is not contiguous.
         let json = r#"{"kind":"per_stage","values":[[0,1.0],[2,0.9]]}"#;
         let result: Result<ParameterKind, _> = serde_json::from_str(json);
         assert!(
@@ -600,7 +562,6 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn parameter_kind_seasonal_rejects_duplicate_season_id_via_serde() {
-        // season_id 1 appears twice — must be rejected with "duplicate season_id 1".
         let json = r#"{"kind":"seasonal","values":[[1,0.5],[1,0.9],[2,1.0]]}"#;
         let result: Result<ParameterKind, _> = serde_json::from_str(json);
         let err = result.expect_err("expected an error for duplicate season_id");

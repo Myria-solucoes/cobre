@@ -1,10 +1,5 @@
-//! Integration tests validating LHS statistical properties and correctness.
-//!
-//! Exercises `NoiseMethod::Lhs` through the full `generate_opening_tree`
-//! pipeline and verifies six properties that cannot be tested in unit tests:
-//! marginal uniformity, stratum collision absence, normal marginal statistics,
-//! correlation application, declaration-order invariance, and point-wise
-//! cross-path stratum consistency.
+//! Integration tests validating LHS statistical properties through the full
+//! `generate_opening_tree` pipeline (`NoiseMethod::Lhs`).
 
 #![allow(
     clippy::unwrap_used,
@@ -55,7 +50,6 @@ fn approx_erf(x: f64) -> f64 {
     sign * (1.0 - poly * (-x * x).exp())
 }
 
-/// Standard normal CDF approximation: `Φ(z) = 0.5 * (1 + erf(z / √2))`.
 fn norm_cdf(z: f64) -> f64 {
     0.5 * (1.0 + approx_erf(z / std::f64::consts::SQRT_2))
 }
@@ -85,7 +79,7 @@ fn make_stage_lhs(index: usize, id: i32, branching_factor: usize) -> Stage {
     }
 }
 
-/// Build a `Stage` without blocks (for use with `generate_opening_tree` directly).
+/// No blocks — for direct use with `generate_opening_tree`.
 fn make_stage_lhs_no_block(index: usize, id: i32, branching_factor: usize) -> Stage {
     Stage {
         index,
@@ -266,7 +260,6 @@ fn make_inflow_model(hydro_id: i32, stage_id: i32) -> InflowModel {
     }
 }
 
-/// Build a `StochasticContext` with LHS stages and the given hydro list.
 fn build_lhs_context(
     hydros: Vec<Hydro>,
     n_openings: usize,
@@ -320,13 +313,6 @@ fn build_lhs_context(
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Verify marginal uniformity: for N=100 openings and dim=5, after applying the
-/// forward normal CDF Φ to each output value and computing `floor(Φ(x) * N)`,
-/// each dimension yields exactly one sample per stratum (a permutation of 0..N).
-///
-/// This confirms the LHS stratification property holds end-to-end through
-/// `generate_opening_tree` — the output noise values encode exactly one stratum
-/// per dimension per opening.
 #[test]
 fn lhs_marginal_uniformity() {
     let n = 100_usize;
@@ -379,12 +365,6 @@ fn lhs_marginal_uniformity() {
     }
 }
 
-/// Verify that no two openings occupy the same stratum in any dimension.
-///
-/// For a valid LHS design each stratum `[k/N, (k+1)/N)` must be occupied by
-/// exactly one sample per dimension. This test checks the absence of stratum
-/// collisions directly, which is equivalent to marginal uniformity but is
-/// expressed as a set uniqueness check rather than a permutation check.
 #[test]
 fn lhs_no_stratum_collision() {
     let n = 80_usize;
@@ -429,12 +409,6 @@ fn lhs_no_stratum_collision() {
     }
 }
 
-/// Verify that LHS produces standard-normal marginal statistics for large N.
-///
-/// For N=1000 openings and dim=1, the sample mean must be within 0.1 of 0.0
-/// and the sample standard deviation within 0.1 of 1.0. LHS improves on pure
-/// Monte Carlo by ensuring full stratum coverage, which typically tightens the
-/// convergence to the target distribution.
 #[test]
 fn lhs_normal_statistics() {
     let n = 1000_usize;
@@ -478,12 +452,6 @@ fn lhs_normal_statistics() {
     );
 }
 
-/// Verify that spatial correlation is correctly applied to LHS noise.
-///
-/// With a 2×2 correlation matrix with off-diagonal rho=0.8 and N=2000 openings,
-/// the sample Pearson correlation between the two dimensions must be within 0.1
-/// of the target 0.8. This exercises the spectral correlation transform applied
-/// after LHS stratified sampling inside `generate_opening_tree`.
 #[test]
 fn lhs_correlation_applied() {
     let n = 2000_usize;
@@ -536,21 +504,13 @@ fn lhs_correlation_applied() {
     );
 }
 
-/// Verify declaration-order invariance: reversing the entity insertion order
-/// in the system produces a bitwise identical opening tree.
-///
-/// The pipeline (`build_stochastic_context`) sorts entities by `EntityId`
-/// internally, so the order in which hydros are supplied to `SystemBuilder`
-/// must not affect the generated opening tree. This guarantees that
-/// case results are reproducible regardless of the order entities appear in
-/// input files.
+/// `build_stochastic_context` sorts entities by `EntityId` internally, so the
+/// order hydros are supplied to `SystemBuilder` must not change the opening tree.
 #[test]
 fn lhs_declaration_order_invariant() {
     let n_openings = 30_usize;
 
-    // Forward order: EntityId(1) before EntityId(2).
     let hydros_fwd = vec![make_hydro(1), make_hydro(2)];
-    // Reversed order: EntityId(2) before EntityId(1).
     let hydros_rev = vec![make_hydro(2), make_hydro(1)];
 
     let ctx_fwd = build_lhs_context(hydros_fwd, n_openings, 42);
@@ -582,14 +542,6 @@ fn lhs_declaration_order_invariant() {
     }
 }
 
-/// Verify that the point-wise LHS path (`sample_lhs_point`) produces a valid
-/// LHS design across all scenarios for a given iteration and stage.
-///
-/// For all scenarios 0..N, the strata assigned by `sample_lhs_point` per
-/// dimension must form a permutation of `{0, …, N-1}`. This confirms that the
-/// communication-free point-wise path (used during the forward pass) is
-/// consistent with the batch path used in the opening tree: both paths
-/// produce valid LHS designs without any inter-worker coordination.
 #[test]
 fn lhs_point_wise_stratum_consistency() {
     let n = 60_usize;
@@ -597,8 +549,6 @@ fn lhs_point_wise_stratum_consistency() {
     let mut perm_scratch = vec![0_usize; n];
     let n_f = n as f64;
 
-    // Collect per-dimension strata across all scenarios for a fixed
-    // (sampling_seed, iteration, stage_id).
     let mut strata_by_dim: Vec<Vec<usize>> = (0..dim).map(|_| Vec::with_capacity(n)).collect();
 
     for scenario in 0..n {

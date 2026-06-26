@@ -1,7 +1,4 @@
 //! Simulation phase for `cobre run`.
-//!
-//! Runs the policy simulation, drains scenario results to Parquet, merges
-//! per-rank metadata and solver stats across MPI ranks, and writes output.
 
 use std::sync::mpsc;
 
@@ -63,9 +60,8 @@ pub(super) fn run_simulation_phase(
     )
     .map_err(CliError::from)?;
 
-    // The drain thread writes scenarios directly to Parquet instead of
-    // collecting into a Vec. This avoids the need to gather all results
-    // on rank 0 via MPI (which overflows i32 on large cases).
+    // Drain straight to Parquet rather than collecting into a Vec and gathering
+    // on rank 0 via MPI, which overflows i32 on large cases.
     let drain_handle = std::thread::spawn(move || {
         let mut failed: u32 = 0;
         for scenario_result in result_rx {
@@ -119,8 +115,8 @@ pub(super) fn run_simulation_phase(
     let (global_agg, global_scenario_stats) =
         aggregate_simulation_solver_stats(&ctx.comm, &sim_run_result.solver_stats)?;
 
-    // Aggregate simulation cost statistics across all MPI ranks so that
-    // the printed mean/std/CI95 reflect ALL scenarios, not just rank 0's.
+    // Aggregate across all ranks so the printed mean/std/CI95 reflect every
+    // scenario, not just rank 0's.
     let cost_summary =
         cobre_sddp::aggregate_simulation(&sim_run_result.costs, sim_config, &ctx.comm).map_err(
             |e| CliError::Internal {
@@ -131,9 +127,6 @@ pub(super) fn run_simulation_phase(
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let parallelism = (ctx.n_threads as u32).saturating_mul(ctx.comm.size() as u32);
 
-    // Route the aggregated simulation cost summary and solver totals into the
-    // output carrier so the cobre-io writer persists them in
-    // `simulation/metadata.json`.
     merged_sim_output.cost = Some(cobre_io::MetadataCost {
         mean_cost: cost_summary.mean_cost,
         std_cost: cost_summary.std_cost,
@@ -193,9 +186,7 @@ fn write_sim_outputs_on_root(
         started_at: sim_started_at,
         completed_at: cobre_io::now_iso8601(),
         distribution: build_distribution_info(&ctx.topology, ctx.n_threads, mpi_world_size),
-        // Simulation metadata has no setup section.
         setup: None,
-        // Simulation metadata carries no production-fit deviation (training-only).
         production_fit_deviation: None,
     };
     write_simulation_outputs(&WriteSimulationArgs {
@@ -236,22 +227,13 @@ fn print_sim_summary(
     );
 }
 
-/// Merge per-rank simulation metadata using lightweight MPI collective operations.
-///
-/// Each rank contributes its local [`SimulationOutput`](cobre_io::SimulationOutput) from
-/// the distributed Parquet writing phase. The merge uses:
-///
-/// - `allreduce(Sum)` for scenario counts (`n_scenarios`, `completed`, `failed`)
-/// - `allreduce(Max)` for `total_time_ms` (wall-clock = slowest rank)
-/// - `allgatherv` for partition path strings (newline-delimited UTF-8)
-///
-/// For single-rank runs (local communicator), this is equivalent to a passthrough.
+/// Merge each rank's local [`SimulationOutput`](cobre_io::SimulationOutput) via
+/// MPI collectives.
 #[allow(clippy::cast_possible_truncation)]
 fn merge_simulation_metadata<C: Communicator>(
     comm: &C,
     local: &cobre_io::SimulationOutput,
 ) -> Result<cobre_io::SimulationOutput, CliError> {
-    // Scalar counts: allreduce(Sum) on [n_scenarios, completed, failed].
     let send_counts = [local.n_scenarios, local.completed, local.failed];
     let mut merged_counts = [0u32; 3];
     comm.allreduce(&send_counts, &mut merged_counts, ReduceOp::Sum)
@@ -259,7 +241,7 @@ fn merge_simulation_metadata<C: Communicator>(
             message: format!("simulation metadata count allreduce error: {e}"),
         })?;
 
-    // Wall-clock time: allreduce(Max) — slowest rank determines total time.
+    // Max, not Sum: wall-clock is the slowest rank's time, not the total.
     let send_time = [local.total_time_ms];
     let mut merged_time = [0u64; 1];
     comm.allreduce(&send_time, &mut merged_time, ReduceOp::Max)
@@ -267,10 +249,8 @@ fn merge_simulation_metadata<C: Communicator>(
             message: format!("simulation metadata time allreduce error: {e}"),
         })?;
 
-    // Partition paths: encode as newline-delimited UTF-8, exchange via allgatherv.
     let local_paths_bytes = local.partitions_written.join("\n").into_bytes();
 
-    // Exchange per-rank byte counts.
     let send_len = [local_paths_bytes.len() as u64];
     let n_ranks = comm.size();
     let mut all_lens = vec![0u64; n_ranks];
@@ -281,7 +261,6 @@ fn merge_simulation_metadata<C: Communicator>(
             message: format!("partition path length exchange error: {e}"),
         })?;
 
-    // Exchange path bytes.
     let recv_counts: Vec<usize> = all_lens.iter().map(|&l| l as usize).collect();
     let recv_displs: Vec<usize> = recv_counts
         .iter()
@@ -303,7 +282,6 @@ fn merge_simulation_metadata<C: Communicator>(
         message: format!("partition path gather error: {e}"),
     })?;
 
-    // Parse received bytes back into path strings.
     let mut all_partitions: Vec<String> = Vec::new();
     for (i, &count) in recv_counts.iter().enumerate() {
         if count == 0 {
@@ -324,7 +302,7 @@ fn merge_simulation_metadata<C: Communicator>(
         failed: merged_counts[2],
         total_time_ms: merged_time[0],
         partitions_written: all_partitions,
-        // Populated by the simulation summary wiring; defaulted here.
+        // Filled later by the summary wiring; defaulted here.
         cost: None,
         solve_stats: cobre_io::MetadataSimulationSolveStats::default(),
     })
@@ -332,32 +310,9 @@ fn merge_simulation_metadata<C: Communicator>(
 
 /// Aggregate simulation solver statistics across all MPI ranks.
 ///
-/// Returns:
-/// - The global [`cobre_sddp::SolverStatsDelta`] aggregate (sum of all ranks' local
-///   aggregates), used for the simulation summary printed on root.
-/// - A [`Vec<(u32, cobre_sddp::SolverStatsDelta)>`] containing one entry per global
-///   scenario (gathered from all ranks), sorted by scenario ID, used for Parquet output.
-///
-/// ## Protocol
-///
-/// **Summary**: Each rank first computes its local aggregate via
-/// [`cobre_sddp::SolverStatsDelta::aggregate`], packs the
-/// [`cobre_sddp::SOLVER_STATS_DELTA_SCALAR_FIELDS`] scalar fields into a
-/// fixed-size buffer, and calls `allreduce(Sum)`. Root reconstructs the global
-/// aggregate from the received buffer.
-///
-/// **Per-scenario gather**: Each rank packs its per-scenario stats into a
-/// flat `f64` buffer (one `scenario_id` field plus
-/// [`cobre_sddp::SOLVER_STATS_DELTA_SCALAR_FIELDS`] scalar fields per scenario).
-/// An `allgatherv` collects all scenarios on all ranks. Root sorts the result by
-/// scenario ID. All ranks participate but only root uses the gathered data.
-///
-/// ## Single-rank behaviour
-///
-/// With `LocalBackend` (single rank), both operations are identity pass-throughs:
-/// the allreduce returns the local values unchanged, and the allgatherv returns
-/// the local buffer unchanged. The result is identical to calling
-/// `SolverStatsDelta::aggregate` directly.
+/// Returns the global [`cobre_sddp::SolverStatsDelta`] (sum over all ranks, for
+/// the root summary) and a per-global-scenario `Vec`, sorted by scenario ID for
+/// deterministic Parquet output.
 #[allow(clippy::cast_possible_truncation)]
 fn aggregate_simulation_solver_stats<C: Communicator>(
     comm: &C,
@@ -370,7 +325,6 @@ fn aggregate_simulation_solver_stats<C: Communicator>(
     CliError,
 > {
     let local_agg = cobre_sddp::SolverStatsDelta::aggregate(local_stats.iter().map(|(_, _, d)| d));
-    // Guard every u64 field before the u64 → f64 cast in pack_delta_scalars.
     check_stats_overflow(&local_agg)?;
     let send_scalars = cobre_sddp::pack_delta_scalars(&local_agg);
     let mut recv_scalars = [0.0_f64; cobre_sddp::SOLVER_STATS_DELTA_SCALAR_FIELDS];
@@ -380,8 +334,7 @@ fn aggregate_simulation_solver_stats<C: Communicator>(
         })?;
     let global_agg = cobre_sddp::unpack_delta_scalars(&recv_scalars);
 
-    // Strip the opening field (always -1 for simulation) before packing — the
-    // MPI wire format does not carry the opening field.
+    // Strip the opening field (always -1 here): the MPI wire format omits it.
     let local_stats_stripped: Vec<(u32, cobre_sddp::SolverStatsDelta)> = local_stats
         .iter()
         .map(|(id, _opening, delta)| (*id, delta.clone()))
@@ -390,7 +343,6 @@ fn aggregate_simulation_solver_stats<C: Communicator>(
     let local_buf = cobre_sddp::pack_scenario_stats(&local_stats_stripped);
     let local_count = local_buf.len();
 
-    // Step 1: exchange per-rank buffer lengths.
     let send_len = [local_count as u64];
     let mut all_lens = vec![0u64; n_ranks];
     let len_counts: Vec<usize> = vec![1; n_ranks];
@@ -400,7 +352,6 @@ fn aggregate_simulation_solver_stats<C: Communicator>(
             message: format!("simulation solver stats length exchange error: {e}"),
         })?;
 
-    // Step 2: gather all per-scenario buffers.
     let recv_counts: Vec<usize> = all_lens.iter().map(|&l| l as usize).collect();
     let recv_displs: Vec<usize> = recv_counts
         .iter()
@@ -417,7 +368,6 @@ fn aggregate_simulation_solver_stats<C: Communicator>(
             message: format!("simulation solver stats gather error: {e}"),
         })?;
 
-    // Step 3: unpack and sort by scenario ID.
     let mut global_scenario_stats = cobre_sddp::unpack_scenario_stats(&all_buf);
     global_scenario_stats.sort_by_key(|(id, _)| *id);
 

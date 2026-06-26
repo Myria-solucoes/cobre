@@ -123,7 +123,6 @@ pub fn parse_external_inflow_scenarios(path: &Path) -> Result<Vec<ExternalScenar
             let hydro_id = EntityId::from(hydro_id_col.value(i));
             let value_m3s = value_m3s_col.value(i);
 
-            // Validate stage_id: must be >= 0.
             if stage_id < 0 {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -132,7 +131,6 @@ pub fn parse_external_inflow_scenarios(path: &Path) -> Result<Vec<ExternalScenar
                 });
             }
 
-            // Validate scenario_id: must be >= 0 (0-based indexing).
             if scenario_id < 0 {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -141,7 +139,6 @@ pub fn parse_external_inflow_scenarios(path: &Path) -> Result<Vec<ExternalScenar
                 });
             }
 
-            // Validate value_m3s: must be finite (no NaN or infinity).
             if !value_m3s.is_finite() {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -166,7 +163,6 @@ pub fn parse_external_inflow_scenarios(path: &Path) -> Result<Vec<ExternalScenar
             .then_with(|| a.hydro_id.0.cmp(&b.hydro_id.0))
     });
 
-    // Check for duplicate (stage_id, scenario_id, hydro_id) tuples.
     if let Some(window) = rows.windows(2).find(|w| {
         w[0].stage_id == w[1].stage_id
             && w[0].scenario_id == w[1].scenario_id
@@ -245,7 +241,6 @@ pub fn parse_external_load_scenarios(path: &Path) -> Result<Vec<ExternalLoadRow>
             let bus_id = EntityId::from(bus_id_col.value(i));
             let value_mw = value_mw_col.value(i);
 
-            // Validate stage_id: must be >= 0.
             if stage_id < 0 {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -254,7 +249,6 @@ pub fn parse_external_load_scenarios(path: &Path) -> Result<Vec<ExternalLoadRow>
                 });
             }
 
-            // Validate scenario_id: must be >= 0 (0-based indexing).
             if scenario_id < 0 {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -263,7 +257,6 @@ pub fn parse_external_load_scenarios(path: &Path) -> Result<Vec<ExternalLoadRow>
                 });
             }
 
-            // Validate value_mw: must be finite (no NaN or infinity).
             if !value_mw.is_finite() {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -288,7 +281,6 @@ pub fn parse_external_load_scenarios(path: &Path) -> Result<Vec<ExternalLoadRow>
             .then_with(|| a.bus_id.0.cmp(&b.bus_id.0))
     });
 
-    // Check for duplicate (stage_id, scenario_id, bus_id) tuples.
     if let Some(window) = rows.windows(2).find(|w| {
         w[0].stage_id == w[1].stage_id
             && w[0].scenario_id == w[1].scenario_id
@@ -367,7 +359,6 @@ pub fn parse_external_ncs_scenarios(path: &Path) -> Result<Vec<ExternalNcsRow>, 
             let ncs_id = EntityId::from(ncs_id_col.value(i));
             let value = value_col.value(i);
 
-            // Validate stage_id: must be >= 0.
             if stage_id < 0 {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -376,7 +367,6 @@ pub fn parse_external_ncs_scenarios(path: &Path) -> Result<Vec<ExternalNcsRow>, 
                 });
             }
 
-            // Validate scenario_id: must be >= 0 (0-based indexing).
             if scenario_id < 0 {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -385,7 +375,6 @@ pub fn parse_external_ncs_scenarios(path: &Path) -> Result<Vec<ExternalNcsRow>, 
                 });
             }
 
-            // Validate value: must be finite (no NaN or infinity).
             if !value.is_finite() {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -410,7 +399,6 @@ pub fn parse_external_ncs_scenarios(path: &Path) -> Result<Vec<ExternalNcsRow>, 
             .then_with(|| a.ncs_id.0.cmp(&b.ncs_id.0))
     });
 
-    // Check for duplicate (stage_id, scenario_id, ncs_id) tuples.
     if let Some(window) = rows.windows(2).find(|w| {
         w[0].stage_id == w[1].stage_id
             && w[0].scenario_id == w[1].scenario_id
@@ -656,7 +644,6 @@ mod tests {
 
         assert_eq!(rows.len(), 4);
 
-        // Verify sorted by (stage_id, scenario_id, bus_id)
         for w in rows.windows(2) {
             let a = &w[0];
             let b = &w[1];
@@ -668,7 +655,6 @@ mod tests {
             assert!(cmp != std::cmp::Ordering::Greater, "rows not sorted");
         }
 
-        // First row after sorting: stage=0, scenario=0, bus=1
         assert_eq!(rows[0].stage_id, 0);
         assert_eq!(rows[0].scenario_id, 0);
         assert_eq!(rows[0].bus_id, EntityId::from(1));
@@ -740,7 +726,6 @@ mod tests {
 
         assert_eq!(rows.len(), 4);
 
-        // Verify sorted by (stage_id, scenario_id, ncs_id)
         for w in rows.windows(2) {
             let a = &w[0];
             let b = &w[1];
@@ -752,7 +737,6 @@ mod tests {
             assert!(cmp != std::cmp::Ordering::Greater, "rows not sorted");
         }
 
-        // First row after sorting: stage=0, scenario=0, ncs=3
         assert_eq!(rows[0].stage_id, 0);
         assert_eq!(rows[0].scenario_id, 0);
         assert_eq!(rows[0].ncs_id, EntityId::from(3));

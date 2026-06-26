@@ -145,7 +145,6 @@ pub fn parse_fpha_hyperplanes(path: &Path) -> Result<Vec<FphaHyperplaneRow>, Loa
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required columns ──────────────────────────────────────────────────
         let hydro_id_col = extract_required_int32(&batch, "hydro_id", path)?;
         let plane_id_col = extract_required_int32(&batch, "plane_id", path)?;
         let gamma_0_col = extract_required_float64(&batch, "gamma_0", path)?;
@@ -153,14 +152,12 @@ pub fn parse_fpha_hyperplanes(path: &Path) -> Result<Vec<FphaHyperplaneRow>, Loa
         let gamma_q_col = extract_required_float64(&batch, "gamma_q", path)?;
         let gamma_s_col = extract_required_float64(&batch, "gamma_s", path)?;
 
-        // ── Optional columns — check existence first ──────────────────────────
         let stage_id_col = extract_optional_int32(&batch, "stage_id", path)?;
         let kappa_col = extract_optional_float64(&batch, "kappa", path)?;
         let valid_v_min_col = extract_optional_float64(&batch, "valid_v_min_hm3", path)?;
         let valid_v_max_col = extract_optional_float64(&batch, "valid_v_max_hm3", path)?;
         let valid_q_max_col = extract_optional_float64(&batch, "valid_q_max_m3s", path)?;
 
-        // ── Build rows ────────────────────────────────────────────────────────
         let n = batch.num_rows();
         rows.reserve(n);
 
@@ -172,17 +169,14 @@ pub fn parse_fpha_hyperplanes(path: &Path) -> Result<Vec<FphaHyperplaneRow>, Loa
             let gamma_q = gamma_q_col.value(i);
             let gamma_s = gamma_s_col.value(i);
 
-            // stage_id: None if column is absent or null at this row.
             let stage_id = stage_id_col
                 .filter(|col| !col.is_null(i))
                 .map(|col| col.value(i));
 
-            // kappa defaults to 1.0 when column is absent or null.
             let kappa = kappa_col
                 .filter(|col| !col.is_null(i))
                 .map_or(1.0, |col| col.value(i));
 
-            // Optional float columns: None when absent or null.
             let valid_v_min_hm3 = valid_v_min_col
                 .filter(|col| !col.is_null(i))
                 .map(|col| col.value(i));
@@ -209,8 +203,7 @@ pub fn parse_fpha_hyperplanes(path: &Path) -> Result<Vec<FphaHyperplaneRow>, Loa
         }
     }
 
-    // ── Sort by (hydro_id, stage_id, plane_id) ascending ─────────────────────
-    // Null stage_id sorts before any non-null value (None < Some(_)).
+    // Null stage_id sorts first (None < Some(_)).
     rows.sort_by(|a, b| {
         a.hydro_id
             .0

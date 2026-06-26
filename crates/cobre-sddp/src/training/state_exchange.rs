@@ -89,26 +89,15 @@ use crate::{error::SddpError, trajectory::TrajectoryRecord};
 #[derive(Debug, Clone)]
 pub struct ExchangeBuffers {
     /// Send buffer: this rank's state vectors packed contiguously.
-    ///
-    /// Length `local_count * n_state`. Entry `m * n_state .. (m+1) * n_state`
-    /// is local scenario `m`'s state vector at the current stage.
     send_buf: Vec<f64>,
 
     /// Receive buffer: all ranks' state vectors in rank-major order.
-    ///
-    /// Length `local_count * num_ranks * n_state`. After a successful
-    /// `exchange`, the slice `recv_buf[r * local_count * n_state + m * n_state..]`
-    /// (first `n_state` elements) holds rank `r`'s scenario `m` state vector.
     recv_buf: Vec<f64>,
 
     /// Per-rank element count for `allgatherv`.
-    ///
-    /// Length `num_ranks`. All entries equal `local_count * n_state`.
     counts: Vec<usize>,
 
     /// Per-rank displacement for `allgatherv`.
-    ///
-    /// Length `num_ranks`. Entry `r` = `r * local_count * n_state`.
     displs: Vec<usize>,
 
     /// Length of each state vector.

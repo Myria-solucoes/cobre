@@ -121,7 +121,7 @@ jobs:
             sudo chown -R "$(id -u):$(id -g)" crates/cobre-python/dist
           fi
           python -m pip install --quiet wheel
-          python scripts/inject_wheel_licenses.py crates/cobre-python/dist \
+          python scripts/gen/inject_wheel_licenses.py crates/cobre-python/dist \
             LICENSE NOTICE THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES.md
 
       - uses: actions/upload-artifact@v6

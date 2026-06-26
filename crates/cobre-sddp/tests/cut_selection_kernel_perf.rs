@@ -1,17 +1,12 @@
-//! Perf regression guard: per-call wall <= 1 ms at aggregated scale.
+//! Perf regression guard: median per-call wall <= 1 ms at aggregated scale
+//! (threshold mandated by design section 1).
 //!
-//! Runs the kernel 10 times (1 warm-up + 9 measured), takes the median,
-//! and asserts the result is below the 1-ms threshold mandated by design
-//! section 1.
-//!
-//! **Unconditionally ignored**: the initial 1-ms threshold
-//! was observed to be tight on the dev host (median ~1.5 ms at 8 threads
-//! on a 16-core Xeon Platinum 8259CL). Threshold tuning is deferred to a
-//! later `M_BLOCK` sweep that finalises both the kernel
-//! configuration and the perf-guard value. Once that sweep lands, this
-//! `#[ignore]` attribute should be replaced with the
-//! `slow-tests`-feature gate used elsewhere in this crate, and the
-//! threshold should be set to the post-sweep target.
+//! **Unconditionally ignored**: the 1-ms threshold was observed tight on the dev
+//! host (median ~1.5 ms at 8 threads on a 16-core Xeon Platinum 8259CL).
+//! Threshold tuning is deferred to a later `M_BLOCK` sweep that finalises both the
+//! kernel configuration and the perf-guard value; when it lands, replace this
+//! `#[ignore]` with the `slow-tests`-feature gate used elsewhere in this crate and
+//! set the post-sweep threshold.
 
 #![cfg_attr(
     test,
@@ -88,10 +83,10 @@ fn select_for_stage_aggregated_under_one_ms() {
         tie_tolerance: 1e-10,
     };
 
-    // Warm-up (untimed): primes caches and the rayon worker pool.
+    // Untimed warm-up: primes caches and the rayon worker pool.
     let _ = rp.install(|| strategy.select(&pool, &states, 5));
 
-    // Nine measured runs; take the median (5th element after sort).
+    // walls[4] is the median of the 9 sorted measured runs.
     let mut walls: Vec<u128> = (0..9)
         .map(|_| {
             let start = Instant::now();

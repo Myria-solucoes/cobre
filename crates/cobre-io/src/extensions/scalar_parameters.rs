@@ -88,19 +88,9 @@ use serde::Deserialize;
 
 use crate::LoadError;
 
-// ── Private JSON intermediate types ──────────────────────────────────────────
-//
-// We cannot directly deserialize `ScalarParameter` from the flat JSON schema
-// because `ParameterKind`'s serde implementation expects kind-specific fields
-// to be nested inside a `"kind"` object, while the JSON schema places all
-// payload fields (`"value"`, `"values"`, `"computed_spec"`) at the same level
-// as `"id"` and `"name"`.
-//
-// `#[serde(flatten)]` on a `ParameterKind` field also does not cooperate with
-// `#[serde(tag = "kind")]` in serde's current implementation.
-//
-// We therefore use these private intermediate types with inline fields, then
-// perform explicit validation and conversion in `parse_scalar_parameters_json`.
+// Intermediate types with inline payload fields: `ScalarParameter` cannot be
+// deserialized directly because the JSON places payload fields flat alongside
+// `id`/`name`, and `#[serde(flatten)]` does not cooperate with `tag = "kind"`.
 
 /// Top-level JSON wrapper.
 ///
@@ -195,7 +185,6 @@ pub fn parse_scalar_parameters_json(path: &Path) -> Result<Vec<ScalarParameter>,
     let mut result: Vec<ScalarParameter> = Vec::with_capacity(entries.len());
 
     for (i, entry) in entries.into_iter().enumerate() {
-        // ── id uniqueness ───────────────────────────────────────────────────
         if !seen_ids.insert(entry.id) {
             return Err(LoadError::SchemaError {
                 path: path.to_path_buf(),
@@ -204,7 +193,6 @@ pub fn parse_scalar_parameters_json(path: &Path) -> Result<Vec<ScalarParameter>,
             });
         }
 
-        // ── name: non-empty, no leading/trailing whitespace ─────────────────
         if entry.name.is_empty() {
             return Err(LoadError::SchemaError {
                 path: path.to_path_buf(),
@@ -223,7 +211,6 @@ pub fn parse_scalar_parameters_json(path: &Path) -> Result<Vec<ScalarParameter>,
             });
         }
 
-        // ── name uniqueness (case-sensitive) ────────────────────────────────
         if !seen_names.insert(entry.name.clone()) {
             return Err(LoadError::SchemaError {
                 path: path.to_path_buf(),
@@ -232,7 +219,6 @@ pub fn parse_scalar_parameters_json(path: &Path) -> Result<Vec<ScalarParameter>,
             });
         }
 
-        // ── Convert entry to ScalarParameter ───────────────────────────────
         let kind = convert_entry_to_kind(i, &entry, path)?;
 
         result.push(ScalarParameter {
@@ -242,7 +228,6 @@ pub fn parse_scalar_parameters_json(path: &Path) -> Result<Vec<ScalarParameter>,
         });
     }
 
-    // ── Sort ascending by id.0 ──────────────────────────────────────────────
     result.sort_by_key(|p| p.id.0);
 
     Ok(result)
@@ -317,13 +302,8 @@ fn convert_constant(
     Ok(ParameterKind::Constant { value })
 }
 
-/// Build a `ParameterKind::PerStage` from an entry.
-///
-/// Validates:
-/// - `"values"` field is present and non-empty.
-/// - No duplicate `stage_id` keys.
-/// - `stage_id` keys form a contiguous range starting at 0.
-/// - All values are finite.
+/// Build a `ParameterKind::PerStage`, rejecting non-finite values and a
+/// `stage_id` set that is not a duplicate-free contiguous range from 0.
 fn convert_per_stage(
     i: usize,
     entry: &ScalarParameterJsonEntry,
@@ -346,11 +326,9 @@ fn convert_per_stage(
         });
     }
 
-    // Sort by stage_id for validation.
     let mut sorted: Vec<(i32, f64)> = pairs.to_vec();
     sorted.sort_by_key(|(k, _)| *k);
 
-    // Check for duplicates (adjacent after sort).
     for window in sorted.windows(2) {
         if window[0].0 == window[1].0 {
             return Err(LoadError::SchemaError {
@@ -361,7 +339,6 @@ fn convert_per_stage(
         }
     }
 
-    // Check contiguity from 0.
     for (expected, &(actual, _)) in sorted.iter().enumerate() {
         let expected_i32 = i32::try_from(expected).unwrap_or(i32::MAX);
         if actual != expected_i32 {
@@ -376,7 +353,6 @@ fn convert_per_stage(
         }
     }
 
-    // Check all values are finite.
     for &(stage_id, v) in &sorted {
         if !v.is_finite() {
             return Err(LoadError::SchemaError {
@@ -391,12 +367,8 @@ fn convert_per_stage(
     Ok(ParameterKind::PerStage { values: dense })
 }
 
-/// Build a `ParameterKind::Seasonal` from an entry.
-///
-/// Validates:
-/// - `"values"` field is present and non-empty.
-/// - No duplicate `season_id` keys.
-/// - All values are finite.
+/// Build a `ParameterKind::Seasonal`, rejecting non-finite values and duplicate
+/// `season_id` keys.
 fn convert_seasonal(
     i: usize,
     entry: &ScalarParameterJsonEntry,
@@ -419,8 +391,8 @@ fn convert_seasonal(
         });
     }
 
-    // Check for duplicate season_ids explicitly (before calling new_seasonal,
-    // which silently dedups).  Duplicates in user-authored files are errors.
+    // Reject duplicate season_ids explicitly: new_seasonal silently dedups, but a
+    // duplicate in a user-authored file is an error, not a value to drop.
     let mut seen_seasons: HashSet<i32> = HashSet::new();
     for &(season_id, v) in pairs {
         if !seen_seasons.insert(season_id) {
@@ -439,7 +411,6 @@ fn convert_seasonal(
         }
     }
 
-    // new_seasonal sorts by season_id; no dedup is needed (we rejected dups above).
     Ok(ParameterKind::new_seasonal(pairs.to_vec()))
 }
 

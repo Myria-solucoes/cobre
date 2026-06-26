@@ -6,12 +6,9 @@
 //! - `training/convergence.parquet` — one row per iteration, capturing
 //!   bounds, gap, row-pool statistics, timing, and resource usage.
 //! - `training/timing/iterations.parquet` — per-iteration timing breakdown
-//!   with measured wall-clock milliseconds for each solver phase (forward pass,
-//!   backward pass, pool selection, collective communication, and related stages).
+//!   with measured wall-clock milliseconds for each solver phase.
 //!
-//! The writer runs on rank 0 only, after training completes.  Both files
-//! are written atomically: the data is written to a `.tmp` suffix first,
-//! then renamed to the final path.
+//! The writer runs on rank 0 only.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,10 +22,7 @@ use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{convergence_schema, iteration_timing_schema};
 
 /// Writes training output to `training/convergence.parquet` and
-/// `training/timing/iterations.parquet`.
-///
-/// Construct via [`TrainingParquetWriter::new`], then call [`write`][Self::write].
-/// Both output files are written atomically using a `.tmp`-suffix temporary file.
+/// `training/timing/iterations.parquet`, each written atomically.
 ///
 /// # Examples
 ///
@@ -76,9 +70,8 @@ pub struct TrainingParquetWriter {
 impl TrainingParquetWriter {
     /// Create a new writer targeting `output_dir`.
     ///
-    /// The training subdirectories (`training/` and `training/timing/`) must
-    /// already exist — they are created by `write_results` before this
-    /// constructor is called.
+    /// The `training/` and `training/timing/` subdirectories must already exist
+    /// (created by `write_results`); the constructor errors otherwise.
     ///
     /// # Errors
     ///
@@ -115,9 +108,7 @@ impl TrainingParquetWriter {
 
     /// Write `training/convergence.parquet` and `training/timing/iterations.parquet`.
     ///
-    /// Both files are written atomically: each is first written to a `.tmp`
-    /// suffix and then renamed to its final path. An empty
-    /// `convergence_records` slice produces valid zero-row Parquet files
+    /// An empty `convergence_records` slice produces valid zero-row Parquet files
     /// with the correct schema.
     ///
     /// # Errors
@@ -141,9 +132,6 @@ impl TrainingParquetWriter {
 }
 
 /// Build a `RecordBatch` for `training/convergence.parquet` from iteration records.
-///
-/// Returns an error if the Arrow `RecordBatch::try_new` call fails (e.g.,
-/// mismatched array lengths, which indicates a programming error).
 #[allow(
     clippy::cast_possible_wrap,
     clippy::cast_possible_truncation,
@@ -207,15 +195,8 @@ fn build_convergence_batch(records: &[IterationRecord]) -> Result<RecordBatch, O
     .map_err(|e| OutputError::serialization("convergence", e.to_string()))
 }
 
-/// Build a `RecordBatch` for `training/timing/iterations.parquet`.
-///
-/// Each [`WorkerTimingRecord`] produces exactly one row. `rank` is always
-/// non-null. `worker_id` is `NULL` for rank-aggregated rows and carries the
-/// per-worker index for per-worker rows. The 16 timing columns come from the
-/// `timings` array at the corresponding slot index.
-///
-/// Schema: `iteration(i32), rank(i32 nullable), worker_id(i32 nullable),`
-/// then 16 `Int64` timing columns in slot order.
+/// Build a `RecordBatch` for `training/timing/iterations.parquet`, one row per
+/// [`WorkerTimingRecord`]. `worker_id` is `NULL` for rank-aggregated rows.
 #[allow(clippy::cast_possible_wrap)]
 fn build_iteration_timing_batch(
     records: &[WorkerTimingRecord],
@@ -247,13 +228,7 @@ fn build_iteration_timing_batch(
         iteration.append_value(rec.iteration as i32);
         rank.append_value(rec.rank);
         worker_id.append_option(rec.worker_id);
-        // Slot indices match the column order defined by iteration_timing_schema():
-        //   0: forward_wall_ms   1: backward_wall_ms  2: cut_selection_ms
-        //   3: mpi_allreduce_ms  4: cut_sync_ms        5: lower_bound_ms
-        //   6: state_exchange_ms 7: cut_batch_build_ms 8: bwd_setup_ms
-        //   9: bwd_load_imbalance_ms  10: bwd_scheduling_overhead_ms
-        //  11: fwd_setup_ms  12: fwd_load_imbalance_ms  13: fwd_scheduling_overhead_ms
-        //  14: overhead_ms   15: lazy_scoring_ms
+        // timings slot order must match the column order in iteration_timing_schema().
         forward_wall_ms.append_value(rec.timings[0] as i64);
         backward_wall_ms.append_value(rec.timings[1] as i64);
         cut_selection_ms.append_value(rec.timings[2] as i64);
@@ -299,10 +274,9 @@ fn build_iteration_timing_batch(
     .map_err(|e| OutputError::serialization("iteration_timing", e.to_string()))
 }
 
-/// Write `training/cut_selection/iterations.parquet` from row-selection records.
+/// Write `training/cut_selection/iterations.parquet`.
 ///
-/// Creates the `training/cut_selection/` directory if it does not exist.
-/// Does nothing if `records` is empty.
+/// Does nothing (no directory, no file) if `records` is empty.
 ///
 /// # Errors
 ///

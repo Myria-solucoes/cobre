@@ -1,19 +1,19 @@
 //! Deterministic seed derivation via SipHash-1-3.
 //!
-//! Derives unique `u64` seeds from a global base seed and context tuple
-//! using SipHash-1-3. The three variants use different wire format lengths
-//! to prevent hash domain collisions:
-//! - [`derive_forward_seed`]: 20 bytes (base seed + iteration + scenario + stage)
-//! - [`derive_opening_seed`]: 16 bytes (base seed + opening index + stage)
-//! - [`derive_stage_seed`]: 12 bytes (base seed + stage)
+//! Every function returns the same `u64` for identical inputs regardless of MPI
+//! rank, thread ID, or process restart — the basis for communication-free noise.
+//!
+//! Domain separation: SipHash-1-3 folds message length into its state, so the
+//! variants' differing wire-format lengths (20 / 16 / 12 bytes, plus the
+//! grouped variant's `0x01` prefix) keep their outputs distinct even when the
+//! numeric arguments overlap. Changing a function's byte layout breaks this and
+//! the golden-value tests.
 
 use siphasher::sip::SipHasher13;
 use std::hash::Hasher;
 
-/// Derive a deterministic seed for forward-pass noise generation.
-///
-/// Returns the same output for identical `(base_seed, iteration, scenario, stage)`
-/// tuples regardless of MPI rank, thread ID, or process restart.
+/// Derive a deterministic seed for forward-pass noise from
+/// `(base_seed, iteration, scenario, stage)`.
 #[must_use]
 pub fn derive_forward_seed(base_seed: u64, iteration: u32, scenario: u32, stage: u32) -> u64 {
     let mut hasher = SipHasher13::new();
@@ -24,11 +24,11 @@ pub fn derive_forward_seed(base_seed: u64, iteration: u32, scenario: u32, stage:
     hasher.finish()
 }
 
-/// Derive a deterministic seed for stage-level batch generation.
+/// Derive a deterministic seed for stage-level batch generation from
+/// `(base_seed, stage_id)`.
 ///
-/// Returns the same output for identical `(base_seed, stage_id)` tuples
-/// regardless of MPI rank or thread ID. Intended for batch noise methods
-/// (LHS, QMC) that require all openings at a stage simultaneously.
+/// Intended for batch noise methods (LHS, QMC) that need all openings at a stage
+/// simultaneously.
 #[must_use]
 pub fn derive_stage_seed(base_seed: u64, stage_id: u32) -> u64 {
     let mut hasher = SipHasher13::new();
@@ -37,10 +37,8 @@ pub fn derive_stage_seed(base_seed: u64, stage_id: u32) -> u64 {
     hasher.finish()
 }
 
-/// Derive a deterministic seed for opening tree generation.
-///
-/// Returns the same output for identical `(base_seed, opening_index, stage)`
-/// tuples regardless of MPI rank or thread ID.
+/// Derive a deterministic seed for opening-tree generation from
+/// `(base_seed, opening_index, stage)`.
 #[must_use]
 pub fn derive_opening_seed(base_seed: u64, opening_index: u32, stage: u32) -> u64 {
     let mut hasher = SipHasher13::new();
@@ -50,22 +48,13 @@ pub fn derive_opening_seed(base_seed: u64, opening_index: u32, stage: u32) -> u6
     hasher.finish()
 }
 
-/// Derive a deterministic seed for grouped forward-pass noise generation.
+/// Derive a deterministic seed for grouped forward-pass noise from
+/// `(base_seed, iteration, scenario, group_id)`.
 ///
-/// Uses `group_id` instead of a per-stage ID, so all stages that belong to
-/// the same noise group draw from the same seed. This enables noise-group sharing
-/// (weekly stages sharing monthly PAR noise): assign the same group ID to all
-/// stages within a `(season_id, year)` bucket, then call this function with
-/// that group ID to obtain a shared seed.
-///
-/// The wire format includes a domain separator byte `0x01` prepended before
-/// the remaining fields. This guarantees that
-/// `derive_forward_seed_grouped(s, i, sc, g)` cannot collide with
-/// `derive_forward_seed(s, i, sc, g)` even when all numeric arguments are
-/// identical, because `derive_forward_seed` writes no prefix byte.
-///
-/// Returns the same output for identical `(base_seed, iteration, scenario, group_id)`
-/// tuples regardless of MPI rank, thread ID, or process restart.
+/// `group_id` replaces the per-stage ID so all stages in one noise group share a
+/// seed — e.g. weekly stages in a `(season_id, year)` bucket sharing monthly PAR
+/// noise. The `0x01` prefix byte keeps its output distinct from
+/// [`derive_forward_seed`] even when every numeric argument matches.
 #[must_use]
 pub fn derive_forward_seed_grouped(
     base_seed: u64,
@@ -160,10 +149,8 @@ mod tests {
     // Cross-function differentiation: 16-byte vs 20-byte wire format
     // -------------------------------------------------------------------------
 
-    /// `derive_opening_seed(base, 0, 0)` feeds 16 bytes;
-    /// `derive_forward_seed(base, 0, 0, 0)` feeds 20 bytes.
-    /// SipHash-1-3 incorporates message length into its state, so the two
-    /// outputs must differ even when the numeric arguments overlap.
+    /// 16-byte (opening) vs 20-byte (forward) inputs must differ — see the
+    /// length-based domain-separation contract in the module doc.
     #[test]
     fn forward_and_opening_seeds_differ_for_same_partial_inputs() {
         assert_ne!(
@@ -176,15 +163,8 @@ mod tests {
     // Golden value regression: pin the output to catch algorithm changes
     // -------------------------------------------------------------------------
 
-    /// This value was computed by running the implementation and recording the
-    /// output. If this test fails, the SipHash-1-3 wire format or the
-    /// `siphasher` crate version has changed in a breaking way.
-    ///
-    /// Input bytes (little-endian):
-    ///   42u64  = [2a 00 00 00 00 00 00 00]
-    ///   0u32   = [00 00 00 00]  (iteration)
-    ///   0u32   = [00 00 00 00]  (scenario)
-    ///   0u32   = [00 00 00 00]  (stage)
+    /// Failure means the SipHash-1-3 wire format or the `siphasher` crate version
+    /// changed in a breaking way.
     #[test]
     fn forward_seed_golden_value() {
         let seed = derive_forward_seed(42, 0, 0, 0);
@@ -215,19 +195,15 @@ mod tests {
     // Cross-function differentiation: 12-byte vs 16-byte and 20-byte wire formats
     // -------------------------------------------------------------------------
 
-    /// `derive_stage_seed(base, 0)` feeds 12 bytes;
-    /// `derive_opening_seed(base, 0, 0)` feeds 16 bytes.
-    /// SipHash-1-3 incorporates message length into its state, so the two
-    /// outputs must differ even when the numeric arguments overlap.
+    /// 12-byte (stage) vs 16-byte (opening) inputs must differ — length-based
+    /// domain separation (module doc).
     #[test]
     fn stage_seed_differs_from_opening_seed() {
         assert_ne!(derive_stage_seed(42, 0), derive_opening_seed(42, 0, 0));
     }
 
-    /// `derive_stage_seed(base, 0)` feeds 12 bytes;
-    /// `derive_forward_seed(base, 0, 0, 0)` feeds 20 bytes.
-    /// SipHash-1-3 incorporates message length into its state, so the two
-    /// outputs must differ even when the numeric arguments overlap.
+    /// 12-byte (stage) vs 20-byte (forward) inputs must differ — length-based
+    /// domain separation (module doc).
     #[test]
     fn stage_seed_differs_from_forward_seed() {
         assert_ne!(derive_stage_seed(42, 0), derive_forward_seed(42, 0, 0, 0));
@@ -237,13 +213,8 @@ mod tests {
     // Golden value regression: pin derive_stage_seed output
     // -------------------------------------------------------------------------
 
-    /// This value was computed by running the implementation and recording the
-    /// output. If this test fails, the SipHash-1-3 wire format or the
-    /// `siphasher` crate version has changed in a breaking way.
-    ///
-    /// Input bytes (little-endian):
-    ///   42u64  = [2a 00 00 00 00 00 00 00]
-    ///   0u32   = [00 00 00 00]  (`stage_id`)
+    /// Failure means the SipHash-1-3 wire format or the `siphasher` crate version
+    /// changed in a breaking way.
     #[test]
     fn stage_seed_golden_value() {
         let seed = derive_stage_seed(42, 0);
@@ -255,7 +226,6 @@ mod tests {
     // derive_forward_seed_grouped: determinism and domain separation
     // -------------------------------------------------------------------------
 
-    /// Same inputs must always produce the same output.
     #[test]
     fn test_derive_forward_seed_grouped_deterministic() {
         assert_eq!(
@@ -264,9 +234,8 @@ mod tests {
         );
     }
 
-    /// The grouped variant must differ from `derive_forward_seed` even when all
-    /// numeric arguments are identical, because the 0x01 domain separator byte
-    /// is absent in `derive_forward_seed`.
+    /// The `0x01` prefix must keep the grouped variant distinct from
+    /// `derive_forward_seed` even with identical numeric arguments.
     #[test]
     fn test_derive_forward_seed_grouped_differs_from_forward() {
         assert_ne!(

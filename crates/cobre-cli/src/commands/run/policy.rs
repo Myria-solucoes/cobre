@@ -1,7 +1,4 @@
 //! Policy load/warm-start/resume phase for `cobre run`.
-//!
-//! Applies warm-start, resume, or boundary cuts before training, and loads a
-//! trained policy from disk for simulation-only mode.
 
 use std::path::Path;
 
@@ -14,8 +11,6 @@ use crate::error::CliError;
 use super::RunContext;
 
 /// Load a policy checkpoint from disk and optionally validate its compatibility.
-///
-/// The `policy_dir` must already exist.
 fn load_and_validate_checkpoint(
     policy_dir: &Path,
     system: &System,
@@ -47,9 +42,7 @@ fn load_and_validate_checkpoint(
 }
 
 /// Build the warm-start FCF from a loaded checkpoint and seed the basis cache.
-///
-/// Shared by the warm-start and resume paths: replaces the setup's FCF with one
-/// reserving an extra final-iteration slot, then seeds the warm-start basis store.
+/// Shared by the warm-start and resume paths.
 fn load_checkpoint_into_setup(
     checkpoint: &cobre_io::PolicyCheckpoint,
     setup: &mut StudySetup,
@@ -62,10 +55,8 @@ fn load_checkpoint_into_setup(
     )
     .map_err(CliError::from)?;
     setup.replace_fcf(warm_fcf);
-    // Seed the warm-start basis store from the checkpoint's stored
-    // bases so iteration 1's cut-loaded LPs warm-start. Skip when the
-    // checkpoint carries no bases (written without `store_basis`):
-    // the store stays empty and iteration 1 cold-starts.
+    // No stored bases (checkpoint written without `store_basis`) → iteration 1
+    // cold-starts.
     if !checkpoint.stage_bases.is_empty() {
         let basis_cache = cobre_sddp::build_basis_cache_from_checkpoint(
             setup.stage_data.stage_templates.templates.len(),
@@ -149,9 +140,8 @@ pub(super) fn apply_training_policy(
         cobre_io::PolicyMode::Fresh => {}
     }
 
-    // Boundary cuts — orthogonal to policy mode. Runs after the match block so
-    // that warm-start and boundary cuts compose correctly: warm-start replaces the
-    // entire FCF first, then boundary cuts overwrite only the terminal pool.
+    // Must run after the match: warm-start replaces the whole FCF first, then
+    // boundary cuts overwrite only the terminal pool.
     if let Some(bp) = root_config.and_then(|c| c.policy.boundary.as_ref()) {
         let boundary_path = ctx.output_dir.join(&bp.path);
         // Rationale: the cast cannot truncate — `state_dimension` counts FCF
@@ -226,8 +216,8 @@ pub(super) fn load_policy_for_simulation(
         basis_cache,
         Vec::new(),
         None,
-        // Baked templates are not stored in policy checkpoints. simulate() re-bakes all stage
-        // templates at startup from the FCF row pool when baked_templates is None.
+        // Checkpoints store no baked templates; `simulate()` re-bakes from the FCF
+        // row pool when this is None.
         None,
     ))
 }

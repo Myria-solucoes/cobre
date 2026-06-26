@@ -2,18 +2,12 @@
 //!
 //! [`ParquetWriterConfig`] carries the compression, row group size, and
 //! dictionary encoding settings used by all Parquet output writers in this
-//! crate. The defaults match the recommendations in the binary-formats spec
-//! (§5): Zstd level 3, 100 000-row groups, dictionary encoding enabled.
+//! crate. The [`Default`] follows the binary-formats spec (§5).
 
 use parquet::basic::{Compression, ZstdLevel};
 
-/// Configuration for Parquet output writers.
-///
-/// Holds the three Parquet writer knobs relevant to output files: compression
-/// codec, row group size, and whether to enable dictionary encoding for
-/// categorical columns.
-///
-/// Construct via [`Default`] or by filling fields directly.
+/// Configuration for Parquet output writers: compression codec, row group size,
+/// and dictionary encoding.
 ///
 /// # Examples
 ///
@@ -28,26 +22,16 @@ use parquet::basic::{Compression, ZstdLevel};
 /// ```
 #[derive(Debug, Clone)]
 pub struct ParquetWriterConfig {
-    /// Parquet compression codec applied to all column chunks.
-    ///
-    /// Default: `Compression::ZSTD(ZstdLevel::try_new(3))` — a good balance
-    /// between compression ratio and write-time CPU cost.
+    /// Parquet compression codec applied to all column chunks. Default: Zstd
+    /// level 3 (a balance of compression ratio and write-time CPU cost).
     pub compression: Compression,
 
-    /// Maximum number of rows per Parquet row group.
-    ///
-    /// Default: `100_000`. Larger row groups improve compression and columnar
-    /// scan throughput; smaller groups reduce peak write-time memory. 100 000
-    /// rows is the recommended value from the binary-formats spec (§5).
+    /// Maximum rows per Parquet row group. Default: `100_000` — larger groups
+    /// improve compression and scan throughput; smaller reduce peak write memory.
     pub row_group_size: usize,
 
-    /// Whether to enable dictionary encoding for categorical columns.
-    ///
-    /// When `true`, the writer uses dictionary pages for columns that contain
-    /// repeated values (entity IDs, stage IDs, operative-state codes). This
-    /// reduces file size significantly for such columns.
-    ///
-    /// Default: `true`.
+    /// Dictionary encoding for categorical columns (entity/stage IDs, state
+    /// codes). Default: `true`.
     pub dictionary_encoding: bool,
 }
 

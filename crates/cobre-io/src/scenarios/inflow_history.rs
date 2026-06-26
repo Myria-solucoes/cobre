@@ -80,12 +80,10 @@ pub fn parse_inflow_history(path: &Path) -> Result<Vec<InflowHistoryRow>, LoadEr
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required columns ──────────────────────────────────────────────────
         let hydro_id_col = extract_required_int32(&batch, "hydro_id", path)?;
         let date_col = extract_required_date32(&batch, "date", path)?;
         let value_col = extract_required_float64(&batch, "value_m3s", path)?;
 
-        // ── Build rows with per-row validation ────────────────────────────────
         let n = batch.num_rows();
         let base_idx = rows.len();
         rows.reserve(n);
@@ -95,8 +93,7 @@ pub fn parse_inflow_history(path: &Path) -> Result<Vec<InflowHistoryRow>, LoadEr
 
             let hydro_id = EntityId::from(hydro_id_col.value(i));
 
-            // Arrow Date32 stores days since Unix epoch (1970-01-01).
-            // date32_to_datetime converts to NaiveDateTime; .date() gives NaiveDate.
+            // Arrow Date32 stores days since the Unix epoch (1970-01-01).
             let date = date32_to_datetime(date_col.value(i))
                 .ok_or_else(|| LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -110,7 +107,6 @@ pub fn parse_inflow_history(path: &Path) -> Result<Vec<InflowHistoryRow>, LoadEr
 
             let value_m3s = value_col.value(i);
 
-            // Validate value_m3s: must be finite.
             if !value_m3s.is_finite() {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
@@ -127,7 +123,6 @@ pub fn parse_inflow_history(path: &Path) -> Result<Vec<InflowHistoryRow>, LoadEr
         }
     }
 
-    // ── Sort by (hydro_id, date) ascending ────────────────────────────────────
     rows.sort_by(|a, b| {
         a.hydro_id
             .0
@@ -195,7 +190,6 @@ mod tests {
         let base_date = NaiveDate::from_ymd_opt(2000, 1, 1).unwrap();
         let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
 
-        // Build 12 monthly dates starting from 2000-01-01.
         let dates_hydro_1: Vec<i32> = (0..12)
             .map(|m| {
                 let d = NaiveDate::from_ymd_opt(2000, 1 + m, 1).unwrap_or(base_date);
@@ -204,7 +198,7 @@ mod tests {
             .collect();
         let dates_hydro_2 = dates_hydro_1.clone();
 
-        // Interleave: hydro 2 dates then hydro 1 dates (scrambled order).
+        // Input is deliberately scrambled (hydro 2 before hydro 1): confirms the sort.
         let mut hydro_ids = vec![2_i32; 12];
         hydro_ids.extend(vec![1_i32; 12]);
         let mut date_vals: Vec<i32> = dates_hydro_2;

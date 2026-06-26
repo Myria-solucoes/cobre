@@ -1,10 +1,4 @@
 //! Integration tests for the [`ForwardSampler`] abstraction.
-//!
-//! Covers dispatch correctness, `InSample` copy equivalence, `OutOfSample`
-//! determinism, `OutOfSample` correlation correctness, factory error paths,
-//! and resume invariance.
-//!
-//! This is the quality-gate test suite for the [`ForwardSampler`] abstraction.
 
 #![allow(
     clippy::unwrap_used,
@@ -667,7 +661,7 @@ fn factory_rejects_out_of_sample_without_seed() {
         &[NoiseMethod::Saa, NoiseMethod::Saa, NoiseMethod::Saa],
         identity_correlation(&[1, 2]),
     );
-    let ctx = build_test_ctx(&system, None); // forward_seed = None
+    let ctx = build_test_ctx(&system, None);
     let stages = stages_from_system(&system);
 
     let result = build_forward_sampler(make_sampler_config(
@@ -757,7 +751,6 @@ fn out_of_sample_resume_invariance() {
     let mut perm_first = vec![0usize; 5];
     let mut perm_resume = vec![0usize; 5];
 
-    // First call — simulates a running solver at iteration=5, scenario=3.
     let first = sampler
         .sample(SampleRequest {
             iteration: 5,
@@ -772,7 +765,6 @@ fn out_of_sample_resume_invariance() {
         .unwrap();
     let first_values: Vec<f64> = first.as_slice().to_vec();
 
-    // Second call — simulates a resumed solver: same arguments, no prior state.
     let resumed = sampler
         .sample(SampleRequest {
             iteration: 5,

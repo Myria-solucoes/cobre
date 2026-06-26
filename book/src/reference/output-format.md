@@ -1,9 +1,9 @@
 # Output Format Reference
 
-This page is the exhaustive schema reference for every file produced by
+This page is the complete schema reference for every file produced by
 `cobre run`. It documents column names, Arrow data types, nullability, JSON
-field structures, and binary format layouts for all 10 Parquet schemas, the
-two metadata files, the five dictionary files, and the policy checkpoint format.
+field structures, and binary format layouts for the Parquet schemas, the
+metadata files, the dictionary files, and the policy checkpoint format.
 
 If you are new to Cobre output, start with
 [Understanding Results](../tutorial/understanding-results.md) first. That page
@@ -125,12 +125,12 @@ single file. Consumers should check `status` before interpreting other fields.
 
 ```json
 {
-  "cobre_version": "0.8.2",
-  "hostname": "fedora",
+  "cobre_version": "0.9.0",
+  "hostname": "<hostname>",
   "solver": "highs",
-  "solver_version": "1.13.1",
-  "started_at": "2026-06-09T14:09:50Z",
-  "completed_at": "2026-06-09T14:09:50Z",
+  "solver_version": "<solver version>",
+  "started_at": "<timestamp>",
+  "completed_at": "<timestamp>",
   "duration_seconds": 0.15,
   "status": "complete",
   "configuration": {
@@ -185,7 +185,7 @@ single file. Consumers should check `status` before interpreting other fields.
     "ranks_participated": 1,
     "num_nodes": 1,
     "threads_per_rank": 1,
-    "hosts": [{ "hostname": "fedora", "ranks": [0] }]
+    "hosts": [{ "hostname": "<hostname>", "ranks": [0] }]
   }
 }
 ```
@@ -197,7 +197,7 @@ single file. Consumers should check `status` before interpreting other fields.
 | `cobre_version`    | string | No       | Version of the cobre binary that produced this output (from `CARGO_PKG_VERSION`). |
 | `hostname`         | string | No       | Hostname of the machine that ran training.                                        |
 | `solver`           | string | No       | LP solver backend: `"highs"` or `"clp"`.                                          |
-| `solver_version`   | string | Yes      | LP solver library version string (e.g. `"1.13.1"`). Omitted when not available.   |
+| `solver_version`   | string | Yes      | Version string of the linked LP solver library. Omitted when not available.       |
 | `started_at`       | string | No       | ISO 8601 timestamp when training started.                                         |
 | `completed_at`     | string | No       | ISO 8601 timestamp when training completed.                                       |
 | `duration_seconds` | number | No       | Total training wall-clock duration in seconds.                                    |
@@ -493,7 +493,7 @@ release (the version field tracks breaking changes).
 ```json
 {
   "version": "1.0",
-  "generated_at": "2026-01-17T08:00:00Z",
+  "generated_at": "<timestamp>",
   "operative_state": {
     "0": "deactivated",
     "1": "maintenance",
@@ -723,11 +723,11 @@ LP solver statistics, and distribution information.
 
 ```json
 {
-  "cobre_version": "0.8.2",
-  "hostname": "fedora",
+  "cobre_version": "0.9.0",
+  "hostname": "<hostname>",
   "solver": "highs",
-  "started_at": "2026-06-09T14:09:50Z",
-  "completed_at": "2026-06-09T14:09:50Z",
+  "started_at": "<timestamp>",
+  "completed_at": "<timestamp>",
   "duration_seconds": 0.103,
   "status": "complete",
   "scenarios": {
@@ -755,7 +755,7 @@ LP solver statistics, and distribution information.
     "ranks_participated": 1,
     "num_nodes": 1,
     "threads_per_rank": 1,
-    "hosts": [{ "hostname": "fedora", "ranks": [0] }]
+    "hosts": [{ "hostname": "<hostname>", "ranks": [0] }]
   }
 }
 ```
@@ -808,7 +808,7 @@ See the **`distribution` fields** table above.
 
 ### `simulation/costs/`
 
-Stage and block-level cost breakdown. One row per (stage, block) pair. 26 columns.
+Stage and block-level cost breakdown. One row per (stage, block) pair. 27 columns.
 
 | Column                         | Type    | Nullable | Description                                                                                                                  |
 | ------------------------------ | ------- | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
@@ -970,16 +970,16 @@ Pumping station results. One row per (stage, block, pumping station) triplet. 9 
 
 Energy contract results. One row per (stage, block, contract) triplet. 8 columns.
 
-| Column                 | Type    | Nullable | Description                                                         |
-| ---------------------- | ------- | -------- | ------------------------------------------------------------------- |
-| `stage_id`             | Int32   | No       | Stage index (0-based).                                              |
-| `block_id`             | Int32   | Yes      | Load block index. `null` for stage-level records.                   |
-| `contract_id`          | Int32   | No       | Contract ID.                                                        |
-| `power_mw`             | Float64 | No       | Contracted power in MW. Positive for imports, negative for exports. |
-| `energy_mwh`           | Float64 | No       | Contracted energy over the block in MWh.                            |
-| `price_per_mwh`        | Float64 | No       | Contract price in monetary units per MWh.                           |
-| `total_cost`           | Float64 | No       | Total contract cost for this block. Positive for imports.           |
-| `operative_state_code` | Int8    | No       | Operative state code (see `codes.json` `operative_state` mapping).  |
+| Column                 | Type    | Nullable | Description                                                                                                                                                             |
+| ---------------------- | ------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stage_id`             | Int32   | No       | Stage index (0-based).                                                                                                                                                  |
+| `block_id`             | Int32   | Yes      | Load block index. `null` for stage-level records.                                                                                                                       |
+| `contract_id`          | Int32   | No       | Contract ID.                                                                                                                                                            |
+| `power_mw`             | Float64 | No       | Contracted power in MW, non-negative for both import and export contracts. Direction is carried by the contract type and the price sign, not by the sign of this value. |
+| `energy_mwh`           | Float64 | No       | Contracted energy over the block in MWh.                                                                                                                                |
+| `price_per_mwh`        | Float64 | No       | Contract price in monetary units per MWh.                                                                                                                               |
+| `total_cost`           | Float64 | No       | Total contract cost for this block: positive for imports (cost), negative for exports (revenue).                                                                        |
+| `operative_state_code` | Int8    | No       | Operative state code (see `codes.json` `operative_state` mapping); always `1` for contracts (a dormant stage emits a zero-`power_mw` row, not a distinct code).         |
 
 ---
 
