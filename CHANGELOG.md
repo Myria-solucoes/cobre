@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-25
+
 ### Added
 
 - **Energy contracts now participate in dispatch.** A `system/energy_contracts.json`
@@ -38,6 +40,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cost column — both emitted by the CLI and the Python bindings.
 
 ### Changed
+
+- **Commissioning windows are now honored by thermal units, transmission lines,
+  and anticipated (GNL) thermals.** The `entry_stage_id`/`exit_stage_id` fields on
+  `system/thermals.json` and `system/lines.json` — previously parsed but inert —
+  now take effect. Outside `[entry, exit)` a thermal has both generation bounds
+  zeroed (including any must-run floor, so a windowed-out must-run unit stays
+  feasible) and a line has both flow caps zeroed. An anticipated thermal gates its
+  commitment and generation on the delivery stage's window. NCS and pumping
+  commissioning is unified onto the same zero-influence treatment, so a dormant
+  NCS, pumping, thermal, or line entity now emits a uniform zero-valued output row
+  rather than being omitted from the output. Only non-filling hydro commissioning
+  windows remain parsed-but-inert (still surfaced by a model-quality warning).
 
 - **`constraints/pumping_bounds.parquet` override rows are validated for domain
   sanity.** A pumped-flow override row is now rejected when a bound is negative or
@@ -2217,7 +2231,8 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 <!-- next-url -->
 
-[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/cobre-rs/cobre/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/cobre-rs/cobre/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/cobre-rs/cobre/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/cobre-rs/cobre/compare/v0.7.0...v0.8.0

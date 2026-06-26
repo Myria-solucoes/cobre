@@ -21,7 +21,7 @@
     "turbined_cost": 0.05,
     "diversion_cost": 0.1,
     "storage_violation_below_cost": 10000.0,
-    "filling_target_violation_cost": 50000.0,
+    "filling_target_violation_cost": 6000.0,
     "turbined_violation_below_cost": 500.0,
     "outflow_violation_below_cost": 500.0,
     "outflow_violation_above_cost": 500.0,

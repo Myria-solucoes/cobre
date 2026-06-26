@@ -197,11 +197,11 @@ Create `my_study/penalties.json`:
     "deficit_segments": [
       {
         "depth_mw": 500.0,
-        "cost": 1000.0
+        "cost": 7000.0
       },
       {
         "depth_mw": null,
-        "cost": 5000.0
+        "cost": 7500.0
       }
     ],
     "excess_cost": 100.0
@@ -214,7 +214,7 @@ Create `my_study/penalties.json`:
     "turbined_cost": 0.05,
     "diversion_cost": 0.1,
     "storage_violation_below_cost": 10000.0,
-    "filling_target_violation_cost": 50000.0,
+    "filling_target_violation_cost": 6000.0,
     "turbined_violation_below_cost": 500.0,
     "outflow_violation_below_cost": 500.0,
     "outflow_violation_above_cost": 500.0,

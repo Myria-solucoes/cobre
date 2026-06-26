@@ -99,11 +99,11 @@ dispatch option.
     "deficit_segments": [
       {
         "depth_mw": 500.0,
-        "cost": 1000.0
+        "cost": 7000.0
       },
       {
         "depth_mw": null,
-        "cost": 5000.0
+        "cost": 7500.0
       }
     ],
     "excess_cost": 100.0
@@ -116,7 +116,7 @@ dispatch option.
     "turbined_cost": 0.05,
     "diversion_cost": 0.1,
     "storage_violation_below_cost": 10000.0,
-    "filling_target_violation_cost": 50000.0,
+    "filling_target_violation_cost": 6000.0,
     "turbined_violation_below_cost": 500.0,
     "outflow_violation_below_cost": 500.0,
     "outflow_violation_above_cost": 500.0,
@@ -131,8 +131,8 @@ dispatch option.
 ```
 
 The `bus.deficit_segments` array defines a piecewise-linear deficit cost curve.
-The first segment covers the first 500 MW of unserved energy at 1000 $/MWh.
-Beyond 500 MW, the cost rises to 5000 $/MWh (the segment with `depth_mw: null`
+The first segment covers the first 500 MW of unserved energy at 7000 $/MWh.
+Beyond 500 MW, the cost rises to 7500 $/MWh (the segment with `depth_mw: null`
 is always the final unbounded tier). The two-tier structure mimics a typical
 Value of Lost Load model where the first tranche represents interruptible load
 and the second represents non-interruptible load. `excess_cost` penalizes
@@ -141,8 +141,11 @@ over-injection at 100 $/MWh.
 Hydro penalty costs cover a range of operational constraint violations. The low
 `spillage_cost` (0.01 $/hm3) makes spillage the cheapest way to release water
 when turbine capacity is exhausted. The high `storage_violation_below_cost`
-(10,000 $/hm3) and `filling_target_violation_cost` (50,000 $/hm3) make reservoir
-bound violations extremely costly, ensuring the solver strongly avoids them.
+(10,000 $/hm3) makes dropping below the minimum reservoir storage the costliest
+hydro violation — priced above even the deficit cost — so the solver avoids it
+except in genuine water shortage. `filling_target_violation_cost` (6,000 $/hm3)
+is deliberately set below the deficit cost, so missing a reservoir filling target
+is discouraged but never takes priority over serving load.
 
 Individual entities can override these global defaults in their own JSON files
 using a `penalties` block. The reference page documents all override options.
@@ -294,7 +297,7 @@ withdrawals at every bus in every LP solve.
       "deficit_segments": [
         {
           "depth_mw": null,
-          "cost": 1000.0
+          "cost": 7500.0
         }
       ]
     }
@@ -308,7 +311,7 @@ as one copper-plate node: there are no transmission constraints.
 
 The bus-level `deficit_segments` here overrides the global default from
 `penalties.json` with a simpler single-tier structure: unlimited deficit at
-1000 $/MWh. When an entity-level override is present, it takes precedence over
+7500 $/MWh. When an entity-level override is present, it takes precedence over
 the global default.
 
 ---
@@ -466,7 +469,7 @@ capacity segments at increasing costs.
 
 Both thermal plants connect to bus 0. `UTE1` is the cheaper unit at 5 $/MWh and
 `UTE2` costs 10 $/MWh. Both are limited to 15 MW maximum dispatch. In the LP,
-Cobre will always prefer UTE1 over UTE2 and prefer both over deficit (1000 $/MWh),
+Cobre will always prefer UTE1 over UTE2 and prefer both over deficit (7500 $/MWh),
 creating a natural merit-order dispatch.
 
 Each thermal has a single cost segment covering its entire capacity. For plants

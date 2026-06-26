@@ -188,7 +188,7 @@ when your case is working and you want dispatch results.
 {
   "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/penalties.schema.json",
   "bus": {
-    "deficit_segments": [{ "depth_mw": null, "cost": 3000.0 }],
+    "deficit_segments": [{ "depth_mw": null, "cost": 7500.0 }],
     "excess_cost": 100.0
   },
   "line": {
@@ -199,7 +199,7 @@ when your case is working and you want dispatch results.
     "turbined_cost": 0.05,
     "diversion_cost": 0.1,
     "storage_violation_below_cost": 10000.0,
-    "filling_target_violation_cost": 50000.0,
+    "filling_target_violation_cost": 6000.0,
     "turbined_violation_below_cost": 500.0,
     "outflow_violation_below_cost": 500.0,
     "outflow_violation_above_cost": 500.0,

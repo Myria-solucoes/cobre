@@ -93,7 +93,7 @@ all fields — required and optional — for a single plant:
         "diversion_cost": 0.1,
         "turbined_cost": 0.05,
         "storage_violation_below_cost": 10000.0,
-        "filling_target_violation_cost": 50000.0,
+        "filling_target_violation_cost": 6000.0,
         "turbined_violation_below_cost": 500.0,
         "outflow_violation_below_cost": 500.0,
         "outflow_violation_above_cost": 500.0,
@@ -731,9 +731,9 @@ filling operation is active.
 }
 ```
 
-| Field                | Description                                                     |
-| -------------------- | --------------------------------------------------------------- |
-| `start_stage_id`     | Stage index at which filling begins (inclusive).                |
+| Field                  | Description                                                                                                                                                                 |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `start_stage_id`       | Stage index at which filling begins (inclusive).                                                                                                                            |
 | `filling_min_rate_m3s` | Per-stage minimum accumulation rate during filling [m³/s]: anchors a per-stage minimum target-storage trajectory on `min_storage_hm3`. Not an applied inflow and not a cap. |
 
 ---
@@ -755,7 +755,7 @@ solver to avoid infeasible or undesirable operating states.
   "diversion_cost": 0.1,
   "turbined_cost": 0.05,
   "storage_violation_below_cost": 10000.0,
-  "filling_target_violation_cost": 50000.0,
+  "filling_target_violation_cost": 6000.0,
   "turbined_violation_below_cost": 500.0,
   "outflow_violation_below_cost": 500.0,
   "outflow_violation_above_cost": 500.0,
