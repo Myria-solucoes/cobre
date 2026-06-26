@@ -92,7 +92,7 @@ def _variables_catalog_row(
     assert csv_path.is_file(), (
         f"training/dictionaries/variables.csv must exist after run; checked {csv_path}"
     )
-    with csv_path.open(newline="") as handle:
+    with csv_path.open(newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
             if row["file"] == file_name and row["column"] == column:
                 return row
