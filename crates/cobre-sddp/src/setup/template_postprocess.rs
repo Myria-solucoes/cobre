@@ -79,18 +79,28 @@ pub(crate) fn postprocess_templates(
     // Discount theta before column/row scaling: discounting is orthogonal to cost
     // scaling (which divides c_i by K but leaves theta untouched), so the two must
     // not be folded together.
-    if let Some(first) = stage_templates.templates.first() {
-        // Theta sits 2*N columns past `n_state` in the LP layout
-        // (z_inflow occupies N cols then storage_in occupies N cols
-        // between the state region and theta). This invariant holds
-        // for both the base and the augmented (anticipated-state-extended)
-        // indexer because `n_state` already absorbs `A*K_max`.
-        let theta_col = first.n_state + 2 * stage_templates.n_hydros;
-        // Snapshot so the discount read does not alias the `templates.iter_mut()`
-        // borrow below (the accessor borrows all of `stage_templates`).
+    //
+    // θ's column index is the authoritative `StageLayout::col_theta()`, captured
+    // per stage in `StageGeometry::theta_col` at build time. It must NOT be
+    // re-derived from `n_state`/`n_hydros` here: that hand arithmetic omits the
+    // `anticipated_state_out` block (length `n_anticipated`) and, when the deck has
+    // anticipated thermals, lands on a zero-cost `storage_in` column — silently
+    // disabling discounting (`0 * d = 0`). Snapshot the indices and discount
+    // factors so the reads do not alias the `templates.iter_mut()` borrow below.
+    {
+        let theta_cols: Vec<usize> = stage_templates
+            .geometry_per_stage
+            .iter()
+            .map(|g| g.theta_col)
+            .collect();
         let discount_factors = stage_templates.discount_factors().to_vec();
+        debug_assert_eq!(
+            theta_cols.len(),
+            stage_templates.templates.len(),
+            "geometry_per_stage must be populated and aligned with templates",
+        );
         for (s_idx, tmpl) in stage_templates.templates.iter_mut().enumerate() {
-            tmpl.objective[theta_col] *= discount_factors[s_idx];
+            tmpl.objective[theta_cols[s_idx]] *= discount_factors[s_idx];
         }
     }
 

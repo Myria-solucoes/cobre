@@ -973,6 +973,8 @@ fn build_geometry(
     let _ = fpha_planes; // FPHA row arithmetic is internal; only the column count matters here.
 
     cobre_sddp::lp_builder::StageGeometry {
+        // θ sits one column before the turbine block (`turbine.start == theta + 1`).
+        theta_col: turbine_start - 1,
         turbine: turbine_start..spillage_start,
         spillage: spillage_start..diversion_start,
         diversion: diversion_start..thermal_start,
