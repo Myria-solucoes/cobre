@@ -34,7 +34,7 @@ pub(super) fn fill_stage_columns(
         objective: &mut objective,
     };
 
-    fill_storage_columns(ctx, stage_idx, layout, b);
+    fill_storage_columns(ctx, stage, stage_idx, layout, b);
     fill_ar_lag_columns(layout, b);
     fill_anticipated_state_columns(layout, b);
     fill_theta_column(layout, b);
@@ -64,24 +64,37 @@ pub(super) fn fill_stage_columns(
 ///
 /// Outgoing storage `v_h` gets `[min_storage, max_storage]`; incoming storage
 /// `v_in_h` is unconstrained (pinned at solve time by column bounds). This site
-/// sets the floor only — the `PreFilling` `[seed, seed]` freeze is applied
-/// elsewhere.
+/// sets the floor only — the `PreFilling` storage pin (incoming column ⇒ the IC /
+/// `filling_storage` seed) is applied at solve time.
 fn fill_storage_columns(
     ctx: &TemplateBuildCtx<'_>,
+    stage: &Stage,
     stage_idx: usize,
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
     for h_idx in 0..layout.n_h {
         let hydro = &ctx.hydros[h_idx];
-        // CONTRACT: `min_storage` is a HARD lower bound for every hydro EXCEPT a
-        // filling one (`hydro.filling.is_some()`), whose floor relaxes to `0` here
-        // and is re-imposed as a SOFT floor by `fill_filled_min_storage_floor_columns`.
-        // FORBIDDEN — globalizing the relax to all hydros (makes dead volume soft
-        // system-wide); keeping it hard for a filled hydro (re-introduces
-        // first-operating-stage infeasibility on a deficient start). Gated on
-        // `is_some()`, mirroring `identify_filled_min_storage_floor_hydros`.
-        let floor_off = hydro.filling.is_some();
+        // CONTRACT: `min_storage` is a HARD lower bound for every hydro EXCEPT (a) a
+        // filling one (`hydro.filling.is_some()`), whose floor relaxes to `0` in ALL
+        // phases and is re-imposed as a SOFT floor by
+        // `fill_filled_min_storage_floor_columns`, and (b) a non-filling hydro while
+        // `PreFilling` (commissioning-dormant), whose frozen-identity row pins `v_h`
+        // to the inert IC storage — a hard floor above that IC value would reject the
+        // pin and make the LP infeasible. FORBIDDEN — globalizing the relax to all
+        // Operating hydros (makes dead volume soft system-wide); keeping it hard
+        // through a dormant non-filling stage (rejects the IC pin). The dormant relax
+        // disappears at `Operating`, restoring the hard floor.
+        let floor_off = hydro.filling.is_some()
+            || matches!(
+                crate::lp_builder::filling_phase(
+                    hydro.filling.as_ref(),
+                    hydro.entry_stage_id,
+                    hydro.exit_stage_id,
+                    stage.id,
+                ),
+                crate::lp_builder::Phase::PreFilling
+            );
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         bufs.col_lower[h_idx] = if floor_off { 0.0 } else { hb.min_storage_hm3 };
         bufs.col_upper[h_idx] = hb.max_storage_hm3;
@@ -126,9 +139,11 @@ fn fill_theta_column(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
 /// productivity` (derated). Every hydro's turbine column carries `turbined_cost *
 /// block_hours`, regardless of production model.
 ///
-/// A filling hydro (`PreFilling`/`Filling`) has BOTH bounds forced to `[0, 0]`:
+/// A suspended hydro (`PreFilling`/`Filling`) has BOTH bounds forced to `[0, 0]`:
 /// both must drop, or a positive `min_turbined_m3s` would leave `[min > 0, 0]`, an
-/// infeasible pair. `filling.is_none()` ⇒ `Operating` ⇒ no-op (parity-neutral).
+/// infeasible pair. This covers a commissioning-dormant non-filling hydro
+/// (`PreFilling`); a non-filling hydro with no window is `Operating` ⇒ no-op
+/// (parity-neutral).
 fn fill_turbine_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -142,6 +157,7 @@ fn fill_turbine_columns(
             crate::lp_builder::filling_phase(
                 hydro.filling.as_ref(),
                 hydro.entry_stage_id,
+                hydro.exit_stage_id,
                 stage.id,
             ),
             crate::lp_builder::Phase::PreFilling | crate::lp_builder::Phase::Filling
@@ -173,6 +189,14 @@ fn fill_turbine_columns(
 }
 
 /// Spillage columns per hydro per block.
+///
+/// CONTRACT: a `PreFilling` hydro's spillage is pinned `[0, 0]` (no dam exists yet
+/// to spill from), gated on `Phase::PreFilling` ALONE. Two forbidden alternatives:
+/// extending the freeze to `Filling` kills the legitimate over-dam relief valve an
+/// impounding reservoir needs (D40); gating on `filling.is_none()` leaves the
+/// phantom-spill hole open for a filling hydro in its own `PreFilling` sub-phase
+/// (D38/D39), where a free spillage column decoupled from frozen storage injects
+/// water it does not have onto the downstream balance row.
 fn fill_spillage_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -181,10 +205,20 @@ fn fill_spillage_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for h_idx in 0..layout.n_h {
+        let hydro = &ctx.hydros[h_idx];
+        let prefilling = matches!(
+            crate::lp_builder::filling_phase(
+                hydro.filling.as_ref(),
+                hydro.entry_stage_id,
+                hydro.exit_stage_id,
+                stage.id,
+            ),
+            crate::lp_builder::Phase::PreFilling
+        );
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         for blk in 0..layout.n_blks {
             let col = layout.spillage_col(h_idx, blk);
-            bufs.col_upper[col] = f64::INFINITY;
+            bufs.col_upper[col] = if prefilling { 0.0 } else { f64::INFINITY };
             let block_hours = stage.blocks[blk].duration_hours;
             bufs.objective[col] = hp.spillage_cost * block_hours;
         }
@@ -196,7 +230,10 @@ fn fill_spillage_columns(
 ///
 /// A filling hydro (`hydro.filling.is_some()`) is forced to `[0, 0]` in ALL phases
 /// — gated on `is_some()`, NOT the `Phase`, deliberately: phase-gating would wrongly
-/// re-enable diversion at `Operating`, but a filling hydro never diverts.
+/// re-enable diversion at `Operating`, but a filling hydro never diverts. A
+/// commissioning-dormant non-filling hydro is additionally forced to `[0, 0]` while
+/// `PreFilling` (the un-built dam diverts nothing), regaining diversion at
+/// `Operating`.
 fn fill_diversion_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -206,10 +243,19 @@ fn fill_diversion_columns(
 ) {
     for (h_idx, hydro) in ctx.hydros.iter().enumerate() {
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
+        let suspended = matches!(
+            crate::lp_builder::filling_phase(
+                hydro.filling.as_ref(),
+                hydro.entry_stage_id,
+                hydro.exit_stage_id,
+                stage.id,
+            ),
+            crate::lp_builder::Phase::PreFilling | crate::lp_builder::Phase::Filling
+        );
         // CONTRACT: read the per-stage RESOLVED `max_diversion_m3s`, NOT the
         // declaration-time `hydro.diversion.max_flow_m3s` — the entity read silently
         // drops any wired per-stage override (mirrors every sibling column family).
-        let max_div = if hydro.filling.is_some() {
+        let max_div = if hydro.filling.is_some() || suspended {
             0.0
         } else {
             ctx.resolved
@@ -1230,7 +1276,7 @@ mod filling_phase_gating_tests {
     use super::super::test_support::{state_layout_for, two_block_stage, zero_hydro_penalties};
     use super::{
         ColumnBufs, StageLayout, TemplateBuildCtx, fill_diversion_columns,
-        fill_fpha_generation_columns, fill_turbine_columns,
+        fill_fpha_generation_columns, fill_spillage_columns, fill_turbine_columns,
     };
 
     const MAX_TURBINED_M3S: f64 = 100.0;
@@ -1540,10 +1586,104 @@ mod filling_phase_gating_tests {
         (col_lower, col_upper, offsets)
     }
 
+    /// Run `fill_spillage_columns` against the fixture at `stage_id`, returning
+    /// `col_upper` and the spillage column start. Isolated like `run_storage_fill`:
+    /// the spillage freeze is independent of the turbine/diversion/generation gates,
+    /// so it is exercised on its own.
+    fn run_spillage_fill(fixtures: &Fixtures, stage_id: i32) -> (Vec<f64>, usize, usize) {
+        let stage_index = usize::try_from(stage_id).expect("test stage ids are non-negative");
+        let stage = two_block_stage(stage_index, [372.0, 372.0]);
+        let ctx = fixtures.make_ctx();
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, STAGE_IDX);
+        let (mut col_lower, mut col_upper, mut objective) = fresh_bufs(layout.num_cols);
+        let mut bufs = ColumnBufs {
+            col_lower: &mut col_lower,
+            col_upper: &mut col_upper,
+            objective: &mut objective,
+        };
+        fill_spillage_columns(&ctx, &stage, STAGE_IDX, &layout, &mut bufs);
+        (col_upper, layout.col_spillage_start(), layout.n_blks)
+    }
+
     fn filling_config() -> FillingConfig {
         FillingConfig {
             start_stage_id: START_STAGE_ID,
             filling_min_rate_m3s: 0.0,
+        }
+    }
+
+    /// A filling hydro's spillage is pinned `[0, 0]` in `PreFilling` ONLY (no dam yet
+    /// to spill from), but stays FREE `[0, +∞)` in `Filling` (a real impounding
+    /// reservoir can spill over-dam excess) and `Operating`. The forbidden
+    /// alternative — extending the freeze to `Filling` — removes that legitimate
+    /// relief valve (D40).
+    #[test]
+    fn filling_hydro_spillage_frozen_in_prefilling_free_in_filling_and_operating() {
+        let fixtures = Fixtures::new(Some(filling_config()), Some(ENTRY_STAGE_ID), false);
+        let (upper_pre, spill_start, n_blks) = run_spillage_fill(&fixtures, PREFILLING_ID);
+        for blk in 0..n_blks {
+            assert_eq!(
+                upper_pre[spill_start + blk],
+                0.0,
+                "spillage col_upper frozen [0,0] in PreFilling, blk {blk}"
+            );
+        }
+        for stage_id in [FILLING_ID, OPERATING_ID] {
+            let (upper, start, n) = run_spillage_fill(&fixtures, stage_id);
+            for blk in 0..n {
+                assert_eq!(
+                    upper[start + blk],
+                    f64::INFINITY,
+                    "spillage col_upper free [0,+∞) at stage {stage_id}, blk {blk}"
+                );
+            }
+        }
+    }
+
+    /// A commissioning-dormant non-filling hydro (`filling = None`, `entry`) has its
+    /// spillage pinned `[0, 0]` while `PreFilling` (the un-built dam spills nothing),
+    /// regaining free spillage from `entry` onward (`Operating`).
+    #[test]
+    fn dormant_non_filling_hydro_spillage_frozen_before_entry_free_after() {
+        let fixtures = Fixtures::new(None, Some(ENTRY_STAGE_ID), false);
+        // With filling = None, both ids < entry are PreFilling (no Filling phase
+        // exists for a non-filling hydro): FILLING_ID here is just a second dormant id.
+        for stage_id in [PREFILLING_ID, FILLING_ID] {
+            let (upper, start, n_blks) = run_spillage_fill(&fixtures, stage_id);
+            for blk in 0..n_blks {
+                assert_eq!(
+                    upper[start + blk],
+                    0.0,
+                    "dormant spillage col_upper frozen [0,0] at PreFilling stage {stage_id}, blk {blk}"
+                );
+            }
+        }
+        let (upper, start, n_blks) = run_spillage_fill(&fixtures, OPERATING_ID);
+        for blk in 0..n_blks {
+            assert_eq!(
+                upper[start + blk],
+                f64::INFINITY,
+                "spillage col_upper free [0,+∞) once Operating, blk {blk}"
+            );
+        }
+    }
+
+    /// A non-filling hydro with no commissioning window is `Operating` at every stage:
+    /// its spillage stays free `[0, +∞)` at every stage id (parity-neutral — the
+    /// freeze never fires).
+    #[test]
+    fn non_filling_hydro_spillage_free_at_every_stage() {
+        let fixtures = Fixtures::new(None, None, false);
+        for stage_id in [PREFILLING_ID, FILLING_ID, OPERATING_ID] {
+            let (upper, start, n_blks) = run_spillage_fill(&fixtures, stage_id);
+            for blk in 0..n_blks {
+                assert_eq!(
+                    upper[start + blk],
+                    f64::INFINITY,
+                    "non-filling spillage col_upper free at stage {stage_id}, blk {blk}"
+                );
+            }
         }
     }
 
@@ -1641,6 +1781,57 @@ mod filling_phase_gating_tests {
         }
     }
 
+    /// A commissioning-dormant non-filling hydro (`filling = None`,
+    /// `entry = Some(4)`) is `PreFilling` before entry: turbine and diversion
+    /// columns are `[0, 0]`, and the FPHA generation column is omitted from the
+    /// dense block (`identify_fpha_hydros` drops it), exactly like a filling hydro's
+    /// `PreFilling` stage.
+    #[test]
+    fn dormant_non_filling_hydro_zeroed_before_entry() {
+        let fixtures = Fixtures::new(None, Some(ENTRY_STAGE_ID), true);
+        for stage_id in [PREFILLING_ID, FILLING_ID] {
+            let (lower, upper, [turb, div, gen_col]) = run_fills(&fixtures, stage_id);
+            assert_eq!(lower[turb], 0.0, "turbine col_lower at stage {stage_id}");
+            assert_eq!(upper[turb], 0.0, "turbine col_upper at stage {stage_id}");
+            for blk in 0..2 {
+                let col = div + blk;
+                assert_eq!(
+                    lower[col], 0.0,
+                    "diversion col_lower blk {blk} at {stage_id}"
+                );
+                assert_eq!(
+                    upper[col], 0.0,
+                    "dormant diversion col_upper blk {blk} at {stage_id}"
+                );
+            }
+            assert_eq!(
+                gen_col,
+                usize::MAX,
+                "dormant non-filling hydro has no FPHA generation column before entry (stage {stage_id})"
+            );
+        }
+    }
+
+    /// From `entry` onward a commissioning-dormant non-filling hydro is `Operating`
+    /// with NO intervening `Filling` phase: turbine, generation, and diversion
+    /// return to their normal bounds at the first commissioned stage.
+    #[test]
+    fn dormant_non_filling_hydro_normal_from_entry() {
+        let fixtures = Fixtures::new(None, Some(ENTRY_STAGE_ID), true);
+        let (lower, upper, [turb, div, gen_col]) = run_fills(&fixtures, OPERATING_ID);
+        assert_eq!(lower[turb], 0.0, "turbine col_lower");
+        assert_eq!(upper[turb], MAX_TURBINED_M3S, "turbine col_upper");
+        assert_eq!(lower[gen_col], 0.0, "generation col_lower");
+        assert_eq!(upper[gen_col], MAX_GENERATION_MW, "generation col_upper");
+        for blk in 0..2 {
+            let col = div + blk;
+            assert_eq!(
+                upper[col], MAX_DIVERSION_M3S,
+                "diversion col_upper blk {blk}"
+            );
+        }
+    }
+
     // A non-zero dead volume so the storage-floor relax (floor → 0) is observable
     // against the hard `min_storage` floor.
     const MIN_STORAGE_HM3: f64 = 50.0;
@@ -1670,7 +1861,7 @@ mod filling_phase_gating_tests {
             col_upper: &mut col_upper,
             objective: &mut objective,
         };
-        super::fill_storage_columns(&ctx, STAGE_IDX, &layout, &mut bufs);
+        super::fill_storage_columns(&ctx, &stage, STAGE_IDX, &layout, &mut bufs);
         (col_lower[0], col_upper[0])
     }
 
@@ -1725,6 +1916,33 @@ mod filling_phase_gating_tests {
                 "non-filling storage col_upper at {stage_id}"
             );
         }
+    }
+
+    /// A commissioning-dormant non-filling hydro relaxes its storage FLOOR to `0`
+    /// while `PreFilling` (the frozen-identity row pins `v_h` to the inert IC
+    /// storage, which a hard `min_storage` floor would reject), then RESTORES the
+    /// hard `min_storage` floor from `entry` onward (`Operating` — a normal plant
+    /// with no soft operating-floor row, unlike a filling hydro). The forbidden
+    /// alternative — keeping the relax at `Operating` — would silently make this
+    /// plant's dead volume soft once it commissions.
+    #[test]
+    fn dormant_non_filling_hydro_storage_floor_relaxed_then_restored() {
+        for stage_id in [PREFILLING_ID, FILLING_ID] {
+            let mut fixtures = Fixtures::new(None, Some(ENTRY_STAGE_ID), false);
+            let (lower, upper) = run_storage_fill(&mut fixtures, stage_id);
+            assert_eq!(
+                lower, 0.0,
+                "dormant storage col_lower relaxed to 0 at {stage_id}"
+            );
+            assert_eq!(upper, MAX_STORAGE_HM3, "storage col_upper at {stage_id}");
+        }
+        let mut fixtures = Fixtures::new(None, Some(ENTRY_STAGE_ID), false);
+        let (lower, upper) = run_storage_fill(&mut fixtures, OPERATING_ID);
+        assert_eq!(
+            lower, MIN_STORAGE_HM3,
+            "storage col_lower restored to hard min_storage at Operating"
+        );
+        assert_eq!(upper, MAX_STORAGE_HM3, "storage col_upper at Operating");
     }
 
     // ── σ_fill terminal-target column ────────────────────────────────────────

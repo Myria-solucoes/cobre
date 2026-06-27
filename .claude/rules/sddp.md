@@ -80,3 +80,18 @@ Read: `training/backward_pass_state.rs`.
 there is no exponentially-weighted smoothing. Gap closure is immediate for
 deterministic cases.
 Read: `convergence/convergence.rs`.
+
+## Spillage is frozen `[0, 0]` during PreFilling
+
+A `PreFilling` hydro's spillage column is pinned `[0, 0]` — no dam exists yet to
+spill from, and its incremental inflow has already left via the short-circuit, so a
+free spillage column injects phantom water onto the first active downstream hydro's
+water-balance row (a conservation violation). The freeze is gated on
+`Phase::PreFilling` ALONE. Two wrong-but-compiling alternatives: extending the
+freeze to `Filling` removes the legitimate over-dam relief valve an impounding
+reservoir needs (D40); gating on `filling.is_none()` leaves the phantom-spill hole
+open for a filling hydro in its own `PreFilling` sub-phase (D38, D39). Turbine and
+diversion differ — they are frozen in BOTH `PreFilling` and `Filling` (no installed
+machinery), whereas spillage is legitimately free in `Filling`.
+Read: `lp/builder/columns.rs` (`fill_spillage_columns`). Cases: D38, D39, D42
+(phantom PreFilling spill removed); D40 (legitimate Filling-phase spill retained).

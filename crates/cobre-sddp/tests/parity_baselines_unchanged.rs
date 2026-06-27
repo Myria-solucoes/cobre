@@ -110,11 +110,11 @@ const EXPECTED_HASHES: &[(&str, &str)] = &[
     ),
     (
         "D38",
-        "7e02e0cfd3d7cbf27ec4d1939a9e6957e52eecaa3e20ccdb2ef2be03426de352",
+        "e86aec8a30fa06d11c5d50f37aea2aeff81fbb3decc0da03a19bab5771a24510",
     ),
     (
         "D39",
-        "7a29931dcd7e678c3e0ce83820508c97c9419e620669f98ae25b17292c8ad7e8",
+        "36317e75030a7ea9d662470d28bdc1e87e991f90eb232341e2ec7a95716b7e21",
     ),
     (
         "D40",
@@ -123,6 +123,10 @@ const EXPECTED_HASHES: &[(&str, &str)] = &[
     (
         "D41",
         "a6093e62935c6ace5fadb9970de58f390f46602bdaddbe85870dc02a0e30b988",
+    ),
+    (
+        "D42",
+        "95893e7218650eff2550e6a6a572b595dcf0bb7ee866ec08867552e78ffb71e4",
     ),
 ];
 

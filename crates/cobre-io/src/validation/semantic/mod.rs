@@ -15,7 +15,8 @@
 //! | 5 | `min_generation_mw <= max_generation_mw` (hydro)  | `system/hydros.json`                  | `InvalidValue`         |
 //! | 6 | `entry_stage_id < exit_stage_id` (when both Some) | all six entity types                  | `InvalidValue`         |
 //! | 7 | Filling `start_stage_id` in study stage set       | `system/hydros.json`                  | `InvalidValue`         |
-//! | 7a| Filling guards: entry⟺filling paired, `start_stage_id < entry_stage_id`, `entry_stage_id < horizon`, seed in `[0, min_storage_hm3)`, no `exit_stage_id` on a filling hydro | `system/hydros.json` | `InvalidValue` |
+//! | 7a| Filling guards (hard): `filling ⟹ entry_stage_id` (a bare window without filling is valid), `start_stage_id < entry_stage_id`, seed in `[0, min_storage_hm3)`, no `exit_stage_id` on a filling hydro, seed `== 0` when `start_stage_id > 0` | `system/hydros.json` | `InvalidValue` |
+//! | 7b| `entry_stage_id >= horizon` on a filling hydro (fills throughout, never operates within this study) | `system/hydros.json` | `ModelQuality` (warning) |
 //! | 8 | Geometry `volume_hm3` strictly increasing         | `system/hydro_geometry.parquet`       | `BusinessRuleViolation`|
 //! | 9 | Geometry `height_m` non-decreasing                | `system/hydro_geometry.parquet`       | `BusinessRuleViolation`|
 //! |10 | Geometry `area_km2` non-decreasing                | `system/hydro_geometry.parquet`       | `BusinessRuleViolation`|
@@ -28,7 +29,6 @@
 //! |17 | `anticipated_decision(N)` in generic constraint targets an anticipated thermal | `constraints/generic_constraints.json` | `BusinessRuleViolation` |
 //! |18 | `thermal_generation(N)` in generic constraint when `N` is anticipated (warn) | `constraints/generic_constraints.json` | `SemanticAmbiguity` (warning) |
 //! |19 | Pumping `source_hydro_id != destination_hydro_id`  | `system/pumping_stations.json`        | `InvalidValue`         |
-//! |20 | Non-filling hydro sets `entry_stage_id`/`exit_stage_id` (parsed, not applied; filling hydros, thermal/line/NCS/pumping/contract windows ARE applied) | `system/hydros.json` | `ModelQuality` (warning) |
 //!
 //! ## Layer 5b rules (stages, penalties, and scenario domain) — `validate_semantic_stages_penalties_scenarios`
 //!
@@ -87,7 +87,6 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     hydro::check_hydro_bounds(data, ctx);
     hydro::check_lifecycle_consistency(data, ctx);
     hydro::check_lifecycle_consistency_remaining(data, ctx);
-    hydro::warn_commissioning_parsed_not_applied(data, ctx);
     hydro::check_filling_config(data, ctx);
     hydro::check_filling_guards(data, ctx);
     hydro::check_geometry_monotonicity(data, ctx);
@@ -135,8 +134,6 @@ pub(crate) fn validate_semantic_stages_penalties_scenarios(
 
 // ── Tolerances ────────────────────────────────────────────────────────────────
 
-/// Tolerance for floating-point probability sum comparisons.
 const PROB_TOLERANCE: f64 = 1e-6;
 
-/// Tolerance for floating-point correlation matrix comparisons.
 const CORR_TOLERANCE: f64 = 1e-9;

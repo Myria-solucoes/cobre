@@ -76,13 +76,20 @@ pub(super) fn fill_anticipated_state_out_def_entries(
 
 /// Returns `true` when hydro `h_idx` is in the `PreFilling` phase at this stage.
 ///
-/// A hydro with no `FillingConfig` is `Operating` at every stage, so this is
-/// `false` and the water-balance fill keeps its standard form (parity-neutral).
+/// A non-filling hydro is `PreFilling` exactly when commissioning-dormant
+/// (`!commissioning_active`), so its water-balance row collapses to the frozen
+/// identity and its inflow short-circuits downstream; a non-filling hydro with no
+/// window is `Operating` and keeps the standard fill (parity-neutral).
 #[inline]
 pub(super) fn is_prefilling(ctx: &TemplateBuildCtx<'_>, stage: &Stage, h_idx: usize) -> bool {
     let hydro = &ctx.hydros[h_idx];
     matches!(
-        crate::lp_builder::filling_phase(hydro.filling.as_ref(), hydro.entry_stage_id, stage.id),
+        crate::lp_builder::filling_phase(
+            hydro.filling.as_ref(),
+            hydro.entry_stage_id,
+            hydro.exit_stage_id,
+            stage.id,
+        ),
         crate::lp_builder::Phase::PreFilling
     )
 }
@@ -252,8 +259,8 @@ pub(super) fn fill_state_and_water_entries(
 ///
 /// Conservation across a `PreFilling` chain: each `PreFilling` hydro routes its OWN
 /// inflow + withdrawal to the same `d` independently with no double-count — a
-/// skipped intermediate contributes ZERO releases (turbine/diversion pinned
-/// `[0, 0]`, spillage driven to 0), so referencing its release columns adds
+/// skipped intermediate contributes ZERO releases (turbine/diversion/spillage all
+/// pinned `[0, 0]` in `PreFilling`), so referencing its release columns adds
 /// nothing. Each link's incremental inflow reaches `d` exactly once.
 ///
 /// Pieces landing on `d`'s row:
@@ -5077,6 +5084,198 @@ mod pumping_water_tests {
         // Sanity: the filling build's H2 row is the frozen identity (0).
         assert_eq!(rl_f[row_h2_f], 0.0, "filling H2 frozen RHS == 0");
         assert_eq!(ru_f[row_h2_f], 0.0, "filling H2 frozen RHS == 0");
+    }
+
+    // ── Commissioning-dormant NON-filling hydro (reuses the PreFilling path) ─────
+
+    /// A NON-filling cascade hydro with a caller-chosen `entry_stage_id` and no
+    /// `FillingConfig`: commissioning-dormant (`PreFilling`) before `entry`, then
+    /// `Operating` from `entry` with no intervening `Filling`.
+    fn ret_hydro_nonfilling(id: i32, downstream: Option<i32>, entry: Option<i32>) -> Hydro {
+        ret_hydro(id, downstream, entry, false)
+    }
+
+    /// Build `H1 → H2(non-filling, entry) → H3` at `stage_id`, with H2's resolved
+    /// withdrawal set to `withdrawal_h`. Mirrors [`build_shortcircuit_case`] but H2
+    /// carries a commissioning window instead of a `FillingConfig`.
+    #[allow(clippy::type_complexity)]
+    fn build_nonfilling_shortcircuit_case(
+        stage_id: i32,
+        entry: i32,
+        withdrawal_h: f64,
+    ) -> (
+        (Vec<i32>, Vec<i32>, Vec<f64>),
+        Vec<f64>,
+        Vec<f64>,
+        ScOffsets,
+    ) {
+        let mut fixtures = PumpFixtures::new(
+            vec![
+                ret_hydro_nonfilling(1, Some(2), None),
+                ret_hydro_nonfilling(2, Some(3), Some(entry)),
+                ret_hydro_nonfilling(3, None, None),
+            ],
+            Vec::new(),
+        );
+        let h2_idx = fixtures.hydro_pos[&EntityId(2)];
+        fixtures
+            .bounds
+            .hydro_bounds_mut(h2_idx, 0)
+            .water_withdrawal_m3s = withdrawal_h;
+        let ctx = fixtures.make_ctx();
+        let stage_index = usize::try_from(stage_id).expect("non-negative");
+        let stage = two_block_stage(stage_index, [300.0, 444.0]);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+        let (row_lower, row_upper) = super::super::rows::fill_stage_rows(&ctx, &stage, 0, &layout);
+        let csc = {
+            let mut entries = build_stage_matrix_entries(&ctx, &stage, 0, &layout);
+            for col in &mut entries {
+                col.sort_unstable_by_key(|&(row, _)| row);
+            }
+            assemble_csc(&entries)
+        };
+        let h1_idx = fixtures.hydro_pos[&EntityId(1)];
+        let h3_idx = fixtures.hydro_pos[&EntityId(3)];
+        let offsets = ScOffsets {
+            zeta: layout.zeta,
+            n_blks: layout.n_blks,
+            h2_idx,
+            water_row_h2: layout.row_water_balance_start() + h2_idx,
+            water_row_h3: layout.row_water_balance_start() + h3_idx,
+            col_storage_in_h2: layout.col_storage_in_start() + h2_idx,
+            z_h2: layout.col_z_inflow_start() + h2_idx,
+            h1_turbine: (0..layout.n_blks)
+                .map(|blk| layout.turbine_col(h1_idx, blk))
+                .collect(),
+            h1_spillage: (0..layout.n_blks)
+                .map(|blk| layout.spillage_col(h1_idx, blk))
+                .collect(),
+            h2_turbine: (0..layout.n_blks)
+                .map(|blk| layout.turbine_col(h2_idx, blk))
+                .collect(),
+            h2_spillage: (0..layout.n_blks)
+                .map(|blk| layout.spillage_col(h2_idx, blk))
+                .collect(),
+        };
+        (csc, row_lower, row_upper, offsets)
+    }
+
+    /// A commissioning-dormant non-filling hydro H2 (entry 4, evaluated at stage 0)
+    /// is `PreFilling`: its own water row is the frozen identity `v_{H2} −
+    /// v_{H2,in} = 0` (RHS 0) and its incremental inflow `z_{H2}` lands on the
+    /// downstream H3's balance row at `−ζ` and nowhere else — identical to a filling
+    /// `PreFilling` hydro, proving the reformulation is reused, not reinvented.
+    #[test]
+    fn dormant_nonfilling_frozen_identity_and_inflow_routed_downstream() {
+        let (csc, row_lower, row_upper, off) =
+            build_nonfilling_shortcircuit_case(0, RET_ENTRY_STAGE_ID, 9.0);
+        let row_h = off.water_row_h2;
+        let row_d = off.water_row_h3;
+
+        // Frozen identity on H2's own row.
+        assert_eq!(
+            csc_at(&csc, off.h2_idx, row_h),
+            1.0,
+            "v_{{H2}} +1.0 on the frozen-identity row (dense storage column)"
+        );
+        assert_eq!(
+            csc_at(&csc, off.col_storage_in_h2, row_h),
+            -1.0,
+            "v_{{H2,in}} −1.0 on the frozen-identity row"
+        );
+        assert_eq!(row_lower[row_h], 0.0, "frozen RHS lower == 0");
+        assert_eq!(row_upper[row_h], 0.0, "frozen RHS upper == 0");
+
+        // z_{H2} routed onto H3's balance row at −ζ, and absent from H2's frozen row.
+        assert_eq!(
+            csc_at(&csc, off.z_h2, row_d),
+            -off.zeta,
+            "z_{{H2}} routed onto H3's water row at −ζ (river flows past the un-built dam)"
+        );
+        assert_eq!(
+            csc_at(&csc, off.z_h2, row_h),
+            0.0,
+            "z_{{H2}} absent from H2's frozen-identity row (not trapped)"
+        );
+    }
+
+    /// The cascade tail (sink) case: a dormant non-filling hydro with no downstream
+    /// drops its water from the system and keeps its frozen identity — feasible, no
+    /// trapped inflow.
+    #[test]
+    fn dormant_nonfilling_sink_drops_water_and_keeps_frozen_identity() {
+        let mut fixtures = PumpFixtures::new(
+            vec![
+                ret_hydro_nonfilling(1, Some(2), None),
+                ret_hydro_nonfilling(2, None, Some(RET_ENTRY_STAGE_ID)),
+            ],
+            Vec::new(),
+        );
+        let h2_idx = fixtures.hydro_pos[&EntityId(2)];
+        fixtures
+            .bounds
+            .hydro_bounds_mut(h2_idx, 0)
+            .water_withdrawal_m3s = 13.0;
+        let ctx = fixtures.make_ctx();
+        let stage = two_block_stage(0, [300.0, 444.0]);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+        let (row_lower, row_upper) = super::super::rows::fill_stage_rows(&ctx, &stage, 0, &layout);
+        let csc = {
+            let mut entries = build_stage_matrix_entries(&ctx, &stage, 0, &layout);
+            for col in &mut entries {
+                col.sort_unstable_by_key(|&(row, _)| row);
+            }
+            assemble_csc(&entries)
+        };
+        let row_h = layout.row_water_balance_start() + h2_idx;
+        let z_h2 = layout.col_z_inflow_start() + h2_idx;
+
+        assert_eq!(csc_at(&csc, h2_idx, row_h), 1.0, "v_{{H2}} +1.0");
+        assert_eq!(
+            csc_at(&csc, layout.col_storage_in_start() + h2_idx, row_h),
+            -1.0,
+            "v_{{H2,in}} −1.0"
+        );
+        assert_eq!(row_lower[row_h], 0.0, "frozen RHS 0");
+        assert_eq!(row_upper[row_h], 0.0, "frozen RHS 0");
+        for h in 0..layout.n_h {
+            let r = layout.row_water_balance_start() + h;
+            assert_eq!(
+                csc_at(&csc, z_h2, r),
+                0.0,
+                "z_{{H2}} on no water row in the sink case (row {r})"
+            );
+        }
+    }
+
+    /// From `entry` onward the same non-filling hydro is `Operating`: its water row
+    /// regains the standard form (own +τ releases, no short-circuit), proving the
+    /// window opens at `entry` with NO intervening `Filling` phase.
+    #[test]
+    fn dormant_nonfilling_operating_from_entry_has_standard_row() {
+        // entry == 0 ⇒ H2 is Operating at stage 0 (commissioned immediately).
+        let (csc, row_lower, row_upper, off) = build_nonfilling_shortcircuit_case(0, 0, 0.0);
+        let row_h = off.water_row_h2;
+        let row_d = off.water_row_h3;
+
+        for blk in 0..off.n_blks {
+            let tau_h = [300.0_f64, 444.0][blk] * M3S_TO_HM3;
+            assert_eq!(
+                csc_at(&csc, off.h2_turbine[blk], row_h),
+                tau_h,
+                "blk {blk}: Operating H2 carries +τ on its own row (standard fill)"
+            );
+        }
+        // No short-circuit: z_{H2} is NOT routed onto H3's row.
+        assert_eq!(
+            csc_at(&csc, off.z_h2, row_d),
+            0.0,
+            "z_{{H2}} not routed downstream when Operating"
+        );
+        // Standard equality row, not the frozen identity (lower == upper, base 0).
+        assert_eq!(row_lower[row_h], row_upper[row_h], "H2 row is an equality");
     }
 
     /// Resolved offsets for a CHAINED short-circuit probe `H1 → H2 → H3` where H1

@@ -450,8 +450,9 @@ fn build_evap_indices(
 /// generation column block is densely packed by FPHA-local index, dropping a hydro
 /// here removes its column entirely — no orphaned `[0, max]` column for an
 /// unconstrained solve to exploit. `stage_id` is the study `stage.id`, not the
-/// stage index ([`filling_phase`] keys on the commissioning id). A non-filling
-/// hydro is `Operating` at every stage (parity-neutral).
+/// stage index ([`filling_phase`] keys on the commissioning id). A
+/// commissioning-dormant non-filling hydro is `PreFilling` and is dropped here too;
+/// a non-filling hydro with no window is `Operating` at every stage (parity-neutral).
 fn identify_fpha_hydros(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -462,7 +463,12 @@ fn identify_fpha_hydros(
     for h_idx in 0..ctx.n_hydros {
         let hydro = &ctx.hydros[h_idx];
         if matches!(
-            filling_phase(hydro.filling.as_ref(), hydro.entry_stage_id, stage_id),
+            filling_phase(
+                hydro.filling.as_ref(),
+                hydro.entry_stage_id,
+                hydro.exit_stage_id,
+                stage_id
+            ),
             Phase::PreFilling | Phase::Filling
         ) {
             continue;
@@ -479,17 +485,23 @@ fn identify_fpha_hydros(
 
 /// Collect the indices of hydros with linearized evaporation at this stage.
 ///
-/// A filling hydro is dropped from the evaporation set only in `PreFilling`
-/// (before `start_stage_id` the dam, hence the reservoir surface, does not exist).
-/// Evaporation is **kept** during `Filling` — the opposite of the FPHA rule
-/// (excluded in `PreFilling` *and* `Filling`); the two must not be unified. A
-/// non-filling hydro is `Operating` at every stage (parity-neutral).
+/// A hydro is dropped from the evaporation set only in `PreFilling` (before
+/// `start_stage_id`, or while a non-filling hydro is commissioning-dormant, the dam
+/// and hence the reservoir surface does not exist). Evaporation is **kept** during
+/// `Filling` — the opposite of the FPHA rule (excluded in `PreFilling` *and*
+/// `Filling`); the two must not be unified. A non-filling hydro with no window is
+/// `Operating` at every stage (parity-neutral).
 fn identify_evap_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<usize> {
     (0..ctx.n_hydros)
         .filter(|&h_idx| {
             let hydro = &ctx.hydros[h_idx];
             if matches!(
-                filling_phase(hydro.filling.as_ref(), hydro.entry_stage_id, stage_id),
+                filling_phase(
+                    hydro.filling.as_ref(),
+                    hydro.entry_stage_id,
+                    hydro.exit_stage_id,
+                    stage_id
+                ),
                 Phase::PreFilling
             ) {
                 return false;
@@ -518,7 +530,12 @@ fn identify_filling_target_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> 
             let hydro = &ctx.hydros[h_idx];
             hydro.filling.is_some()
                 && matches!(
-                    filling_phase(hydro.filling.as_ref(), hydro.entry_stage_id, stage_id),
+                    filling_phase(
+                        hydro.filling.as_ref(),
+                        hydro.entry_stage_id,
+                        hydro.exit_stage_id,
+                        stage_id
+                    ),
                     Phase::Filling
                 )
         })
@@ -546,7 +563,12 @@ fn identify_filled_min_storage_floor_hydros(
         .filter(|&h_idx| {
             let hydro = &ctx.hydros[h_idx];
             matches!(
-                filling_phase(hydro.filling.as_ref(), hydro.entry_stage_id, stage_id),
+                filling_phase(
+                    hydro.filling.as_ref(),
+                    hydro.entry_stage_id,
+                    hydro.exit_stage_id,
+                    stage_id
+                ),
                 Phase::Operating
             ) && hydro.filling.is_some()
         })

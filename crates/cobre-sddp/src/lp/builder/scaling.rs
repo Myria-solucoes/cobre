@@ -177,6 +177,7 @@ pub(super) fn compute_noise_scale(
                     crate::lp_builder::filling_phase(
                         hydro.filling.as_ref(),
                         hydro.entry_stage_id,
+                        hydro.exit_stage_id,
                         stage.id,
                     ),
                     crate::lp_builder::Phase::PreFilling
@@ -259,8 +260,6 @@ mod tests {
     /// For each row: min_abs = max_abs = 1.0 → scale = 1/sqrt(1*1) = 1.0.
     #[test]
     fn row_scale_identity_for_uniform_matrix() {
-        // All nonzeros have |value| = 1.0.  min_abs = max_abs = 1.0.
-        // scale[i] = 1/sqrt(1.0 * 1.0) = 1.0 for every row.
         let col_starts = vec![0, 2, 4];
         let row_indices = vec![0, 1, 0, 1];
         let values = vec![1.0, 1.0, 1.0, 1.0];

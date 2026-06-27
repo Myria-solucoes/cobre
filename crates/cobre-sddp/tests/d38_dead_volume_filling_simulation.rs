@@ -26,21 +26,21 @@
 //! separately). A single filling hydro is the design baseline — the chained
 //! transitive short-circuit walk is covered by `filling_cut_validity`.
 //!
-//! The volume-target filling model gives each Filling stage a per-stage soft
-//! floor `v_out[t] + σ_fill[t] ≥ V_target[t]`, with the target anchored backward
-//! from the dead volume: `V_target[3] = min_storage_hm3 = 60` and
-//! `V_target[2] = 60 − ζ·rate = 28.896` hm³. Filling is continuous: the
-//! end-of-Filling storage at id 3 hands off to the incoming storage at id 4 with
-//! no reset. The inflow schedule (`std_m3s = 0` everywhere ⇒ deterministic) drives
-//! the binding regime: `H2`'s natural inflow is SHORT during Filling (5 m³/s) so
-//! the accumulation stays below the per-stage `V_target` floors and `σ_fill[t] > 0`
-//! at BOTH filling stages (ids 2 and 3); it RECOVERS in Operating (60 m³/s) so
-//! `H2` climbs above the dead volume and `σ^{v-} → 0` by id 5. Filling is uncapped,
-//! so a water-rich upstream feeder would overfill `H2` past the target; `H1` is
-//! therefore starved before Operating (seed 0, inflow 2/2/0/0 m³/s over ids 0–3)
-//! so its total drainable water (≤ `ζ·2·2 = 10.368` hm³) cannot lift `H2` to the
-//! target even if released in full at the first filling stage. `σ_fill` binding is
-//! thus structural, not an artifact of a particular LP routing choice.
+//! The volume-target filling model gives each Filling stage a per-stage SOFT
+//! floor `v_out[t] + σ_fill[t] ≥ V_target[t]` (`fill_filling_target_rows`:
+//! row_upper = +∞), with the target anchored backward from the dead volume:
+//! `V_target[3] = min_storage_hm3 = 60` and `V_target[2] = 60 − ζ·rate = 28.896`
+//! hm³. The end-of-Filling storage at id 3 hands off to the incoming storage at id
+//! 4 with no reset (the pin chain). Because the floor is soft and Filling spillage
+//! is FREE, H2 is not forced to hold its water across Filling: with the downstream
+//! H3 starved (the PreFilling phantom-spill removed), the LP optimally releases the
+//! impounded water at the last Filling stage (id 3) to feed H3, driving `σ_fill[3]`
+//! to the full dead-volume shortfall. d40 (byte-identical penalties) suppresses the
+//! same release only via a downstream turbine cap that d38 lacks. The inflow
+//! schedule (`std_m3s = 0` everywhere ⇒ deterministic) keeps `σ_fill[t] > 0` at
+//! BOTH filling stages (ids 2 and 3); inflows RECOVER in Operating (60 m³/s) so H2
+//! climbs above the dead volume and `σ^{v-} → 0` by id 5. `H1` is starved before
+//! Operating (seed 0, inflow 2/2/0/0 m³/s over ids 0–3).
 
 #![allow(
     clippy::unwrap_used,
@@ -71,8 +71,8 @@ const START_STAGE_ID: i32 = 2;
 const ENTRY_STAGE_ID: i32 = 4;
 /// Hydro entity ids in canonical order. `H1` (id 0) is the upstream cascade
 /// feeder, `H2` (id 1) the mid-cascade filling hydro, `H3` (id 2) its real fed
-/// downstream, and `H4` (id 3) the off-cascade control. Only the asserted-on
-/// hydros need a named constant.
+/// downstream, and `H4` (id 3) the off-cascade control.
+const H1_ID: i32 = 0;
 const H2_ID: i32 = 1;
 const H3_ID: i32 = 2;
 const H4_ID: i32 = 3;
@@ -370,10 +370,17 @@ fn dead_volume_filling_binds_and_routes_in_simulation() {
         );
     }
 
-    // §7.3: H2 storage frozen at the seed (0.0, empty pit) across PreFilling
-    // (stages 0–1), then non-decreasing across Filling (stages 2–3) as the
-    // inflow-only accumulation climbs toward the per-stage V_target floors. The
-    // seed is the stage-0 incoming storage.
+    // §7.3: H2's PreFilling freeze and its per-stage Filling water balance. H2
+    // spillage is frozen [0,0] only while PreFilling (no dam yet — the "spillage
+    // frozen during PreFilling" contract); it is FREE during Filling, so the LP may
+    // legitimately release the impounded water at the last Filling stage (id 3) to
+    // feed the water-starved downstream H3 rather than hold it. The σ_fill row is a
+    // SOFT floor (`fill_filling_target_rows`: row_upper = +∞), so storage is NOT
+    // required to be monotone across Filling. d40 (byte-identical penalties)
+    // suppresses the same release only via a downstream turbine cap that d38 lacks.
+
+    // (a) PreFilling freeze: storage stays pinned at the empty-pit seed through both
+    // PreFilling stages (ids 0–1), the stage-0 incoming storage.
     let h2_s0 = stage_hydro(scenario, H2_ID, 0);
     let h2_s1 = stage_hydro(scenario, H2_ID, 1);
     let seed = h2_s0.storage_initial_hm3;
@@ -381,38 +388,104 @@ fn dead_volume_filling_binds_and_routes_in_simulation() {
         seed.abs() < 1e-6,
         "H2 PreFilling seed must be the empty pit 0.0; got {seed}"
     );
-    assert!(
-        (h2_s0.storage_final_hm3 - seed).abs() < 1e-6,
-        "H2 storage must be frozen at the seed through PreFilling stage 0; got {}",
-        h2_s0.storage_final_hm3
-    );
-    assert!(
-        (h2_s1.storage_final_hm3 - seed).abs() < 1e-6,
-        "H2 storage must be frozen at the seed through PreFilling stage 1; got {}",
-        h2_s1.storage_final_hm3
-    );
+    for (stage, h2) in [(0_usize, &h2_s0), (1, &h2_s1)] {
+        assert!(
+            (h2.storage_final_hm3 - seed).abs() < 1e-6,
+            "H2 storage must be frozen at the seed through PreFilling stage {stage}; got {}",
+            h2.storage_final_hm3
+        );
+    }
 
+    // (b) Per-stage Filling water balance (ids 2–3), every term pinned to FP
+    // tolerance: v_out = v_in + ζ·incr_H2 − τ·spillage_H2 + routed_upstream(H1→H2).
+    // H2 turbine and diversion are 0 while Filling (asserted by §7.2 / the
+    // diversion-pin contract), so only its spillage subtracts. The upstream H1
+    // release enters with per-block τ_k = block_hours·M3S_TO_HM3, summed across the
+    // stage's blocks so the balance is exact regardless of block count.
+    let h2_incr_filling_m3s = 5.0; // scenarios/inflow_seasonal_stats.parquet, H2 ids 2–3
+    for stage in (START_STAGE_ID as usize)..(ENTRY_STAGE_ID as usize) {
+        let h2 = stage_hydro(scenario, H2_ID, stage);
+        let h2_spill_release_hm3: f64 = scenario.stages[stage]
+            .hydros
+            .iter()
+            .filter(|r| r.hydro_id == H2_ID)
+            .map(|r| r.spillage_m3s * block_hours(stage, r.block_id) * M3S_TO_HM3)
+            .sum();
+        let routed_upstream_hm3: f64 = scenario.stages[stage]
+            .hydros
+            .iter()
+            .filter(|r| r.hydro_id == H1_ID)
+            .map(|r| {
+                (r.turbined_m3s + r.spillage_m3s) * block_hours(stage, r.block_id) * M3S_TO_HM3
+            })
+            .sum();
+        let expected_v_out = h2.storage_initial_hm3 + zeta * h2_incr_filling_m3s
+            - h2_spill_release_hm3
+            + routed_upstream_hm3;
+        assert!(
+            (h2.storage_final_hm3 - expected_v_out).abs() < 1e-3,
+            "Filling stage {stage}: H2's closed water balance must hold — v_out {} = v_in {} + \
+             ζ·incr {} − spill_release {h2_spill_release_hm3} + routed_upstream {routed_upstream_hm3}; \
+             expected {expected_v_out}",
+            h2.storage_final_hm3,
+            h2.storage_initial_hm3,
+            zeta * h2_incr_filling_m3s
+        );
+    }
+
+    // (c) When H2 releases at the last Filling stage (v_out[3] < v_out[2] with
+    // spillage[3] > 0), the released water must reach the starved downstream H3 (the
+    // same routed-gap balance §7.1 uses on H3), and σ_fill[3] must book the
+    // dead-volume shortfall exactly: σ_fill[3] = V_target[3] − v_out[3].
     let h2_s2 = stage_hydro(scenario, H2_ID, 2);
     let h2_s3 = stage_hydro(scenario, H2_ID, 3);
-    assert!(
-        h2_s2.storage_final_hm3 >= h2_s1.storage_final_hm3 - 1e-6,
-        "H2 storage must not decrease entering Filling: {} -> {}",
-        h2_s1.storage_final_hm3,
-        h2_s2.storage_final_hm3
-    );
-    assert!(
-        h2_s3.storage_final_hm3 >= h2_s2.storage_final_hm3 - 1e-6,
-        "H2 storage must be non-decreasing across Filling: {} -> {}",
-        h2_s2.storage_final_hm3,
-        h2_s3.storage_final_hm3
-    );
-    assert!(
-        h2_s3.storage_final_hm3 > h2_s1.storage_final_hm3 + 1e-6,
-        "H2 storage must rise during Filling (id 3 above the frozen PreFilling \
-         level): {} -> {}",
-        h2_s1.storage_final_hm3,
-        h2_s3.storage_final_hm3
-    );
+    let h2_s3_spill_total: f64 = scenario.stages[3]
+        .hydros
+        .iter()
+        .filter(|r| r.hydro_id == H2_ID)
+        .map(|r| r.spillage_m3s)
+        .sum();
+    if h2_s3.storage_final_hm3 < h2_s2.storage_final_hm3 - 1e-6 {
+        assert!(
+            h2_s3_spill_total > 1e-6,
+            "H2 storage fell across Filling ids 2→3 ({} → {}); the only free release path while \
+             Filling is spillage, so spillage[3] must be > 0; got {h2_s3_spill_total}",
+            h2_s2.storage_final_hm3,
+            h2_s3.storage_final_hm3
+        );
+        let h3_s3 = stage_hydro(scenario, H3_ID, 3);
+        let h3_release_hm3: f64 = scenario.stages[3]
+            .hydros
+            .iter()
+            .filter(|r| r.hydro_id == H3_ID)
+            .map(|r| (r.turbined_m3s + r.spillage_m3s) * block_hours(3, r.block_id) * M3S_TO_HM3)
+            .sum();
+        let h3_delta = h3_s3.storage_final_hm3 - h3_s3.storage_initial_hm3;
+        let h3_incremental_balance = zeta * h3_s3.incremental_inflow_m3s - h3_release_hm3;
+        let h3_routed_gap = h3_delta - h3_incremental_balance;
+        let h2_released_hm3: f64 = scenario.stages[3]
+            .hydros
+            .iter()
+            .filter(|r| r.hydro_id == H2_ID)
+            .map(|r| r.spillage_m3s * block_hours(3, r.block_id) * M3S_TO_HM3)
+            .sum();
+        assert!(
+            h3_routed_gap >= h2_released_hm3 - 1e-3,
+            "H2's last-Filling release ({h2_released_hm3:.6} hm³ of spillage) must reach H3: H3's \
+             routed-water gap ({h3_routed_gap:.6} hm³) must be at least H2's released volume — \
+             conservation, not a vanished dump"
+        );
+        let v_target_3 = H2_MIN_STORAGE_HM3;
+        assert!(
+            (h2_s3.filling_target_violation_hm3 - (v_target_3 - h2_s3.storage_final_hm3)).abs()
+                < 1e-3,
+            "σ_fill[3] must book the dead-volume shortfall exactly: σ_fill {} = V_target[3] {} − \
+             v_out[3] {}",
+            h2_s3.filling_target_violation_hm3,
+            v_target_3,
+            h2_s3.storage_final_hm3
+        );
+    }
 
     // §7.1 (water balance on H3, re-anchored — does NOT use inflow_m3s): during
     // PreFilling the dam at H2 does not exist, so H2's water short-circuits onto
