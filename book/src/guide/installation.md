@@ -46,7 +46,7 @@ cobre version
 Expected output (exact versions and arch will vary):
 
 ```
-cobre   v0.9.0
+cobre   v0.9.1
 solver: HiGHS
 comm:   local
 zstd:   enabled
@@ -153,7 +153,7 @@ explicitly. The default build (no extra flags) uses HiGHS.
 The `cobre version` banner shows which backend is compiled in:
 
 ```
-cobre   v0.9.0
+cobre   v0.9.1
 solver: CLP 1.17.11
 comm:   local
 ...

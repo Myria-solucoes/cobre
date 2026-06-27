@@ -125,7 +125,7 @@ single file. Consumers should check `status` before interpreting other fields.
 
 ```json
 {
-  "cobre_version": "0.9.0",
+  "cobre_version": "0.9.1",
   "hostname": "<hostname>",
   "solver": "highs",
   "solver_version": "<solver version>",
@@ -723,7 +723,7 @@ LP solver statistics, and distribution information.
 
 ```json
 {
-  "cobre_version": "0.9.0",
+  "cobre_version": "0.9.1",
   "hostname": "<hostname>",
   "solver": "highs",
   "started_at": "<timestamp>",

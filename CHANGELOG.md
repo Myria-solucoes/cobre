@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-06-26
+
+### Fixed
+
+- **Future-cost discounting is now applied to the correct LP column when a study
+  combines anticipated (GNL-style) thermal pre-commitment with a non-zero
+  `stages.json` `annual_discount_rate`.** The per-stage discount factor multiplies
+  the future-cost epigraph (θ) column of the LP objective. Its column index was
+  derived by hand from the state and hydro counts, which omits the anticipated-state
+  block; in a deck with anticipated thermals this landed on a zero-cost column,
+  leaving the future-cost term undiscounted. The discount now reads the authoritative
+  per-stage θ column index. Decks without anticipated thermals, or with
+  `annual_discount_rate: 0`, produce bit-for-bit identical output.
+
 ## [0.9.0] - 2026-06-25
 
 ### Added
@@ -2231,7 +2245,8 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 <!-- next-url -->
 
-[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/cobre-rs/cobre/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/cobre-rs/cobre/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/cobre-rs/cobre/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/cobre-rs/cobre/compare/v0.8.0...v0.8.1
