@@ -125,6 +125,45 @@ pub(super) fn check_stage_structure(data: &ParsedData, ctx: &mut ValidationConte
     }
 }
 
+/// Warns once when an autoregressive inflow model (PAR order `p > 0`) coexists
+/// with every study stage having `state_config.inflow_lags == false`.
+///
+/// AR order is read as the maximum 1-based `lag` over `inflow_ar_coefficients`;
+/// an empty table (no AR model, or white-noise order 0) yields order 0 and is
+/// silent. Only study stages (`id >= 0`) are considered, so pre-study seed
+/// stages do not satisfy the all-disabled condition on their own.
+pub(super) fn check_inflow_lags_vs_par_order(data: &ParsedData, ctx: &mut ValidationContext) {
+    let max_order: i32 = data
+        .inflow_ar_coefficients
+        .iter()
+        .map(|c| c.lag)
+        .max()
+        .unwrap_or(0);
+    if max_order == 0 {
+        return;
+    }
+
+    let mut study_stages = data.stages.stages.iter().filter(|s| s.id >= 0).peekable();
+    if study_stages.peek().is_none() {
+        return;
+    }
+    if !study_stages.all(|s| !s.state_config.inflow_lags) {
+        return;
+    }
+
+    ctx.add_warning(
+        ErrorKind::ModelQuality,
+        "stages.json",
+        None::<&str>,
+        format!(
+            "inflow lags are disabled on all study stages (state_variables.inflow_lags = false) \
+             despite a PAR(p>0) inflow model (AR order {max_order}); cuts will be storage-only. \
+             This is intended for boundary compatibility (e.g. DECOMP storage-only cuts); \
+             otherwise it is likely a misconfiguration"
+        ),
+    );
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -138,9 +177,23 @@ pub(super) fn check_stage_structure(data: &ParsedData, ctx: &mut ValidationConte
 mod tests {
     use super::super::test_support::*;
     use super::super::validate_semantic_stages_penalties_scenarios;
+    use cobre_core::EntityId;
     use cobre_core::temporal::{Block, PolicyGraphType, StageRiskConfig, Transition};
 
+    use crate::scenarios::InflowArCoefficientRow;
     use crate::validation::{ErrorKind, ValidationContext};
+
+    /// One AR coefficient row at the given 1-based lag (the PAR order is the max
+    /// lag across rows).
+    fn ar_row(lag: i32) -> InflowArCoefficientRow {
+        InflowArCoefficientRow {
+            hydro_id: EntityId::from(1),
+            stage_id: 0,
+            lag,
+            coefficient: 0.5,
+            residual_std_ratio: 0.85,
+        }
+    }
 
     // ── Rule 1: Transition stage validity ─────────────────────────────────────
 
@@ -448,6 +501,88 @@ mod tests {
                 .iter()
                 .any(|e| e.kind == ErrorKind::InvalidValue),
             "CVaR lambda=-0.1 should produce InvalidValue"
+        );
+    }
+
+    // ── Rule 34: inflow_lags disabled on all stages under PAR(p>0) ────────────
+
+    /// PAR order 6 with every study stage `inflow_lags == false` produces exactly
+    /// one `ModelQuality` warning and no error.
+    #[test]
+    fn test_5b_all_stages_inflow_lags_disabled_under_par_warns_once() {
+        let stages = make_stages_5b(vec![0, 1, 2]); // make_stage defaults inflow_lags false
+        let data = make_data_5b(
+            vec![make_hydro_ordered_penalties(1)],
+            stages,
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![ar_row(1), ar_row(6)], // max lag 6 => PAR order 6
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+        assert!(!ctx.has_errors(), "warning-only check must not error");
+        let model_quality: Vec<_> = ctx
+            .warnings()
+            .into_iter()
+            .filter(|w| w.kind == ErrorKind::ModelQuality && w.message.contains("inflow lags"))
+            .collect();
+        assert_eq!(
+            model_quality.len(),
+            1,
+            "expected exactly one inflow-lags ModelQuality warning, got: {model_quality:?}"
+        );
+        let msg = &model_quality[0].message;
+        assert!(
+            msg.contains("PAR"),
+            "warning should mention PAR(p>0), got: {msg}"
+        );
+    }
+
+    /// PAR order 6 but one study stage with `inflow_lags == true` produces no
+    /// inflow-lags warning.
+    #[test]
+    fn test_5b_one_stage_inflow_lags_enabled_under_par_no_warning() {
+        let mut stages = make_stages_5b(vec![0, 1, 2]);
+        stages.stages[1].state_config.inflow_lags = true;
+        let data = make_data_5b(
+            vec![make_hydro_ordered_penalties(1)],
+            stages,
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![ar_row(1), ar_row(6)],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+        assert!(
+            !ctx.warnings()
+                .iter()
+                .any(|w| w.kind == ErrorKind::ModelQuality && w.message.contains("inflow lags")),
+            "no inflow-lags warning when any stage enables inflow_lags"
+        );
+    }
+
+    /// Every study stage `inflow_lags == false` but the inflow model is order 0
+    /// (white noise, no AR rows) produces no inflow-lags warning.
+    #[test]
+    fn test_5b_all_stages_inflow_lags_disabled_white_noise_no_warning() {
+        let stages = make_stages_5b(vec![0, 1, 2]);
+        let data = make_data_5b(
+            vec![make_hydro_ordered_penalties(1)],
+            stages,
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![], // order 0: no AR coefficients
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+        assert!(
+            !ctx.warnings()
+                .iter()
+                .any(|w| w.kind == ErrorKind::ModelQuality && w.message.contains("inflow lags")),
+            "no inflow-lags warning for white-noise (order 0) models"
         );
     }
 }

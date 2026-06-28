@@ -697,6 +697,9 @@ fn single_stage_system_produces_no_cuts() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -800,6 +803,9 @@ fn two_stage_system_two_trial_points_generates_two_cuts_at_stage_0() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -903,6 +909,9 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1002,6 +1011,9 @@ fn no_cuts_generated_at_last_stage() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1101,6 +1113,9 @@ fn elapsed_ms_is_non_negative() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1198,6 +1213,9 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1340,6 +1358,9 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1460,6 +1481,9 @@ fn cut_gradient_sign_physically_correct() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1585,6 +1609,9 @@ fn cut_is_tight_at_trial_point() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1696,6 +1723,9 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1817,6 +1847,9 @@ fn forward_pass_index_matches_global_scenario_index() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1932,6 +1965,9 @@ fn warm_start_uses_prepopulated_forward_basis() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2041,6 +2077,9 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2157,6 +2196,9 @@ fn backward_solver_error_propagates() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2320,6 +2362,9 @@ fn test_backward_pass_parallel_cut_determinism() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2410,6 +2455,9 @@ fn test_backward_pass_parallel_cut_determinism() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2799,6 +2847,9 @@ fn backward_pass_load_patches_applied() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2975,6 +3026,9 @@ fn backward_pass_no_load_buses_unchanged() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -3156,6 +3210,9 @@ fn backward_pass_cut_coefficients_unaffected() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -3283,6 +3340,9 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -3419,6 +3479,9 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -3611,6 +3674,9 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -3981,6 +4047,9 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -4212,6 +4281,9 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -4342,6 +4414,9 @@ fn run_one_trial_point_with_stores(
     let training_ctx = TrainingContext {
         horizon: &horizon,
         state: &state,
+        cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            &state, n_stages,
+        ),
         study_dims: &study_dims,
         inflow_method: &InflowNonNegativityMethod::None,
         stochastic: &stochastic,
@@ -4376,6 +4451,13 @@ fn run_one_trial_point_with_stores(
         row_upper: Vec::new(),
     };
 
+    let cut_state_layout = crate::indexer::CutStateLayout::new(
+        &state,
+        cobre_core::temporal::StageStateConfig {
+            storage: true,
+            inflow_lags: true,
+        },
+    );
     let succ_spec = super::SuccessorSpec {
         t: 0,
         successor: 1,
@@ -4389,6 +4471,7 @@ fn run_one_trial_point_with_stores(
         cut_activity_tolerance: 0.0,
         successor_populated_count: fcf.pools[1].populated_count,
         successor_pool: &fcf.pools[1],
+        cut_state: &cut_state_layout,
     };
 
     // Derive a single-worker BasisStoreSliceMut covering all scenarios.
@@ -4674,6 +4757,9 @@ fn handshake_passes_with_local_backend() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -4837,6 +4923,9 @@ fn handshake_rejects_nonuniform_workers() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -4914,7 +5003,14 @@ fn cut_coefficient_sign_convention_slot_zero_k2() {
         row_lower: Vec::new(),
         row_upper: Vec::new(),
     };
-    crate::cut::row::build_cut_row_batch_into(&mut batch, &fcf, 1, &state, &[]);
+    crate::cut::row::build_cut_row_batch_into(
+        &mut batch,
+        &fcf,
+        1,
+        &state,
+        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &[],
+    );
 
     // Slot 0 (j = anticipated_state.start) is the matured slot (K=2, slot+1==K via
     // the Equal branch), so it maps to anticipated_state_out.start == 1.
@@ -5058,6 +5154,7 @@ fn run_dcs_backward_trial_point_at(
 ) -> (super::StagedCut, Vec<f64>, Vec<u64>) {
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let n_state = state.n_state;
+    let n_stages = 2;
     let core = dcs_core_template();
     let templates = vec![core.clone(), core.clone()];
     let base_rows = vec![0_usize, 0_usize];
@@ -5067,7 +5164,13 @@ fn run_dcs_backward_trial_point_at(
 
     let mut fcf = dcs_two_stage_fcf();
     // All-cuts batch for the baked path (delta == all cuts here).
-    let cut_batch = crate::cut::row::build_cut_row_batch(&fcf, 1, &state, &[]);
+    let cut_batch = crate::cut::row::build_cut_row_batch(
+        &fcf,
+        1,
+        &state,
+        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &[],
+    );
     let successor_active_slots: Vec<usize> = (0..fcf.pools[1].populated_count).collect();
     let num_cuts = successor_active_slots.len();
 
@@ -5103,6 +5206,9 @@ fn run_dcs_backward_trial_point_at(
     let training_ctx = TrainingContext {
         horizon: &horizon,
         state: &state,
+        cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            &state, n_stages,
+        ),
         study_dims: &study_dims,
         inflow_method: &InflowNonNegativityMethod::None,
         stochastic: &stochastic,
@@ -5122,6 +5228,13 @@ fn run_dcs_backward_trial_point_at(
     };
 
     let probabilities = vec![1.0_f64];
+    let cut_state_layout = crate::indexer::CutStateLayout::new(
+        &state,
+        cobre_core::temporal::StageStateConfig {
+            storage: true,
+            inflow_lags: true,
+        },
+    );
     let succ = super::SuccessorSpec {
         t: 0,
         successor: 1,
@@ -5135,6 +5248,7 @@ fn run_dcs_backward_trial_point_at(
         cut_activity_tolerance: 0.0,
         successor_populated_count: fcf.pools[1].populated_count,
         successor_pool: &fcf.pools[1],
+        cut_state: &cut_state_layout,
     };
 
     let mut basis_slices = basis_store.split_workers_mut(1);
@@ -5530,10 +5644,15 @@ fn dcs_baked_template_with_one_cut() -> StageTemplate {
 /// assertion. (Verified: this test fails on the buggy code, passes on the
 /// fix.)
 #[test]
+// Rationale: one end-to-end DCS-vs-baked scenario whose setup (templates, fcf,
+// SuccessorSpec, contexts) and sequential assertions form a single coherent
+// fixture; splitting would fragment the cut-row-identity checks it verifies.
+#[allow(clippy::too_many_lines)]
 fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
     let iteration = 5;
     let state = crate::indexer::test_fixtures::state_layout(1, 0);
     let n_state = state.n_state;
+    let n_stages = 2;
 
     // Cut-free base (loaded by the DCS path) and the baked successor
     // template that carries the binding cut as a structural row.
@@ -5551,7 +5670,13 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
     // binding cut, the delta is the remaining (non-baked) cuts. For the DCS
     // exactness comparison we only need the all-cuts reference, computed
     // from the full pool against the cut-free base below.
-    let cut_batch = crate::cut::row::build_cut_row_batch(&fcf, 1, &state, &[]);
+    let cut_batch = crate::cut::row::build_cut_row_batch(
+        &fcf,
+        1,
+        &state,
+        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &[],
+    );
     let successor_active_slots: Vec<usize> = (0..fcf.pools[1].populated_count).collect();
     let num_cuts = successor_active_slots.len();
 
@@ -5587,6 +5712,9 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
     let training_ctx = TrainingContext {
         horizon: &horizon,
         state: &state,
+        cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            &state, n_stages,
+        ),
         study_dims: &study_dims,
         inflow_method: &InflowNonNegativityMethod::None,
         stochastic: &stochastic,
@@ -5609,6 +5737,13 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
     // `baked_template` carries a baked cut row (num_rows = 2); the cut-free
     // base has template_num_rows = 1. This is the baking-active shape that
     // exposed the bug.
+    let cut_state_layout = crate::indexer::CutStateLayout::new(
+        &state,
+        cobre_core::temporal::StageStateConfig {
+            storage: true,
+            inflow_lags: true,
+        },
+    );
     let succ = super::SuccessorSpec {
         t: 0,
         successor: 1,
@@ -5622,6 +5757,7 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
         cut_activity_tolerance: 0.0,
         successor_populated_count: fcf.pools[1].populated_count,
         successor_pool: &fcf.pools[1],
+        cut_state: &cut_state_layout,
     };
 
     let mut basis_slices = basis_store.split_workers_mut(1);

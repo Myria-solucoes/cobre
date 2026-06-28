@@ -98,6 +98,7 @@ impl StudySetup {
         let training_ctx = TrainingContext {
             horizon: &self.methodology.horizon,
             state: &self.stage_data.state,
+            cut_state_layouts: &self.stage_data.cut_state_layouts,
             study_dims: &self.stage_data.study_dims,
             inflow_method: &self.methodology.inflow_method,
             stochastic: &self.stochastic,

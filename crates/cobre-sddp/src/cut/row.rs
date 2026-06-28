@@ -11,7 +11,7 @@
 use cobre_solver::{RowBatch, SolverInterface};
 
 use crate::cut::FutureCostFunction;
-use crate::indexer::StateLayout;
+use crate::indexer::{CutStateLayout, StateLayout};
 
 /// Push one cut-row coefficient: `-coeff * col_scale[j]` (sign negation per the
 /// module-doc Benders contract). Sole owner of the negate-and-scale rule, shared
@@ -44,19 +44,21 @@ pub(crate) fn push_scaled_coefficient(
 /// terminator / `num_rows` / `add_rows` afterward; this helper appends only the
 /// non-zeros and bounds. Shared by [`append_new_cuts_to_lp`] and the DCS
 /// [`append_slots_to_lp`] so the two cannot drift apart.
+///
+/// `coefficients` has length `cut_state.n_state()` (the pool's enabled cut-state
+/// dimensions); the row places each enabled non-padding coefficient onto the
+/// outgoing column [`CutStateLayout::render_pairs`] yields. `theta` is the global
+/// scalar column (stage-invariant).
 #[inline]
 pub(crate) fn push_cut_row(
     batch: &mut RowBatch,
     intercept: f64,
     coefficients: &[f64],
-    state: &StateLayout,
+    cut_state: &CutStateLayout,
+    theta_col: usize,
     col_scale: &[f64],
 ) {
-    let theta_col = state.theta;
-    let mask = &state.nonzero_state_indices;
-
-    for &j in mask {
-        let lp_col = state.state_to_lp_column(j);
+    for (j, lp_col) in cut_state.render_pairs() {
         push_scaled_coefficient(batch, lp_col, coefficients[j], col_scale);
     }
 
@@ -100,20 +102,13 @@ pub fn build_cut_row_batch_into(
     fcf: &FutureCostFunction,
     stage: usize,
     state: &StateLayout,
+    cut_state: &CutStateLayout,
     col_scale: &[f64],
 ) {
     batch.clear();
 
-    let n_state = state.n_state;
+    let n_cut_state = cut_state.n_state();
     let theta_col = state.theta;
-    let mask = &state.nonzero_state_indices;
-
-    // `StateLayout::new` always finalizes the map; this guards a malformed test
-    // layout, not a production miss.
-    debug_assert!(
-        !state.state_to_lp_column_map.is_empty() || state.n_state == 0,
-        "state_to_lp_column_map not finalized before build_cut_row_batch_into"
-    );
 
     let num_cuts: usize = fcf.pools[stage].active_count();
 
@@ -122,7 +117,7 @@ pub fn build_cut_row_batch_into(
         return;
     }
 
-    let nnz_per_cut = mask.len() + 1;
+    let nnz_per_cut = cut_state.render_len() + 1;
     let total_nnz = num_cuts * nnz_per_cut;
 
     let mut nz_offset = 0;
@@ -130,22 +125,21 @@ pub fn build_cut_row_batch_into(
     for (_slot, intercept, coefficients) in fcf.active_cuts(stage) {
         debug_assert_eq!(
             coefficients.len(),
-            n_state,
-            "cut coefficients length {got} != n_state {expected}",
+            n_cut_state,
+            "cut coefficients length {got} != pool n_state {expected}",
             got = coefficients.len(),
-            expected = n_state,
+            expected = n_cut_state,
         );
 
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         batch.row_starts.push(nz_offset as i32);
 
-        // lp_column_for_state remaps outgoing-state index j to its LP column:
-        // identity for storage (j < N); for lag dimensions the outgoing state
-        // after shift_lag_state holds z_inflow at lag 0 and shifted incoming
-        // lags at lag 1+, so the cut references z_inflow and incoming lag l−1.
-        // The mask omits anticipated padding slots, so j is never a padding slot.
-        for &j in mask {
-            let lp_col = state.lp_column_for_state(j);
+        // render_pairs maps each enabled non-padding reduced index j to its
+        // outgoing LP column: identity for storage; for lag dimensions the
+        // outgoing state after shift_lag_state holds z_inflow at lag 0 and shifted
+        // incoming lags at lag 1+, so the cut references z_inflow and incoming lag
+        // l−1. Padding slots are dropped (no row entry), never zero-filled.
+        for (j, lp_col) in cut_state.render_pairs() {
             push_scaled_coefficient(batch, lp_col, coefficients[j], col_scale);
         }
 
@@ -188,6 +182,7 @@ pub fn build_cut_row_batch(
     fcf: &FutureCostFunction,
     stage: usize,
     state: &StateLayout,
+    cut_state: &CutStateLayout,
     col_scale: &[f64],
 ) -> RowBatch {
     let mut batch = RowBatch {
@@ -198,7 +193,7 @@ pub fn build_cut_row_batch(
         row_lower: Vec::new(),
         row_upper: Vec::new(),
     };
-    build_cut_row_batch_into(&mut batch, fcf, stage, state, col_scale);
+    build_cut_row_batch_into(&mut batch, fcf, stage, state, cut_state, col_scale);
     batch
 }
 
@@ -230,14 +225,16 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
     fcf: &FutureCostFunction,
     stage: usize,
     state: &StateLayout,
+    cut_state: &CutStateLayout,
     col_scale: &[f64],
     row_map: &mut crate::cut::CutRowMap,
     batch_buf: &mut RowBatch,
 ) -> usize {
     batch_buf.clear();
 
-    let n_state = state.n_state;
-    let nnz_per_cut = state.nonzero_state_indices.len() + 1;
+    let n_cut_state = cut_state.n_state();
+    let theta_col = state.theta;
+    let nnz_per_cut = cut_state.render_len() + 1;
 
     let mut new_count = 0usize;
     let mut nz_offset = 0usize;
@@ -249,16 +246,23 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
 
         debug_assert_eq!(
             coefficients.len(),
-            n_state,
-            "cut coefficients length {got} != n_state {expected}",
+            n_cut_state,
+            "cut coefficients length {got} != pool n_state {expected}",
             got = coefficients.len(),
-            expected = n_state,
+            expected = n_cut_state,
         );
 
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         batch_buf.row_starts.push(nz_offset as i32);
 
-        push_cut_row(batch_buf, intercept, coefficients, state, col_scale);
+        push_cut_row(
+            batch_buf,
+            intercept,
+            coefficients,
+            cut_state,
+            theta_col,
+            col_scale,
+        );
 
         row_map.insert(slot);
         new_count += 1;
@@ -304,14 +308,25 @@ pub fn append_slots_to_lp<S: SolverInterface>(
     pool: &crate::cut::CutPool,
     slots: &[u32],
     state: &StateLayout,
+    cut_state: &CutStateLayout,
     col_scale: &[f64],
     row_map: &mut crate::cut::CutRowMap,
     batch_buf: &mut RowBatch,
 ) -> usize {
     batch_buf.clear();
 
-    let n_state = state.n_state;
-    let nnz_per_cut = state.nonzero_state_indices.len() + 1;
+    // The pool stores coefficients at its own (possibly reduced) dimension; slice
+    // by that, render via the matching per-pool projection.
+    debug_assert_eq!(
+        pool.state_dimension,
+        cut_state.n_state(),
+        "append_slots_to_lp: pool.state_dimension {} != cut_state.n_state() {}",
+        pool.state_dimension,
+        cut_state.n_state(),
+    );
+    let n_cut_state = pool.state_dimension;
+    let theta_col = state.theta;
+    let nnz_per_cut = cut_state.render_len() + 1;
 
     let mut new_count = 0usize;
     let mut nz_offset = 0usize;
@@ -327,13 +342,20 @@ pub fn append_slots_to_lp<S: SolverInterface>(
         }
 
         let intercept = pool.intercepts[slot_usize];
-        let start = slot_usize * n_state;
-        let coefficients = &pool.coefficients[start..start + n_state];
+        let start = slot_usize * n_cut_state;
+        let coefficients = &pool.coefficients[start..start + n_cut_state];
 
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         batch_buf.row_starts.push(nz_offset as i32);
 
-        push_cut_row(batch_buf, intercept, coefficients, state, col_scale);
+        push_cut_row(
+            batch_buf,
+            intercept,
+            coefficients,
+            cut_state,
+            theta_col,
+            col_scale,
+        );
 
         row_map.insert(slot_usize);
         new_count += 1;
@@ -362,7 +384,7 @@ mod tests {
 
     use super::{append_new_cuts_to_lp, build_cut_row_batch, build_cut_row_batch_into};
     use crate::cut::FutureCostFunction;
-    use crate::indexer::StateLayout;
+    use crate::indexer::{CutStateLayout, StateLayout};
 
     /// Build a finalized storage+lag [`StateLayout`] (no anticipated thermals)
     /// with the full `max_par_order` lag stride for every hydro — the dense
@@ -373,13 +395,25 @@ mod tests {
         StateLayout::new(hydro_count, max_par_order, 0, 0, vec![], &lag_counts)
     }
 
+    /// All-enabled per-pool projection of `state` — these builder tests use
+    /// full-dimension pools, so the render reproduces the global nonzero mask.
+    fn cut_state(state: &StateLayout) -> CutStateLayout {
+        CutStateLayout::new(
+            state,
+            cobre_core::temporal::StageStateConfig {
+                storage: true,
+                inflow_lags: true,
+            },
+        )
+    }
+
     // ── Unit tests: build_cut_row_batch ──────────────────────────────────────
 
     #[test]
     fn build_cut_row_batch_empty_cuts_returns_empty_batch() {
         let fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
         let state = state_layout(1, 0);
-        let batch = build_cut_row_batch(&fcf, 0, &state, &[]);
+        let batch = build_cut_row_batch(&fcf, 0, &state, &cut_state(&state), &[]);
 
         assert_eq!(batch.num_rows, 0);
         assert_eq!(batch.row_starts, vec![0]);
@@ -394,7 +428,7 @@ mod tests {
         let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
         fcf.add_cut(0, 0, 0, 5.0, &[2.0]);
         let state = state_layout(1, 0);
-        let batch = build_cut_row_batch(&fcf, 0, &state, &[]);
+        let batch = build_cut_row_batch(&fcf, 0, &state, &cut_state(&state), &[]);
 
         assert_eq!(batch.num_rows, 1);
         assert_eq!(batch.row_starts, vec![0, 2]);
@@ -410,7 +444,7 @@ mod tests {
         fcf.add_cut(1, 0, 0, 10.0, &[1.0, 3.0]);
         fcf.add_cut(1, 1, 0, 20.0, &[2.0, 4.0]);
         let state = state_layout(1, 1);
-        let batch = build_cut_row_batch(&fcf, 1, &state, &[]);
+        let batch = build_cut_row_batch(&fcf, 1, &state, &cut_state(&state), &[]);
 
         assert_eq!(batch.num_rows, 2);
         assert_eq!(batch.row_starts, vec![0, 3, 6]);
@@ -436,7 +470,7 @@ mod tests {
         let mut fcf = FutureCostFunction::new(1, 2, 1, 5, &[0; 1]);
         fcf.add_cut(0, 0, 0, 3.0, &[0.0, 7.0]);
         let state = state_layout(1, 1);
-        let batch = build_cut_row_batch(&fcf, 0, &state, &[]);
+        let batch = build_cut_row_batch(&fcf, 0, &state, &cut_state(&state), &[]);
 
         assert_eq!(batch.num_rows, 1);
         assert_eq!(batch.col_indices, vec![0, 2, 4]); // lag 0 → z_inflow col 2; theta at 4
@@ -538,6 +572,7 @@ mod tests {
             &fcf,
             0,
             &state,
+            &cut_state(&state),
             &[],
             &mut row_map,
             &mut batch_buf,
@@ -564,6 +599,7 @@ mod tests {
             &fcf,
             0,
             &state,
+            &cut_state(&state),
             &[],
             &mut row_map,
             &mut batch_buf,
@@ -597,6 +633,7 @@ mod tests {
             &fcf,
             0,
             &state,
+            &cut_state(&state),
             &[],
             &mut row_map,
             &mut batch_buf,
@@ -620,7 +657,14 @@ mod tests {
         let state = state_layout(1, 0);
 
         let mut expected_batch = empty_row_batch();
-        build_cut_row_batch_into(&mut expected_batch, &fcf, 0, &state, &[]);
+        build_cut_row_batch_into(
+            &mut expected_batch,
+            &fcf,
+            0,
+            &state,
+            &cut_state(&state),
+            &[],
+        );
 
         // Empty row_map, so append_new_cuts_to_lp treats all cuts as new.
         let mut row_map = CutRowMap::new(10, 5);
@@ -631,6 +675,7 @@ mod tests {
             &fcf,
             0,
             &state,
+            &cut_state(&state),
             &[],
             &mut row_map,
             &mut actual_batch,
@@ -656,7 +701,14 @@ mod tests {
         let col_scale = vec![0.5, 2.0, 1.0, 0.1];
 
         let mut expected = empty_row_batch();
-        build_cut_row_batch_into(&mut expected, &fcf, 0, &state, &col_scale);
+        build_cut_row_batch_into(
+            &mut expected,
+            &fcf,
+            0,
+            &state,
+            &cut_state(&state),
+            &col_scale,
+        );
 
         let mut row_map = CutRowMap::new(10, 5);
         let mut actual = empty_row_batch();
@@ -666,6 +718,7 @@ mod tests {
             &fcf,
             0,
             &state,
+            &cut_state(&state),
             &col_scale,
             &mut row_map,
             &mut actual,

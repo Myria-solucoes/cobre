@@ -17,7 +17,7 @@
 
 use cobre_sddp::cut::{CutPool, CutRowMap};
 use cobre_sddp::dcs::{DcsParams, DcsScoringScratch, score_violated_candidates};
-use cobre_sddp::indexer::StateLayout;
+use cobre_sddp::indexer::{CutStateLayout, StateLayout};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
@@ -180,6 +180,13 @@ fn make_primal(n_state: usize, seed: u64) -> Vec<f64> {
 
 fn bench_one(c: &mut Criterion, k: usize, n_state: usize) {
     let state = StateLayout::new(n_state, 0, 0, 0, vec![], &vec![0; n_state]);
+    let cut_state = CutStateLayout::new(
+        &state,
+        cobre_core::temporal::StageStateConfig {
+            storage: true,
+            inflow_lags: true,
+        },
+    );
     let pool = make_candidate_pool(k, n_state, 0xDEAD_BEEF_CAFE_F00D);
     let primal = make_primal(n_state, 0xFEED_FACE_1234_5678);
     let resident = CutRowMap::new(k.max(1), 0); // empty: every cut a candidate
@@ -204,6 +211,7 @@ fn bench_one(c: &mut Criterion, k: usize, n_state: usize) {
                 let count = score_violated_candidates(
                     black_box(&pool),
                     black_box(&state),
+                    black_box(&cut_state),
                     black_box(&primal),
                     black_box(&[]),
                     black_box(&resident),

@@ -174,7 +174,6 @@ impl StageOpeningSolver {
         omega: usize,
         is_first: bool,
     ) -> Result<(), SddpError> {
-        let state = training_ctx.state;
         patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
 
         // Moved out before the solve to avoid a borrow conflict with `view`'s
@@ -205,8 +204,7 @@ impl StageOpeningSolver {
         // below).
         let objective = extract_duals_from_view(
             &view,
-            state.n_state,
-            state,
+            succ.cut_state,
             &ctx.templates[s].col_scale,
             succ,
             &mut state_duals,
@@ -304,11 +302,16 @@ impl StageOpeningSolver {
             iteration: Some(iteration),
             continue_carry,
         };
+        // The DCS LP renders `successor_pool`'s cuts into stage `s` (== successor);
+        // its projection is pool `successor`'s, NOT `succ.cut_state` (pool `t`'s,
+        // used only for the incoming extraction below).
+        let successor_cut_layout = &training_ctx.cut_state_layouts[succ.successor];
         lazy_solve_preloaded(
             &mut ws.solver,
             core,
             succ.successor_pool,
             state,
+            successor_cut_layout,
             col_scale,
             None,
             &ws.backward_accum.dcs_initial_resident,
@@ -319,7 +322,7 @@ impl StageOpeningSolver {
         let view = ws.backward_accum.dcs_solve.result_view();
 
         let objective =
-            extract_state_duals_only(&view, state.n_state, state, col_scale, &mut state_duals);
+            extract_state_duals_only(&view, succ.cut_state, col_scale, &mut state_duals);
 
         // `view` and `dcs_solve.row_map` both borrow `dcs_solve` immutably (so they
         // coexist); `slot_increments` is a distinct field borrowed mutably.

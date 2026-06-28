@@ -3499,3 +3499,105 @@ fn baked_vs_fallback_simulation_costs_are_identical() {
         );
     }
 }
+
+/// D43: storage-only (lag-dropped) cut convergence.
+///
+/// ## System
+///
+/// 1 bus, 1 hydro (H0, constant productivity 0.8 MW/(m3/s), 0–500 hm3 storage),
+/// 1 thermal (300 MW @ 100 $/MWh), 4 monthly stages, load 220 MW constant.
+/// PACF with `max_order=2` fits a PAR(2) model (global `n_state = N*(1+L) = 3`).
+///
+/// ## Storage-only stage
+///
+/// Stage 2 sets `state_variables.inflow_lags = false`. Pool `t` is sized by stage
+/// `t+1`'s config, so stage 2's storage-only config sizes **pool 1** at cut
+/// dimension `N = 1` (the AR lags are dropped from that pool's cuts) while the
+/// lag-enabled pools stay at `N*(1+L) = 3`. The reduced cut, rendered through the
+/// per-pool outgoing projection, touches only the storage column.
+///
+/// ## Convergence
+///
+/// The lag-dropped cut is an approximation change; this case proves it still
+/// closes the LB/UB gap. The run terminates on `bound_stalling` (the LB
+/// stabilizes — it does not plateau below the UB), with LB == UB to machine
+/// precision.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d43_storage_only_cut_converges() {
+    let case_dir = Path::new("../../examples/deterministic/d43-storage-only-cut");
+
+    // Pool dimensions: stage 2's storage-only config sizes pool 1 down to N,
+    // while the lag-enabled pools carry storage + lags.
+    let config = cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
+    let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
+    let pr = prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
+        .expect("prepare_stochastic must succeed");
+    let system = pr.system;
+    let stochastic = pr.stochastic;
+    let hydro_models =
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
+    let mut setup = build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models);
+    let n_hydros = setup.stage_state().hydro_count;
+    let global_n_state = setup.stage_state().n_state;
+    assert!(
+        global_n_state > n_hydros,
+        "D43: PACF must fit PAR(p>0) so the lag drop is non-trivial (n_state={global_n_state}, N={n_hydros})",
+    );
+    // ONLY pool 1 is reduced (sized by stage 2's storage-only config); every
+    // sibling stays at the full global dimension. Pinning all four catches both an
+    // under-reduction (pool 1 not dropped) and an over-eager reduction (a sibling
+    // wrongly dropped).
+    assert_eq!(
+        setup.fcf.pools[1].state_dimension, n_hydros,
+        "D43: storage-only pool 1 must have cut dimension N (lags dropped)",
+    );
+    for t in [0usize, 2, 3] {
+        assert_eq!(
+            setup.fcf.pools[t].state_dimension, global_n_state,
+            "D43: lag-enabled pool {t} must stay at the full global dimension",
+        );
+    }
+
+    // Convergence: the storage-only cut closes the LB/UB gap and the run stops on
+    // bound stalling (not the iteration cap), proving the LB does not plateau.
+    let comm = StubComm;
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+    let outcome = setup
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+        .expect("train must return Ok");
+    assert!(outcome.error.is_none(), "D43: expected no training error");
+    let result = outcome.result;
+    assert_eq!(
+        result.reason, "bound_stalling",
+        "D43: must converge via bound_stalling, not exhaust the iteration cap (reason={})",
+        result.reason,
+    );
+    assert!(
+        result.final_gap < 1e-6,
+        "D43: LB/UB gap must close (gap={})",
+        result.final_gap,
+    );
+    assert_cost(result.final_lb, 11_658_487.253_236_46, 1.0, "D43");
+
+    // The cut(s) stored in the reduced pool carry the reduced length: a cut on a
+    // storage-only pool has exactly N coefficients, not the global n_state. This is
+    // what discriminates the per-stage-dimension-aware storage from a revert to
+    // full-dimension (the bound alone is neutral — an exact reduction stores
+    // numerically the same cut a full pool would).
+    let reduced_pool = &setup.fcf.pools[1];
+    assert!(
+        reduced_pool.active_count() > 0,
+        "D43: the reduced pool must hold at least one trained cut to inspect",
+    );
+    for (slot, _intercept, coefficients) in reduced_pool.active_cuts() {
+        assert_eq!(
+            coefficients.len(),
+            n_hydros,
+            "D43: stored cut at pool-1 slot {slot} must have reduced length N={n_hydros}",
+        );
+    }
+}

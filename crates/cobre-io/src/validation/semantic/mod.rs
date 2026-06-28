@@ -67,6 +67,7 @@
 //! |31  | Observation resolution must not be finer than season resolution          | `scenarios/inflow_history.parquet`             | `BusinessRuleViolation`  |
 //! |32  | Each `season_id` in `past_inflows[i].season_ids` must exist in `SeasonMap` | `initial_conditions.json`                    | `BusinessRuleViolation`  |
 //! |33  | Filling schedule reaches the dead volume: `Σ ζ_s·rate_s >= min_storage − seed` | `system/hydros.json`               | `BusinessRuleViolation`  |
+//! |34  | PAR order > 0 but every study stage has `inflow_lags == false` (storage-only cuts) | `stages.json`                | `ModelQuality` (warning) |
 
 use super::{ValidationContext, schema::ParsedData};
 
@@ -116,6 +117,7 @@ pub(crate) fn validate_semantic_stages_penalties_scenarios(
     ctx: &mut ValidationContext,
 ) {
     stages::check_stage_structure(data, ctx);
+    stages::check_inflow_lags_vs_par_order(data, ctx);
     sobol::check_sobol_power_of_2(data, ctx);
     scenarios::check_penalty_ordering(data, ctx);
     scenarios::check_filling_sufficiency(data, ctx);

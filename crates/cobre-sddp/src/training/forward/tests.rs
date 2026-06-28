@@ -744,6 +744,10 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -877,6 +881,10 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1016,6 +1024,10 @@ fn cost_statistics_accumulated_correctly() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1470,6 +1482,10 @@ fn run_one_iteration(
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1652,6 +1668,10 @@ fn test_forward_pass_parallel_cost_agreement() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1695,6 +1715,10 @@ fn test_forward_pass_parallel_cost_agreement() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1813,6 +1837,10 @@ fn test_forward_pass_work_distribution() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2137,6 +2165,10 @@ fn run_single_stage_forward(
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &inflow_method,
             stochastic,
@@ -2339,6 +2371,10 @@ fn none_method_unchanged_with_truncation_code_present() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2594,6 +2630,10 @@ fn test_forward_pass_parallel_infeasibility() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2757,6 +2797,10 @@ fn forward_pass_load_noise_positive_realization() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2915,6 +2959,10 @@ fn forward_pass_load_noise_clamped_to_zero() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -3024,6 +3072,10 @@ fn forward_pass_no_load_buses_unchanged() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
             study_dims: &crate::indexer::test_fixtures::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -3089,7 +3141,15 @@ fn test_build_delta_empty_pool() {
     let _indexer = crate::indexer::test_fixtures::geom(1, 0);
     let mut batch = empty_delta_batch();
 
-    build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &state, &[], 1);
+    build_delta_cut_row_batch_into(
+        &mut batch,
+        &fcf,
+        0,
+        &state,
+        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &[],
+        1,
+    );
 
     assert_eq!(batch.num_rows, 0);
     assert_eq!(batch.row_starts, vec![0_i32]);
@@ -3118,7 +3178,15 @@ fn test_build_delta_single_iteration_filter() {
     let _indexer = crate::indexer::test_fixtures::geom(1, 0);
     let mut batch = empty_delta_batch();
 
-    build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &state, &[], 2);
+    build_delta_cut_row_batch_into(
+        &mut batch,
+        &fcf,
+        0,
+        &state,
+        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &[],
+        2,
+    );
 
     assert_eq!(batch.num_rows, 1);
     assert_eq!(batch.row_lower, vec![20.0]);
@@ -3144,7 +3212,15 @@ fn test_build_delta_skips_deactivated_cuts() {
     let _indexer = crate::indexer::test_fixtures::geom(1, 0);
     let mut batch = empty_delta_batch();
 
-    build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &state, &[], 1);
+    build_delta_cut_row_batch_into(
+        &mut batch,
+        &fcf,
+        0,
+        &state,
+        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &[],
+        1,
+    );
 
     // Only slot 3 (intercept=20.0) should appear.
     assert_eq!(batch.num_rows, 1);
@@ -3179,7 +3255,15 @@ fn test_build_delta_excludes_warm_start_cuts() {
     let _indexer = crate::indexer::test_fixtures::geom(1, 0);
     let mut batch = empty_delta_batch();
 
-    build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &state, &[], 1);
+    build_delta_cut_row_batch_into(
+        &mut batch,
+        &fcf,
+        0,
+        &state,
+        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &[],
+        1,
+    );
 
     // Warm-start cut (intercept=99.0) must be excluded; training cut
     // (intercept=7.0) must be present.
@@ -3201,10 +3285,25 @@ fn test_build_delta_matches_full_batch_when_pool_has_only_current_iter() {
     let _indexer = crate::indexer::test_fixtures::geom(1, 0);
 
     let mut batch_full = empty_delta_batch();
-    build_cut_row_batch_into(&mut batch_full, &fcf, 0, &state, &[]);
+    build_cut_row_batch_into(
+        &mut batch_full,
+        &fcf,
+        0,
+        &state,
+        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &[],
+    );
 
     let mut batch_delta = empty_delta_batch();
-    build_delta_cut_row_batch_into(&mut batch_delta, &fcf, 0, &state, &[], 1);
+    build_delta_cut_row_batch_into(
+        &mut batch_delta,
+        &fcf,
+        0,
+        &state,
+        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &[],
+        1,
+    );
 
     assert_eq!(batch_delta.num_rows, batch_full.num_rows);
     assert_eq!(batch_delta.row_starts, batch_full.row_starts);
@@ -3247,7 +3346,15 @@ fn test_build_delta_sparse_path() {
     fcf.add_cut(0, 1, 0, 5.0, &vec![1.0; state.n_state]);
 
     let mut batch = empty_delta_batch();
-    build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &state, &[], 1);
+    build_delta_cut_row_batch_into(
+        &mut batch,
+        &fcf,
+        0,
+        &state,
+        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &[],
+        1,
+    );
 
     assert_eq!(batch.num_rows, 1);
     // Each row: mask_len state entries + 1 theta entry.
@@ -3267,12 +3374,28 @@ fn test_build_delta_reuses_out_buffer() {
     let mut batch = empty_delta_batch();
 
     // First call: iteration 1 → should yield the iteration-1 cut.
-    build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &state, &[], 1);
+    build_delta_cut_row_batch_into(
+        &mut batch,
+        &fcf,
+        0,
+        &state,
+        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &[],
+        1,
+    );
     assert_eq!(batch.num_rows, 1);
     assert_eq!(batch.row_lower, vec![11.0]);
 
     // Second call: iteration 2 → stale data from first call must be gone.
-    build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &state, &[], 2);
+    build_delta_cut_row_batch_into(
+        &mut batch,
+        &fcf,
+        0,
+        &state,
+        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &[],
+        2,
+    );
     assert_eq!(batch.num_rows, 1);
     assert_eq!(batch.row_lower, vec![22.0]);
     assert_eq!(batch.row_starts.len(), 2); // [0, 2]
@@ -3297,7 +3420,15 @@ fn test_build_delta_clears_row_starts() {
         row_upper: vec![0.0_f64; 5],
     };
 
-    build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &state, &[], 1);
+    build_delta_cut_row_batch_into(
+        &mut batch,
+        &fcf,
+        0,
+        &state,
+        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &[],
+        1,
+    );
 
     assert_eq!(batch.row_starts[0], 0_i32);
     assert_eq!(batch.num_rows, 1);
@@ -3341,7 +3472,15 @@ fn build_delta_cut_row_batch_into_skips_warm_start_slots() {
         row_upper: Vec::new(),
     };
 
-    build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &state, &[], 1);
+    build_delta_cut_row_batch_into(
+        &mut batch,
+        &fcf,
+        0,
+        &state,
+        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &[],
+        1,
+    );
 
     // Warm-start slot must be excluded; only the iteration-1 cut appears.
     assert_eq!(batch.num_rows, 1);
@@ -3585,6 +3724,10 @@ mod dcs_forward {
         let training_ctx = TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,

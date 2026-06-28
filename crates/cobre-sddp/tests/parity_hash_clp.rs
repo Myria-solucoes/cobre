@@ -182,6 +182,7 @@ fn case_dir(label: &str) -> std::path::PathBuf {
         "D40" => "d40-filling-cascade",
         "D41" => "d41-energy-contracts",
         "D42" => "d42-nonfilling-hydro-commissioning",
+        "D43" => "d43-storage-only-cut",
         other => panic!("unknown case label: {other}"),
     };
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -551,4 +552,13 @@ fn parity_hash_d41() {
 )]
 fn parity_hash_d42() {
     run_case("D42");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d43() {
+    run_case("D43");
 }

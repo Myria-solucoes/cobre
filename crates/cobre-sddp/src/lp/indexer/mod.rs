@@ -139,12 +139,17 @@
 //!   handle to it.
 //! - `study_dimensions` — the [`StudyDimensions`] type, the single owner of the
 //!   study-invariant non-state LP shape.
+//! - `cut_state_layout` — the [`CutStateLayout`] type, a storage-scoped
+//!   projection of [`StateLayout`] exposing only the cut-state dimensions a
+//!   stage's `StageStateConfig` enables (anticipated state always included),
+//!   delegating each column to [`StateLayout::state_to_lp_incoming_column`].
 //!
 //! Every public symbol is re-exported here so the `cobre_sddp::indexer::Symbol`
 //! and `crate::indexer::Symbol` module paths resolve to the same item regardless
 //! of which submodule owns it.
 
 mod block_grid;
+mod cut_state_layout;
 mod layout;
 mod state_layout;
 mod study_dimensions;
@@ -152,6 +157,7 @@ mod study_dimensions;
 pub mod test_fixtures;
 
 pub use block_grid::BlockGrid;
+pub use cut_state_layout::CutStateLayout;
 pub use layout::{EvaporationIndices, FphaRowRange};
 pub use state_layout::StateLayout;
 pub use study_dimensions::StudyDimensions;

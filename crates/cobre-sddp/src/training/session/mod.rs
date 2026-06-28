@@ -997,6 +997,7 @@ where
                 self.fcf,
                 t,
                 state,
+                &self.training_ctx.cut_state_layouts[t],
                 &self.stage_ctx.templates[t].col_scale,
             );
             #[allow(clippy::cast_possible_truncation)]
@@ -1109,6 +1110,7 @@ where
             self.fcf,
             self.training_ctx.initial_state,
             self.training_ctx.state,
+            &self.training_ctx.cut_state_layouts[0],
             &mut lb_bundle,
             &lb_spec,
             self.comm,
@@ -1573,6 +1575,7 @@ mod tests {
         horizon: &'a HorizonMode,
         study_dims: &'a StudyDimensions,
         state: &'a StateLayout,
+        cut_state_layouts: &'a [crate::indexer::CutStateLayout],
         stochastic: &'a StochasticContext,
         initial_state: &'a [f64],
         stages: &'a [Stage],
@@ -1580,6 +1583,7 @@ mod tests {
         TrainingContext {
             horizon,
             state,
+            cut_state_layouts,
             study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic,
@@ -1622,10 +1626,13 @@ mod tests {
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
         let study_dims = crate::indexer::test_fixtures::study_dims();
+        let cut_state_layouts =
+            crate::indexer::test_fixtures::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
             &state,
+            &cut_state_layouts,
             &stochastic,
             &initial_state,
             &stages,
@@ -1695,10 +1702,13 @@ mod tests {
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
         let study_dims = crate::indexer::test_fixtures::study_dims();
+        let cut_state_layouts =
+            crate::indexer::test_fixtures::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
             &state,
+            &cut_state_layouts,
             &stochastic,
             &initial_state,
             &stages,
@@ -1755,10 +1765,13 @@ mod tests {
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
         let study_dims = crate::indexer::test_fixtures::study_dims();
+        let cut_state_layouts =
+            crate::indexer::test_fixtures::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
             &state,
+            &cut_state_layouts,
             &stochastic,
             &initial_state,
             &stages,
@@ -1818,10 +1831,13 @@ mod tests {
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
         let study_dims = crate::indexer::test_fixtures::study_dims();
+        let cut_state_layouts =
+            crate::indexer::test_fixtures::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
             &state,
+            &cut_state_layouts,
             &stochastic,
             &initial_state,
             &stages,
@@ -1870,10 +1886,13 @@ mod tests {
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
         let study_dims = crate::indexer::test_fixtures::study_dims();
+        let cut_state_layouts =
+            crate::indexer::test_fixtures::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
             &state,
+            &cut_state_layouts,
             &stochastic,
             &initial_state,
             &stages,
@@ -1939,10 +1958,13 @@ mod tests {
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
         let study_dims = crate::indexer::test_fixtures::study_dims();
+        let cut_state_layouts =
+            crate::indexer::test_fixtures::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
             &state,
+            &cut_state_layouts,
             &stochastic,
             &initial_state,
             &stages,

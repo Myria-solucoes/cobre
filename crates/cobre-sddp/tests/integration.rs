@@ -621,6 +621,7 @@ fn run_one_deterministic_pass(
         &TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic,
@@ -708,6 +709,7 @@ fn train_converges_with_mock_solver() {
         &TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
@@ -824,6 +826,7 @@ fn train_lb_monotonically_nondecreasing() {
         &TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
@@ -929,6 +932,7 @@ fn train_emits_correct_event_sequence() {
         &TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
@@ -1040,6 +1044,7 @@ fn train_stops_at_iteration_limit() {
         &TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
@@ -1138,6 +1143,7 @@ fn train_stops_on_graceful_shutdown() {
         &TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
@@ -1226,6 +1232,7 @@ fn train_propagates_infeasible_error() {
         &TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
@@ -1335,6 +1342,7 @@ fn d17_level1_cut_selection_convergence() {
         &TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
@@ -1491,6 +1499,7 @@ fn d17_level1_cut_selection_reconstruction() {
         &TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
@@ -1601,6 +1610,7 @@ fn d18_lml1_cut_selection_convergence() {
         &TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
@@ -1834,6 +1844,7 @@ fn baked_backward_pass_smoke_test() {
         &TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
@@ -1868,4 +1879,22 @@ fn baked_backward_pass_smoke_test() {
         "final lower bound must be non-negative; got {}",
         outcome.result.final_lb
     );
+}
+
+/// Local mirror of the gated `indexer::test_fixtures::all_enabled_cut_state_layouts`
+/// via the public `CutStateLayout::new`, so this external test crate (which cannot
+/// see the parent crate's `#[cfg(test)]` surface) builds the default all-enabled
+/// per-pool projection. Every pool projects the full global state, keeping the
+/// extracted subgradient bit-identical to the global-loop result.
+fn all_enabled_cut_state_layouts(
+    global: &StateLayout,
+    n_stages: usize,
+) -> Vec<cobre_sddp::indexer::CutStateLayout> {
+    let full = StageStateConfig {
+        storage: true,
+        inflow_lags: true,
+    };
+    (0..n_stages)
+        .map(|_| cobre_sddp::indexer::CutStateLayout::new(global, full))
+        .collect()
 }

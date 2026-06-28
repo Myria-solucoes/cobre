@@ -581,6 +581,7 @@ fn train_fixture(
         &TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, n_stages),
             study_dims: &fx.study_dims,
             inflow_method: &fx.inflow_method,
             stochastic: &fx.stochastic,
@@ -684,6 +685,10 @@ fn simulate_fixture(
         &TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(
+                &fx.state,
+                fx.stage_templates.templates.len(),
+            ),
             study_dims: &fx.study_dims,
             inflow_method: &fx.inflow_method,
             stochastic: &fx.stochastic,
@@ -967,4 +972,22 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
         "H2/H1 objective ratio must be 50 (5000/100), got {}",
         h2_obj / h1_obj
     );
+}
+
+/// Local mirror of the gated `indexer::test_fixtures::all_enabled_cut_state_layouts`
+/// via the public `CutStateLayout::new`, so this external test crate (which cannot
+/// see the parent crate's `#[cfg(test)]` surface) builds the default all-enabled
+/// per-pool projection. Every pool projects the full global state, keeping the
+/// extracted subgradient bit-identical to the global-loop result.
+fn all_enabled_cut_state_layouts(
+    global: &StateLayout,
+    n_stages: usize,
+) -> Vec<cobre_sddp::indexer::CutStateLayout> {
+    let full = StageStateConfig {
+        storage: true,
+        inflow_lags: true,
+    };
+    (0..n_stages)
+        .map(|_| cobre_sddp::indexer::CutStateLayout::new(global, full))
+        .collect()
 }

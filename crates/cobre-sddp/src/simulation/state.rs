@@ -229,6 +229,7 @@ impl SimulationState {
             inputs.fcf,
             inputs.ctx,
             state,
+            training_ctx.cut_state_layouts,
             num_stages,
             inputs.baked_templates,
             &mut self.bake_batch,
@@ -493,6 +494,7 @@ fn rebake_templates_if_needed(
     fcf: &FutureCostFunction,
     ctx: &StageContext<'_>,
     state: &crate::indexer::StateLayout,
+    cut_state_layouts: &[crate::indexer::CutStateLayout],
     num_stages: usize,
     caller_baked: Option<&[StageTemplate]>,
     bake_batch: &mut RowBatch,
@@ -505,8 +507,19 @@ fn rebake_templates_if_needed(
     }
 
     let mut owned = Vec::with_capacity(num_stages);
+    // Rationale: `t` is the stage index passed to `build_cut_row_batch_into` AND used
+    // to index three parallel slices (fcf pools, cut_state_layouts, templates); an
+    // iterator zip would not carry the stage index the builder needs.
+    #[allow(clippy::needless_range_loop)]
     for t in 0..num_stages {
-        build_cut_row_batch_into(bake_batch, fcf, t, state, &ctx.templates[t].col_scale);
+        build_cut_row_batch_into(
+            bake_batch,
+            fcf,
+            t,
+            state,
+            &cut_state_layouts[t],
+            &ctx.templates[t].col_scale,
+        );
         let mut baked = StageTemplate::empty();
         cobre_solver::bake_rows_into_template(
             &ctx.templates[t],

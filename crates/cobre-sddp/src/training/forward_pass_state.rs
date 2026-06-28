@@ -1212,6 +1212,7 @@ mod tests {
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &[],
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
@@ -1288,6 +1289,7 @@ mod tests {
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &[],
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
@@ -1415,6 +1417,7 @@ mod tests {
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &[],
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
@@ -1543,6 +1546,7 @@ mod tests {
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &[],
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,

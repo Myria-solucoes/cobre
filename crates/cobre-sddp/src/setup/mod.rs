@@ -64,7 +64,7 @@ use crate::{
     error::SddpError,
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
-    indexer::{StateLayout, StudyDimensions},
+    indexer::{CutStateLayout, StateLayout, StudyDimensions},
     lp_builder::build_stage_templates,
     risk_measure::RiskMeasure,
     simulation::EntityCounts,
@@ -319,8 +319,14 @@ impl StudySetup {
         let n_stages = stage_templates.templates.len();
         let max_iterations = max_iterations_from_rules(&stopping_rule_set);
         let fcf_capacity_iterations = max_iterations.saturating_add(1);
-        let fcf = FutureCostFunction::new(
-            n_stages,
+
+        let cut_state_layouts = build_cut_state_layouts(system, &state_layout, n_stages);
+        let pool_state_dimensions: Vec<usize> = cut_state_layouts
+            .iter()
+            .map(CutStateLayout::n_state)
+            .collect();
+        let fcf = FutureCostFunction::new_per_stage(
+            &pool_state_dimensions,
             state_layout.n_state,
             forward_passes,
             fcf_capacity_iterations,
@@ -398,6 +404,7 @@ impl StudySetup {
                 stage_templates,
                 state: state_layout,
                 study_dims,
+                cut_state_layouts,
                 stages,
                 entity_counts,
                 pumping_consumption_mw_per_m3s,
@@ -704,6 +711,50 @@ fn build_wired_indexer(
 
     (state, study_dims)
 }
+
+/// Build the per-pool [`CutStateLayout`], one per stage (pool) `t`, projecting
+/// the global [`StateLayout`] onto the cut-state dimensions each pool carries.
+///
+/// Pool `t` is sized by `stages[t + 1].state_config` — the cost-to-go this
+/// stage's **successor** generates for it (pool `t` is populated by the backward
+/// pass when it solves stage `t + 1`'s LP and reads stage `t + 1`'s
+/// incoming-state reduced costs). Sizing pool `t` from `stages[t].state_config`
+/// is the off-by-one that compiles but stores cuts at the wrong dimension.
+/// Stage 0's config never sizes a pool (it has no predecessor pool).
+///
+/// The terminal pool `n_stages - 1` has no successor stage, so the `t + 1` rule
+/// does not apply: it is sized by the **full global `n_state`**. With
+/// `config.policy.boundary` set, the injected boundary cuts come from the
+/// external study and are validated and rebuilt against `fcf.state_dimension`
+/// (the global `n_state`) by `load_boundary_cuts` / `inject_boundary_cuts`, so
+/// the global dimension is exactly the size injection requires — never a DECOMP
+/// stage's reduced config. (Per-slot identity reconciliation between a
+/// differently-scoped boundary manifest and the local layout is out of scope
+/// here.)
+fn build_cut_state_layouts(
+    system: &cobre_core::System,
+    state_layout: &StateLayout,
+    n_stages: usize,
+) -> Vec<CutStateLayout> {
+    let study_stages: Vec<&Stage> = system.stages().iter().filter(|s| s.id >= 0).collect();
+    (0..n_stages)
+        .map(|t| {
+            if t + 1 < n_stages {
+                CutStateLayout::new(state_layout, study_stages[t + 1].state_config)
+            } else {
+                CutStateLayout::new(state_layout, FULL_STATE_CONFIG)
+            }
+        })
+        .collect()
+}
+
+/// The all-dimensions cut-state config, sizing a pool to the full global
+/// `n_state`. Used for the terminal pool (no successor stage to govern it).
+const FULL_STATE_CONFIG: cobre_core::temporal::StageStateConfig =
+    cobre_core::temporal::StageStateConfig {
+        storage: true,
+        inflow_lags: true,
+    };
 
 /// Grouped output of [`precompute_lag_data`].
 struct LagData {
@@ -1166,7 +1217,7 @@ mod tests {
         ResolvedPenalties, ThermalStageBounds,
     };
     use cobre_core::{
-        EntityId, SystemBuilder,
+        EntityId, HydroPastInflows, InitialConditions, SystemBuilder,
         entities::{
             bus::{Bus, DeficitSegment},
             hydro::{Hydro, HydroGenerationModel, HydroPenalties},
@@ -6733,7 +6784,13 @@ mod tests {
             .collect();
         fcf.add_cut(0, 0, 0, 7.5, &coefficients);
 
-        let from_production = build_cut_row_batch(&fcf, 0, state, &[]);
+        let from_production = build_cut_row_batch(
+            &fcf,
+            0,
+            state,
+            &crate::indexer::test_fixtures::cut_state_layout(state),
+            &[],
+        );
 
         // Independent mirror of `build_cut_row_batch_into`'s mask-driven body over the
         // same `StateLayout` role-(a) reads; a disagreement means the cut-path repoint
@@ -6792,6 +6849,379 @@ mod tests {
         assert_eq!(
             from_production.num_rows, from_state.num_rows,
             "num_rows must match"
+        );
+    }
+
+    // ── per-stage cut-pool sizing (build_cut_state_layouts) ───────────────────
+
+    /// Build a PAR(2) study (`max_par_order = 2`, so `L > 0`) with 1 hydro, 1
+    /// thermal, 1 bus, and one stage per entry in `state_configs`. Each stage
+    /// takes the matching `StageStateConfig`; AR(2) coefficients plus pre-study
+    /// inflow models at stage ids -1/-2 give the PAR builder the lag statistics
+    /// it needs, so the global `StateLayout` has `n_state = N*(1 + 2)`.
+    #[allow(clippy::too_many_lines, clippy::cast_possible_wrap)]
+    fn par2_system_with_state_configs(state_configs: &[StageStateConfig]) -> cobre_core::System {
+        use chrono::NaiveDate;
+
+        const PHI_1: f64 = 0.5;
+        const PHI_2: f64 = 0.2;
+        const N_SEASONS: usize = 12;
+        let hydro_id = EntityId(3);
+
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+
+        let thermal = Thermal {
+            id: EntityId(2),
+            name: "T1".to_string(),
+            bus_id: EntityId(1),
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            cost_per_mwh: 50.0,
+            anticipated_config: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+        };
+
+        let hydro = Hydro {
+            id: hydro_id,
+            name: "H1".to_string(),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 500.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 200.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 200.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        };
+
+        let n_stages = state_configs.len();
+        let stages: Vec<Stage> = state_configs
+            .iter()
+            .enumerate()
+            .map(|(i, &state_config)| Stage {
+                index: i,
+                id: i as i32,
+                start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                season_id: Some(i % N_SEASONS),
+                blocks: vec![Block {
+                    index: 0,
+                    name: "S".to_string(),
+                    duration_hours: 744.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config,
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            })
+            .collect();
+
+        let mut inflow_models: Vec<InflowModel> = Vec::new();
+        for pre_id in [-2_i32, -1_i32] {
+            inflow_models.push(InflowModel {
+                hydro_id,
+                stage_id: pre_id,
+                mean_m3s: 1000.0,
+                std_m3s: 200.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            });
+        }
+        for i in 0..n_stages {
+            inflow_models.push(InflowModel {
+                hydro_id,
+                stage_id: i as i32,
+                mean_m3s: 1000.0,
+                std_m3s: 200.0,
+                ar_coefficients: vec![PHI_1, PHI_2],
+                residual_std_ratio: 0.7,
+                annual: None,
+            });
+        }
+
+        let load_models: Vec<LoadModel> = (0..n_stages)
+            .map(|i| LoadModel {
+                bus_id: EntityId(1),
+                stage_id: i as i32,
+                mean_mw: 100.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: n_stages.max(1),
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 500.0,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 200.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 200.0,
+                    max_diversion_m3s: None,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: n_stages.max(1),
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.01,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 500.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 1000.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        let initial_conditions = InitialConditions {
+            past_inflows: vec![HydroPastInflows {
+                hydro_id,
+                values_m3s: vec![1000.0, 1000.0],
+                season_ids: None,
+            }],
+            ..InitialConditions::default()
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(vec![thermal])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .initial_conditions(initial_conditions)
+            .build()
+            .expect("par2_system_with_state_configs: valid")
+    }
+
+    /// Construct a [`StudySetup`] from `system` with a single-iteration config.
+    fn setup_from_system(system: &cobre_core::System) -> StudySetup {
+        let config = minimal_config(1, 10);
+        let stochastic = build_stochastic_context(
+            system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("stochastic context");
+        StudySetup::new(
+            system,
+            &config,
+            stochastic,
+            PrepareHydroModelsResult::default_from_system(system),
+        )
+        .expect("setup")
+    }
+
+    /// The `t + 1` governance rule: with `stages[1].state_config.inflow_lags =
+    /// false` and all other stages enabling lags, only `pools[0]` (governed by
+    /// stage 1) drops the lag dimensions; every other pool keeps the full global
+    /// `n_state`. With N=1 hydro, L=2, A=0: storage-only is `N = 1`,
+    /// `n_state = N*(1 + L) = 3`.
+    #[test]
+    fn cut_pool_sizing_t_plus_1_reduces_pool_zero_for_lagless_successor() {
+        let lags = StageStateConfig {
+            storage: true,
+            inflow_lags: true,
+        };
+        let storage_only = StageStateConfig {
+            storage: true,
+            inflow_lags: false,
+        };
+        // Stage 1 is lag-less; it governs pool 0 (its predecessor).
+        let system = par2_system_with_state_configs(&[lags, storage_only, lags, lags]);
+        let setup = setup_from_system(&system);
+
+        let global_n_state = setup.stage_data.state.n_state;
+        assert_eq!(global_n_state, 3, "N=1, L=2 → n_state = N*(1+L) = 3");
+        assert_eq!(setup.fcf.pools.len(), 4);
+
+        // pool 0 ← stages[1] (inflow_lags=false) → storage-only = N + A*k_max = 1.
+        assert_eq!(
+            setup.fcf.pools[0].state_dimension, 1,
+            "pool 0 is governed by stage 1's lag-less config (the t+1 rule)"
+        );
+        // pools 1, 2 ← stages[2], stages[3] (lags) → global n_state.
+        assert_eq!(setup.fcf.pools[1].state_dimension, global_n_state);
+        assert_eq!(setup.fcf.pools[2].state_dimension, global_n_state);
+        // Terminal pool 3 ← full global n_state (no successor stage).
+        assert_eq!(setup.fcf.pools[3].state_dimension, global_n_state);
+    }
+
+    /// Result-neutrality: when every stage enables all dimensions (the default
+    /// for every shipped case), every pool's `state_dimension` equals the global
+    /// `StateLayout::n_state`. This is the bit-identical-to-today guarantee.
+    #[test]
+    fn cut_pool_sizing_all_enabled_matches_global_n_state() {
+        let lags = StageStateConfig {
+            storage: true,
+            inflow_lags: true,
+        };
+        let system = par2_system_with_state_configs(&[lags, lags, lags, lags]);
+        let setup = setup_from_system(&system);
+
+        let global_n_state = setup.stage_data.state.n_state;
+        assert_eq!(global_n_state, 3);
+        assert_eq!(setup.fcf.pools.len(), 4);
+        for (t, pool) in setup.fcf.pools.iter().enumerate() {
+            assert_eq!(
+                pool.state_dimension, global_n_state,
+                "all-enabled pool {t} must equal the global n_state"
+            );
+        }
+        // The FCF's global field is unchanged from today's single-value model.
+        assert_eq!(setup.fcf.state_dimension, global_n_state);
+    }
+
+    /// One [`CutStateLayout`] is stored per pool and is reachable, with each
+    /// layout's `n_state()` equal to its pool's `state_dimension` (the pairing
+    /// the backward pass relies on to extract duals at the right dimension).
+    #[test]
+    fn cut_state_layouts_stored_one_per_pool_and_reachable() {
+        let lags = StageStateConfig {
+            storage: true,
+            inflow_lags: true,
+        };
+        let storage_only = StageStateConfig {
+            storage: true,
+            inflow_lags: false,
+        };
+        let system = par2_system_with_state_configs(&[lags, storage_only, lags, lags]);
+        let setup = setup_from_system(&system);
+
+        assert_eq!(
+            setup.stage_data.cut_state_layouts.len(),
+            setup.fcf.pools.len(),
+            "exactly one CutStateLayout per pool",
+        );
+        for (t, layout) in setup.stage_data.cut_state_layouts.iter().enumerate() {
+            assert_eq!(
+                layout.n_state(),
+                setup.fcf.pools[t].state_dimension,
+                "cut_state_layouts[{t}].n_state() must match pool {t} dimension",
+            );
+        }
+
+        // Pool `t` is sized by stage `t+1`'s config. The `storage_only` config sits
+        // at stage index 1, so it sizes pool 0: its cut dimension drops the AR lags
+        // to exactly the hydro (storage) count N, while pool 1 (sized by stage 2's
+        // lag-enabled config) carries storage + lags (N*(1+L) > N).
+        let n_hydros = setup.stage_data.state.hydro_count;
+        assert_eq!(
+            setup.fcf.pools[0].state_dimension, n_hydros,
+            "storage-only pool 0 must have cut dimension N (lags dropped)",
+        );
+        assert!(
+            setup.fcf.pools[1].state_dimension > n_hydros,
+            "lag-enabled pool 1 must carry storage + lags (dimension > N)",
         );
     }
 }

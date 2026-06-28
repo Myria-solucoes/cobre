@@ -139,6 +139,7 @@ impl StudySetup {
         TrainingContext {
             horizon: &self.methodology.horizon,
             state: &self.stage_data.state,
+            cut_state_layouts: &self.stage_data.cut_state_layouts,
             study_dims: &self.stage_data.study_dims,
             inflow_method: &self.methodology.inflow_method,
             stochastic: &self.stochastic,
@@ -204,6 +205,12 @@ impl StudySetup {
         TrainingContext {
             horizon: &self.methodology.horizon,
             state: &self.stage_data.state,
+            // Simulation does not EXTRACT cuts, but it RENDERS stored cuts into the
+            // baked templates and the DCS LP, so the per-pool projection threads
+            // through here too (all-enabled for every simulated study, since a
+            // policy loaded via FutureCostFunction::from_deserialized carries a
+            // uniform global cut dimension).
+            cut_state_layouts: &self.stage_data.cut_state_layouts,
             study_dims: &self.stage_data.study_dims,
             inflow_method: &self.methodology.inflow_method,
             stochastic: &self.stochastic,

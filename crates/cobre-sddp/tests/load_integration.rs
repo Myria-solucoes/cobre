@@ -473,6 +473,7 @@ fn test_stochastic_load_training_completes() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -606,6 +607,7 @@ fn test_deterministic_load_training_matches_baseline() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -722,6 +724,7 @@ fn test_stochastic_load_seed_determinism() {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
+                cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
                 study_dims: &study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
@@ -795,4 +798,22 @@ fn test_stochastic_load_seed_determinism() {
         result1.result.final_lb,
         result2.result.final_lb
     );
+}
+
+/// Local mirror of the gated `indexer::test_fixtures::all_enabled_cut_state_layouts`
+/// via the public `CutStateLayout::new`, so this external test crate (which cannot
+/// see the parent crate's `#[cfg(test)]` surface) builds the default all-enabled
+/// per-pool projection. Every pool projects the full global state, keeping the
+/// extracted subgradient bit-identical to the global-loop result.
+fn all_enabled_cut_state_layouts(
+    global: &StateLayout,
+    n_stages: usize,
+) -> Vec<cobre_sddp::indexer::CutStateLayout> {
+    let full = StageStateConfig {
+        storage: true,
+        inflow_lags: true,
+    };
+    (0..n_stages)
+        .map(|_| cobre_sddp::indexer::CutStateLayout::new(global, full))
+        .collect()
 }

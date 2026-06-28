@@ -14,6 +14,7 @@ use crate::lp_builder::{
     EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET, StageGeometry,
 };
 
+use super::cut_state_layout::CutStateLayout;
 use super::layout::EvaporationIndices;
 use super::state_layout::StateLayout;
 use super::study_dimensions::StudyDimensions;
@@ -344,6 +345,39 @@ pub fn state_layout_full(
         k_max,
         anticipated_lead_stages,
         &effective_lag_count,
+    )
+}
+
+/// Build the all-enabled per-pool [`CutStateLayout`] vector (one entry per stage)
+/// the default training paths use: every pool projects the full global state, so
+/// `cut_state_layouts[t].n_state() == global.n_state` for all `t`.
+///
+/// Tests that drive the backward pass need this slice on `TrainingContext`; the
+/// default (all-enabled) projection keeps the extracted subgradient bit-identical
+/// to the global-loop result.
+#[must_use]
+pub fn all_enabled_cut_state_layouts(global: &StateLayout, n_stages: usize) -> Vec<CutStateLayout> {
+    let full = cobre_core::temporal::StageStateConfig {
+        storage: true,
+        inflow_lags: true,
+    };
+    (0..n_stages)
+        .map(|_| CutStateLayout::new(global, full))
+        .collect()
+}
+
+/// Build a single all-enabled per-pool [`CutStateLayout`] projecting the full
+/// global state — the projection a cut-row builder test threads alongside a
+/// full-dimension [`StateLayout`] so the render reproduces the global nonzero
+/// mask.
+#[must_use]
+pub fn cut_state_layout(global: &StateLayout) -> CutStateLayout {
+    CutStateLayout::new(
+        global,
+        cobre_core::temporal::StageStateConfig {
+            storage: true,
+            inflow_lags: true,
+        },
     )
 }
 

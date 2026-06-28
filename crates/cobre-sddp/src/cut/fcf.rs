@@ -33,14 +33,21 @@
 use super::pool::CutPool;
 
 /// All-stages container for the Future Cost Function (FCF): one [`CutPool`] per
-/// stage, all sharing `state_dimension`. Per-cut logic is delegated to
-/// [`CutPool`].
+/// stage. Per-cut logic is delegated to [`CutPool`].
+///
+/// Each pool carries its own [`CutPool::state_dimension`]; a stage whose cuts
+/// span fewer state dimensions (a successor with `inflow_lags: false`) sizes a
+/// smaller pool. [`Self::state_dimension`] remains the global state-vector
+/// length used by the cross-cutting checkpoint and boundary paths, equal to
+/// every pool's dimension when all stages enable all dimensions (the default).
 #[derive(Debug, Clone)]
 pub struct FutureCostFunction {
     /// One cut pool per stage, indexed 0-based.
     pub pools: Vec<CutPool>,
 
-    /// State-vector length shared across all stages.
+    /// Global state-vector length (`StateLayout::n_state`). Each pool's own
+    /// `state_dimension` may be smaller; this is the cross-cutting value the
+    /// checkpoint metadata and boundary-cut injection key off.
     pub state_dimension: usize,
 
     /// Forward passes per training iteration. Immutable after construction.
@@ -77,12 +84,46 @@ impl FutureCostFunction {
         max_iterations: u64,
         warm_start_counts: &[u32],
     ) -> Self {
+        Self::new_per_stage(
+            &vec![state_dimension; num_stages],
+            state_dimension,
+            forward_passes,
+            max_iterations,
+            warm_start_counts,
+        )
+    }
+
+    /// Construct a `FutureCostFunction` sizing each stage's [`CutPool`] by its own
+    /// cut state dimension, for the per-stage `state_config` projection.
+    ///
+    /// `pool_state_dimensions[t]` is the dimension of pool `t` (the count from
+    /// `CutStateLayout(stages[t+1].state_config)` for non-terminal pools; the
+    /// global `n_state` for the terminal pool). `global_state_dimension` is
+    /// `StateLayout::n_state` — the value stored in [`Self::state_dimension`] and
+    /// used by the checkpoint/boundary paths, independent of any reduced pool.
+    ///
+    /// # Parameters
+    ///
+    /// - `warm_start_counts`: per-stage warm-start cut counts; length must equal
+    ///   `pool_state_dimensions.len()`. Pass `&vec![0; n]` for no warm-start.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if `warm_start_counts.len() != pool_state_dimensions.len()`.
+    #[must_use]
+    pub fn new_per_stage(
+        pool_state_dimensions: &[usize],
+        global_state_dimension: usize,
+        forward_passes: u32,
+        max_iterations: u64,
+        warm_start_counts: &[u32],
+    ) -> Self {
         debug_assert_eq!(
             warm_start_counts.len(),
-            num_stages,
-            "warm_start_counts.len() ({}) != num_stages ({})",
+            pool_state_dimensions.len(),
+            "warm_start_counts.len() ({}) != pool_state_dimensions.len() ({})",
             warm_start_counts.len(),
-            num_stages
+            pool_state_dimensions.len()
         );
 
         // u64 arithmetic guards the capacity product against overflow; the cast
@@ -90,16 +131,17 @@ impl FutureCostFunction {
         #[allow(clippy::cast_possible_truncation)]
         let pools = warm_start_counts
             .iter()
-            .map(|&wsc| {
+            .zip(pool_state_dimensions)
+            .map(|(&wsc, &pool_dim)| {
                 let capacity =
                     (u64::from(wsc) + max_iterations * u64::from(forward_passes)) as usize;
-                CutPool::new(capacity, state_dimension, forward_passes, wsc)
+                CutPool::new(capacity, pool_dim, forward_passes, wsc)
             })
             .collect();
 
         Self {
             pools,
-            state_dimension,
+            state_dimension: global_state_dimension,
             forward_passes,
         }
     }

@@ -864,6 +864,9 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
+                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                    &state, n_stages,
+                ),
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
@@ -971,6 +974,9 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
+                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                    &state, n_stages,
+                ),
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
@@ -1097,6 +1103,9 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
+                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                    &state, n_stages,
+                ),
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
@@ -1306,6 +1315,9 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
+                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                    &state, n_stages,
+                ),
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
@@ -1484,6 +1496,9 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
+                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                    &state, n_stages,
+                ),
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
@@ -1589,6 +1604,9 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
+                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                    &state, n_stages,
+                ),
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
@@ -1691,6 +1709,9 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
+                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                    &state, n_stages,
+                ),
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
@@ -1801,6 +1822,9 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
+                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                    &state, n_stages,
+                ),
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
@@ -1921,6 +1945,9 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
+                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                    &state, n_stages,
+                ),
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
@@ -2051,6 +2078,9 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
+                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                    &state, n_stages,
+                ),
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
@@ -2192,6 +2222,9 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
+                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                    &state, n_stages,
+                ),
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
@@ -2307,6 +2340,9 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
+                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                    &state, n_stages,
+                ),
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
@@ -2431,6 +2467,9 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
+                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                    &state, n_stages,
+                ),
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
@@ -2536,6 +2575,9 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
+                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                    &state, n_stages,
+                ),
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
@@ -3272,6 +3314,9 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
+                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                    &state, n_stages,
+                ),
                 study_dims: &crate::indexer::test_fixtures::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,

@@ -686,6 +686,10 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
     let training_ctx = inputs.training_ctx;
     let ctx = inputs.ctx;
     let cut_state = training_ctx.state;
+    // Pool `t`'s cut-state projection (sized from stage `t+1`'s state_config):
+    // the dimension this stage's extracted subgradient and per-stage backward
+    // buffers carry. Equals the global state for an all-enabled study.
+    let cut_state_layout = &training_ctx.cut_state_layouts[t];
     let num_stages = training_ctx.horizon.num_stages();
     let successor = t + 1;
 
@@ -725,11 +729,16 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
 
     let batch_start = Instant::now();
     let template_num_rows = ctx.templates[successor].num_rows;
+    // Rendering pool `successor`'s cuts into stage `successor`'s LP uses that
+    // pool's own projection — NOT `cut_state_layout` (pool `t`'s, sized for
+    // extraction at stage `successor`).
+    let successor_cut_layout = &training_ctx.cut_state_layouts[successor];
     build_delta_cut_row_batch_into(
         &mut inputs.cut_batches[successor],
         inputs.fcf,
         successor,
         cut_state,
+        successor_cut_layout,
         &ctx.templates[successor].col_scale,
         inputs.iteration,
     );
@@ -757,6 +766,7 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
         cut_activity_tolerance: inputs.cut_activity_tolerance,
         successor_populated_count: inputs.fcf.pools[successor].populated_count,
         successor_pool: &inputs.fcf.pools[successor],
+        cut_state: cut_state_layout,
     };
 
     let basis_slices = inputs
@@ -799,8 +809,8 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
         let range = cut.coefficients_range.clone();
         let arena = &inputs.workspaces[*w].backward_accum.agg_arena;
         debug_assert!(
-            range.len() == cut_state.n_state && range.end <= arena.len(),
-            "coefficients_range must span exactly n_state and lie within the worker arena"
+            range.len() == cut_state_layout.n_state() && range.end <= arena.len(),
+            "coefficients_range must span exactly the pool's cut n_state and lie within the worker arena"
         );
         inputs.fcf.add_cut(
             t,
@@ -877,7 +887,14 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
     basis_slices: Vec<BasisStoreSliceMut<'_>>,
 ) -> Vec<Result<(usize, Vec<StagedCut>), SddpError>> {
     let n_openings = succ.probabilities.len();
-    let n_state = training_ctx.state.n_state;
+    // Per-stage cut dimension (pool `t`'s `CutStateLayout`): the length the
+    // extracted subgradient, every per-opening outcome buffer, the aggregation
+    // buffer, and the arena stride must all carry for this stage. Buffers are
+    // reused across stages within a worker, so they are resized to EXACTLY this
+    // each stage (not grown to a per-worker max) — a reduced stage following a
+    // full one must shrink, or `write_opening_outcome`'s `copy_from_slice` reads
+    // stale full-length data. Equals the global `n_state` for an all-enabled study.
+    let cut_n_state = succ.cut_state.n_state();
     let pop = succ.successor_populated_count;
     let n_workers = workspaces.len().max(1);
 
@@ -902,16 +919,19 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
                     .outcomes
                     .push(crate::risk_measure::BackwardOutcome {
                         intercept: 0.0,
-                        coefficients: vec![0.0_f64; n_state],
+                        coefficients: vec![0.0_f64; cut_n_state],
                         objective_value: 0.0,
                     });
+            }
+            for outcome in &mut ws.backward_accum.outcomes[..n_openings] {
+                outcome.coefficients.resize(cut_n_state, 0.0_f64);
             }
             if ws.backward_accum.slot_increments.len() < pop {
                 ws.backward_accum.slot_increments.resize(pop, 0u64);
             }
-            if ws.backward_accum.agg_coefficients.len() < n_state {
-                ws.backward_accum.agg_coefficients.resize(n_state, 0.0_f64);
-            }
+            ws.backward_accum
+                .agg_coefficients
+                .resize(cut_n_state, 0.0_f64);
             if ws.backward_accum.metadata_sync_contribution.len() < pop {
                 ws.backward_accum
                     .metadata_sync_contribution
@@ -927,9 +947,11 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
 
             // Static partition, matching the basis_slice view.
             let (start_m, end_m) = partition(local_work, n_workers, w);
-            // Grow-only arena (one `n_state` slot per owned trial point); content is
-            // overwritten per trial point before read, so no zero-fill.
-            let arena_len = (end_m - start_m) * n_state;
+            // Grow-only arena (one `cut_n_state` slot per owned trial point);
+            // content is overwritten per trial point before read, so no zero-fill.
+            // Stride is `cut_n_state` — must match the `coefficients_range` length
+            // `process_trial_point_backward` writes.
+            let arena_len = (end_m - start_m) * cut_n_state;
             if ws.backward_accum.agg_arena.len() < arena_len {
                 ws.backward_accum.agg_arena.resize(arena_len, 0.0_f64);
             }
@@ -955,7 +977,7 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
                 ws.backward_accum.slot_increments[..pop].fill(0);
                 // Call before the push to avoid a simultaneous mutable borrow of
                 // `staged_cuts_buf` (push receiver) and `ws` (function argument).
-                let arena_offset = (m - start_m) * n_state;
+                let arena_offset = (m - start_m) * cut_n_state;
                 let cut = process_trial_point_backward(
                     ws,
                     ctx,
@@ -1515,6 +1537,9 @@ mod tests {
         let training_ctx = TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1650,6 +1675,9 @@ mod tests {
         let training_ctx = TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,

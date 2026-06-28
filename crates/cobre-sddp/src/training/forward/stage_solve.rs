@@ -241,6 +241,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             &ctx.templates[t],
             pool,
             state,
+            &training_ctx.cut_state_layouts[t],
             col_scale,
             None,
             &ws.backward_accum.dcs_initial_resident,

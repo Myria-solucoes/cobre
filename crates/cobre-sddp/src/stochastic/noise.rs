@@ -1037,6 +1037,7 @@ mod tests {
         let training_ctx = TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &[],
             study_dims: &study_dims,
             inflow_method: &inflow_method,
             stochastic: &stochastic,
@@ -1120,6 +1121,7 @@ mod tests {
         let training_ctx = TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &[],
             study_dims: &study_dims,
             inflow_method: &inflow_method,
             stochastic: &stochastic,
@@ -1203,6 +1205,7 @@ mod tests {
         let training_ctx = TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &[],
             study_dims: &study_dims,
             inflow_method: &inflow_method,
             stochastic: &stochastic,

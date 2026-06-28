@@ -4,7 +4,7 @@ use cobre_solver::RowBatch;
 
 use crate::cut::FutureCostFunction;
 use crate::cut::row::push_scaled_coefficient;
-use crate::indexer::StateLayout;
+use crate::indexer::{CutStateLayout, StateLayout};
 
 /// Fill a pre-allocated [`RowBatch`] with only the Benders cut rows generated
 /// in `current_iteration`, for appending to a baked template via `add_rows`.
@@ -13,7 +13,8 @@ use crate::indexer::StateLayout;
 /// excluded. The CSR layout and coefficient transformation mirror
 /// [`build_cut_row_batch_into`](crate::cut::row::build_cut_row_batch_into); when
 /// the pool holds only `current_iteration` cuts the two produce byte-identical
-/// output.
+/// output. `cut_state` is pool `stage`'s projection; `coefficients` has length
+/// `cut_state.n_state()`.
 ///
 /// # Panics
 ///
@@ -26,14 +27,14 @@ pub fn build_delta_cut_row_batch_into(
     fcf: &FutureCostFunction,
     stage: usize,
     state: &StateLayout,
+    cut_state: &CutStateLayout,
     col_scale: &[f64],
     current_iteration: u64,
 ) {
     batch.clear();
 
-    let n_state = state.n_state;
+    let n_cut_state = cut_state.n_state();
     let theta_col = state.theta;
-    let mask = &state.nonzero_state_indices;
 
     // Count first: cheap scan that early-returns on the common zero-delta case
     // before the heavier coefficient loop.
@@ -48,7 +49,7 @@ pub fn build_delta_cut_row_batch_into(
 
     // NNZ per cut = nonzero state entries + theta, matching the sparse-only
     // authority `cut::row::build_cut_row_batch_into`.
-    let nnz_per_cut = mask.len() + 1;
+    let nnz_per_cut = cut_state.render_len() + 1;
     let total_nnz = num_cuts * nnz_per_cut;
 
     let mut nz_offset = 0;
@@ -56,21 +57,20 @@ pub fn build_delta_cut_row_batch_into(
     for (_slot, intercept, coefficients) in fcf.pools[stage].active_delta_cuts(current_iteration) {
         debug_assert_eq!(
             coefficients.len(),
-            n_state,
-            "cut coefficients length {got} != n_state {expected}",
+            n_cut_state,
+            "cut coefficients length {got} != pool n_state {expected}",
             got = coefficients.len(),
-            expected = n_state,
+            expected = n_cut_state,
         );
 
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         batch.row_starts.push(nz_offset as i32);
 
-        // state_to_lp_column remaps outgoing-state indices to LP columns:
-        // identity for storage (j < N); for lag dimensions the outgoing state
-        // stores z_inflow at lag 0 and shifted incoming lags at lag 1+, so the
-        // cut references z_inflow and incoming lag l−1, not the outgoing slot.
-        for &j in mask {
-            let lp_col = state.state_to_lp_column(j);
+        // render_pairs maps each enabled non-padding reduced index to its outgoing
+        // LP column: identity for storage; for lag dimensions the outgoing state
+        // stores z_inflow at lag 0 and shifted incoming lags at lag 1+, so the cut
+        // references z_inflow and incoming lag l−1, not the outgoing slot.
+        for (j, lp_col) in cut_state.render_pairs() {
             push_scaled_coefficient(batch, lp_col, coefficients[j], col_scale);
         }
 

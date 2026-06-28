@@ -7,7 +7,7 @@ use cobre_stochastic::{ExternalScenarioLibrary, HistoricalScenarioLibrary, Stoch
 use crate::{
     dcs::DcsParams,
     horizon_mode::HorizonMode,
-    indexer::{StateLayout, StudyDimensions},
+    indexer::{CutStateLayout, StateLayout, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::StageGeometry,
     noise_key_diag::NoiseKeyDiag,
@@ -149,6 +149,13 @@ pub struct TrainingContext<'a> {
     /// `n_state`, the resolvers, and the mask. Every hot-path state-column read
     /// resolves through this handle.
     pub state: &'a StateLayout,
+    /// Per-pool cut-state projection, indexed by pool `t` (paired 1:1 with
+    /// `FutureCostFunction::pools`). The backward pass reads
+    /// `cut_state_layouts[t]` when solving stage `t+1` to size pool `t`'s
+    /// extracted subgradient and every per-stage backward buffer. Empty on the
+    /// non-training paths (simulation, lower-bound eval), which never extract
+    /// cuts.
+    pub cut_state_layouts: &'a [CutStateLayout],
     /// Single owner of the study-invariant, non-state LP shape (non-state entity
     /// counts, optional-column presence flags, anticipated-thermal identity
     /// list). Nested contexts reach it transitively as `training_ctx.study_dims`.

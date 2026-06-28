@@ -6,19 +6,20 @@
 
 use cobre_solver::SolutionView;
 
-use crate::indexer::StateLayout;
+use crate::indexer::CutStateLayout;
 
 use super::SuccessorSpec;
 
 /// Extract state and cut duals from the live solver view into pre-warmed scratch
 /// buffers, returning the LP objective. `state_duals` holds the unscaled
-/// incoming-state reduced costs (the module-level `col_scale`-division contract);
+/// incoming-state reduced costs of the stage's enabled cut-state dimensions (the
+/// module-level `col_scale`-division contract), iterated over `cut_state`; a
+/// disabled dimension's reduced cost is computed in the LP but not extracted.
 /// `cut_duals` holds the cut-row slice
 /// `[template_num_rows, template_num_rows + num_cuts)`.
 pub(crate) fn extract_duals_from_view(
     view: &SolutionView<'_>,
-    n_state: usize,
-    state: &StateLayout,
+    cut_state: &CutStateLayout,
     col_scale: &[f64],
     succ: &SuccessorSpec<'_>,
     state_duals: &mut Vec<f64>,
@@ -30,8 +31,8 @@ pub(crate) fn extract_duals_from_view(
     // multiplied (the pin sets v_scaled = v_orig / col_scale; see
     // fill_col_state_patches). Empty col_scale ⇒ raw rc.
     state_duals.clear();
-    for j in 0..n_state {
-        let col = state.state_to_lp_incoming_column(j);
+    for j in 0..cut_state.n_state() {
+        let col = cut_state.state_to_lp_incoming_column(j);
         let rc = view.reduced_costs[col];
         let unscaled = if col_scale.is_empty() {
             rc
@@ -42,8 +43,8 @@ pub(crate) fn extract_duals_from_view(
     }
     debug_assert_eq!(
         state_duals.len(),
-        n_state,
-        "state_duals must contain exactly n_state entries after fill"
+        cut_state.n_state(),
+        "state_duals must contain exactly cut_state.n_state() entries after fill"
     );
 
     cut_duals.clear();
@@ -57,23 +58,23 @@ pub(crate) fn extract_duals_from_view(
 }
 
 /// State-dual half of [`extract_duals_from_view`] for the lazy-solve path: fills
-/// `state_duals` with the unscaled incoming-state reduced costs.
+/// `state_duals` with the unscaled incoming-state reduced costs of the enabled
+/// cut-state dimensions, iterated over `cut_state`.
 ///
 /// Unlike [`extract_duals_from_view`] it does NOT read cut-row duals — under
 /// lazy-solve the resident cut rows are an insertion-order subset, so the
 /// cut-row→slot mapping does not apply.
 pub(crate) fn extract_state_duals_only(
     view: &SolutionView<'_>,
-    n_state: usize,
-    state: &StateLayout,
+    cut_state: &CutStateLayout,
     col_scale: &[f64],
     state_duals: &mut Vec<f64>,
 ) -> f64 {
     let objective = view.objective;
 
     state_duals.clear();
-    for j in 0..n_state {
-        let col = state.state_to_lp_incoming_column(j);
+    for j in 0..cut_state.n_state() {
+        let col = cut_state.state_to_lp_incoming_column(j);
         let rc = view.reduced_costs[col];
         let unscaled = if col_scale.is_empty() {
             rc
@@ -84,9 +85,93 @@ pub(crate) fn extract_state_duals_only(
     }
     debug_assert_eq!(
         state_duals.len(),
-        n_state,
-        "state_duals must contain exactly n_state entries after fill"
+        cut_state.n_state(),
+        "state_duals must contain exactly cut_state.n_state() entries after fill"
     );
 
     objective
+}
+
+#[cfg(test)]
+#[allow(clippy::float_cmp, clippy::cast_precision_loss)]
+mod tests {
+    use cobre_solver::SolutionView;
+
+    use super::extract_state_duals_only;
+    use crate::indexer::{CutStateLayout, StateLayout};
+    use cobre_core::temporal::StageStateConfig;
+
+    const ALL_ENABLED: StageStateConfig = StageStateConfig {
+        storage: true,
+        inflow_lags: true,
+    };
+    const STORAGE_ONLY: StageStateConfig = StageStateConfig {
+        storage: true,
+        inflow_lags: false,
+    };
+
+    fn state_layout(hydro_count: usize, max_par_order: usize) -> StateLayout {
+        let lag_counts = vec![max_par_order; hydro_count];
+        StateLayout::new(hydro_count, max_par_order, 0, 0, vec![], &lag_counts)
+    }
+
+    /// Build a `SolutionView` whose `reduced_costs[col]` equals `col as f64`, so
+    /// an extracted subgradient at LP column `col` is exactly `col as f64`
+    /// (`col_scale` empty ⇒ raw rc).
+    fn indexed_view(n_cols: usize, reduced_costs: &[f64]) -> SolutionView<'_> {
+        SolutionView {
+            objective: 0.0,
+            primal: &[],
+            dual: &[],
+            reduced_costs: &reduced_costs[..n_cols],
+            iterations: 0,
+            solve_time_seconds: 0.0,
+        }
+    }
+
+    /// Storage-only `CutStateLayout` (`N=3, L=2`): extraction yields an `N`-length
+    /// subgradient reading exactly the storage columns `[0, N)`, no lag entries.
+    #[test]
+    fn storage_only_yields_n_length_subgradient_with_storage_columns() {
+        let global = state_layout(3, 2);
+        let cut_state = CutStateLayout::new(&global, STORAGE_ONLY);
+        assert_eq!(cut_state.n_state(), 3);
+
+        let rc: Vec<f64> = (0..=global.theta).map(|c| c as f64).collect();
+        let view = indexed_view(rc.len(), &rc);
+        let mut state_duals = Vec::new();
+
+        let _ = extract_state_duals_only(&view, &cut_state, &[], &mut state_duals);
+
+        assert_eq!(state_duals.len(), 3);
+        for (j, &dual) in state_duals.iter().enumerate() {
+            assert_eq!(
+                dual,
+                global.state_to_lp_incoming_column(j) as f64,
+                "storage slot {j} reads its storage_in column reduced cost"
+            );
+        }
+    }
+
+    /// All-enabled `CutStateLayout` reproduces the pre-change global-loop result:
+    /// `n_state()` equals the global `n_state` and every slot reads the same LP
+    /// column the global `StateLayout` resolver would.
+    #[test]
+    fn all_enabled_reproduces_global_loop_result() {
+        let global = state_layout(3, 2);
+        let cut_state = CutStateLayout::new(&global, ALL_ENABLED);
+        assert_eq!(cut_state.n_state(), global.n_state);
+
+        let rc: Vec<f64> = (0..=global.theta).map(|c| c as f64).collect();
+        let view = indexed_view(rc.len(), &rc);
+
+        let mut via_cut_state = Vec::new();
+        let _ = extract_state_duals_only(&view, &cut_state, &[], &mut via_cut_state);
+
+        let global_loop: Vec<f64> = (0..global.n_state)
+            .map(|j| rc[global.state_to_lp_incoming_column(j)])
+            .collect();
+
+        assert_eq!(via_cut_state, global_loop);
+    }
 }

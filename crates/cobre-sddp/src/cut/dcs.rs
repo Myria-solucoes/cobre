@@ -22,7 +22,7 @@ use crate::cut::{CutPool, CutRowMap};
 use crate::cut_selection::CutSelectionStrategy;
 use crate::error::SddpError;
 use crate::gemm::gemm_block;
-use crate::indexer::StateLayout;
+use crate::indexer::{CutStateLayout, StateLayout};
 use crate::workspace::CapturedBasis;
 
 /// Dynamic Cut Selection hyperparameters.
@@ -179,9 +179,10 @@ impl DcsScoringScratch {
 /// when `v = alpha − theta_raw > epsilon_viol` (strict). Both `θ*` and every
 /// state column are unscaled by `col_scale` before scoring
 /// (`x_raw = col_scale[c] · x_scaled`, empty ⇒ factor 1.0) — **mixing scaled
-/// state with raw coefficients is the classic silent bug.** State index → LP
-/// column mapping uses [`StateLayout::state_to_lp_column`], identical to the
-/// cut-row builder, so scoring and row construction reference the same columns.
+/// state with raw coefficients is the classic silent bug.** Reduced index → LP
+/// column mapping uses the per-pool
+/// [`CutStateLayout::state_to_lp_outgoing_column`], so scoring spans the same
+/// enabled cut-state dimensions the cut-row builder renders.
 ///
 /// # Batched scoring
 ///
@@ -215,9 +216,15 @@ impl DcsScoringScratch {
 /// # Allocation
 ///
 /// Allocation-free beyond growth of the pre-reserved `scratch` vectors.
+// Rationale: each argument is a distinct input (pool, the global `state` for theta,
+// the per-pool `cut_state` projection, primal, col_scale, resident map, params,
+// iteration) or scratch buffer; there is no natural grouping that reduces caller
+// borrows without cloning, which conflicts with the zero-allocation hot path.
+#[allow(clippy::too_many_arguments)]
 pub fn score_violated_candidates(
     pool: &CutPool,
     state: &StateLayout,
+    cut_state: &CutStateLayout,
     primal: &[f64],
     col_scale: &[f64],
     resident: &CutRowMap,
@@ -226,7 +233,7 @@ pub fn score_violated_candidates(
     scratch: &mut DcsScoringScratch,
     out_selected: &mut Vec<u32>,
 ) -> usize {
-    let n_state = state.n_state;
+    let n_state = cut_state.n_state();
     let theta = state.theta;
 
     // `> theta` rather than `>= theta + 1` to satisfy clippy::int_plus_one.
@@ -237,11 +244,11 @@ pub fn score_violated_candidates(
     );
     debug_assert_eq!(
         pool.state_dimension, n_state,
-        "score_violated_candidates: pool.state_dimension {} != state.n_state {}",
+        "score_violated_candidates: pool.state_dimension {} != cut_state.n_state() {}",
         pool.state_dimension, n_state,
     );
     // col_scale is per-column (sized like primal), so this one check covers both
-    // col_scale[theta] and every col_scale[state_to_lp_column(j)] read below.
+    // col_scale[theta] and every col_scale[state_to_lp_outgoing_column(j)] read below.
     debug_assert!(
         col_scale.is_empty() || col_scale.len() == primal.len(),
         "score_violated_candidates: col_scale.len() {} != primal.len() {} (non-empty col_scale \
@@ -264,7 +271,7 @@ pub fn score_violated_candidates(
 
     scratch.unscaled_state.clear();
     for j in 0..n_state {
-        let c = state.state_to_lp_column(j);
+        let c = cut_state.state_to_lp_outgoing_column(j);
         let x_raw = if col_scale.is_empty() {
             primal[c]
         } else {
@@ -567,6 +574,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
     core: &StageTemplate,
     pool: &CutPool,
     state: &StateLayout,
+    cut_state: &CutStateLayout,
     col_scale: &[f64],
     stored_basis: Option<&CapturedBasis>,
     initial_resident: &[u32],
@@ -591,6 +599,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
             pool,
             initial_resident,
             state,
+            cut_state,
             col_scale,
             &mut scratch.row_map,
             &mut scratch.batch,
@@ -621,6 +630,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
         let violated = score_violated_candidates(
             pool,
             state,
+            cut_state,
             view.primal,
             col_scale,
             &scratch.row_map,
@@ -646,6 +656,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
             pool,
             &scratch.out_selected,
             state,
+            cut_state,
             col_scale,
             &mut scratch.row_map,
             &mut scratch.batch,
@@ -661,6 +672,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
     let remaining = score_violated_candidates(
         pool,
         state,
+        cut_state,
         view.primal,
         col_scale,
         &scratch.row_map,
@@ -677,6 +689,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
             pool,
             &scratch.out_selected,
             state,
+            cut_state,
             col_scale,
             &mut scratch.row_map,
             &mut scratch.batch,
@@ -748,7 +761,19 @@ mod tests {
     };
     use crate::cut::{CutPool, CutRowMap};
     use crate::cut_selection::{CutMetadata, CutSelectionStrategy};
-    use crate::indexer::StateLayout;
+    use crate::indexer::{CutStateLayout, StateLayout};
+
+    /// All-enabled per-pool projection of `idx`: every scoring/append test uses a
+    /// full-dimension pool, so this reproduces the global outgoing render.
+    fn cut_state(idx: &StateLayout) -> CutStateLayout {
+        CutStateLayout::new(
+            idx,
+            cobre_core::temporal::StageStateConfig {
+                storage: true,
+                inflow_lags: true,
+            },
+        )
+    }
 
     #[test]
     fn default_matches_spec() {
@@ -909,6 +934,7 @@ mod tests {
         let count = score_violated_candidates(
             &pool,
             &idx,
+            &cut_state(&idx),
             &primal,
             &[],
             &resident,
@@ -943,6 +969,7 @@ mod tests {
         let count = score_violated_candidates(
             &pool,
             &idx,
+            &cut_state(&idx),
             &primal,
             &[],
             &resident,
@@ -973,6 +1000,7 @@ mod tests {
         let count = score_violated_candidates(
             &pool,
             &idx,
+            &cut_state(&idx),
             &primal,
             &[],
             &resident,
@@ -1015,6 +1043,7 @@ mod tests {
         let count = score_violated_candidates(
             &pool,
             &idx,
+            &cut_state(&idx),
             &primal,
             &col_scale,
             &resident,
@@ -1048,6 +1077,7 @@ mod tests {
         let count = score_violated_candidates(
             &pool,
             &idx,
+            &cut_state(&idx),
             &primal,
             &[],
             &resident,
@@ -1081,6 +1111,7 @@ mod tests {
         let count_finite = score_violated_candidates(
             &pool,
             &idx,
+            &cut_state(&idx),
             &primal,
             &[],
             &resident,
@@ -1097,6 +1128,7 @@ mod tests {
         let count_inf = score_violated_candidates(
             &pool,
             &idx,
+            &cut_state(&idx),
             &primal,
             &[],
             &resident,
@@ -1125,6 +1157,7 @@ mod tests {
         let count = score_violated_candidates(
             &pool,
             &idx,
+            &cut_state(&idx),
             &primal,
             &[],
             &resident,
@@ -1154,6 +1187,7 @@ mod tests {
         let count = score_violated_candidates(
             &pool,
             &idx,
+            &cut_state(&idx),
             &primal,
             &[],
             &resident,
@@ -1183,6 +1217,7 @@ mod tests {
         let count = score_violated_candidates(
             &pool,
             &idx,
+            &cut_state(&idx),
             &primal,
             &[],
             &resident,
@@ -1353,6 +1388,7 @@ mod tests {
         let count = score_violated_candidates(
             &pool,
             &idx,
+            &cut_state(&idx),
             &primal,
             &col_scale,
             &resident,
@@ -1421,6 +1457,7 @@ mod tests {
         let _ = score_violated_candidates(
             &pool,
             &idx,
+            &cut_state(&idx),
             &primal,
             &[],
             &resident,
@@ -1470,6 +1507,7 @@ mod tests {
         let _ = score_violated_candidates(
             &pool,
             &idx,
+            &cut_state(&idx),
             &primal,
             &[],
             &resident,
@@ -1503,6 +1541,7 @@ mod tests {
         let count = score_violated_candidates(
             &pool,
             &idx,
+            &cut_state(&idx),
             &primal,
             &[],
             &resident,
@@ -1538,6 +1577,7 @@ mod tests {
         let count = score_violated_candidates(
             &pool,
             &idx,
+            &cut_state(&idx),
             &primal,
             &[],
             &resident,
@@ -1586,6 +1626,7 @@ mod tests {
             let _ = score_violated_candidates(
                 &pool,
                 &idx,
+                &cut_state(&idx),
                 &primal,
                 &[],
                 &resident,
@@ -1715,11 +1756,13 @@ mod tests {
             row_upper: Vec::new(),
         };
         let all_slots: Vec<u32> = (0..pool.populated_count as u32).collect();
+        let cs = cut_state(state);
         crate::cut::row::append_slots_to_lp(
             &mut solver,
             pool,
             &all_slots,
             state,
+            &cs,
             &[],
             &mut row_map,
             &mut batch,
@@ -1752,6 +1795,7 @@ mod tests {
             &core,
             &pool,
             &indexer,
+            &cut_state(&indexer),
             &[],
             None,
             &[0, 1], // omit binding slot 2
@@ -1801,6 +1845,7 @@ mod tests {
             &core,
             &pool,
             &indexer,
+            &cut_state(&indexer),
             &[],
             None,
             &[0, 1, 2],
@@ -1845,6 +1890,7 @@ mod tests {
             &core,
             &pool,
             &indexer,
+            &cut_state(&indexer),
             &[],
             None,
             &[0, 1], // omit binding slot 2
@@ -1898,6 +1944,7 @@ mod tests {
             &core,
             &pool,
             &indexer,
+            &cut_state(&indexer),
             &[],
             None,
             &[0, 1],
@@ -1929,6 +1976,7 @@ mod tests {
             &core,
             &pool,
             &indexer,
+            &cut_state(&indexer),
             &[],
             None,
             &[], // ignored in continue mode
@@ -1958,6 +2006,7 @@ mod tests {
             &core,
             &pool,
             &indexer,
+            &cut_state(&indexer),
             &[],
             None,
             &[], // ignored in continue mode
@@ -2011,6 +2060,7 @@ mod tests {
             &core,
             &pool,
             &indexer,
+            &cut_state(&indexer),
             &[],
             None,
             &[0, 1], // omit binding slot 2 → inner loop runs
@@ -2053,6 +2103,7 @@ mod tests {
                 &core,
                 &pool,
                 &indexer,
+                &cut_state(&indexer),
                 &[],
                 None,
                 &[0, 1, 2], // all three cuts resident from the seed → no growth
@@ -2093,6 +2144,7 @@ mod tests {
             &core,
             &pool,
             &indexer,
+            &cut_state(&indexer),
             &[],
             None,
             &[0, 1, 2], // binding cut already resident → single scoring pass, no growth
@@ -2145,6 +2197,7 @@ mod tests {
             &core,
             &pool,
             &indexer,
+            &cut_state(&indexer),
             &[],
             None,
             &[], // omit ALL cuts to force ≥2 inner iterations without the cap
@@ -2182,6 +2235,7 @@ mod tests {
                 &core,
                 &pool,
                 &indexer,
+                &cut_state(&indexer),
                 &[],
                 None,
                 &[0],
@@ -2224,6 +2278,7 @@ mod tests {
                 &core,
                 &pool,
                 &indexer,
+                &cut_state(&indexer),
                 &[],
                 None,
                 &[0, 1], // omit binding slot 2 → at least one add, fills res_* twice
@@ -2375,6 +2430,7 @@ mod tests {
             &core,
             &pool,
             &indexer,
+            &cut_state(&indexer),
             &[],
             None,
             &[], // omit cut 0 so the loop must add it mid-loop
