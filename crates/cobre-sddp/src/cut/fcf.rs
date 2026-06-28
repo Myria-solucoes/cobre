@@ -635,6 +635,7 @@ mod tests {
             warm_start_count: 0,
             populated_count,
             cuts,
+            entity_manifest: Vec::new(),
         }
     }
 

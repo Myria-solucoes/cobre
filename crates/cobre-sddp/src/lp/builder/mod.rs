@@ -139,10 +139,6 @@ pub(crate) fn filling_phase(
 /// callable outside the LP builder (the policy writer reads it to populate the
 /// `was_active` cut-manifest flag). A dormant/`PreFilling`/`Filling` hydro returns
 /// `false`. Total function, no panic.
-// Seam: the policy-writer call site (cut-manifest `was_active`) is not yet wired;
-// this is the single owner of the active predicate so that site does not duplicate
-// the phase logic when it lands.
-#[allow(dead_code)]
 #[inline]
 #[must_use]
 pub(crate) fn hydro_operating_active(

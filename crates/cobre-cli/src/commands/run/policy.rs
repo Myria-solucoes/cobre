@@ -149,9 +149,23 @@ pub(super) fn apply_training_policy(
         // dimensions and far below `u32::MAX`.
         #[allow(clippy::cast_possible_truncation)]
         let state_dim = setup.fcf.state_dimension as u32;
-        let boundary_records =
-            cobre_sddp::load_boundary_cuts(&boundary_path, bp.source_stage, state_dim)
-                .map_err(CliError::from)?;
+        let current_manifest = setup.build_terminal_entity_manifest(system);
+        let stderr = &ctx.stderr;
+        let quiet = ctx.quiet;
+        let is_root = ctx.is_root;
+        let mut on_warning = |msg: &str| {
+            if is_root && !quiet {
+                let _ = stderr.write_line(&format!("warning: {msg}"));
+            }
+        };
+        let boundary_records = cobre_sddp::load_boundary_cuts(
+            &boundary_path,
+            bp.source_stage,
+            state_dim,
+            &current_manifest,
+            &mut on_warning,
+        )
+        .map_err(CliError::from)?;
         cobre_sddp::inject_boundary_cuts(setup, &boundary_records);
         if ctx.is_root && !ctx.quiet {
             let _ = ctx.stderr.write_line(&format!(

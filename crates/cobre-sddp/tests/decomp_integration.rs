@@ -81,6 +81,20 @@ fn write_test_checkpoint(
     result: &cobre_sddp::TrainingResult,
     seed: u64,
 ) {
+    let stage_manifests: Vec<Vec<cobre_io::EntitySlot>> = vec![Vec::new(); setup.fcf.pools.len()];
+    write_test_checkpoint_with_manifests(policy_dir, setup, result, seed, &stage_manifests);
+}
+
+/// Like [`write_test_checkpoint`] but attaches `stage_manifests` (one per pool) to
+/// the per-stage cut payloads, so a test can write a checkpoint whose entity
+/// identity deliberately diverges from the current study's.
+fn write_test_checkpoint_with_manifests(
+    policy_dir: &Path,
+    setup: &StudySetup,
+    result: &cobre_sddp::TrainingResult,
+    seed: u64,
+    stage_manifests: &[Vec<cobre_io::EntitySlot>],
+) {
     use cobre_sddp::policy_export::{
         build_active_indices, build_stage_basis_records, build_stage_cut_records,
         build_stage_cuts_payloads, convert_basis_cache,
@@ -88,7 +102,8 @@ fn write_test_checkpoint(
     let fcf = &setup.fcf;
     let stage_records = build_stage_cut_records(fcf);
     let stage_active_indices = build_active_indices(&stage_records);
-    let stage_cuts = build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices);
+    let stage_cuts =
+        build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices, stage_manifests);
     let (basis_col, basis_row) = convert_basis_cache(result);
     let stage_bases = build_stage_basis_records(fcf, result, &basis_col, &basis_row);
     let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
@@ -114,7 +129,7 @@ fn write_test_checkpoint(
 /// Build a `StudySetup` for the D28 case, calling `config.training_scenario_source()`
 /// so the External inflow library is loaded; `ScenarioSource::default()` (`InSample`)
 /// would skip the external parquet and produce a wrong scenario pipeline.
-fn build_setup(case_dir: &Path, config: &cobre_io::Config) -> StudySetup {
+fn build_setup(case_dir: &Path, config: &cobre_io::Config) -> (StudySetup, cobre_core::System) {
     let system = cobre_io::load_case(case_dir).expect("load_case");
     let config_path = case_dir.join("config.json");
     let source = config
@@ -124,7 +139,9 @@ fn build_setup(case_dir: &Path, config: &cobre_io::Config) -> StudySetup {
         prepare_stochastic(system, case_dir, config, 42, &source).expect("prepare_stochastic");
     let hydro_models =
         prepare_hydro_models(&prep.system, case_dir, false).expect("prepare_hydro_models");
-    StudySetup::new(&prep.system, config, prep.stochastic, hydro_models).expect("StudySetup::new")
+    let setup = StudySetup::new(&prep.system, config, prep.stochastic, hydro_models)
+        .expect("StudySetup::new");
+    (setup, prep.system)
 }
 
 /// Verify structural properties, training correctness, lag accumulation, and
@@ -177,7 +194,7 @@ fn structural_properties_and_training() {
         "monthly season map must have 12 seasons"
     );
 
-    let mut setup = build_setup(&case_dir, &config);
+    let (mut setup, _system) = build_setup(&case_dir, &config);
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("solver");
 
@@ -276,7 +293,7 @@ fn decomp_boundary_cuts_compose_with_weekly_monthly() {
 
     let comm = StubComm;
 
-    let mut setup_a = build_setup(&case_dir, &config);
+    let (mut setup_a, _system_a) = build_setup(&case_dir, &config);
     let mut solver_a = ActiveSolver::new().expect("solver A");
     let outcome_a = setup_a
         .train(&mut solver_a, &comm, 1, ActiveSolver::new, None, None)
@@ -290,7 +307,7 @@ fn decomp_boundary_cuts_compose_with_weekly_monthly() {
     let num_stages = setup_a.fcf.pools.len();
     let source_stage = (num_stages - 2) as u32; // second-to-last stage has backward-pass cuts
 
-    let mut setup_b = build_setup(&case_dir, &config);
+    let (mut setup_b, _system_b) = build_setup(&case_dir, &config);
     let mut solver_b = ActiveSolver::new().expect("solver B");
     let outcome_b = setup_b
         .train(&mut solver_b, &comm, 1, ActiveSolver::new, None, None)
@@ -301,11 +318,18 @@ fn decomp_boundary_cuts_compose_with_weekly_monthly() {
     );
     let lb_no_boundary = outcome_b.result.final_lb;
 
-    let mut setup_c = build_setup(&case_dir, &config);
+    let (mut setup_c, system_c) = build_setup(&case_dir, &config);
     let state_dim = setup_c.fcf.state_dimension as u32;
-    let boundary_records =
-        cobre_sddp::load_boundary_cuts(&source_policy_dir, source_stage, state_dim)
-            .expect("load_boundary_cuts");
+    let current_manifest = setup_c.build_terminal_entity_manifest(&system_c);
+    let mut warnings: Vec<String> = Vec::new();
+    let boundary_records = cobre_sddp::load_boundary_cuts(
+        &source_policy_dir,
+        source_stage,
+        state_dim,
+        &current_manifest,
+        &mut |msg| warnings.push(msg.to_string()),
+    )
+    .expect("load_boundary_cuts");
     assert!(
         !boundary_records.is_empty(),
         "source stage must have cuts after training"
@@ -337,5 +361,75 @@ fn decomp_boundary_cuts_compose_with_weekly_monthly() {
     assert!(
         lb_with_boundary >= lb_no_boundary - 1e-6,
         "boundary LB ({lb_with_boundary}) must be >= baseline LB ({lb_no_boundary})"
+    );
+}
+
+/// A boundary checkpoint whose source-stage manifest carries a permuted hydro
+/// `entity_id` at slot 0 must be rejected by `load_boundary_cuts` against the
+/// current study's terminal manifest, naming the offending slot — the fail-loud
+/// catch of the silent wrong-bound mis-load the integer-only check misses.
+#[test]
+fn decomp_boundary_cuts_reject_permuted_entity_identity() {
+    let case_dir = d28_case_dir();
+    let config_path = case_dir.join("config.json");
+    let config = cobre_io::parse_config(&config_path).expect("config");
+
+    let comm = StubComm;
+
+    let (mut setup_a, system_a) = build_setup(&case_dir, &config);
+    let mut solver_a = ActiveSolver::new().expect("solver A");
+    let outcome_a = setup_a
+        .train(&mut solver_a, &comm, 1, ActiveSolver::new, None, None)
+        .expect("train A");
+    assert!(outcome_a.error.is_none(), "source training must not error");
+
+    // D28 has one hydro, so the terminal manifest carries at least one storage
+    // slot to permute.
+    let current_manifest = setup_a.build_terminal_entity_manifest(&system_a);
+    assert!(
+        !current_manifest.is_empty(),
+        "D28 must have at least one state slot for this test"
+    );
+
+    // Write the source checkpoint with a manifest whose slot 0 entity_id is
+    // shifted away from the current study's, on every stage (the uniform cut
+    // dimension makes per-stage manifests identical).
+    let mut permuted = current_manifest.clone();
+    permuted[0].entity_id += 1000;
+    let n_pools = setup_a.fcf.pools.len();
+    let stage_manifests: Vec<Vec<cobre_io::EntitySlot>> = vec![permuted; n_pools];
+
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let source_policy_dir = tmpdir.path().join("source_policy");
+    write_test_checkpoint_with_manifests(
+        &source_policy_dir,
+        &setup_a,
+        &outcome_a.result,
+        42,
+        &stage_manifests,
+    );
+
+    let source_stage = (n_pools - 2) as u32;
+    let state_dim = setup_a.fcf.state_dimension as u32;
+    let result = cobre_sddp::load_boundary_cuts(
+        &source_policy_dir,
+        source_stage,
+        state_dim,
+        &current_manifest,
+        &mut |_| {},
+    );
+
+    assert!(
+        result.is_err(),
+        "a permuted slot-0 identity must be rejected, not silently loaded"
+    );
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("slot 0"),
+        "rejection must name the offending slot 0: {msg}"
+    );
+    assert!(
+        msg.contains("entity-identity mismatch"),
+        "rejection must describe the identity mismatch: {msg}"
     );
 }

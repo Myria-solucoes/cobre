@@ -9,8 +9,12 @@ use std::process::Command;
 
 use arrow::array::{Array, BooleanArray, Float64Array, Int32Array};
 use assert_cmd::prelude::*;
+use cobre_io::{EntitySlot, deserialize_stage_cuts};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tempfile::TempDir;
+
+/// Raw `EntityType::AnticipatedThermalState` discriminant from `schemas/policy.fbs`.
+const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
 
 fn cobre() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("cobre"))
@@ -226,7 +230,7 @@ fn read_thermals_parquet(path: &Path) -> ThermalRows {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
+fn cli_run_k2_populates_anticipated_columns_and_manifest() {
     let regular_id: i32 = 1;
     let anticipated_id: i32 = 2;
     assert!(regular_id < anticipated_id);
@@ -432,75 +436,62 @@ fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
         );
     }
 
-    let state_dict_path = output.join("training/dictionaries/state_dictionary.json");
+    // The per-slot state identity now lives in the embedded entity manifest of
+    // each policy cut file, not a separate dictionary sidecar. Read stage 0's
+    // manifest and assert it carries the two anticipated ring slots for plant 2.
+    let cuts_path = output.join("policy/cuts/stage_000.bin");
     assert!(
-        state_dict_path.exists(),
-        "training/dictionaries/state_dictionary.json must exist at {}",
-        state_dict_path.display()
+        cuts_path.exists(),
+        "policy/cuts/stage_000.bin must exist at {}",
+        cuts_path.display()
     );
 
-    let state_dict_str = fs::read_to_string(&state_dict_path).unwrap_or_else(|e| {
-        panic!(
-            "failed to read state_dictionary.json at {}: {e}",
-            state_dict_path.display()
-        )
-    });
+    let cuts_bytes = fs::read(&cuts_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", cuts_path.display()));
+    let stage_cuts = deserialize_stage_cuts(&cuts_bytes)
+        .unwrap_or_else(|e| panic!("failed to decode {}: {e:?}", cuts_path.display()));
 
-    let state_dict: serde_json::Value = serde_json::from_str(&state_dict_str).unwrap_or_else(|e| {
-        panic!(
-            "failed to parse state_dictionary.json at {}: {e}",
-            state_dict_path.display()
-        )
-    });
-
-    let state_vars = state_dict
-        .get("state_variables")
-        .and_then(serde_json::Value::as_array)
-        .expect("state_dictionary.json must have a top-level \"state_variables\" array");
-
-    let anticipated_entries: Vec<&serde_json::Value> = state_vars
+    // No hydros in this case, so every manifest slot is an anticipated ring slot.
+    let anticipated_slots: Vec<&EntitySlot> = stage_cuts
+        .entity_manifest
         .iter()
-        .filter(|entry| entry["type"].as_str() == Some("anticipated_state"))
+        .filter(|slot| slot.entity_type == ENTITY_TYPE_ANTICIPATED_THERMAL_STATE)
         .collect();
 
     assert_eq!(
-        anticipated_entries.len(),
+        anticipated_slots.len(),
         2,
-        "state_dictionary.json must contain exactly 2 \"anticipated_state\" entries \
+        "stage 0 manifest must contain exactly 2 anticipated ring slots \
          (K_max=2, n_anticipated=1), found {}",
-        anticipated_entries.len()
+        anticipated_slots.len()
     );
 
-    for entry in &anticipated_entries {
+    for slot in &anticipated_slots {
         assert_eq!(
-            entry["entity_id"].as_i64(),
-            Some(i64::from(anticipated_id)),
-            "each anticipated_state entry must reference entity_id={anticipated_id}, \
-             got {:?}",
-            entry["entity_id"]
+            slot.entity_id, anticipated_id,
+            "each anticipated slot must reference entity_id={anticipated_id}, got {}",
+            slot.entity_id
         );
     }
 
-    let slot_indices: std::collections::HashSet<u64> = anticipated_entries
-        .iter()
-        .filter_map(|entry| entry["slot_index"].as_u64())
-        .collect();
+    let ring_subindices: std::collections::HashSet<u32> =
+        anticipated_slots.iter().map(|slot| slot.subindex).collect();
     assert_eq!(
-        slot_indices,
-        [0u64, 1u64]
+        ring_subindices,
+        [0u32, 1u32]
             .into_iter()
-            .collect::<std::collections::HashSet<u64>>(),
-        "anticipated_state entries must cover slot_index values {{0, 1}}, found {slot_indices:?}"
+            .collect::<std::collections::HashSet<u32>>(),
+        "anticipated slots must cover ring subindex values {{0, 1}}, found {ring_subindices:?}"
     );
 
-    // Consumers use lead_stages to split active slots (slot_index < lead_stages)
-    // from padding (slot_index >= lead_stages); here lead_stages=2=k_max, all active.
-    for entry in &anticipated_entries {
-        assert_eq!(
-            entry["lead_stages"].as_u64(),
-            Some(2),
-            "each anticipated_state entry must carry lead_stages=2, got {:?}",
-            entry["lead_stages"]
+    // `was_active` encodes the active/dormant distinction the sidecar's
+    // `lead_stages` split previously served: plant 2 has no commissioning
+    // window and K_i = K_max = 2, so both ring slots are active at stage 0.
+    for slot in &anticipated_slots {
+        assert!(
+            slot.was_active,
+            "anticipated slot (subindex {}) must be active at stage 0",
+            slot.subindex
         );
     }
 }

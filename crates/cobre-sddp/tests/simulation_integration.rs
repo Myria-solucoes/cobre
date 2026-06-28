@@ -728,6 +728,7 @@ fn train_simulate_write_cycle() {
             cuts: &cut_records_per_stage[stage_idx],
             active_cut_indices: &active_indices_per_stage[stage_idx],
             populated_count: pool.populated_count as u32,
+            entity_manifest: &[],
         })
         .collect();
 

@@ -123,7 +123,9 @@ fn simulation_only_fcf_round_trip() {
     let fcf = &setup.fcf;
     let stage_records = build_stage_cut_records(fcf);
     let stage_active_indices = build_active_indices(&stage_records);
-    let stage_cuts = build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices);
+    let stage_manifests: Vec<Vec<cobre_io::EntitySlot>> = vec![Vec::new(); fcf.pools.len()];
+    let stage_cuts =
+        build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices, &stage_manifests);
 
     let (basis_col_u8, basis_row_u8) = convert_basis_cache(&training_result);
     let stage_bases =

@@ -17,16 +17,18 @@ use cobre_io::output::{
 use cobre_io::scenarios::LoadSeasonalStatsRow;
 use cobre_stochastic::StochasticContext;
 
+use crate::TrainingResult;
 use crate::estimation::EstimationReport;
 use crate::policy_export::{
     build_active_indices, build_stage_basis_records, build_stage_cut_records,
-    build_stage_cuts_payloads, build_stage_states_payloads, convert_basis_cache,
+    build_stage_cuts_payloads, build_stage_entity_manifest, build_stage_states_payloads,
+    convert_basis_cache,
 };
+use crate::setup::StudySetup;
 use crate::stochastic_summary::{
     estimation_report_to_fitting_report, inflow_models_to_annual_component_rows,
     inflow_models_to_ar_rows, inflow_models_to_stats_rows,
 };
-use crate::{FutureCostFunction, TrainingResult};
 
 use cobre_core::System;
 use cobre_core::scenario::LoadModel;
@@ -55,7 +57,10 @@ pub struct CheckpointParams {
 ///
 /// This is the single implementation shared by the CLI and the Python
 /// bindings — both call this function so the on-disk format and write
-/// ordering cannot drift between them.
+/// ordering (including the per-slot entity manifest) cannot drift between them.
+///
+/// `system` is passed explicitly because [`StudySetup`] does not own it; the
+/// future cost function and per-pool cut-state projections come from `setup`.
 ///
 /// # Errors
 ///
@@ -65,16 +70,31 @@ pub struct CheckpointParams {
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn write_checkpoint(
     policy_dir: &Path,
-    fcf: &FutureCostFunction,
+    setup: &StudySetup,
+    system: &System,
     training_result: &TrainingResult,
     params: &CheckpointParams,
 ) -> Result<(), OutputError> {
+    let fcf = &setup.fcf;
     let n_stages = fcf.pools.len();
     let state_dimension = fcf.state_dimension;
 
+    let global_layout = setup.stage_state();
+    let stage_manifests: Vec<Vec<cobre_io::output::policy::EntitySlot>> = (0..n_stages)
+        .map(|t| {
+            build_stage_entity_manifest(
+                system,
+                global_layout,
+                &setup.stage_data.cut_state_layouts[t],
+                setup.study_stage_ids[t],
+            )
+        })
+        .collect();
+
     let stage_records = build_stage_cut_records(fcf);
     let stage_active_indices = build_active_indices(&stage_records);
-    let stage_cuts = build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices);
+    let stage_cuts =
+        build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices, &stage_manifests);
 
     let (basis_col_u8, basis_row_u8) = convert_basis_cache(training_result);
     let stage_bases = build_stage_basis_records(fcf, training_result, &basis_col_u8, &basis_row_u8);
@@ -100,7 +120,7 @@ pub fn write_checkpoint(
     };
 
     let stage_states = if params.export_states {
-        build_stage_states_payloads(training_result.visited_archive.as_ref())
+        build_stage_states_payloads(training_result.visited_archive.as_ref(), &stage_manifests)
     } else {
         Vec::new()
     };

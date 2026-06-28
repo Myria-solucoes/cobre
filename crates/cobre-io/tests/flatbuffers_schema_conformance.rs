@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use cobre_io::{
-    OwnedPolicyBasisRecord, OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCutRecord,
+    EntitySlot, OwnedPolicyBasisRecord, OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCutRecord,
     StageCutsReadResult, StageStatesPayload, StageStatesReadResult, deserialize_stage_basis,
     deserialize_stage_cuts, deserialize_stage_states, serialize_stage_basis, serialize_stage_cuts,
     serialize_stage_states,
@@ -137,6 +137,93 @@ fn as_bool(v: &Value, key: &str) -> bool {
         .unwrap_or_else(|| panic!("field `{key}` is not a bool: {v}"))
 }
 
+/// flatc `-t` omits scalar fields equal to their default, so manifest assertions
+/// must treat an absent field as its default rather than panicking.
+fn u64_or(v: &Value, key: &str, default: u64) -> u64 {
+    v.get(key).map_or(default, |f| {
+        f.as_u64()
+            .unwrap_or_else(|| panic!("field `{key}` is not a u64: {v}"))
+    })
+}
+
+fn i64_or(v: &Value, key: &str, default: i64) -> i64 {
+    v.get(key).map_or(default, |f| {
+        f.as_i64()
+            .unwrap_or_else(|| panic!("field `{key}` is not an i64: {v}"))
+    })
+}
+
+fn bool_or(v: &Value, key: &str, default: bool) -> bool {
+    v.get(key).map_or(default, |f| {
+        f.as_bool()
+            .unwrap_or_else(|| panic!("field `{key}` is not a bool: {v}"))
+    })
+}
+
+/// flatc renders the `EntityType` enum by name; map the raw byte to the name the
+/// schema declares so writer→flatc assertions can compare against it. An absent
+/// `entity_type` (the `0`/`HydroStorage` default) is treated as `HydroStorage`.
+fn entity_type_name(byte: u8) -> &'static str {
+    match byte {
+        0 => "HydroStorage",
+        1 => "HydroInflowLag",
+        2 => "AnticipatedThermalState",
+        other => panic!("unexpected entity_type byte {other}"),
+    }
+}
+
+fn assert_manifest_json_matches(manifest_json: &Value, expected: &[EntitySlot]) {
+    let arr = manifest_json
+        .as_array()
+        .expect("entity_manifest must be an array");
+    assert_eq!(arr.len(), expected.len(), "entity_manifest length");
+    for (i, (obj, slot)) in arr.iter().zip(expected).enumerate() {
+        let ty = obj
+            .get("entity_type")
+            .and_then(Value::as_str)
+            .unwrap_or("HydroStorage");
+        assert_eq!(
+            ty,
+            entity_type_name(slot.entity_type),
+            "slot {i} entity_type"
+        );
+        assert_eq!(
+            i64_or(obj, "entity_id", 0),
+            i64::from(slot.entity_id),
+            "slot {i} entity_id"
+        );
+        assert_eq!(
+            u64_or(obj, "subindex", 0),
+            u64::from(slot.subindex),
+            "slot {i} subindex"
+        );
+        assert_eq!(
+            bool_or(obj, "was_active", false),
+            slot.was_active,
+            "slot {i} was_active"
+        );
+    }
+}
+
+/// Manifest fixture exercising all three `entity_type` bytes and a `-1` id, so the
+/// writer→flatc and flatc→reader paths cover every field including a signed id.
+fn conformance_manifest() -> Vec<EntitySlot> {
+    vec![
+        EntitySlot {
+            entity_type: 2,
+            entity_id: 7,
+            subindex: 1,
+            was_active: true,
+        },
+        EntitySlot {
+            entity_type: 1,
+            entity_id: -1,
+            subindex: 3,
+            was_active: false,
+        },
+    ]
+}
+
 // ─── StageCuts ───────────────────────────────────────────────────────────────
 
 #[test]
@@ -164,7 +251,8 @@ fn stage_cuts_writer_matches_schema() {
         },
     ];
     let active = [0_u32];
-    let buf = serialize_stage_cuts(3, 4, 16, 0, &cuts, &active, 2);
+    let manifest = conformance_manifest();
+    let buf = serialize_stage_cuts(3, 4, 16, 0, &cuts, &active, 2, &manifest);
 
     let json = flatc_decode(&buf, "StageCuts");
 
@@ -174,6 +262,7 @@ fn stage_cuts_writer_matches_schema() {
     assert_eq!(as_u64(&json, "warm_start_count"), 0);
     assert_eq!(as_u64(&json, "populated_count"), 2);
     assert_eq!(get(&json, "active_cut_indices"), &json!([0]));
+    assert_manifest_json_matches(get(&json, "entity_manifest"), &manifest);
 
     let cuts_json = get(&json, "cuts").as_array().expect("cuts is an array");
     assert_eq!(cuts_json.len(), 2);
@@ -218,6 +307,10 @@ fn stage_cuts_reader_consumes_flatc_buffer() {
                 "coefficients": [0.1, 0.2, 0.3],
                 "is_active": true
             }
+        ],
+        "entity_manifest": [
+            {"entity_type": "AnticipatedThermalState", "entity_id": 7, "subindex": 1, "was_active": true},
+            {"entity_type": "HydroInflowLag", "entity_id": -1, "subindex": 3, "was_active": false}
         ]
     });
     let buf = flatc_encode(&document, "StageCuts");
@@ -239,6 +332,115 @@ fn stage_cuts_reader_consumes_flatc_buffer() {
     assert!((cut.intercept - 12.5).abs() < 1e-12);
     assert_eq!(cut.coefficients, vec![0.1, 0.2, 0.3]);
     assert!(cut.is_active);
+
+    assert_eq!(result.entity_manifest.len(), 2);
+    let m0 = &result.entity_manifest[0];
+    assert_eq!(m0.entity_type, 2, "AnticipatedThermalState byte");
+    assert_eq!(m0.entity_id, 7);
+    assert_eq!(m0.subindex, 1);
+    assert!(m0.was_active);
+    let m1 = &result.entity_manifest[1];
+    assert_eq!(m1.entity_type, 1, "HydroInflowLag byte");
+    assert_eq!(m1.entity_id, -1);
+    assert_eq!(m1.subindex, 3);
+    assert!(!m1.was_active);
+}
+
+/// Reduced-dimension manifest: storage-only (two `HydroStorage` slots, zero lag
+/// slots), `state_dimension = 2` where the all-enabled analogue would be larger.
+/// This is the reduced-per-stage case at the conformance level — a manifest
+/// shorter than the all-enabled count must round-trip in both directions.
+fn reduced_storage_manifest() -> Vec<EntitySlot> {
+    vec![
+        EntitySlot {
+            entity_type: 0,
+            entity_id: 1,
+            subindex: 0,
+            was_active: true,
+        },
+        EntitySlot {
+            entity_type: 0,
+            entity_id: 2,
+            subindex: 0,
+            was_active: true,
+        },
+    ]
+}
+
+#[test]
+fn stage_cuts_reduced_dimension_writer_matches_schema() {
+    let coeffs = [3.5, -1.25];
+    let cuts = [PolicyCutRecord {
+        cut_id: 42,
+        slot_index: 0,
+        iteration: 2,
+        forward_pass_index: 0,
+        intercept: 7.0,
+        coefficients: &coeffs,
+        is_active: true,
+    }];
+    let active = [0_u32];
+    let manifest = reduced_storage_manifest();
+    let buf = serialize_stage_cuts(1, 2, 8, 0, &cuts, &active, 1, &manifest);
+
+    let json = flatc_decode(&buf, "StageCuts");
+
+    assert_eq!(as_u64(&json, "state_dimension"), 2);
+    assert_eq!(as_u64(&json, "populated_count"), 1);
+
+    let manifest_json = get(&json, "entity_manifest");
+    assert_eq!(
+        manifest_json
+            .as_array()
+            .expect("entity_manifest must be an array")
+            .len(),
+        2,
+        "reduced manifest must have 2 storage slots"
+    );
+    assert_manifest_json_matches(manifest_json, &manifest);
+
+    let decoded_cut = &get(&json, "cuts").as_array().expect("cuts array")[0];
+    assert_eq!(get(decoded_cut, "coefficients"), &json!([3.5, -1.25]));
+}
+
+#[test]
+fn stage_cuts_reduced_dimension_reader_consumes_flatc_buffer() {
+    let document = json!({
+        "stage_id": 1,
+        "state_dimension": 2,
+        "capacity": 8,
+        "warm_start_count": 0,
+        "populated_count": 1,
+        "active_cut_indices": [0],
+        "cuts": [
+            {
+                "cut_id": 42,
+                "slot_index": 0,
+                "iteration": 2,
+                "forward_pass_index": 0,
+                "intercept": 7.0,
+                "coefficients": [3.5, -1.25],
+                "is_active": true
+            }
+        ],
+        "entity_manifest": [
+            {"entity_type": "HydroStorage", "entity_id": 1, "subindex": 0, "was_active": true},
+            {"entity_type": "HydroStorage", "entity_id": 2, "subindex": 0, "was_active": true}
+        ]
+    });
+    let buf = flatc_encode(&document, "StageCuts");
+    let result: StageCutsReadResult =
+        deserialize_stage_cuts(&buf).expect("hand-rolled reader must consume flatc-built buffer");
+
+    assert_eq!(result.state_dimension, 2);
+    assert_eq!(result.entity_manifest.len(), 2);
+    for (i, slot) in result.entity_manifest.iter().enumerate() {
+        assert_eq!(slot.entity_type, 0, "slot {i} HydroStorage byte");
+        assert_eq!(slot.subindex, 0, "slot {i} subindex");
+        assert!(slot.was_active, "slot {i} was_active");
+    }
+    assert_eq!(result.entity_manifest[0].entity_id, 1);
+    assert_eq!(result.entity_manifest[1].entity_id, 2);
 }
 
 // ─── StageBasis ──────────────────────────────────────────────────────────────
@@ -294,11 +496,13 @@ fn stage_basis_reader_consumes_flatc_buffer() {
 #[test]
 fn stage_states_writer_matches_schema() {
     let data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let manifest = conformance_manifest();
     let payload = StageStatesPayload {
         stage_id: 2,
         state_dimension: 3,
         count: 2,
         data: &data,
+        entity_manifest: &manifest,
     };
     let buf = serialize_stage_states(&payload);
 
@@ -308,6 +512,7 @@ fn stage_states_writer_matches_schema() {
     assert_eq!(as_u64(&json, "state_dimension"), 3);
     assert_eq!(as_u64(&json, "count"), 2);
     assert_eq!(get(&json, "data"), &json!([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]));
+    assert_manifest_json_matches(get(&json, "entity_manifest"), &manifest);
 }
 
 #[test]
@@ -316,7 +521,11 @@ fn stage_states_reader_consumes_flatc_buffer() {
         "stage_id": 9,
         "state_dimension": 2,
         "count": 3,
-        "data": [10.0, 11.0, 12.0, 13.0, 14.0, 15.0]
+        "data": [10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+        "entity_manifest": [
+            {"entity_type": "HydroStorage", "entity_id": 4, "subindex": 0, "was_active": true},
+            {"entity_type": "HydroStorage", "entity_id": 5, "subindex": 0, "was_active": true}
+        ]
     });
     let buf = flatc_encode(&document, "StageStates");
     let result: StageStatesReadResult =
@@ -326,6 +535,12 @@ fn stage_states_reader_consumes_flatc_buffer() {
     assert_eq!(result.state_dimension, 2);
     assert_eq!(result.count, 3);
     assert_eq!(result.data, vec![10.0, 11.0, 12.0, 13.0, 14.0, 15.0]);
+
+    assert_eq!(result.entity_manifest.len(), 2);
+    assert_eq!(result.entity_manifest[0].entity_type, 0);
+    assert_eq!(result.entity_manifest[0].entity_id, 4);
+    assert!(result.entity_manifest[0].was_active);
+    assert_eq!(result.entity_manifest[1].entity_id, 5);
 }
 
 // ─── Legacy / deprecated-slot regression ─────────────────────────────────────
@@ -408,4 +623,8 @@ table StageCuts {
     assert_eq!(cut.cut_id, 1);
     assert_eq!(cut.coefficients, vec![1.0, 2.0]);
     assert!(cut.is_active);
+    assert!(
+        result.entity_manifest.is_empty(),
+        "a buffer lacking the entity_manifest field must deserialize to an empty manifest"
+    );
 }

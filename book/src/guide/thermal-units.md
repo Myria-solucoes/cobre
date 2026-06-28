@@ -212,35 +212,26 @@ both optional columns set to `null`. Rows for anticipated units have
 `is_anticipated = true`; the two nullable columns are populated according to each
 stage's position relative to the decision and delivery windows described above.
 
-Training output also records anticipated-dispatch state in
-`training/dictionaries/state_dictionary.json`. For each anticipated thermal unit,
-the dictionary contains one entry per slot index from `0` to `K_max - 1` where
-`K_max` is the maximum `lead_stages` across all anticipated thermals in the study.
-Entries are emitted in slot-major order. Each entry has the following shape:
+The anticipated-commitment state is part of the policy's state vector, so each
+anticipated thermal unit contributes ring-buffer slots to the per-slot entity
+manifest embedded in every `policy/cuts/stage_NNN.bin` and
+`policy/states/stage_NNN.bin` (see
+[Policy Checkpoint](../reference/output-format.md#policy-checkpoint)). For an
+anticipated unit each slot's manifest entry has `entity_type` set to the
+anticipated-thermal-state class, `entity_id` set to the unit's id, and `subindex`
+set to the ring-buffer slot — slot 0 tracks the oldest still-pending commitment
+and the highest slot the most recent.
 
-```json
-{
-  "type": "anticipated_state",
-  "entity_type": "thermal",
-  "entity_id": 2,
-  "slot_index": 0,
-  "lead_stages": 2,
-  "unit": "MW"
-}
-```
-
-The `lead_stages` field reflects the plant's own `K_i`, not the study-wide
-`K_max`. For a plant where `K_i < K_max` (mixed-`K` studies), entries with
-`slot_index >= lead_stages` are structural padding — those slots are
-deterministically zero and exist only to align the ring buffer to a uniform
-stride. Filter `slot_index < lead_stages` to keep only the active slots.
+The ring buffer is sized to the study-wide `K_max` (the maximum `lead_stages`
+across all anticipated thermals). For a unit whose own `K_i < K_max` (mixed-`K`
+studies), the surplus high slots are structural padding aligning the buffer to a
+uniform stride; they are deterministically zero. Each slot's `was_active` flag
+records whether the owning unit was operationally active at that stage, encoding
+the active/padding distinction directly.
 
 For a study with a single anticipated thermal unit (`id = 2`) configured as
-`lead_stages = 2`, the state dictionary contains exactly two such entries: one
-with `slot_index = 0` and one with `slot_index = 1` — both active, since
-`K_max = lead_stages = 2`. The slot index identifies which pending commitment
-the state variable tracks: slot 0 holds the oldest still-pending commitment and
-slot `lead_stages - 1` holds the most recent.
+`lead_stages = 2`, the manifest carries exactly two such slots — `subindex = 0`
+and `subindex = 1` — both active, since `K_i = K_max = 2`.
 
 ---
 

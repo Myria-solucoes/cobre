@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Each policy cut and state file now embeds the per-slot identity of its
+  state-vector dimensions.** Every `policy/cuts/stage_NNN.bin` and
+  `policy/states/stage_NNN.bin` carries an entity manifest with one entry per
+  coefficient position, recording the owning entity's type, id, and secondary
+  index (the inflow-lag order or anticipated-commitment ring slot) plus whether
+  that entity was operationally active at the stage. This identity is now read
+  directly from the policy file rather than cross-referenced against a separate
+  sidecar.
+
+### Removed
+
+- **The `training/dictionaries/state_dictionary.json` sidecar is no longer
+  written.** Its per-slot state-variable mapping is now embedded in each policy
+  cut and state file (see above). `training/dictionaries/` still contains
+  `codes.json`, `entities.csv`, `variables.csv`, and `bounds.parquet`.
+
 ## [0.9.1] - 2026-06-26
 
 ### Fixed

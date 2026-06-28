@@ -20,7 +20,7 @@ pub use checkpoint::{read_policy_checkpoint, write_policy_checkpoint};
 pub use codec::{deserialize_stage_basis, deserialize_stage_cuts, deserialize_stage_states};
 pub use codec::{serialize_stage_basis, serialize_stage_cuts, serialize_stage_states};
 pub use records::{
-    OwnedPolicyBasisRecord, OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCheckpoint,
+    EntitySlot, OwnedPolicyBasisRecord, OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCheckpoint,
     PolicyCheckpointMetadata, PolicyCutRecord, StageCutsPayload, StageCutsReadResult,
     StageStatesPayload, StageStatesReadResult,
 };
@@ -63,7 +63,7 @@ mod tests {
             is_active: true,
         };
 
-        let buf = serialize_stage_cuts(0, 3, 100, 0, &[cut], &[0], 1);
+        let buf = serialize_stage_cuts(0, 3, 100, 0, &[cut], &[0], 1, &[]);
 
         assert!(!buf.is_empty(), "buffer must not be empty");
         assert!(buf.len() >= 4, "buffer must have at least 4 bytes");
@@ -76,7 +76,7 @@ mod tests {
 
     #[test]
     fn serialize_stage_cuts_empty_cuts_valid_buffer() {
-        let buf = serialize_stage_cuts(0, 3, 100, 0, &[], &[], 0);
+        let buf = serialize_stage_cuts(0, 3, 100, 0, &[], &[], 0, &[]);
 
         assert!(!buf.is_empty(), "buffer must not be empty for empty cuts");
         assert!(
@@ -102,8 +102,8 @@ mod tests {
             make_cut_record(3, 2, 1, &c2),
         ];
 
-        let buf_a = serialize_stage_cuts(5, 3, 50, 0, &cuts, &[0, 1, 2], 3);
-        let buf_b = serialize_stage_cuts(5, 3, 50, 0, &cuts, &[0, 1, 2], 3);
+        let buf_a = serialize_stage_cuts(5, 3, 50, 0, &cuts, &[0, 1, 2], 3, &[]);
+        let buf_b = serialize_stage_cuts(5, 3, 50, 0, &cuts, &[0, 1, 2], 3, &[]);
 
         assert_eq!(buf_a, buf_b, "output must be byte-identical for same input");
     }
@@ -121,7 +121,7 @@ mod tests {
                 coefficients: &coefs,
                 is_active: true,
             };
-            let buf = serialize_stage_cuts(0, dim, 10, 0, &[cut], &[0], 1);
+            let buf = serialize_stage_cuts(0, dim, 10, 0, &[cut], &[0], 1, &[]);
             assert!(
                 !buf.is_empty(),
                 "buffer must not be empty for state_dimension={dim}"
@@ -325,6 +325,7 @@ mod tests {
             cuts,
             active_cut_indices,
             populated_count: u32::try_from(cuts.len()).unwrap(),
+            entity_manifest: &[],
         }
     }
 
@@ -663,7 +664,7 @@ mod tests {
             is_active: true,
         };
 
-        let buf = serialize_stage_cuts(0, 3, 100, 0, &[cut], &[0], 1);
+        let buf = serialize_stage_cuts(0, 3, 100, 0, &[cut], &[0], 1, &[]);
         let result = deserialize_stage_cuts(&buf).expect("deserialization must succeed");
 
         assert_eq!(result.stage_id, 0, "stage_id must round-trip");
@@ -728,7 +729,7 @@ mod tests {
             },
         ];
 
-        let buf = serialize_stage_cuts(5, 2, 50, 1, &cuts, &[0, 2], 3);
+        let buf = serialize_stage_cuts(5, 2, 50, 1, &cuts, &[0, 2], 3, &[]);
         let result = deserialize_stage_cuts(&buf).expect("deserialization must succeed");
 
         assert_eq!(result.stage_id, 5);
@@ -756,7 +757,7 @@ mod tests {
 
     #[test]
     fn deserialize_stage_cuts_empty_cut_pool() {
-        let buf = serialize_stage_cuts(2, 10, 200, 0, &[], &[], 0);
+        let buf = serialize_stage_cuts(2, 10, 200, 0, &[], &[], 0, &[]);
         let result =
             deserialize_stage_cuts(&buf).expect("deserialization of empty cut pool must succeed");
 
@@ -780,7 +781,7 @@ mod tests {
             coefficients: &[],
             is_active: true,
         };
-        let buf = serialize_stage_cuts(0, 0, 10, 0, &[cut], &[0], 1);
+        let buf = serialize_stage_cuts(0, 0, 10, 0, &[cut], &[0], 1, &[]);
         let result =
             deserialize_stage_cuts(&buf).expect("zero-length coefficients must deserialize");
         assert_eq!(result.cuts.len(), 1);
@@ -803,7 +804,7 @@ mod tests {
             coefficients: &coefs,
             is_active: false,
         };
-        let buf = serialize_stage_cuts(3, dim, 10, 0, &[cut], &[0], 1);
+        let buf = serialize_stage_cuts(3, dim, 10, 0, &[cut], &[0], 1, &[]);
         let result =
             deserialize_stage_cuts(&buf).expect("large coefficient vector must deserialize");
         assert_eq!(result.cuts[0].coefficients.len(), dim as usize);
@@ -815,7 +816,7 @@ mod tests {
     fn deserialize_stage_cuts_truncated_buffer_returns_error() {
         let coefs = [1.0_f64, 2.0];
         let cut = make_cut_record(1, 0, 1, &coefs);
-        let full_buf = serialize_stage_cuts(0, 2, 10, 0, &[cut], &[0], 1);
+        let full_buf = serialize_stage_cuts(0, 2, 10, 0, &[cut], &[0], 1, &[]);
         // Truncate to 2 bytes — root offset itself is incomplete.
         let truncated = &full_buf[..2];
         let result = deserialize_stage_cuts(truncated);
@@ -824,9 +825,88 @@ mod tests {
 
     #[test]
     fn deserialize_stage_cuts_stage_id_nonzero() {
-        let buf = serialize_stage_cuts(59, 4, 50, 0, &[], &[], 0);
+        let buf = serialize_stage_cuts(59, 4, 50, 0, &[], &[], 0, &[]);
         let result = deserialize_stage_cuts(&buf).expect("stage_id=59 must deserialize");
         assert_eq!(result.stage_id, 59, "stage_id=59 must round-trip");
+    }
+
+    // ── entity_manifest round-trip tests ──────────────────────────────────────
+
+    fn sample_manifest() -> Vec<EntitySlot> {
+        vec![
+            EntitySlot {
+                entity_type: 0,
+                entity_id: 12,
+                subindex: 0,
+                was_active: true,
+            },
+            EntitySlot {
+                entity_type: 1,
+                entity_id: -1,
+                subindex: 3,
+                was_active: false,
+            },
+            EntitySlot {
+                entity_type: 2,
+                entity_id: 7,
+                subindex: 1,
+                was_active: true,
+            },
+        ]
+    }
+
+    fn assert_manifest_eq(actual: &[EntitySlot], expected: &[EntitySlot]) {
+        assert_eq!(actual.len(), expected.len(), "manifest length must match");
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(a.entity_type, e.entity_type, "slot {i} entity_type");
+            assert_eq!(a.entity_id, e.entity_id, "slot {i} entity_id");
+            assert_eq!(a.subindex, e.subindex, "slot {i} subindex");
+            assert_eq!(a.was_active, e.was_active, "slot {i} was_active");
+        }
+    }
+
+    #[test]
+    fn stage_cuts_entity_manifest_round_trip() {
+        let coefficients = [1.0_f64, 2.0, 3.0];
+        let cut = make_cut_record(7, 0, 1, &coefficients);
+        let manifest = sample_manifest();
+
+        let buf = serialize_stage_cuts(4, 3, 100, 0, &[cut], &[0], 1, &manifest);
+        let result = deserialize_stage_cuts(&buf).expect("manifest round-trip must succeed");
+
+        assert_eq!(result.cuts.len(), 1, "cuts must still round-trip");
+        assert_manifest_eq(&result.entity_manifest, &manifest);
+    }
+
+    #[test]
+    fn stage_states_entity_manifest_round_trip() {
+        let data = [1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let manifest = sample_manifest();
+        let payload = StageStatesPayload {
+            stage_id: 2,
+            state_dimension: 3,
+            count: 2,
+            data: &data,
+            entity_manifest: &manifest,
+        };
+
+        let buf = serialize_stage_states(&payload);
+        let result = deserialize_stage_states(&buf).expect("manifest round-trip must succeed");
+
+        assert_eq!(result.data, data.to_vec(), "data must still round-trip");
+        assert_manifest_eq(&result.entity_manifest, &manifest);
+    }
+
+    #[test]
+    fn stage_cuts_empty_manifest_deserializes_to_empty_vec() {
+        let coefficients = [1.0_f64, 2.0];
+        let cut = make_cut_record(1, 0, 1, &coefficients);
+        let buf = serialize_stage_cuts(0, 2, 10, 0, &[cut], &[0], 1, &[]);
+        let result = deserialize_stage_cuts(&buf).expect("empty manifest must deserialize");
+        assert!(
+            result.entity_manifest.is_empty(),
+            "empty manifest must produce zero slots"
+        );
     }
 
     // ── deserialize_stage_basis tests ─────────────────────────────────────────
@@ -1260,6 +1340,7 @@ mod tests {
                 cuts: &cuts_s0,
                 active_cut_indices: &[0, 1],
                 populated_count: 2,
+                entity_manifest: &[],
             },
             StageCutsPayload {
                 stage_id: 1,
@@ -1269,6 +1350,7 @@ mod tests {
                 cuts: &cuts_s1,
                 active_cut_indices: &[0, 1, 2],
                 populated_count: 3,
+                entity_manifest: &[],
             },
             StageCutsPayload {
                 stage_id: 2,
@@ -1278,6 +1360,7 @@ mod tests {
                 cuts: &cuts_s2,
                 active_cut_indices: &[0, 1, 2, 3],
                 populated_count: 4,
+                entity_manifest: &[],
             },
         ];
 

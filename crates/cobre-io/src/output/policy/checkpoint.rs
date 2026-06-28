@@ -70,6 +70,7 @@ use super::records::{
 ///     cuts: &[cut],
 ///     active_cut_indices: &[0],
 ///     populated_count: 1,
+///     entity_manifest: &[],
 /// }];
 /// let metadata = PolicyCheckpointMetadata {
 ///     cobre_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -114,6 +115,7 @@ pub fn write_policy_checkpoint(
             payload.cuts,
             payload.active_cut_indices,
             payload.populated_count,
+            payload.entity_manifest,
         );
         std::fs::write(&file_path, &buf).map_err(|e| OutputError::io(&file_path, e))?;
     }

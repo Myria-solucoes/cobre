@@ -90,7 +90,7 @@ pub use extensions::{
 };
 pub use initial_conditions::parse_initial_conditions;
 pub use output::policy::{
-    OwnedPolicyBasisRecord, OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCheckpoint,
+    EntitySlot, OwnedPolicyBasisRecord, OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCheckpoint,
     PolicyCheckpointMetadata, PolicyCutRecord, StageCutsPayload, StageCutsReadResult,
     StageStatesPayload, StageStatesReadResult, deserialize_stage_basis, deserialize_stage_cuts,
     deserialize_stage_states, read_policy_checkpoint, serialize_stage_basis, serialize_stage_cuts,

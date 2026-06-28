@@ -70,6 +70,33 @@ impl StudySetup {
         &self.stage_data.state
     }
 
+    /// Build the per-slot entity-identity manifest for the terminal stage's cut
+    /// pool — the stage a boundary policy injects into.
+    ///
+    /// Delegates to
+    /// [`build_stage_entity_manifest`](crate::policy_export::build_stage_entity_manifest),
+    /// the single owner of identity resolution shared with the checkpoint writer,
+    /// against the terminal pool's projection
+    /// (`cut_state_layouts[num_stages - 1]`). The caller passes the result to
+    /// [`load_boundary_cuts`](crate::load_boundary_cuts) so a boundary cut whose
+    /// slot identity diverges from the current study is rejected rather than
+    /// silently mis-loaded.
+    ///
+    /// `system` is passed explicitly because [`StudySetup`] does not own it.
+    #[must_use]
+    pub fn build_terminal_entity_manifest(
+        &self,
+        system: &cobre_core::System,
+    ) -> Vec<cobre_io::EntitySlot> {
+        let terminal_idx = self.stage_data.cut_state_layouts.len() - 1;
+        crate::policy_export::build_stage_entity_manifest(
+            system,
+            &self.stage_data.state,
+            &self.stage_data.cut_state_layouts[terminal_idx],
+            self.study_stage_ids[terminal_idx],
+        )
+    }
+
     /// Number of stages in the planning horizon.
     #[must_use]
     pub fn num_stages(&self) -> usize {

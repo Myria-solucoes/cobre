@@ -31,7 +31,6 @@ will not produce `simulation/pumping_stations/`.
       entities.csv
       variables.csv
       bounds.parquet
-      state_dictionary.json
     timing/
       iterations.parquet
       mpi_ranks.parquet
@@ -579,38 +578,12 @@ resolution (global / entity / stage overrides).
 | `lower_bound`      | Float64 | No       | Resolved lower bound value in the bound's natural unit.  |
 | `upper_bound`      | Float64 | No       | Resolved upper bound value in the bound's natural unit.  |
 
-#### `state_dictionary.json`
-
-Describes the state space structure used by the algorithm: which entities have
-state variables, how many state dimensions they contribute, and what units
-apply. Useful for interpreting cut coefficient vectors in the policy checkpoint.
-
-```json
-{
-  "version": "1.0",
-  "state_dimension": 164,
-  "storage_states": [
-    { "hydro_id": 0, "dimension_index": 0, "unit": "hm3" },
-    { "hydro_id": 1, "dimension_index": 1, "unit": "hm3" }
-  ],
-  "inflow_lag_states": [
-    { "hydro_id": 0, "lag_index": 1, "dimension_index": 2, "unit": "m3s" }
-  ]
-}
-```
-
-| Field                                 | Description                                                                                                   |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `state_dimension`                     | Total number of state variables. Equals the length of each cut's coefficient vector in the policy checkpoint. |
-| `storage_states`                      | One entry per hydro plant that contributes a reservoir storage state variable.                                |
-| `storage_states[].hydro_id`           | Hydro plant ID.                                                                                               |
-| `storage_states[].dimension_index`    | 0-based index of this state variable in the coefficient vector.                                               |
-| `storage_states[].unit`               | Physical unit: always `"hm3"` (hectare-metres cubed).                                                         |
-| `inflow_lag_states`                   | One entry per (hydro, lag) pair that contributes an inflow lag state variable.                                |
-| `inflow_lag_states[].hydro_id`        | Hydro plant ID.                                                                                               |
-| `inflow_lag_states[].lag_index`       | Autoregressive lag order (1-based).                                                                           |
-| `inflow_lag_states[].dimension_index` | 0-based index in the coefficient vector.                                                                      |
-| `inflow_lag_states[].unit`            | Physical unit: always `"m3s"` (cubic metres per second).                                                      |
+> The state-space structure — which entity owns each state-vector dimension —
+> is recorded directly in the policy checkpoint. Every `policy/cuts/stage_NNN.bin`
+> and `policy/states/stage_NNN.bin` embeds a per-slot entity manifest, described
+> under [Policy Checkpoint](#policy-checkpoint) below. There is no separate
+> state-dictionary sidecar; read the manifest from the policy file to interpret a
+> cut's coefficient vector.
 
 ---
 
@@ -638,8 +611,20 @@ contained in the file is:
 | `iteration`          | uint32    | Training iteration that generated this cut.                                                                                          |
 | `forward_pass_index` | uint32    | Forward pass index within the generating iteration.                                                                                  |
 | `intercept`          | float64   | Pre-computed cut intercept: `alpha - beta' * x_hat`, where `x_hat` is the state at the generating forward pass node.                 |
-| `coefficients`       | float64[] | Gradient coefficient vector. Length equals `state_dimension` from `state_dictionary.json`.                                           |
+| `coefficients`       | float64[] | Gradient coefficient vector. Length equals the file's `state_dimension` and the length of its `entity_manifest`.                     |
 | `is_active`          | bool      | Whether this cut is currently active in the LP. Inactive cuts are retained for potential reactivation by the cut selection strategy. |
+
+Alongside the cuts, the file carries an `entity_manifest`: a per-slot record of
+which entity owns each state-vector dimension, so coefficient position `i` can
+be attributed without an external lookup. The manifest length equals the file's
+`state_dimension`, and slot `i` describes coefficient position `i` on every cut.
+
+| Field         | Type   | Description                                                                                                                                                           |
+| ------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `entity_type` | enum   | State-variable class: hydro storage, hydro inflow lag, or anticipated thermal commitment state.                                                                       |
+| `entity_id`   | int32  | Owning entity's id, matching the `entity_id` columns in `entities.csv` and `bounds.parquet`.                                                                          |
+| `subindex`    | uint32 | Secondary index within the owning entity: the 1-based autoregressive lag order for an inflow lag, the ring-buffer slot for an anticipated state, and `0` for storage. |
+| `was_active`  | bool   | Whether the owning entity was operationally active at this slot's stage. A dormant entity's slot is present but carries zero influence.                               |
 
 The encoding uses the FlatBuffers runtime builder API (little-endian, no
 reflection, no generated code). Field order in the binary matches the
@@ -680,9 +665,13 @@ they serve as a diagnostic and analysis artifact.
 | Field             | Type      | Description                                                                      |
 | ----------------- | --------- | -------------------------------------------------------------------------------- |
 | `stage_id`        | uint32    | Stage index (0-based).                                                           |
-| `state_dimension` | uint32    | Length of each state vector. Must match `state_dictionary.json`.                 |
+| `state_dimension` | uint32    | Length of each state vector. Equals the length of the file's `entity_manifest`.  |
 | `count`           | uint32    | Number of state vectors stored for this stage.                                   |
 | `data`            | float64[] | Flat array of `count * state_dimension` elements, row-major (one state per row). |
+
+This file carries the same per-slot `entity_manifest` as
+`policy/cuts/stage_NNN.bin` (one entry per state-vector dimension), so each
+column of `data` can be attributed to its owning entity.
 
 ### `policy/metadata.json`
 
@@ -696,7 +685,7 @@ machine-readable by tooling that inspects policy files.
 | `completed_iterations` | integer   | No       | Number of training iterations completed at checkpoint time.                                                                      |
 | `final_lower_bound`    | number    | No       | Lower bound value after the final completed iteration.                                                                           |
 | `best_upper_bound`     | number    | Yes      | Best upper bound observed during training. `null` when upper bound evaluation was disabled.                                      |
-| `state_dimension`      | integer   | No       | Length of each cut's coefficient vector. Must match `state_dictionary.json`.                                                     |
+| `state_dimension`      | integer   | No       | Length of each cut's coefficient vector. Equals the `state_dimension` of every per-stage cut and state file.                     |
 | `num_stages`           | integer   | No       | Number of stages. Must match the case configuration on resume.                                                                   |
 | `max_iterations`       | integer   | No       | Maximum iterations configured for the run.                                                                                       |
 | `forward_passes`       | integer   | No       | Number of forward passes per iteration configured for the run.                                                                   |

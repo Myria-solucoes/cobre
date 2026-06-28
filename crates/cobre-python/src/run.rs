@@ -424,7 +424,8 @@ pub(crate) fn write_training_artifacts(
 ) -> Result<(), String> {
     cobre_sddp::orchestration::write_checkpoint(
         &output_dir.join(&setup.policy_path),
-        &setup.fcf,
+        setup,
+        system,
         &training.result,
         &cobre_sddp::orchestration::CheckpointParams {
             max_iterations: setup.loop_params.max_iterations,
@@ -1005,9 +1006,16 @@ pub(crate) fn apply_training_policy_mode(
         let boundary_path = output_dir.join(&bp.path);
         #[allow(clippy::cast_possible_truncation)]
         let state_dim = setup.fcf.state_dimension as u32;
-        let boundary_records =
-            cobre_sddp::load_boundary_cuts(&boundary_path, bp.source_stage, state_dim)
-                .map_err(|e| format!("boundary cut error: {e}"))?;
+        let current_manifest = setup.build_terminal_entity_manifest(system);
+        let mut on_warning = |msg: &str| eprintln!("cobre-python: boundary cut warning: {msg}");
+        let boundary_records = cobre_sddp::load_boundary_cuts(
+            &boundary_path,
+            bp.source_stage,
+            state_dim,
+            &current_manifest,
+            &mut on_warning,
+        )
+        .map_err(|e| format!("boundary cut error: {e}"))?;
         cobre_sddp::inject_boundary_cuts(setup, &boundary_records);
     }
 

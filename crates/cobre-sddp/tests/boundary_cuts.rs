@@ -87,7 +87,9 @@ fn write_test_checkpoint(
     let fcf = &setup.fcf;
     let stage_records = build_stage_cut_records(fcf);
     let stage_active_indices = build_active_indices(&stage_records);
-    let stage_cuts = build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices);
+    let stage_manifests: Vec<Vec<cobre_io::EntitySlot>> = vec![Vec::new(); fcf.pools.len()];
+    let stage_cuts =
+        build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices, &stage_manifests);
     let (basis_col, basis_row) = convert_basis_cache(result);
     let stage_bases = build_stage_basis_records(fcf, result, &basis_col, &basis_row);
     let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
@@ -110,13 +112,15 @@ fn write_test_checkpoint(
         .expect("write checkpoint");
 }
 
-fn build_setup(case_dir: &Path, config: &cobre_io::Config) -> StudySetup {
+fn build_setup(case_dir: &Path, config: &cobre_io::Config) -> (StudySetup, cobre_core::System) {
     let system = cobre_io::load_case(case_dir).expect("load_case");
     let prep = prepare_stochastic(system, case_dir, config, 42, &ScenarioSource::default())
         .expect("prepare_stochastic");
     let hydro_models =
         prepare_hydro_models(&prep.system, case_dir, false).expect("prepare_hydro_models");
-    StudySetup::new(&prep.system, config, prep.stochastic, hydro_models).expect("StudySetup::new")
+    let setup = StudySetup::new(&prep.system, config, prep.stochastic, hydro_models)
+        .expect("StudySetup::new");
+    (setup, prep.system)
 }
 
 #[test]
@@ -133,7 +137,7 @@ fn boundary_cuts_improve_terminal_stage_objective() {
         }]);
 
     // Run A: source study, produces the checkpoint.
-    let mut setup_a = build_setup(&case_dir, &config_5iter);
+    let (mut setup_a, _system_a) = build_setup(&case_dir, &config_5iter);
     let comm = StubComm;
     let mut solver_a = ActiveSolver::new().expect("solver");
     let outcome_a = setup_a
@@ -149,7 +153,7 @@ fn boundary_cuts_improve_terminal_stage_objective() {
     let source_stage = (num_stages - 2) as u32; // terminal stage has no backward-pass cuts
 
     // Run B: consumer baseline, no boundary cuts.
-    let mut setup_b = build_setup(&case_dir, &config_5iter);
+    let (mut setup_b, _system_b) = build_setup(&case_dir, &config_5iter);
     let mut solver_b = ActiveSolver::new().expect("solver");
     let outcome_b = setup_b
         .train(&mut solver_b, &comm, 1, ActiveSolver::new, None, None)
@@ -158,11 +162,18 @@ fn boundary_cuts_improve_terminal_stage_objective() {
     let lb_no_boundary = outcome_b.result.final_lb;
 
     // Run C: consumer with boundary cuts.
-    let mut setup_c = build_setup(&case_dir, &config_5iter);
+    let (mut setup_c, system_c) = build_setup(&case_dir, &config_5iter);
     let state_dim = setup_c.fcf.state_dimension as u32;
-    let boundary_records =
-        cobre_sddp::load_boundary_cuts(&source_policy_dir, source_stage, state_dim)
-            .expect("load_boundary_cuts");
+    let current_manifest = setup_c.build_terminal_entity_manifest(&system_c);
+    let mut warnings: Vec<String> = Vec::new();
+    let boundary_records = cobre_sddp::load_boundary_cuts(
+        &source_policy_dir,
+        source_stage,
+        state_dim,
+        &current_manifest,
+        &mut |msg| warnings.push(msg.to_string()),
+    )
+    .expect("load_boundary_cuts");
     assert!(
         !boundary_records.is_empty(),
         "source stage must have cuts after training"

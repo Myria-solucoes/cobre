@@ -15,7 +15,7 @@ use flatbuffers::{FlatBufferBuilder, WIPOffset};
 
 use super::super::error::OutputError;
 use super::records::{
-    OwnedPolicyBasisRecord, OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCutRecord,
+    EntitySlot, OwnedPolicyBasisRecord, OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCutRecord,
     StageCutsReadResult, StageStatesPayload, StageStatesReadResult,
 };
 
@@ -34,6 +34,11 @@ const CUT_FIELD_COEFFICIENTS: u16 = 16;
 const CUT_FIELD_STATE_AT_GENERATION: u16 = 18;
 const CUT_FIELD_IS_ACTIVE: u16 = 20;
 
+const ENTITY_SLOT_FIELD_ENTITY_TYPE: u16 = 4;
+const ENTITY_SLOT_FIELD_ENTITY_ID: u16 = 6;
+const ENTITY_SLOT_FIELD_SUBINDEX: u16 = 8;
+const ENTITY_SLOT_FIELD_WAS_ACTIVE: u16 = 10;
+
 const STAGE_CUTS_FIELD_STAGE_ID: u16 = 4;
 const STAGE_CUTS_FIELD_STATE_DIMENSION: u16 = 6;
 const STAGE_CUTS_FIELD_CAPACITY: u16 = 8;
@@ -41,6 +46,7 @@ const STAGE_CUTS_FIELD_WARM_START_COUNT: u16 = 10;
 const STAGE_CUTS_FIELD_CUTS: u16 = 12;
 const STAGE_CUTS_FIELD_ACTIVE_CUT_INDICES: u16 = 14;
 const STAGE_CUTS_FIELD_POPULATED_COUNT: u16 = 16;
+const STAGE_CUTS_FIELD_ENTITY_MANIFEST: u16 = 18;
 
 const BASIS_FIELD_STAGE_ID: u16 = 4;
 const BASIS_FIELD_ITERATION: u16 = 6;
@@ -54,6 +60,7 @@ const STATES_FIELD_STAGE_ID: u16 = 4;
 const STATES_FIELD_STATE_DIMENSION: u16 = 6;
 const STATES_FIELD_COUNT: u16 = 8;
 const STATES_FIELD_DATA: u16 = 10;
+const STATES_FIELD_ENTITY_MANIFEST: u16 = 12;
 
 /// All nested objects (coefficient vector, `state_at_generation` vector) must be
 /// created before the `start_table`/`end_table` pair — `FlatBuffers` requires
@@ -75,6 +82,22 @@ fn build_cut_table(
     builder.push_slot_always(CUT_FIELD_COEFFICIENTS, coefficients_vec);
     builder.push_slot_always(CUT_FIELD_STATE_AT_GENERATION, state_at_gen_vec);
     builder.push_slot_always::<bool>(CUT_FIELD_IS_ACTIVE, cut.is_active);
+
+    builder.end_table(tab)
+}
+
+/// Build one `EntitySlot` nested table. Has no inner vector, so — unlike
+/// [`build_cut_table`] — nothing precedes the `start_table`/`end_table` pair.
+fn build_entity_slot_table(
+    builder: &mut FlatBufferBuilder<'_>,
+    slot: &EntitySlot,
+) -> WIPOffset<flatbuffers::TableFinishedWIPOffset> {
+    let tab = builder.start_table();
+
+    builder.push_slot_always::<u8>(ENTITY_SLOT_FIELD_ENTITY_TYPE, slot.entity_type);
+    builder.push_slot_always::<i32>(ENTITY_SLOT_FIELD_ENTITY_ID, slot.entity_id);
+    builder.push_slot_always::<u32>(ENTITY_SLOT_FIELD_SUBINDEX, slot.subindex);
+    builder.push_slot_always::<bool>(ENTITY_SLOT_FIELD_WAS_ACTIVE, slot.was_active);
 
     builder.end_table(tab)
 }
@@ -101,7 +124,7 @@ fn build_cut_table(
 ///     coefficients: &[1.0, 2.0, 3.0],
 ///     is_active: true,
 /// };
-/// let buf = serialize_stage_cuts(0, 3, 100, 0, &[cut], &[0], 1);
+/// let buf = serialize_stage_cuts(0, 3, 100, 0, &[cut], &[0], 1, &[]);
 /// assert!(!buf.is_empty());
 /// ```
 #[must_use]
@@ -114,11 +137,13 @@ pub fn serialize_stage_cuts(
     cuts: &[PolicyCutRecord<'_>],
     active_cut_indices: &[u32],
     populated_count: u32,
+    entity_manifest: &[EntitySlot],
 ) -> Vec<u8> {
     // Pre-size the builder to avoid reallocation.
     let estimated = 64
         + cuts.len() * (96usize + state_dimension as usize * std::mem::size_of::<f64>())
-        + std::mem::size_of_val(active_cut_indices);
+        + std::mem::size_of_val(active_cut_indices)
+        + entity_manifest.len() * 32usize;
 
     let mut builder = FlatBufferBuilder::with_capacity(estimated);
 
@@ -126,9 +151,14 @@ pub fn serialize_stage_cuts(
         .iter()
         .map(|c| build_cut_table(&mut builder, c))
         .collect();
+    let manifest_offsets: Vec<WIPOffset<flatbuffers::TableFinishedWIPOffset>> = entity_manifest
+        .iter()
+        .map(|s| build_entity_slot_table(&mut builder, s))
+        .collect();
 
     let cuts_vec = builder.create_vector(&cut_offsets);
     let active_vec = builder.create_vector(active_cut_indices);
+    let manifest_vec = builder.create_vector(&manifest_offsets);
 
     let root = builder.start_table();
 
@@ -139,6 +169,7 @@ pub fn serialize_stage_cuts(
     builder.push_slot_always(STAGE_CUTS_FIELD_CUTS, cuts_vec);
     builder.push_slot_always(STAGE_CUTS_FIELD_ACTIVE_CUT_INDICES, active_vec);
     builder.push_slot_always::<u32>(STAGE_CUTS_FIELD_POPULATED_COUNT, populated_count);
+    builder.push_slot_always(STAGE_CUTS_FIELD_ENTITY_MANIFEST, manifest_vec);
 
     let root_offset = builder.end_table(root);
     builder.finish_minimal(root_offset);
@@ -200,16 +231,25 @@ pub fn serialize_stage_basis(record: &PolicyBasisRecord<'_>) -> Vec<u8> {
 #[must_use]
 #[allow(clippy::cast_possible_truncation)]
 pub fn serialize_stage_states(payload: &StageStatesPayload<'_>) -> Vec<u8> {
-    let estimated = 64 + std::mem::size_of_val(payload.data);
+    let estimated =
+        64 + std::mem::size_of_val(payload.data) + payload.entity_manifest.len() * 32usize;
     let mut builder = FlatBufferBuilder::with_capacity(estimated);
 
+    let manifest_offsets: Vec<WIPOffset<flatbuffers::TableFinishedWIPOffset>> = payload
+        .entity_manifest
+        .iter()
+        .map(|s| build_entity_slot_table(&mut builder, s))
+        .collect();
+
     let data_vec = builder.create_vector(payload.data);
+    let manifest_vec = builder.create_vector(&manifest_offsets);
 
     let root = builder.start_table();
     builder.push_slot_always::<u32>(STATES_FIELD_STAGE_ID, payload.stage_id);
     builder.push_slot_always::<u32>(STATES_FIELD_STATE_DIMENSION, payload.state_dimension);
     builder.push_slot_always::<u32>(STATES_FIELD_COUNT, payload.count);
     builder.push_slot_always(STATES_FIELD_DATA, data_vec);
+    builder.push_slot_always(STATES_FIELD_ENTITY_MANIFEST, manifest_vec);
 
     let root_offset = builder.end_table(root);
     builder.finish_minimal(root_offset);
@@ -392,6 +432,72 @@ fn read_table_vector_positions(buf: &[u8], vec_pos: usize) -> Option<Vec<usize>>
     Some(positions)
 }
 
+/// Read an `entity_manifest` table-vector at vtable `slot`, mirroring the cuts
+/// read block. An absent field yields an empty `Vec` (graceful absence).
+fn read_entity_manifest(
+    buf: &[u8],
+    table_pos: usize,
+    vtable_pos: usize,
+    slot: u16,
+    ctx: &str,
+) -> Result<Vec<EntitySlot>, OutputError> {
+    let Some(field_pos) = field_pos(buf, table_pos, vtable_pos, slot) else {
+        return Ok(Vec::new());
+    };
+    let vec_pos = follow_uoffset(buf, field_pos).ok_or_else(|| {
+        OutputError::serialization(ctx, "invalid uoffset for entity_manifest vector")
+    })?;
+    let nested_positions = read_table_vector_positions(buf, vec_pos).ok_or_else(|| {
+        OutputError::serialization(ctx, "entity_manifest vector header truncated or corrupt")
+    })?;
+
+    let mut out = Vec::with_capacity(nested_positions.len());
+    for (idx, &slot_table_pos) in nested_positions.iter().enumerate() {
+        let entry = deserialize_entity_slot_table(buf, slot_table_pos).ok_or_else(|| {
+            OutputError::serialization(ctx, format!("entity_slot table {idx} truncated or corrupt"))
+        })?;
+        out.push(entry);
+    }
+    Ok(out)
+}
+
+fn deserialize_entity_slot_table(buf: &[u8], slot_table_pos: usize) -> Option<EntitySlot> {
+    let vtable_pos = resolve_vtable_pos(buf, slot_table_pos)?;
+
+    let entity_type = field_pos(
+        buf,
+        slot_table_pos,
+        vtable_pos,
+        ENTITY_SLOT_FIELD_ENTITY_TYPE,
+    )
+    .and_then(|p| buf.get(p).copied())
+    .unwrap_or(0);
+
+    let entity_id = field_pos(buf, slot_table_pos, vtable_pos, ENTITY_SLOT_FIELD_ENTITY_ID)
+        .and_then(|p| read_i32_le(buf, p))
+        .unwrap_or(0);
+
+    let subindex = field_pos(buf, slot_table_pos, vtable_pos, ENTITY_SLOT_FIELD_SUBINDEX)
+        .and_then(|p| read_u32_le(buf, p))
+        .unwrap_or(0);
+
+    let was_active = field_pos(
+        buf,
+        slot_table_pos,
+        vtable_pos,
+        ENTITY_SLOT_FIELD_WAS_ACTIVE,
+    )
+    .and_then(|p| read_bool_byte(buf, p))
+    .unwrap_or(false);
+
+    Some(EntitySlot {
+        entity_type,
+        entity_id,
+        subindex,
+        was_active,
+    })
+}
+
 // ── Deserializers ─────────────────────────────────────────────────────────────
 
 /// Deserialize a `StageCuts` `FlatBuffers` buffer into an owned [`StageCutsReadResult`].
@@ -415,7 +521,7 @@ fn read_table_vector_positions(buf: &[u8], vec_pos: usize) -> Option<Vec<usize>>
 ///     coefficients: &[1.0, 2.0, 3.0],
 ///     is_active: true,
 /// };
-/// let buf = serialize_stage_cuts(2, 3, 100, 0, &[cut], &[0], 1);
+/// let buf = serialize_stage_cuts(2, 3, 100, 0, &[cut], &[0], 1, &[]);
 /// let result = deserialize_stage_cuts(&buf).expect("round-trip must succeed");
 /// assert_eq!(result.stage_id, 2);
 /// assert_eq!(result.cuts.len(), 1);
@@ -478,6 +584,14 @@ pub fn deserialize_stage_cuts(buf: &[u8]) -> Result<StageCutsReadResult, OutputE
         Vec::new()
     };
 
+    let entity_manifest = read_entity_manifest(
+        buf,
+        table_pos,
+        vtable_pos,
+        STAGE_CUTS_FIELD_ENTITY_MANIFEST,
+        ctx,
+    )?;
+
     Ok(StageCutsReadResult {
         stage_id,
         state_dimension,
@@ -485,6 +599,7 @@ pub fn deserialize_stage_cuts(buf: &[u8]) -> Result<StageCutsReadResult, OutputE
         warm_start_count,
         populated_count,
         cuts,
+        entity_manifest,
     })
 }
 
@@ -652,11 +767,20 @@ pub fn deserialize_stage_states(buf: &[u8]) -> Result<StageStatesReadResult, Out
         Vec::new()
     };
 
+    let entity_manifest = read_entity_manifest(
+        buf,
+        table_pos,
+        vtable_pos,
+        STATES_FIELD_ENTITY_MANIFEST,
+        ctx,
+    )?;
+
     Ok(StageStatesReadResult {
         stage_id,
         state_dimension,
         count,
         data,
+        entity_manifest,
     })
 }
 
