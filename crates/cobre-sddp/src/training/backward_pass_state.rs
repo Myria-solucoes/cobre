@@ -689,7 +689,7 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
     // Pool `t`'s cut-state projection (sized from stage `t+1`'s state_config):
     // the dimension this stage's extracted subgradient and per-stage backward
     // buffers carry. Equals the global state for an all-enabled study.
-    let cut_state_layout = &training_ctx.cut_state_layouts[t];
+    let cut_state_projection = &training_ctx.cut_state_layouts[t];
     let num_stages = training_ctx.horizon.num_stages();
     let successor = t + 1;
 
@@ -730,7 +730,7 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
     let batch_start = Instant::now();
     let template_num_rows = ctx.templates[successor].num_rows;
     // Rendering pool `successor`'s cuts into stage `successor`'s LP uses that
-    // pool's own projection — NOT `cut_state_layout` (pool `t`'s, sized for
+    // pool's own projection — NOT `cut_state_projection` (pool `t`'s, sized for
     // extraction at stage `successor`).
     let successor_cut_layout = &training_ctx.cut_state_layouts[successor];
     build_delta_cut_row_batch_into(
@@ -766,7 +766,7 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
         cut_activity_tolerance: inputs.cut_activity_tolerance,
         successor_populated_count: inputs.fcf.pools[successor].populated_count,
         successor_pool: &inputs.fcf.pools[successor],
-        cut_state: cut_state_layout,
+        cut_state: cut_state_projection,
     };
 
     let basis_slices = inputs
@@ -809,7 +809,7 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
         let range = cut.coefficients_range.clone();
         let arena = &inputs.workspaces[*w].backward_accum.agg_arena;
         debug_assert!(
-            range.len() == cut_state_layout.n_state() && range.end <= arena.len(),
+            range.len() == cut_state_projection.n_state() && range.end <= arena.len(),
             "coefficients_range must span exactly the pool's cut n_state and lie within the worker arena"
         );
         inputs.fcf.add_cut(
@@ -887,7 +887,7 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
     basis_slices: Vec<BasisStoreSliceMut<'_>>,
 ) -> Vec<Result<(usize, Vec<StagedCut>), SddpError>> {
     let n_openings = succ.probabilities.len();
-    // Per-stage cut dimension (pool `t`'s `CutStateLayout`): the length the
+    // Per-stage cut dimension (pool `t`'s `CutStateProjection`): the length the
     // extracted subgradient, every per-opening outcome buffer, the aggregation
     // buffer, and the arena stride must all carry for this stage. Buffers are
     // reused across stages within a worker, so they are resized to EXACTLY this

@@ -4,7 +4,7 @@ use cobre_solver::RowBatch;
 
 use crate::cut::FutureCostFunction;
 use crate::cut::row::push_scaled_coefficient;
-use crate::indexer::{CutStateLayout, StateLayout};
+use crate::indexer::{CutStateProjection, StateLayout};
 
 /// Fill a pre-allocated [`RowBatch`] with only the Benders cut rows generated
 /// in `current_iteration`, for appending to a baked template via `add_rows`.
@@ -27,7 +27,7 @@ pub fn build_delta_cut_row_batch_into(
     fcf: &FutureCostFunction,
     stage: usize,
     state: &StateLayout,
-    cut_state: &CutStateLayout,
+    cut_state: &CutStateProjection,
     col_scale: &[f64],
     current_iteration: u64,
 ) {

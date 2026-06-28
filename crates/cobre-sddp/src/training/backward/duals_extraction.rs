@@ -6,7 +6,7 @@
 
 use cobre_solver::SolutionView;
 
-use crate::indexer::CutStateLayout;
+use crate::indexer::CutStateProjection;
 
 use super::SuccessorSpec;
 
@@ -19,7 +19,7 @@ use super::SuccessorSpec;
 /// `[template_num_rows, template_num_rows + num_cuts)`.
 pub(crate) fn extract_duals_from_view(
     view: &SolutionView<'_>,
-    cut_state: &CutStateLayout,
+    cut_state: &CutStateProjection,
     col_scale: &[f64],
     succ: &SuccessorSpec<'_>,
     state_duals: &mut Vec<f64>,
@@ -66,7 +66,7 @@ pub(crate) fn extract_duals_from_view(
 /// cut-row→slot mapping does not apply.
 pub(crate) fn extract_state_duals_only(
     view: &SolutionView<'_>,
-    cut_state: &CutStateLayout,
+    cut_state: &CutStateProjection,
     col_scale: &[f64],
     state_duals: &mut Vec<f64>,
 ) -> f64 {
@@ -98,7 +98,7 @@ mod tests {
     use cobre_solver::SolutionView;
 
     use super::extract_state_duals_only;
-    use crate::indexer::{CutStateLayout, StateLayout};
+    use crate::indexer::{CutStateProjection, StateLayout};
     use cobre_core::temporal::StageStateConfig;
 
     const ALL_ENABLED: StageStateConfig = StageStateConfig {
@@ -129,12 +129,12 @@ mod tests {
         }
     }
 
-    /// Storage-only `CutStateLayout` (`N=3, L=2`): extraction yields an `N`-length
+    /// Storage-only `CutStateProjection` (`N=3, L=2`): extraction yields an `N`-length
     /// subgradient reading exactly the storage columns `[0, N)`, no lag entries.
     #[test]
     fn storage_only_yields_n_length_subgradient_with_storage_columns() {
         let global = state_layout(3, 2);
-        let cut_state = CutStateLayout::new(&global, STORAGE_ONLY);
+        let cut_state = CutStateProjection::new(&global, STORAGE_ONLY);
         assert_eq!(cut_state.n_state(), 3);
 
         let rc: Vec<f64> = (0..=global.theta).map(|c| c as f64).collect();
@@ -153,13 +153,13 @@ mod tests {
         }
     }
 
-    /// All-enabled `CutStateLayout` reproduces the pre-change global-loop result:
+    /// All-enabled `CutStateProjection` reproduces the pre-change global-loop result:
     /// `n_state()` equals the global `n_state` and every slot reads the same LP
     /// column the global `StateLayout` resolver would.
     #[test]
     fn all_enabled_reproduces_global_loop_result() {
         let global = state_layout(3, 2);
-        let cut_state = CutStateLayout::new(&global, ALL_ENABLED);
+        let cut_state = CutStateProjection::new(&global, ALL_ENABLED);
         assert_eq!(cut_state.n_state(), global.n_state);
 
         let rc: Vec<f64> = (0..=global.theta).map(|c| c as f64).collect();

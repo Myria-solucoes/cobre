@@ -59,7 +59,7 @@
 
 use cobre_solver::RowBatch;
 
-use crate::{cut::pool::CutPool, indexer::CutStateLayout, solver_stats::SolverStatsDelta};
+use crate::{cut::pool::CutPool, indexer::CutStateProjection, solver_stats::SolverStatsDelta};
 
 mod duals_extraction;
 mod lp_setup;
@@ -211,5 +211,5 @@ pub(crate) struct SuccessorSpec<'a> {
     /// `t`, sized from `stages[t+1].state_config`): the LP incoming-state columns
     /// dual extraction reads and the dimension every per-stage backward buffer is
     /// sized to. `n_state()` equals `successor_pool.state_dimension`.
-    pub(crate) cut_state: &'a CutStateLayout,
+    pub(crate) cut_state: &'a CutStateProjection,
 }

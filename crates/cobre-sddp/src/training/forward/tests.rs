@@ -3146,7 +3146,7 @@ fn test_build_delta_empty_pool() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &crate::indexer::test_fixtures::cut_state_projection(&state),
         &[],
         1,
     );
@@ -3183,7 +3183,7 @@ fn test_build_delta_single_iteration_filter() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &crate::indexer::test_fixtures::cut_state_projection(&state),
         &[],
         2,
     );
@@ -3217,7 +3217,7 @@ fn test_build_delta_skips_deactivated_cuts() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &crate::indexer::test_fixtures::cut_state_projection(&state),
         &[],
         1,
     );
@@ -3260,7 +3260,7 @@ fn test_build_delta_excludes_warm_start_cuts() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &crate::indexer::test_fixtures::cut_state_projection(&state),
         &[],
         1,
     );
@@ -3290,7 +3290,7 @@ fn test_build_delta_matches_full_batch_when_pool_has_only_current_iter() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &crate::indexer::test_fixtures::cut_state_projection(&state),
         &[],
     );
 
@@ -3300,7 +3300,7 @@ fn test_build_delta_matches_full_batch_when_pool_has_only_current_iter() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &crate::indexer::test_fixtures::cut_state_projection(&state),
         &[],
         1,
     );
@@ -3351,7 +3351,7 @@ fn test_build_delta_sparse_path() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &crate::indexer::test_fixtures::cut_state_projection(&state),
         &[],
         1,
     );
@@ -3379,7 +3379,7 @@ fn test_build_delta_reuses_out_buffer() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &crate::indexer::test_fixtures::cut_state_projection(&state),
         &[],
         1,
     );
@@ -3392,7 +3392,7 @@ fn test_build_delta_reuses_out_buffer() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &crate::indexer::test_fixtures::cut_state_projection(&state),
         &[],
         2,
     );
@@ -3425,7 +3425,7 @@ fn test_build_delta_clears_row_starts() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &crate::indexer::test_fixtures::cut_state_projection(&state),
         &[],
         1,
     );
@@ -3477,7 +3477,7 @@ fn build_delta_cut_row_batch_into_skips_warm_start_slots() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &crate::indexer::test_fixtures::cut_state_projection(&state),
         &[],
         1,
     );

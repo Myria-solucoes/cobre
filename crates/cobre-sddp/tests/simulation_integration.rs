@@ -1584,19 +1584,19 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
 }
 
 /// Local mirror of the gated `indexer::test_fixtures::all_enabled_cut_state_layouts`
-/// via the public `CutStateLayout::new`, so this external test crate (which cannot
+/// via the public `CutStateProjection::new`, so this external test crate (which cannot
 /// see the parent crate's `#[cfg(test)]` surface) builds the default all-enabled
 /// per-pool projection. Every pool projects the full global state, keeping the
 /// extracted subgradient bit-identical to the global-loop result.
 fn all_enabled_cut_state_layouts(
     global: &StateLayout,
     n_stages: usize,
-) -> Vec<cobre_sddp::indexer::CutStateLayout> {
+) -> Vec<cobre_sddp::indexer::CutStateProjection> {
     let full = StageStateConfig {
         storage: true,
         inflow_lags: true,
     };
     (0..n_stages)
-        .map(|_| cobre_sddp::indexer::CutStateLayout::new(global, full))
+        .map(|_| cobre_sddp::indexer::CutStateProjection::new(global, full))
         .collect()
 }

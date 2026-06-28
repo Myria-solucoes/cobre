@@ -11,7 +11,7 @@
 use cobre_solver::{RowBatch, SolverInterface};
 
 use crate::cut::FutureCostFunction;
-use crate::indexer::{CutStateLayout, StateLayout};
+use crate::indexer::{CutStateProjection, StateLayout};
 
 /// Push one cut-row coefficient: `-coeff * col_scale[j]` (sign negation per the
 /// module-doc Benders contract). Sole owner of the negate-and-scale rule, shared
@@ -47,14 +47,14 @@ pub(crate) fn push_scaled_coefficient(
 ///
 /// `coefficients` has length `cut_state.n_state()` (the pool's enabled cut-state
 /// dimensions); the row places each enabled non-padding coefficient onto the
-/// outgoing column [`CutStateLayout::render_pairs`] yields. `theta` is the global
+/// outgoing column [`CutStateProjection::render_pairs`] yields. `theta` is the global
 /// scalar column (stage-invariant).
 #[inline]
 pub(crate) fn push_cut_row(
     batch: &mut RowBatch,
     intercept: f64,
     coefficients: &[f64],
-    cut_state: &CutStateLayout,
+    cut_state: &CutStateProjection,
     theta_col: usize,
     col_scale: &[f64],
 ) {
@@ -102,7 +102,7 @@ pub fn build_cut_row_batch_into(
     fcf: &FutureCostFunction,
     stage: usize,
     state: &StateLayout,
-    cut_state: &CutStateLayout,
+    cut_state: &CutStateProjection,
     col_scale: &[f64],
 ) {
     batch.clear();
@@ -182,7 +182,7 @@ pub fn build_cut_row_batch(
     fcf: &FutureCostFunction,
     stage: usize,
     state: &StateLayout,
-    cut_state: &CutStateLayout,
+    cut_state: &CutStateProjection,
     col_scale: &[f64],
 ) -> RowBatch {
     let mut batch = RowBatch {
@@ -225,7 +225,7 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
     fcf: &FutureCostFunction,
     stage: usize,
     state: &StateLayout,
-    cut_state: &CutStateLayout,
+    cut_state: &CutStateProjection,
     col_scale: &[f64],
     row_map: &mut crate::cut::CutRowMap,
     batch_buf: &mut RowBatch,
@@ -308,7 +308,7 @@ pub fn append_slots_to_lp<S: SolverInterface>(
     pool: &crate::cut::CutPool,
     slots: &[u32],
     state: &StateLayout,
-    cut_state: &CutStateLayout,
+    cut_state: &CutStateProjection,
     col_scale: &[f64],
     row_map: &mut crate::cut::CutRowMap,
     batch_buf: &mut RowBatch,
@@ -384,7 +384,7 @@ mod tests {
 
     use super::{append_new_cuts_to_lp, build_cut_row_batch, build_cut_row_batch_into};
     use crate::cut::FutureCostFunction;
-    use crate::indexer::{CutStateLayout, StateLayout};
+    use crate::indexer::{CutStateProjection, StateLayout};
 
     /// Build a finalized storage+lag [`StateLayout`] (no anticipated thermals)
     /// with the full `max_par_order` lag stride for every hydro — the dense
@@ -397,8 +397,8 @@ mod tests {
 
     /// All-enabled per-pool projection of `state` — these builder tests use
     /// full-dimension pools, so the render reproduces the global nonzero mask.
-    fn cut_state(state: &StateLayout) -> CutStateLayout {
-        CutStateLayout::new(
+    fn cut_state(state: &StateLayout) -> CutStateProjection {
+        CutStateProjection::new(
             state,
             cobre_core::temporal::StageStateConfig {
                 storage: true,

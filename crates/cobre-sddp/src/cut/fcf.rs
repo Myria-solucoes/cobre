@@ -97,7 +97,7 @@ impl FutureCostFunction {
     /// cut state dimension, for the per-stage `state_config` projection.
     ///
     /// `pool_state_dimensions[t]` is the dimension of pool `t` (the count from
-    /// `CutStateLayout(stages[t+1].state_config)` for non-terminal pools; the
+    /// `CutStateProjection(stages[t+1].state_config)` for non-terminal pools; the
     /// global `n_state` for the terminal pool). `global_state_dimension` is
     /// `StateLayout::n_state` — the value stored in [`Self::state_dimension`] and
     /// used by the checkpoint/boundary paths, independent of any reduced pool.

@@ -3,7 +3,7 @@
 use cobre_core::{Stage, temporal::StageLagTransition};
 
 use crate::{
-    indexer::{CutStateLayout, StateLayout, StudyDimensions},
+    indexer::{CutStateProjection, StateLayout, StudyDimensions},
     lp_builder::StageTemplates,
     scaling_report::ScalingReport,
     simulation::EntityCounts,
@@ -43,7 +43,7 @@ pub struct StageData {
     /// The single owner of each pool's cut-state dimension; the backward pass
     /// reads it (via [`crate::context::TrainingContext::cut_state_layouts`]) to
     /// size pool `t`'s extracted subgradient and per-stage buffers.
-    pub(crate) cut_state_layouts: Vec<CutStateLayout>,
+    pub(crate) cut_state_layouts: Vec<CutStateProjection>,
 
     /// Study stages (id >= 0) in index order.
     pub(crate) stages: Vec<Stage>,

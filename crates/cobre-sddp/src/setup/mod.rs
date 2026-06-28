@@ -64,7 +64,7 @@ use crate::{
     error::SddpError,
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
-    indexer::{CutStateLayout, StateLayout, StudyDimensions},
+    indexer::{CutStateProjection, StateLayout, StudyDimensions},
     lp_builder::build_stage_templates,
     risk_measure::RiskMeasure,
     simulation::EntityCounts,
@@ -323,7 +323,7 @@ impl StudySetup {
         let cut_state_layouts = build_cut_state_layouts(system, &state_layout, n_stages);
         let pool_state_dimensions: Vec<usize> = cut_state_layouts
             .iter()
-            .map(CutStateLayout::n_state)
+            .map(CutStateProjection::n_state)
             .collect();
         let fcf = FutureCostFunction::new_per_stage(
             &pool_state_dimensions,
@@ -712,7 +712,7 @@ fn build_wired_indexer(
     (state, study_dims)
 }
 
-/// Build the per-pool [`CutStateLayout`], one per stage (pool) `t`, projecting
+/// Build the per-pool [`CutStateProjection`], one per stage (pool) `t`, projecting
 /// the global [`StateLayout`] onto the cut-state dimensions each pool carries.
 ///
 /// Pool `t` is sized by `stages[t + 1].state_config` — the cost-to-go this
@@ -735,14 +735,14 @@ fn build_cut_state_layouts(
     system: &cobre_core::System,
     state_layout: &StateLayout,
     n_stages: usize,
-) -> Vec<CutStateLayout> {
+) -> Vec<CutStateProjection> {
     let study_stages: Vec<&Stage> = system.stages().iter().filter(|s| s.id >= 0).collect();
     (0..n_stages)
         .map(|t| {
             if t + 1 < n_stages {
-                CutStateLayout::new(state_layout, study_stages[t + 1].state_config)
+                CutStateProjection::new(state_layout, study_stages[t + 1].state_config)
             } else {
-                CutStateLayout::new(state_layout, FULL_STATE_CONFIG)
+                CutStateProjection::new(state_layout, FULL_STATE_CONFIG)
             }
         })
         .collect()
@@ -6788,7 +6788,7 @@ mod tests {
             &fcf,
             0,
             state,
-            &crate::indexer::test_fixtures::cut_state_layout(state),
+            &crate::indexer::test_fixtures::cut_state_projection(state),
             &[],
         );
 
@@ -7181,7 +7181,7 @@ mod tests {
         assert_eq!(setup.fcf.state_dimension, global_n_state);
     }
 
-    /// One [`CutStateLayout`] is stored per pool and is reachable, with each
+    /// One [`CutStateProjection`] is stored per pool and is reachable, with each
     /// layout's `n_state()` equal to its pool's `state_dimension` (the pairing
     /// the backward pass relies on to extract duals at the right dimension).
     #[test]
@@ -7200,7 +7200,7 @@ mod tests {
         assert_eq!(
             setup.stage_data.cut_state_layouts.len(),
             setup.fcf.pools.len(),
-            "exactly one CutStateLayout per pool",
+            "exactly one CutStateProjection per pool",
         );
         for (t, layout) in setup.stage_data.cut_state_layouts.iter().enumerate() {
             assert_eq!(

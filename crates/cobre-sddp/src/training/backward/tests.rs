@@ -4451,7 +4451,7 @@ fn run_one_trial_point_with_stores(
         row_upper: Vec::new(),
     };
 
-    let cut_state_layout = crate::indexer::CutStateLayout::new(
+    let cut_state_projection = crate::indexer::CutStateProjection::new(
         &state,
         cobre_core::temporal::StageStateConfig {
             storage: true,
@@ -4471,7 +4471,7 @@ fn run_one_trial_point_with_stores(
         cut_activity_tolerance: 0.0,
         successor_populated_count: fcf.pools[1].populated_count,
         successor_pool: &fcf.pools[1],
-        cut_state: &cut_state_layout,
+        cut_state: &cut_state_projection,
     };
 
     // Derive a single-worker BasisStoreSliceMut covering all scenarios.
@@ -5008,7 +5008,7 @@ fn cut_coefficient_sign_convention_slot_zero_k2() {
         &fcf,
         1,
         &state,
-        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &crate::indexer::test_fixtures::cut_state_projection(&state),
         &[],
     );
 
@@ -5168,7 +5168,7 @@ fn run_dcs_backward_trial_point_at(
         &fcf,
         1,
         &state,
-        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &crate::indexer::test_fixtures::cut_state_projection(&state),
         &[],
     );
     let successor_active_slots: Vec<usize> = (0..fcf.pools[1].populated_count).collect();
@@ -5228,7 +5228,7 @@ fn run_dcs_backward_trial_point_at(
     };
 
     let probabilities = vec![1.0_f64];
-    let cut_state_layout = crate::indexer::CutStateLayout::new(
+    let cut_state_projection = crate::indexer::CutStateProjection::new(
         &state,
         cobre_core::temporal::StageStateConfig {
             storage: true,
@@ -5248,7 +5248,7 @@ fn run_dcs_backward_trial_point_at(
         cut_activity_tolerance: 0.0,
         successor_populated_count: fcf.pools[1].populated_count,
         successor_pool: &fcf.pools[1],
-        cut_state: &cut_state_layout,
+        cut_state: &cut_state_projection,
     };
 
     let mut basis_slices = basis_store.split_workers_mut(1);
@@ -5674,7 +5674,7 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
         &fcf,
         1,
         &state,
-        &crate::indexer::test_fixtures::cut_state_layout(&state),
+        &crate::indexer::test_fixtures::cut_state_projection(&state),
         &[],
     );
     let successor_active_slots: Vec<usize> = (0..fcf.pools[1].populated_count).collect();
@@ -5737,7 +5737,7 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
     // `baked_template` carries a baked cut row (num_rows = 2); the cut-free
     // base has template_num_rows = 1. This is the baking-active shape that
     // exposed the bug.
-    let cut_state_layout = crate::indexer::CutStateLayout::new(
+    let cut_state_projection = crate::indexer::CutStateProjection::new(
         &state,
         cobre_core::temporal::StageStateConfig {
             storage: true,
@@ -5757,7 +5757,7 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
         cut_activity_tolerance: 0.0,
         successor_populated_count: fcf.pools[1].populated_count,
         successor_pool: &fcf.pools[1],
-        cut_state: &cut_state_layout,
+        cut_state: &cut_state_projection,
     };
 
     let mut basis_slices = basis_store.split_workers_mut(1);

@@ -27,14 +27,14 @@
 
 use cobre_sddp::build_cut_row_batch_into;
 use cobre_sddp::cut::fcf::FutureCostFunction;
-use cobre_sddp::indexer::{CutStateLayout, StateLayout};
+use cobre_sddp::indexer::{CutStateProjection, StateLayout};
 use cobre_solver::RowBatch;
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
 /// All-enabled per-pool projection (full storage + lags) for the bench layouts.
-fn full_cut_state(state: &StateLayout) -> CutStateLayout {
-    CutStateLayout::new(
+fn full_cut_state(state: &StateLayout) -> CutStateProjection {
+    CutStateProjection::new(
         state,
         cobre_core::temporal::StageStateConfig {
             storage: true,

@@ -22,7 +22,7 @@ use crate::cut::{CutPool, CutRowMap};
 use crate::cut_selection::CutSelectionStrategy;
 use crate::error::SddpError;
 use crate::gemm::gemm_block;
-use crate::indexer::{CutStateLayout, StateLayout};
+use crate::indexer::{CutStateProjection, StateLayout};
 use crate::workspace::CapturedBasis;
 
 /// Dynamic Cut Selection hyperparameters.
@@ -181,7 +181,7 @@ impl DcsScoringScratch {
 /// (`x_raw = col_scale[c] · x_scaled`, empty ⇒ factor 1.0) — **mixing scaled
 /// state with raw coefficients is the classic silent bug.** Reduced index → LP
 /// column mapping uses the per-pool
-/// [`CutStateLayout::state_to_lp_outgoing_column`], so scoring spans the same
+/// [`CutStateProjection::state_to_lp_outgoing_column`], so scoring spans the same
 /// enabled cut-state dimensions the cut-row builder renders.
 ///
 /// # Batched scoring
@@ -224,7 +224,7 @@ impl DcsScoringScratch {
 pub fn score_violated_candidates(
     pool: &CutPool,
     state: &StateLayout,
-    cut_state: &CutStateLayout,
+    cut_state: &CutStateProjection,
     primal: &[f64],
     col_scale: &[f64],
     resident: &CutRowMap,
@@ -574,7 +574,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
     core: &StageTemplate,
     pool: &CutPool,
     state: &StateLayout,
-    cut_state: &CutStateLayout,
+    cut_state: &CutStateProjection,
     col_scale: &[f64],
     stored_basis: Option<&CapturedBasis>,
     initial_resident: &[u32],
@@ -761,12 +761,12 @@ mod tests {
     };
     use crate::cut::{CutPool, CutRowMap};
     use crate::cut_selection::{CutMetadata, CutSelectionStrategy};
-    use crate::indexer::{CutStateLayout, StateLayout};
+    use crate::indexer::{CutStateProjection, StateLayout};
 
     /// All-enabled per-pool projection of `idx`: every scoring/append test uses a
     /// full-dimension pool, so this reproduces the global outgoing render.
-    fn cut_state(idx: &StateLayout) -> CutStateLayout {
-        CutStateLayout::new(
+    fn cut_state(idx: &StateLayout) -> CutStateProjection {
+        CutStateProjection::new(
             idx,
             cobre_core::temporal::StageStateConfig {
                 storage: true,

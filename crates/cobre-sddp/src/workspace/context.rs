@@ -7,7 +7,7 @@ use cobre_stochastic::{ExternalScenarioLibrary, HistoricalScenarioLibrary, Stoch
 use crate::{
     dcs::DcsParams,
     horizon_mode::HorizonMode,
-    indexer::{CutStateLayout, StateLayout, StudyDimensions},
+    indexer::{CutStateProjection, StateLayout, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::StageGeometry,
     noise_key_diag::NoiseKeyDiag,
@@ -155,7 +155,7 @@ pub struct TrainingContext<'a> {
     /// extracted subgradient and every per-stage backward buffer. Empty on the
     /// non-training paths (simulation, lower-bound eval), which never extract
     /// cuts.
-    pub cut_state_layouts: &'a [CutStateLayout],
+    pub cut_state_layouts: &'a [CutStateProjection],
     /// Single owner of the study-invariant, non-state LP shape (non-state entity
     /// counts, optional-column presence flags, anticipated-thermal identity
     /// list). Nested contexts reach it transitively as `training_ctx.study_dims`.

@@ -1,7 +1,7 @@
 //! Storage-scoped projection of the global [`StateLayout`] for cut storage,
 //! extraction (incoming), and rendering (outgoing).
 //!
-//! [`CutStateLayout`] exposes only the cut-state dimensions a stage's
+//! [`CutStateProjection`] exposes only the cut-state dimensions a stage's
 //! [`StageStateConfig`] enables — storage and/or inflow lags — with anticipated
 //! state always included (it is not governed by [`StageStateConfig`]). It maps a
 //! cut slot index `j ∈ [0, n_state())` to the LP incoming-state column its
@@ -12,9 +12,10 @@
 //! storage → lag → anticipated order.
 //!
 //! The global [`StateLayout`] is unchanged: it still drives the LP. This is a
-//! projection used only for cut storage / extraction / rendering, so it carries
-//! no LP-build responsibility and never reimplements the global layout's column
-//! arithmetic — it delegates every column to
+//! projection **of** that layout used only for cut storage / extraction /
+//! rendering — it carries no LP-build responsibility, holds only an
+//! enabled-dimension mask plus precomputed column vectors, and never reimplements
+//! the global layout's column arithmetic: it delegates every column to
 //! [`StateLayout::state_to_lp_incoming_column`] (incoming) or
 //! [`StateLayout::lp_column_for_state`] (outgoing).
 
@@ -24,6 +25,14 @@ use super::StateLayout;
 
 /// A storage-scoped view of the global state vector exposing only the cut-state
 /// dimensions a stage enables, plus anticipated state (always included).
+///
+/// This is a projection **of** a [`StateLayout`], not a sibling layout: it
+/// delegates all column arithmetic to the global layout and carries only an
+/// enabled-dimension mask (the [`StageStateConfig`] applied at construction) plus
+/// the precomputed column vectors that mask selects. It is meaningless without the
+/// [`StateLayout`] it was built from, and it never drives the LP. The default
+/// (all-enabled) projection is index-identical to that global layout (see the
+/// default-identity contract below).
 ///
 /// This is the foundational projection that sizes a stage's cut pool to its
 /// enabled cut-state dimensions, gates which incoming-state columns dual
@@ -54,7 +63,7 @@ use super::StateLayout;
 /// dropped, matching the global `nonzero_state_indices`), because a cut row emits
 /// no entry for a structurally-zero padding coefficient.
 #[derive(Debug, Clone)]
-pub struct CutStateLayout {
+pub struct CutStateProjection {
     /// Precomputed LP incoming-state column for every cut slot `j`, read on the
     /// extraction hot path. Built by delegating to
     /// [`StateLayout::state_to_lp_incoming_column`] for each enabled dimension.
@@ -75,9 +84,15 @@ pub struct CutStateLayout {
     render_columns: Vec<usize>,
 }
 
-impl CutStateLayout {
+impl CutStateProjection {
     /// Project the global [`StateLayout`] onto the cut-state dimensions enabled by
     /// `state_config`, with anticipated state always included.
+    ///
+    /// The result is a projection **of** `global`: every column is delegated to
+    /// `global` ([`StateLayout::state_to_lp_incoming_column`] /
+    /// [`StateLayout::lp_column_for_state`]) and the projection retains only the
+    /// `state_config` mask plus the precomputed vectors. No column arithmetic is
+    /// reimplemented here.
     ///
     /// Dimensions are walked in storage → lag → anticipated order. A storage
     /// index `[0, N)` is included iff `state_config.storage`; an inflow-lag index
@@ -239,7 +254,7 @@ impl CutStateLayout {
 
 #[cfg(test)]
 mod tests {
-    use super::{CutStateLayout, StageStateConfig};
+    use super::{CutStateProjection, StageStateConfig};
     use crate::indexer::StateLayout;
 
     fn finalized(
@@ -275,7 +290,7 @@ mod tests {
     #[test]
     fn default_projection_is_identity() {
         let global = finalized(3, 2, 0, 0, vec![]);
-        let cut = CutStateLayout::new(&global, ALL_ENABLED);
+        let cut = CutStateProjection::new(&global, ALL_ENABLED);
 
         assert_eq!(global.n_state, 9);
         assert_eq!(cut.n_state(), global.n_state);
@@ -293,7 +308,7 @@ mod tests {
     #[test]
     fn storage_only_projection() {
         let global = finalized(3, 2, 0, 0, vec![]);
-        let cut = CutStateLayout::new(&global, STORAGE_ONLY);
+        let cut = CutStateProjection::new(&global, STORAGE_ONLY);
 
         assert_eq!(cut.n_state(), 3);
         for j in 0..3 {
@@ -313,7 +328,7 @@ mod tests {
     #[test]
     fn storage_only_with_anticipated_includes_anticipated() {
         let global = finalized(2, 1, 1, 2, vec![2]);
-        let cut = CutStateLayout::new(&global, STORAGE_ONLY);
+        let cut = CutStateProjection::new(&global, STORAGE_ONLY);
 
         assert_eq!(cut.n_state(), 4);
         for j in 0..2 {
@@ -338,7 +353,7 @@ mod tests {
     #[test]
     fn storage_disabled_begins_at_first_enabled_dimension() {
         let global = finalized(2, 1, 0, 0, vec![]);
-        let cut = CutStateLayout::new(
+        let cut = CutStateProjection::new(
             &global,
             StageStateConfig {
                 storage: false,
@@ -365,7 +380,7 @@ mod tests {
     #[test]
     fn default_render_matches_global_nonzero_mask() {
         let global = finalized(3, 2, 0, 0, vec![]);
-        let cut = CutStateLayout::new(&global, ALL_ENABLED);
+        let cut = CutStateProjection::new(&global, ALL_ENABLED);
 
         assert_eq!(cut.n_state(), global.n_state);
         for j in 0..global.n_state {
@@ -396,7 +411,7 @@ mod tests {
     #[test]
     fn storage_only_render_touches_only_storage_columns() {
         let global = finalized(3, 2, 0, 0, vec![]);
-        let cut = CutStateLayout::new(&global, STORAGE_ONLY);
+        let cut = CutStateProjection::new(&global, STORAGE_ONLY);
 
         assert_eq!(cut.n_state(), 3);
         assert_eq!(cut.render_len(), 3);
@@ -422,7 +437,7 @@ mod tests {
     fn render_drops_ar_padding_slots() {
         let lag_counts = [1usize, 3];
         let global = StateLayout::new(2, 3, 0, 0, vec![], &lag_counts);
-        let cut = CutStateLayout::new(&global, ALL_ENABLED);
+        let cut = CutStateProjection::new(&global, ALL_ENABLED);
 
         // Full enabled range spans every dimension (incl. padding).
         assert_eq!(cut.n_state(), global.n_state);

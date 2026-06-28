@@ -1575,7 +1575,7 @@ mod tests {
         horizon: &'a HorizonMode,
         study_dims: &'a StudyDimensions,
         state: &'a StateLayout,
-        cut_state_layouts: &'a [crate::indexer::CutStateLayout],
+        cut_state_layouts: &'a [crate::indexer::CutStateProjection],
         stochastic: &'a StochasticContext,
         initial_state: &'a [f64],
         stages: &'a [Stage],

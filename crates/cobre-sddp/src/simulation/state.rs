@@ -494,7 +494,7 @@ fn rebake_templates_if_needed(
     fcf: &FutureCostFunction,
     ctx: &StageContext<'_>,
     state: &crate::indexer::StateLayout,
-    cut_state_layouts: &[crate::indexer::CutStateLayout],
+    cut_state_layouts: &[crate::indexer::CutStateProjection],
     num_stages: usize,
     caller_baked: Option<&[StageTemplate]>,
     bake_batch: &mut RowBatch,
