@@ -14,7 +14,7 @@
 /// calling crate, not interpreted here.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EntitySlot {
-    /// Raw `EntityType` enum byte (`0`/`1`/`2`).
+    /// Raw `EntityType` enum byte.
     pub entity_type: u8,
     /// Owning entity's id; `int32` because a sentinel id can be `-1`.
     pub entity_id: i32,
@@ -81,6 +81,7 @@ pub struct StageStatesPayload<'a> {
     /// Flat data buffer: `count * state_dimension` f64 elements.
     pub data: &'a [f64],
     /// Per-slot entity identity; length equals `state_dimension` when populated.
+    /// An empty slice means no manifest is written.
     pub entity_manifest: &'a [EntitySlot],
 }
 
@@ -103,6 +104,7 @@ pub struct StageCutsPayload<'a> {
     /// Number of filled slots in the pool.
     pub populated_count: u32,
     /// Per-slot entity identity; length equals `state_dimension` when populated.
+    /// An empty slice means no manifest is written.
     pub entity_manifest: &'a [EntitySlot],
 }
 

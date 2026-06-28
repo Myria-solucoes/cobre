@@ -147,10 +147,9 @@ pub fn build_basis_cache_from_checkpoint(
     cache
 }
 
-/// Positional entity identity of one state-vector slot: the triple that must
-/// match between a boundary cut and the current study for the cut's coefficient
-/// to be attached to the same state variable. `was_active` is excluded — it is a
-/// cross-study diagnostic, not part of identity.
+/// Positional identity of one state-vector slot; `was_active` is excluded —
+/// adding it would reject a cut whose entity merely changed activity across
+/// studies.
 fn slot_identity(slot: &cobre_io::EntitySlot) -> (u8, i32, u32) {
     (slot.entity_type, slot.entity_id, slot.subindex)
 }

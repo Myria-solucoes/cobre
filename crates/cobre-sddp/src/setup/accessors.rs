@@ -76,8 +76,7 @@ impl StudySetup {
     /// Delegates to
     /// [`build_stage_entity_manifest`](crate::policy_export::build_stage_entity_manifest),
     /// the single owner of identity resolution shared with the checkpoint writer,
-    /// against the terminal pool's projection
-    /// (`cut_state_layouts[num_stages - 1]`). The caller passes the result to
+    /// against the terminal stage's projection. The caller passes the result to
     /// [`load_boundary_cuts`](crate::load_boundary_cuts) so a boundary cut whose
     /// slot identity diverges from the current study is rejected rather than
     /// silently mis-loaded.

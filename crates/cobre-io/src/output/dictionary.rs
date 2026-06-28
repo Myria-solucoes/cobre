@@ -171,7 +171,6 @@ fn write_entities_csv(path: &Path, system: &System) -> Result<(), OutputError> {
         .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
     }
 
-    // Buses (code 2) — bus_id = own id
     for b in system.buses() {
         wtr.write_record(&[
             ENTITY_TYPE_BUS.to_string(),
@@ -183,7 +182,7 @@ fn write_entities_csv(path: &Path, system: &System) -> Result<(), OutputError> {
         .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
     }
 
-    // Lines (code 3) — bus_id = -1 (connects two buses)
+    // bus_id is -1: a line connects two buses, so it has no single owning bus.
     for l in system.lines() {
         wtr.write_record(&[
             ENTITY_TYPE_LINE.to_string(),
@@ -750,7 +749,7 @@ fn write_bounds_parquet(
             entity_type_codes.append_value($entity_type);
             entity_ids.append_value($entity_id);
             stage_ids.append_value($stage_id);
-            block_ids.append_null(); // block_id always null (stage-level bounds)
+            block_ids.append_null();
             bound_type_codes.append_value($bound_type);
             bound_values.append_value($value);
         };

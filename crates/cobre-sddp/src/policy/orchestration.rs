@@ -31,7 +31,6 @@ use crate::stochastic_summary::{
 };
 
 use cobre_core::System;
-use cobre_core::scenario::LoadModel;
 
 // ── Policy checkpoint ─────────────────────────────────────────────────────────
 
@@ -59,8 +58,7 @@ pub struct CheckpointParams {
 /// bindings — both call this function so the on-disk format and write
 /// ordering (including the per-slot entity manifest) cannot drift between them.
 ///
-/// `system` is passed explicitly because [`StudySetup`] does not own it; the
-/// future cost function and per-pool cut-state projections come from `setup`.
+/// `system` is passed explicitly because [`StudySetup`] does not own it.
 ///
 /// # Errors
 ///
@@ -199,10 +197,7 @@ pub fn export_stochastic_artifacts(
         on_warning(&format!("correlation: {e}"));
     }
 
-    let has_stochastic_load = system
-        .load_models()
-        .iter()
-        .any(|m: &LoadModel| m.std_mw > 0.0);
+    let has_stochastic_load = system.load_models().iter().any(|m| m.std_mw > 0.0);
     if has_stochastic_load {
         let load_rows: Vec<LoadSeasonalStatsRow> = system
             .load_models()
