@@ -943,6 +943,9 @@ mod tests {
     /// stage's remote cuts deserialize with the correct per-stage coefficient
     /// count and exact bit-for-bit intercepts/coefficients.
     #[test]
+    // RATIONALE: one test drives two stages of differing dimension through the
+    // shared recv_buf so the per-stage-stride contract is exercised end-to-end;
+    // splitting per stage would not share the buffer and so would not test it.
     #[allow(clippy::too_many_lines)]
     fn sync_packed_records_two_stages_differing_dimension_per_stage_stride() {
         /// 3-rank mock; rank 0 is local. `allgatherv` copies only the rank-0
@@ -1011,7 +1014,7 @@ mod tests {
         // sync and assert per-stage recovery.
         let remote_iteration = 1u64;
 
-        // ── Stage 0 (dimension 2) ────────────────────────────────────────────
+        // Stage 0 (dimension 2).
         let s0_record_size = cut_wire_size(dims[0]); // 41
         fcf.add_cut(0, remote_iteration, 0, 50.0, &[0.1, 0.2]);
         fcf.add_cut(0, remote_iteration, 1, 60.0, &[0.3, 0.4]);
@@ -1075,7 +1078,7 @@ mod tests {
         assert_eq!(s0_recovered_r1[0].1[0].to_bits(), 1.0_f64.to_bits());
         assert_eq!(s0_recovered_r1[0].1[1].to_bits(), 2.0_f64.to_bits());
 
-        // ── Stage 1 (dimension 5) ────────────────────────────────────────────
+        // Stage 1 (dimension 5).
         let s1_record_size = cut_wire_size(dims[1]); // 65
         fcf.add_cut(1, remote_iteration, 0, 70.0, &[1.1, 1.2, 1.3, 1.4, 1.5]);
         fcf.add_cut(1, remote_iteration, 1, 80.0, &[2.1, 2.2, 2.3, 2.4, 2.5]);

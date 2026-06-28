@@ -157,9 +157,9 @@ pub(super) fn check_inflow_lags_vs_par_order(data: &ParsedData, ctx: &mut Valida
         None::<&str>,
         format!(
             "inflow lags are disabled on all study stages (state_variables.inflow_lags = false) \
-             despite a PAR(p>0) inflow model (AR order {max_order}); cuts will be storage-only. \
-             This is intended for boundary compatibility (e.g. DECOMP storage-only cuts); \
-             otherwise it is likely a misconfiguration"
+             despite a PAR(p>0) inflow model (AR order {max_order}), so the inflow-lag dimensions \
+             are omitted from the per-stage state. This is a valid configuration for external-solver \
+             interoperability; otherwise it is likely a misconfiguration"
         ),
     );
 }

@@ -3557,7 +3557,7 @@ mod tests {
 
         // minimal_system cannot override IC, so its past_inflows is empty and both
         // lag slots stay 0.0 — the same outcome as past_inflows for an unknown hydro.
-        let system = { minimal_system(2) };
+        let system = minimal_system(2);
         let layout = layout_for_lag_test(1, 2);
 
         let state = build_initial_state(

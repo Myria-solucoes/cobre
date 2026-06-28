@@ -1259,18 +1259,22 @@ mod tests {
     /// Per-row reference for the batched scorer: replays the EXACT filter / gather
     /// order of `score_violated_candidates`, but scores each surviving candidate
     /// with its own `gemm_block(coef, x*, 1, n_state, 1, ..)` call (the old
-    /// per-candidate path). Returns `(alpha_bits_in_gather_order, out_selected)`.
+    /// per-candidate path). The reduced-index → LP-column mapping uses the per-pool
+    /// `cut_state` projection (`n_state` and `state_to_lp_outgoing_column`), mirroring
+    /// production so the reference is a true oracle for a reduced projection, not
+    /// only the all-enabled case. Returns `(alpha_bits_in_gather_order, out_selected)`.
     #[allow(clippy::cast_possible_truncation)]
     fn per_row_reference(
         pool: &CutPool,
         idx: &StateLayout,
+        cut_state: &CutStateProjection,
         primal: &[f64],
         col_scale: &[f64],
         resident: &CutRowMap,
         p: &DcsParams,
         current_iteration: u64,
     ) -> (Vec<u64>, Vec<u32>) {
-        let n_state = idx.n_state;
+        let n_state = cut_state.n_state();
         let theta = idx.theta;
         let theta_raw = if col_scale.is_empty() {
             primal[theta]
@@ -1279,7 +1283,7 @@ mod tests {
         };
         let mut unscaled_state = Vec::with_capacity(n_state);
         for j in 0..n_state {
-            let c = idx.state_to_lp_column(j);
+            let c = cut_state.state_to_lp_outgoing_column(j);
             let x_raw = if col_scale.is_empty() {
                 primal[c]
             } else {
@@ -1376,6 +1380,7 @@ mod tests {
         let (ref_alpha_bits, ref_selected) = per_row_reference(
             &pool,
             &idx,
+            &cut_state(&idx),
             &primal,
             &col_scale,
             &resident,

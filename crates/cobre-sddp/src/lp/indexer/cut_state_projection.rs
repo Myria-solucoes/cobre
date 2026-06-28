@@ -65,14 +65,12 @@ use super::StateLayout;
 #[derive(Debug, Clone)]
 pub struct CutStateProjection {
     /// Precomputed LP incoming-state column for every cut slot `j`, read on the
-    /// extraction hot path. Built by delegating to
-    /// [`StateLayout::state_to_lp_incoming_column`] for each enabled dimension.
+    /// extraction hot path.
     incoming_columns: Vec<usize>,
 
     /// Precomputed LP outgoing-state column for every cut slot `j`, read on the
-    /// DCS scoring hot path. Built by delegating to
-    /// [`StateLayout::lp_column_for_state`] for each enabled dimension, parallel
-    /// to [`Self::incoming_columns`] (same `j`, same enabled dimension).
+    /// DCS scoring hot path; parallel to [`Self::incoming_columns`] (same `j`,
+    /// same enabled dimension).
     outgoing_columns: Vec<usize>,
 
     /// Reduced coefficient index `j ∈ [0, n_state())` for each render pair, in
@@ -97,12 +95,9 @@ impl CutStateProjection {
     /// Dimensions are walked in storage → lag → anticipated order. A storage
     /// index `[0, N)` is included iff `state_config.storage`; an inflow-lag index
     /// `[N, N*(1+L))` iff `state_config.inflow_lags`; an anticipated-state index
-    /// `[N*(1+L), N*(1+L) + A*k_max)` always. For every included global index the
-    /// incoming column comes from [`StateLayout::state_to_lp_incoming_column`] and
-    /// the outgoing column from [`StateLayout::lp_column_for_state`]; the render
-    /// subset additionally keeps only indices in `global.nonzero_state_indices`
-    /// (padding slots dropped), so the default projection reproduces the global
-    /// `nonzero_state_indices` render exactly.
+    /// `[N*(1+L), N*(1+L) + A*k_max)` always. The render subset keeps only indices
+    /// in `global.nonzero_state_indices` (padding slots dropped), so the default
+    /// projection reproduces the global `nonzero_state_indices` render exactly.
     #[must_use]
     pub fn new(global: &StateLayout, state_config: StageStateConfig) -> Self {
         let n = global.hydro_count;
@@ -121,15 +116,16 @@ impl CutStateProjection {
                         render_columns: &mut Vec<usize>,
                         g: usize| {
             let reduced_j = incoming_columns.len();
+            let outgoing = global.lp_column_for_state(g);
             incoming_columns.push(global.state_to_lp_incoming_column(g));
-            outgoing_columns.push(global.lp_column_for_state(g));
+            outgoing_columns.push(outgoing);
             // Render only the nonzero (non-padding) subset: a padding slot's
             // coefficient is structurally zero, so the row emits no entry for it —
             // and dropping it (not zero-filling) is what keeps the default
             // projection bit-identical to the global nonzero_state_indices render.
             if global.nonzero_state_indices.binary_search(&g).is_ok() {
                 render_coeff_indices.push(reduced_j);
-                render_columns.push(global.lp_column_for_state(g));
+                render_columns.push(outgoing);
             }
         };
 
@@ -205,11 +201,9 @@ impl CutStateProjection {
     /// column — the column its coefficient is dotted against in DCS scoring,
     /// indexing the enabled subset in storage → lag → anticipated order.
     ///
-    /// The per-pool analogue of [`StateLayout::lp_column_for_state`]: it spans the
-    /// full enabled range (including padding slots) because DCS dot-product
-    /// scoring reads every coefficient entry. For rendering a cut into LP rows use
-    /// [`Self::render_pairs`] instead, which drops the structurally-zero padding
-    /// slots.
+    /// The per-pool analogue of [`StateLayout::lp_column_for_state`], spanning the
+    /// full enabled range (padding included); see the struct-level "Incoming vs
+    /// outgoing vs render" section for the contrast with [`Self::render_pairs`].
     ///
     /// # Panics (debug builds only)
     ///

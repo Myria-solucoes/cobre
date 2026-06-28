@@ -45,9 +45,8 @@ pub struct FutureCostFunction {
     /// One cut pool per stage, indexed 0-based.
     pub pools: Vec<CutPool>,
 
-    /// Global state-vector length (`StateLayout::n_state`). Each pool's own
-    /// `state_dimension` may be smaller; this is the cross-cutting value the
-    /// checkpoint metadata and boundary-cut injection key off.
+    /// Global state-vector length (`StateLayout::n_state`); a pool's own
+    /// `state_dimension` may be smaller.
     pub state_dimension: usize,
 
     /// Forward passes per training iteration. Immutable after construction.
@@ -435,7 +434,6 @@ mod tests {
 
     #[test]
     fn new_uniform_zero_counts_matches_old_scalar_zero_behavior() {
-        // Verifies that &[0, 0, 0] gives identical behavior to old warm_start_count = 0
         let fcf = FutureCostFunction::new(3, 4, 2, 10, &[0, 0, 0]);
         for pool in &fcf.pools {
             // capacity = 0 + 10*2 = 20

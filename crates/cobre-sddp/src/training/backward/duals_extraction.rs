@@ -93,7 +93,7 @@ pub(crate) fn extract_state_duals_only(
 }
 
 #[cfg(test)]
-#[allow(clippy::float_cmp, clippy::cast_precision_loss)]
+#[allow(clippy::cast_precision_loss)]
 mod tests {
     use cobre_solver::SolutionView;
 
@@ -118,12 +118,12 @@ mod tests {
     /// Build a `SolutionView` whose `reduced_costs[col]` equals `col as f64`, so
     /// an extracted subgradient at LP column `col` is exactly `col as f64`
     /// (`col_scale` empty ⇒ raw rc).
-    fn indexed_view(n_cols: usize, reduced_costs: &[f64]) -> SolutionView<'_> {
+    fn indexed_view(reduced_costs: &[f64]) -> SolutionView<'_> {
         SolutionView {
             objective: 0.0,
             primal: &[],
             dual: &[],
-            reduced_costs: &reduced_costs[..n_cols],
+            reduced_costs,
             iterations: 0,
             solve_time_seconds: 0.0,
         }
@@ -138,7 +138,7 @@ mod tests {
         assert_eq!(cut_state.n_state(), 3);
 
         let rc: Vec<f64> = (0..=global.theta).map(|c| c as f64).collect();
-        let view = indexed_view(rc.len(), &rc);
+        let view = indexed_view(&rc);
         let mut state_duals = Vec::new();
 
         let _ = extract_state_duals_only(&view, &cut_state, &[], &mut state_duals);
@@ -163,7 +163,7 @@ mod tests {
         assert_eq!(cut_state.n_state(), global.n_state);
 
         let rc: Vec<f64> = (0..=global.theta).map(|c| c as f64).collect();
-        let view = indexed_view(rc.len(), &rc);
+        let view = indexed_view(&rc);
 
         let mut via_cut_state = Vec::new();
         let _ = extract_state_duals_only(&view, &cut_state, &[], &mut via_cut_state);

@@ -36,8 +36,6 @@ pub fn build_delta_cut_row_batch_into(
     let n_cut_state = cut_state.n_state();
     let theta_col = state.theta;
 
-    // Count first: cheap scan that early-returns on the common zero-delta case
-    // before the heavier coefficient loop.
     let num_cuts: usize = fcf.pools[stage]
         .active_delta_cuts(current_iteration)
         .count();
@@ -66,10 +64,6 @@ pub fn build_delta_cut_row_batch_into(
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         batch.row_starts.push(nz_offset as i32);
 
-        // render_pairs maps each enabled non-padding reduced index to its outgoing
-        // LP column: identity for storage; for lag dimensions the outgoing state
-        // stores z_inflow at lag 0 and shifted incoming lags at lag 1+, so the cut
-        // references z_inflow and incoming lag l−1, not the outgoing slot.
         for (j, lp_col) in cut_state.render_pairs() {
             push_scaled_coefficient(batch, lp_col, coefficients[j], col_scale);
         }

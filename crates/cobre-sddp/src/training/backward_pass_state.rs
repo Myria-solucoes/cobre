@@ -277,11 +277,6 @@ impl BackwardPassState {
 
     /// Execute the backward pass for one training iteration on this rank.
     ///
-    /// Sweeps stages from `num_stages - 2` down to `0`. For each stage,
-    /// the trial-point loop is parallelised with static scenario partitioning.
-    /// Each worker generates cuts into a thread-local buffer, sorted by
-    /// trial-point index before FCF insertion.
-    ///
     /// # Errors
     ///
     /// Returns `Err(SddpError::Infeasible { .. })` when a stage LP has no
@@ -375,7 +370,6 @@ impl BackwardPassState {
         }
 
         let mut cuts_generated: usize = 0;
-        // Pre-size to (num_stages - 1): one entry per stage in the backward sweep.
         let mut stage_stats: Vec<(usize, Vec<StageWorkerOpeningDelta>)> =
             Vec::with_capacity(num_stages.saturating_sub(1));
         let mut state_exchange_ms: u64 = 0;
@@ -665,10 +659,6 @@ struct StageOutput {
 
 /// Execute one backward stage (index `t`, solving at successor `t + 1`).
 ///
-/// Performs state exchange, builds the successor LP batch, runs the parallel
-/// trial-point loop, inserts cuts, syncs cuts across ranks, syncs cut metadata,
-/// and collects per-worker solver statistics.
-///
 /// Returns a [`StageOutput`] accumulating all timing components and the cut
 /// entries for this stage.
 // RATIONALE: this function sequences ~9 disjoint phases (state exchange,
@@ -688,7 +678,7 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
     let cut_state = training_ctx.state;
     // Pool `t`'s cut-state projection (sized from stage `t+1`'s state_config):
     // the dimension this stage's extracted subgradient and per-stage backward
-    // buffers carry. Equals the global state for an all-enabled study.
+    // buffers carry.
     let cut_state_projection = &training_ctx.cut_state_layouts[t];
     let num_stages = training_ctx.horizon.num_stages();
     let successor = t + 1;
@@ -864,12 +854,6 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
 }
 
 /// Evaluate all trial points for a single backward stage, returning staged cuts.
-///
-/// This is the `BackwardPassState`-aware replacement for the free function of the
-/// same name in `backward.rs`. It receives the per-call buffers that are needed
-/// inside the rayon parallel region as individual parameters (rather than a
-/// `BackwardPassState` borrow) to avoid whole-struct borrow conflicts across the
-/// parallel closure boundary.
 // RATIONALE: 10 args are individually-borrowed slices passed through the rayon closure
 // boundary. Bundling them into a struct would require either cloning or an `Arc`, both of
 // which conflict with the zero-allocation HPC constraint for backward-pass hot code.
@@ -893,7 +877,7 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
     // reused across stages within a worker, so they are resized to EXACTLY this
     // each stage (not grown to a per-worker max) — a reduced stage following a
     // full one must shrink, or `write_opening_outcome`'s `copy_from_slice` reads
-    // stale full-length data. Equals the global `n_state` for an all-enabled study.
+    // stale full-length data.
     let cut_n_state = succ.cut_state.n_state();
     let pop = succ.successor_populated_count;
     let n_workers = workspaces.len().max(1);
