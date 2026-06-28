@@ -638,6 +638,7 @@ fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>
 /// # Examples
 ///
 /// ```
+/// use chrono::NaiveDate;
 /// use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
 /// use cobre_sddp::InflowNonNegativityMethod;
 /// use cobre_sddp::hydro_models::PrepareHydroModelsResult;
@@ -648,6 +649,7 @@ fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>
 /// let bus = Bus {
 ///     id: EntityId(1),
 ///     name: "B1".to_string(),
+///     operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
 ///     deficit_segments: vec![DeficitSegment { depth_mw: None, cost_per_mwh: 1000.0 }],
 ///     excess_cost: 0.0,
 /// };
