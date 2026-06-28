@@ -15,8 +15,6 @@ pub enum ContractType {
 
 /// Bilateral energy contract with an external system.
 ///
-/// Data-complete stub: contributes zero LP variables or constraints.
-///
 /// See Input System Entities SS1.9.7.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

@@ -27,9 +27,7 @@ pub(crate) fn extract_duals_from_view(
 ) -> f64 {
     let objective = view.objective;
 
-    // Unscale: the subgradient is rc_scaled / col_scale[col] — divided, not
-    // multiplied (the pin sets v_scaled = v_orig / col_scale; see
-    // fill_col_state_patches). Empty col_scale ⇒ raw rc.
+    // Divided, not multiplied (module-level contract). Empty col_scale ⇒ raw rc.
     state_duals.clear();
     for j in 0..cut_state.n_state() {
         let col = cut_state.state_to_lp_incoming_column(j);

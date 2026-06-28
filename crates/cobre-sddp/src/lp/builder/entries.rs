@@ -762,7 +762,6 @@ pub(super) fn fill_generic_constraint_entries(
             stage.blocks[entry.block_idx].duration_hours
         };
 
-        // 1. Set row bounds from sense and RHS bound value.
         match entry.sense {
             ConstraintSense::LessEqual => {
                 row_lower[row] = f64::NEG_INFINITY;
@@ -778,7 +777,6 @@ pub(super) fn fill_generic_constraint_entries(
             }
         }
 
-        // 2. Fill CSC matrix entries for each expression term.
         for term in &constraint.expression.terms {
             let pairs = resolve_variable_ref(
                 &term.variable,
@@ -802,13 +800,10 @@ pub(super) fn fill_generic_constraint_entries(
             }
         }
 
-        // 3. Set slack column bounds and CSC entries when slack is enabled.
         if let Some(plus_col) = entry.slack_plus_col {
             let penalty = constraint.slack.penalty.unwrap_or(0.0);
             let obj_coeff = penalty * block_hours;
 
-            // plus slack: [0, +INF), penalised in objective.
-            // col_lower is already 0.0 from vec initialisation.
             col_upper[plus_col] = f64::INFINITY;
             objective[plus_col] = obj_coeff;
 

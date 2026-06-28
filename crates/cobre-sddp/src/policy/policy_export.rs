@@ -26,14 +26,12 @@ const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
 /// Build the per-slot entity-identity manifest for one stage's cut pool: one
 /// [`EntitySlot`] per enabled cut-state dimension of `projection`.
 ///
-/// Slots are emitted in `projection`'s own storage → lag → anticipated order, so
-/// slot `j` describes the entity owning positional coefficient `j` — the order a
+/// Slots are emitted in `projection`'s storage → lag → anticipated order, so slot
+/// `j` describes the entity owning positional coefficient `j` — the order a
 /// consumer matches the manifest against the cut coefficients. Each slot is
 /// classified by the global [`StateLayout`] region containing its incoming-state
 /// column ([`CutStateProjection::state_to_lp_incoming_column`]), never by
-/// re-deriving column arithmetic. `stage_id` is the study `stage.id`; `was_active`
-/// is read from `hydro_operating_active` / `commissioning_active` — never a
-/// re-derived phase.
+/// re-deriving column arithmetic.
 ///
 /// # Panics (debug builds only)
 ///
@@ -497,7 +495,6 @@ mod tests {
         assert_eq!(manifest.len(), projection.n_state());
         assert_eq!(manifest.len(), 8);
 
-        // Storage block.
         assert_eq!(manifest[0].entity_type, ENTITY_TYPE_HYDRO_STORAGE);
         assert_eq!(manifest[0].entity_id, 1);
         assert_eq!(manifest[0].subindex, 0);

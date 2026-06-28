@@ -383,8 +383,7 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
         .resize(params.config.n_scenarios.max(1) as usize, 0_usize);
 
     // Build once per worker: eliminates the per-(scenario, stage) allocation that
-    // would otherwise occur inside extract_thermals / extract_hydros (e.g. 600k
-    // allocs for 10k scenarios × 60 stages).
+    // would otherwise occur inside extract_thermals / extract_hydros.
     let lookups = SimLookups::build(
         params.training_ctx.study_dims,
         params.ctx.geometry_per_stage,
@@ -579,8 +578,7 @@ mod tests {
 
     /// Assert that `all_costs` is ascending by `scenario_id` after a sequential
     /// `extend` from four workers covering 3 scenarios each (1-rank, 4-worker,
-    /// 12-scenario layout).  This mirrors AC1 without requiring a full solver
-    /// fixture: the ordering invariant is structural, not algorithmic.
+    /// 12-scenario layout): the ordering invariant is structural, not algorithmic.
     #[test]
     fn aggregate_costs_is_ascending_post_extend() {
         use crate::simulation::types::ScenarioCategoryCosts;
@@ -593,7 +591,6 @@ mod tests {
             imputed_cost: 0.0,
         };
 
-        // Simulate 4 workers each covering 3 consecutive scenario IDs.
         let worker_outputs: Vec<Vec<(u32, f64, ScenarioCategoryCosts)>> = (0u32..4)
             .map(|w| {
                 (0..3u32)
@@ -607,19 +604,16 @@ mod tests {
             all_costs.extend(costs);
         }
 
-        // The invariant checked by the debug_assert! in `run()`.
         assert!(
             all_costs.windows(2).all(|w| w[0].0 <= w[1].0),
             "all_costs must be ascending by scenario_id after sequential extend"
         );
-        // Verify all 12 IDs are present and ordered 0..=11.
         let ids: Vec<u32> = all_costs.iter().map(|e| e.0).collect();
         assert_eq!(ids, (0u32..12).collect::<Vec<_>>());
     }
 
     /// Assert that the `debug_assert!` invariant check catches an out-of-order
-    /// `all_costs` sequence (AC2).  The check expression is extracted into a
-    /// helper so it can be called in tests without a full solver fixture.
+    /// `all_costs` sequence.
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "all_costs not pre-sorted")]

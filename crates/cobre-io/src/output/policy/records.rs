@@ -198,11 +198,7 @@ pub struct OwnedPolicyCutRecord {
     pub forward_pass_index: u32,
     /// Pre-computed cut intercept.
     pub intercept: f64,
-    /// Gradient coefficients, length equals the stage's `state_dimension`.
-    ///
-    /// Positional only: index `i` is the i-th state-vector dimension, whose
-    /// identity is carried by slot `i` of the co-located [`EntitySlot`] manifest
-    /// (`entity_manifest`); no labels are stored inline.
+    /// Gradient coefficients; positional per the [`PolicyCutRecord::coefficients`] contract.
     pub coefficients: Vec<f64>,
     /// Whether this cut is currently active in the LP.
     pub is_active: bool,

@@ -45,8 +45,7 @@ pub fn build_delta_cut_row_batch_into(
         return;
     }
 
-    // NNZ per cut = nonzero state entries + theta, matching the sparse-only
-    // authority `cut::row::build_cut_row_batch_into`.
+    // +1 for theta; matches the sparse-only authority `cut::row::build_cut_row_batch_into`.
     let nnz_per_cut = cut_state.render_len() + 1;
     let total_nnz = num_cuts * nnz_per_cut;
 

@@ -18,15 +18,11 @@
 //!
 //! ## Cut coefficient formula
 //!
-//! The convention is `coefficients = reduced_cost` (raw, no sign flip at
-//! extraction); the LP cut row negates it later in
-//! `cut::row::build_cut_row_batch_into` (`-coeff * x + theta >= intercept`).
-//! `pi[i] = reduced_cost[col_i] / col_scale[col_i]`, where `col_i =
-//! state_to_lp_incoming_column(i)`; state fixing uses column bounds, so the
-//! gradient is a reduced cost (dual of the `lb == ub` pin by KKT stationarity),
-//! unscaled by `col_scale` not `row_scale`. The intercept is
-//! `alpha = Q - sum_i(pi[i] * x_hat[i])`, covering all `n_state` indices
-//! uniformly. See sddp.md "Benders cut sign & subgradient extraction".
+//! `coefficients = reduced_cost` (raw, no sign flip at extraction); the LP cut row
+//! negates it in `cut::row::build_cut_row_batch_into`. The full subgradient
+//! contract (`pi[i] = reduced_cost[col_i] / col_scale[col_i]`, divided not
+//! multiplied) lives in `duals_extraction` and sddp.md "Benders cut sign &
+//! subgradient extraction".
 //!
 //! ### Anticipated-state cut gradient flow
 //!

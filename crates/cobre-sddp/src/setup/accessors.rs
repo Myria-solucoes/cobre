@@ -28,11 +28,7 @@ impl StudySetup {
     /// training.
     ///
     /// `cache` carries one entry per stage (as built by
-    /// [`build_basis_cache_from_checkpoint`](crate::build_basis_cache_from_checkpoint)
-    /// from the checkpoint's stored solver bases). [`StudySetup::train`] takes
-    /// this out of `self` and replicates each stage's basis across every
-    /// forward-pass worker so iteration 1's cut-loaded LPs warm-start.
-    ///
+    /// [`build_basis_cache_from_checkpoint`](crate::build_basis_cache_from_checkpoint)).
     /// Leave unset (the default `None`) for a fresh start.
     pub fn set_warm_start_basis_cache(&mut self, cache: Vec<Option<CapturedBasis>>) {
         self.warm_start_basis_cache = Some(cache);
@@ -231,11 +227,8 @@ impl StudySetup {
         TrainingContext {
             horizon: &self.methodology.horizon,
             state: &self.stage_data.state,
-            // Simulation does not EXTRACT cuts, but it RENDERS stored cuts into the
-            // baked templates and the DCS LP, so the per-pool projection threads
-            // through here too (all-enabled for every simulated study, since a
-            // policy loaded via FutureCostFunction::from_deserialized carries a
-            // uniform global cut dimension).
+            // Simulation renders stored cuts into baked templates and the DCS LP
+            // (it does not extract), so the per-pool projection threads through here.
             cut_state_layouts: &self.stage_data.cut_state_layouts,
             study_dims: &self.stage_data.study_dims,
             inflow_method: &self.methodology.inflow_method,

@@ -61,9 +61,8 @@ pub(crate) fn postprocess_templates(
     stage_templates: &mut StageTemplates,
     system: &System,
 ) -> crate::scaling_report::ScalingReport {
-    // Install via the setter (which derives cumulative factors in the same call,
-    // so the two slices cannot drift); done here, not inside
-    // build_stage_templates, to avoid threading PolicyGraph through its signature.
+    // The setter derives cumulative factors in the same call, so the two slices
+    // cannot drift.
     {
         let pg = system.policy_graph();
         let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
@@ -76,17 +75,14 @@ pub(crate) fn postprocess_templates(
         "cumulative_discount_factors must have length n_stages after postprocess"
     );
 
-    // Discount theta before column/row scaling: discounting is orthogonal to cost
-    // scaling (which divides c_i by K but leaves theta untouched), so the two must
-    // not be folded together.
+    // Discount theta before column/row scaling: cost scaling divides c_i by K but
+    // leaves theta untouched, so the two must not be folded together.
     //
-    // θ's column index is the authoritative `StageLayout::col_theta()`, captured
-    // per stage in `StageGeometry::theta_col` at build time. It must NOT be
-    // re-derived from `n_state`/`n_hydros` here: that hand arithmetic omits the
-    // `anticipated_state_out` block (length `n_anticipated`) and, when the deck has
-    // anticipated thermals, lands on a zero-cost `storage_in` column — silently
-    // disabling discounting (`0 * d = 0`). Snapshot the indices and discount
-    // factors so the reads do not alias the `templates.iter_mut()` borrow below.
+    // Use the per-stage `StageGeometry::theta_col` (= authoritative
+    // `StageLayout::col_theta()`), NOT a re-derivation from `n_state`/`n_hydros`:
+    // that hand arithmetic omits the `anticipated_state_out` block and, with
+    // anticipated thermals, lands on a zero-cost `storage_in` column, silently
+    // disabling discounting (`0 * d = 0`).
     {
         let theta_cols: Vec<usize> = stage_templates
             .geometry_per_stage
@@ -104,21 +100,17 @@ pub(crate) fn postprocess_templates(
         }
     }
 
-    // Column scaling then row scaling for numerical conditioning (D_r * A * D_c
-    // form). Scale factors are stored in the template for unscaling primal/dual
-    // solutions in the forward and backward passes.
+    // Column scaling then row scaling (D_r * A * D_c). Scale factors are stored on
+    // the template for unscaling primal/dual solutions in the forward/backward passes.
     let mut stage_scaling_reports = Vec::with_capacity(stage_templates.templates.len());
 
     for (stage_id, tmpl) in stage_templates.templates.iter_mut().enumerate() {
-        // Cost scaling is already baked into the objective during template
-        // construction; this snapshot precedes only col/row scaling.
         let pre_scaling = compute_coefficient_range(tmpl);
 
         let col_scale =
             lp_builder::compute_col_scale(tmpl.num_cols, &tmpl.col_starts, &tmpl.values);
         lp_builder::apply_col_scale(tmpl, &col_scale);
         tmpl.col_scale.clone_from(&col_scale);
-        // Row scaling is applied to the already column-scaled matrix.
         let row_scale = lp_builder::compute_row_scale(
             tmpl.num_rows,
             tmpl.num_cols,
@@ -147,11 +139,9 @@ pub(crate) fn postprocess_templates(
 
     let scaling_report = build_scaling_report(lp_builder::COST_SCALE_FACTOR, stage_scaling_reports);
 
-    // Pre-scale noise_scale by row_scale so that the inflow noise
-    // perturbation (noise_scale * eta) is in the same scaled units as
-    // the template row bounds (which were already row-scaled above).
-    // Without this, transform_inflow_noise would produce a mixed-scale
-    // RHS: scaled base + unscaled perturbation.
+    // Pre-scale noise_scale by row_scale so the perturbation (noise_scale * eta)
+    // shares the units of the already-row-scaled row bounds; otherwise
+    // transform_inflow_noise produces a mixed-scale RHS (scaled base + unscaled perturbation).
     let n_hydros_noise = stage_templates.n_hydros;
     for (s_idx, tmpl) in stage_templates.templates.iter().enumerate() {
         if !tmpl.row_scale.is_empty() {
@@ -183,26 +173,22 @@ mod tests {
     #[test]
     fn cumulative_discount_factors_length_matches_n_stages() {
         let n_stages = 4_usize;
-        // Uniform 5% annual discount folded into per-stage factors.
         let per_stage = vec![0.95_f64; n_stages];
         let cumulative = compute_cumulative_discount_factors(&per_stage);
 
-        // Length must equal n_stages = 4.
         assert_eq!(
             cumulative.len(),
             n_stages,
             "cumulative_discount_factors length must equal n_stages = {n_stages}"
         );
 
-        // Spot-check values.
         assert_eq!(cumulative[0], 1.0, "cumulative[0] == 1.0 (present value)");
         assert_eq!(
             cumulative[1], 0.95,
             "cumulative[1] == 0.95 = 1.0 * per_stage[0]"
         );
-        // Use approximate comparison: repeated multiplication may differ from
-        // powi(3) by a ULP due to floating-point associativity.
-        // The last in-horizon entry is cumulative[n_stages - 1] = 0.95^(n_stages - 1).
+        // Approximate: repeated multiplication may differ from powi(3) by a ULP
+        // (floating-point associativity).
         assert!(
             (cumulative[n_stages - 1] - 0.95_f64.powi(3)).abs() < 1e-15,
             "cumulative[n_stages-1] must be within 1e-15 of 0.95^(n_stages-1) (got {})",

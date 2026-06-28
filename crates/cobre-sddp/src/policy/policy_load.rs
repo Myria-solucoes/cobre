@@ -107,9 +107,6 @@ pub fn build_basis_cache_from_checkpoint(
         let row_status: Vec<i32> = record.row_status.iter().map(|&r| i32::from(r)).collect();
 
         let num_cut = record.num_cut_rows as usize;
-        // `build_stage_cut_records` sets `slot_index` to the pool slot, so the
-        // active records' `slot_index` in increasing order reproduce the
-        // capture-time `active_cuts()` order.
         let active_slots: Option<Vec<u32>> = stage_cuts
             .iter()
             .find(|sc| sc.stage_id == record.stage_id)
@@ -156,29 +153,21 @@ fn slot_identity(slot: &cobre_io::EntitySlot) -> (u8, i32, u32) {
 
 /// Load boundary cuts from the `source_stage` of a source Cobre policy checkpoint.
 ///
-/// Validates the source state dimension against `current_state_dimension` and —
-/// when both manifests are populated — the source stage's per-slot entity
-/// identity against `current_manifest` slot-for-slot. The integer check alone
-/// passes a different entity (or a different lag) occupying the same slot, which
-/// would silently attach a cut's coefficient to the wrong state variable.
+/// Per-slot `(entity_type, entity_id, subindex)` identity is matched against
+/// `current_manifest` slot-for-slot and a mismatch is REJECTED: the
+/// `state_dimension` check alone passes a different entity (or lag) occupying the
+/// same slot, silently attaching a cut's coefficient to the wrong state variable.
+/// Only `state_dimension` must match — `num_stages` may differ (a monthly source
+/// vs. a weekly+monthly current study); per-slot matching compares the source
+/// stage's manifest to the current TERMINAL-stage manifest, both length
+/// `state_dimension`.
 ///
-/// Only `state_dimension` must match between the source and current study —
-/// `num_stages` may differ (e.g., a monthly source checkpoint vs. a
-/// weekly+monthly current study). Per-slot matching compares the SOURCE stage's
-/// manifest to the current TERMINAL-stage manifest, both of length
-/// `state_dimension`; stage COUNT is orthogonal.
-///
-/// `current_manifest` is the current study's terminal-stage manifest, built by
-/// the caller via
+/// `current_manifest` is built via
 /// [`StudySetup::build_terminal_entity_manifest`](crate::StudySetup::build_terminal_entity_manifest)
-/// (the single owner of identity resolution, shared with the checkpoint writer).
-/// When either manifest is empty (a pre-manifest checkpoint), identity cannot be
-/// verified: the integer check stands and a warning is routed through
-/// `on_warning`.
-///
-/// A boundary slot dormant at the boundary stage (`was_active == false`) whose
-/// current-study counterpart is active is a non-fatal cross-study divergence,
-/// also routed through `on_warning`; the cut is still loaded.
+/// (single owner of identity resolution, shared with the checkpoint writer). An
+/// empty manifest (pre-manifest checkpoint) leaves the `state_dimension` check
+/// standing and warns. A `was_active == false` boundary slot whose current
+/// counterpart is active is a non-fatal divergence: warn, load the cut anyway.
 ///
 /// # Errors
 ///
@@ -280,13 +269,9 @@ pub fn load_boundary_cuts(
 /// Inject boundary cuts into the terminal stage of the study's FCF.
 ///
 /// Replaces the terminal stage's [`CutPool`] with one pre-populated from
-/// `boundary_records`. The pool retains capacity for new training cuts;
-/// only the terminal pool is modified.
-///
-/// After this call, `setup.fcf().pools[num_stages - 1].warm_start_count`
-/// equals `boundary_records.len()`, which causes the forward pass to set
-/// `terminal_has_boundary_cuts = true` and prevents theta zeroing at the
-/// terminal stage.
+/// `boundary_records`, retaining capacity for new training cuts. The resulting
+/// nonzero `warm_start_count` is what makes the forward pass treat the terminal
+/// stage as boundary-loaded (`terminal_has_boundary_cuts`) and skip theta zeroing.
 pub fn inject_boundary_cuts(
     setup: &mut StudySetup,
     boundary_records: &[cobre_io::OwnedPolicyCutRecord],
@@ -690,8 +675,6 @@ mod tests {
     #[test]
     fn both_dimensions_mismatched_returns_err() {
         let meta = sample_metadata();
-        // Both state_dimension (10 vs 8) and num_stages (12 vs 24) mismatch.
-        // The function should return an error on the first mismatch (state_dimension).
         let result = validate_policy_compatibility(&meta, 8, 24);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();

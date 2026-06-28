@@ -353,12 +353,10 @@ impl CutSyncBuffers {
     ) -> usize {
         let pool = &fcf.pools[stage];
 
-        // The wire stride for stage `t` is `cut_wire_size(pools[t].state_dimension)`
-        // — the pool's own per-stage coefficient count — never the cached
-        // `max_record_size`. Packing at the global max while the slice below reads
-        // `pool.state_dimension` coefficients mis-strides every record once a stage
-        // is reduced, corrupting remote ranks' deserialized cuts. The cached value
-        // sizes buffers only.
+        // Wire stride is the pool's own per-stage dimension, never the cached
+        // `max_record_size` (see the `max_n_state` field doc): packing at the global
+        // max while the slice below reads `pool.state_dimension` coefficients
+        // mis-strides every record once a stage is reduced.
         let record_size = cut_wire_size(pool.state_dimension);
         debug_assert!(
             record_size <= self.max_record_size,
@@ -444,9 +442,8 @@ impl CutSyncBuffers {
             )));
         }
 
-        // Per-stage wire stride: `cut_wire_size(pools[stage].state_dimension)`,
-        // matching the stride `pack_local_records` packed at. The cached
-        // `max_record_size` sizes buffers only.
+        // Per-stage wire stride, matching what `pack_local_records` packed at (see
+        // the `max_n_state` field doc).
         let stage_n_state = fcf.pools[stage].state_dimension;
         debug_assert!(
             stage_n_state <= self.max_n_state,

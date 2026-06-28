@@ -11,11 +11,8 @@
 //! pairs a cut row is built from ([`Self::render_pairs`]) — all in
 //! storage → lag → anticipated order.
 //!
-//! The global [`StateLayout`] is unchanged: it still drives the LP. This is a
-//! projection **of** that layout used only for cut storage / extraction /
-//! rendering — it carries no LP-build responsibility, holds only an
-//! enabled-dimension mask plus precomputed column vectors, and never reimplements
-//! the global layout's column arithmetic: it delegates every column to
+//! The global [`StateLayout`] is unchanged: it still drives the LP. This carries
+//! no LP-build responsibility and delegates every column to
 //! [`StateLayout::state_to_lp_incoming_column`] (incoming) or
 //! [`StateLayout::lp_column_for_state`] (outgoing).
 
@@ -86,12 +83,6 @@ impl CutStateProjection {
     /// Project the global [`StateLayout`] onto the cut-state dimensions enabled by
     /// `state_config`, with anticipated state always included.
     ///
-    /// The result is a projection **of** `global`: every column is delegated to
-    /// `global` ([`StateLayout::state_to_lp_incoming_column`] /
-    /// [`StateLayout::lp_column_for_state`]) and the projection retains only the
-    /// `state_config` mask plus the precomputed vectors. No column arithmetic is
-    /// reimplemented here.
-    ///
     /// Dimensions are walked in storage → lag → anticipated order. A storage
     /// index `[0, N)` is included iff `state_config.storage`; an inflow-lag index
     /// `[N, N*(1+L))` iff `state_config.inflow_lags`; an anticipated-state index
@@ -119,10 +110,9 @@ impl CutStateProjection {
             let outgoing = global.lp_column_for_state(g);
             incoming_columns.push(global.state_to_lp_incoming_column(g));
             outgoing_columns.push(outgoing);
-            // Render only the nonzero (non-padding) subset: a padding slot's
-            // coefficient is structurally zero, so the row emits no entry for it —
-            // and dropping it (not zero-filling) is what keeps the default
-            // projection bit-identical to the global nonzero_state_indices render.
+            // Drop padding slots (not zero-fill): a dropped structurally-zero
+            // coefficient keeps the default render bit-identical to the global
+            // nonzero_state_indices render.
             if global.nonzero_state_indices.binary_search(&g).is_ok() {
                 render_coeff_indices.push(reduced_j);
                 render_columns.push(outgoing);
