@@ -19,6 +19,9 @@ preserved; the file is not reserialized.
 Idempotent: a file whose entities already carry the field is skipped.
 """
 
+# Status: ALREADY APPLIED to all shipped fixtures. Retained for reference and to
+# regenerate fixtures if new deterministic cases are added — not a pending action.
+
 from __future__ import annotations
 
 import datetime
@@ -75,7 +78,6 @@ def backfill_file(path: str) -> bool:
     if len(set(ids)) != len(ids):
         raise SystemExit(f"{path}: duplicate ids {ids}; non-monotonic scheme")
 
-    # rank by id ascending -> date offset; map document-order index -> date.
     rank_by_id = {eid: r for r, eid in enumerate(sorted(ids))}
     dates_in_doc_order = [
         (BASE_DATE + datetime.timedelta(days=rank_by_id[e["id"]])).isoformat()

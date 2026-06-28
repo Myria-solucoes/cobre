@@ -401,7 +401,9 @@ pub(crate) struct RawHydroPenaltyOverrides {
 /// Reads the JSON file, deserializes it through intermediate serde types,
 /// performs post-deserialization validation, then converts to `Vec<Hydro>` using
 /// the three-tier penalty resolution cascade (global → entity). The result is
-/// sorted by `id` ascending to satisfy declaration-order invariance.
+/// sorted by `id` ascending — the deterministic pre-sort `SystemBuilder::build`
+/// relies on to break `(operational_start_date, name)` ties when it applies the
+/// canonical entity order.
 ///
 /// Cross-reference validation (`bus_id`, `downstream_id`,
 /// `diversion.downstream_id`) is deferred to Layer 3.
@@ -751,7 +753,8 @@ fn convert_hydros(
         })
         .collect::<Result<_, LoadError>>()?;
 
-    // Sort by id ascending to satisfy declaration-order invariance.
+    // Pre-sort by id so equal (operational_start_date, name) keys break ties
+    // deterministically in SystemBuilder::build (declaration-order invariance).
     hydros.sort_by_key(|h| h.id.0);
     Ok(hydros)
 }

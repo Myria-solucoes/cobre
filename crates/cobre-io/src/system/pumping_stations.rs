@@ -104,8 +104,10 @@ pub(crate) struct RawPumpingFlow {
 ///
 /// Reads the JSON file, deserializes it through intermediate serde types,
 /// performs post-deserialization validation, then converts to
-/// `Vec<PumpingStation>`. The result is sorted by `id` ascending to satisfy
-/// declaration-order invariance.
+/// `Vec<PumpingStation>`. The result is sorted by `id` ascending — the
+/// deterministic pre-sort `SystemBuilder::build` relies on to break
+/// `(operational_start_date, name)` ties when it applies the canonical entity
+/// order.
 ///
 /// # Errors
 ///
@@ -240,7 +242,8 @@ fn convert_pumping(raw: RawPumpingFile, path: &Path) -> Result<Vec<PumpingStatio
         })
         .collect::<Result<_, LoadError>>()?;
 
-    // Sort by id ascending to satisfy declaration-order invariance.
+    // Pre-sort by id so equal (operational_start_date, name) keys break ties
+    // deterministically in SystemBuilder::build (declaration-order invariance).
     stations.sort_by_key(|s| s.id.0);
     Ok(stations)
 }

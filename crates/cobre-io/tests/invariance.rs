@@ -1,8 +1,9 @@
 //! Declaration-order invariance tests for `cobre_io::load_case`.
 //!
 //! `load_case` must produce bit-for-bit identical [`System`] values regardless
-//! of entity declaration order: collections are stored in canonical ID-sorted
-//! order, so a reversed input array must yield an equal result.
+//! of entity declaration order: collections are stored in canonical
+//! (operational_start_date, name) order, so a reversed input array must yield an
+//! equal result.
 #![allow(
     clippy::unwrap_used,
     clippy::panic,

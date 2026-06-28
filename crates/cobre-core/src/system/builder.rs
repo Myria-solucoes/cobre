@@ -2,6 +2,8 @@
 
 use std::collections::HashSet;
 
+use chrono::NaiveDate;
+
 use super::System;
 use super::validate::{
     CrossRefEntities, build_index, build_stage_index, check_duplicate_stages, check_duplicates,
@@ -326,44 +328,29 @@ impl SystemBuilder {
     // thread those through every call and lose the fail-fast-on-duplicates short-circuit.
     #[allow(clippy::too_many_lines)]
     pub fn build(mut self) -> Result<System, Vec<ValidationError>> {
-        // Stable sort on (operational_start_date, name), not id: the canonical
-        // order must be invariant under id renumbering to uphold the
-        // declaration-order hard rule (a tie preserves input order).
-        self.buses.sort_by(|a, b| {
-            a.operational_start_date
-                .cmp(&b.operational_start_date)
-                .then_with(|| a.name.cmp(&b.name))
-        });
-        self.lines.sort_by(|a, b| {
-            a.operational_start_date
-                .cmp(&b.operational_start_date)
-                .then_with(|| a.name.cmp(&b.name))
-        });
-        self.hydros.sort_by(|a, b| {
-            a.operational_start_date
-                .cmp(&b.operational_start_date)
-                .then_with(|| a.name.cmp(&b.name))
-        });
-        self.thermals.sort_by(|a, b| {
-            a.operational_start_date
-                .cmp(&b.operational_start_date)
-                .then_with(|| a.name.cmp(&b.name))
-        });
-        self.pumping_stations.sort_by(|a, b| {
-            a.operational_start_date
-                .cmp(&b.operational_start_date)
-                .then_with(|| a.name.cmp(&b.name))
-        });
-        self.contracts.sort_by(|a, b| {
-            a.operational_start_date
-                .cmp(&b.operational_start_date)
-                .then_with(|| a.name.cmp(&b.name))
-        });
-        self.non_controllable_sources.sort_by(|a, b| {
-            a.operational_start_date
-                .cmp(&b.operational_start_date)
-                .then_with(|| a.name.cmp(&b.name))
-        });
+        sort_canonical(&mut self.buses, |b| b.operational_start_date, |b| &b.name);
+        sort_canonical(&mut self.lines, |l| l.operational_start_date, |l| &l.name);
+        sort_canonical(&mut self.hydros, |h| h.operational_start_date, |h| &h.name);
+        sort_canonical(
+            &mut self.thermals,
+            |t| t.operational_start_date,
+            |t| &t.name,
+        );
+        sort_canonical(
+            &mut self.pumping_stations,
+            |p| p.operational_start_date,
+            |p| &p.name,
+        );
+        sort_canonical(
+            &mut self.contracts,
+            |c| c.operational_start_date,
+            |c| &c.name,
+        );
+        sort_canonical(
+            &mut self.non_controllable_sources,
+            |n| n.operational_start_date,
+            |n| &n.name,
+        );
         self.stages.sort_by_key(|s| s.id);
         self.generic_constraints.sort_by_key(|c| c.id.0);
 
@@ -482,4 +469,15 @@ impl SystemBuilder {
             external_ncs_scenarios: self.external_ncs_scenarios,
         })
     }
+}
+
+/// Stable-sort entities by `(operational_start_date, name)`, never by `id`: the
+/// canonical order must be invariant under id renumbering to uphold the
+/// declaration-order hard rule (a tie preserves input order).
+fn sort_canonical<T>(
+    entities: &mut [T],
+    date: impl Fn(&T) -> NaiveDate,
+    name: impl Fn(&T) -> &str,
+) {
+    entities.sort_by(|a, b| date(a).cmp(&date(b)).then_with(|| name(a).cmp(name(b))));
 }
