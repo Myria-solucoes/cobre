@@ -1483,6 +1483,7 @@ mod tests {
         Hydro {
             id: EntityId(id),
             name: format!("H{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: None,
@@ -1539,6 +1540,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 1000.0,
@@ -1549,6 +1551,7 @@ mod tests {
         let line = Line {
             id: EntityId(1),
             name: "L1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             source_bus_id: EntityId(1),
             target_bus_id: EntityId(1),
             entry_stage_id: None,
@@ -1565,6 +1568,7 @@ mod tests {
         let thermal = Thermal {
             id: EntityId(1),
             name: "T1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             entry_stage_id: None,
             exit_stage_id: None,
@@ -1595,6 +1599,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 1000.0,
@@ -1605,6 +1610,7 @@ mod tests {
         let line = Line {
             id: EntityId(1),
             name: "L1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             source_bus_id: EntityId(1),
             target_bus_id: EntityId(1),
             entry_stage_id: None,
@@ -1618,6 +1624,7 @@ mod tests {
         let pumping_station = PumpingStation {
             id: EntityId(1),
             name: "P1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             source_hydro_id: EntityId(1),
             destination_hydro_id: EntityId(2),

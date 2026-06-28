@@ -1,6 +1,7 @@
 //! Hydro plant entity — reservoir, turbine, spillage, and cascade topology.
 
 use crate::EntityId;
+use chrono::NaiveDate;
 
 /// A single point on the piecewise tailrace curve.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -171,6 +172,8 @@ pub struct Hydro {
     pub id: EntityId,
     /// Human-readable plant name.
     pub name: String,
+    /// Date the entity enters service (ISO 8601).
+    pub operational_start_date: NaiveDate,
     /// Bus to which this plant's generation is injected.
     pub bus_id: EntityId,
     /// Identifier of the downstream hydro plant in the cascade.
@@ -256,6 +259,7 @@ mod tests {
         Hydro {
             id: EntityId::from(1),
             name: String::from("Itaipu"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(10),
             downstream_id: None,
             entry_stage_id: None,
@@ -318,6 +322,7 @@ mod tests {
         let hydro = Hydro {
             id: EntityId::from(2),
             name: String::from("Tucuruí"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(20),
             downstream_id: Some(EntityId::from(3)),
             entry_stage_id: Some(1),
@@ -488,6 +493,7 @@ mod tests {
         let hydro = Hydro {
             id: EntityId::from(2),
             name: "Tucuruí".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(20),
             downstream_id: Some(EntityId::from(3)),
             entry_stage_id: Some(1),

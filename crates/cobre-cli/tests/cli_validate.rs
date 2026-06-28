@@ -77,7 +77,8 @@ const STAGES_JSON: &str = r#"{
 }"#;
 
 const INITIAL_CONDITIONS_JSON: &str = r#"{ "storage": [], "filling_storage": [] }"#;
-const BUSES_JSON: &str = r#"{ "buses": [{ "id": 1, "name": "BUS_1" }] }"#;
+const BUSES_JSON: &str =
+    r#"{ "buses": [{ "id": 1, "name": "BUS_1", "operational_start_date": "2024-01-01" }] }"#;
 const LINES_JSON: &str = r#"{ "lines": [] }"#;
 const HYDROS_JSON: &str = r#"{ "hydros": [] }"#;
 const THERMALS_JSON: &str = r#"{ "thermals": [] }"#;
@@ -180,7 +181,7 @@ fn validate_schema_failure_path_appears_once() {
     write_file(
         dir.path(),
         "system/buses.json",
-        r#"{ "buses": [{ "id": 1, "name": "BUS_1" }, { "id": 1, "name": "BUS_2" }] }"#,
+        r#"{ "buses": [{ "id": 1, "name": "BUS_1", "operational_start_date": "2024-01-01" }, { "id": 1, "name": "BUS_2", "operational_start_date": "2024-01-01" }] }"#,
     );
 
     let output = cobre()
@@ -285,6 +286,7 @@ fn fpha_hydro_without_production_models_json_fails_validate() {
             {
                 "id": 1,
                 "name": "UHE_FPHA",
+                "operational_start_date": "2024-01-01",
                 "bus_id": 1,
                 "downstream_id": null,
                 "reservoir": {
@@ -335,6 +337,7 @@ fn fpha_hydro_without_production_models_json_stdout_mentions_file() {
             {
                 "id": 1,
                 "name": "UHE_FPHA",
+                "operational_start_date": "2024-01-01",
                 "bus_id": 1,
                 "downstream_id": null,
                 "reservoir": {

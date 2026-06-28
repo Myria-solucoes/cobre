@@ -49,6 +49,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Path;
 
+use super::parse_operational_start_date;
 use crate::LoadError;
 
 /// Top-level intermediate type for `buses.json` (serde only, not re-exported).
@@ -72,6 +73,8 @@ pub(crate) struct RawBus {
     id: i32,
     /// Human-readable bus name.
     name: String,
+    /// Date the entity enters service (ISO 8601 `YYYY-MM-DD`).
+    operational_start_date: String,
     /// Optional entity-level deficit segment overrides.
     /// When absent, the global defaults from `penalties.json` are used.
     deficit_segments: Option<Vec<RawDeficitSegment>>,
@@ -131,7 +134,7 @@ pub fn parse_buses(
 
     validate_raw_buses(&raw, path)?;
 
-    Ok(convert_buses(raw, global_penalties))
+    convert_buses(raw, global_penalties, path)
 }
 
 fn validate_raw_buses(raw: &RawBusFile, path: &Path) -> Result<(), LoadError> {
@@ -215,11 +218,22 @@ fn validate_deficit_segments(
     Ok(())
 }
 
-fn convert_buses(raw: RawBusFile, global: &GlobalPenaltyDefaults) -> Vec<Bus> {
+fn convert_buses(
+    raw: RawBusFile,
+    global: &GlobalPenaltyDefaults,
+    path: &Path,
+) -> Result<Vec<Bus>, LoadError> {
     let mut buses: Vec<Bus> = raw
         .buses
         .into_iter()
-        .map(|raw_bus| {
+        .enumerate()
+        .map(|(i, raw_bus)| {
+            let operational_start_date = parse_operational_start_date(
+                &raw_bus.operational_start_date,
+                path,
+                &format!("buses[{i}].operational_start_date"),
+            )?;
+
             let entity_segments: Option<Vec<DeficitSegment>> =
                 raw_bus.deficit_segments.map(|segs| {
                     segs.into_iter()
@@ -233,18 +247,19 @@ fn convert_buses(raw: RawBusFile, global: &GlobalPenaltyDefaults) -> Vec<Bus> {
             let deficit_segments = resolve_bus_deficit_segments(&entity_segments, global);
             let excess_cost = resolve_bus_excess_cost(None, global);
 
-            Bus {
+            Ok(Bus {
                 id: EntityId(raw_bus.id),
                 name: raw_bus.name,
+                operational_start_date,
                 deficit_segments,
                 excess_cost,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<_, LoadError>>()?;
 
     // Sort by id ascending to satisfy declaration-order invariance.
     buses.sort_by_key(|b| b.id.0);
-    buses
+    Ok(buses)
 }
 
 #[cfg(test)]
@@ -304,10 +319,11 @@ mod tests {
     const VALID_JSON: &str = r#"{
       "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/buses.schema.json",
       "buses": [
-        { "id": 0, "name": "South" },
+        { "id": 0, "name": "South", "operational_start_date": "2024-01-01" },
         {
           "id": 1,
           "name": "North",
+          "operational_start_date": "2024-01-01",
           "deficit_segments": [
             { "depth_mw": 300.0, "cost": 2000.0 },
             { "depth_mw": null, "cost": 8000.0 }
@@ -374,8 +390,8 @@ mod tests {
     fn test_duplicate_bus_id() {
         let json = r#"{
           "buses": [
-            { "id": 5, "name": "Alpha" },
-            { "id": 5, "name": "Beta" }
+            { "id": 5, "name": "Alpha", "operational_start_date": "2024-01-01" },
+            { "id": 5, "name": "Beta", "operational_start_date": "2024-01-01" }
           ]
         }"#;
         let f = write_json(json);
@@ -404,14 +420,14 @@ mod tests {
     fn test_declaration_order_invariance() {
         let json_forward = r#"{
           "buses": [
-            { "id": 0, "name": "South" },
-            { "id": 1, "name": "North" }
+            { "id": 0, "name": "South", "operational_start_date": "2024-01-01" },
+            { "id": 1, "name": "North", "operational_start_date": "2024-01-01" }
           ]
         }"#;
         let json_reversed = r#"{
           "buses": [
-            { "id": 1, "name": "North" },
-            { "id": 0, "name": "South" }
+            { "id": 1, "name": "North", "operational_start_date": "2024-01-01" },
+            { "id": 0, "name": "South", "operational_start_date": "2024-01-01" }
           ]
         }"#;
         let global = make_global();
@@ -439,6 +455,7 @@ mod tests {
             {
               "id": 0,
               "name": "Bad",
+              "operational_start_date": "2024-01-01",
               "deficit_segments": [
                 { "depth_mw": null, "cost": -100.0 }
               ]
@@ -471,6 +488,7 @@ mod tests {
             {
               "id": 0,
               "name": "Bad",
+              "operational_start_date": "2024-01-01",
               "deficit_segments": [
                 { "depth_mw": 100.0, "cost": 1000.0 },
                 { "depth_mw": 200.0, "cost": 5000.0 }
@@ -504,6 +522,7 @@ mod tests {
             {
               "id": 0,
               "name": "Bad",
+              "operational_start_date": "2024-01-01",
               "deficit_segments": [
                 { "depth_mw": 100.0, "cost": 5000.0 },
                 { "depth_mw": null, "cost": 1000.0 }
@@ -571,11 +590,58 @@ mod tests {
         assert!(buses.is_empty());
     }
 
+    /// A malformed `operational_start_date` → `SchemaError` whose message names
+    /// the offending value and contains the substring `ISO-8601`.
+    #[test]
+    fn test_malformed_operational_start_date() {
+        let json = r#"{
+          "buses": [
+            { "id": 0, "name": "Alpha", "operational_start_date": "2030-13-40" }
+          ]
+        }"#;
+        let f = write_json(json);
+        let global = make_global();
+        let err = parse_buses(f.path(), &global).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(
+                    field.contains("buses[0].operational_start_date"),
+                    "field should name the offending field, got: {field}"
+                );
+                assert!(
+                    message.contains("2030-13-40"),
+                    "message should contain the offending value, got: {message}"
+                );
+                assert!(
+                    message.contains("ISO-8601"),
+                    "message should contain 'ISO-8601', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// A bus object omitting `operational_start_date` fails to parse (the field
+    /// is required; no serde default supplies a value).
+    #[test]
+    fn test_missing_operational_start_date_rejected() {
+        let json = r#"{
+          "buses": [{ "id": 0, "name": "Alpha" }]
+        }"#;
+        let f = write_json(json);
+        let global = make_global();
+        let result = parse_buses(f.path(), &global);
+        assert!(
+            result.is_err(),
+            "expected Err when operational_start_date is omitted, got: {result:?}"
+        );
+    }
+
     /// Excess cost on bus always comes from global defaults (no entity override).
     #[test]
     fn test_excess_cost_always_from_global() {
         let json = r#"{
-          "buses": [{ "id": 0, "name": "Alpha" }]
+          "buses": [{ "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01" }]
         }"#;
         let f = write_json(json);
         let global = make_global();

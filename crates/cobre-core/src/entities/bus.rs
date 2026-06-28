@@ -1,6 +1,7 @@
 //! Bus entity — an electrical network node with power balance constraint.
 
 use crate::EntityId;
+use chrono::NaiveDate;
 
 /// A single segment of the piecewise-linear deficit cost curve.
 ///
@@ -28,6 +29,8 @@ pub struct Bus {
     pub id: EntityId,
     /// Human-readable bus name.
     pub name: String,
+    /// Date the entity enters service (ISO 8601).
+    pub operational_start_date: NaiveDate,
     /// Deficit cost segments, ordered by ascending cost.
     pub deficit_segments: Vec<DeficitSegment>,
     /// Cost per `MWh` for surplus generation absorption \[$/`MWh`\].
@@ -43,6 +46,7 @@ mod tests {
         let bus = Bus {
             id: EntityId::from(1),
             name: "Bus A".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![
                 DeficitSegment {
                     depth_mw: Some(100.0),
@@ -83,6 +87,7 @@ mod tests {
         let bus_a = Bus {
             id: EntityId::from(1),
             name: "Bus A".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -107,6 +112,7 @@ mod tests {
         let bus = Bus {
             id: EntityId::from(1),
             name: "Main Bus".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![
                 DeficitSegment {
                     depth_mw: Some(100.0),

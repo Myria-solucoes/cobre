@@ -16,6 +16,7 @@
 //!     {
 //!       "id": 0,
 //!       "name": "Importação Argentina",
+//!       "operational_start_date": "2024-01-01",
 //!       "bus_id": 5,
 //!       "type": "import",
 //!       "price_per_mwh": 200.0,
@@ -24,6 +25,7 @@
 //!     {
 //!       "id": 1,
 //!       "name": "Exportação Uruguai",
+//!       "operational_start_date": "2024-01-01",
 //!       "bus_id": 6,
 //!       "type": "export",
 //!       "entry_stage_id": 1,
@@ -60,6 +62,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Path;
 
+use super::parse_operational_start_date;
 use crate::LoadError;
 
 /// Top-level intermediate type for `energy_contracts.json` (serde only, not re-exported).
@@ -83,6 +86,8 @@ pub(crate) struct RawContract {
     id: i32,
     /// Human-readable contract name.
     name: String,
+    /// Date the entity enters service (ISO 8601 `YYYY-MM-DD`).
+    operational_start_date: String,
     /// Bus at which the contracted power is injected or withdrawn.
     bus_id: i32,
     /// Direction of energy flow. Uses `#[serde(rename = "type")]` since `type`
@@ -166,7 +171,7 @@ pub fn parse_energy_contracts(path: &Path) -> Result<Vec<EnergyContract>, LoadEr
 
     validate_raw_contracts(&raw, path)?;
 
-    Ok(convert_contracts(raw))
+    convert_contracts(raw, path)
 }
 
 fn validate_raw_contracts(raw: &RawContractFile, path: &Path) -> Result<(), LoadError> {
@@ -226,19 +231,27 @@ fn validate_contract_limits(
     Ok(())
 }
 
-fn convert_contracts(raw: RawContractFile) -> Vec<EnergyContract> {
+fn convert_contracts(raw: RawContractFile, path: &Path) -> Result<Vec<EnergyContract>, LoadError> {
     let mut contracts: Vec<EnergyContract> = raw
         .contracts
         .into_iter()
-        .map(|raw_contract| {
+        .enumerate()
+        .map(|(i, raw_contract)| {
+            let operational_start_date = parse_operational_start_date(
+                &raw_contract.operational_start_date,
+                path,
+                &format!("contracts[{i}].operational_start_date"),
+            )?;
+
             let contract_type = match raw_contract.contract_type {
                 RawContractType::Import => ContractType::Import,
                 RawContractType::Export => ContractType::Export,
             };
 
-            EnergyContract {
+            Ok(EnergyContract {
                 id: EntityId(raw_contract.id),
                 name: raw_contract.name,
+                operational_start_date,
                 bus_id: EntityId(raw_contract.bus_id),
                 contract_type,
                 entry_stage_id: raw_contract.entry_stage_id,
@@ -246,13 +259,13 @@ fn convert_contracts(raw: RawContractFile) -> Vec<EnergyContract> {
                 price_per_mwh: raw_contract.price_per_mwh,
                 min_mw: raw_contract.limits.min_mw,
                 max_mw: raw_contract.limits.max_mw,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<_, LoadError>>()?;
 
     // Sort by id ascending to satisfy declaration-order invariance.
     contracts.sort_by_key(|c| c.id.0);
-    contracts
+    Ok(contracts)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -285,6 +298,7 @@ mod tests {
             {
               "id": 0,
               "name": "Importação Argentina",
+              "operational_start_date": "2024-01-01",
               "bus_id": 5,
               "type": "import",
               "price_per_mwh": 200.0,
@@ -293,6 +307,7 @@ mod tests {
             {
               "id": 1,
               "name": "Exportação Uruguai",
+              "operational_start_date": "2024-01-01",
               "bus_id": 6,
               "type": "export",
               "entry_stage_id": 1,
@@ -336,7 +351,7 @@ mod tests {
         let json = r#"{
           "contracts": [
             {
-              "id": 0, "name": "Bad", "bus_id": 0,
+              "id": 0, "name": "Bad", "operational_start_date": "2024-01-01", "bus_id": 0,
               "type": "unknown_value",
               "price_per_mwh": 100.0,
               "limits": { "min_mw": 0.0, "max_mw": 100.0 }
@@ -360,13 +375,13 @@ mod tests {
         let json = r#"{
           "contracts": [
             {
-              "id": 4, "name": "Alpha", "bus_id": 0,
+              "id": 4, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
               "type": "import",
               "price_per_mwh": 100.0,
               "limits": { "min_mw": 0.0, "max_mw": 100.0 }
             },
             {
-              "id": 4, "name": "Beta", "bus_id": 1,
+              "id": 4, "name": "Beta", "operational_start_date": "2024-01-01", "bus_id": 1,
               "type": "export",
               "price_per_mwh": -50.0,
               "limits": { "min_mw": 0.0, "max_mw": 200.0 }
@@ -398,7 +413,7 @@ mod tests {
         let json = r#"{
           "contracts": [
             {
-              "id": 0, "name": "Bad", "bus_id": 0,
+              "id": 0, "name": "Bad", "operational_start_date": "2024-01-01", "bus_id": 0,
               "type": "import",
               "price_per_mwh": 100.0,
               "limits": { "min_mw": -10.0, "max_mw": 100.0 }
@@ -428,7 +443,7 @@ mod tests {
         let json = r#"{
           "contracts": [
             {
-              "id": 0, "name": "Bad", "bus_id": 0,
+              "id": 0, "name": "Bad", "operational_start_date": "2024-01-01", "bus_id": 0,
               "type": "import",
               "price_per_mwh": 100.0,
               "limits": { "min_mw": 500.0, "max_mw": 100.0 }
@@ -460,7 +475,7 @@ mod tests {
         let json = r#"{
           "contracts": [
             {
-              "id": 0, "name": "Export Revenue", "bus_id": 0,
+              "id": 0, "name": "Export Revenue", "operational_start_date": "2024-01-01", "bus_id": 0,
               "type": "export",
               "price_per_mwh": -500.0,
               "limits": { "min_mw": 0.0, "max_mw": 200.0 }
@@ -486,13 +501,13 @@ mod tests {
         let json_forward = r#"{
           "contracts": [
             {
-              "id": 0, "name": "Import A", "bus_id": 0,
+              "id": 0, "name": "Import A", "operational_start_date": "2024-01-01", "bus_id": 0,
               "type": "import",
               "price_per_mwh": 100.0,
               "limits": { "min_mw": 0.0, "max_mw": 100.0 }
             },
             {
-              "id": 1, "name": "Export B", "bus_id": 1,
+              "id": 1, "name": "Export B", "operational_start_date": "2024-01-01", "bus_id": 1,
               "type": "export",
               "price_per_mwh": -50.0,
               "limits": { "min_mw": 0.0, "max_mw": 200.0 }
@@ -502,13 +517,13 @@ mod tests {
         let json_reversed = r#"{
           "contracts": [
             {
-              "id": 1, "name": "Export B", "bus_id": 1,
+              "id": 1, "name": "Export B", "operational_start_date": "2024-01-01", "bus_id": 1,
               "type": "export",
               "price_per_mwh": -50.0,
               "limits": { "min_mw": 0.0, "max_mw": 200.0 }
             },
             {
-              "id": 0, "name": "Import A", "bus_id": 0,
+              "id": 0, "name": "Import A", "operational_start_date": "2024-01-01", "bus_id": 0,
               "type": "import",
               "price_per_mwh": 100.0,
               "limits": { "min_mw": 0.0, "max_mw": 100.0 }
@@ -576,7 +591,7 @@ mod tests {
         let json = r#"{
           "contracts": [
             {
-              "id": 0, "name": "Fixed", "bus_id": 0,
+              "id": 0, "name": "Fixed", "operational_start_date": "2024-01-01", "bus_id": 0,
               "type": "import",
               "price_per_mwh": 100.0,
               "limits": { "min_mw": 100.0, "max_mw": 100.0 }
@@ -597,7 +612,7 @@ mod tests {
         let json = r#"{
           "contracts": [
             {
-              "id": 0, "name": "Free Import", "bus_id": 0,
+              "id": 0, "name": "Free Import", "operational_start_date": "2024-01-01", "bus_id": 0,
               "type": "import",
               "price_per_mwh": 0.0,
               "limits": { "min_mw": 0.0, "max_mw": 100.0 }

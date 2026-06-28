@@ -1,6 +1,7 @@
 //! Non-controllable generation source entity — intermittent wind/solar.
 
 use crate::EntityId;
+use chrono::NaiveDate;
 
 /// Intermittent generation source that cannot be dispatched.
 ///
@@ -17,6 +18,8 @@ pub struct NonControllableSource {
     pub id: EntityId,
     /// Human-readable source name.
     pub name: String,
+    /// Date the entity enters service (ISO 8601).
+    pub operational_start_date: NaiveDate,
     /// Bus to which this source's generation is injected.
     pub bus_id: EntityId,
     /// Stage index when the source enters service. None = always exists.
@@ -44,6 +47,7 @@ mod tests {
         let source = NonControllableSource {
             id: EntityId::from(1),
             name: "Eólica Caetité".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(7),
             entry_stage_id: None,
             exit_stage_id: None,
@@ -67,6 +71,7 @@ mod tests {
         let source = NonControllableSource {
             id: EntityId::from(2),
             name: "Solar Pirapora".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(3),
             entry_stage_id: Some(12),
             exit_stage_id: None,
@@ -83,6 +88,7 @@ mod tests {
         let source = NonControllableSource {
             id: EntityId::from(3),
             name: "PCH Aggregate NE".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(0),
             entry_stage_id: None,
             exit_stage_id: None,

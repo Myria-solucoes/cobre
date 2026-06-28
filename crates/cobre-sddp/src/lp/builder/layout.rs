@@ -1721,6 +1721,7 @@ mod tests {
         Hydro {
             id: EntityId(id),
             name: format!("H{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: entry,
@@ -3143,6 +3144,7 @@ mod tests {
                 .map(|i| PumpingStation {
                     id: EntityId(i as i32),
                     name: format!("P{i}"),
+                    operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                     bus_id: EntityId(0),
                     source_hydro_id: EntityId(0),
                     destination_hydro_id: EntityId(1),

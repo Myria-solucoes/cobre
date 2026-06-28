@@ -289,6 +289,7 @@ fn build_system() -> cobre_core::System {
     let bus = Bus {
         id: BUS_ID,
         name: "B1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: C_DEFICIT,
@@ -299,6 +300,7 @@ fn build_system() -> cobre_core::System {
     let thermal_ant = Thermal {
         id: ANTICIPATED_ID,
         name: "T_ant".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: BUS_ID,
         min_generation_mw: 0.0,
         max_generation_mw: M_ANT,
@@ -311,6 +313,7 @@ fn build_system() -> cobre_core::System {
     let thermal_backup = Thermal {
         id: BACKUP_ID,
         name: "T_backup".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: BUS_ID,
         min_generation_mw: 0.0,
         max_generation_mw: B_BACK,

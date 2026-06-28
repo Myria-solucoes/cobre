@@ -1156,6 +1156,7 @@ mod tests {
         cobre_core::entities::hydro::Hydro {
             id: EntityId::from(id),
             name: format!("Hydro{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(10),
             downstream_id: None,
             entry_stage_id: None,
@@ -2979,6 +2980,7 @@ mod tests {
         Bus {
             id: EntityId::from(10),
             name: "Bus10".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: Vec::new(),
             excess_cost: 0.0,
         }

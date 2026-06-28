@@ -22,11 +22,16 @@
         "name": {
           "description": "Human-readable bus name.",
           "type": "string"
+        },
+        "operational_start_date": {
+          "description": "Date the entity enters service (ISO 8601 `YYYY-MM-DD`).",
+          "type": "string"
         }
       },
       "required": [
         "id",
-        "name"
+        "name",
+        "operational_start_date"
       ],
       "type": "object"
     },

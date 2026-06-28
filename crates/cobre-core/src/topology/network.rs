@@ -193,11 +193,13 @@ impl NetworkTopology {
 mod tests {
     use super::*;
     use crate::entities::{ContractType, HydroGenerationModel, HydroPenalties};
+    use chrono::NaiveDate;
 
     fn make_bus(id: i32) -> Bus {
         Bus {
             id: EntityId(id),
             name: String::new(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![],
             excess_cost: 0.0,
         }
@@ -207,6 +209,7 @@ mod tests {
         Line {
             id: EntityId(id),
             name: String::new(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             source_bus_id: EntityId(source_bus_id),
             target_bus_id: EntityId(target_bus_id),
             entry_stage_id: None,
@@ -240,6 +243,7 @@ mod tests {
         Hydro {
             id: EntityId(id),
             name: String::new(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(bus_id),
             downstream_id: None,
             entry_stage_id: None,
@@ -269,6 +273,7 @@ mod tests {
         Thermal {
             id: EntityId(id),
             name: String::new(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(bus_id),
             entry_stage_id: None,
             exit_stage_id: None,
@@ -283,6 +288,7 @@ mod tests {
         NonControllableSource {
             id: EntityId(id),
             name: String::new(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(bus_id),
             entry_stage_id: None,
             exit_stage_id: None,
@@ -296,6 +302,7 @@ mod tests {
         EnergyContract {
             id: EntityId(id),
             name: String::new(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(bus_id),
             contract_type: ContractType::Import,
             entry_stage_id: None,
@@ -310,6 +317,7 @@ mod tests {
         PumpingStation {
             id: EntityId(id),
             name: String::new(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(bus_id),
             source_hydro_id: EntityId(0),
             destination_hydro_id: EntityId(1),

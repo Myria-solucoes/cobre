@@ -1582,6 +1582,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(0),
             name: "B0".to_string(),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 1000.0,
@@ -1592,6 +1593,7 @@ mod tests {
         let ncs_source = NonControllableSource {
             id: ncs_entity_id,
             name: "W1".to_string(),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(0),
             entry_stage_id: None,
             exit_stage_id: None,
@@ -1960,6 +1962,7 @@ mod tests {
         let filling_hydro = |id: i32, start_stage_id: i32, entry: i32| Hydro {
             id: EntityId(id),
             name: format!("H{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: Some(entry),
@@ -1990,6 +1993,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,

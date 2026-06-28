@@ -121,6 +121,7 @@ fn one_bus_system(n_stages: usize) -> cobre_core::System {
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -241,6 +242,7 @@ fn one_hydro_system(n_stages: usize, lag_order: usize) -> cobre_core::System {
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -251,6 +253,7 @@ fn one_hydro_system(n_stages: usize, lag_order: usize) -> cobre_core::System {
     let hydro = Hydro {
         id: EntityId(2),
         name: "H1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
         entry_stage_id: None,
@@ -767,6 +770,7 @@ fn fpha_system_with_turbined_cost(
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -776,6 +780,7 @@ fn fpha_system_with_turbined_cost(
     let hydro = Hydro {
         id: EntityId(2),
         name: "FPHA1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
         entry_stage_id: None,
@@ -1189,6 +1194,7 @@ fn test_fpha_model_accepted() {
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -1198,6 +1204,7 @@ fn test_fpha_model_accepted() {
     let hydro = Hydro {
         id: EntityId(5),
         name: "Tucurui".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
         entry_stage_id: None,
@@ -1242,7 +1249,7 @@ fn test_fpha_model_accepted() {
     let stages: Vec<Stage> = vec![Stage {
         index: 0,
         id: 0,
-        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         end_date: NaiveDate::from_ymd_opt(2024, 2, 1).expect("valid date"),
         season_id: None,
         blocks: vec![Block {
@@ -1738,6 +1745,7 @@ fn two_bus_system_with_stochastic_load(
     let bus1 = Bus {
         id: EntityId(10),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -1747,6 +1755,7 @@ fn two_bus_system_with_stochastic_load(
     let bus2 = Bus {
         id: EntityId(20),
         name: "B2".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -1787,6 +1796,7 @@ fn two_bus_system_with_stochastic_load(
         .map(|h| Hydro {
             id: EntityId((h + 100) as i32),
             name: format!("H{h}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(10),
             downstream_id: None,
             entry_stage_id: None,
@@ -2053,6 +2063,7 @@ fn one_fpha_hydro_system(n_planes: usize) -> (cobre_core::System, ProductionMode
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -2062,6 +2073,7 @@ fn one_fpha_hydro_system(n_planes: usize) -> (cobre_core::System, ProductionMode
     let hydro = Hydro {
         id: EntityId(2),
         name: "FPHA1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
         entry_stage_id: None,
@@ -2249,6 +2261,7 @@ fn four_hydro_mixed_system() -> (cobre_core::System, ProductionModelSet) {
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -2278,6 +2291,7 @@ fn four_hydro_mixed_system() -> (cobre_core::System, ProductionModelSet) {
     let make_hydro = |id: i32, gen_model: HydroGenerationModel| Hydro {
         id: EntityId(id),
         name: format!("H{id}"),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
         entry_stage_id: None,
@@ -3625,6 +3639,7 @@ fn evap_water_balance_only_second_hydro_has_evap() {
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -3652,6 +3667,7 @@ fn evap_water_balance_only_second_hydro_has_evap() {
     let make_h = |id: i32| Hydro {
         id: EntityId(id),
         name: format!("H{id}"),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
         entry_stage_id: None,
@@ -3885,6 +3901,7 @@ fn evap_hydro_system_with_violation_cost(
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -3895,6 +3912,7 @@ fn evap_hydro_system_with_violation_cost(
     let hydro = Hydro {
         id: EntityId(2),
         name: "H1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
         entry_stage_id: None,
@@ -4558,6 +4576,7 @@ fn test_multi_segment_deficit_column_count() {
     let bus0 = Bus {
         id: EntityId(1),
         name: "Bus0".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![
             DeficitSegment {
                 depth_mw: Some(10.0),
@@ -4577,6 +4596,7 @@ fn test_multi_segment_deficit_column_count() {
     let bus1 = Bus {
         id: EntityId(2),
         name: "Bus1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 1000.0,
@@ -4730,6 +4750,7 @@ fn test_multi_segment_deficit_bounds_and_objective() {
     let bus = Bus {
         id: EntityId(1),
         name: "Bus0".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![
             DeficitSegment {
                 depth_mw: Some(10.0),
@@ -4798,6 +4819,7 @@ fn test_single_segment_backward_compat() {
     let bus = Bus {
         id: EntityId(1),
         name: "Bus0".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: cost,
@@ -4848,6 +4870,7 @@ fn test_multi_segment_deficit_load_balance_coefficients() {
     let bus = Bus {
         id: EntityId(1),
         name: "Bus0".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![
             DeficitSegment {
                 depth_mw: Some(10.0),
@@ -4947,6 +4970,7 @@ fn one_hydro_system_with_withdrawal(
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -4957,6 +4981,7 @@ fn one_hydro_system_with_withdrawal(
     let hydro = Hydro {
         id: EntityId(2),
         name: "H1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
         entry_stage_id: None,
@@ -5395,6 +5420,7 @@ fn two_hydro_withdrawal_slack_entries_per_hydro() {
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -5406,6 +5432,7 @@ fn two_hydro_withdrawal_slack_entries_per_hydro() {
     let make_hydro = |id: i32| Hydro {
         id: EntityId(id),
         name: format!("H{id}"),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
         entry_stage_id: None,
@@ -5662,6 +5689,7 @@ fn three_hydro_num_cols_includes_three_withdrawal_slacks() {
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -5673,6 +5701,7 @@ fn three_hydro_num_cols_includes_three_withdrawal_slacks() {
     let make_hydro = |id: i32| Hydro {
         id: EntityId(id),
         name: format!("H{id}"),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
         entry_stage_id: None,
@@ -5915,6 +5944,7 @@ fn one_bus_system_n_blks(n_blks: usize) -> cobre_core::System {
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -6452,6 +6482,7 @@ fn one_bus_system_n_blks_with_generic(
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -6900,6 +6931,7 @@ fn generic_constraint_two_hydros_sum_csc_entries() {
     let make_hydro = |id: EntityId, _prod: f64| Hydro {
         id,
         name: format!("H{}", id.0),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
         entry_stage_id: None,
@@ -6946,6 +6978,7 @@ fn generic_constraint_two_hydros_sum_csc_entries() {
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -7171,6 +7204,7 @@ fn one_bus_one_thermal_system(
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -7181,6 +7215,7 @@ fn one_bus_one_thermal_system(
     let thermal = Thermal {
         id: thermal_entity_id,
         name: "T1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         min_generation_mw: 0.0,
         max_generation_mw: 100.0,
@@ -7306,6 +7341,7 @@ fn one_hydro_active_violations(n_stages: usize) -> cobre_core::System {
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -7316,6 +7352,7 @@ fn one_hydro_active_violations(n_stages: usize) -> cobre_core::System {
     let hydro = Hydro {
         id: EntityId(2),
         name: "H1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
         entry_stage_id: None,
@@ -7646,6 +7683,7 @@ fn two_hydro_par_system(
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -7656,6 +7694,7 @@ fn two_hydro_par_system(
     let make_hydro = |id: i32, name: &str| Hydro {
         id: EntityId(id),
         name: name.to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
         entry_stage_id: None,
@@ -8150,6 +8189,7 @@ fn one_anticipated_thermal_system(
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -8160,6 +8200,7 @@ fn one_anticipated_thermal_system(
     let thermal = Thermal {
         id: EntityId(2),
         name: "T_ant".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         min_generation_mw,
         max_generation_mw,
@@ -8615,6 +8656,7 @@ fn two_thermal_one_anticipated_system(n_stages: usize, lead_stages: u32) -> cobr
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -8625,6 +8667,7 @@ fn two_thermal_one_anticipated_system(n_stages: usize, lead_stages: u32) -> cobr
     let thermal_ant = Thermal {
         id: EntityId(2),
         name: "T_ant".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         min_generation_mw: 0.0,
         max_generation_mw: 100.0,
@@ -8637,6 +8680,7 @@ fn two_thermal_one_anticipated_system(n_stages: usize, lead_stages: u32) -> cobr
     let thermal_non = Thermal {
         id: EntityId(3),
         name: "T_non".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         min_generation_mw: 0.0,
         max_generation_mw: 100.0,
@@ -8908,6 +8952,7 @@ fn two_anticipated_thermal_system(n_stages: usize) -> cobre_core::System {
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -8918,6 +8963,7 @@ fn two_anticipated_thermal_system(n_stages: usize) -> cobre_core::System {
     let thermal_0 = Thermal {
         id: EntityId(2),
         name: "T_ant0".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         min_generation_mw: 0.0,
         max_generation_mw: 100.0,
@@ -8929,6 +8975,7 @@ fn two_anticipated_thermal_system(n_stages: usize) -> cobre_core::System {
     let thermal_1 = Thermal {
         id: EntityId(3),
         name: "T_ant1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         min_generation_mw: 0.0,
         max_generation_mw: 100.0,
@@ -9057,6 +9104,7 @@ fn one_hydro_one_ant_system(n_stages: usize) -> cobre_core::System {
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -9067,6 +9115,7 @@ fn one_hydro_one_ant_system(n_stages: usize) -> cobre_core::System {
     let hydro = Hydro {
         id: EntityId(2),
         name: "H1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
         entry_stage_id: None,
@@ -9112,6 +9161,7 @@ fn one_hydro_one_ant_system(n_stages: usize) -> cobre_core::System {
     let thermal = Thermal {
         id: EntityId(3),
         name: "T_ant".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         min_generation_mw: 0.0,
         max_generation_mw: 100.0,
@@ -9591,6 +9641,7 @@ fn build_hydro_one_ant_system(
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -9601,6 +9652,7 @@ fn build_hydro_one_ant_system(
     let hydro = Hydro {
         id: EntityId(2),
         name: "H1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
         entry_stage_id: None,
@@ -9645,6 +9697,7 @@ fn build_hydro_one_ant_system(
     let thermal = Thermal {
         id: EntityId(3),
         name: "T_ant".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         min_generation_mw: 0.0,
         max_generation_mw: 100.0,
@@ -9814,6 +9867,7 @@ fn build_k0_baseline_system() -> cobre_core::System {
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -9824,6 +9878,7 @@ fn build_k0_baseline_system() -> cobre_core::System {
     let hydro = Hydro {
         id: EntityId(2),
         name: "H1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
         entry_stage_id: None,
@@ -9869,6 +9924,7 @@ fn build_k0_baseline_system() -> cobre_core::System {
     let thermal = Thermal {
         id: EntityId(3),
         name: "T_non".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         min_generation_mw: 0.0,
         max_generation_mw: 100.0,

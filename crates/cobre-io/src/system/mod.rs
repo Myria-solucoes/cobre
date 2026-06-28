@@ -40,6 +40,7 @@ pub use non_controllable::parse_non_controllable_sources;
 pub use pumping_stations::parse_pumping_stations;
 pub use thermals::parse_thermals;
 
+use chrono::NaiveDate;
 use cobre_core::{
     entities::{EnergyContract, NonControllableSource, PumpingStation},
     penalty::GlobalPenaltyDefaults,
@@ -47,6 +48,28 @@ use cobre_core::{
 use std::path::Path;
 
 use crate::LoadError;
+
+/// Parse an `operational_start_date` string into a [`NaiveDate`].
+///
+/// The single owner of the `operational_start_date` date format for every
+/// `system/*.json` entity registry. Accepts an ISO-8601 calendar date
+/// (`YYYY-MM-DD`).
+///
+/// # Errors
+///
+/// Returns [`LoadError::SchemaError`] naming `path`, `field`, and the offending
+/// value when `raw` is not a valid ISO-8601 date.
+pub(crate) fn parse_operational_start_date(
+    raw: &str,
+    path: &Path,
+    field: &str,
+) -> Result<NaiveDate, LoadError> {
+    NaiveDate::parse_from_str(raw, "%Y-%m-%d").map_err(|_| LoadError::SchemaError {
+        path: path.to_path_buf(),
+        field: field.to_string(),
+        message: format!("'{raw}' is not a valid ISO-8601 date (YYYY-MM-DD)"),
+    })
+}
 
 /// Load `system/non_controllable_sources.json`, or return an empty vec when absent.
 ///

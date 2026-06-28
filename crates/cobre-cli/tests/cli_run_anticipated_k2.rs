@@ -100,7 +100,8 @@ const INITIAL_CONDITIONS_JSON: &str = r#"{
     ]
 }"#;
 
-const BUSES_JSON: &str = r#"{ "buses": [{ "id": 1, "name": "BUS_1" }] }"#;
+const BUSES_JSON: &str =
+    r#"{ "buses": [{ "id": 1, "name": "BUS_1", "operational_start_date": "2024-01-01" }] }"#;
 const LINES_JSON: &str = r#"{ "lines": [] }"#;
 const HYDROS_JSON: &str = r#"{ "hydros": [] }"#;
 
@@ -111,6 +112,7 @@ const THERMALS_JSON: &str = r#"{
         {
             "id": 1,
             "name": "REGULAR",
+            "operational_start_date": "2024-01-01",
             "bus_id": 1,
             "cost_per_mwh": 30.0,
             "generation": { "min_mw": 0.0, "max_mw": 200.0 }
@@ -118,6 +120,7 @@ const THERMALS_JSON: &str = r#"{
         {
             "id": 2,
             "name": "ANTICIPATED",
+            "operational_start_date": "2024-01-01",
             "bus_id": 1,
             "cost_per_mwh": 25.0,
             "generation": { "min_mw": 0.0, "max_mw": 100.0 },

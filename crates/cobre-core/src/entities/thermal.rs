@@ -1,6 +1,7 @@
 //! Thermal plant entity — generation with MW bounds and cost.
 
 use crate::EntityId;
+use chrono::NaiveDate;
 
 /// Anticipated dispatch configuration for thermal plants requiring advance commitment.
 ///
@@ -27,6 +28,8 @@ pub struct Thermal {
     pub id: EntityId,
     /// Human-readable plant name.
     pub name: String,
+    /// Date the entity enters service (ISO 8601).
+    pub operational_start_date: NaiveDate,
     /// Bus to which this plant's generation is injected.
     pub bus_id: EntityId,
     /// Stage index when the plant enters service. None = always exists.
@@ -52,6 +55,7 @@ mod tests {
         let thermal = Thermal {
             id: EntityId::from(1),
             name: "Angra 1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(10),
             entry_stage_id: None,
             exit_stage_id: None,
@@ -77,6 +81,7 @@ mod tests {
         let thermal = Thermal {
             id: EntityId::from(2),
             name: "Pecém I".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(20),
             entry_stage_id: Some(1),
             exit_stage_id: Some(120),
@@ -106,6 +111,7 @@ mod tests {
         let thermal = Thermal {
             id: EntityId::from(2),
             name: "Pecém I".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(20),
             entry_stage_id: Some(1),
             exit_stage_id: Some(120),

@@ -53,6 +53,7 @@ pub struct PenaltiesOverrides<'a> {
 /// # Examples
 ///
 /// ```
+/// use chrono::NaiveDate;
 /// use cobre_core::EntityId;
 /// use cobre_core::entities::{Bus, DeficitSegment, Hydro, HydroPenalties, HydroGenerationModel, Line, NonControllableSource};
 /// use cobre_io::constraints::HydroPenaltyOverrideRow;
@@ -81,6 +82,7 @@ pub struct PenaltiesOverrides<'a> {
 /// let make_hydro = |id: i32| Hydro {
 ///     id: EntityId::from(id),
 ///     name: format!("Hydro {id}"),
+///     operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
 ///     bus_id: EntityId::from(1),
 ///     downstream_id: None,
 ///     entry_stage_id: None,
@@ -424,6 +426,7 @@ fn hydro_stage_penalties(hydro: &Hydro) -> HydroStagePenalties {
 )]
 mod tests {
     use super::*;
+    use chrono::NaiveDate;
     use cobre_core::entities::{
         Bus, DeficitSegment, HydroGenerationModel, HydroPenalties, Line, NonControllableSource,
     };
@@ -471,6 +474,7 @@ mod tests {
         Hydro {
             id: EntityId::from(id),
             name: format!("Hydro {id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(1),
             downstream_id: None,
             entry_stage_id: None,
@@ -518,6 +522,7 @@ mod tests {
         Hydro {
             id: EntityId::from(id),
             name: format!("Hydro {id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(1),
             downstream_id: None,
             entry_stage_id: None,
@@ -564,6 +569,7 @@ mod tests {
         Bus {
             id: EntityId::from(id),
             name: format!("Bus {id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -576,6 +582,7 @@ mod tests {
         Line {
             id: EntityId::from(id),
             name: format!("Line {id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             source_bus_id: EntityId::from(1),
             target_bus_id: EntityId::from(2),
             entry_stage_id: None,
@@ -591,6 +598,7 @@ mod tests {
         NonControllableSource {
             id: EntityId::from(id),
             name: format!("NCS {id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(1),
             entry_stage_id: None,
             exit_stage_id: None,

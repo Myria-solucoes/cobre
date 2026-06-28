@@ -878,7 +878,8 @@ mod tests {
 
     // buses.json: mandatory fields are "id" and "name" only.
     // "base_kv" does not exist in the actual Bus raw type.
-    const VALID_BUSES_JSON: &str = r#"{ "buses": [{ "id": 1, "name": "BUS_1" }] }"#;
+    const VALID_BUSES_JSON: &str =
+        r#"{ "buses": [{ "id": 1, "name": "BUS_1", "operational_start_date": "2024-01-01" }] }"#;
 
     const VALID_LINES_JSON: &str = r#"{ "lines": [] }"#;
 
@@ -1011,7 +1012,7 @@ mod tests {
         write_file(
             dir.path(),
             "system/buses.json",
-            r#"{ "buses": [{ "id": 1, "name": "A" }, { "id": 1, "name": "B" }] }"#,
+            r#"{ "buses": [{ "id": 1, "name": "A", "operational_start_date": "2024-01-01" }, { "id": 1, "name": "B", "operational_start_date": "2024-01-01" }] }"#,
         );
 
         // penalties.json: invalid JSON syntax — produces a parse error

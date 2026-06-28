@@ -78,7 +78,8 @@ const STAGES_JSON: &str = r#"{
 }"#;
 
 const INITIAL_CONDITIONS_JSON: &str = r#"{ "storage": [], "filling_storage": [] }"#;
-const BUSES_JSON: &str = r#"{ "buses": [{ "id": 1, "name": "BUS_1" }] }"#;
+const BUSES_JSON: &str =
+    r#"{ "buses": [{ "id": 1, "name": "BUS_1", "operational_start_date": "2024-01-01" }] }"#;
 const LINES_JSON: &str = r#"{ "lines": [] }"#;
 const HYDROS_JSON: &str = r#"{ "hydros": [] }"#;
 const THERMALS_JSON: &str = r#"{ "thermals": [] }"#;

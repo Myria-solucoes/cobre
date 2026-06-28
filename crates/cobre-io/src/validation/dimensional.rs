@@ -322,6 +322,7 @@ mod tests {
     };
 
     use super::*;
+    use chrono::NaiveDate;
 
     fn make_hydro(
         id: i32,
@@ -332,6 +333,7 @@ mod tests {
         cobre_core::entities::Hydro {
             id: EntityId(id),
             name: format!("Hydro {id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id,
@@ -361,6 +363,7 @@ mod tests {
         Bus {
             id: EntityId(id),
             name: format!("Bus {id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![],
             excess_cost: 0.0,
         }

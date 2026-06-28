@@ -1,6 +1,7 @@
 //! Energy contract entity — import/export agreements with external systems.
 
 use crate::EntityId;
+use chrono::NaiveDate;
 
 /// Direction of energy flow for a bilateral contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +25,8 @@ pub struct EnergyContract {
     pub id: EntityId,
     /// Human-readable contract name.
     pub name: String,
+    /// Date the entity enters service (ISO 8601).
+    pub operational_start_date: NaiveDate,
     /// Bus at which the contracted power is injected or withdrawn.
     pub bus_id: EntityId,
     /// Direction of energy flow for this contract.
@@ -49,6 +52,7 @@ mod tests {
         let contract = EnergyContract {
             id: EntityId::from(1),
             name: "Importação Argentina".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(5),
             contract_type: ContractType::Import,
             entry_stage_id: None,
@@ -67,6 +71,7 @@ mod tests {
         let contract = EnergyContract {
             id: EntityId::from(2),
             name: "Exportação Uruguai".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(6),
             contract_type: ContractType::Export,
             entry_stage_id: Some(1),

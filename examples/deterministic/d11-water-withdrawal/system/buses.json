@@ -3,7 +3,8 @@
   "buses": [
     {
       "id": 0,
-      "name": "B0"
+      "name": "B0",
+      "operational_start_date": "2020-01-01"
     }
   ]
 }

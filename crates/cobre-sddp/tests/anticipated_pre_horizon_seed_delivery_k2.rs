@@ -179,6 +179,7 @@ fn build_system() -> cobre_core::System {
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 5000.0,
@@ -190,6 +191,7 @@ fn build_system() -> cobre_core::System {
     let thermal_ant = Thermal {
         id: anticipated_id,
         name: "T_ant_seed_k2".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         min_generation_mw: 0.0,
         max_generation_mw: 200.0,
@@ -202,6 +204,7 @@ fn build_system() -> cobre_core::System {
     let thermal_backup = Thermal {
         id: EntityId(43),
         name: "T_backup_seed_k2".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         min_generation_mw: 0.0,
         max_generation_mw: 500.0,
@@ -216,6 +219,7 @@ fn build_system() -> cobre_core::System {
     let hydro = Hydro {
         id: EntityId(41),
         name: "H1_seed_k2".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
         entry_stage_id: None,

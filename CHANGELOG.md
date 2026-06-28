@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Every `system/*.json` entity now carries a required `operational_start_date`
+  field (an ISO-8601 `YYYY-MM-DD` calendar date).** Buses, hydros, thermals,
+  lines, non-controllable sources, pumping stations, and energy contracts must
+  each declare the date the entity enters service. The field has no default: a
+  registry file that omits it is rejected, and a value that is not a valid
+  ISO-8601 date produces a schema error naming the file, the field, and the
+  offending string.
+
 ### Changed
 
 - **Each policy cut and state file now embeds the per-slot identity of its

@@ -166,6 +166,7 @@ fn build_system_with_one_hydro() -> cobre_core::System {
     let bus = Bus {
         id: EntityId::from(BUS_ID),
         name: "B1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: Some(f64::INFINITY),
             cost_per_mwh: 3000.0,
@@ -176,6 +177,7 @@ fn build_system_with_one_hydro() -> cobre_core::System {
     let hydro = Hydro {
         id: EntityId::from(HYDRO_ID),
         name: "H1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId::from(BUS_ID),
         downstream_id: None,
         entry_stage_id: None,
@@ -512,6 +514,7 @@ fn build_system_for_par1(n_hydros: usize) -> cobre_core::System {
     let bus = Bus {
         id: EntityId::from(BUS_ID),
         name: "B1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: Some(f64::INFINITY),
             cost_per_mwh: 3000.0,
@@ -523,6 +526,7 @@ fn build_system_for_par1(n_hydros: usize) -> cobre_core::System {
         .map(|h| Hydro {
             id: EntityId::from((h + 1) as i32),
             name: format!("H{}", h + 1),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(BUS_ID),
             downstream_id: None,
             entry_stage_id: None,
@@ -774,6 +778,7 @@ fn build_system_for_par1_with_user_stats() -> cobre_core::System {
         .map(|_| Bus {
             id: EntityId::from(BUS_ID),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: Some(f64::INFINITY),
                 cost_per_mwh: 3000.0,

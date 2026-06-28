@@ -16,6 +16,7 @@
 //!     {
 //!       "id": 0,
 //!       "name": "Bombeamento Serra da Mesa",
+//!       "operational_start_date": "2024-01-01",
 //!       "bus_id": 10,
 //!       "source_hydro_id": 3,
 //!       "destination_hydro_id": 5,
@@ -44,6 +45,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Path;
 
+use super::parse_operational_start_date;
 use crate::LoadError;
 
 /// Top-level intermediate type for `pumping_stations.json` (serde only, not re-exported).
@@ -67,6 +69,8 @@ pub(crate) struct RawPumpingStation {
     id: i32,
     /// Human-readable station name.
     name: String,
+    /// Date the entity enters service (ISO 8601 `YYYY-MM-DD`).
+    operational_start_date: String,
     /// Bus from which electrical power is consumed.
     bus_id: i32,
     /// Hydro plant from whose reservoir water is extracted.
@@ -132,7 +136,7 @@ pub fn parse_pumping_stations(path: &Path) -> Result<Vec<PumpingStation>, LoadEr
 
     validate_raw_pumping(&raw, path)?;
 
-    Ok(convert_pumping(raw))
+    convert_pumping(raw, path)
 }
 
 fn validate_raw_pumping(raw: &RawPumpingFile, path: &Path) -> Result<(), LoadError> {
@@ -208,27 +212,37 @@ fn validate_flow_bounds(
     Ok(())
 }
 
-fn convert_pumping(raw: RawPumpingFile) -> Vec<PumpingStation> {
+fn convert_pumping(raw: RawPumpingFile, path: &Path) -> Result<Vec<PumpingStation>, LoadError> {
     let mut stations: Vec<PumpingStation> = raw
         .pumping_stations
         .into_iter()
-        .map(|raw_station| PumpingStation {
-            id: EntityId(raw_station.id),
-            name: raw_station.name,
-            bus_id: EntityId(raw_station.bus_id),
-            source_hydro_id: EntityId(raw_station.source_hydro_id),
-            destination_hydro_id: EntityId(raw_station.destination_hydro_id),
-            entry_stage_id: raw_station.entry_stage_id,
-            exit_stage_id: raw_station.exit_stage_id,
-            consumption_mw_per_m3s: raw_station.consumption_mw_per_m3s,
-            min_flow_m3s: raw_station.flow.min_m3s,
-            max_flow_m3s: raw_station.flow.max_m3s,
+        .enumerate()
+        .map(|(i, raw_station)| {
+            let operational_start_date = parse_operational_start_date(
+                &raw_station.operational_start_date,
+                path,
+                &format!("pumping_stations[{i}].operational_start_date"),
+            )?;
+
+            Ok(PumpingStation {
+                id: EntityId(raw_station.id),
+                name: raw_station.name,
+                operational_start_date,
+                bus_id: EntityId(raw_station.bus_id),
+                source_hydro_id: EntityId(raw_station.source_hydro_id),
+                destination_hydro_id: EntityId(raw_station.destination_hydro_id),
+                entry_stage_id: raw_station.entry_stage_id,
+                exit_stage_id: raw_station.exit_stage_id,
+                consumption_mw_per_m3s: raw_station.consumption_mw_per_m3s,
+                min_flow_m3s: raw_station.flow.min_m3s,
+                max_flow_m3s: raw_station.flow.max_m3s,
+            })
         })
-        .collect();
+        .collect::<Result<_, LoadError>>()?;
 
     // Sort by id ascending to satisfy declaration-order invariance.
     stations.sort_by_key(|s| s.id.0);
-    stations
+    Ok(stations)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -259,6 +273,7 @@ mod tests {
             {
               "id": 0,
               "name": "Bombeamento Serra da Mesa",
+              "operational_start_date": "2024-01-01",
               "bus_id": 10,
               "source_hydro_id": 3,
               "destination_hydro_id": 5,
@@ -268,6 +283,7 @@ mod tests {
             {
               "id": 1,
               "name": "Bombeamento Cana Brava",
+              "operational_start_date": "2024-01-01",
               "bus_id": 11,
               "source_hydro_id": 4,
               "destination_hydro_id": 6,
@@ -311,13 +327,13 @@ mod tests {
         let json = r#"{
           "pumping_stations": [
             {
-              "id": 2, "name": "Alpha", "bus_id": 0,
+              "id": 2, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
               "source_hydro_id": 1, "destination_hydro_id": 2,
               "consumption_mw_per_m3s": 0.5,
               "flow": { "min_m3s": 0.0, "max_m3s": 100.0 }
             },
             {
-              "id": 2, "name": "Beta", "bus_id": 1,
+              "id": 2, "name": "Beta", "operational_start_date": "2024-01-01", "bus_id": 1,
               "source_hydro_id": 2, "destination_hydro_id": 3,
               "consumption_mw_per_m3s": 0.6,
               "flow": { "min_m3s": 0.0, "max_m3s": 200.0 }
@@ -349,7 +365,7 @@ mod tests {
         let json = r#"{
           "pumping_stations": [
             {
-              "id": 0, "name": "Bad", "bus_id": 0,
+              "id": 0, "name": "Bad", "operational_start_date": "2024-01-01", "bus_id": 0,
               "source_hydro_id": 1, "destination_hydro_id": 2,
               "consumption_mw_per_m3s": -0.5,
               "flow": { "min_m3s": 0.0, "max_m3s": 100.0 }
@@ -379,7 +395,7 @@ mod tests {
         let json = r#"{
           "pumping_stations": [
             {
-              "id": 0, "name": "Bad", "bus_id": 0,
+              "id": 0, "name": "Bad", "operational_start_date": "2024-01-01", "bus_id": 0,
               "source_hydro_id": 1, "destination_hydro_id": 2,
               "consumption_mw_per_m3s": 0.5,
               "flow": { "min_m3s": -10.0, "max_m3s": 100.0 }
@@ -409,7 +425,7 @@ mod tests {
         let json = r#"{
           "pumping_stations": [
             {
-              "id": 0, "name": "Bad", "bus_id": 0,
+              "id": 0, "name": "Bad", "operational_start_date": "2024-01-01", "bus_id": 0,
               "source_hydro_id": 1, "destination_hydro_id": 2,
               "consumption_mw_per_m3s": 0.5,
               "flow": { "min_m3s": 200.0, "max_m3s": 100.0 }
@@ -442,13 +458,13 @@ mod tests {
         let json_forward = r#"{
           "pumping_stations": [
             {
-              "id": 0, "name": "Alpha", "bus_id": 0,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
               "source_hydro_id": 1, "destination_hydro_id": 2,
               "consumption_mw_per_m3s": 0.5,
               "flow": { "min_m3s": 0.0, "max_m3s": 100.0 }
             },
             {
-              "id": 1, "name": "Beta", "bus_id": 1,
+              "id": 1, "name": "Beta", "operational_start_date": "2024-01-01", "bus_id": 1,
               "source_hydro_id": 2, "destination_hydro_id": 3,
               "consumption_mw_per_m3s": 0.8,
               "flow": { "min_m3s": 0.0, "max_m3s": 200.0 }
@@ -458,13 +474,13 @@ mod tests {
         let json_reversed = r#"{
           "pumping_stations": [
             {
-              "id": 1, "name": "Beta", "bus_id": 1,
+              "id": 1, "name": "Beta", "operational_start_date": "2024-01-01", "bus_id": 1,
               "source_hydro_id": 2, "destination_hydro_id": 3,
               "consumption_mw_per_m3s": 0.8,
               "flow": { "min_m3s": 0.0, "max_m3s": 200.0 }
             },
             {
-              "id": 0, "name": "Alpha", "bus_id": 0,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
               "source_hydro_id": 1, "destination_hydro_id": 2,
               "consumption_mw_per_m3s": 0.5,
               "flow": { "min_m3s": 0.0, "max_m3s": 100.0 }
@@ -532,7 +548,7 @@ mod tests {
         let json = r#"{
           "pumping_stations": [
             {
-              "id": 0, "name": "Alpha", "bus_id": 0,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
               "source_hydro_id": 1, "destination_hydro_id": 2,
               "consumption_mw_per_m3s": 0.5,
               "flow": { "min_m3s": 100.0, "max_m3s": 100.0 }

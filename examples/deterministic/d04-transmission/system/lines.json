@@ -4,6 +4,7 @@
     {
       "id": 0,
       "name": "B0_B1",
+      "operational_start_date": "2020-01-01",
       "source_bus_id": 0,
       "target_bus_id": 1,
       "capacity": {

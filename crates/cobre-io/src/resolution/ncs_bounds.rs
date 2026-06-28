@@ -61,12 +61,14 @@ pub fn resolve_ncs_bounds(
 #[allow(clippy::unwrap_used, clippy::float_cmp)]
 mod tests {
     use super::*;
+    use chrono::NaiveDate;
     use cobre_core::EntityId;
 
     fn make_ncs(id: i32, max_mw: f64) -> NonControllableSource {
         NonControllableSource {
             id: EntityId(id),
             name: format!("NCS{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(0),
             entry_stage_id: None,
             exit_stage_id: None,

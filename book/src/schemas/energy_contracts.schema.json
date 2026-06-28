@@ -40,6 +40,10 @@
           "description": "Human-readable contract name.",
           "type": "string"
         },
+        "operational_start_date": {
+          "description": "Date the entity enters service (ISO 8601 `YYYY-MM-DD`).",
+          "type": "string"
+        },
         "price_per_mwh": {
           "description": "Contract price per `MWh`. May be negative for export revenue [$/`MWh`].",
           "format": "double",
@@ -53,6 +57,7 @@
       "required": [
         "id",
         "name",
+        "operational_start_date",
         "bus_id",
         "type",
         "price_per_mwh",

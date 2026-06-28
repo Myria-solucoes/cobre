@@ -993,6 +993,7 @@ fn validate_variable_ref_entity(
 )]
 mod tests {
     use super::*;
+    use chrono::NaiveDate;
     use cobre_core::{
         EntityId,
         entities::{
@@ -1100,7 +1101,7 @@ mod tests {
         write_file(
             root,
             "system/buses.json",
-            r#"{ "buses": [{ "id": 1, "name": "BUS_1" }] }"#,
+            r#"{ "buses": [{ "id": 1, "name": "BUS_1", "operational_start_date": "2024-01-01" }] }"#,
         );
         write_file(root, "system/lines.json", r#"{ "lines": [] }"#);
         write_file(root, "system/hydros.json", r#"{ "hydros": [] }"#);
@@ -1152,6 +1153,7 @@ mod tests {
         Hydro {
             id: EntityId::from(id),
             name: format!("Hydro_{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(bus_id),
             downstream_id: None,
             entry_stage_id: None,
@@ -1181,6 +1183,7 @@ mod tests {
         Line {
             id: EntityId::from(id),
             name: format!("Line_{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             source_bus_id: EntityId::from(source_bus),
             target_bus_id: EntityId::from(target_bus),
             entry_stage_id: None,
@@ -1196,6 +1199,7 @@ mod tests {
         NonControllableSource {
             id: EntityId::from(id),
             name: format!("Ncs_{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(bus_id),
             entry_stage_id: None,
             exit_stage_id: None,
@@ -1209,6 +1213,7 @@ mod tests {
         PumpingStation {
             id: EntityId::from(id),
             name: format!("Pump_{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(bus_id),
             source_hydro_id: EntityId::from(src_hydro),
             destination_hydro_id: EntityId::from(dst_hydro),
@@ -1338,6 +1343,7 @@ mod tests {
         data.thermals = vec![Thermal {
             id: EntityId::from(20),
             name: "T20".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(777), // bad
             entry_stage_id: None,
             exit_stage_id: None,

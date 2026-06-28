@@ -192,12 +192,14 @@ impl From<BroadcastComputedParameter> for ComputedParameter {
 /// # Examples
 ///
 /// ```
+/// use chrono::NaiveDate;
 /// use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
 /// use cobre_io::serialize_system;
 ///
 /// let bus = Bus {
 ///     id: EntityId(1),
 ///     name: "Main Bus".to_string(),
+///     operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
 ///     deficit_segments: vec![DeficitSegment { depth_mw: None, cost_per_mwh: 500.0 }],
 ///     excess_cost: 0.0,
 /// };
@@ -223,12 +225,14 @@ pub fn serialize_system(system: &System) -> Result<Vec<u8>, LoadError> {
 /// # Examples
 ///
 /// ```
+/// use chrono::NaiveDate;
 /// use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
 /// use cobre_io::{deserialize_system, serialize_system};
 ///
 /// let bus = Bus {
 ///     id: EntityId(1),
 ///     name: "Main Bus".to_string(),
+///     operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
 ///     deficit_segments: vec![DeficitSegment { depth_mw: None, cost_per_mwh: 500.0 }],
 ///     excess_cost: 0.0,
 /// };
@@ -322,6 +326,7 @@ pub fn deserialize_parameters(bytes: &[u8]) -> Result<Vec<ScalarParameter>, Load
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use chrono::NaiveDate;
     use cobre_core::{
         AnticipatedCommitmentHistory, Bus, ComputedParameter, DeficitSegment, EntityId, Hydro,
         HydroGenerationModel, HydroPenalties, InitialConditions, ParameterKind, ScalarParameter,
@@ -332,6 +337,7 @@ mod tests {
         Bus {
             id: EntityId(id),
             name: format!("Bus {id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -344,6 +350,7 @@ mod tests {
         Thermal {
             id: EntityId(id),
             name: format!("Thermal {id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(bus_id),
             entry_stage_id: None,
             exit_stage_id: None,
@@ -379,6 +386,7 @@ mod tests {
         Hydro {
             id: EntityId(id),
             name: format!("Hydro {id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(bus_id),
             downstream_id: None,
             entry_stage_id: None,

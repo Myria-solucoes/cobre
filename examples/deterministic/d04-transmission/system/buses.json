@@ -4,6 +4,7 @@
     {
       "id": 0,
       "name": "B0",
+      "operational_start_date": "2020-01-01",
       "deficit_segments": [
         {
           "depth_mw": null,
@@ -14,6 +15,7 @@
     {
       "id": 1,
       "name": "B1",
+      "operational_start_date": "2020-01-02",
       "deficit_segments": [
         {
           "depth_mw": null,

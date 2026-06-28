@@ -1253,6 +1253,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -1263,6 +1264,7 @@ mod tests {
         let thermal = Thermal {
             id: EntityId(2),
             name: "T1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
@@ -1275,6 +1277,7 @@ mod tests {
         let hydro = Hydro {
             id: EntityId(3),
             name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: None,
@@ -1480,6 +1483,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -1490,6 +1494,7 @@ mod tests {
         let thermal = Thermal {
             id: EntityId(2),
             name: "T1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
@@ -1502,6 +1507,7 @@ mod tests {
         let hydro = Hydro {
             id: EntityId(3),
             name: "H_FPHA_BAD".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: None,
@@ -2786,6 +2792,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -2795,6 +2802,7 @@ mod tests {
         let thermal = Thermal {
             id: EntityId(2),
             name: "T1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
@@ -2806,6 +2814,7 @@ mod tests {
         let hydro = Hydro {
             id: EntityId(3),
             name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: None,
@@ -3248,6 +3257,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -3258,6 +3268,7 @@ mod tests {
         let make_hydro = |id: i32, name: &str| Hydro {
             id: EntityId(id),
             name: name.to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: None,
@@ -3603,6 +3614,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -3613,6 +3625,7 @@ mod tests {
         let make_hydro = |id: i32, name: &str, filling: Option<cobre_core::FillingConfig>| Hydro {
             id: EntityId(id),
             name: name.to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             // A filling hydro requires `entry_stage_id` (the operating-handoff
@@ -4150,6 +4163,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -4165,6 +4179,7 @@ mod tests {
             .map(|(i, &k)| Thermal {
                 id: EntityId(10 + i as i32),
                 name: format!("AT{i}"),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 bus_id: EntityId(1),
                 min_generation_mw: 0.0,
                 max_generation_mw: 100.0,
@@ -4178,6 +4193,7 @@ mod tests {
         let hydro = Hydro {
             id: EntityId(3),
             name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: None,
@@ -4800,6 +4816,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -4810,6 +4827,7 @@ mod tests {
         let thermal = Thermal {
             id: EntityId(2),
             name: "T1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
@@ -4822,6 +4840,7 @@ mod tests {
         let hydro = Hydro {
             id: EntityId(3),
             name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: None,
@@ -5073,6 +5092,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -5082,6 +5102,7 @@ mod tests {
         let thermal = Thermal {
             id: EntityId(2),
             name: "T1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
@@ -5093,6 +5114,7 @@ mod tests {
         let hydro = Hydro {
             id: EntityId(3),
             name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: None,
@@ -5329,6 +5351,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -5338,6 +5361,7 @@ mod tests {
         let thermal = Thermal {
             id: EntityId(2),
             name: "T1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
@@ -5349,6 +5373,7 @@ mod tests {
         let hydro = Hydro {
             id: EntityId(3),
             name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: None,
@@ -5603,6 +5628,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -5612,6 +5638,7 @@ mod tests {
         let thermal = Thermal {
             id: EntityId(2),
             name: "T1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
@@ -5623,6 +5650,7 @@ mod tests {
         let hydro = Hydro {
             id: EntityId(3),
             name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: None,
@@ -5668,6 +5696,7 @@ mod tests {
         let ncs_source = NonControllableSource {
             id: ncs_id,
             name: "Wind1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             entry_stage_id: None,
             exit_stage_id: None,
@@ -5899,6 +5928,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -5908,6 +5938,7 @@ mod tests {
         let thermal = Thermal {
             id: EntityId(2),
             name: "T1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
@@ -5919,6 +5950,7 @@ mod tests {
         let hydro = Hydro {
             id: EntityId(3),
             name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: None,
@@ -6261,6 +6293,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -6271,6 +6304,7 @@ mod tests {
         let thermal = Thermal {
             id: EntityId(2),
             name: "T1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
@@ -6283,6 +6317,7 @@ mod tests {
         let hydro = Hydro {
             id: EntityId(3),
             name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: None,
@@ -6871,6 +6906,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -6881,6 +6917,7 @@ mod tests {
         let thermal = Thermal {
             id: EntityId(2),
             name: "T1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
@@ -6893,6 +6930,7 @@ mod tests {
         let hydro = Hydro {
             id: hydro_id,
             name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: None,

@@ -565,6 +565,7 @@ mod tests {
     use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
     use crate::validation::{ErrorKind, ValidationContext};
+    use chrono::NaiveDate;
 
     // ── Cascade acyclicity tests ───────────────────────────────────────────────
 
@@ -829,6 +830,7 @@ mod tests {
         PumpingStation {
             id: EntityId::from(id),
             name: format!("Pump_{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(1),
             source_hydro_id: EntityId::from(1),
             destination_hydro_id: EntityId::from(2),
@@ -845,6 +847,7 @@ mod tests {
         NonControllableSource {
             id: EntityId::from(id),
             name: format!("NCS_{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(1),
             entry_stage_id: entry,
             exit_stage_id: exit,
@@ -859,6 +862,7 @@ mod tests {
         EnergyContract {
             id: EntityId::from(id),
             name: format!("Contract_{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(1),
             contract_type: ContractType::Import,
             entry_stage_id: entry,
@@ -1066,6 +1070,7 @@ mod tests {
         cobre_core::entities::Line {
             id: EntityId::from(id),
             name: format!("Line_{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             source_bus_id: EntityId::from(1),
             target_bus_id: EntityId::from(2),
             entry_stage_id: entry,

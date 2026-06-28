@@ -1034,6 +1034,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: Some(f64::INFINITY),
                 cost_per_mwh: 1000.0,
@@ -1439,6 +1440,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(10),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: Some(f64::INFINITY),
                 cost_per_mwh: 3000.0,
@@ -1480,6 +1482,7 @@ mod tests {
         let hydro = Hydro {
             id: hydro_id,
             name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(10),
             downstream_id: None,
             entry_stage_id: None,
@@ -2334,6 +2337,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(10),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: Some(f64::INFINITY),
                 cost_per_mwh: 3000.0,
@@ -2358,6 +2362,7 @@ mod tests {
         let hydro = Hydro {
             id: hydro_id,
             name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(10),
             downstream_id: None,
             entry_stage_id: None,
@@ -2600,6 +2605,7 @@ mod tests {
         Hydro {
             id: hydro_id,
             name: format!("H{}", hydro_id.0),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id,
             downstream_id: None,
             entry_stage_id: None,
@@ -2658,6 +2664,7 @@ mod tests {
         let bus = Bus {
             id: bus_id,
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: Some(f64::INFINITY),
                 cost_per_mwh: 3000.0,
@@ -3198,6 +3205,7 @@ mod tests {
         let bus = Bus {
             id: bus_id,
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: Some(f64::INFINITY),
                 cost_per_mwh: 3000.0,

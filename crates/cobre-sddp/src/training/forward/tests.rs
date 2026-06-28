@@ -251,6 +251,7 @@ fn make_stochastic_context_1_hydro_3_stages() -> StochasticContext {
     let bus = Bus {
         id: EntityId(0),
         name: "B0".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 1000.0,
@@ -260,6 +261,7 @@ fn make_stochastic_context_1_hydro_3_stages() -> StochasticContext {
     let hydro = Hydro {
         id: EntityId(1),
         name: "H1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(0),
         downstream_id: None,
         entry_stage_id: None,
@@ -1932,6 +1934,7 @@ fn make_stochastic_1h_1s(mean_m3s: f64, std_m3s: f64) -> StochasticContext {
     let bus = Bus {
         id: EntityId(0),
         name: "B0".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 1000.0,
@@ -1941,6 +1944,7 @@ fn make_stochastic_1h_1s(mean_m3s: f64, std_m3s: f64) -> StochasticContext {
     let hydro = Hydro {
         id: EntityId(1),
         name: "H1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(0),
         downstream_id: None,
         entry_stage_id: None,
@@ -2426,6 +2430,7 @@ fn make_stochastic_context_1_hydro_1_load_bus(mean_mw: f64, std_mw: f64) -> Stoc
     let bus0 = Bus {
         id: EntityId(0),
         name: "B0".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 1000.0,
@@ -2435,6 +2440,7 @@ fn make_stochastic_context_1_hydro_1_load_bus(mean_mw: f64, std_mw: f64) -> Stoc
     let bus1 = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 1000.0,
@@ -2444,6 +2450,7 @@ fn make_stochastic_context_1_hydro_1_load_bus(mean_mw: f64, std_mw: f64) -> Stoc
     let hydro = Hydro {
         id: EntityId(10),
         name: "H10".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(0),
         downstream_id: None,
         entry_stage_id: None,

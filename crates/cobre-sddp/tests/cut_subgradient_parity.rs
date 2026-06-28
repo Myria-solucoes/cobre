@@ -131,6 +131,7 @@ fn fpha_evap_system() -> cobre_core::System {
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -141,6 +142,7 @@ fn fpha_evap_system() -> cobre_core::System {
     let hydro = Hydro {
         id: EntityId(2),
         name: "H_FPHA".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
         entry_stage_id: None,

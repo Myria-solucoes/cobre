@@ -166,6 +166,7 @@ fn make_hydro(
     Hydro {
         id: EntityId(id),
         name: name.to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: downstream.map(EntityId),
         // A filling hydro requires `entry_stage_id` to be `Some`; the system
@@ -204,6 +205,7 @@ fn build_system() -> cobre_core::System {
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -214,6 +216,7 @@ fn build_system() -> cobre_core::System {
     let thermal_backup = Thermal {
         id: EntityId(5),
         name: "T_backup".to_string(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         min_generation_mw: 0.0,
         max_generation_mw: 400.0,

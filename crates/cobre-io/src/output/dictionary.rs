@@ -994,6 +994,7 @@ mod tests {
         Hydro {
             id: EntityId(id),
             name: name.to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(bus_id),
             downstream_id: None,
             entry_stage_id: None,
@@ -1023,6 +1024,7 @@ mod tests {
         Thermal {
             id: EntityId(id),
             name: name.to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(bus_id),
             entry_stage_id: None,
             exit_stage_id: None,
@@ -1037,6 +1039,7 @@ mod tests {
         Bus {
             id: EntityId(id),
             name: format!("Bus{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 1000.0,

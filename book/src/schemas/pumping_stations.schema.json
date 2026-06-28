@@ -71,6 +71,10 @@
           "description": "Human-readable station name.",
           "type": "string"
         },
+        "operational_start_date": {
+          "description": "Date the entity enters service (ISO 8601 `YYYY-MM-DD`).",
+          "type": "string"
+        },
         "source_hydro_id": {
           "description": "Hydro plant from whose reservoir water is extracted.",
           "format": "int32",
@@ -80,6 +84,7 @@
       "required": [
         "id",
         "name",
+        "operational_start_date",
         "bus_id",
         "source_hydro_id",
         "destination_hydro_id",

@@ -949,6 +949,7 @@ mod diversion_bound_tests {
         Hydro {
             id: EntityId(1),
             name: "H1".to_string(),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: None,
@@ -1305,6 +1306,7 @@ mod filling_phase_gating_tests {
         Hydro {
             id: EntityId(1),
             name: "H1".to_string(),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: entry,
@@ -2276,6 +2278,7 @@ mod anticipated_objective_tests {
                 Thermal {
                     id: EntityId(1),
                     name: "T_ant".to_string(),
+                    operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                     bus_id: EntityId(1),
                     min_generation_mw: 0.0,
                     max_generation_mw: MAX_GEN_MW,
@@ -2289,6 +2292,7 @@ mod anticipated_objective_tests {
                 Thermal {
                     id: EntityId(2),
                     name: "T_std".to_string(),
+                    operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                     bus_id: EntityId(1),
                     min_generation_mw: 0.0,
                     max_generation_mw: MAX_GEN_MW,
@@ -2615,6 +2619,7 @@ mod block_family_slack_tests {
         Hydro {
             id: EntityId(id),
             name: format!("H{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: None,
@@ -2988,6 +2993,7 @@ mod contract_column_tests {
         EnergyContract {
             id: EntityId(id),
             name: format!("C{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             contract_type,
             entry_stage_id,

@@ -956,6 +956,7 @@ mod tests {
         Hydro {
             id: EntityId(id),
             name: String::new(),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(0),
             downstream_id: downstream_id.map(EntityId),
             entry_stage_id: None,
@@ -1288,6 +1289,7 @@ mod tests {
         EnergyContract {
             id: EntityId(id),
             name: String::new(),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(0),
             contract_type,
             entry_stage_id: None,
@@ -1304,6 +1306,7 @@ mod tests {
         PumpingStation {
             id: EntityId(id),
             name: String::new(),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(0),
             source_hydro_id: EntityId(0),
             destination_hydro_id: EntityId(0),

@@ -1,6 +1,7 @@
 //! Pumping station entity — water transfer consuming electrical power.
 
 use crate::EntityId;
+use chrono::NaiveDate;
 
 /// Pumping station that transfers water between hydro reservoirs.
 ///
@@ -15,6 +16,8 @@ pub struct PumpingStation {
     pub id: EntityId,
     /// Human-readable pumping station name.
     pub name: String,
+    /// Date the entity enters service (ISO 8601).
+    pub operational_start_date: NaiveDate,
     /// Bus from which electrical power is consumed.
     pub bus_id: EntityId,
     /// Hydro plant from whose reservoir water is extracted.
@@ -42,6 +45,7 @@ mod tests {
         let station = PumpingStation {
             id: EntityId::from(1),
             name: "Bombeamento Serra da Mesa".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(10),
             source_hydro_id: EntityId::from(3),
             destination_hydro_id: EntityId::from(5),

@@ -23,19 +23,24 @@ use crate::{
 /// # Examples
 ///
 /// ```
+/// use chrono::NaiveDate;
 /// use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
 ///
+/// let early = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+/// let late = NaiveDate::from_ymd_opt(2024, 2, 1).unwrap();
 /// let system = SystemBuilder::new()
 ///     .buses(vec![
-///         Bus { id: EntityId(2), name: "B".to_string(), deficit_segments: vec![], excess_cost: 0.0 },
-///         Bus { id: EntityId(1), name: "A".to_string(), deficit_segments: vec![], excess_cost: 0.0 },
+///         Bus { id: EntityId(1), name: "B".to_string(), operational_start_date: late, deficit_segments: vec![], excess_cost: 0.0 },
+///         Bus { id: EntityId(2), name: "Z".to_string(), operational_start_date: early, deficit_segments: vec![], excess_cost: 0.0 },
+///         Bus { id: EntityId(3), name: "A".to_string(), operational_start_date: early, deficit_segments: vec![], excess_cost: 0.0 },
 ///     ])
 ///     .build()
 ///     .expect("valid system");
 ///
-/// // Canonical ordering: id=1 comes before id=2.
-/// assert_eq!(system.buses()[0].id, EntityId(1));
-/// assert_eq!(system.buses()[1].id, EntityId(2));
+/// // Canonical ordering: by operational_start_date, then by name; never by id.
+/// assert_eq!(system.buses()[0].name, "A"); // early date, name "A"
+/// assert_eq!(system.buses()[1].name, "Z"); // early date, name "Z"
+/// assert_eq!(system.buses()[2].name, "B"); // later date
 /// ```
 pub struct SystemBuilder {
     buses: Vec<Bus>,
@@ -302,9 +307,11 @@ impl SystemBuilder {
         self
     }
 
-    /// Sort every collection into canonical [`EntityId`] order, validate, and assemble
-    /// the immutable [`System`]. All validation errors are collected before returning —
-    /// no short-circuiting on the first error.
+    /// Sort every collection into canonical order, validate, and assemble the
+    /// immutable [`System`]. Operational entities sort by
+    /// `(operational_start_date, name)`; stages and generic constraints sort by
+    /// `id`. All validation errors are collected before returning — no
+    /// short-circuiting on the first error.
     ///
     /// # Errors
     ///
@@ -319,13 +326,44 @@ impl SystemBuilder {
     // thread those through every call and lose the fail-fast-on-duplicates short-circuit.
     #[allow(clippy::too_many_lines)]
     pub fn build(mut self) -> Result<System, Vec<ValidationError>> {
-        self.buses.sort_by_key(|e| e.id.0);
-        self.lines.sort_by_key(|e| e.id.0);
-        self.hydros.sort_by_key(|e| e.id.0);
-        self.thermals.sort_by_key(|e| e.id.0);
-        self.pumping_stations.sort_by_key(|e| e.id.0);
-        self.contracts.sort_by_key(|e| e.id.0);
-        self.non_controllable_sources.sort_by_key(|e| e.id.0);
+        // Stable sort on (operational_start_date, name), not id: the canonical
+        // order must be invariant under id renumbering to uphold the
+        // declaration-order hard rule (a tie preserves input order).
+        self.buses.sort_by(|a, b| {
+            a.operational_start_date
+                .cmp(&b.operational_start_date)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        self.lines.sort_by(|a, b| {
+            a.operational_start_date
+                .cmp(&b.operational_start_date)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        self.hydros.sort_by(|a, b| {
+            a.operational_start_date
+                .cmp(&b.operational_start_date)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        self.thermals.sort_by(|a, b| {
+            a.operational_start_date
+                .cmp(&b.operational_start_date)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        self.pumping_stations.sort_by(|a, b| {
+            a.operational_start_date
+                .cmp(&b.operational_start_date)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        self.contracts.sort_by(|a, b| {
+            a.operational_start_date
+                .cmp(&b.operational_start_date)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        self.non_controllable_sources.sort_by(|a, b| {
+            a.operational_start_date
+                .cmp(&b.operational_start_date)
+                .then_with(|| a.name.cmp(&b.name))
+        });
         self.stages.sort_by_key(|s| s.id);
         self.generic_constraints.sort_by_key(|c| c.id.0);
 

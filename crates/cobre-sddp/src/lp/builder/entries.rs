@@ -1181,6 +1181,7 @@ mod parameter_resolution_tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -1191,6 +1192,7 @@ mod parameter_resolution_tests {
         let thermal = Thermal {
             id: thermal_entity_id,
             name: "T1".to_string(),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
@@ -1797,6 +1799,7 @@ mod zero_cost_tests {
             Thermal {
                 id: EntityId(1),
                 name: "T_ant".to_string(),
+                operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 bus_id: EntityId(1),
                 min_generation_mw: 0.0,
                 max_generation_mw: 100.0,
@@ -1808,6 +1811,7 @@ mod zero_cost_tests {
             Thermal {
                 id: EntityId(2),
                 name: "T_std".to_string(),
+                operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 bus_id: EntityId(1),
                 min_generation_mw: 0.0,
                 max_generation_mw: 100.0,
@@ -2317,6 +2321,7 @@ mod pumping_water_tests {
         Hydro {
             id: EntityId(id),
             name: format!("H{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: downstream_id.map(EntityId),
             entry_stage_id: None,
@@ -2384,6 +2389,7 @@ mod pumping_water_tests {
         Bus {
             id: EntityId(id),
             name: format!("B{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 1000.0,
@@ -2419,6 +2425,7 @@ mod pumping_water_tests {
         PumpingStation {
             id: EntityId(id),
             name: format!("P{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(bus_id),
             source_hydro_id: EntityId(source),
             destination_hydro_id: EntityId(destination),
@@ -2440,6 +2447,7 @@ mod pumping_water_tests {
         Bus {
             id: EntityId(id),
             name: format!("B{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: (0..n_segments)
                 .map(|_| DeficitSegment {
                     depth_mw: None,
@@ -2456,6 +2464,7 @@ mod pumping_water_tests {
         Thermal {
             id: EntityId(id),
             name: format!("T{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(bus_id),
             entry_stage_id: None,
             exit_stage_id: None,
@@ -2474,6 +2483,7 @@ mod pumping_water_tests {
         Line {
             id: EntityId(id),
             name: format!("L{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             source_bus_id: EntityId(source_bus),
             target_bus_id: EntityId(target_bus),
             entry_stage_id: None,
@@ -3066,6 +3076,7 @@ mod pumping_water_tests {
         EnergyContract {
             id: EntityId(id),
             name: format!("C{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(bus_id),
             contract_type,
             entry_stage_id: None,
@@ -3993,6 +4004,7 @@ mod pumping_water_tests {
         Hydro {
             id: EntityId(id),
             name: format!("H{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: downstream.map(EntityId),
             entry_stage_id: entry,

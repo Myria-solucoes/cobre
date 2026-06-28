@@ -71,11 +71,16 @@
         "name": {
           "description": "Human-readable plant name.",
           "type": "string"
+        },
+        "operational_start_date": {
+          "description": "Date the entity enters service (ISO 8601 `YYYY-MM-DD`).",
+          "type": "string"
         }
       },
       "required": [
         "id",
         "name",
+        "operational_start_date",
         "bus_id",
         "cost_per_mwh",
         "generation"

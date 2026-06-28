@@ -77,7 +77,8 @@ pub const VALID_INITIAL_CONDITIONS_JSON: &str = r#"{
 }"#;
 
 /// Single-bus `buses.json`.
-const VALID_BUSES_JSON: &str = r#"{ "buses": [{ "id": 1, "name": "BUS_1" }] }"#;
+const VALID_BUSES_JSON: &str =
+    r#"{ "buses": [{ "id": 1, "name": "BUS_1", "operational_start_date": "2024-01-01" }] }"#;
 
 /// Empty lines array.
 const VALID_LINES_JSON: &str = r#"{ "lines": [] }"#;
@@ -170,8 +171,8 @@ pub fn make_multi_entity_case(dir: &TempDir) {
         "system/buses.json",
         r#"{
     "buses": [
-        { "id": 1, "name": "BUS_SE" },
-        { "id": 2, "name": "BUS_S" }
+        { "id": 1, "name": "BUS_SE", "operational_start_date": "2024-01-01" },
+        { "id": 2, "name": "BUS_S", "operational_start_date": "2024-01-01" }
     ]
 }"#,
     );
@@ -184,6 +185,7 @@ pub fn make_multi_entity_case(dir: &TempDir) {
         {
             "id": 1,
             "name": "SE-S",
+            "operational_start_date": "2024-01-01",
             "source_bus_id": 1,
             "target_bus_id": 2,
             "capacity": { "direct_mw": 2000.0, "reverse_mw": 1500.0 }
@@ -200,6 +202,7 @@ pub fn make_multi_entity_case(dir: &TempDir) {
         {
             "id": 1,
             "name": "HYDRO_1",
+            "operational_start_date": "2024-01-01",
             "bus_id": 1,
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
@@ -224,6 +227,7 @@ pub fn make_multi_entity_case(dir: &TempDir) {
         {
             "id": 1,
             "name": "THERMAL_1",
+            "operational_start_date": "2024-01-01",
             "bus_id": 2,
             "cost_per_mwh": 80.0,
             "generation": { "min_mw": 0.0, "max_mw": 300.0 }
@@ -269,6 +273,7 @@ pub fn make_referential_violation_case(dir: &TempDir) {
         {
             "id": 1,
             "name": "HYDRO_1",
+            "operational_start_date": "2024-01-01",
             "bus_id": 999,
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },

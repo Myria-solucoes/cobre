@@ -1227,6 +1227,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -1368,6 +1369,7 @@ mod tests {
         Hydro {
             id: EntityId(id),
             name: format!("H{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: None,
@@ -1408,6 +1410,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -1515,6 +1518,7 @@ mod tests {
         PumpingStation {
             id: EntityId(id),
             name: format!("P{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             source_hydro_id: EntityId(1),
             destination_hydro_id: EntityId(2),
@@ -1697,6 +1701,7 @@ mod tests {
         EnergyContract {
             id: EntityId(id),
             name: format!("C{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             contract_type,
             entry_stage_id: None,
@@ -1720,6 +1725,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -1960,6 +1966,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -2080,6 +2087,7 @@ mod tests {
             Thermal {
                 id: EntityId(1),
                 name: "T_a".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 bus_id: EntityId(1),
                 entry_stage_id: None,
                 exit_stage_id: None,
@@ -2091,6 +2099,7 @@ mod tests {
             Thermal {
                 id: EntityId(2),
                 name: "T_b".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 bus_id: EntityId(1),
                 entry_stage_id: None,
                 exit_stage_id: None,
@@ -2102,6 +2111,7 @@ mod tests {
             Thermal {
                 id: EntityId(3),
                 name: "T_c".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 bus_id: EntityId(1),
                 entry_stage_id: None,
                 exit_stage_id: None,
@@ -2149,6 +2159,7 @@ mod tests {
             Thermal {
                 id: EntityId(1),
                 name: "T1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 bus_id: EntityId(1),
                 entry_stage_id: None,
                 exit_stage_id: None,
@@ -2160,6 +2171,7 @@ mod tests {
             Thermal {
                 id: EntityId(2),
                 name: "T2".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 bus_id: EntityId(1),
                 entry_stage_id: None,
                 exit_stage_id: None,
@@ -2217,6 +2229,7 @@ mod tests {
             Thermal {
                 id: EntityId(1),
                 name: "T_ant_k2".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 bus_id: EntityId(1),
                 entry_stage_id: None,
                 exit_stage_id: None,
@@ -2228,6 +2241,7 @@ mod tests {
             Thermal {
                 id: EntityId(2),
                 name: "T_ant_k3".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 bus_id: EntityId(1),
                 entry_stage_id: None,
                 exit_stage_id: None,
@@ -2239,6 +2253,7 @@ mod tests {
             Thermal {
                 id: EntityId(3),
                 name: "T_backup".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 bus_id: EntityId(1),
                 entry_stage_id: None,
                 exit_stage_id: None,
@@ -2256,6 +2271,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 1000.0,
@@ -2824,6 +2840,7 @@ mod tests {
         let thermals = vec![Thermal {
             id: EntityId(1),
             name: "T1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             entry_stage_id: None,
             exit_stage_id: None,
@@ -2837,6 +2854,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -3030,6 +3048,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -3040,6 +3059,7 @@ mod tests {
         let hydro = Hydro {
             id: EntityId(2),
             name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: None,
@@ -3652,6 +3672,7 @@ mod tests {
         Hydro {
             id: EntityId(id),
             name: format!("H{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: Some(entry),

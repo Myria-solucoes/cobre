@@ -4,6 +4,7 @@
     {
       "id": 0,
       "name": "H0",
+      "operational_start_date": "2020-01-01",
       "bus_id": 0,
       "downstream_id": 1,
       "reservoir": {
@@ -25,6 +26,7 @@
     {
       "id": 1,
       "name": "H1",
+      "operational_start_date": "2020-01-02",
       "bus_id": 0,
       "downstream_id": null,
       "reservoir": {

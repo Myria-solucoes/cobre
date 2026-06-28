@@ -78,6 +78,7 @@ pub fn resolve_ncs_factors(
 #[allow(clippy::unwrap_used, clippy::float_cmp)]
 mod tests {
     use super::*;
+    use chrono::NaiveDate;
     use cobre_core::EntityId;
     use cobre_core::temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
@@ -89,6 +90,7 @@ mod tests {
         NonControllableSource {
             id: EntityId(id),
             name: format!("NCS{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(0),
             entry_stage_id: None,
             exit_stage_id: None,

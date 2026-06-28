@@ -12,6 +12,7 @@
 //!     {
 //!       "id": 0,
 //!       "name": "Angra 1",
+//!       "operational_start_date": "2024-01-01",
 //!       "bus_id": 2,
 //!       "cost_per_mwh": 12.0,
 //!       "generation": { "min_mw": 0.0, "max_mw": 600.0 }
@@ -19,6 +20,7 @@
 //!     {
 //!       "id": 1,
 //!       "name": "Pecém I",
+//!       "operational_start_date": "2024-01-01",
 //!       "bus_id": 3,
 //!       "entry_stage_id": 1,
 //!       "exit_stage_id": 120,
@@ -49,6 +51,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Path;
 
+use super::parse_operational_start_date;
 use crate::LoadError;
 
 /// Top-level intermediate type for `thermals.json` (serde only, not re-exported).
@@ -72,6 +75,8 @@ pub(crate) struct RawThermal {
     id: i32,
     /// Human-readable plant name.
     name: String,
+    /// Date the entity enters service (ISO 8601 `YYYY-MM-DD`).
+    operational_start_date: String,
     /// Bus to which this plant's generation is injected.
     bus_id: i32,
     /// Stage index when the plant enters service. Absent or null = always exists.
@@ -157,7 +162,7 @@ pub fn parse_thermals(path: &Path) -> Result<Vec<Thermal>, LoadError> {
 
     validate_raw_thermals(&raw, path)?;
 
-    Ok(convert_thermals(raw))
+    convert_thermals(raw, path)
 }
 
 fn validate_raw_thermals(raw: &RawThermalFile, path: &Path) -> Result<(), LoadError> {
@@ -253,19 +258,27 @@ fn validate_generation_bounds(
     Ok(())
 }
 
-fn convert_thermals(raw: RawThermalFile) -> Vec<Thermal> {
+fn convert_thermals(raw: RawThermalFile, path: &Path) -> Result<Vec<Thermal>, LoadError> {
     let mut thermals: Vec<Thermal> = raw
         .thermals
         .into_iter()
-        .map(|raw_thermal| {
+        .enumerate()
+        .map(|(i, raw_thermal)| {
+            let operational_start_date = parse_operational_start_date(
+                &raw_thermal.operational_start_date,
+                path,
+                &format!("thermals[{i}].operational_start_date"),
+            )?;
+
             let anticipated_config: Option<AnticipatedConfig> =
                 raw_thermal.anticipated_config.map(|g| AnticipatedConfig {
                     lead_stages: g.lead_stages,
                 });
 
-            Thermal {
+            Ok(Thermal {
                 id: EntityId(raw_thermal.id),
                 name: raw_thermal.name,
+                operational_start_date,
                 bus_id: EntityId(raw_thermal.bus_id),
                 entry_stage_id: raw_thermal.entry_stage_id,
                 exit_stage_id: raw_thermal.exit_stage_id,
@@ -273,13 +286,13 @@ fn convert_thermals(raw: RawThermalFile) -> Vec<Thermal> {
                 min_generation_mw: raw_thermal.generation.min_mw,
                 max_generation_mw: raw_thermal.generation.max_mw,
                 anticipated_config,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<_, LoadError>>()?;
 
     // Sort by id ascending to satisfy declaration-order invariance.
     thermals.sort_by_key(|t| t.id.0);
-    thermals
+    Ok(thermals)
 }
 
 #[cfg(test)]
@@ -304,6 +317,7 @@ mod tests {
         {
           "id": 0,
           "name": "Angra 1",
+          "operational_start_date": "2024-01-01",
           "bus_id": 2,
           "cost_per_mwh": 12.0,
           "generation": { "min_mw": 0.0, "max_mw": 600.0 }
@@ -311,6 +325,7 @@ mod tests {
         {
           "id": 1,
           "name": "Pecém I",
+          "operational_start_date": "2024-01-01",
           "bus_id": 3,
           "entry_stage_id": 1,
           "exit_stage_id": 120,
@@ -375,12 +390,12 @@ mod tests {
         let json = r#"{
           "thermals": [
             {
-              "id": 5, "name": "Alpha", "bus_id": 0,
+              "id": 5, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
               "cost_per_mwh": 50.0,
               "generation": { "min_mw": 0.0, "max_mw": 100.0 }
             },
             {
-              "id": 5, "name": "Beta", "bus_id": 0,
+              "id": 5, "name": "Beta", "operational_start_date": "2024-01-01", "bus_id": 0,
               "cost_per_mwh": 80.0,
               "generation": { "min_mw": 0.0, "max_mw": 200.0 }
             }
@@ -412,7 +427,7 @@ mod tests {
         let json = r#"{
           "thermals": [
             {
-              "id": 0, "name": "Alpha", "bus_id": 0,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
               "cost_per_mwh": 75.0,
               "generation": { "min_mw": 0.0, "max_mw": 100.0 }
             }
@@ -438,7 +453,7 @@ mod tests {
         let json = r#"{
           "thermals": [
             {
-              "id": 0, "name": "Alpha", "bus_id": 0,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
               "generation": { "min_mw": 0.0, "max_mw": 100.0 }
             }
           ]
@@ -459,7 +474,7 @@ mod tests {
         let json = r#"{
           "thermals": [
             {
-              "id": 0, "name": "Alpha", "bus_id": 0,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
               "cost_per_mwh": -50.0,
               "generation": { "min_mw": 0.0, "max_mw": 100.0 }
             }
@@ -486,7 +501,7 @@ mod tests {
         let json = r#"{
           "thermals": [
             {
-              "id": 0, "name": "Alpha", "bus_id": 0,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
               "cost_per_mwh": 50.0,
               "generation": { "min_mw": -10.0, "max_mw": 100.0 }
             }
@@ -515,7 +530,7 @@ mod tests {
         let json = r#"{
           "thermals": [
             {
-              "id": 0, "name": "Alpha", "bus_id": 0,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
               "cost_per_mwh": 50.0,
               "generation": { "min_mw": 0.0, "max_mw": -100.0 }
             }
@@ -544,7 +559,7 @@ mod tests {
         let json = r#"{
           "thermals": [
             {
-              "id": 0, "name": "Alpha", "bus_id": 0,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
               "cost_per_mwh": 50.0,
               "generation": { "min_mw": 200.0, "max_mw": 100.0 }
             }
@@ -576,12 +591,12 @@ mod tests {
         let json_forward = r#"{
           "thermals": [
             {
-              "id": 0, "name": "Angra 1", "bus_id": 0,
+              "id": 0, "name": "Angra 1", "operational_start_date": "2024-01-01", "bus_id": 0,
               "cost_per_mwh": 12.0,
               "generation": { "min_mw": 0.0, "max_mw": 600.0 }
             },
             {
-              "id": 1, "name": "Pecém I", "bus_id": 1,
+              "id": 1, "name": "Pecém I", "operational_start_date": "2024-01-01", "bus_id": 1,
               "cost_per_mwh": 120.0,
               "generation": { "min_mw": 0.0, "max_mw": 360.0 }
             }
@@ -590,12 +605,12 @@ mod tests {
         let json_reversed = r#"{
           "thermals": [
             {
-              "id": 1, "name": "Pecém I", "bus_id": 1,
+              "id": 1, "name": "Pecém I", "operational_start_date": "2024-01-01", "bus_id": 1,
               "cost_per_mwh": 120.0,
               "generation": { "min_mw": 0.0, "max_mw": 360.0 }
             },
             {
-              "id": 0, "name": "Angra 1", "bus_id": 0,
+              "id": 0, "name": "Angra 1", "operational_start_date": "2024-01-01", "bus_id": 0,
               "cost_per_mwh": 12.0,
               "generation": { "min_mw": 0.0, "max_mw": 600.0 }
             }
@@ -649,7 +664,7 @@ mod tests {
             r#"{{
           "thermals": [
             {{
-              "id": 0, "name": "Alpha", "bus_id": 0,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
               "cost_per_mwh": 50.0,
               "generation": {{ "min_mw": 0.0, "max_mw": 100.0 }},
               "{old_key}": {{ "{old_sub}": 2 }}
@@ -717,7 +732,7 @@ mod tests {
         let json = r#"{
           "thermals": [
             {
-              "id": 0, "name": "Alpha", "bus_id": 0,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
               "cost_per_mwh": 50.0,
               "generation": { "min_mw": 0.0, "max_mw": 100.0 }
             }
@@ -738,7 +753,7 @@ mod tests {
         let json = r#"{
           "thermals": [
             {
-              "id": 0, "name": "Alpha", "bus_id": 0,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
               "cost_per_mwh": 50.0,
               "generation": { "min_mw": 0.0, "max_mw": 100.0 },
               "anticipated_config": { "lead_stages": 0 }
@@ -778,7 +793,7 @@ mod tests {
         let json = r#"{
           "thermals": [
             {
-              "id": 0, "name": "Alpha", "bus_id": 0,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
               "cost_per_mwh": 50.0,
               "generation": { "min_mw": 0.0, "max_mw": 100.0 },
               "anticipated_config": { "lead_stages": -3 }
@@ -809,7 +824,7 @@ mod tests {
         let json = r#"{
           "thermals": [
             {
-              "id": 0, "name": "Alpha", "bus_id": 0,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
               "cost_per_mwh": 50.0,
               "generation": { "min_mw": 0.0, "max_mw": 100.0 },
               "anticipated_config": { "lead_stages": 1 }
@@ -831,7 +846,7 @@ mod tests {
         let json = r#"{
           "thermals": [
             {
-              "id": 0, "name": "Alpha", "bus_id": 0,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
               "cost_per_mwh": 50.0,
               "generation": { "min_mw": 100.0, "max_mw": 100.0 }
             }
@@ -851,7 +866,7 @@ mod tests {
         let json = r#"{
           "thermals": [
             {
-              "id": 0, "name": "Alpha", "bus_id": 0,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
               "cost_per_mwh": 0.0,
               "generation": { "min_mw": 0.0, "max_mw": 100.0 }
             }

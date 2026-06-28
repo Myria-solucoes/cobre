@@ -205,19 +205,19 @@ fn test_inflow_history_wired_into_system() {
     std::fs::write(
         dir.path().join("system/hydros.json"),
         r#"{ "hydros": [
-            { "id": 1, "name": "H1", "bus_id": 1, "downstream_id": null,
+            { "id": 1, "name": "H1", "operational_start_date": "2024-01-01", "bus_id": 1, "downstream_id": null,
               "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
               "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
               "generation": { "model": "constant_productivity",
                 "min_turbined_m3s": 0.0, "max_turbined_m3s": 200.0,
                 "min_generation_mw": 0.0, "max_generation_mw": 200.0 } },
-            { "id": 2, "name": "H2", "bus_id": 1, "downstream_id": null,
+            { "id": 2, "name": "H2", "operational_start_date": "2024-01-01", "bus_id": 1, "downstream_id": null,
               "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 500.0 },
               "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
               "generation": { "model": "constant_productivity",
                 "min_turbined_m3s": 0.0, "max_turbined_m3s": 100.0,
                 "min_generation_mw": 0.0, "max_generation_mw": 100.0 } },
-            { "id": 3, "name": "H3", "bus_id": 1, "downstream_id": null,
+            { "id": 3, "name": "H3", "operational_start_date": "2024-01-01", "bus_id": 1, "downstream_id": null,
               "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 300.0 },
               "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
               "generation": { "model": "constant_productivity",
@@ -368,19 +368,19 @@ fn test_external_scenarios_wired_into_system() {
     std::fs::write(
         dir.path().join("system/hydros.json"),
         r#"{ "hydros": [
-            { "id": 1, "name": "H1", "bus_id": 1, "downstream_id": null,
+            { "id": 1, "name": "H1", "operational_start_date": "2024-01-01", "bus_id": 1, "downstream_id": null,
               "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
               "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
               "generation": { "model": "constant_productivity",
                 "min_turbined_m3s": 0.0, "max_turbined_m3s": 200.0,
                 "min_generation_mw": 0.0, "max_generation_mw": 200.0 } },
-            { "id": 2, "name": "H2", "bus_id": 1, "downstream_id": null,
+            { "id": 2, "name": "H2", "operational_start_date": "2024-01-01", "bus_id": 1, "downstream_id": null,
               "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 500.0 },
               "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
               "generation": { "model": "constant_productivity",
                 "min_turbined_m3s": 0.0, "max_turbined_m3s": 100.0,
                 "min_generation_mw": 0.0, "max_generation_mw": 100.0 } },
-            { "id": 3, "name": "H3", "bus_id": 1, "downstream_id": null,
+            { "id": 3, "name": "H3", "operational_start_date": "2024-01-01", "bus_id": 1, "downstream_id": null,
               "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 300.0 },
               "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
               "generation": { "model": "constant_productivity",
@@ -569,8 +569,8 @@ fn test_external_ncs_scenarios_wired_into_system() {
         "system/non_controllable_sources.json",
         r#"{
     "non_controllable_sources": [
-        { "id": 1, "name": "NCS_A", "bus_id": 1, "max_generation_mw": 50.0 },
-        { "id": 2, "name": "NCS_B", "bus_id": 1, "max_generation_mw": 30.0 }
+        { "id": 1, "name": "NCS_A", "operational_start_date": "2024-01-01", "bus_id": 1, "max_generation_mw": 50.0 },
+        { "id": 2, "name": "NCS_B", "operational_start_date": "2024-01-01", "bus_id": 1, "max_generation_mw": 30.0 }
     ]
 }"#,
     );

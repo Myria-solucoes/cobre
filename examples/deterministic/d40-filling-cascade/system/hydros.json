@@ -4,6 +4,7 @@
     {
       "id": 0,
       "name": "H_up",
+      "operational_start_date": "2020-01-01",
       "bus_id": 0,
       "downstream_id": 1,
       "entry_stage_id": 4,
@@ -27,6 +28,7 @@
     {
       "id": 1,
       "name": "H_down",
+      "operational_start_date": "2020-01-02",
       "bus_id": 0,
       "downstream_id": 2,
       "entry_stage_id": 4,
@@ -50,6 +52,7 @@
     {
       "id": 2,
       "name": "H_sink",
+      "operational_start_date": "2020-01-03",
       "bus_id": 0,
       "downstream_id": null,
       "reservoir": {
@@ -71,6 +74,7 @@
     {
       "id": 3,
       "name": "H_ctrl",
+      "operational_start_date": "2020-01-04",
       "bus_id": 0,
       "downstream_id": null,
       "reservoir": {

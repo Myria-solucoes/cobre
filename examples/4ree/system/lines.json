@@ -4,6 +4,7 @@
     {
       "id": 0,
       "name": "SUDESTE_SUL",
+      "operational_start_date": "2020-01-01",
       "source_bus_id": 0,
       "target_bus_id": 1,
       "capacity": {
@@ -15,6 +16,7 @@
     {
       "id": 1,
       "name": "SUDESTE_NORDESTE",
+      "operational_start_date": "2020-01-02",
       "source_bus_id": 0,
       "target_bus_id": 2,
       "capacity": {
@@ -26,6 +28,7 @@
     {
       "id": 2,
       "name": "SUDESTE_NOFICT1",
+      "operational_start_date": "2020-01-03",
       "source_bus_id": 0,
       "target_bus_id": 4,
       "capacity": {
@@ -37,6 +40,7 @@
     {
       "id": 3,
       "name": "NORDESTE_NOFICT1",
+      "operational_start_date": "2020-01-04",
       "source_bus_id": 2,
       "target_bus_id": 4,
       "capacity": {
@@ -48,6 +52,7 @@
     {
       "id": 4,
       "name": "NORTE_NOFICT1",
+      "operational_start_date": "2020-01-05",
       "source_bus_id": 3,
       "target_bus_id": 4,
       "capacity": {

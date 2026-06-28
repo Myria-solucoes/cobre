@@ -222,6 +222,7 @@ mod tests {
         cobre_core::entities::Hydro {
             id: EntityId(id),
             name: format!("Hydro {id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
             entry_stage_id: None,
@@ -349,6 +350,7 @@ mod tests {
             buses: vec![Bus {
                 id: EntityId(1),
                 name: "BUS_1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 deficit_segments: vec![DeficitSegment {
                     depth_mw: None,
                     cost_per_mwh: 1000.0,
