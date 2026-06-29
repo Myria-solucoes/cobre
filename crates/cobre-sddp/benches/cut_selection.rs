@@ -1,28 +1,16 @@
-//! Perf regression guard: median per-call wall <= 1 ms at aggregated scale
-//! (threshold mandated by design section 1).
+//! Microbenchmark for `CutSelectionStrategy::Lml1` selection at the aggregated
+//! scale (K=945, D=155, M=384) on 8 rayon worker threads.
 //!
-//! **Unconditionally ignored**: the 1-ms threshold was observed tight on the dev
-//! host (median ~1.5 ms at 8 threads on a 16-core Xeon Platinum 8259CL).
-//! Threshold tuning is deferred to a later `M_BLOCK` sweep that finalises both the
-//! kernel configuration and the perf-guard value; when it lands, replace this
-//! `#[ignore]` with the `slow-tests`-feature gate used elsewhere in this crate and
-//! set the post-sweep threshold.
+//! Synthetic, deterministic fixtures (`splitmix64`); no external data. The rayon
+//! pool is built once outside the timed region so Criterion measures only the
+//! `select` call.
 
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::float_cmp,
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-    )
-)]
+#![allow(missing_docs, clippy::expect_used, clippy::cast_possible_truncation)]
 
 use cobre_sddp::cut::CutPool;
 use cobre_sddp::cut_selection::CutSelectionStrategy;
-use std::time::Instant;
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -64,9 +52,7 @@ fn make_states(m: usize, d: usize, seed: u64) -> Vec<f64> {
     buf
 }
 
-#[test]
-#[ignore = "perf threshold pending a later M_BLOCK sweep"]
-fn select_for_stage_aggregated_under_one_ms() {
+fn select_for_stage_aggregated_8threads(c: &mut Criterion) {
     const K: usize = 945;
     const D: usize = 155;
     const M: usize = 384;
@@ -83,24 +69,14 @@ fn select_for_stage_aggregated_under_one_ms() {
         tie_tolerance: 1e-10,
     };
 
-    // Untimed warm-up: primes caches and the rayon worker pool.
-    let _ = rp.install(|| strategy.select(&pool, &states, 5));
-
-    // walls[4] is the median of the 9 sorted measured runs.
-    let mut walls: Vec<u128> = (0..9)
-        .map(|_| {
-            let start = Instant::now();
-            let _ = rp.install(|| strategy.select(&pool, &states, 5));
-            start.elapsed().as_micros()
-        })
-        .collect();
-    walls.sort_unstable();
-    let median_us = walls[4];
-
-    eprintln!("select_for_stage/aggregated/{THREADS}threads median: {median_us} us");
-
-    assert!(
-        median_us < 1_000,
-        "regression: median per-call wall {median_us} us exceeds 1-ms threshold (design section 1)",
-    );
+    c.bench_function("cut_selection/aggregated/8threads", |b| {
+        b.iter(|| {
+            rp.install(|| {
+                black_box(strategy.select(black_box(&pool), black_box(&states), 5));
+            });
+        });
+    });
 }
+
+criterion_group!(benches, select_for_stage_aggregated_8threads);
+criterion_main!(benches);

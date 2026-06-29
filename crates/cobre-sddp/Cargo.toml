@@ -97,6 +97,10 @@ name = "cut_application_anticipated_state"
 harness = false
 
 [[bench]]
+name = "cut_selection"
+harness = false
+
+[[bench]]
 name = "cut_selection_kernel"
 harness = false
 

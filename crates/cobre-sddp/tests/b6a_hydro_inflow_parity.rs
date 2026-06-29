@@ -38,9 +38,7 @@
 //!
 //! B6a adds no LP columns and no rows for any study without a `hydro_inflow`
 //! constraint, so the existing parity baselines are byte-identical and this file
-//! adds **no** `.sha256` baseline and **no** `EXPECTED_HASHES` entry. The
-//! `parity_baselines_unchanged::parity_baselines_have_not_changed` guard
-//! verifies that property independently.
+//! adds **no** new `.sha256` baseline to `tests/fixtures/parity_baselines*`.
 
 #![allow(
     clippy::unwrap_used,

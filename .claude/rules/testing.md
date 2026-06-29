@@ -16,8 +16,8 @@ rule; the rules below are the Cobre-specific ones.
 ## Tiers — use the cheapest tier that catches the regression
 
 1. **Golden bit-exact (parity hash).** SHA-256 over **final** output (cut pool,
-   simulation primal / dual / equipment / cost). Reserved for ~5 deliberately
-   feature-combined cases that exercise the shared LP-build / scaling / cut / basis
+   simulation primal / dual / equipment / cost). Reserved for a small, deliberately
+   feature-combined set of cases that exercise the shared LP-build / scaling / cut / basis
    machinery (and so also catch cross-feature dormant bugs). NOT the default; a new
    golden case needs justification. The hash MUST NOT include the convergence
    trajectory or any per-iteration state — a faster warm-start to the same optimum
