@@ -575,7 +575,6 @@ fn simulate_single_rank_4_scenarios_produces_4_results() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -707,7 +706,6 @@ fn simulate_infeasible_returns_lp_infeasible_error() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -830,7 +828,6 @@ fn simulate_infeasible_at_scenario2_stage3() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -951,7 +948,6 @@ fn simulate_channel_closed_returns_error() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -1074,7 +1070,6 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -1194,7 +1189,6 @@ fn simulate_cost_buffer_scenario_ids_match_assigned_range() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -1314,7 +1308,6 @@ fn simulate_channel_receives_results_in_scenario_order() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -1430,7 +1423,6 @@ fn test_simulation_parallel_cost_determinism() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -1524,7 +1516,6 @@ fn test_simulation_parallel_cost_determinism() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -1669,7 +1660,6 @@ fn simulate_emits_progress_events() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -1810,7 +1800,6 @@ fn simulate_no_events_when_sender_is_none() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -1936,7 +1925,6 @@ fn simulate_progress_events_received_before_return() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -2073,7 +2061,6 @@ fn simulate_progress_scenario_cost_equals_total_cost() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -2208,7 +2195,6 @@ fn simulate_emits_simulation_finished_as_last_event() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -2355,7 +2341,6 @@ fn simulate_progress_scenario_cost_is_finite() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -2485,7 +2470,6 @@ fn simulate_baked_path_issues_zero_add_rows() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -2608,7 +2592,6 @@ fn simulate_fallback_path_issues_expected_add_rows() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -2734,7 +2717,6 @@ fn simulate_baked_length_mismatch_returns_error() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -2896,7 +2878,6 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -3060,7 +3041,6 @@ fn simulate_with_empty_stage_bases_cold_starts() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {

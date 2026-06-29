@@ -181,7 +181,6 @@ impl StudySetup {
                 .cut_selection
                 .as_ref()
                 .and_then(crate::dcs::DcsParams::from_strategy),
-            noise_key_diag: None,
         }
     }
 
@@ -249,7 +248,6 @@ impl StudySetup {
                 .cut_selection
                 .as_ref()
                 .and_then(crate::dcs::DcsParams::from_strategy),
-            noise_key_diag: None,
         }
     }
 }

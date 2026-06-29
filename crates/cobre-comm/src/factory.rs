@@ -1,26 +1,28 @@
 //! Factory function for creating the active communication backend.
 //!
 //! [`create_communicator`] is the single runtime entry point for constructing a
-//! [`Communicator`](crate::Communicator). Selection order: the
-//! `COBRE_COMM_BACKEND` environment variable, then compiled-in Cargo features
-//! (`mpi`), then a fallback to [`LocalBackend`](crate::LocalBackend).
+//! [`Communicator`](crate::Communicator). The caller passes an explicit
+//! [`BackendKind`]; no environment variable or launcher probe selects the
+//! backend.
 
-/// Programmatic backend selector for library-mode callers that pass a
-/// `BackendKind` to [`create_communicator`] instead of using environment
-/// variables.
+/// Explicit backend selector passed by the caller to [`create_communicator`].
+///
+/// The communication backend is chosen solely by this value; there is no
+/// environment-variable or MPI-launcher auto-detection.
 ///
 /// # Examples
 ///
 /// ```rust
 /// use cobre_comm::BackendKind;
 ///
-/// let kind = BackendKind::Auto;
+/// let kind = BackendKind::Local;
 /// let copy = kind;
 /// assert_eq!(copy, kind);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
-    /// Auto-detect the best available backend (same order as the env-var path).
+    /// Unspecified / unknown backend label, used only for persisted-provenance
+    /// reconstruction; never a valid selection input to [`create_communicator`].
     Auto,
     /// MPI backend; fails at runtime if the `mpi` feature is not compiled in.
     Mpi,
@@ -191,91 +193,65 @@ pub fn available_backends() -> Vec<String> {
     backends
 }
 
-/// Returns `true` if any MPI launcher environment variable is present (checked
-/// via `var_os`, so non-UTF-8 values still count).
-///
-/// Always compiled (no cfg gate) so it is testable in no-feature builds, where
-/// it is unused outside tests — hence the dead-code allow.
-#[cfg_attr(not(feature = "mpi"), allow(dead_code))]
-fn mpi_launch_detected() -> bool {
-    const MPI_ENV_VARS: [&str; 6] = [
-        "PMI_RANK",
-        "PMI_SIZE",
-        "OMPI_COMM_WORLD_RANK",
-        "OMPI_COMM_WORLD_SIZE",
-        "MPI_LOCALRANKID",
-        "SLURM_PROCID",
-    ];
-    MPI_ENV_VARS
-        .iter()
-        .any(|var| std::env::var_os(var).is_some())
-}
-
 /// Construct the active communication backend (no-feature build).
 ///
-/// When the `mpi` feature is not compiled in, this function always returns a
-/// [`crate::LocalBackend`] or an error:
+/// When the `mpi` feature is not compiled in, the explicit `kind` selects:
 ///
-/// - `COBRE_COMM_BACKEND` unset, `"auto"`, or `"local"` → `Ok(LocalBackend)`
-/// - A known distributed backend name (`"mpi"`) →
-///   `Err(BackendError::BackendNotAvailable)`
-/// - An unknown name → `Err(BackendError::InvalidBackend)`
+/// - [`BackendKind::Local`] → `Ok(LocalBackend)`
+/// - [`BackendKind::Mpi`] → `Err(BackendError::BackendNotAvailable)`
+/// - [`BackendKind::Auto`] → `Err(BackendError::InvalidBackend)` (a provenance
+///   label, never a valid selection input)
 ///
 /// # Errors
 ///
 /// - [`crate::BackendError::BackendNotAvailable`]: a known backend was requested
 ///   but not compiled into this binary.
-/// - [`crate::BackendError::InvalidBackend`]: `COBRE_COMM_BACKEND` contains an
-///   unrecognized value.
+/// - [`crate::BackendError::InvalidBackend`]: the selector is not a valid
+///   backend choice.
 ///
 /// # Examples
 ///
 /// ```rust
 /// # #[cfg(not(feature = "mpi"))]
 /// # {
-/// use cobre_comm::create_communicator;
+/// use cobre_comm::{create_communicator, BackendKind};
 ///
-/// // With no distributed features, the factory always returns LocalBackend.
-/// let backend = create_communicator().expect("local backend must succeed");
+/// // With no distributed features, only the local backend is constructible.
+/// let backend = create_communicator(BackendKind::Local).expect("local backend must succeed");
 /// # use cobre_comm::Communicator;
 /// assert_eq!(backend.rank(), 0);
 /// assert_eq!(backend.size(), 1);
 /// # }
 /// ```
 #[cfg(not(feature = "mpi"))]
-pub fn create_communicator() -> Result<crate::LocalBackend, crate::BackendError> {
-    let requested = std::env::var("COBRE_COMM_BACKEND").unwrap_or_else(|_| "auto".to_string());
-    match requested.as_str() {
-        "auto" | "local" => Ok(crate::LocalBackend),
-        "mpi" => Err(crate::BackendError::BackendNotAvailable {
-            requested,
+pub fn create_communicator(kind: BackendKind) -> Result<crate::LocalBackend, crate::BackendError> {
+    match kind {
+        BackendKind::Local => Ok(crate::LocalBackend),
+        BackendKind::Mpi => Err(crate::BackendError::BackendNotAvailable {
+            requested: "mpi".to_string(),
             available: available_backends(),
         }),
-        _ => Err(crate::BackendError::InvalidBackend {
-            requested,
-            available: vec!["auto", "mpi", "local"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
+        BackendKind::Auto => Err(crate::BackendError::InvalidBackend {
+            requested: "auto".to_string(),
+            available: vec!["mpi", "local"].into_iter().map(String::from).collect(),
         }),
     }
 }
 
 /// Construct the active communication backend (MPI build).
 ///
-/// When the `mpi` feature is compiled in, this function returns a
-/// [`CommBackend`] selected according to the `COBRE_COMM_BACKEND` environment
-/// variable:
+/// When the `mpi` feature is compiled in, the explicit `kind` selects the
+/// [`CommBackend`]:
 ///
-/// - Unset or `"auto"` → auto-detect priority chain
-/// - `"mpi"` → `CommBackend::Mpi(FerrompiBackend::new()?)`
-/// - `"local"` → `CommBackend::Local(LocalBackend)`
-/// - Unknown name → `Err(BackendError::InvalidBackend)`
+/// - [`BackendKind::Mpi`] → `CommBackend::Mpi(FerrompiBackend::new()?)`
+/// - [`BackendKind::Local`] → `CommBackend::Local(LocalBackend)`
+/// - [`BackendKind::Auto`] → `Err(BackendError::InvalidBackend)` (a provenance
+///   label, never a valid selection input)
 ///
 /// # Errors
 ///
-/// - [`crate::BackendError::InvalidBackend`]: `COBRE_COMM_BACKEND` contains an
-///   unrecognized value.
+/// - [`crate::BackendError::InvalidBackend`]: the selector is not a valid
+///   backend choice.
 /// - [`crate::BackendError::InitializationFailed`]: the selected backend failed
 ///   to initialize (propagated from [`crate::FerrompiBackend::new`]).
 ///
@@ -284,60 +260,30 @@ pub fn create_communicator() -> Result<crate::LocalBackend, crate::BackendError>
 /// ```rust
 /// # #[cfg(feature = "mpi")]
 /// # {
-/// use cobre_comm::{create_communicator, Communicator};
+/// use cobre_comm::{create_communicator, BackendKind, Communicator};
 ///
-/// // With COBRE_COMM_BACKEND unset or "local", returns CommBackend::Local.
-/// // std::env::remove_var is unsafe in multi-threaded contexts (Rust 2024).
-/// // SAFETY: this doctest runs single-threaded; no concurrent env mutation.
-/// unsafe { std::env::set_var("COBRE_COMM_BACKEND", "local") };
-/// let backend = create_communicator().expect("local backend must succeed");
+/// // The local backend is selected explicitly.
+/// let backend = create_communicator(BackendKind::Local).expect("local backend must succeed");
 /// assert_eq!(backend.rank(), 0);
-/// unsafe { std::env::remove_var("COBRE_COMM_BACKEND") };
 /// # }
 /// ```
 #[cfg(feature = "mpi")]
-pub fn create_communicator() -> Result<CommBackend, crate::BackendError> {
-    let requested = std::env::var("COBRE_COMM_BACKEND").unwrap_or_else(|_| "auto".to_string());
-    match requested.as_str() {
-        "auto" => auto_detect(),
-        "mpi" => Ok(CommBackend::Mpi(Box::new(crate::FerrompiBackend::new()?))),
-        "local" => Ok(CommBackend::Local(crate::LocalBackend)),
-        _ => Err(crate::BackendError::InvalidBackend {
-            requested,
-            available: vec!["auto", "mpi", "local"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
+pub fn create_communicator(kind: BackendKind) -> Result<CommBackend, crate::BackendError> {
+    match kind {
+        BackendKind::Mpi => Ok(CommBackend::Mpi(Box::new(crate::FerrompiBackend::new()?))),
+        BackendKind::Local => Ok(CommBackend::Local(crate::LocalBackend)),
+        BackendKind::Auto => Err(crate::BackendError::InvalidBackend {
+            requested: "auto".to_string(),
+            available: vec!["mpi", "local"].into_iter().map(String::from).collect(),
         }),
     }
 }
 
-/// Auto-detect the backend: MPI when [`mpi_launch_detected`] is `true`,
-/// otherwise the local fallback.
-///
-/// # Errors
-///
-/// Returns [`crate::BackendError::InitializationFailed`] if the MPI backend is
-/// selected but [`crate::FerrompiBackend::new`] fails.
-#[cfg(feature = "mpi")]
-fn auto_detect() -> Result<CommBackend, crate::BackendError> {
-    #[cfg(feature = "mpi")]
-    if mpi_launch_detected() {
-        return Ok(CommBackend::Mpi(Box::new(crate::FerrompiBackend::new()?)));
-    }
-    Ok(CommBackend::Local(crate::LocalBackend))
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::BackendKind;
 
-    use super::{available_backends, mpi_launch_detected};
-
-    /// Serialises tests that mutate `COBRE_COMM_BACKEND`.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use super::available_backends;
 
     /// `available_backends()` always contains `"local"` regardless of features.
     #[test]
@@ -356,101 +302,39 @@ mod tests {
         assert_eq!(available_backends(), vec!["local".to_string()]);
     }
 
-    /// `mpi_launch_detected()` returns `false` when none of the MPI env vars
-    /// are set.
-    #[test]
-    fn test_mpi_launch_detected_false_by_default() {
-        const MPI_VARS: [&str; 6] = [
-            "PMI_RANK",
-            "PMI_SIZE",
-            "OMPI_COMM_WORLD_RANK",
-            "OMPI_COMM_WORLD_SIZE",
-            "MPI_LOCALRANKID",
-            "SLURM_PROCID",
-        ];
-        // Hold ENV_LOCK to prevent races with tests that set/remove MPI vars.
-        let _guard = ENV_LOCK.lock().unwrap();
-        let any_set = MPI_VARS.iter().any(|v| std::env::var_os(v).is_some());
-        if any_set {
-            // Running inside a real MPI launch; skip rather than fail.
-            return;
-        }
-        assert!(!mpi_launch_detected());
-    }
-
-    /// `mpi_launch_detected()` returns `true` when `PMI_RANK` is set.
-    #[test]
-    fn test_mpi_launch_detected_pmi_rank() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: serialised by ENV_LOCK; no concurrent env var access.
-        unsafe { std::env::set_var("PMI_RANK", "0") };
-        let result = mpi_launch_detected();
-        // SAFETY: symmetric with set_var above.
-        unsafe { std::env::remove_var("PMI_RANK") };
-        assert!(
-            result,
-            "expected mpi_launch_detected() == true when PMI_RANK is set"
-        );
-    }
-
-    /// `mpi_launch_detected()` returns `true` when `OMPI_COMM_WORLD_RANK` is set.
-    #[test]
-    fn test_mpi_launch_detected_ompi() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: serialised by ENV_LOCK.
-        unsafe { std::env::set_var("OMPI_COMM_WORLD_RANK", "0") };
-        let result = mpi_launch_detected();
-        // SAFETY: symmetric with set_var above.
-        unsafe { std::env::remove_var("OMPI_COMM_WORLD_RANK") };
-        assert!(
-            result,
-            "expected mpi_launch_detected() == true when OMPI_COMM_WORLD_RANK is set"
-        );
-    }
-
-    /// No-feature build: unset `COBRE_COMM_BACKEND` → `Ok(LocalBackend)` with
+    /// No-feature build: [`BackendKind::Local`] → `Ok(LocalBackend)` with
     /// rank 0 and size 1.
     #[test]
     #[cfg(not(feature = "mpi"))]
-    fn test_create_communicator_no_feature_auto() {
+    fn test_create_communicator_no_feature_local() {
         use crate::Communicator;
 
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe { std::env::remove_var("COBRE_COMM_BACKEND") };
-        let backend = super::create_communicator().expect("LocalBackend construction must succeed");
+        let backend = super::create_communicator(BackendKind::Local)
+            .expect("LocalBackend construction must succeed");
         assert_eq!(backend.rank(), 0);
         assert_eq!(backend.size(), 1);
     }
 
-    /// No-feature build: `COBRE_COMM_BACKEND=foobar` → `Err(InvalidBackend)`.
+    /// No-feature build: [`BackendKind::Auto`] (provenance-only label) →
+    /// `Err(InvalidBackend)`.
     #[test]
     #[cfg(not(feature = "mpi"))]
     fn test_create_communicator_no_feature_invalid() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("COBRE_COMM_BACKEND", "foobar") };
-        let err = super::create_communicator().expect_err("unknown backend must return Err");
-        // SAFETY: symmetric with set_var above.
-        unsafe { std::env::remove_var("COBRE_COMM_BACKEND") };
+        let err = super::create_communicator(BackendKind::Auto)
+            .expect_err("auto is not a valid selection");
         assert!(
-            matches!(
-                err,
-                crate::BackendError::InvalidBackend { ref requested, .. }
-                    if requested == "foobar"
-            ),
+            matches!(err, crate::BackendError::InvalidBackend { .. }),
             "unexpected error: {err:?}"
         );
     }
 
-    /// No-feature build: `COBRE_COMM_BACKEND=mpi` → `Err(BackendNotAvailable)`
+    /// No-feature build: [`BackendKind::Mpi`] → `Err(BackendNotAvailable)`
     /// where `requested == "mpi"` and `available` contains `"local"`.
     #[test]
     #[cfg(not(feature = "mpi"))]
     fn test_create_communicator_no_feature_unavailable() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("COBRE_COMM_BACKEND", "mpi") };
-        let err = super::create_communicator().expect_err("unavailable backend must return Err");
-        // SAFETY: symmetric with set_var above.
-        unsafe { std::env::remove_var("COBRE_COMM_BACKEND") };
+        let err = super::create_communicator(BackendKind::Mpi)
+            .expect_err("unavailable backend must return Err");
         assert!(
             matches!(err, crate::BackendError::BackendNotAvailable { .. }),
             "expected BackendNotAvailable, got {err:?}"

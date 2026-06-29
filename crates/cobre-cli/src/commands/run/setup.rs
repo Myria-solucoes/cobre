@@ -28,16 +28,10 @@ use crate::commands::broadcast::{
 use super::{RunArgs, RunContext};
 
 pub(super) fn resolve_thread_count(cli_threads: Option<u32>) -> usize {
-    if let Some(n) = cli_threads {
-        return n as usize;
+    match cli_threads {
+        Some(n) => n as usize,
+        None => 1,
     }
-    if let Ok(val) = std::env::var("COBRE_THREADS")
-        && let Ok(n) = val.parse::<usize>()
-        && n > 0
-    {
-        return n;
-    }
-    1
 }
 
 /// Values loaded on rank 0 by [`load_case_and_config`]. The trailing
@@ -135,7 +129,7 @@ pub(super) struct LoadBroadcastResult {
 pub(super) fn setup_communicator(
     args: &RunArgs,
 ) -> Result<RunContext<impl Communicator>, CliError> {
-    let comm = create_communicator()?;
+    let comm = create_communicator(args.comm_backend.into())?;
     let is_root = comm.rank() == 0;
     let quiet = args.quiet || !is_root;
 

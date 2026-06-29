@@ -1601,7 +1601,6 @@ mod tests {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         }
     }
 

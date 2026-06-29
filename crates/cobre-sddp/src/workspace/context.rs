@@ -10,7 +10,6 @@ use crate::{
     indexer::{CutStateProjection, StateLayout, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::StageGeometry,
-    noise_key_diag::NoiseKeyDiag,
 };
 
 /// Immutable per-stage LP layout and noise scaling parameters.
@@ -196,11 +195,4 @@ pub struct TrainingContext<'a> {
     /// past `start_iteration`, the backward pass solves each stage LP lazily;
     /// otherwise the baked all-cuts path is used.
     pub dcs: Option<DcsParams>,
-    /// Env-gated (`COBRE_W1_DIAG`) backward `noise_key` diagnostic table.
-    ///
-    /// `None` by default, in which case the backward pass performs zero key
-    /// computation and the solve path is byte-identical. When `Some`, it looks up
-    /// the per-(stage, ω) noise key by canonical ω and emits it alongside the
-    /// opening's `simplex_iterations`. See [`crate::noise_key_diag`].
-    pub noise_key_diag: Option<&'a NoiseKeyDiag>,
 }

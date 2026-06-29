@@ -81,7 +81,7 @@ pub use production::{energy_conversion, hydro_models};
 // `lag_transition::precompute_stage_lag_transitions` is intentionally absent
 // from the curated re-export — this shim is its sole resolution path. `noise`
 // and `stochastic_summary` stay `pub(crate)`.
-pub use stochastic::{estimation, inflow_method, lag_transition, noise_key_diag};
+pub use stochastic::{estimation, inflow_method, lag_transition};
 pub(crate) use stochastic::{noise, stochastic_summary};
 
 // Re-export shim exposing the `training/` pass modules at crate-root paths for

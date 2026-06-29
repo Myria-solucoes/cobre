@@ -244,9 +244,12 @@ impl crate::TopologyProvider for LocalBackend {
 
         static TOPOLOGY: OnceLock<ExecutionTopology> = OnceLock::new();
         TOPOLOGY.get_or_init(|| {
-            let hostname = std::env::var("HOSTNAME")
-                .or_else(|_| std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()))
-                .unwrap_or_else(|_| "localhost".to_string());
+            let hostname = gethostname::gethostname().to_string_lossy().into_owned();
+            let hostname = if hostname.is_empty() {
+                "localhost".to_string()
+            } else {
+                hostname
+            };
             ExecutionTopology {
                 backend: BackendKind::Local,
                 world_size: 1,
