@@ -271,7 +271,7 @@ demonstration of the thesis):
   exactly why prose facts must be checked against live source, `target/` excluded.
 - **`assessment-report.md` is NOT committed debt.** It is gitignored
   (`.gitignore:38`, `assessment*.md`) and untracked. _However:_ a committed test
-  references it — `crates/cobre-sddp/tests/anticipated_5stage_k2_smoke.rs:486`
+  references it — `crates/cobre-sddp/tests/anticipated_scenarios.rs`
   ("See F3-003 in assessment-report.md") — a dead reference + plan token in
   shipped code for anyone who clones. The only misplaced **tracked** root artifact
   is `allow-attribute-inventory.md`.

@@ -402,7 +402,7 @@ than keep-as-ignored):
   bit-identical across thread/rank counts.
 - The `cobre_tuning` example config was migrated to drop the two now-deleted keys
   (`deny_unknown_fields` would otherwise reject it).
-- `parity_hash_d01_d15` (HiGHS) was re-baselined under the always-descending path
+- `parity_hash_highs` (HiGHS) was re-baselined under the always-descending path
   (`COBRE_PARITY_REGEN=1`, owner-approved). The regenerated hashes came out
   **byte-identical** to the prior canonical-order baselines: the deterministic
   D-cases are single-opening per stage, so descending equals the identity

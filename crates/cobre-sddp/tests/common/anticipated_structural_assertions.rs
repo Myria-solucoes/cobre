@@ -5,9 +5,8 @@
 //! changes (cut counts, basis-cache layout tweaks, FCF additions) and catch
 //! regressions of the form "didn't crash, didn't fail to converge".
 //!
-//! Value-correctness coverage lives in
-//! `crates/cobre-sddp/tests/anticipated_closed_form_lb_k1_single_thermal.rs`,
-//! the hand-derivable canary. The two are complementary: the canary defends
+//! Value-correctness coverage is the `anticipated_closed_form_lb_k1_single_thermal`
+//! test in `crates/cobre-sddp/tests/anticipated_core.rs`, the hand-derivable canary. The two are complementary: the canary defends
 //! the LP/cut math at a single trivial fixture; these structural assertions
 //! defend the larger fixtures that have no closed form.
 

@@ -3258,9 +3258,9 @@ fn d29_weekly_par_noise_sharing() {
 /// - Training completes at least 1 iteration with a positive lower bound.
 ///
 /// Full structural and downstream-lag-transition assertions are in the dedicated
-/// `multi_resolution_integration.rs` test file, which verifies composition
-/// correctness including noise group IDs, accumulate_downstream flags,
-/// rebuild_from_downstream, and simulation.
+/// `hydro_sim.rs` test file (the `multi_resolution_integration` module), which
+/// verifies composition correctness including noise group IDs,
+/// accumulate_downstream flags, rebuild_from_downstream, and simulation.
 #[cfg_attr(
     not(feature = "slow-tests"),
     ignore = "slow: run with --features slow-tests"

@@ -55,7 +55,7 @@ The lever is **bit-exact pin count and its duplication**, not study count. Decis
   hash; git diff already records changes and the slow end-to-end test verifies the
   computation). The committed `.sha256` is the baseline.
 - **Determinism is guarded separately.** Declaration-order invariance / determinism
-  have dedicated tests (`determinism.rs`, `declaration_order_invariance_*.rs`), so
+  have dedicated tests (`parity.rs`, `declaration_order_invariance_*.rs`), so
   the 29 parity hashes are _pure regression tripwires_ and can be thinned safely —
   see §3-G for the caveat that those DOI tests are currently weak.
 

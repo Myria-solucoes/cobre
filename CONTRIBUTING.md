@@ -404,7 +404,7 @@ Before tagging a new release:
    and update the guard table **in the same change** — otherwise the `Test`
    job goes red on the stale baselines:
    ```bash
-   COBRE_PARITY_REGEN=1 cargo test -p cobre-sddp --features slow-tests --test parity_hash_d01_d15
+   COBRE_PARITY_REGEN=1 cargo test -p cobre-sddp --features slow-tests --test parity
    # This rewrites the committed baselines under
    # crates/cobre-sddp/tests/fixtures/parity_baselines/ (the single source of
    # truth); review the .sha256 diff and commit it in the same change.
