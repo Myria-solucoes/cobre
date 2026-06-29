@@ -666,7 +666,7 @@ fn make_stages_3() -> Vec<Stage> {
 #[allow(clippy::too_many_lines)]
 fn ac_two_scenarios_three_stages_fixed_solution() {
     // State layout: N=1, L=0 → n_state=1, theta=3, num_cols=4
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let solver = MockSolver::always_ok(solution);
     let fcf = FutureCostFunction::new(3, state.n_state, 2, 100, &[0; 3]);
@@ -746,11 +746,11 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                 &state,
                 horizon.num_stages(),
             ),
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -799,7 +799,7 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     // Stage-first loop: with 2 scenarios and 3 stages, the solve order is
     // (s0,t0), (s1,t0), (s0,t1), (s1,t1), ... — the 3rd call (index 2)
@@ -882,11 +882,11 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                 &state,
                 horizon.num_stages(),
             ),
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -944,7 +944,7 @@ fn ac_global_scenario_index_rank1_scenario0() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn cost_statistics_accumulated_correctly() {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let solver = MockSolver::always_ok(solution);
     let fcf = FutureCostFunction::new(3, state.n_state, 2, 100, &[0; 3]);
@@ -1024,11 +1024,11 @@ fn cost_statistics_accumulated_correctly() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                 &state,
                 horizon.num_stages(),
             ),
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1406,7 +1406,7 @@ fn run_one_iteration(
     ws: &mut SolverWorkspace<MockSolver>,
     basis_store: &mut BasisStore,
 ) -> Result<(), crate::SddpError> {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let fcf = FutureCostFunction::new(3, state.n_state, 1, 100, &[0; 3]);
     let config = TrainingConfig {
         loop_config: LoopConfig {
@@ -1481,11 +1481,11 @@ fn run_one_iteration(
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                 &state,
                 horizon.num_stages(),
             ),
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1522,8 +1522,8 @@ fn run_one_iteration(
 /// 3 stages warm-start from the store populated in iteration 1).
 #[test]
 fn warm_start_first_iteration_cold_second_iteration_warm() {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let _indexer = crate::test_support::geom(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let solver = MockSolver::always_ok(solution);
     // Single workspace and a shared basis store (1 scenario × 3 stages).
@@ -1565,8 +1565,8 @@ fn warm_start_first_iteration_cold_second_iteration_warm() {
 /// - `basis_store.get(0, 0)` is `Some` (stage 0 succeeded in iteration 2).
 #[test]
 fn basis_invalidated_on_solver_error() {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let _indexer = crate::test_support::geom(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     // Call 4 = second iteration, stage 1 (calls 0-2 = first iteration
     // stages 0,1,2; calls 3,4,5 = second iteration stages 0,1,2).
@@ -1613,7 +1613,7 @@ fn basis_invalidated_on_solver_error() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn test_forward_pass_parallel_cost_agreement() {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let stochastic = make_stochastic_context_1_hydro_3_stages();
     let stages = make_stages_3();
@@ -1666,11 +1666,11 @@ fn test_forward_pass_parallel_cost_agreement() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                 &state,
                 horizon.num_stages(),
             ),
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1712,11 +1712,11 @@ fn test_forward_pass_parallel_cost_agreement() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                 &state,
                 horizon.num_stages(),
             ),
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1777,7 +1777,7 @@ fn test_forward_pass_parallel_cost_agreement() {
 #[allow(clippy::too_many_lines)]
 #[test]
 fn test_forward_pass_work_distribution() {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let stochastic = make_stochastic_context_1_hydro_3_stages();
     let stages = make_stages_3();
@@ -1833,11 +1833,11 @@ fn test_forward_pass_work_distribution() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                 &state,
                 horizon.num_stages(),
             ),
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2092,7 +2092,7 @@ fn run_single_stage_forward(
     base_rhs: f64,
     noise_scale_val: f64,
 ) -> Vec<f64> {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let solution = fixed_solution(4, 0.0, state.theta, 0.0);
     let solver = MockSolver::always_ok(solution);
     let fcf = FutureCostFunction::new(1, state.n_state, 1, 10, &[0; 1]);
@@ -2162,11 +2162,11 @@ fn run_single_stage_forward(
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                 &state,
                 horizon.num_stages(),
             ),
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &inflow_method,
             stochastic,
             initial_state: &initial_state,
@@ -2288,7 +2288,7 @@ fn truncation_no_clamp_when_inflow_positive() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn none_method_unchanged_with_truncation_code_present() {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let solver = MockSolver::always_ok(solution);
     let fcf = FutureCostFunction::new(3, state.n_state, 2, 100, &[0; 3]);
@@ -2367,11 +2367,11 @@ fn none_method_unchanged_with_truncation_code_present() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                 &state,
                 horizon.num_stages(),
             ),
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2561,7 +2561,7 @@ fn make_stochastic_context_1_hydro_1_load_bus(mean_mw: f64, std_mw: f64) -> Stoc
 /// Expected: `SddpError::Infeasible { stage: 0, scenario: 3, .. }`.
 #[test]
 fn test_forward_pass_parallel_infeasibility() {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let stochastic = make_stochastic_context_1_hydro_3_stages();
     let stages = make_stages_3();
@@ -2628,11 +2628,11 @@ fn test_forward_pass_parallel_infeasibility() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                 &state,
                 horizon.num_stages(),
             ),
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2700,7 +2700,7 @@ fn test_forward_pass_parallel_infeasibility() {
 fn forward_pass_load_noise_positive_realization() {
     let n_load_buses = 1usize;
     let stochastic = make_stochastic_context_1_hydro_1_load_bus(300.0, 30.0);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0);
     let mut ws = SolverWorkspace {
         rank: 0,
@@ -2794,11 +2794,11 @@ fn forward_pass_load_noise_positive_realization() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                 &state,
                 horizon.num_stages(),
             ),
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2861,7 +2861,7 @@ fn forward_pass_load_noise_positive_realization() {
 fn forward_pass_load_noise_clamped_to_zero() {
     let n_load_buses = 1usize;
     let stochastic = make_stochastic_context_1_hydro_1_load_bus(-1000.0, 1.0);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0);
     let mut ws = SolverWorkspace {
         rank: 0,
@@ -2955,11 +2955,11 @@ fn forward_pass_load_noise_clamped_to_zero() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                 &state,
                 horizon.num_stages(),
             ),
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -3018,7 +3018,7 @@ fn forward_pass_no_load_buses_unchanged() {
     // Use the existing 1-hydro-3-stage context that has no load buses.
     let stochastic = make_stochastic_context_1_hydro_3_stages();
     let stages = make_stages_3();
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let mut ws = single_workspace(MockSolver::always_ok(solution), &state);
 
@@ -3067,11 +3067,11 @@ fn forward_pass_no_load_buses_unchanged() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                 &state,
                 horizon.num_stages(),
             ),
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -3131,8 +3131,8 @@ fn empty_delta_batch() -> RowBatch {
 fn test_build_delta_empty_pool() {
     // Empty pool → num_rows == 0, row_starts == [0], col_indices empty.
     let fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let _indexer = crate::test_support::geom(1, 0);
     let mut batch = empty_delta_batch();
 
     build_delta_cut_row_batch_into(
@@ -3140,7 +3140,7 @@ fn test_build_delta_empty_pool() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_projection(&state),
+        &crate::test_support::cut_state_projection(&state),
         &[],
         1,
     );
@@ -3168,8 +3168,8 @@ fn test_build_delta_single_iteration_filter() {
     // iteration=3, fwd_idx=0: slot = 0 + 3*1 + 0 = 3
     fcf.add_cut(0, 3, 0, 30.0, &[3.0]);
 
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let _indexer = crate::test_support::geom(1, 0);
     let mut batch = empty_delta_batch();
 
     build_delta_cut_row_batch_into(
@@ -3177,7 +3177,7 @@ fn test_build_delta_single_iteration_filter() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_projection(&state),
+        &crate::test_support::cut_state_projection(&state),
         &[],
         2,
     );
@@ -3202,8 +3202,8 @@ fn test_build_delta_skips_deactivated_cuts() {
     // Deactivate slot 2 (the first iteration-1 cut).
     fcf.pools[0].deactivate(&[2]);
 
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let _indexer = crate::test_support::geom(1, 0);
     let mut batch = empty_delta_batch();
 
     build_delta_cut_row_batch_into(
@@ -3211,7 +3211,7 @@ fn test_build_delta_skips_deactivated_cuts() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_projection(&state),
+        &crate::test_support::cut_state_projection(&state),
         &[],
         1,
     );
@@ -3245,8 +3245,8 @@ fn test_build_delta_excludes_warm_start_cuts() {
     let mut fcf = FutureCostFunction::new(2, 1, 2, 10, &[0; 2]);
     fcf.pools[0] = pool;
 
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let _indexer = crate::test_support::geom(1, 0);
     let mut batch = empty_delta_batch();
 
     build_delta_cut_row_batch_into(
@@ -3254,7 +3254,7 @@ fn test_build_delta_excludes_warm_start_cuts() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_projection(&state),
+        &crate::test_support::cut_state_projection(&state),
         &[],
         1,
     );
@@ -3275,8 +3275,8 @@ fn test_build_delta_matches_full_batch_when_pool_has_only_current_iter() {
     // iteration=1, fwd_idx=1: slot = 1*2+1 = 3
     fcf.add_cut(0, 1, 1, 20.0, &[3.0]);
 
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let _indexer = crate::test_support::geom(1, 0);
 
     let mut batch_full = empty_delta_batch();
     build_cut_row_batch_into(
@@ -3284,7 +3284,7 @@ fn test_build_delta_matches_full_batch_when_pool_has_only_current_iter() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_projection(&state),
+        &crate::test_support::cut_state_projection(&state),
         &[],
     );
 
@@ -3294,7 +3294,7 @@ fn test_build_delta_matches_full_batch_when_pool_has_only_current_iter() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_projection(&state),
+        &crate::test_support::cut_state_projection(&state),
         &[],
         1,
     );
@@ -3325,8 +3325,8 @@ fn test_build_delta_sparse_path() {
 
     // n_hydro=1, n_lag=1: n_state=2 (vol + lag).
     // nonzero_state_indices should be non-empty (check via indexer).
-    let state = crate::indexer::test_fixtures::state_layout(1, 1);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 1);
+    let state = crate::test_support::state_layout(1, 1);
+    let _indexer = crate::test_support::geom(1, 1);
     // nonzero_state_indices is the mask for non-trivially-zero state dims.
     let mask_len = state.nonzero_state_indices.len();
 
@@ -3345,7 +3345,7 @@ fn test_build_delta_sparse_path() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_projection(&state),
+        &crate::test_support::cut_state_projection(&state),
         &[],
         1,
     );
@@ -3363,8 +3363,8 @@ fn test_build_delta_reuses_out_buffer() {
     fcf.add_cut(0, 1, 0, 11.0, &[1.0]);
     fcf.add_cut(0, 2, 0, 22.0, &[2.0]);
 
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let _indexer = crate::test_support::geom(1, 0);
     let mut batch = empty_delta_batch();
 
     // First call: iteration 1 → should yield the iteration-1 cut.
@@ -3373,7 +3373,7 @@ fn test_build_delta_reuses_out_buffer() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_projection(&state),
+        &crate::test_support::cut_state_projection(&state),
         &[],
         1,
     );
@@ -3386,7 +3386,7 @@ fn test_build_delta_reuses_out_buffer() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_projection(&state),
+        &crate::test_support::cut_state_projection(&state),
         &[],
         2,
     );
@@ -3401,8 +3401,8 @@ fn test_build_delta_clears_row_starts() {
     let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
     fcf.add_cut(0, 1, 0, 5.0, &[1.0]);
 
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let _indexer = crate::test_support::geom(1, 0);
 
     // Pre-populate batch with garbage.
     let mut batch = RowBatch {
@@ -3419,7 +3419,7 @@ fn test_build_delta_clears_row_starts() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_projection(&state),
+        &crate::test_support::cut_state_projection(&state),
         &[],
         1,
     );
@@ -3455,8 +3455,8 @@ fn build_delta_cut_row_batch_into_skips_warm_start_slots() {
     let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
     fcf.pools[0] = pool;
 
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let _indexer = crate::test_support::geom(1, 0);
     let mut batch = RowBatch {
         num_rows: 0,
         row_starts: Vec::new(),
@@ -3471,7 +3471,7 @@ fn build_delta_cut_row_batch_into_skips_warm_start_slots() {
         &fcf,
         0,
         &state,
-        &crate::indexer::test_fixtures::cut_state_projection(&state),
+        &crate::test_support::cut_state_projection(&state),
         &[],
         1,
     );
@@ -3671,7 +3671,7 @@ mod dcs_forward {
         // straight through) is what makes the inactive-iteration assertion a
         // real witness instead of a coincidence.
         let dcs = dcs.filter(|p| p.is_active(iteration));
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let core = fwd_core_template();
         let templates = vec![core.clone(), core.clone()];
         let base_rows = vec![0_usize, 0_usize];
@@ -3714,11 +3714,11 @@ mod dcs_forward {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                 &state,
                 horizon.num_stages(),
             ),

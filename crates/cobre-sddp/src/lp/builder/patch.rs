@@ -415,8 +415,8 @@ impl PatchBuffer {
 )]
 mod tests {
     use super::PatchBuffer;
-    use crate::indexer::test_fixtures::{state_layout, state_layout_full};
     use crate::indexer::{BlockGrid, StateLayout};
+    use crate::test_support::{state_layout, state_layout_full};
 
     /// Convenience: make a role-(a) state layout without repeating N/L everywhere.
     fn idx(n: usize, l: usize) -> StateLayout {

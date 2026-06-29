@@ -852,7 +852,7 @@ mod tests {
     /// AC1: 1 opening, Expectation — LB equals the single LP objective.
     #[test]
     fn one_opening_expectation_lb_equals_single_objective() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
@@ -894,7 +894,7 @@ mod tests {
             &fcf,
             &initial_state,
             &state,
-            &crate::indexer::test_fixtures::cut_state_projection(&state),
+            &crate::test_support::cut_state_projection(&state),
             &mut bundle,
             &spec,
             &comm,
@@ -910,7 +910,7 @@ mod tests {
     /// AC2: 3 openings, Expectation — LB equals mean of objectives.
     #[test]
     fn three_openings_expectation_lb_equals_mean() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
@@ -953,7 +953,7 @@ mod tests {
             &fcf,
             &initial_state,
             &state,
-            &crate::indexer::test_fixtures::cut_state_projection(&state),
+            &crate::test_support::cut_state_projection(&state),
             &mut bundle_lb,
             &spec,
             &comm,
@@ -970,7 +970,7 @@ mod tests {
     /// AC3: 2 openings, CVaR(alpha=0.5, lambda=1.0) — pure `CVaR` selects worst.
     #[test]
     fn two_openings_pure_cvar_alpha_half_lb_equals_worst() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1019,7 +1019,7 @@ mod tests {
             &fcf,
             &initial_state,
             &state,
-            &crate::indexer::test_fixtures::cut_state_projection(&state),
+            &crate::test_support::cut_state_projection(&state),
             &mut bundle_lb,
             &spec,
             &comm,
@@ -1037,7 +1037,7 @@ mod tests {
     /// AC4 (extra): 2 openings, CVaR(alpha=1.0, lambda=1.0) = Expectation.
     #[test]
     fn two_openings_cvar_alpha_one_equals_expectation() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1082,7 +1082,7 @@ mod tests {
             &fcf,
             &initial_state,
             &state,
-            &crate::indexer::test_fixtures::cut_state_projection(&state),
+            &crate::test_support::cut_state_projection(&state),
             &mut bundle_lb,
             &spec,
             &comm,
@@ -1099,7 +1099,7 @@ mod tests {
     /// AC5: solver returns Infeasible for the first opening — must propagate as `SddpError::Infeasible`.
     #[test]
     fn infeasible_solve_maps_to_sddp_infeasible() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1141,7 +1141,7 @@ mod tests {
             &fcf,
             &initial_state,
             &state,
-            &crate::indexer::test_fixtures::cut_state_projection(&state),
+            &crate::test_support::cut_state_projection(&state),
             &mut bundle_result,
             &spec,
             &comm,
@@ -1156,7 +1156,7 @@ mod tests {
     /// AC6: broadcast failure maps to `SddpError::Communication`.
     #[test]
     fn broadcast_failure_maps_to_communication_error() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1198,7 +1198,7 @@ mod tests {
             &fcf,
             &initial_state,
             &state,
-            &crate::indexer::test_fixtures::cut_state_projection(&state),
+            &crate::test_support::cut_state_projection(&state),
             &mut bundle_result,
             &spec,
             &comm,
@@ -1219,7 +1219,7 @@ mod tests {
     /// and `RiskMeasure::Expectation`.
     #[test]
     fn integration_two_openings_local_backend_expectation() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let template = minimal_template();
         // Start with 0 cuts (empty FCF).
         let fcf = make_fcf(2, state.n_state);
@@ -1262,7 +1262,7 @@ mod tests {
             &fcf,
             &initial_state,
             &state,
-            &crate::indexer::test_fixtures::cut_state_projection(&state),
+            &crate::test_support::cut_state_projection(&state),
             &mut bundle_lb,
             &spec,
             &comm,
@@ -1283,7 +1283,7 @@ mod tests {
     /// must be >= the first.
     #[test]
     fn integration_monotonicity_more_cuts_yields_higher_or_equal_lb() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64];
@@ -1326,7 +1326,7 @@ mod tests {
             &fcf,
             &initial_state,
             &state,
-            &crate::indexer::test_fixtures::cut_state_projection(&state),
+            &crate::test_support::cut_state_projection(&state),
             &mut bundle_lb1,
             &spec,
             &comm,
@@ -1347,7 +1347,7 @@ mod tests {
             &fcf,
             &initial_state,
             &state,
-            &crate::indexer::test_fixtures::cut_state_projection(&state),
+            &crate::test_support::cut_state_projection(&state),
             &mut bundle_lb2,
             &spec,
             &comm,
@@ -1369,7 +1369,7 @@ mod tests {
     /// control flow works correctly when no PAR model is present.
     #[test]
     fn test_lb_none_method_unchanged() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1411,7 +1411,7 @@ mod tests {
             &fcf,
             &initial_state,
             &state,
-            &crate::indexer::test_fixtures::cut_state_projection(&state),
+            &crate::test_support::cut_state_projection(&state),
             &mut bundle_lb,
             &spec,
             &comm,
@@ -1432,7 +1432,7 @@ mod tests {
     /// (`needs_truncation` = true, `truncation_par` = `None`) does not panic.
     #[test]
     fn test_lb_truncation_no_crash() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1474,7 +1474,7 @@ mod tests {
             &fcf,
             &initial_state,
             &state,
-            &crate::indexer::test_fixtures::cut_state_projection(&state),
+            &crate::test_support::cut_state_projection(&state),
             &mut bundle_result,
             &spec,
             &comm,
@@ -1489,7 +1489,7 @@ mod tests {
     /// `TruncationWithPenalty` method does not cause a crash or infeasibility.
     #[test]
     fn test_lb_truncation_with_penalty_no_crash() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1531,7 +1531,7 @@ mod tests {
             &fcf,
             &initial_state,
             &state,
-            &crate::indexer::test_fixtures::cut_state_projection(&state),
+            &crate::test_support::cut_state_projection(&state),
             &mut bundle_result,
             &spec,
             &comm,
@@ -1709,7 +1709,7 @@ mod tests {
             row_scale: Vec::new(),
         };
 
-        let state = crate::indexer::test_fixtures::state_layout(0, 0);
+        let state = crate::test_support::state_layout(0, 0);
         let ncs_max_gen = vec![100.0_f64; n_ncs];
         let ncs_allow_curtailment = vec![true; n_ncs];
         // Dense: every stochastic slot maps to its own NCS column (slot order ==
@@ -1792,7 +1792,7 @@ mod tests {
         // Use n_hydros = 1 so that noise_buf gets populated (capacity grows to 1
         // after the first call). The template must have at least 1 row to avoid
         // index-out-of-bounds in fill_forward_patches when n_hydros = 1.
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1837,7 +1837,7 @@ mod tests {
                 &fcf,
                 &initial_state,
                 &state,
-                &crate::indexer::test_fixtures::cut_state_projection(&state),
+                &crate::test_support::cut_state_projection(&state),
                 &mut bundle,
                 &spec,
                 &comm,
@@ -1864,7 +1864,7 @@ mod tests {
                 &fcf,
                 &initial_state,
                 &state,
-                &crate::indexer::test_fixtures::cut_state_projection(&state),
+                &crate::test_support::cut_state_projection(&state),
                 &mut bundle,
                 &spec,
                 &comm,
@@ -2472,7 +2472,7 @@ mod tests {
         let comm = LocalComm;
 
         // 2 storage states (one per hydro), white noise ⇒ max_par_order = 0.
-        let state = crate::indexer::test_fixtures::state_layout(2, 0);
+        let state = crate::test_support::state_layout(2, 0);
         let fcf = make_fcf(templates.templates.len(), state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
         let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
@@ -2511,7 +2511,7 @@ mod tests {
             &fcf,
             &initial_state,
             &state,
-            &crate::indexer::test_fixtures::cut_state_projection(&state),
+            &crate::test_support::cut_state_projection(&state),
             &mut bundle,
             &spec,
             &comm,

@@ -47,7 +47,7 @@ use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make
 
 // ── Stub communicator ────────────────────────────────────────────────────────
 
-/// Mirrors the gated `indexer::test_fixtures::state_layout_for` via the public
+/// Mirrors the gated `test_support::state_layout_for` via the public
 /// [`StateLayout::new`] constructor: this external test crate cannot see the
 /// parent crate's `#[cfg(test)]` surface, so it rebuilds byte-identical patch
 /// columns on the default feature set.
@@ -572,7 +572,7 @@ fn simulate_single_rank_4_scenarios_produces_4_results() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims(),
@@ -703,7 +703,7 @@ fn simulate_infeasible_returns_lp_infeasible_error() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims(),
@@ -825,7 +825,7 @@ fn simulate_infeasible_at_scenario2_stage3() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims(),
@@ -945,7 +945,7 @@ fn simulate_channel_closed_returns_error() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims(),
@@ -1067,7 +1067,7 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims(),
@@ -1186,7 +1186,7 @@ fn simulate_cost_buffer_scenario_ids_match_assigned_range() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims(),
@@ -1305,7 +1305,7 @@ fn simulate_channel_receives_results_in_scenario_order() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims(),
@@ -1420,7 +1420,7 @@ fn test_simulation_parallel_cost_determinism() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims(),
@@ -1513,7 +1513,7 @@ fn test_simulation_parallel_cost_determinism() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims(),
@@ -1657,7 +1657,7 @@ fn simulate_emits_progress_events() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims(),
@@ -1797,7 +1797,7 @@ fn simulate_no_events_when_sender_is_none() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims(),
@@ -1922,7 +1922,7 @@ fn simulate_progress_events_received_before_return() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims(),
@@ -2058,7 +2058,7 @@ fn simulate_progress_scenario_cost_equals_total_cost() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims(),
@@ -2192,7 +2192,7 @@ fn simulate_emits_simulation_finished_as_last_event() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims(),
@@ -2338,7 +2338,7 @@ fn simulate_progress_scenario_cost_is_finite() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims(),
@@ -2467,7 +2467,7 @@ fn simulate_baked_path_issues_zero_add_rows() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims(),
@@ -2589,7 +2589,7 @@ fn simulate_fallback_path_issues_expected_add_rows() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims(),
@@ -2714,7 +2714,7 @@ fn simulate_baked_length_mismatch_returns_error() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims(),
@@ -2875,7 +2875,7 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims(),
@@ -3038,7 +3038,7 @@ fn simulate_with_empty_stage_bases_cold_starts() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims(),

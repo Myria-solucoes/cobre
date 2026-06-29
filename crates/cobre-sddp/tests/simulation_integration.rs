@@ -60,7 +60,7 @@ mod common;
 use common::StubComm;
 use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage};
 
-/// Mirrors the gated `indexer::test_fixtures::state_layout_for` via the public
+/// Mirrors the gated `test_support::state_layout_for` via the public
 /// [`StateLayout::new`] constructor: this external test crate cannot see the parent
 /// crate's `#[cfg(test)]` surface, so it rebuilds byte-identical patch columns here.
 fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
@@ -1565,7 +1565,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
     );
 }
 
-/// Local mirror of the gated `indexer::test_fixtures::all_enabled_cut_state_layouts`
+/// Local mirror of the gated `test_support::all_enabled_cut_state_layouts`
 /// via the public `CutStateProjection::new`, so this external test crate (which cannot
 /// see the parent crate's `#[cfg(test)]` surface) builds the default all-enabled
 /// per-pool projection. Every pool projects the full global state, keeping the

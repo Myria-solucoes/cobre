@@ -1122,7 +1122,7 @@ mod tests {
         fn new() -> Self {
             let n_stages = 2_usize;
             let n_scenarios = 2_usize;
-            let state = crate::indexer::test_fixtures::state_layout(1, 0);
+            let state = crate::test_support::state_layout(1, 0);
             let stochastic = make_stochastic_context_2_stages();
             let stages = make_stages_2();
             let solution = fixed_solution_1_0();
@@ -1210,7 +1210,7 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
@@ -1286,7 +1286,7 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
@@ -1413,7 +1413,7 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
@@ -1541,7 +1541,7 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,

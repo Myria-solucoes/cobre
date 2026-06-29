@@ -1015,8 +1015,8 @@ mod tests {
     fn make_indexer() -> StageGeometry {
         // N=4, L=0, T=2, Ln=1, B=2, K=3, no penalty, 2 FPHA hydros at positions 0 and 2
         // (local FPHA indices 0 and 1), each with 3 planes.
-        crate::indexer::test_fixtures::geometry(
-            &crate::indexer::test_fixtures::GeometryDims {
+        crate::test_support::geometry(
+            &crate::test_support::GeometryDims {
                 hydro_count: 4,
                 n_thermals: 2,
                 n_lines: 1,
@@ -1605,8 +1605,8 @@ mod tests {
     /// evap cols: [15, 18)  → evaporation_flow=15, f_evap_plus=16, f_evap_minus=17
     #[test]
     fn hydro_evaporation_maps_to_evaporation_flow_col() {
-        let evap_indexer = crate::indexer::test_fixtures::geometry(
-            &crate::indexer::test_fixtures::GeometryDims {
+        let evap_indexer = crate::test_support::geometry(
+            &crate::test_support::GeometryDims {
                 hydro_count: 2,
                 n_buses: 1,
                 n_blks: 1,
@@ -1679,8 +1679,8 @@ mod tests {
     /// HydroEvaporation for hydro that has no evaporation model returns empty vec.
     #[test]
     fn hydro_evaporation_no_evap_model_returns_empty() {
-        let evap_indexer = crate::indexer::test_fixtures::geometry(
-            &crate::indexer::test_fixtures::GeometryDims {
+        let evap_indexer = crate::test_support::geometry(
+            &crate::test_support::GeometryDims {
                 hydro_count: 2,
                 n_buses: 1,
                 n_blks: 1,
@@ -2624,8 +2624,8 @@ mod tests {
     ///   deficit: [9, 9+1*1*2) = [9, 11)  (B=1, S=1, K=2)
     ///   excess:  [11, 11+1*2) = [11, 13)
     fn make_indexer_with_anticipated() -> StageGeometry {
-        crate::indexer::test_fixtures::geometry(
-            &crate::indexer::test_fixtures::GeometryDims {
+        crate::test_support::geometry(
+            &crate::test_support::GeometryDims {
                 n_thermals: 2,
                 n_buses: 1,
                 n_blks: 2,

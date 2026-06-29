@@ -3205,20 +3205,14 @@ mod tests {
 
     /// Build the role-(a) `StateLayout` for lag tests: N hydros, L lags.
     fn layout_for_lag_test(hydro_count: usize, max_par_order: usize) -> StateLayout {
-        crate::indexer::test_fixtures::state_layout(hydro_count, max_par_order)
+        crate::test_support::state_layout(hydro_count, max_par_order)
     }
 
     /// Build the role-(a) `StateLayout` matching [`counts_with_anticipated`]
     /// (1 hydro, 0 lags, `n_anticipated` plants with the given per-plant K).
     fn layout_with_anticipated(n_anticipated: usize, k_values: &[usize]) -> StateLayout {
         let k_max = k_values.iter().copied().max().unwrap_or(0);
-        crate::indexer::test_fixtures::state_layout_full(
-            1,
-            0,
-            n_anticipated,
-            k_max,
-            k_values.to_vec(),
-        )
+        crate::test_support::state_layout_full(1, 0, n_anticipated, k_max, k_values.to_vec())
     }
 
     /// Build a 2-hydro system (IDs 1 and 2) with `n_stages` study stages and
@@ -3483,11 +3477,7 @@ mod tests {
             minimal_system_2_hydros_with_past_inflows(1, vec![600.0, 500.0], vec![200.0, 100.0]);
         let layout = layout_for_lag_test(2, 2);
 
-        let state = build_initial_state(
-            &system,
-            &crate::indexer::test_fixtures::study_dims(),
-            &layout,
-        );
+        let state = build_initial_state(&system, &crate::test_support::study_dims(), &layout);
 
         // State layout: storage(0..2), lags(2..6) in lag-major order.
         // Lag-major: slot = s + lag * N + h, where N = 2.
@@ -3529,11 +3519,7 @@ mod tests {
         let system = minimal_system(2);
         let layout = layout_for_lag_test(1, 3);
 
-        let state = build_initial_state(
-            &system,
-            &crate::indexer::test_fixtures::study_dims(),
-            &layout,
-        );
+        let state = build_initial_state(&system, &crate::test_support::study_dims(), &layout);
 
         let s = layout.inflow_lags.start;
         for l in 0..3 {
@@ -3556,11 +3542,7 @@ mod tests {
         let system = minimal_system(2);
         let layout = layout_for_lag_test(1, 2);
 
-        let state = build_initial_state(
-            &system,
-            &crate::indexer::test_fixtures::study_dims(),
-            &layout,
-        );
+        let state = build_initial_state(&system, &crate::test_support::study_dims(), &layout);
 
         let s = layout.inflow_lags.start;
         assert!(
@@ -3840,11 +3822,7 @@ mod tests {
         let system = filling_system_2_hydros(1, 0, ic);
         let layout = layout_for_lag_test(2, 2);
 
-        let state = build_initial_state(
-            &system,
-            &crate::indexer::test_fixtures::study_dims(),
-            &layout,
-        );
+        let state = build_initial_state(&system, &crate::test_support::study_dims(), &layout);
 
         // Hydro id=2 is at system index 1; its storage coordinate is state[1].
         assert!(
@@ -3880,11 +3858,7 @@ mod tests {
         let system = filling_system_2_hydros(1, 1, ic);
         let layout = layout_for_lag_test(2, 2);
 
-        let state = build_initial_state(
-            &system,
-            &crate::indexer::test_fixtures::study_dims(),
-            &layout,
-        );
+        let state = build_initial_state(&system, &crate::test_support::study_dims(), &layout);
 
         assert!(
             state[1].abs() < 1e-10,
@@ -3901,7 +3875,7 @@ mod tests {
         use super::build_initial_state;
 
         let layout = layout_for_lag_test(2, 2);
-        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let study_dims = crate::test_support::study_dims();
 
         let baseline_ic = cobre_core::InitialConditions {
             storage: vec![],
@@ -3972,11 +3946,7 @@ mod tests {
         let system = filling_system_2_hydros(1, 0, ic);
         let layout = layout_for_lag_test(2, 2);
 
-        let state = build_initial_state(
-            &system,
-            &crate::indexer::test_fixtures::study_dims(),
-            &layout,
-        );
+        let state = build_initial_state(&system, &crate::test_support::study_dims(), &layout);
 
         // Both storage coordinates carry their respective seeds.
         assert!(
@@ -4090,11 +4060,7 @@ mod tests {
             "inflow_lags range should be empty for L=0"
         );
 
-        let state = build_initial_state(
-            &system,
-            &crate::indexer::test_fixtures::study_dims(),
-            &layout,
-        );
+        let state = build_initial_state(&system, &crate::test_support::study_dims(), &layout);
 
         assert_eq!(state.len(), 1, "state length must equal n_state=1");
     }
@@ -4114,9 +4080,9 @@ mod tests {
         n_anticipated: usize,
         k_values: &[usize],
         thermal_indices: &[usize],
-    ) -> crate::indexer::test_fixtures::GeometryDims {
+    ) -> crate::test_support::GeometryDims {
         let k_max = k_values.iter().copied().max().unwrap_or(0);
-        crate::indexer::test_fixtures::GeometryDims {
+        crate::test_support::GeometryDims {
             hydro_count: 1,
             n_thermals: n_anticipated, // at least cover the anticipated plants
             n_buses: 1,
@@ -4393,11 +4359,7 @@ mod tests {
         assert_eq!(layout.n_anticipated, 0);
         assert!(layout.anticipated_state.is_empty());
 
-        let state = build_initial_state(
-            &system,
-            &crate::indexer::test_fixtures::study_dims(),
-            &layout,
-        );
+        let state = build_initial_state(&system, &crate::test_support::study_dims(), &layout);
 
         assert_eq!(
             state.len(),
@@ -4435,7 +4397,7 @@ mod tests {
 
         let state = build_initial_state(
             &system,
-            &crate::indexer::test_fixtures::study_dims_for(&counts_with_anticipated(1, &[2], &[0])),
+            &crate::test_support::study_dims_for(&counts_with_anticipated(1, &[2], &[0])),
             &layout,
         );
 
@@ -4494,11 +4456,7 @@ mod tests {
 
         let state = build_initial_state(
             &system,
-            &crate::indexer::test_fixtures::study_dims_for(&counts_with_anticipated(
-                2,
-                &[2, 3],
-                &[0, 1],
-            )),
+            &crate::test_support::study_dims_for(&counts_with_anticipated(2, &[2, 3], &[0, 1])),
             &layout,
         );
 
@@ -4556,7 +4514,7 @@ mod tests {
 
         let state = build_initial_state(
             &system,
-            &crate::indexer::test_fixtures::study_dims_for(&counts_with_anticipated(1, &[2], &[0])),
+            &crate::test_support::study_dims_for(&counts_with_anticipated(1, &[2], &[0])),
             &layout,
         );
 
@@ -4595,7 +4553,7 @@ mod tests {
 
         let state = build_initial_state(
             &system,
-            &crate::indexer::test_fixtures::study_dims_for(&counts_with_anticipated(1, &[2], &[0])),
+            &crate::test_support::study_dims_for(&counts_with_anticipated(1, &[2], &[0])),
             &layout,
         );
 
@@ -4651,11 +4609,7 @@ mod tests {
 
         let state = build_initial_state(
             &system,
-            &crate::indexer::test_fixtures::study_dims_for(&counts_with_anticipated(
-                2,
-                &[1, 2],
-                &[0, 1],
-            )),
+            &crate::test_support::study_dims_for(&counts_with_anticipated(2, &[1, 2], &[0, 1])),
             &layout,
         );
 
@@ -6623,7 +6577,7 @@ mod tests {
 
     /// Geometry byte-identity: the production stage-0 `StageGeometry` (built by
     /// `StageGeometry::from_layout` and stored in `StageTemplates::geometry_per_stage[0]`)
-    /// is byte-identical to an independent `test_fixtures::geometry` build from
+    /// is byte-identical to an independent `test_support::geometry` build from
     /// the same equipment dimensions (the role-(b) analogue of
     /// `assert_state_layout_finalized`). A divergence means the per-stage geometry
     /// the `StageLayout` produces drifted from the column/row arithmetic the
@@ -6660,7 +6614,7 @@ mod tests {
         // Rebuild the reference geometry independently from the single-owner
         // `study_dims`, so a divergence between it and the production geometry fails
         // the test.
-        let dims = crate::indexer::test_fixtures::GeometryDims {
+        let dims = crate::test_support::GeometryDims {
             hydro_count: geometry.water_balance.len(),
             max_par_order: 0, // role-(b) ranges do not depend on L
             n_thermals: study_dims.n_thermals,
@@ -6673,7 +6627,7 @@ mod tests {
             k_max: 0,
             anticipated_thermal_indices: study_dims.anticipated_thermal_indices.clone(),
         };
-        let reference = crate::indexer::test_fixtures::geometry(
+        let reference = crate::test_support::geometry(
             &dims,
             geometry.fpha_hydro_indices.clone(),
             // minimal_system has no FPHA planes; mirror the built geometry's
@@ -6808,7 +6762,7 @@ mod tests {
             &fcf,
             0,
             state,
-            &crate::indexer::test_fixtures::cut_state_projection(state),
+            &crate::test_support::cut_state_projection(state),
             &[],
         );
 

@@ -1449,7 +1449,7 @@ mod tests {
         let n_stages = 2_usize;
         let n_openings = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template_1_0(); n_stages];
         // Production carries a separate baked-template buffer alongside
         // `ctx.templates`; mirror that here so `baked` does not alias the
@@ -1497,11 +1497,11 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims,
@@ -1589,7 +1589,7 @@ mod tests {
         let n_stages = 2_usize;
         let n_openings = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template_1_0(); n_stages];
         let baked_templates = templates.clone();
         let base_rows = vec![1_usize; n_stages];
@@ -1634,11 +1634,11 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                 &state, n_stages,
             ),
             study_dims: &study_dims,

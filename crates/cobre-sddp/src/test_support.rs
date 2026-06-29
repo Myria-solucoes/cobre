@@ -1,23 +1,21 @@
-//! Shared role-(a) [`StateLayout`], role-(b) [`StageGeometry`], and
-//! [`StudyDimensions`] builders for the indexer / extraction / patch unit tests.
+//! Crate-internal test-support builders: role-(a) [`StateLayout`], role-(b)
+//! [`StageGeometry`], and [`StudyDimensions`] fixtures shared across the crate's
+//! unit tests (indexer, extraction, patch, noise, training, setup, …) and the
+//! `tests/` integration suites.
 //!
 //! These reproduce the production stage-0 geometry arithmetic from explicit
 //! equipment dimensions so a test can build the exact `StageGeometry`,
 //! `StateLayout`, and `StudyDimensions` a study with those dimensions would
-//! produce, without constructing a full `StudySetup`.
-//!
-//! Compiled under `#[cfg(any(test, feature = "test-support"))]` so plain
-//! `cargo test` and downstream integration tests (via `test-support`) both
-//! reach the same builders.
+//! produce, without constructing a full `StudySetup`. They build crate-internal
+//! types, so they live in `src/` (not `tests/`) under
+//! `#[cfg(any(test, feature = "test-support"))]`: plain `cargo test` and
+//! downstream integration tests (via the `test-support` feature) reach the same
+//! builders.
 
+use crate::indexer::{CutStateProjection, EvaporationIndices, StateLayout, StudyDimensions};
 use crate::lp_builder::{
     EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET, StageGeometry,
 };
-
-use super::cut_state_projection::CutStateProjection;
-use super::layout::EvaporationIndices;
-use super::state_layout::StateLayout;
-use super::study_dimensions::StudyDimensions;
 
 /// Equipment dimensions for the [`geometry`] / [`study_dims_for`] test builders.
 ///

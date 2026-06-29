@@ -796,7 +796,7 @@ mod tests {
     #[test]
     fn ac_train_completes_with_iteration_limit() {
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -866,10 +866,10 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                     &state, n_stages,
                 ),
-                study_dims: &crate::indexer::test_fixtures::study_dims(),
+                study_dims: &crate::test_support::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -905,7 +905,7 @@ mod tests {
     #[test]
     fn ac_train_returns_partial_on_infeasible() {
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -975,10 +975,10 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                     &state, n_stages,
                 ),
-                study_dims: &crate::indexer::test_fixtures::study_dims(),
+                study_dims: &crate::test_support::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1031,7 +1031,7 @@ mod tests {
     #[test]
     fn ac_train_emits_correct_event_sequence() {
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1103,10 +1103,10 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                     &state, n_stages,
                 ),
-                study_dims: &crate::indexer::test_fixtures::study_dims(),
+                study_dims: &crate::test_support::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1242,7 +1242,7 @@ mod tests {
         use cobre_core::WorkerTimingPhase;
 
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1314,10 +1314,10 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                     &state, n_stages,
                 ),
-                study_dims: &crate::indexer::test_fixtures::study_dims(),
+                study_dims: &crate::test_support::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1424,7 +1424,7 @@ mod tests {
     #[test]
     fn ac_train_result_fields_populated() {
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1494,10 +1494,10 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                     &state, n_stages,
                 ),
-                study_dims: &crate::indexer::test_fixtures::study_dims(),
+                study_dims: &crate::test_support::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1531,7 +1531,7 @@ mod tests {
     #[test]
     fn ac_train_with_no_event_sender() {
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1601,10 +1601,10 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                     &state, n_stages,
                 ),
-                study_dims: &crate::indexer::test_fixtures::study_dims(),
+                study_dims: &crate::test_support::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1635,7 +1635,7 @@ mod tests {
     #[test]
     fn ac_total_time_ms_is_non_negative() {
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1705,10 +1705,10 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                     &state, n_stages,
                 ),
-                study_dims: &crate::indexer::test_fixtures::study_dims(),
+                study_dims: &crate::test_support::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1745,7 +1745,7 @@ mod tests {
     #[test]
     fn cut_selection_none_skips_step() {
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1817,10 +1817,10 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                     &state, n_stages,
                 ),
-                study_dims: &crate::indexer::test_fixtures::study_dims(),
+                study_dims: &crate::test_support::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1864,7 +1864,7 @@ mod tests {
         use crate::cut_selection::CutSelectionStrategy;
 
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1939,10 +1939,10 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                     &state, n_stages,
                 ),
-                study_dims: &crate::indexer::test_fixtures::study_dims(),
+                study_dims: &crate::test_support::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -1996,7 +1996,7 @@ mod tests {
         use crate::cut_selection::CutSelectionStrategy;
 
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -2071,10 +2071,10 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                     &state, n_stages,
                 ),
-                study_dims: &crate::indexer::test_fixtures::study_dims(),
+                study_dims: &crate::test_support::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2144,7 +2144,7 @@ mod tests {
     #[test]
     fn existing_train_tests_pass_with_none() {
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -2214,10 +2214,10 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                     &state, n_stages,
                 ),
-                study_dims: &crate::indexer::test_fixtures::study_dims(),
+                study_dims: &crate::test_support::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2255,7 +2255,7 @@ mod tests {
     #[test]
     fn ac_train_partial_result_on_mid_iteration_failure() {
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -2331,10 +2331,10 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                     &state, n_stages,
                 ),
-                study_dims: &crate::indexer::test_fixtures::study_dims(),
+                study_dims: &crate::test_support::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2387,7 +2387,7 @@ mod tests {
     #[test]
     fn start_iteration_resumes_from_offset() {
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -2457,10 +2457,10 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                     &state, n_stages,
                 ),
-                study_dims: &crate::indexer::test_fixtures::study_dims(),
+                study_dims: &crate::test_support::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2494,7 +2494,7 @@ mod tests {
     #[test]
     fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -2564,10 +2564,10 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                     &state, n_stages,
                 ),
-                study_dims: &crate::indexer::test_fixtures::study_dims(),
+                study_dims: &crate::test_support::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -3229,7 +3229,7 @@ mod tests {
     #[test]
     fn template_bake_event_emitted() {
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -3302,10 +3302,10 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                     &state, n_stages,
                 ),
-                study_dims: &crate::indexer::test_fixtures::study_dims(),
+                study_dims: &crate::test_support::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,

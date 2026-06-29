@@ -1775,7 +1775,7 @@ mod tests {
         assert_eq!(layout.k_max, 0, "k_max");
 
         // col_turbine_start must equal the legacy theta + 1.
-        let idx = crate::indexer::test_fixtures::state_layout(ctx.n_hydros, ctx.max_par_order);
+        let idx = crate::test_support::state_layout(ctx.n_hydros, ctx.max_par_order);
         assert_eq!(
             layout.col_turbine_start(),
             idx.theta + 1,
@@ -3299,7 +3299,7 @@ mod tests {
 
         // Pre-existing column starts for the zero-entity, single-block layout:
         // theta == 0, every equipment/slack/NCS region empty starting at theta+1.
-        let idx = crate::indexer::test_fixtures::state_layout(ctx.n_hydros, ctx.max_par_order);
+        let idx = crate::test_support::state_layout(ctx.n_hydros, ctx.max_par_order);
         let expected_start = idx.theta + 1;
         assert_eq!(layout.col_turbine_start(), expected_start);
         assert_eq!(layout.col_thermal_start(), expected_start);

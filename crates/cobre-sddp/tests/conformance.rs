@@ -774,7 +774,7 @@ mod lb_conformance {
 
     use super::{LocalComm, MockSolver, make_fcf, minimal_template, simple_opening_tree};
 
-    /// Mirrors the gated `indexer::test_fixtures::state_layout_for` body via the
+    /// Mirrors the gated `test_support::state_layout_for` body via the
     /// public [`StateLayout::new`] constructor, so this external test crate (which
     /// does not see the parent crate's `#[cfg(test)]` surface) resolves
     /// byte-identical patch columns on the default feature set.
@@ -852,7 +852,7 @@ mod lb_conformance {
                 &fcf,
                 &initial_state,
                 &state_layout,
-                &cobre_sddp::indexer::test_fixtures::cut_state_projection(&state_layout),
+                &cobre_sddp::test_support::cut_state_projection(&state_layout),
                 &mut bundle,
                 &spec,
                 &comm,
@@ -881,7 +881,7 @@ mod lb_conformance {
                 &fcf,
                 &initial_state,
                 &state_layout,
-                &cobre_sddp::indexer::test_fixtures::cut_state_projection(&state_layout),
+                &cobre_sddp::test_support::cut_state_projection(&state_layout),
                 &mut bundle,
                 &spec,
                 &comm,
@@ -905,7 +905,7 @@ mod lb_conformance {
 // Constraint inventory conformance
 // ---------------------------------------------------------------------------
 
-/// Mirrors the gated `indexer::test_fixtures::geometry` body through the public
+/// Mirrors the gated `test_support::geometry` body through the public
 /// [`StageGeometry`](cobre_sddp::lp_builder::StageGeometry) literal, so this
 /// external test crate (which does not see the parent crate's `#[cfg(test)]`
 /// surface) resolves byte-identical column ranges on the default feature set. The

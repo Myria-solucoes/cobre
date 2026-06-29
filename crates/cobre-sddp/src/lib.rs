@@ -36,6 +36,8 @@ pub mod simulation;
 pub mod solve;
 pub mod solver_stats;
 pub mod stochastic;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod training;
 pub mod validate_phases;
 pub mod workspace;

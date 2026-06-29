@@ -1816,7 +1816,7 @@ mod tests {
             n_scenarios: 1,
             io_channel_capacity: 4,
         };
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
@@ -1911,10 +1911,10 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                     &state, n_stages,
                 ),
-                study_dims: &crate::indexer::test_fixtures::study_dims(),
+                study_dims: &crate::test_support::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2028,7 +2028,7 @@ mod tests {
         let base_rows = vec![0usize];
 
         let stochastic = make_stochastic_context(n_stages);
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
         let config = SimulationConfig {
             n_scenarios: 1,
@@ -2080,10 +2080,10 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                     &state, n_stages,
                 ),
-                study_dims: &crate::indexer::test_fixtures::study_dims(),
+                study_dims: &crate::test_support::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2176,7 +2176,7 @@ mod tests {
 
         let n_load_buses = 1usize;
         let stochastic = make_stochastic_context_1_hydro_1_load_bus_sim(300.0, 30.0);
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
         let config = SimulationConfig {
             n_scenarios: 1,
@@ -2274,10 +2274,10 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                     &state, n_stages,
                 ),
-                study_dims: &crate::indexer::test_fixtures::study_dims(),
+                study_dims: &crate::test_support::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2602,7 +2602,7 @@ mod tests {
         let base_rows = vec![0_usize];
         let noise_scale = vec![noise_scale_val];
 
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let fcf = FutureCostFunction::new(n_stages, state.n_state, 1, 10, &vec![0; n_stages]);
         let config = SimulationConfig {
             n_scenarios: 4,
@@ -2654,10 +2654,10 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                     &state, n_stages,
                 ),
-                study_dims: &crate::indexer::test_fixtures::study_dims(),
+                study_dims: &crate::test_support::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::Truncation,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -2737,7 +2737,7 @@ mod tests {
         let base_rows = vec![0_usize];
         let noise_scale = vec![noise_scale_val];
 
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let fcf = FutureCostFunction::new(n_stages, state.n_state, 1, 10, &vec![0; n_stages]);
         let config = SimulationConfig {
             n_scenarios: 4,
@@ -2788,10 +2788,10 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
                     &state, n_stages,
                 ),
-                study_dims: &crate::indexer::test_fixtures::study_dims(),
+                study_dims: &crate::test_support::study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
                 initial_state: &initial_state,
@@ -3019,7 +3019,7 @@ mod tests {
             dcs: Option<DcsParams>,
             baked: &StageTemplate,
         ) -> (f64, SimulationStageResult) {
-            let state = crate::indexer::test_fixtures::state_layout(1, 0);
+            let state = crate::test_support::state_layout(1, 0);
             let core = sim_core_template();
             let templates = vec![core.clone()];
             let base_rows = vec![0_usize];
@@ -3080,13 +3080,11 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             };
-            let study_dims = crate::indexer::test_fixtures::study_dims();
+            let study_dims = crate::test_support::study_dims();
             let training_ctx = TrainingContext {
                 horizon: &horizon,
                 state: &state,
-                cut_state_layouts: &crate::indexer::test_fixtures::all_enabled_cut_state_layouts(
-                    &state, 1,
-                ),
+                cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(&state, 1),
                 study_dims: &study_dims,
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
@@ -3136,8 +3134,7 @@ mod tests {
                 baked_template: baked,
                 warm_basis: None,
             };
-            let lookups =
-                SimLookups::build(&crate::indexer::test_fixtures::study_dims(), &[], 0, 1);
+            let lookups = SimLookups::build(&crate::test_support::study_dims(), &[], 0, 1);
 
             let (immediate, result) = solve_simulation_stage(
                 &mut ws,

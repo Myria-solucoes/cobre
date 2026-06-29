@@ -288,8 +288,9 @@ mod tests {
         ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG,
         ENTITY_TYPE_HYDRO_STORAGE, build_stage_entity_manifest,
     };
-    use crate::indexer::{CutStateProjection, StateLayout, test_fixtures};
+    use crate::indexer::{CutStateProjection, StateLayout};
     use crate::lp_builder::hydro_operating_active;
+    use crate::test_support;
     use cobre_core::temporal::StageStateConfig;
     use cobre_core::{
         AnticipatedConfig, Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro,
@@ -477,7 +478,7 @@ mod tests {
 
     /// The `N=2, L=2, A=1, k_max=2` global layout the fixture system maps onto.
     fn layout_2h_1ant() -> StateLayout {
-        test_fixtures::state_layout_full(2, 2, 1, 2, vec![2])
+        test_support::state_layout_full(2, 2, 1, 2, vec![2])
     }
 
     /// All-enabled projection: length 8 (2 storage + 4 lag + 2 anticipated), with

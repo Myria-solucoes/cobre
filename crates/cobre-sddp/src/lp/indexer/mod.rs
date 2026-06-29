@@ -153,8 +153,6 @@ mod cut_state_projection;
 mod layout;
 mod state_layout;
 mod study_dimensions;
-#[cfg(any(test, feature = "test-support"))]
-pub mod test_fixtures;
 
 pub use block_grid::BlockGrid;
 pub use cut_state_projection::CutStateProjection;

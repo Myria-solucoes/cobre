@@ -60,7 +60,7 @@ use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make
 // Shared helpers
 // ===========================================================================
 
-/// Mirrors the gated `indexer::test_fixtures::state_layout_for` via the public
+/// Mirrors the gated `test_support::state_layout_for` via the public
 /// [`StateLayout::new`], so this external test crate (which cannot see the parent
 /// crate's `#[cfg(test)]` surface) resolves byte-identical patch columns.
 fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
@@ -1842,7 +1842,7 @@ fn baked_backward_pass_smoke_test() {
     );
 }
 
-/// Local mirror of the gated `indexer::test_fixtures::all_enabled_cut_state_layouts`
+/// Local mirror of the gated `test_support::all_enabled_cut_state_layouts`
 /// via the public `CutStateProjection::new`, so this external test crate (which cannot
 /// see the parent crate's `#[cfg(test)]` surface) builds the default all-enabled
 /// per-pool projection. Every pool projects the full global state, keeping the

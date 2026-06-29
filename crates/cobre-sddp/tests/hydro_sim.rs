@@ -863,7 +863,7 @@ mod sparse_dense {
             row_lower: Vec::new(),
             row_upper: Vec::new(),
         };
-        let cut_state = cobre_sddp::indexer::test_fixtures::cut_state_projection(&state);
+        let cut_state = cobre_sddp::test_support::cut_state_projection(&state);
         build_cut_row_batch_into(&mut batch, &fcf, 0, &state, &cut_state, &col_scale);
 
         assert_eq!(batch.num_rows, 1);
