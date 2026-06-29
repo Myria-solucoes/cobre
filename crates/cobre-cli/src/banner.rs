@@ -1,7 +1,7 @@
 //! Terminal banner for the `cobre` CLI.
 //!
-//! Color output is gated on `NO_COLOR` and terminal color support, following
-//! the [no-color.org](https://no-color.org) convention.
+//! Color output is gated on the resolved `--color` setting (the `console` crate's
+//! global stderr flag, set by `resolve_color`).
 //!
 //! # Example
 //!
@@ -41,12 +41,11 @@ pub(crate) fn render_banner_string(use_color: bool) -> String {
 
 /// Write the three-line Cobre banner followed by an empty line to `stderr`.
 ///
-/// Color is enabled when [`console::colors_enabled_stderr`] returns `true` and
-/// `NO_COLOR` is absent ([no-color.org](https://no-color.org)). Write errors are
-/// silently ignored; the caller owns the display conditions (`--quiet`, TTY
-/// detection).
+/// Color is enabled when [`console::colors_enabled_stderr`] returns `true` (the
+/// flag `resolve_color` set from `--color`). Write errors are silently ignored;
+/// the caller owns the display conditions (`--quiet`, TTY detection).
 pub fn print_banner(stderr: &Term) {
-    let use_color = console::colors_enabled_stderr() && std::env::var_os("NO_COLOR").is_none();
+    let use_color = console::colors_enabled_stderr();
     let banner = render_banner_string(use_color);
     for line in banner.lines() {
         let _ = stderr.write_line(line);

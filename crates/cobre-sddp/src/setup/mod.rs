@@ -201,13 +201,6 @@ pub struct StudySetup {
     /// [`BasisStore`](crate::workspace::BasisStore) so iteration 1's LPs warm-start.
     /// `None` for a fresh start, leaving fresh-mode behavior untouched.
     pub(crate) warm_start_basis_cache: Option<Vec<Option<CapturedBasis>>>,
-
-    /// Throwaway, env-gated backward `noise_key` diagnostic table.
-    ///
-    /// `Some` only when `COBRE_W1_DIAG` was set at setup; `None` otherwise, in which
-    /// case nothing is allocated and the backward solve path is byte-identical. See
-    /// [`crate::noise_key_diag`].
-    pub(crate) noise_key_diag: Option<crate::noise_key_diag::NoiseKeyDiag>,
 }
 
 impl StudySetup {
@@ -288,13 +281,11 @@ impl StudySetup {
             scalar_parameters,
         } = config;
 
-        // The backward solve order shares the SAME `build_noise_key_table` keys the
-        // `noise_key` diagnostic records, so the order and the diagnostic that
-        // validates it cannot drift. The keys are a pure function of the synced tree
-        // + fixed σ, so every rank computes the identical permutation and cuts stay
-        // bit-identical across thread/rank counts (canonical-ω aggregation is
-        // order-independent).
-        let solve_order_keys = crate::noise_key_diag::build_noise_key_table(system, &stochastic)?;
+        // Keys are a pure function of the synced tree + fixed σ, so every rank
+        // computes the identical permutation and cuts stay bit-identical across
+        // thread/rank counts (canonical-ω aggregation is order-independent).
+        let solve_order_keys =
+            crate::stochastic::noise_key::build_noise_key_table(system, &stochastic)?;
         stochastic
             .set_solve_order(&solve_order_keys, SweepDirection::Descending)
             .map_err(|e| SddpError::Validation(e.to_string()))?;
@@ -394,11 +385,6 @@ impl StudySetup {
         let hydro_min_storage_hm3: Vec<f64> =
             system.hydros().iter().map(|h| h.min_storage_hm3).collect();
 
-        // Reuses the `solve_order_keys` table computed above, not a fresh build, so
-        // the diagnostic and the solve order cannot drift.
-        let noise_key_diag =
-            crate::noise_key_diag::NoiseKeyDiag::from_keys_if_enabled(&solve_order_keys);
-
         Ok(Self {
             stage_data: stage_data::StageData {
                 stage_templates,
@@ -457,7 +443,6 @@ impl StudySetup {
             energy_conversion,
             hydro_min_storage_hm3,
             warm_start_basis_cache: None,
-            noise_key_diag,
         })
     }
 }

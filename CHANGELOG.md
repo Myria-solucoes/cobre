@@ -21,6 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Cobre is configured only through config/data files and `cobre` CLI
+  arguments; environment variables are no longer an input channel.** The
+  `COBRE_THREADS`, `COBRE_COLOR`, `COBRE_COMM_BACKEND`, `COBRE_W1_DIAG`,
+  `FORCE_COLOR`, `NO_COLOR`, `COLUMNS`, and `HOSTNAME` reads are removed, along
+  with the MPI launcher-variable auto-detection. Thread count is set with
+  `--threads`; color with `--color <auto|always|never>` (default `auto`, colored
+  only when stderr is a terminal); and the communication backend with
+  `--comm-backend <local|mpi>` (default `local`). Running under MPI now requires
+  the explicit `--comm-backend mpi`, and requesting it from a binary built
+  without MPI support fails with a clear message. Terminal width for progress
+  rendering and the hostname recorded in run provenance are now obtained by
+  querying the terminal and the OS directly.
+
 - **Each policy cut and state file now embeds the per-slot identity of its
   state-vector dimensions.** Every `policy/cuts/stage_NNN.bin` and
   `policy/states/stage_NNN.bin` carries an entity manifest with one entry per

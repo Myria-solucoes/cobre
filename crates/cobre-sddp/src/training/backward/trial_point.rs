@@ -391,9 +391,6 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         "per_opening_stats must be initialised to n_openings before each stage's trial-point loop"
     );
 
-    // Env-gated backward `noise_key` diagnostic; `None` on the default path.
-    let noise_key_diag = training_ctx.noise_key_diag;
-
     // Openings are SOLVED in `solve_order(s)` (a run-constant, rank-invariant
     // permutation) but written and aggregated by CANONICAL ω below, so the generated
     // cut is bit-identical regardless of solve order: the reorder changes only the
@@ -432,15 +429,6 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
             omega,
             is_first,
         )?;
-
-        if let Some(diag) = noise_key_diag {
-            let simplex_iterations = ws.backward_accum.per_opening_stats[omega].simplex_iterations;
-            let noise_key = diag.key(s, omega).unwrap_or(f64::NAN);
-            eprintln!(
-                "COBRE_W1_DIAG\tstage={s}\ttrial={scenario}\tomega={omega}\t\
-                 noise_key={noise_key:.17e}\tsimplex_iterations={simplex_iterations}"
-            );
-        }
     }
 
     // Aggregate into `agg_coefficients`, then copy into this trial point's arena

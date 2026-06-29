@@ -668,7 +668,6 @@ fn train_simulate_write_cycle() {
             recent_weight_seed: 0.0,
             dcs: None,
             stages: &[],
-            noise_key_diag: None,
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
@@ -859,7 +858,6 @@ fn train_simulate_write_cycle() {
             recent_weight_seed: 0.0,
             dcs: None,
             stages: &[],
-            noise_key_diag: None,
         },
         &sim_config,
         SimulationOutputSpec {
@@ -1452,7 +1450,6 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             recent_weight_seed: 0.0,
             dcs: None,
             stages: &[],
-            noise_key_diag: None,
         },
         &StubComm,
         || Ok(SizedMockSolver::new(t0.num_cols, t0.num_rows)),
@@ -1538,7 +1535,6 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             recent_weight_seed: 0.0,
             dcs: None,
             stages: &[],
-            noise_key_diag: None,
         },
         &sim_config,
         SimulationOutputSpec {

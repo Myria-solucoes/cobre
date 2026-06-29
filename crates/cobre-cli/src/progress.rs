@@ -158,17 +158,14 @@ pub fn run_progress_thread(
     ProgressHandle { handle }
 }
 
-/// Resolve the terminal width for progress bar rendering, falling back to
-/// `$COLUMNS` then a fixed default when stderr reports no size.
+/// Resolve the terminal width for progress bar rendering, querying the terminal
+/// directly and falling back to a fixed default when stderr is not a tty.
 pub fn resolve_term_width() -> u16 {
     let term = Term::stderr();
     if let Some((_, w)) = term.size_checked() {
         return w;
     }
-    if let Ok(val) = std::env::var("COLUMNS")
-        && let Ok(w) = val.parse::<u16>()
-        && w > 0
-    {
+    if let Some((terminal_size::Width(w), _)) = terminal_size::terminal_size() {
         return w;
     }
     120

@@ -9,12 +9,34 @@ mod training;
 
 use std::path::PathBuf;
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 use console::Term;
 
-use cobre_comm::{Communicator, ExecutionTopology};
+use cobre_comm::{BackendKind, Communicator, ExecutionTopology};
 
 use crate::error::CliError;
+
+/// Communication backend selected by `--comm-backend`.
+///
+/// Maps to [`BackendKind`]; there is no `auto` value (backend auto-detection is
+/// removed — MPI must be requested explicitly with `--comm-backend mpi`).
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum CommBackendArg {
+    /// Single-process local backend (default).
+    #[default]
+    Local,
+    /// MPI backend; requires the binary to be built with the `mpi` feature.
+    Mpi,
+}
+
+impl From<CommBackendArg> for BackendKind {
+    fn from(arg: CommBackendArg) -> Self {
+        match arg {
+            CommBackendArg::Local => BackendKind::Local,
+            CommBackendArg::Mpi => BackendKind::Mpi,
+        }
+    }
+}
 
 use outputs::{WriteTrainingArgs, write_training_outputs};
 use policy::{apply_training_policy, load_policy_for_simulation};
@@ -37,10 +59,16 @@ pub struct RunArgs {
     #[arg(long)]
     pub quiet: bool,
 
-    /// Worker threads per MPI rank for parallel scenario processing. Resolves
-    /// in order: this flag, then `COBRE_THREADS`, then a default of 1.
+    /// Worker threads per MPI rank for parallel scenario processing.
+    /// Defaults to 1 when omitted.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     pub threads: Option<u32>,
+
+    /// Communication backend. `local` runs single-process; `mpi` requires the
+    /// binary to be built with the `mpi` feature and to be launched under an MPI
+    /// launcher (e.g. `mpirun`).
+    #[arg(long, value_enum, default_value_t = CommBackendArg::Local)]
+    pub comm_backend: CommBackendArg,
 }
 
 /// Shared context for execute phases (communicator, output, topology, etc.).

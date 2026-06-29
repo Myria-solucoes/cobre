@@ -1,15 +1,12 @@
-//! Throwaway, env-gated backward-pass diagnostic for opening-ordering analysis.
-//!
-//! When `COBRE_W1_DIAG` is set, the backward pass emits one record per opening
-//! pairing a σ-weighted aggregate **noise key** with the just-consumed
-//! `simplex_iterations` of that opening's warm dual-simplex re-solve, to predict
-//! whether reordering openings by noise similarity would shrink warm-start hops.
+//! Per-(stage, canonical-ω) σ-weighted noise keys for the backward solve order.
 //!
 //! `noise_key[stage][ω]` is a pure function of setup-constant data (the synced
 //! tree's `raw_noise` and the fixed per-(hydro, stage) `std_m3s`), so it is
-//! precomputed once at setup and the backward hot path only looks it up by
-//! canonical ω — σ never reaches the hot path. The table is built only when the
-//! env var is set, so the default path allocates and computes nothing new.
+//! precomputed once at setup and never reaches the hot path. The backward solve
+//! order sorts each stage's openings by this key (see
+//! [`crate::setup`] / `OpeningTree::set_solve_order`); the keys are a pure
+//! function of the synced tree plus fixed σ, so every rank computes the identical
+//! permutation and cuts stay bit-identical across thread/rank counts.
 //!
 //! ## σ layout alignment
 //!
@@ -26,45 +23,8 @@ use cobre_stochastic::StochasticContext;
 
 use crate::error::SddpError;
 
-/// Enables the diagnostic when present, with any value including empty.
-const DIAG_ENV_VAR: &str = "COBRE_W1_DIAG";
-
-/// Precomputed per-(stage, canonical-ω) σ-weighted noise keys for the backward
-/// diagnostic.
-///
-/// Built once at setup and borrowed read-only by the backward pass via
-/// [`TrainingContext`](crate::context::TrainingContext).
-/// `keys[stage][omega]` is `Σ_h std_m3s_{stage,h} · raw_noise_{stage,omega}[h]`
-/// over the `n_hydros` inflow components of the opening noise vector.
-#[derive(Debug, Clone)]
-pub struct NoiseKeyDiag {
-    keys: Vec<Vec<f64>>,
-}
-
-impl NoiseKeyDiag {
-    /// Build the diagnostic table iff `COBRE_W1_DIAG` is set, else `None`.
-    ///
-    /// Reuses the caller's precomputed σ-weighted key table (the same one the
-    /// backward solve order sorts by) so the diagnostic and the ordering cannot
-    /// drift and the table is built once, not twice.
-    pub(crate) fn from_keys_if_enabled(keys: &[Vec<f64>]) -> Option<Self> {
-        std::env::var_os(DIAG_ENV_VAR)?;
-        Some(Self {
-            keys: keys.to_vec(),
-        })
-    }
-
-    /// Look up the precomputed noise key for `(stage, omega)`, returning `None`
-    /// out of range rather than panicking, so a malformed request never aborts.
-    #[must_use]
-    pub(crate) fn key(&self, stage: usize, omega: usize) -> Option<f64> {
-        self.keys.get(stage).and_then(|s| s.get(omega).copied())
-    }
-}
-
 /// Build the per-(stage, canonical-ω) σ-weighted noise key table from
-/// setup-constant data — the SAME key [`NoiseKeyDiag`] records and the ordering
-/// work sorts by, so the two cannot drift.
+/// setup-constant data — the key the backward solve order sorts by.
 ///
 /// # Errors
 ///

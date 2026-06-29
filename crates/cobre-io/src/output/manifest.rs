@@ -48,16 +48,17 @@ pub struct OutputContext {
     pub production_fit_deviation: Option<DeviationSummary>,
 }
 
-/// Read the system hostname.
+/// Read the system hostname via the `gethostname` syscall.
 ///
-/// Tries `/proc/sys/kernel/hostname` first (Linux), then the `HOSTNAME`
-/// environment variable, falling back to `"unknown"`.
+/// Falls back to `"unknown"` when the syscall yields an empty name.
 #[must_use]
 pub fn get_hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .map(|s| s.trim().to_string())
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "unknown".to_string())
+    let name = gethostname::gethostname().to_string_lossy().into_owned();
+    if name.is_empty() {
+        "unknown".to_string()
+    } else {
+        name
+    }
 }
 
 /// Return the current UTC time as an ISO 8601 string (e.g. `"2026-04-05T14:30:00Z"`).

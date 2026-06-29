@@ -602,7 +602,6 @@ fn run_training(
                     recent_accum_seed: &[],
                     recent_weight_seed: 0.0,
                     dcs: None,
-                    noise_key_diag: None,
                 },
                 &comm,
                 || Ok(MockSolver3H::new(100.0)),
@@ -739,7 +738,6 @@ fn run_simulation(
                     recent_accum_seed: &[],
                     recent_weight_seed: 0.0,
                     dcs: None,
-                    noise_key_diag: None,
                 },
                 &sim_config,
                 SimulationOutputSpec {

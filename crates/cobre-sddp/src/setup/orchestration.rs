@@ -118,9 +118,6 @@ impl StudySetup {
                 .cut_selection
                 .as_ref()
                 .and_then(DcsParams::from_strategy),
-            // `Some` only when `COBRE_W1_DIAG` was set at setup; `None` keeps the
-            // byte-identical default path.
-            noise_key_diag: self.noise_key_diag.as_ref(),
         };
 
         let warm_start_basis_cache = self.warm_start_basis_cache.take();

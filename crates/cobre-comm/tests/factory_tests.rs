@@ -1,54 +1,32 @@
 //! Integration tests for the `create_communicator()` factory and public APIs.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::sync::Mutex;
-
-/// Serialises every test that mutates `COBRE_COMM_BACKEND`; without it the
-/// parallel `set_var` / `remove_var` calls race.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
 /// Gated `not(feature = "mpi")`: there `create_communicator()` returns
 /// `Result<LocalBackend, _>`, not the `CommBackend` of the `mpi` build.
 #[cfg(not(feature = "mpi"))]
 mod no_feature_factory {
-    use cobre_comm::{BackendError, Communicator, create_communicator};
+    use cobre_comm::{BackendError, BackendKind, Communicator, create_communicator};
 
     #[test]
-    fn test_factory_no_feature_auto() {
-        let _guard = crate::ENV_LOCK.lock().unwrap();
-        unsafe { std::env::remove_var("COBRE_COMM_BACKEND") };
-        let backend = create_communicator().expect("must succeed");
+    fn test_factory_no_feature_local() {
+        let backend = create_communicator(BackendKind::Local).expect("must succeed");
         assert_eq!(backend.rank(), 0);
         assert_eq!(backend.size(), 1);
     }
 
+    /// `BackendKind::Auto` is a provenance-only label: `InvalidBackend`.
     #[test]
-    fn test_factory_no_feature_explicit_local() {
-        let _guard = crate::ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("COBRE_COMM_BACKEND", "local") };
-        let result = create_communicator();
-        unsafe { std::env::remove_var("COBRE_COMM_BACKEND") };
-        let backend = result.expect("must succeed");
-        assert_eq!(backend.rank(), 0);
-        assert_eq!(backend.size(), 1);
-    }
-
-    #[test]
-    fn test_factory_no_feature_explicit_auto() {
-        let _guard = crate::ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("COBRE_COMM_BACKEND", "auto") };
-        let result = create_communicator();
-        unsafe { std::env::remove_var("COBRE_COMM_BACKEND") };
-        result.expect("must succeed");
+    fn test_factory_no_feature_auto_invalid() {
+        let err = create_communicator(BackendKind::Auto).expect_err("must fail");
+        assert!(
+            matches!(err, BackendError::InvalidBackend { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn test_factory_no_feature_mpi_unavailable() {
-        let _guard = crate::ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("COBRE_COMM_BACKEND", "mpi") };
-        let result = create_communicator();
-        unsafe { std::env::remove_var("COBRE_COMM_BACKEND") };
-        let err = result.expect_err("must fail");
+        let err = create_communicator(BackendKind::Mpi).expect_err("must fail");
         assert!(
             matches!(
                 err,
@@ -63,111 +41,32 @@ mod no_feature_factory {
             assert!(available.contains(&"local".to_string()));
         }
     }
-
-    /// `tcp` is an undeclared name: `InvalidBackend`, not `BackendNotAvailable`.
-    #[test]
-    fn test_factory_no_feature_tcp_unavailable() {
-        let _guard = crate::ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("COBRE_COMM_BACKEND", "tcp") };
-        let result = create_communicator();
-        unsafe { std::env::remove_var("COBRE_COMM_BACKEND") };
-        let err = result.expect_err("must fail");
-        assert!(matches!(err, BackendError::InvalidBackend { .. }));
-    }
-
-    /// `shm` is an undeclared name: `InvalidBackend`, not `BackendNotAvailable`.
-    #[test]
-    fn test_factory_no_feature_shm_unavailable() {
-        let _guard = crate::ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("COBRE_COMM_BACKEND", "shm") };
-        let result = create_communicator();
-        unsafe { std::env::remove_var("COBRE_COMM_BACKEND") };
-        let err = result.expect_err("must fail");
-        assert!(matches!(err, BackendError::InvalidBackend { .. }));
-    }
-
-    #[test]
-    fn test_factory_no_feature_invalid_name() {
-        let _guard = crate::ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("COBRE_COMM_BACKEND", "foobar") };
-        let result = create_communicator();
-        unsafe { std::env::remove_var("COBRE_COMM_BACKEND") };
-        let err = result.expect_err("must fail");
-        assert!(
-            matches!(
-                err,
-                BackendError::InvalidBackend {
-                    ref requested,
-                    ..
-                } if requested == "foobar"
-            ),
-            "got {err:?}"
-        );
-    }
 }
 
 // ── any-feature factory tests ─────────────────────────────────────────────────
 
 #[cfg(feature = "mpi")]
 mod any_feature_factory {
-    use cobre_comm::{BackendError, CommBackend, Communicator, create_communicator};
+    use cobre_comm::{BackendError, BackendKind, CommBackend, Communicator, create_communicator};
 
     #[test]
     fn test_factory_any_feature_local() {
-        let _guard = crate::ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("COBRE_COMM_BACKEND", "local") };
-        let result = create_communicator();
-        unsafe { std::env::remove_var("COBRE_COMM_BACKEND") };
-        let backend = result.expect("must succeed");
+        let backend = create_communicator(BackendKind::Local).expect("must succeed");
         assert!(matches!(backend, CommBackend::Local(_)));
         assert_eq!(backend.rank(), 0);
     }
 
-    /// `tcp` is an undeclared name: `InvalidBackend`, not `BackendNotAvailable`.
+    /// `BackendKind::Auto` is a provenance-only label: `InvalidBackend`.
+    /// `CommBackend` is not `Debug`, so match instead of `expect_err`.
     #[test]
-    fn test_factory_any_feature_tcp_unavailable() {
-        let _guard = crate::ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("COBRE_COMM_BACKEND", "tcp") };
-        let result = create_communicator();
-        unsafe { std::env::remove_var("COBRE_COMM_BACKEND") };
-        match result {
-            Ok(_) => panic!("must fail"),
-            Err(err) => assert!(matches!(err, BackendError::InvalidBackend { .. })),
-        }
-    }
-
-    /// `shm` is an undeclared name: `InvalidBackend`, not `BackendNotAvailable`.
-    #[test]
-    fn test_factory_any_feature_shm_unavailable() {
-        let _guard = crate::ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("COBRE_COMM_BACKEND", "shm") };
-        let result = create_communicator();
-        unsafe { std::env::remove_var("COBRE_COMM_BACKEND") };
-        match result {
-            Ok(_) => panic!("must fail"),
-            Err(err) => assert!(matches!(err, BackendError::InvalidBackend { .. })),
-        }
-    }
-
-    #[test]
-    fn test_factory_any_feature_invalid_name() {
-        let _guard = crate::ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("COBRE_COMM_BACKEND", "foobar") };
-        let result = create_communicator();
-        unsafe { std::env::remove_var("COBRE_COMM_BACKEND") };
-        match result {
-            Ok(_) => panic!("must fail"),
-            Err(err) => assert!(
-                matches!(
-                    err,
-                    BackendError::InvalidBackend {
-                        ref requested,
-                        ..
-                    } if requested == "foobar"
-                ),
-                "got {err:?}"
-            ),
-        }
+    fn test_factory_any_feature_auto_invalid() {
+        let Err(err) = create_communicator(BackendKind::Auto) else {
+            panic!("must fail")
+        };
+        assert!(
+            matches!(err, BackendError::InvalidBackend { .. }),
+            "got {err:?}"
+        );
     }
 }
 

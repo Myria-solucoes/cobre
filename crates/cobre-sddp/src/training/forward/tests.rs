@@ -765,7 +765,6 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: config.loop_config.forward_passes as usize,
@@ -902,7 +901,6 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: config.loop_config.forward_passes as usize,
@@ -1045,7 +1043,6 @@ fn cost_statistics_accumulated_correctly() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: config.loop_config.forward_passes as usize,
@@ -1503,7 +1500,6 @@ fn run_one_iteration(
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: config.loop_config.forward_passes as usize,
@@ -1689,7 +1685,6 @@ fn test_forward_pass_parallel_cost_agreement() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: n_scenarios,
@@ -1736,7 +1731,6 @@ fn test_forward_pass_parallel_cost_agreement() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: n_scenarios,
@@ -1858,7 +1852,6 @@ fn test_forward_pass_work_distribution() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: n_scenarios,
@@ -2188,7 +2181,6 @@ fn run_single_stage_forward(
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: 1,
@@ -2394,7 +2386,6 @@ fn none_method_unchanged_with_truncation_code_present() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: config.loop_config.forward_passes as usize,
@@ -2656,7 +2647,6 @@ fn test_forward_pass_parallel_infeasibility() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: n_scenarios,
@@ -2823,7 +2813,6 @@ fn forward_pass_load_noise_positive_realization() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: 1,
@@ -2985,7 +2974,6 @@ fn forward_pass_load_noise_clamped_to_zero() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: 1,
@@ -3098,7 +3086,6 @@ fn forward_pass_no_load_buses_unchanged() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: 1,
@@ -3750,7 +3737,6 @@ mod dcs_forward {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs,
-            noise_key_diag: None,
         };
 
         // Baked path: mirror run_forward_worker's per-scenario baked load.
