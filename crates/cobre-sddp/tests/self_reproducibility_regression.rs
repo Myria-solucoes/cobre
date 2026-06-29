@@ -137,7 +137,7 @@ fn run_d02_once() -> String {
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
-    let (event_tx, event_rx) = mpsc::channel::<TrainingEvent>();
+    let (event_tx, _event_rx) = mpsc::channel::<TrainingEvent>();
 
     let outcome = setup
         .train(
@@ -151,26 +151,6 @@ fn run_d02_once() -> String {
         .expect("train must return Ok");
     assert!(outcome.error.is_none(), "expected no training error");
     let result = outcome.result;
-
-    let mut convergence_updates: Vec<(u64, f64, f64, f64, f64)> = event_rx
-        .into_iter()
-        .filter_map(|ev| {
-            if let TrainingEvent::ConvergenceUpdate {
-                iteration,
-                lower_bound,
-                upper_bound,
-                upper_bound_std,
-                gap,
-                ..
-            } = ev
-            {
-                Some((iteration, lower_bound, upper_bound, upper_bound_std, gap))
-            } else {
-                None
-            }
-        })
-        .collect();
-    convergence_updates.sort_by_key(|&(iter, ..)| iter);
 
     let mut pool = setup
         .create_workspace_pool(&comm, 1, ActiveSolver::new)
@@ -198,7 +178,7 @@ fn run_d02_once() -> String {
     let _summary = aggregate_simulation(&local_costs.costs, sim_config, &comm)
         .expect("aggregate_simulation must succeed");
 
-    compute_parity_hash(&convergence_updates, &setup, scenario_results)
+    compute_parity_hash(&setup, scenario_results)
 }
 
 #[test]

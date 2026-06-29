@@ -21,7 +21,7 @@ use std::path::Path;
 use std::sync::mpsc;
 
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
-use cobre_core::{TrainingEvent, scenario::ScenarioSource};
+use cobre_core::TrainingEvent;
 use cobre_sddp::{
     StudySetup, aggregate_simulation,
     hydro_models::prepare_hydro_models,
@@ -145,38 +145,14 @@ fn read_or_regen_baseline(case: &str, hash: &str) -> Result<(), String> {
 // Case runner
 // ---------------------------------------------------------------------------
 
-/// Map a D-case label (e.g. `"D01"`) to its fixture directory path.
+/// Map a D-case label (e.g. `"D06"`) to its fixture directory path.
 fn case_dir(label: &str) -> std::path::PathBuf {
     let suffix = match label {
-        "D01" => "d01-thermal-dispatch",
-        "D02" => "d02-single-hydro",
-        "D03" => "d03-two-hydro-cascade",
-        "D04" => "d04-transmission",
-        "D05" => "d05-fpha-constant-head",
         "D06" => "d06-fpha-variable-head",
-        "D07" => "d07-fpha-computed",
-        "D08" => "d08-evaporation",
-        "D09" => "d09-multi-deficit",
-        "D10" => "d10-inflow-nonnegativity",
-        "D11" => "d11-water-withdrawal",
-        "D13" => "d13-generic-constraint",
-        "D14" => "d14-block-factors",
         "D15" => "d15-non-controllable-source",
-        "D17" => "d17-evaporation-mixed-sign",
-        "D18" => "d18-ncs-commissioning-window",
-        "D31" => "d31-backwater-reference-volume",
-        "D32" => "d32-reversible-plant",
-        "D33" => "d33-per-stage-block-counts",
+        "D30" => "d30-multi-resolution-monthly-quarterly",
         "D34" => "d34-anticipated-varying-blocks",
-        "D35" => "d35-pumping-commissioning",
-        "D36" => "d36-thermal-line-commissioning",
-        "D37" => "d37-anticipated-commissioning",
-        "D38" => "d38-dead-volume-filling",
-        "D39" => "d39-prefilling-upstream-of-filling",
-        "D40" => "d40-filling-cascade",
         "D41" => "d41-energy-contracts",
-        "D42" => "d42-nonfilling-hydro-commissioning",
-        "D43" => "d43-storage-only-cut",
         other => panic!("unknown case label: {other}"),
     };
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -193,7 +169,10 @@ fn run_case(label: &str) {
 
     let system = cobre_io::load_case(&dir).expect("load_case must succeed");
 
-    let pr = prepare_stochastic(system, &dir, &config, 42, &ScenarioSource::default())
+    let prep_source = config
+        .training_scenario_source(&config_path)
+        .expect("training_scenario_source must parse");
+    let pr = prepare_stochastic(system, &dir, &config, 42, &prep_source)
         .expect("prepare_stochastic must succeed");
     let system = pr.system;
     let stochastic = pr.stochastic;
@@ -230,7 +209,7 @@ fn run_case(label: &str) {
     let comm = StubComm;
     let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
 
-    let (event_tx, event_rx) = mpsc::channel::<TrainingEvent>();
+    let (event_tx, _event_rx) = mpsc::channel::<TrainingEvent>();
 
     let outcome = setup
         .train(
@@ -247,26 +226,6 @@ fn run_case(label: &str) {
         "{label}: expected no training error"
     );
     let result = outcome.result;
-
-    let mut convergence_updates: Vec<(u64, f64, f64, f64, f64)> = event_rx
-        .into_iter()
-        .filter_map(|ev| {
-            if let TrainingEvent::ConvergenceUpdate {
-                iteration,
-                lower_bound,
-                upper_bound,
-                upper_bound_std,
-                gap,
-                ..
-            } = ev
-            {
-                Some((iteration, lower_bound, upper_bound, upper_bound_std, gap))
-            } else {
-                None
-            }
-        })
-        .collect();
-    convergence_updates.sort_by_key(|&(iter, ..)| iter);
 
     let mut pool = setup
         .create_workspace_pool(&comm, 1, HighsSolver::new)
@@ -294,7 +253,7 @@ fn run_case(label: &str) {
     let _summary = aggregate_simulation(&local_costs.costs, sim_config, &comm)
         .expect("aggregate_simulation must succeed");
 
-    let hash = compute_parity_hash(&convergence_updates, &setup, scenario_results);
+    let hash = compute_parity_hash(&setup, scenario_results);
 
     read_or_regen_baseline(label, &hash).unwrap_or_else(|msg| panic!("{msg}"));
 }
@@ -308,116 +267,8 @@ fn run_case(label: &str) {
     not(feature = "slow-tests"),
     ignore = "slow: run with --features slow-tests"
 )]
-fn parity_hash_d01() {
-    run_case("D01");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d02() {
-    run_case("D02");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d03() {
-    run_case("D03");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d04() {
-    run_case("D04");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d05() {
-    run_case("D05");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
 fn parity_hash_d06() {
     run_case("D06");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d07() {
-    run_case("D07");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d08() {
-    run_case("D08");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d09() {
-    run_case("D09");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d10() {
-    run_case("D10");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d11() {
-    run_case("D11");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d13() {
-    run_case("D13");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d14() {
-    run_case("D14");
 }
 
 #[test]
@@ -434,44 +285,8 @@ fn parity_hash_d15() {
     not(feature = "slow-tests"),
     ignore = "slow: run with --features slow-tests"
 )]
-fn parity_hash_d17() {
-    run_case("D17");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d18() {
-    run_case("D18");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d31() {
-    run_case("D31");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d32() {
-    run_case("D32");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d33() {
-    run_case("D33");
+fn parity_hash_d30() {
+    run_case("D30");
 }
 
 #[test]
@@ -488,78 +303,6 @@ fn parity_hash_d34() {
     not(feature = "slow-tests"),
     ignore = "slow: run with --features slow-tests"
 )]
-fn parity_hash_d35() {
-    run_case("D35");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d36() {
-    run_case("D36");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d37() {
-    run_case("D37");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d38() {
-    run_case("D38");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d39() {
-    run_case("D39");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d40() {
-    run_case("D40");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
 fn parity_hash_d41() {
     run_case("D41");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d42() {
-    run_case("D42");
-}
-
-#[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow: run with --features slow-tests"
-)]
-fn parity_hash_d43() {
-    run_case("D43");
 }

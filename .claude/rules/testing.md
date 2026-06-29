@@ -17,11 +17,15 @@ rule; the rules below are the Cobre-specific ones.
 
 1. **Golden bit-exact (parity hash).** SHA-256 over **final** output (cut pool,
    simulation primal / dual / equipment / cost). Reserved for a small, deliberately
-   feature-combined set of cases that exercise the shared LP-build / scaling / cut / basis
-   machinery (and so also catch cross-feature dormant bugs). NOT the default; a new
-   golden case needs justification. The hash MUST NOT include the convergence
-   trajectory or any per-iteration state — a faster warm-start to the same optimum
-   must not break it.
+   feature-combined golden set whose union spans the
+   cross-feature interactions that hide dormant bugs (cascade, anticipated, NCS,
+   multi-resolution, energy contracts / pumping) and which exercise the shared
+   LP-build / scaling / cut / basis machinery. The authoritative membership is the
+   set of `parity_hash_<case>` test names, not a list frozen here; every other
+   hashed case is demoted to tier 2 (behavioral). NOT the default; promoting a case
+   into the golden set needs justification. The hash MUST NOT include the
+   convergence trajectory or any per-iteration state — a faster warm-start to the
+   same optimum must not break it.
 2. **Behavioral (the default for deterministic cases).** `LB == UB` to tolerance,
    known optimum cost, water-balance closure, feature dispatch values. Backend-
    AGNOSTIC: one assertion covers HiGHS and CLP and survives benign refactors with no

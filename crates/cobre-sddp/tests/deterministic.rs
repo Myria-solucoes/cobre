@@ -619,8 +619,9 @@ fn d06_fpha_variable_head() {
 /// the constant tailrace at 300 m), giving a net head of ~50–100 m. Factor losses
 /// of 3% and constant efficiency of 92% are applied.
 ///
-/// No exact cost is asserted: the computed fitting pipeline uses a different
-/// discretization grid and plane count than D06's precomputed planes.
+/// The asserted cost is the converged optimum (LB == UB), distinct from D06's
+/// value because the computed fitting uses a different discretization grid and
+/// plane count than D06's precomputed planes. Backend-agnostic to tolerance.
 #[cfg_attr(
     not(feature = "slow-tests"),
     ignore = "slow: run with --features slow-tests"
@@ -644,6 +645,7 @@ fn d07_fpha_computed() {
         "D07: final_lb={} must be positive",
         result.final_lb
     );
+    assert_cost(result.final_lb, 3_657_537.696_594_757, 1.0, "D07");
 }
 
 // ---------------------------------------------------------------------------
@@ -3601,4 +3603,202 @@ fn d43_storage_only_cut_converges() {
             "D43: stored cut at pool-1 slot {slot} must have reduced length N={n_hydros}",
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Behavioral convergence coverage for the non-golden (demoted) hashed cases
+//
+// Each demoted case is single-scenario deterministic, so it converges to a
+// hand-stable optimum with LB == UB. The asserted cost is that converged optimum
+// and is backend-agnostic — HiGHS and CLP agree to the absolute tolerance below.
+// This is the behavioral safety net (tier 2) that lets the bit-exact golden tier
+// shrink to a small feature-combined set without losing regression coverage.
+// ---------------------------------------------------------------------------
+
+/// D17: mixed-sign (per-month) evaporation.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d17_converges_to_known_optimum() {
+    let case_dir = Path::new("../../examples/deterministic/d17-evaporation-mixed-sign");
+    let result = run_deterministic(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D17: gap={:.2e}",
+        result.final_gap
+    );
+    assert_cost(result.final_lb, 4_380_000.0, 1.0, "D17");
+}
+
+/// D31: backwater reference volume — upstream computed-FPHA plane shift.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d31_converges_to_known_optimum() {
+    let case_dir = Path::new("../../examples/deterministic/d31-backwater-reference-volume");
+    let result = run_deterministic(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D31: gap={:.2e}",
+        result.final_gap
+    );
+    assert_cost(result.final_lb, 1_475_795.556_870_993_5, 1.0, "D31");
+}
+
+/// D32: reversible (pumping) plant.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d32_converges_to_known_optimum() {
+    let case_dir = Path::new("../../examples/deterministic/d32-reversible-plant");
+    let result = run_deterministic(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D32: gap={:.2e}",
+        result.final_gap
+    );
+    assert_cost(result.final_lb, 1_126_109.6, 1.0, "D32");
+}
+
+/// D33: per-stage varying block counts (convergence companion to
+/// [`d33_per_stage_block_count_varies`], which only checks the structural strides).
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d33_converges_to_known_optimum() {
+    let case_dir = Path::new("../../examples/deterministic/d33-per-stage-block-counts");
+    let result = run_deterministic(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D33: gap={:.2e}",
+        result.final_gap
+    );
+    assert_cost(result.final_lb, 553.333_333_333_3, 1e-2, "D33");
+}
+
+/// D35: pumping-station commissioning window.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d35_converges_to_known_optimum() {
+    let case_dir = Path::new("../../examples/deterministic/d35-pumping-commissioning");
+    let result = run_deterministic(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D35: gap={:.2e}",
+        result.final_gap
+    );
+    assert_cost(result.final_lb, 1_245_756.166_666_667, 1.0, "D35");
+}
+
+/// D36: thermal + line commissioning window.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d36_converges_to_known_optimum() {
+    let case_dir = Path::new("../../examples/deterministic/d36-thermal-line-commissioning");
+    let result = run_deterministic(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D36: gap={:.2e}",
+        result.final_gap
+    );
+    assert_cost(result.final_lb, 30_713_514.888_888_91, 1.0, "D36");
+}
+
+/// D37: anticipated thermal under a commissioning window.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d37_converges_to_known_optimum() {
+    let case_dir = Path::new("../../examples/deterministic/d37-anticipated-commissioning");
+    let result = run_deterministic(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D37: gap={:.2e}",
+        result.final_gap
+    );
+    assert_cost(result.final_lb, 15_444_634.222_222_22, 1.0, "D37");
+}
+
+/// D38: dead-volume filling hydro.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d38_converges_to_known_optimum() {
+    let case_dir = Path::new("../../examples/deterministic/d38-dead-volume-filling");
+    let result = run_deterministic(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D38: gap={:.2e}",
+        result.final_gap
+    );
+    assert_cost(result.final_lb, 21_821_186.4, 1.0, "D38");
+}
+
+/// D39: PreFilling hydro upstream of a Filling hydro.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d39_converges_to_known_optimum() {
+    let case_dir = Path::new("../../examples/deterministic/d39-prefilling-upstream-of-filling");
+    let result = run_deterministic(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D39: gap={:.2e}",
+        result.final_gap
+    );
+    assert_cost(result.final_lb, 4_882_544.0, 1.0, "D39");
+}
+
+/// D40: filling cascade.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d40_converges_to_known_optimum() {
+    let case_dir = Path::new("../../examples/deterministic/d40-filling-cascade");
+    let result = run_deterministic(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D40: gap={:.2e}",
+        result.final_gap
+    );
+    assert_cost(result.final_lb, 27_503_012.0, 1.0, "D40");
+}
+
+/// D42: non-filling hydro commissioning.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d42_converges_to_known_optimum() {
+    let case_dir = Path::new("../../examples/deterministic/d42-nonfilling-hydro-commissioning");
+    let result = run_deterministic(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D42: gap={:.2e}",
+        result.final_gap
+    );
+    assert_cost(result.final_lb, 10_185_524.0, 1.0, "D42");
 }

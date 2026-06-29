@@ -1,25 +1,23 @@
 //! Shared parity-hash computation for the integration test harnesses — the sole
 //! owner of the hash whitelist and its byte layout.
 //!
-//! The hash is deterministic: every field is little-endian, iterations and stages
-//! ascending, scenarios sorted by `scenario_id`, hydro/thermal records by
-//! `(block_id, id)`. Fields 5–7 are not redundant with storage/dual: each is an
+//! The hash is deterministic: every field is little-endian, stages ascending,
+//! scenarios sorted by `scenario_id`, hydro/thermal records by
+//! `(block_id, id)`. Fields 4–6 are not redundant with storage/dual: each is an
 //! `n_blks`-dependent read kept specifically to surface an extraction/cost/base
 //! bug a uniform-block case cannot detect — do not drop them as duplicate.
 //!
 //! ## Hash whitelist (in fixed order)
 //!
-//! 1. Per-iteration convergence: `iteration_u64_le || lower_bound_f64_le
-//!    || upper_bound_f64_le || upper_bound_std_f64_le || gap_f64_le`
-//! 2. Per-stage, per-cut: `stage_u32_le || intercept_f64_le ||
+//! 1. Per-stage, per-cut: `stage_u32_le || intercept_f64_le ||
 //!    coefficient_count_u32_le || coefficient_f64_le[]`
-//! 3. Primal trajectory (`storage_final_hm3`) per scenario per stage.
-//! 4. Dual trajectory (`water_value_per_hm3`) per scenario per stage.
-//! 5. Per-block equipment (`spillage_m3s`) — base shifts off stage 0's block
+//! 2. Primal trajectory (`storage_final_hm3`) per scenario per stage.
+//! 3. Dual trajectory (`water_value_per_hm3`) per scenario per stage.
+//! 4. Per-block equipment (`spillage_m3s`) — base shifts off stage 0's block
 //!    width under a non-uniform schedule (the simulation-extraction base bug).
-//! 6. Cost breakdown (`spillage_cost`) — a `range_sum` whose base AND length
+//! 5. Cost breakdown (`spillage_cost`) — a `range_sum` whose base AND length
 //!    shift under a non-uniform schedule (the cost-breakdown bug).
-//! 7. Anticipated decision (`anticipated_decision_mw`) — base is the per-stage
+//! 6. Anticipated decision (`anticipated_decision_mw`) — base is the per-stage
 //!    `thermal.end` (`n_blks`-dependent). `None` hashes as a 0-flag, so only
 //!    anticipated cases (D34) move this field.
 
@@ -34,19 +32,10 @@ use sha2::{Digest, Sha256};
 
 /// Compute the SHA-256 parity hash over the module-doc whitelist.
 pub fn compute_parity_hash(
-    convergence_updates: &[(u64, f64, f64, f64, f64)],
     setup: &StudySetup,
     mut scenario_results: Vec<SimulationScenarioResult>,
 ) -> String {
     let mut hasher = Sha256::new();
-
-    for &(iteration, lb, ub, ub_std, gap) in convergence_updates {
-        hasher.update(iteration.to_le_bytes());
-        hasher.update(lb.to_le_bytes());
-        hasher.update(ub.to_le_bytes());
-        hasher.update(ub_std.to_le_bytes());
-        hasher.update(gap.to_le_bytes());
-    }
 
     // Active cuts in ascending stage order, then active_cuts() slot order — fixed
     // iteration order is what makes the cut digest declaration-order-stable.
