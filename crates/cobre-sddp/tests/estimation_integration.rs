@@ -15,6 +15,9 @@
     clippy::cast_possible_wrap,
     clippy::too_many_lines
 )]
+// `..Default::default()` in the make_* Spec calls is the intentional future-field
+// seam from `common::builders` — a no-op today, not dead code.
+#![allow(clippy::needless_update)]
 
 use std::path::Path;
 use std::sync::Arc;
@@ -24,8 +27,8 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use chrono::NaiveDate;
 use cobre_core::{
-    Bus, DeficitSegment, EntityId, SystemBuilder,
-    entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
+    DeficitSegment, EntityId, SystemBuilder,
+    entities::hydro::{HydroGenerationModel, HydroPenalties},
     temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
         StageStateConfig,
@@ -35,6 +38,9 @@ use cobre_io::Config;
 use cobre_sddp::estimate_from_history;
 use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
+
+mod common;
+use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -163,61 +169,67 @@ fn create_minimal_case_skeleton(case_dir: &Path, order_selection: &str, max_orde
 /// falls within a stage's `[start_date, end_date)` window — mirroring what
 /// `load_case` produces from per-stage `season_id` fields.
 fn build_system_with_one_hydro() -> cobre_core::System {
-    let bus = Bus {
-        id: EntityId::from(BUS_ID),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: Some(f64::INFINITY),
-            cost_per_mwh: 3000.0,
-        }],
-        excess_cost: 0.0,
-    };
-
-    let hydro = Hydro {
-        id: EntityId::from(HYDRO_ID),
-        name: "H1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId::from(BUS_ID),
-        downstream_id: None,
-        entry_stage_id: None,
-        exit_stage_id: None,
-        min_storage_hm3: 0.0,
-        max_storage_hm3: 5000.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity,
-        min_turbined_m3s: 0.0,
-        max_turbined_m3s: 1000.0,
-        specific_productivity_mw_per_m3s_per_m: None,
-        min_generation_mw: 0.0,
-        max_generation_mw: 900.0,
-        tailrace: None,
-        hydraulic_losses: None,
-        efficiency: None,
-        evaporation_coefficients_mm: None,
-        evaporation_reference_volumes_hm3: None,
-        diversion: None,
-        filling: None,
-        penalties: HydroPenalties {
-            spillage_cost: 0.0,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 1000.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 1000.0,
+    let bus = make_bus(
+        EntityId::from(BUS_ID),
+        BusSpec {
+            name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: Some(f64::INFINITY),
+                cost_per_mwh: 3000.0,
+            }],
+            excess_cost: 0.0,
+            ..Default::default()
         },
-    };
+    );
+
+    let hydro = make_hydro(
+        EntityId::from(HYDRO_ID),
+        HydroSpec {
+            name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId::from(BUS_ID),
+            downstream_id: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 5000.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 1000.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 900.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.0,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 1000.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+            ..Default::default()
+        },
+    );
 
     let mut stages: Vec<Stage> = Vec::with_capacity(N_YEARS * N_SEASONS);
     let mut stage_index: usize = 0;
@@ -235,28 +247,30 @@ fn build_system_with_one_hydro() -> cobre_core::System {
             };
             let end_date = NaiveDate::from_ymd_opt(end_year, end_month, 1).unwrap();
 
-            stages.push(Stage {
-                index: stage_index,
-                id: stage_index as i32,
-                start_date,
-                end_date,
-                season_id: Some(month),
-                blocks: vec![Block {
-                    index: 0,
-                    name: format!("M{month:02}"),
-                    duration_hours: 720.0,
-                }],
-                block_mode: BlockMode::Parallel,
-                state_config: StageStateConfig {
-                    storage: true,
-                    inflow_lags: false,
+            stages.push(make_stage(
+                stage_index,
+                StageSpec {
+                    start_date,
+                    end_date,
+                    season_id: Some(month),
+                    blocks: vec![Block {
+                        index: 0,
+                        name: format!("M{month:02}"),
+                        duration_hours: 720.0,
+                    }],
+                    block_mode: BlockMode::Parallel,
+                    state_config: StageStateConfig {
+                        storage: true,
+                        inflow_lags: false,
+                    },
+                    risk_config: StageRiskConfig::Expectation,
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: 1,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                    ..Default::default()
                 },
-                risk_config: StageRiskConfig::Expectation,
-                scenario_config: ScenarioSourceConfig {
-                    branching_factor: 1,
-                    noise_method: NoiseMethod::Saa,
-                },
-            });
+            ));
             stage_index += 1;
         }
     }
@@ -503,7 +517,7 @@ fn write_par1_inflow_history(path: &Path, n_hydros: usize) {
 /// `[1st, 1st-of-next)` window.
 fn build_system_for_par1(n_hydros: usize) -> cobre_core::System {
     use cobre_core::{
-        Bus, DeficitSegment, EntityId, SystemBuilder,
+        DeficitSegment, EntityId, SystemBuilder,
         entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
         temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
@@ -511,61 +525,69 @@ fn build_system_for_par1(n_hydros: usize) -> cobre_core::System {
         },
     };
 
-    let bus = Bus {
-        id: EntityId::from(BUS_ID),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: Some(f64::INFINITY),
-            cost_per_mwh: 3000.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = make_bus(
+        EntityId::from(BUS_ID),
+        BusSpec {
+            name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: Some(f64::INFINITY),
+                cost_per_mwh: 3000.0,
+            }],
+            excess_cost: 0.0,
+            ..Default::default()
+        },
+    );
 
     let hydros: Vec<Hydro> = (0..n_hydros)
-        .map(|h| Hydro {
-            id: EntityId::from((h + 1) as i32),
-            name: format!("H{}", h + 1),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId::from(BUS_ID),
-            downstream_id: None,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            min_storage_hm3: 0.0,
-            max_storage_hm3: 5000.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s: 0.0,
-            max_turbined_m3s: 1000.0,
-            specific_productivity_mw_per_m3s_per_m: None,
-            min_generation_mw: 0.0,
-            max_generation_mw: 900.0,
-            tailrace: None,
-            hydraulic_losses: None,
-            efficiency: None,
-            evaporation_coefficients_mm: None,
-            evaporation_reference_volumes_hm3: None,
-            diversion: None,
-            filling: None,
-            penalties: HydroPenalties {
-                spillage_cost: 0.0,
-                diversion_cost: 0.0,
-                turbined_cost: 0.0,
-                storage_violation_below_cost: 1000.0,
-                filling_target_violation_cost: 0.0,
-                turbined_violation_below_cost: 0.0,
-                outflow_violation_below_cost: 0.0,
-                outflow_violation_above_cost: 0.0,
-                generation_violation_below_cost: 0.0,
-                evaporation_violation_cost: 0.0,
-                water_withdrawal_violation_cost: 0.0,
-                water_withdrawal_violation_pos_cost: 0.0,
-                water_withdrawal_violation_neg_cost: 0.0,
-                evaporation_violation_pos_cost: 0.0,
-                evaporation_violation_neg_cost: 0.0,
-                inflow_nonnegativity_cost: 1000.0,
-            },
+        .map(|h| {
+            make_hydro(
+                EntityId::from((h + 1) as i32),
+                HydroSpec {
+                    name: format!("H{}", h + 1),
+                    operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    bus_id: EntityId::from(BUS_ID),
+                    downstream_id: None,
+                    entry_stage_id: None,
+                    exit_stage_id: None,
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 5000.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    generation_model: HydroGenerationModel::ConstantProductivity,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 1000.0,
+                    specific_productivity_mw_per_m3s_per_m: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 900.0,
+                    tailrace: None,
+                    hydraulic_losses: None,
+                    efficiency: None,
+                    evaporation_coefficients_mm: None,
+                    evaporation_reference_volumes_hm3: None,
+                    diversion: None,
+                    filling: None,
+                    penalties: HydroPenalties {
+                        spillage_cost: 0.0,
+                        diversion_cost: 0.0,
+                        turbined_cost: 0.0,
+                        storage_violation_below_cost: 1000.0,
+                        filling_target_violation_cost: 0.0,
+                        turbined_violation_below_cost: 0.0,
+                        outflow_violation_below_cost: 0.0,
+                        outflow_violation_above_cost: 0.0,
+                        generation_violation_below_cost: 0.0,
+                        evaporation_violation_cost: 0.0,
+                        water_withdrawal_violation_cost: 0.0,
+                        water_withdrawal_violation_pos_cost: 0.0,
+                        water_withdrawal_violation_neg_cost: 0.0,
+                        evaporation_violation_pos_cost: 0.0,
+                        evaporation_violation_neg_cost: 0.0,
+                        inflow_nonnegativity_cost: 1000.0,
+                    },
+                    ..Default::default()
+                },
+            )
         })
         .collect();
 
@@ -575,53 +597,57 @@ fn build_system_for_par1(n_hydros: usize) -> cobre_core::System {
         let cal_year = 2000 + year as i32;
 
         // January stage: season_id = 0
-        stages.push(Stage {
-            index: stage_index,
-            id: stage_index as i32,
-            start_date: chrono::NaiveDate::from_ymd_opt(cal_year, 1, 1).unwrap(),
-            end_date: chrono::NaiveDate::from_ymd_opt(cal_year, 2, 1).unwrap(),
-            season_id: Some(0),
-            blocks: vec![Block {
-                index: 0,
-                name: "JAN".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
+        stages.push(make_stage(
+            stage_index,
+            StageSpec {
+                start_date: chrono::NaiveDate::from_ymd_opt(cal_year, 1, 1).unwrap(),
+                end_date: chrono::NaiveDate::from_ymd_opt(cal_year, 2, 1).unwrap(),
+                season_id: Some(0),
+                blocks: vec![Block {
+                    index: 0,
+                    name: "JAN".to_string(),
+                    duration_hours: 744.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+                ..Default::default()
             },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
-        });
+        ));
         stage_index += 1;
 
         // February stage: season_id = 1
-        stages.push(Stage {
-            index: stage_index,
-            id: stage_index as i32,
-            start_date: chrono::NaiveDate::from_ymd_opt(cal_year, 2, 1).unwrap(),
-            end_date: chrono::NaiveDate::from_ymd_opt(cal_year, 3, 1).unwrap(),
-            season_id: Some(1),
-            blocks: vec![Block {
-                index: 0,
-                name: "FEB".to_string(),
-                duration_hours: 672.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
+        stages.push(make_stage(
+            stage_index,
+            StageSpec {
+                start_date: chrono::NaiveDate::from_ymd_opt(cal_year, 2, 1).unwrap(),
+                end_date: chrono::NaiveDate::from_ymd_opt(cal_year, 3, 1).unwrap(),
+                season_id: Some(1),
+                blocks: vec![Block {
+                    index: 0,
+                    name: "FEB".to_string(),
+                    duration_hours: 672.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+                ..Default::default()
             },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
-        });
+        ));
         stage_index += 1;
     }
 
@@ -775,15 +801,20 @@ fn build_system_for_par1_with_user_stats() -> cobre_core::System {
     let stages_owned = stages.to_vec();
     let hydros_owned = base.hydros().to_vec();
     let buses_owned = (0..base.n_buses())
-        .map(|_| Bus {
-            id: EntityId::from(BUS_ID),
-            name: "B1".to_string(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: Some(f64::INFINITY),
-                cost_per_mwh: 3000.0,
-            }],
-            excess_cost: 0.0,
+        .map(|_| {
+            make_bus(
+                EntityId::from(BUS_ID),
+                BusSpec {
+                    name: "B1".to_string(),
+                    operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    deficit_segments: vec![DeficitSegment {
+                        depth_mw: Some(f64::INFINITY),
+                        cost_per_mwh: 3000.0,
+                    }],
+                    excess_cost: 0.0,
+                    ..Default::default()
+                },
+            )
         })
         .take(1)
         .collect::<Vec<_>>();

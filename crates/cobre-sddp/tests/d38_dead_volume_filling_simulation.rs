@@ -53,13 +53,15 @@
 use std::path::Path;
 use std::sync::mpsc;
 
-use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::TrainingEvent;
 use cobre_core::scenario::ScenarioSource;
 use cobre_sddp::{
     SolverStatsDelta, StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
 };
 use cobre_solver::ActiveSolver;
+
+mod common;
+use common::StubComm;
 
 // ---------------------------------------------------------------------------
 // Fixture constants (study stage ids == indices for this single-resolution horizon)
@@ -94,53 +96,6 @@ const H4_SEED_HM3: f64 = 100.0;
 const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
 /// Every stage in `stages.json` totals 720 h, so `ζ` is uniform.
 const STAGE_HOURS: f64 = 720.0;
-
-/// Single-rank communicator stub that faithfully copies data through the
-/// collectives, so the pipeline runs without MPI.
-struct StubComm;
-
-impl Communicator for StubComm {
-    fn allgatherv<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _counts: &[usize],
-        _displs: &[usize],
-    ) -> Result<(), CommError> {
-        recv[..send.len()].clone_from_slice(send);
-        Ok(())
-    }
-
-    fn allreduce<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _op: ReduceOp,
-    ) -> Result<(), CommError> {
-        recv.clone_from_slice(send);
-        Ok(())
-    }
-
-    fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn barrier(&self) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn rank(&self) -> usize {
-        0
-    }
-
-    fn size(&self) -> usize {
-        1
-    }
-
-    fn abort(&self, error_code: i32) -> ! {
-        std::process::exit(error_code)
-    }
-}
 
 /// Per-(stage, hydro) view collapsing the stage's per-block rows to the scalars
 /// the assertions need. The simulation emits one `SimulationHydroResult` per

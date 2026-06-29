@@ -26,7 +26,6 @@
 use std::path::Path;
 use std::sync::mpsc;
 
-use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::TrainingEvent;
 use cobre_sddp::{
     StudySetup, aggregate_simulation,
@@ -36,57 +35,13 @@ use cobre_sddp::{
 use cobre_solver::clp::ClpSolver;
 
 mod common;
+use common::StubComm;
 
 use crate::common::parity_hash::compute_parity_hash;
 
 // ---------------------------------------------------------------------------
 // Stub communicator (single-rank)
 // ---------------------------------------------------------------------------
-
-struct StubComm;
-
-impl Communicator for StubComm {
-    fn allgatherv<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _counts: &[usize],
-        _displs: &[usize],
-    ) -> Result<(), CommError> {
-        recv[..send.len()].clone_from_slice(send);
-        Ok(())
-    }
-
-    fn allreduce<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _op: ReduceOp,
-    ) -> Result<(), CommError> {
-        recv.clone_from_slice(send);
-        Ok(())
-    }
-
-    fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn barrier(&self) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn rank(&self) -> usize {
-        0
-    }
-
-    fn size(&self) -> usize {
-        1
-    }
-
-    fn abort(&self, error_code: i32) -> ! {
-        std::process::exit(error_code)
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Baseline file path

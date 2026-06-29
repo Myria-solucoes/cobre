@@ -30,7 +30,6 @@
 use std::path::Path;
 use std::sync::mpsc;
 
-use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::{TrainingEvent, scenario::ScenarioSource};
 use cobre_sddp::{
     SimulationScenarioResult, StudySetup, aggregate_simulation,
@@ -39,54 +38,12 @@ use cobre_sddp::{
 };
 use cobre_solver::highs::HighsSolver;
 
+mod common;
+use common::StubComm;
+
 // ---------------------------------------------------------------------------
 // Single-rank stub communicator (mirrors the parity harness).
 // ---------------------------------------------------------------------------
-
-struct StubComm;
-
-impl Communicator for StubComm {
-    fn allgatherv<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _counts: &[usize],
-        _displs: &[usize],
-    ) -> Result<(), CommError> {
-        recv[..send.len()].clone_from_slice(send);
-        Ok(())
-    }
-
-    fn allreduce<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _op: ReduceOp,
-    ) -> Result<(), CommError> {
-        recv.clone_from_slice(send);
-        Ok(())
-    }
-
-    fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn barrier(&self) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn rank(&self) -> usize {
-        0
-    }
-
-    fn size(&self) -> usize {
-        1
-    }
-
-    fn abort(&self, error_code: i32) -> ! {
-        std::process::exit(error_code)
-    }
-}
 
 fn case_dir(suffix: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

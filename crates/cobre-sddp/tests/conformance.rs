@@ -20,12 +20,18 @@
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation
 )]
+// `..Default::default()` in the make_* Spec calls is the intentional future-field
+// seam from `common::builders` — a no-op today, not dead code.
+#![allow(clippy::needless_update)]
 
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_sddp::SyncResult;
 use cobre_solver::{
     Basis, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
 };
+
+mod common;
+use common::builders::{StageSpec, make_stage};
 
 /// Single-rank stub communicator for tests.
 struct LocalComm;
@@ -167,35 +173,36 @@ fn simple_opening_tree(n_openings: usize) -> cobre_stochastic::OpeningTree {
         EntityId,
         scenario::{CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile},
         temporal::{
-            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-            StageStateConfig,
+            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
         },
     };
     use cobre_stochastic::correlation::resolve::DecomposedCorrelation;
     use std::collections::BTreeMap;
 
-    let stage = Stage {
-        index: 0,
-        id: 0,
-        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-        season_id: Some(0),
-        blocks: vec![Block {
-            index: 0,
-            name: "S".to_string(),
-            duration_hours: 744.0,
-        }],
-        block_mode: BlockMode::Parallel,
-        state_config: StageStateConfig {
-            storage: true,
-            inflow_lags: false,
+    let stage = make_stage(
+        0,
+        StageSpec {
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "S".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: n_openings,
+                noise_method: NoiseMethod::Saa,
+            },
+            ..Default::default()
         },
-        risk_config: StageRiskConfig::Expectation,
-        scenario_config: ScenarioSourceConfig {
-            branching_factor: n_openings,
-            noise_method: NoiseMethod::Saa,
-        },
-    };
+    );
 
     let entity_id = EntityId(1);
     let mut profiles = BTreeMap::new();

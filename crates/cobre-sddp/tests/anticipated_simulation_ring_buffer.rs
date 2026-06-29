@@ -27,16 +27,18 @@
     clippy::needless_range_loop,
     clippy::too_many_lines
 )]
+// `..Default::default()` in the make_* Spec calls is the intentional future-field
+// seam from `common::builders` — a no-op today, not dead code.
+#![allow(clippy::needless_update)]
 
 use std::sync::mpsc;
 
-use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::entities::{
-    bus::{Bus, DeficitSegment},
-    hydro::{Hydro, HydroGenerationModel, HydroPenalties},
-    thermal::{AnticipatedConfig, Thermal},
+    bus::DeficitSegment,
+    hydro::{HydroGenerationModel, HydroPenalties},
+    thermal::AnticipatedConfig,
 };
-use cobre_core::scenario::{InflowModel, LoadModel, SamplingScheme};
+use cobre_core::scenario::{InflowModel, LoadModel};
 use cobre_core::temporal::{
     Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
 };
@@ -53,58 +55,14 @@ use cobre_io::config::{
     SimulationConfig as IoSimulationConfig, StoppingRuleConfig, TrainingConfig,
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
-use cobre_sddp::{StudySetup, hydro_models::PrepareHydroModelsResult};
 use cobre_solver::ActiveSolver;
-use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
-// ---------------------------------------------------------------------------
-// StubComm — single-rank communicator for testing
-// ---------------------------------------------------------------------------
-
-struct StubComm;
-
-impl Communicator for StubComm {
-    fn allgatherv<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _counts: &[usize],
-        _displs: &[usize],
-    ) -> Result<(), CommError> {
-        recv[..send.len()].clone_from_slice(send);
-        Ok(())
-    }
-
-    fn allreduce<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _op: ReduceOp,
-    ) -> Result<(), CommError> {
-        recv.clone_from_slice(send);
-        Ok(())
-    }
-
-    fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn barrier(&self) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn rank(&self) -> usize {
-        0
-    }
-
-    fn size(&self) -> usize {
-        1
-    }
-
-    fn abort(&self, error_code: i32) -> ! {
-        std::process::exit(error_code)
-    }
-}
+mod common;
+use common::StubComm;
+use common::build_setup_in_code;
+use common::builders::{
+    BusSpec, HydroSpec, StageSpec, ThermalSpec, make_bus, make_hydro, make_stage, make_thermal,
+};
 
 // ---------------------------------------------------------------------------
 // System builder
@@ -127,118 +85,134 @@ fn build_system(k: usize, past_commitments_mw: Vec<f64>, n_stages: usize) -> cob
         "past_commitments_mw length must equal K (lead_stages)",
     );
 
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 5000.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = make_bus(
+        EntityId(1),
+        BusSpec {
+            name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 5000.0,
+            }],
+            excess_cost: 0.0,
+            ..Default::default()
+        },
+    );
 
     // Anticipated thermal: K lead stages, very cheap so the optimal policy
     // saturates anticipated dispatch at the load level.
     let anticipated_id = EntityId(2);
-    let thermal_ant = Thermal {
-        id: anticipated_id,
-        name: "T_ant".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
-        min_generation_mw: 0.0,
-        max_generation_mw: 200.0,
-        cost_per_mwh: 10.0,
-        anticipated_config: Some(AnticipatedConfig {
-            lead_stages: k as u32,
-        }),
-        entry_stage_id: None,
-        exit_stage_id: None,
-    };
+    let thermal_ant = make_thermal(
+        anticipated_id,
+        ThermalSpec {
+            name: "T_ant".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(1),
+            min_generation_mw: 0.0,
+            max_generation_mw: 200.0,
+            cost_per_mwh: 10.0,
+            anticipated_config: Some(AnticipatedConfig {
+                lead_stages: k as u32,
+            }),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            ..Default::default()
+        },
+    );
 
     // Backup thermal: very expensive so the LP prefers anticipated dispatch
     // whenever possible.
-    let thermal_backup = Thermal {
-        id: EntityId(4),
-        name: "T_backup".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
-        min_generation_mw: 0.0,
-        max_generation_mw: 500.0,
-        cost_per_mwh: 5000.0,
-        anticipated_config: None,
-        entry_stage_id: None,
-        exit_stage_id: None,
-    };
+    let thermal_backup = make_thermal(
+        EntityId(4),
+        ThermalSpec {
+            name: "T_backup".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(1),
+            min_generation_mw: 0.0,
+            max_generation_mw: 500.0,
+            cost_per_mwh: 5000.0,
+            anticipated_config: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            ..Default::default()
+        },
+    );
 
     // Hydro: small to keep the model deterministic in the thermal regime.
-    let hydro = Hydro {
-        id: EntityId(3),
-        name: "H1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
-        downstream_id: None,
-        entry_stage_id: None,
-        exit_stage_id: None,
-        min_storage_hm3: 0.0,
-        max_storage_hm3: 1.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity,
-        min_turbined_m3s: 0.0,
-        max_turbined_m3s: 1.0,
-        specific_productivity_mw_per_m3s_per_m: None,
-        min_generation_mw: 0.0,
-        max_generation_mw: 1.0,
-        tailrace: None,
-        hydraulic_losses: None,
-        efficiency: None,
-        evaporation_coefficients_mm: None,
-        evaporation_reference_volumes_hm3: None,
-        diversion: None,
-        filling: None,
-        penalties: HydroPenalties {
-            spillage_cost: 0.01,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 0.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 1000.0,
+    let hydro = make_hydro(
+        EntityId(3),
+        HydroSpec {
+            name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 1.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 1.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 1.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+            ..Default::default()
         },
-    };
+    );
 
     let stages: Vec<Stage> = (0..n_stages)
-        .map(|i| Stage {
-            index: i,
-            id: i as i32,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: None,
-            blocks: vec![Block {
-                index: 0,
-                name: "S".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
+        .map(|i| {
+            make_stage(
+                i,
+                StageSpec {
+                    start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                    season_id: None,
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "S".to_string(),
+                        duration_hours: 744.0,
+                    }],
+                    block_mode: BlockMode::Parallel,
+                    state_config: StageStateConfig {
+                        storage: true,
+                        inflow_lags: false,
+                    },
+                    risk_config: StageRiskConfig::Expectation,
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: 1,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                    ..Default::default()
+                },
+            )
         })
         .collect();
 
@@ -435,31 +409,6 @@ fn build_config(training_iters: u32) -> Config {
 }
 
 // ---------------------------------------------------------------------------
-// Setup builder
-// ---------------------------------------------------------------------------
-
-fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
-    let stochastic = build_stochastic_context(
-        &system,
-        42,
-        None,
-        &[],
-        &[],
-        OpeningTreeInputs::default(),
-        ClassSchemes {
-            inflow: Some(SamplingScheme::InSample),
-            load: Some(SamplingScheme::InSample),
-            ncs: Some(SamplingScheme::InSample),
-        },
-    )
-    .expect("build_stochastic_context");
-
-    let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-
-    StudySetup::new(&system, config, stochastic, hydro_models).expect("StudySetup::new")
-}
-
-// ---------------------------------------------------------------------------
 // Test
 // ---------------------------------------------------------------------------
 
@@ -476,7 +425,7 @@ fn simulation_ring_buffer_shifts_anticipated_state_k1() {
 
     let system = build_system(k, seed.clone(), n_stages);
     let config = build_config(50);
-    let mut setup = build_setup(system, &config);
+    let mut setup = build_setup_in_code(system, &config);
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
 
@@ -584,7 +533,7 @@ fn simulation_ring_buffer_shifts_anticipated_state_k2() {
 
     let system = build_system(k, seed.clone(), n_stages);
     let config = build_config(10);
-    let mut setup = build_setup(system, &config);
+    let mut setup = build_setup_in_code(system, &config);
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
 

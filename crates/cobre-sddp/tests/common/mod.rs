@@ -6,11 +6,19 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, dead_code)]
 
 use std::path::Path;
+use std::sync::mpsc;
 
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
-use cobre_sddp::{StudySetup, setup::StudyParams};
+use cobre_core::scenario::SamplingScheme;
+use cobre_sddp::{
+    SimulationScenarioResult, StudySetup, hydro_models::PrepareHydroModelsResult,
+    setup::StudyParams,
+};
+use cobre_solver::ActiveSolver;
+use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
 pub mod anticipated_structural_assertions;
+pub mod builders;
 pub mod parity_hash;
 
 /// Single-rank `Communicator` stub: broadcasts/reductions copy data locally;
@@ -91,4 +99,75 @@ pub fn build_setup_for_case(
         &simulation_source,
     )
     .expect("StudySetup::from_broadcast_params must build")
+}
+
+/// Construct a [`StudySetup`] in-process, building the stochastic context
+/// directly so the test stays hermetic (no external scenario files).
+// Taken by value so callers pass an owned `System` inline without a separate
+// binding; the body only borrows it.
+#[allow(clippy::needless_pass_by_value)]
+pub fn build_setup_in_code(system: cobre_core::System, config: &cobre_io::Config) -> StudySetup {
+    let stochastic = build_stochastic_context(
+        &system,
+        42,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("build_stochastic_context");
+
+    let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+
+    StudySetup::new(&system, config, stochastic, hydro_models).expect("StudySetup::new")
+}
+
+/// Train `iterations`, then run the one-scenario simulation and return the drained
+/// per-scenario results.
+pub fn run_simulation(setup: &mut StudySetup, iterations: usize) -> Vec<SimulationScenarioResult> {
+    let comm = StubComm;
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new: must succeed");
+
+    let outcome = setup
+        .train(
+            &mut solver,
+            &comm,
+            iterations,
+            ActiveSolver::new,
+            None,
+            None,
+        )
+        .expect("training error: train() must not return Err");
+    assert!(
+        outcome.error.is_none(),
+        "training error: training returned an error: {:?}",
+        outcome.error,
+    );
+
+    let mut pool = setup
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
+        .expect("workspace pool error: create_workspace_pool must succeed");
+    let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
+    let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);
+    let drain_handle = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
+
+    let _sim_run = setup
+        .simulate(
+            &mut pool.workspaces,
+            &comm,
+            &result_tx,
+            None,
+            None,
+            &outcome.result.basis_cache,
+        )
+        .expect("simulation error: simulate() must not return Err");
+    // Drop the sender before the join below; a live result_tx keeps
+    // result_rx.into_iter() blocked forever, deadlocking the join.
+    drop(result_tx);
+    drain_handle.join().expect("drain thread must not panic")
 }

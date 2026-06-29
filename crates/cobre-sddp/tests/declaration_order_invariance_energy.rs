@@ -17,90 +17,16 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::scenario::ScenarioSource;
 use cobre_sddp::{
-    StudySetup, aggregate_simulation,
-    hydro_models::prepare_hydro_models,
-    setup::{StudyParams, prepare_stochastic},
+    aggregate_simulation, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
     simulation::SimulationScenarioResult,
 };
 use cobre_solver::ActiveSolver;
 
-struct StubComm;
-
-impl Communicator for StubComm {
-    fn allgatherv<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _counts: &[usize],
-        _displs: &[usize],
-    ) -> Result<(), CommError> {
-        recv[..send.len()].clone_from_slice(send);
-        Ok(())
-    }
-
-    fn allreduce<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _op: ReduceOp,
-    ) -> Result<(), CommError> {
-        recv.clone_from_slice(send);
-        Ok(())
-    }
-
-    fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn barrier(&self) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn rank(&self) -> usize {
-        0
-    }
-
-    fn size(&self) -> usize {
-        1
-    }
-
-    fn abort(&self, error_code: i32) -> ! {
-        std::process::exit(error_code)
-    }
-}
-
-fn build_setup_for_case(
-    case_dir: &Path,
-    config: &cobre_io::Config,
-    system: &cobre_core::System,
-    stochastic: cobre_stochastic::StochasticContext,
-    hydro_models: cobre_sddp::PrepareHydroModelsResult,
-) -> StudySetup {
-    let _ = case_dir; // productivity override rides on hydro_models, not case_dir
-    let sentinel = Path::new("config.json");
-    let training_source = config
-        .training_scenario_source(sentinel)
-        .expect("training_scenario_source must parse");
-    let simulation_source = config
-        .simulation_scenario_source(sentinel)
-        .expect("simulation_scenario_source must parse");
-
-    let params = StudyParams::from_config(config).expect("StudyParams::from_config must succeed");
-    let construction = params.into_construction_config();
-
-    StudySetup::from_broadcast_params(
-        system,
-        stochastic,
-        construction,
-        hydro_models,
-        &training_source,
-        &simulation_source,
-    )
-    .expect("StudySetup::from_broadcast_params must build")
-}
+mod common;
+use common::StubComm;
+use common::build_setup_for_case;
 
 fn run_with_simulation(case_dir: &Path) -> Vec<SimulationScenarioResult> {
     let config_path = case_dir.join("config.json");

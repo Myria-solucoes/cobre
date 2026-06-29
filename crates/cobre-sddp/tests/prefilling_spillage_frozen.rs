@@ -36,11 +36,13 @@
 use std::path::Path;
 use std::sync::mpsc;
 
-use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::TrainingEvent;
 use cobre_core::scenario::ScenarioSource;
 use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
 use cobre_solver::ActiveSolver;
+
+mod common;
+use common::StubComm;
 
 /// Hydro ids in canonical order. H2 (id 1) is the filling hydro that is PreFilling
 /// at stages 0–1; H1 (id 0) is its upstream feeder; H3 (id 2) is the active fed
@@ -65,53 +67,6 @@ const H3_INCR_M3S: f64 = 20.0;
 /// 0 and 1 are single FLAT blocks totalling 720 h, so `ζ = 720 · M3S_TO_HM3`.
 const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
 const STAGE_HOURS: f64 = 720.0;
-
-/// Single-rank communicator stub that faithfully copies data through the
-/// collectives, so the pipeline runs without MPI.
-struct StubComm;
-
-impl Communicator for StubComm {
-    fn allgatherv<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _counts: &[usize],
-        _displs: &[usize],
-    ) -> Result<(), CommError> {
-        recv[..send.len()].clone_from_slice(send);
-        Ok(())
-    }
-
-    fn allreduce<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _op: ReduceOp,
-    ) -> Result<(), CommError> {
-        recv.clone_from_slice(send);
-        Ok(())
-    }
-
-    fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn barrier(&self) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn rank(&self) -> usize {
-        0
-    }
-
-    fn size(&self) -> usize {
-        1
-    }
-
-    fn abort(&self, error_code: i32) -> ! {
-        std::process::exit(error_code)
-    }
-}
 
 /// Sum a hydro's release (turbine + spillage, m³/s) across the blocks of one stage.
 fn release_m3s(

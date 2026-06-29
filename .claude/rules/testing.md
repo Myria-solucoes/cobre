@@ -62,6 +62,13 @@ rule; the rules below are the Cobre-specific ones.
 - `cobre-solver` statically links HiGHS/CLP into every dependent `tests/*.rs`, so each
   new integration-test **binary** pays a full C++ link. Add a test function to an
   existing domain binary rather than a new file; group related tests with `mod`.
-- Shared `StubComm`, entity builders, and `build_setup_for_case` live in
-  `tests/common/` and are used from there — never re-defined per file. A required-field
-  addition to an entity must be a one-place change, not a workspace-wide ripple.
+- The shared harness helpers (`StubComm`, `build_setup_in_code`, `build_setup_for_case`,
+  `run_simulation`) and entity construction (`Stage`/`Hydro`/`Bus`/`Thermal` through the
+  `make_*` builders) live once in `tests/common/` — never re-defined per file. Because
+  every `tests/*.rs` construction routes through the shared builder, adding a required
+  field to one of those `cobre-core` entities is a one-place change in
+  `tests/common/builders.rs` (the `<Entity>Spec` default + the `make_<entity>` mapping);
+  no `tests/*.rs` consumer is touched.
+- That one-place property is scoped to the integration-test layer and does NOT hold
+  workspace-wide: production parquet readers and inline `#[cfg(test)]` `--lib` unit-test
+  literals construct these entities directly and must each wire a new field themselves.

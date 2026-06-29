@@ -20,15 +20,16 @@
     clippy::needless_range_loop,
     clippy::too_many_lines
 )]
-
-use std::sync::mpsc;
+// `..Default::default()` in the make_* Spec calls is the intentional future-field
+// seam from `common::builders` — a no-op today, not dead code.
+#![allow(clippy::needless_update)]
 
 use cobre_core::entities::{
-    bus::{Bus, DeficitSegment},
-    hydro::{Hydro, HydroGenerationModel, HydroPenalties},
-    thermal::{AnticipatedConfig, Thermal},
+    bus::DeficitSegment,
+    hydro::{HydroGenerationModel, HydroPenalties},
+    thermal::AnticipatedConfig,
 };
-use cobre_core::scenario::{InflowModel, LoadModel, SamplingScheme};
+use cobre_core::scenario::{InflowModel, LoadModel};
 use cobre_core::temporal::{
     Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
 };
@@ -45,12 +46,13 @@ use cobre_io::config::{
     SimulationConfig as IoSimulationConfig, StoppingRuleConfig, TrainingConfig,
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
-use cobre_sddp::{SimulationScenarioResult, StudySetup, hydro_models::PrepareHydroModelsResult};
-use cobre_solver::ActiveSolver;
-use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
 mod common;
-use common::StubComm;
+use common::build_setup_in_code;
+use common::builders::{
+    BusSpec, HydroSpec, StageSpec, ThermalSpec, make_bus, make_hydro, make_stage, make_thermal,
+};
+use common::run_simulation;
 
 // ---------------------------------------------------------------------------
 // Per-K fixture table
@@ -119,113 +121,129 @@ fn build_system(fixture: &SaturationFixture) -> cobre_core::System {
     let k = fixture.k;
     let n_stages = fixture.n_stages;
 
-    let bus = Bus {
-        id: fixture.bus_id,
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 5000.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = make_bus(
+        fixture.bus_id,
+        BusSpec {
+            name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 5000.0,
+            }],
+            excess_cost: 0.0,
+            ..Default::default()
+        },
+    );
 
     let anticipated_id = fixture.anticipated_id;
-    let thermal_ant = Thermal {
-        id: anticipated_id,
-        name: fixture.anticipated_name.to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: fixture.bus_id,
-        min_generation_mw: 0.0,
-        max_generation_mw: 200.0,
-        cost_per_mwh: 10.0,
-        anticipated_config: Some(AnticipatedConfig {
-            lead_stages: k as u32,
-        }),
-        entry_stage_id: None,
-        exit_stage_id: None,
-    };
-
-    let thermal_backup = Thermal {
-        id: fixture.backup_id,
-        name: fixture.backup_name.to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: fixture.bus_id,
-        min_generation_mw: 0.0,
-        max_generation_mw: 500.0,
-        cost_per_mwh: 5000.0,
-        anticipated_config: None,
-        entry_stage_id: None,
-        exit_stage_id: None,
-    };
-
-    let hydro = Hydro {
-        id: fixture.hydro_id,
-        name: "H1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: fixture.bus_id,
-        downstream_id: None,
-        entry_stage_id: None,
-        exit_stage_id: None,
-        min_storage_hm3: 0.0,
-        max_storage_hm3: 1.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity,
-        min_turbined_m3s: 0.0,
-        max_turbined_m3s: 1.0,
-        specific_productivity_mw_per_m3s_per_m: None,
-        min_generation_mw: 0.0,
-        max_generation_mw: 1.0,
-        tailrace: None,
-        hydraulic_losses: None,
-        efficiency: None,
-        evaporation_coefficients_mm: None,
-        evaporation_reference_volumes_hm3: None,
-        diversion: None,
-        filling: None,
-        penalties: HydroPenalties {
-            spillage_cost: 0.01,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 0.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 1000.0,
+    let thermal_ant = make_thermal(
+        anticipated_id,
+        ThermalSpec {
+            name: fixture.anticipated_name.to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: fixture.bus_id,
+            min_generation_mw: 0.0,
+            max_generation_mw: 200.0,
+            cost_per_mwh: 10.0,
+            anticipated_config: Some(AnticipatedConfig {
+                lead_stages: k as u32,
+            }),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            ..Default::default()
         },
-    };
+    );
+
+    let thermal_backup = make_thermal(
+        fixture.backup_id,
+        ThermalSpec {
+            name: fixture.backup_name.to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: fixture.bus_id,
+            min_generation_mw: 0.0,
+            max_generation_mw: 500.0,
+            cost_per_mwh: 5000.0,
+            anticipated_config: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            ..Default::default()
+        },
+    );
+
+    let hydro = make_hydro(
+        fixture.hydro_id,
+        HydroSpec {
+            name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: fixture.bus_id,
+            downstream_id: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 1.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 1.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 1.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+            ..Default::default()
+        },
+    );
 
     let stages: Vec<Stage> = (0..n_stages)
-        .map(|i| Stage {
-            index: i,
-            id: i as i32,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: None,
-            blocks: vec![Block {
-                index: 0,
-                name: "S".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
+        .map(|i| {
+            make_stage(
+                i,
+                StageSpec {
+                    start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                    season_id: None,
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "S".to_string(),
+                        duration_hours: 744.0,
+                    }],
+                    block_mode: BlockMode::Parallel,
+                    state_config: StageStateConfig {
+                        storage: true,
+                        inflow_lags: false,
+                    },
+                    risk_config: StageRiskConfig::Expectation,
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: 1,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                    ..Default::default()
+                },
+            )
         })
         .collect();
 
@@ -421,78 +439,8 @@ fn build_config(iterations: usize) -> Config {
 }
 
 // ---------------------------------------------------------------------------
-// Setup builder
-// ---------------------------------------------------------------------------
-
-fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
-    let stochastic = build_stochastic_context(
-        &system,
-        42,
-        None,
-        &[],
-        &[],
-        OpeningTreeInputs::default(),
-        ClassSchemes {
-            inflow: Some(SamplingScheme::InSample),
-            load: Some(SamplingScheme::InSample),
-            ncs: Some(SamplingScheme::InSample),
-        },
-    )
-    .expect("build_stochastic_context: must succeed");
-
-    let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-
-    StudySetup::new(&system, config, stochastic, hydro_models)
-        .expect("StudySetup::new: must succeed")
-}
-
-// ---------------------------------------------------------------------------
 // Train + simulate + drain helper
 // ---------------------------------------------------------------------------
-
-/// Train `iterations` then run the one-scenario simulation, returning the drained
-/// per-scenario results. The `mpsc::sync_channel` is dropped before the drain
-/// thread is joined — reversing that order deadlocks the join.
-fn run_simulation(setup: &mut StudySetup, iterations: usize) -> Vec<SimulationScenarioResult> {
-    let comm = StubComm;
-    let mut solver = ActiveSolver::new().expect("ActiveSolver::new: must succeed");
-
-    let outcome = setup
-        .train(
-            &mut solver,
-            &comm,
-            iterations,
-            ActiveSolver::new,
-            None,
-            None,
-        )
-        .expect("training error: train() must not return Err");
-    assert!(
-        outcome.error.is_none(),
-        "training error: training returned an error: {:?}",
-        outcome.error,
-    );
-
-    let mut pool = setup
-        .create_workspace_pool(&comm, 1, ActiveSolver::new)
-        .expect("workspace pool error: create_workspace_pool must succeed");
-    let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
-    let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);
-    let drain_handle = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
-
-    let _sim_run = setup
-        .simulate(
-            &mut pool.workspaces,
-            &comm,
-            &result_tx,
-            None,
-            None,
-            &outcome.result.basis_cache,
-        )
-        .expect("simulation error: simulate() must not return Err");
-    drop(result_tx);
-    drain_handle.join().expect("drain thread must not panic")
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -525,7 +473,7 @@ fn d_t_commits_to_load_for_every_active_stage_k2() {
 
     let system = build_system(&FIXTURE_K2);
     let config = build_config(FIXTURE_K2.iterations);
-    let mut setup = build_setup(system, &config);
+    let mut setup = build_setup_in_code(system, &config);
     let scenario_results = run_simulation(&mut setup, FIXTURE_K2.iterations);
 
     assert_eq!(
@@ -615,7 +563,7 @@ fn d_t_commits_to_load_for_every_active_stage_k3() {
 
     let system = build_system(&FIXTURE_K3);
     let config = build_config(FIXTURE_K3.iterations);
-    let mut setup = build_setup(system, &config);
+    let mut setup = build_setup_in_code(system, &config);
     let scenario_results = run_simulation(&mut setup, FIXTURE_K3.iterations);
 
     assert_eq!(

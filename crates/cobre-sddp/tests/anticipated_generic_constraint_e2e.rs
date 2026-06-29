@@ -39,11 +39,13 @@
     clippy::needless_range_loop,
     clippy::too_many_lines
 )]
+// `..Default::default()` in the make_* Spec calls is the intentional future-field
+// seam from `common::builders` — a no-op today, not dead code.
+#![allow(clippy::needless_update)]
 
 use std::path::Path;
 
 use chrono::NaiveDate;
-use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::{
     AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
     ConstraintExpression, ConstraintSense, ContractStageBounds, EntityId, GenericConstraint,
@@ -51,11 +53,8 @@ use cobre_core::{
     LinearTerm, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds,
     ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedPenalties, SlackConfig, SystemBuilder,
     ThermalStageBounds, VariableRef,
-    entities::{
-        bus::{Bus, DeficitSegment},
-        thermal::{AnticipatedConfig, Thermal},
-    },
-    scenario::{LoadModel, SamplingScheme},
+    entities::{bus::DeficitSegment, thermal::AnticipatedConfig},
+    scenario::LoadModel,
     temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
         StageStateConfig,
@@ -67,58 +66,12 @@ use cobre_io::config::{
     SimulationConfig as IoSimulationConfig, StoppingRuleConfig, TrainingConfig,
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
-use cobre_sddp::{StudySetup, hydro_models::PrepareHydroModelsResult};
 use cobre_solver::ActiveSolver;
-use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
-// ---------------------------------------------------------------------------
-// StubComm — single-rank communicator for testing
-// ---------------------------------------------------------------------------
-
-struct StubComm;
-
-impl Communicator for StubComm {
-    fn allgatherv<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _counts: &[usize],
-        _displs: &[usize],
-    ) -> Result<(), CommError> {
-        recv[..send.len()].clone_from_slice(send);
-        Ok(())
-    }
-
-    fn allreduce<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _op: ReduceOp,
-    ) -> Result<(), CommError> {
-        recv.clone_from_slice(send);
-        Ok(())
-    }
-
-    fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn barrier(&self) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn rank(&self) -> usize {
-        0
-    }
-
-    fn size(&self) -> usize {
-        1
-    }
-
-    fn abort(&self, error_code: i32) -> ! {
-        std::process::exit(error_code)
-    }
-}
+mod common;
+use common::StubComm;
+use common::build_setup_in_code;
+use common::builders::{BusSpec, StageSpec, ThermalSpec, make_bus, make_stage, make_thermal};
 
 // ---------------------------------------------------------------------------
 // Fixture parameters (AC-15 closed-form derivation)
@@ -164,65 +117,78 @@ fn build_system(
     generic_constraints: Vec<GenericConstraint>,
     generic_bounds: ResolvedGenericConstraintBounds,
 ) -> cobre_core::System {
-    let bus = Bus {
-        id: BUS_ID,
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: DEFICIT_COST,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = make_bus(
+        BUS_ID,
+        BusSpec {
+            name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: DEFICIT_COST,
+            }],
+            excess_cost: 0.0,
+            ..Default::default()
+        },
+    );
 
-    let thermal_ant = Thermal {
-        id: ANT_THERMAL_ID,
-        name: "T_ant".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
-        bus_id: BUS_ID,
-        min_generation_mw: 0.0,
-        max_generation_mw: ANT_MAX_MW,
-        cost_per_mwh: ANT_COST,
-        anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
-        entry_stage_id: None,
-        exit_stage_id: None,
-    };
+    let thermal_ant = make_thermal(
+        ANT_THERMAL_ID,
+        ThermalSpec {
+            name: "T_ant".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
+            bus_id: BUS_ID,
+            min_generation_mw: 0.0,
+            max_generation_mw: ANT_MAX_MW,
+            cost_per_mwh: ANT_COST,
+            anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            ..Default::default()
+        },
+    );
 
-    let thermal_backup = Thermal {
-        id: BACKUP_THERMAL_ID,
-        name: "T_backup".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 4).unwrap(),
-        bus_id: BUS_ID,
-        min_generation_mw: 0.0,
-        max_generation_mw: BACKUP_MAX_MW,
-        cost_per_mwh: BACKUP_COST,
-        anticipated_config: None,
-        entry_stage_id: None,
-        exit_stage_id: None,
-    };
+    let thermal_backup = make_thermal(
+        BACKUP_THERMAL_ID,
+        ThermalSpec {
+            name: "T_backup".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 4).unwrap(),
+            bus_id: BUS_ID,
+            min_generation_mw: 0.0,
+            max_generation_mw: BACKUP_MAX_MW,
+            cost_per_mwh: BACKUP_COST,
+            anticipated_config: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            ..Default::default()
+        },
+    );
 
     let stages: Vec<Stage> = (0..N_STAGES)
-        .map(|i| Stage {
-            index: i,
-            id: i as i32,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: None,
-            blocks: vec![Block {
-                index: 0,
-                name: "S".to_string(),
-                duration_hours: BLOCK_HOURS,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: false,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
+        .map(|i| {
+            make_stage(
+                i,
+                StageSpec {
+                    start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                    season_id: None,
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "S".to_string(),
+                        duration_hours: BLOCK_HOURS,
+                    }],
+                    block_mode: BlockMode::Parallel,
+                    state_config: StageStateConfig {
+                        storage: false,
+                        inflow_lags: false,
+                    },
+                    risk_config: StageRiskConfig::Expectation,
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: 1,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                    ..Default::default()
+                },
+            )
         })
         .collect();
 
@@ -394,31 +360,6 @@ fn build_config() -> Config {
 }
 
 // ---------------------------------------------------------------------------
-// Setup builder
-// ---------------------------------------------------------------------------
-
-fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
-    let stochastic = build_stochastic_context(
-        &system,
-        42,
-        None,
-        &[],
-        &[],
-        OpeningTreeInputs::default(),
-        ClassSchemes {
-            inflow: Some(SamplingScheme::InSample),
-            load: Some(SamplingScheme::InSample),
-            ncs: Some(SamplingScheme::InSample),
-        },
-    )
-    .expect("build_stochastic_context");
-
-    let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-
-    StudySetup::new(&system, config, stochastic, hydro_models).expect("StudySetup::new")
-}
-
-// ---------------------------------------------------------------------------
 // AC-15: Constrained training lower-bound is strictly worse than unconstrained
 // ---------------------------------------------------------------------------
 
@@ -475,7 +416,7 @@ fn anticipated_decision_constraint_raises_lb() {
     let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, raw_bounds.into_iter());
 
     let constrained_system = build_system(vec![constraint], generic_bounds);
-    let mut constrained_setup = build_setup(constrained_system, &config);
+    let mut constrained_setup = build_setup_in_code(constrained_system, &config);
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
 
     let constrained_outcome = constrained_setup
@@ -490,7 +431,7 @@ fn anticipated_decision_constraint_raises_lb() {
     let constrained_lb = constrained_outcome.result.final_lb;
 
     let baseline_system = build_system(vec![], ResolvedGenericConstraintBounds::empty());
-    let mut baseline_setup = build_setup(baseline_system, &config);
+    let mut baseline_setup = build_setup_in_code(baseline_system, &config);
     let mut baseline_solver = ActiveSolver::new().expect("ActiveSolver::new baseline");
 
     let baseline_outcome = baseline_setup

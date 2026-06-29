@@ -27,15 +27,17 @@
     clippy::needless_range_loop,
     clippy::too_many_lines
 )]
+// `..Default::default()` in the make_* Spec calls is the intentional future-field
+// seam from `common::builders` — a no-op today, not dead code.
+#![allow(clippy::needless_update)]
 
 use std::sync::mpsc;
 
-use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::entities::{
-    bus::{Bus, DeficitSegment},
-    hydro::{FillingConfig, Hydro, HydroGenerationModel, HydroPenalties},
+    bus::DeficitSegment,
+    hydro::{FillingConfig, HydroGenerationModel, HydroPenalties},
 };
-use cobre_core::scenario::{InflowModel, LoadModel, SamplingScheme};
+use cobre_core::scenario::{InflowModel, LoadModel};
 use cobre_core::temporal::{
     Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
 };
@@ -52,9 +54,15 @@ use cobre_io::config::{
     SimulationConfig as IoSimulationConfig, StoppingRuleConfig, TrainingConfig,
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
-use cobre_sddp::{SolverStatsDelta, StudySetup, hydro_models::PrepareHydroModelsResult};
+use cobre_sddp::SolverStatsDelta;
 use cobre_solver::ActiveSolver;
-use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
+
+mod common;
+use common::StubComm;
+use common::build_setup_in_code;
+use common::builders::{
+    BusSpec, HydroSpec, StageSpec, ThermalSpec, make_bus, make_hydro, make_stage, make_thermal,
+};
 
 // ---------------------------------------------------------------------------
 // Fixture topology constants (study stage ids; id == index for this horizon)
@@ -78,55 +86,6 @@ const HF1_ID: i32 = 1;
 const HF2_ID: i32 = 2;
 const HOP_ID: i32 = 3; // Operating downstream — the transitive short-circuit target
 const HCTL_ID: i32 = 4; // off-cascade control hydro (Operating every stage)
-
-// ---------------------------------------------------------------------------
-// StubComm — single-rank communicator for testing
-// ---------------------------------------------------------------------------
-
-struct StubComm;
-
-impl Communicator for StubComm {
-    fn allgatherv<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _counts: &[usize],
-        _displs: &[usize],
-    ) -> Result<(), CommError> {
-        recv[..send.len()].clone_from_slice(send);
-        Ok(())
-    }
-
-    fn allreduce<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _op: ReduceOp,
-    ) -> Result<(), CommError> {
-        recv.clone_from_slice(send);
-        Ok(())
-    }
-
-    fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn barrier(&self) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn rank(&self) -> usize {
-        0
-    }
-
-    fn size(&self) -> usize {
-        1
-    }
-
-    fn abort(&self, error_code: i32) -> ! {
-        std::process::exit(error_code)
-    }
-}
 
 // ---------------------------------------------------------------------------
 // System builder — chained filling cascade + off-cascade control
@@ -153,81 +112,42 @@ fn hydro_penalties() -> HydroPenalties {
     }
 }
 
-/// Build a `Hydro` for the cascade. A filling hydro has a non-zero dead volume
-/// (`min_storage_hm3 = 50`) it impounds toward; the control and operating hydros
-/// use a zero floor so they dispatch as plain Operating plants.
-fn make_hydro(
-    id: i32,
-    name: &str,
-    downstream: Option<i32>,
-    filling: Option<FillingConfig>,
-) -> Hydro {
-    let min_storage_hm3 = if filling.is_some() { 50.0 } else { 0.0 };
-    Hydro {
-        id: EntityId(id),
-        name: name.to_string(),
-        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1)
-            .unwrap()
-            .checked_add_signed(chrono::Duration::days(i64::from(id)))
-            .unwrap(),
-        bus_id: EntityId(1),
-        downstream_id: downstream.map(EntityId),
-        // A filling hydro requires `entry_stage_id` to be `Some`; the system
-        // builder rejects `filling` without it.
-        entry_stage_id: filling.as_ref().map(|_| ENTRY_STAGE_ID),
-        exit_stage_id: None,
-        min_storage_hm3,
-        max_storage_hm3: 200.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity,
-        min_turbined_m3s: 0.0,
-        max_turbined_m3s: 100.0,
-        specific_productivity_mw_per_m3s_per_m: None,
-        min_generation_mw: 0.0,
-        max_generation_mw: 250.0,
-        tailrace: None,
-        hydraulic_losses: None,
-        efficiency: None,
-        evaporation_coefficients_mm: None,
-        evaporation_reference_volumes_hm3: None,
-        diversion: None,
-        filling,
-        penalties: hydro_penalties(),
-    }
-}
-
 /// Build the chained filling cascade system: `Hf1 -> Hf2 -> Hop` (both filling,
 /// both PreFilling at ids 0,1; `Hop` the transitive short-circuit target),
 /// an off-cascade control `Hctl`, plus a bus deficit segment + backup thermal so
 /// the LP stays feasible regardless of the filling hydros' frozen storage.
 fn build_system() -> cobre_core::System {
     use chrono::NaiveDate;
-    use cobre_core::entities::thermal::Thermal;
 
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
+    let bus = make_bus(
+        EntityId(1),
+        BusSpec {
+            name: "B1".to_string(),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+            ..Default::default()
+        },
+    );
+
+    let thermal_backup = make_thermal(
+        EntityId(5),
+        ThermalSpec {
+            name: "T_backup".to_string(),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 6).unwrap(),
+            bus_id: EntityId(1),
+            entry_stage_id: None,
+            exit_stage_id: None,
             cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
-
-    let thermal_backup = Thermal {
-        id: EntityId(5),
-        name: "T_backup".to_string(),
-        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 6).unwrap(),
-        bus_id: EntityId(1),
-        min_generation_mw: 0.0,
-        max_generation_mw: 400.0,
-        cost_per_mwh: 500.0,
-        anticipated_config: None,
-        entry_stage_id: None,
-        exit_stage_id: None,
-    };
+            min_generation_mw: 0.0,
+            max_generation_mw: 400.0,
+            anticipated_config: None,
+            ..Default::default()
+        },
+    );
 
     let filling = || {
         Some(FillingConfig {
@@ -236,35 +156,81 @@ fn build_system() -> cobre_core::System {
         })
     };
 
+    // A filling hydro impounds toward a non-zero dead volume (min_storage_hm3 = 50)
+    // and requires entry_stage_id = Some (the system builder rejects `filling`
+    // without it); operating/control hydros use a 0 floor and no entry stage.
+    let cascade_hydro =
+        |id: i32, name: &str, downstream: Option<i32>, filling: Option<FillingConfig>| {
+            let min_storage_hm3 = if filling.is_some() { 50.0 } else { 0.0 };
+            make_hydro(
+                EntityId(id),
+                HydroSpec {
+                    name: name.to_string(),
+                    operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1)
+                        .unwrap()
+                        .checked_add_signed(chrono::Duration::days(i64::from(id)))
+                        .unwrap(),
+                    bus_id: EntityId(1),
+                    downstream_id: downstream.map(EntityId),
+                    entry_stage_id: filling.as_ref().map(|_| ENTRY_STAGE_ID),
+                    exit_stage_id: None,
+                    min_storage_hm3,
+                    max_storage_hm3: 200.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    generation_model: HydroGenerationModel::ConstantProductivity,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 100.0,
+                    specific_productivity_mw_per_m3s_per_m: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 250.0,
+                    tailrace: None,
+                    hydraulic_losses: None,
+                    efficiency: None,
+                    evaporation_coefficients_mm: None,
+                    evaporation_reference_volumes_hm3: None,
+                    diversion: None,
+                    filling,
+                    penalties: hydro_penalties(),
+                    ..Default::default()
+                },
+            )
+        };
+
     let hydros = vec![
-        make_hydro(HF1_ID, "Hf1", Some(HF2_ID), filling()),
-        make_hydro(HF2_ID, "Hf2", Some(HOP_ID), filling()),
-        make_hydro(HOP_ID, "Hop", None, None),
-        make_hydro(HCTL_ID, "Hctl", None, None),
+        cascade_hydro(HF1_ID, "Hf1", Some(HF2_ID), filling()),
+        cascade_hydro(HF2_ID, "Hf2", Some(HOP_ID), filling()),
+        cascade_hydro(HOP_ID, "Hop", None, None),
+        cascade_hydro(HCTL_ID, "Hctl", None, None),
     ];
 
     let stages: Vec<Stage> = (0..N_STAGES)
-        .map(|i| Stage {
-            index: i,
-            id: i as i32,
-            start_date: NaiveDate::from_ymd_opt(2020, (i % 12 + 1) as u32, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2020, ((i % 12 + 1) % 12 + 1) as u32, 1).unwrap(),
-            season_id: None,
-            blocks: vec![Block {
-                index: 0,
-                name: "S".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
+        .map(|i| {
+            make_stage(
+                i,
+                StageSpec {
+                    start_date: NaiveDate::from_ymd_opt(2020, (i % 12 + 1) as u32, 1).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(2020, ((i % 12 + 1) % 12 + 1) as u32, 1)
+                        .unwrap(),
+                    season_id: None,
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "S".to_string(),
+                        duration_hours: 744.0,
+                    }],
+                    block_mode: BlockMode::Parallel,
+                    state_config: StageStateConfig {
+                        storage: true,
+                        inflow_lags: false,
+                    },
+                    risk_config: StageRiskConfig::Expectation,
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: 1,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                    ..Default::default()
+                },
+            )
         })
         .collect();
 
@@ -466,27 +432,6 @@ fn build_config() -> Config {
     }
 }
 
-fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
-    let stochastic = build_stochastic_context(
-        &system,
-        42,
-        None,
-        &[],
-        &[],
-        OpeningTreeInputs::default(),
-        ClassSchemes {
-            inflow: Some(SamplingScheme::InSample),
-            load: Some(SamplingScheme::InSample),
-            ncs: Some(SamplingScheme::InSample),
-        },
-    )
-    .expect("build_stochastic_context");
-
-    let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-
-    StudySetup::new(&system, config, stochastic, hydro_models).expect("StudySetup::new")
-}
-
 // ---------------------------------------------------------------------------
 // Integration test
 // ---------------------------------------------------------------------------
@@ -499,7 +444,7 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 fn filling_cascade_lower_bound_monotone_no_basis_spike() {
     let system = build_system();
     let config = build_config();
-    let mut setup = build_setup(system, &config);
+    let mut setup = build_setup_in_code(system, &config);
     // Populate the visited-states archive so the control hydro's forward-pass
     // storage trajectory is observable for the parity-neutrality assertion below.
     setup.set_export_states(true);

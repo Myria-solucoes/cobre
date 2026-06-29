@@ -16,12 +16,12 @@
     clippy::needless_range_loop,
     clippy::too_many_lines
 )]
+// `..Default::default()` in the make_* Spec calls is the intentional future-field
+// seam from `common::builders` — a no-op today, not dead code.
+#![allow(clippy::needless_update)]
 
-use cobre_core::entities::{
-    bus::{Bus, DeficitSegment},
-    thermal::{AnticipatedConfig, Thermal},
-};
-use cobre_core::scenario::{LoadModel, SamplingScheme};
+use cobre_core::entities::{bus::DeficitSegment, thermal::AnticipatedConfig};
+use cobre_core::scenario::LoadModel;
 use cobre_core::temporal::{
     Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
 };
@@ -37,12 +37,12 @@ use cobre_io::config::{
     SimulationConfig as IoSimulationConfig, StoppingRuleConfig, TrainingConfig,
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
-use cobre_sddp::{StudySetup, hydro_models::PrepareHydroModelsResult};
 use cobre_solver::ActiveSolver;
-use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
 mod common;
 use common::StubComm;
+use common::build_setup_in_code;
+use common::builders::{BusSpec, StageSpec, ThermalSpec, make_bus, make_stage, make_thermal};
 
 // ---------------------------------------------------------------------------
 // Numeric constants shared across all K (single source of truth).
@@ -141,45 +141,54 @@ fn build_system(fixture: &BackwardCutFixture) -> cobre_core::System {
 
     let date = |d: (i32, u32, u32)| NaiveDate::from_ymd_opt(d.0, d.1, d.2).expect("valid date");
 
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
-        // Deficit cost set safely above c_reg so the LP never prefers shedding load.
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 1000.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = make_bus(
+        EntityId(1),
+        BusSpec {
+            name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            // Deficit cost set safely above c_reg so the LP never prefers shedding load.
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 1000.0,
+            }],
+            excess_cost: 0.0,
+            ..Default::default()
+        },
+    );
 
-    let thermal_reg = Thermal {
-        id: fixture.reg_id,
-        name: "T_reg".to_string(),
-        operational_start_date: date(fixture.reg_start_date),
-        bus_id: EntityId(1),
-        min_generation_mw: 0.0,
-        max_generation_mw: fixture.max_gen_reg,
-        cost_per_mwh: C_REG,
-        anticipated_config: None,
-        entry_stage_id: None,
-        exit_stage_id: None,
-    };
+    let thermal_reg = make_thermal(
+        fixture.reg_id,
+        ThermalSpec {
+            name: "T_reg".to_string(),
+            operational_start_date: date(fixture.reg_start_date),
+            bus_id: EntityId(1),
+            min_generation_mw: 0.0,
+            max_generation_mw: fixture.max_gen_reg,
+            cost_per_mwh: C_REG,
+            anticipated_config: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            ..Default::default()
+        },
+    );
 
-    let thermal_ant = Thermal {
-        id: fixture.ant_id,
-        name: "T_ant".to_string(),
-        operational_start_date: date(fixture.ant_start_date),
-        bus_id: EntityId(1),
-        min_generation_mw: 0.0,
-        max_generation_mw: fixture.max_gen_ant,
-        cost_per_mwh: C_ANT,
-        anticipated_config: Some(AnticipatedConfig {
-            lead_stages: fixture.k_max as u32,
-        }),
-        entry_stage_id: None,
-        exit_stage_id: None,
-    };
+    let thermal_ant = make_thermal(
+        fixture.ant_id,
+        ThermalSpec {
+            name: "T_ant".to_string(),
+            operational_start_date: date(fixture.ant_start_date),
+            bus_id: EntityId(1),
+            min_generation_mw: 0.0,
+            max_generation_mw: fixture.max_gen_ant,
+            cost_per_mwh: C_ANT,
+            anticipated_config: Some(AnticipatedConfig {
+                lead_stages: fixture.k_max as u32,
+            }),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            ..Default::default()
+        },
+    );
 
     assert!(
         thermal_reg.id.0 < thermal_ant.id.0,
@@ -190,27 +199,31 @@ fn build_system(fixture: &BackwardCutFixture) -> cobre_core::System {
     );
 
     let stages: Vec<Stage> = (0..fixture.n_stages)
-        .map(|i| Stage {
-            index: i,
-            id: i as i32,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: None,
-            blocks: vec![Block {
-                index: 0,
-                name: "S".to_string(),
-                duration_hours: BLOCK_HOURS,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: false,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
+        .map(|i| {
+            make_stage(
+                i,
+                StageSpec {
+                    start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                    season_id: None,
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "S".to_string(),
+                        duration_hours: BLOCK_HOURS,
+                    }],
+                    block_mode: BlockMode::Parallel,
+                    state_config: StageStateConfig {
+                        storage: false,
+                        inflow_lags: false,
+                    },
+                    risk_config: StageRiskConfig::Expectation,
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: 1,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                    ..Default::default()
+                },
+            )
         })
         .collect();
 
@@ -376,31 +389,6 @@ fn build_config(iterations: usize) -> Config {
 }
 
 // ---------------------------------------------------------------------------
-// Setup builder
-// ---------------------------------------------------------------------------
-
-fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
-    let stochastic = build_stochastic_context(
-        &system,
-        42,
-        None,
-        &[],
-        &[],
-        OpeningTreeInputs::default(),
-        ClassSchemes {
-            inflow: Some(SamplingScheme::InSample),
-            load: Some(SamplingScheme::InSample),
-            ncs: Some(SamplingScheme::InSample),
-        },
-    )
-    .expect("build_stochastic_context");
-
-    let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-
-    StudySetup::new(&system, config, stochastic, hydro_models).expect("StudySetup::new")
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -434,7 +422,7 @@ fn two_stage_k1_anticipated_cut_coefficient_matches_analytical() {
 
     let system = build_system(&FIXTURE_K1);
     let config = build_config(FIXTURE_K1.iterations);
-    let mut setup = build_setup(system, &config);
+    let mut setup = build_setup_in_code(system, &config);
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
 
@@ -528,7 +516,7 @@ fn three_stage_k2_anticipated_cut_coefficient_propagates_correctly() {
 
     let system = build_system(&FIXTURE_K2);
     let config = build_config(FIXTURE_K2.iterations);
-    let mut setup = build_setup(system, &config);
+    let mut setup = build_setup_in_code(system, &config);
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
 
@@ -672,7 +660,7 @@ fn four_stage_k3_anticipated_cut_coefficient_propagates_correctly() {
 
     let system = build_system(&FIXTURE_K3);
     let config = build_config(FIXTURE_K3.iterations);
-    let mut setup = build_setup(system, &config);
+    let mut setup = build_setup_in_code(system, &config);
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
 
