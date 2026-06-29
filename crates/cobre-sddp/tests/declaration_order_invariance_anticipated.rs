@@ -164,7 +164,7 @@ fn build_system_with_thermal_order(thermal_order: &[EntityId; 3]) -> cobre_core:
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 500.0,
@@ -176,7 +176,7 @@ fn build_system_with_thermal_order(thermal_order: &[EntityId; 3]) -> cobre_core:
     let thermal_ant_k2 = Thermal {
         id: ant_id_k2,
         name: "T_ant_k2".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
         bus_id: EntityId(1),
         min_generation_mw: 0.0,
         max_generation_mw: 100.0,
@@ -189,7 +189,7 @@ fn build_system_with_thermal_order(thermal_order: &[EntityId; 3]) -> cobre_core:
     let thermal_backup = Thermal {
         id: EntityId(4),
         name: "T_backup".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 5).unwrap(),
         bus_id: EntityId(1),
         min_generation_mw: 0.0,
         max_generation_mw: 200.0,
@@ -203,7 +203,7 @@ fn build_system_with_thermal_order(thermal_order: &[EntityId; 3]) -> cobre_core:
     let thermal_ant_k4 = Thermal {
         id: ant_id_k4,
         name: "T_ant_k4".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 6).unwrap(),
         bus_id: EntityId(1),
         min_generation_mw: 0.0,
         max_generation_mw: 80.0,
@@ -226,7 +226,7 @@ fn build_system_with_thermal_order(thermal_order: &[EntityId; 3]) -> cobre_core:
     let hydro = Hydro {
         id: EntityId(3),
         name: "H1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 4).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
         entry_stage_id: None,

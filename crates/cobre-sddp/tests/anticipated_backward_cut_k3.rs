@@ -157,7 +157,7 @@ fn build_system() -> cobre_core::System {
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
         // Deficit cost set safely above c_reg so the LP never prefers shedding load.
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
@@ -169,7 +169,7 @@ fn build_system() -> cobre_core::System {
     let thermal_reg = Thermal {
         id: REGULAR_ID,
         name: "T_reg".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
         bus_id: EntityId(1),
         min_generation_mw: 0.0,
         max_generation_mw: MAX_GEN_REG,
@@ -182,7 +182,7 @@ fn build_system() -> cobre_core::System {
     let thermal_ant = Thermal {
         id: ANTICIPATED_ID,
         name: "T_ant".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 6).unwrap(),
         bus_id: EntityId(1),
         min_generation_mw: 0.0,
         max_generation_mw: MAX_GEN_ANT,

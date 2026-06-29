@@ -167,7 +167,7 @@ fn build_system(
     let bus = Bus {
         id: BUS_ID,
         name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: DEFICIT_COST,
@@ -178,7 +178,7 @@ fn build_system(
     let thermal_ant = Thermal {
         id: ANT_THERMAL_ID,
         name: "T_ant".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
         bus_id: BUS_ID,
         min_generation_mw: 0.0,
         max_generation_mw: ANT_MAX_MW,
@@ -191,7 +191,7 @@ fn build_system(
     let thermal_backup = Thermal {
         id: BACKUP_THERMAL_ID,
         name: "T_backup".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 4).unwrap(),
         bus_id: BUS_ID,
         min_generation_mw: 0.0,
         max_generation_mw: BACKUP_MAX_MW,
@@ -550,7 +550,7 @@ fn anticipated_decision_on_non_anticipated_thermal_rejected_by_validator() {
 
     fs::write(
         system_dir.join("buses.json"),
-        r#"{"buses":[{"id":1,"name":"B1","deficit_segments":[{"depth_mw":null,"cost":1000.0}]}]}"#,
+        r#"{"buses":[{"id":1,"name":"B1","operational_start_date":"2024-01-02","deficit_segments":[{"depth_mw":null,"cost":1000.0}]}]}"#,
     )
     .expect("write buses.json");
 
@@ -565,6 +565,7 @@ fn anticipated_decision_on_non_anticipated_thermal_rejected_by_validator() {
     {
       "id": 2,
       "name": "T_ant",
+      "operational_start_date": "2024-01-03",
       "bus_id": 1,
       "generation": { "min_mw": 0.0, "max_mw": 100.0 },
       "cost_per_mwh": 10.0,
@@ -573,6 +574,7 @@ fn anticipated_decision_on_non_anticipated_thermal_rejected_by_validator() {
     {
       "id": 3,
       "name": "T_backup",
+      "operational_start_date": "2024-01-04",
       "bus_id": 1,
       "generation": { "min_mw": 0.0, "max_mw": 200.0 },
       "cost_per_mwh": 100.0
