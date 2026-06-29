@@ -1,22 +1,11 @@
-//! Regression test: `d_t` must commit to load level for every active
-//! anticipated-decision stage in a K=3 fixture.
-//!
-//! ## Bug being guarded against
-//!
-//! In an 8-stage K=3 study with a 500x cost asymmetry (anticipated thermal at
-//! $10/MWh vs backup at $5000/MWh), the LP should commit the anticipated
-//! thermal to exactly `load = 150 MW` at every stage `t` where `t + K < n_stages`
-//! (i.e. `t in {0, 1, 2, 3, 4}`). Over-committing to `max_gen = 200 MW` costs
-//! an extra 50 MW × $10/MWh × 744 h = $372k/stage with zero offsetting benefit
-//! (excess generation is free), so the LP optimum is `d_t = load = 150 MW`,
-//! not `max_gen = 200 MW`.
-//!
-//! The K=3 propagation chain is longer than K=2: cuts at stage `t` propagate
-//! to predecessor's slot 1, which is `state_col[slot 2]`, whose value at K=3
-//! is `incoming_slot_2 - d_{t-1}` if the decision-write coefficient is at
-//! slot K-1 = 2. This variant exercises the multi-step propagation through
-//! all three slot positions, confirming the fix is general and not K=2-specific.
-//!
+//! `d_t`-saturation regression tests for an anticipated thermal across lead_stages
+//! K = 2, 3. Each test trains a small in-code study, runs a one-scenario
+//! simulation, and asserts that the anticipated-decision variable `d_t` commits to
+//! the load level at every active stage (`t + K < n_stages`) and is absent at the
+//! strict-boundary inactive stages. The K=3 test additionally checks the
+//! ring-buffer shift `committed_at(t) ≈ decision_at(t − K)`. Each K's
+//! economic-reasoning derivation lives on its test function.
+
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -34,7 +23,6 @@
 
 use std::sync::mpsc;
 
-use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::entities::{
     bus::{Bus, DeficitSegment},
     hydro::{Hydro, HydroGenerationModel, HydroPenalties},
@@ -57,80 +45,82 @@ use cobre_io::config::{
     SimulationConfig as IoSimulationConfig, StoppingRuleConfig, TrainingConfig,
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
-use cobre_sddp::{StudySetup, hydro_models::PrepareHydroModelsResult};
+use cobre_sddp::{SimulationScenarioResult, StudySetup, hydro_models::PrepareHydroModelsResult};
 use cobre_solver::ActiveSolver;
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
+mod common;
+use common::StubComm;
+
 // ---------------------------------------------------------------------------
-// StubComm — single-rank communicator for testing
+// Per-K fixture table
 // ---------------------------------------------------------------------------
 
-/// Single-rank communicator stub for testing.
-struct StubComm;
-
-impl Communicator for StubComm {
-    fn allgatherv<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _counts: &[usize],
-        _displs: &[usize],
-    ) -> Result<(), CommError> {
-        recv[..send.len()].clone_from_slice(send);
-        Ok(())
-    }
-
-    fn allreduce<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _op: ReduceOp,
-    ) -> Result<(), CommError> {
-        recv.clone_from_slice(send);
-        Ok(())
-    }
-
-    fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn barrier(&self) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn rank(&self) -> usize {
-        0
-    }
-
-    fn size(&self) -> usize {
-        1
-    }
-
-    fn abort(&self, error_code: i32) -> ! {
-        std::process::exit(error_code)
-    }
+/// Per-K parameters for a `d_t`-saturation fixture. Each `#[test]` builds an
+/// independent `System` from one entry, so an entity id may name different roles
+/// across K (id 3 is the K=2 hydro but the K=3 anticipated thermal) without
+/// colliding — the ids are local to each built system.
+struct SaturationFixture {
+    n_stages: usize,
+    /// Anticipated `lead_stages` K — also the ring-buffer depth.
+    k: usize,
+    bus_id: EntityId,
+    anticipated_id: EntityId,
+    anticipated_name: &'static str,
+    backup_id: EntityId,
+    backup_name: &'static str,
+    hydro_id: EntityId,
+    /// Anticipated ring-buffer seeds, MW (length `k`); zero isolates in-horizon
+    /// behaviour from any seeding artefact.
+    seeds_mw: &'static [f64],
+    iterations: usize,
 }
+
+const FIXTURE_K2: SaturationFixture = SaturationFixture {
+    n_stages: 6,
+    k: 2,
+    bus_id: EntityId(1),
+    anticipated_id: EntityId(2),
+    anticipated_name: "T_ant",
+    backup_id: EntityId(4),
+    backup_name: "T_backup",
+    hydro_id: EntityId(3),
+    seeds_mw: &[0.0, 0.0],
+    iterations: 10,
+};
+
+const FIXTURE_K3: SaturationFixture = SaturationFixture {
+    n_stages: 8,
+    k: 3,
+    bus_id: EntityId(1),
+    anticipated_id: EntityId(3),
+    anticipated_name: "T_ant_k3",
+    backup_id: EntityId(4),
+    backup_name: "T_backup_k3",
+    hydro_id: EntityId(5),
+    seeds_mw: &[0.0, 0.0, 0.0],
+    iterations: 15,
+};
 
 // ---------------------------------------------------------------------------
 // System builder
 // ---------------------------------------------------------------------------
 
-/// Build an 8-stage K=3 thermal system (1 bus, 1 anticipated thermal id=3, 1
-/// backup thermal id=4) for the d_t-saturation derivation in the module doc.
-///
-/// The trivial hydro keeps the model in the thermal regime without adding a
-/// hydro state variable that complicates interpretation. Seeds are zero so the
-/// test isolates the in-horizon bug, not any seeding artefact. IDs 3/4 differ
-/// from the K=2 sibling (IDs 2/4) so combined nextest runs attribute failures
-/// unambiguously per entity.
-fn build_system_k3() -> cobre_core::System {
+/// Build the thermal `System` for one `d_t`-saturation fixture: one anticipated
+/// thermal (cheap, $10/MWh, max 200 MW) at `fixture.anticipated_id`, one backup
+/// ($5000/MWh, max 500 MW) at `fixture.backup_id`, and a trivial hydro (1 hm³,
+/// zero inflow, 1 MW max_gen) at `fixture.hydro_id` that keeps the model in the
+/// thermal regime without adding an interpretable hydro state. Load is 150 MW
+/// across all stages; seeds (`fixture.seeds_mw`) are zero to isolate the
+/// in-horizon behaviour from any seeding artefact.
+fn build_system(fixture: &SaturationFixture) -> cobre_core::System {
     use chrono::NaiveDate;
 
-    let k: usize = 3;
-    let n_stages: usize = 8;
+    let k = fixture.k;
+    let n_stages = fixture.n_stages;
 
     let bus = Bus {
-        id: EntityId(1),
+        id: fixture.bus_id,
         name: "B1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
@@ -140,14 +130,12 @@ fn build_system_k3() -> cobre_core::System {
         excess_cost: 0.0,
     };
 
-    // Cheap ($10/MWh) so the policy dispatches it to load level; max 200 MW
-    // exceeds the 150 MW load but over-commitment carries no benefit.
-    let anticipated_id = EntityId(3);
+    let anticipated_id = fixture.anticipated_id;
     let thermal_ant = Thermal {
         id: anticipated_id,
-        name: "T_ant_k3".to_string(),
+        name: fixture.anticipated_name.to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
+        bus_id: fixture.bus_id,
         min_generation_mw: 0.0,
         max_generation_mw: 200.0,
         cost_per_mwh: 10.0,
@@ -158,13 +146,11 @@ fn build_system_k3() -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    // Expensive ($5000/MWh) so the LP avoids it wherever anticipated dispatch
-    // is available.
     let thermal_backup = Thermal {
-        id: EntityId(4),
-        name: "T_backup_k3".to_string(),
+        id: fixture.backup_id,
+        name: fixture.backup_name.to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
+        bus_id: fixture.bus_id,
         min_generation_mw: 0.0,
         max_generation_mw: 500.0,
         cost_per_mwh: 5000.0,
@@ -174,10 +160,10 @@ fn build_system_k3() -> cobre_core::System {
     };
 
     let hydro = Hydro {
-        id: EntityId(5),
+        id: fixture.hydro_id,
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
+        bus_id: fixture.bus_id,
         downstream_id: None,
         entry_stage_id: None,
         exit_stage_id: None,
@@ -243,10 +229,9 @@ fn build_system_k3() -> cobre_core::System {
         })
         .collect();
 
-    // Zero inflow — keeps the model deterministic and purely thermal.
     let inflow_models: Vec<InflowModel> = (0..n_stages)
         .map(|i| InflowModel {
-            hydro_id: EntityId(5),
+            hydro_id: fixture.hydro_id,
             stage_id: i as i32,
             mean_m3s: 0.0,
             std_m3s: 0.0,
@@ -258,7 +243,7 @@ fn build_system_k3() -> cobre_core::System {
 
     let load_models: Vec<LoadModel> = (0..n_stages)
         .map(|i| LoadModel {
-            bus_id: EntityId(1),
+            bus_id: fixture.bus_id,
             stage_id: i as i32,
             mean_mw: 150.0,
             std_mw: 0.0,
@@ -302,16 +287,12 @@ fn build_system_k3() -> cobre_core::System {
         }
     }
 
-    // Build resolved bounds with default values, then apply per-thermal
-    // overrides. `ResolvedBounds::new` accepts a single default for ALL
-    // thermals; the per-thermal costs must be patched afterwards so the
-    // objective properly distinguishes the cheap anticipated thermal from
-    // the expensive backup.
-    //
-    // The padding region `[n_stages, n_stages + k)` is the delivery-stage
-    // axis read by `fill_anticipated_columns`; it must also
-    // carry the per-thermal cost so the decision column's objective
-    // coefficient is non-zero.
+    // The per-thermal costs must be patched afterwards (ResolvedBounds::new takes
+    // one default for ALL thermals) so the objective distinguishes the cheap
+    // anticipated thermal from the expensive backup. The patch must extend over the
+    // padding region `[n_stages, n_stages + k)` — the delivery-stage axis read by
+    // `fill_anticipated_columns` — or the decision column's objective coefficient
+    // stays zero and the regression is masked.
     let thermal_axis = n_stages + k;
     let mut bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
@@ -346,9 +327,9 @@ fn build_system_k3() -> cobre_core::System {
         },
     );
     for s in 0..thermal_axis {
-        bounds.thermal_bounds_mut(0, s).cost_per_mwh = 10.0; // index 0 = anticipated
+        bounds.thermal_bounds_mut(0, s).cost_per_mwh = 10.0; // index 0 = anticipated (cheap)
         bounds.thermal_bounds_mut(0, s).max_generation_mw = 200.0;
-        bounds.thermal_bounds_mut(1, s).cost_per_mwh = 5000.0; // index 1 = backup
+        bounds.thermal_bounds_mut(1, s).cost_per_mwh = 5000.0; // index 1 = backup (expensive)
         bounds.thermal_bounds_mut(1, s).max_generation_mw = 500.0;
     }
 
@@ -372,14 +353,14 @@ fn build_system_k3() -> cobre_core::System {
 
     let initial_conditions = InitialConditions {
         storage: vec![HydroStorage {
-            hydro_id: EntityId(5),
+            hydro_id: fixture.hydro_id,
             value_hm3: 0.0,
         }],
         filling_storage: vec![],
         past_inflows: vec![],
         past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
             thermal_id: anticipated_id,
-            values_mw: vec![0.0, 0.0, 0.0],
+            values_mw: fixture.seeds_mw.to_vec(),
         }],
         recent_observations: vec![],
     };
@@ -395,18 +376,18 @@ fn build_system_k3() -> cobre_core::System {
         .penalties(penalties)
         .initial_conditions(initial_conditions)
         .build()
-        .expect("build_system_k3: valid system")
+        .expect("build_system: valid system")
 }
 
 // ---------------------------------------------------------------------------
 // Config builder
 // ---------------------------------------------------------------------------
 
-/// Fifteen iterations is sufficient for the 500x cost asymmetry to produce
-/// cuts that signal the value of anticipated dispatch at load level. K=3
-/// needs one extra step for cut propagation through three slot positions
-/// versus K=2; 15 is a safe upper bound.
-fn build_config() -> Config {
+/// Build a [`Config`] for `iterations`-iteration training and 1-scenario
+/// deterministic simulation. More iterations let cuts sharpen so the cut
+/// gradients at the anticipated-state columns drive `d_t` to load level at every
+/// active stage; K=3's longer propagation chain needs more than K=2.
+fn build_config(iterations: usize) -> Config {
     Config {
         schema: None,
         modeling: ModelingConfig {
@@ -418,7 +399,9 @@ fn build_config() -> Config {
             enabled: true,
             tree_seed: Some(42),
             forward_passes: Some(1),
-            stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 15 }]),
+            stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
+                limit: iterations as u32,
+            }]),
             stopping_mode: "any".to_string(),
             cut_selection: RowSelectionConfig::default(),
             solver: TrainingSolverConfig::default(),
@@ -464,37 +447,25 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 }
 
 // ---------------------------------------------------------------------------
-// Test
+// Train + simulate + drain helper
 // ---------------------------------------------------------------------------
 
-/// Assert (per the module-doc derivation) that `anticipated_decision_mw` commits
-/// to load level (150 MW) for every active decision stage in a K=3, 8-stage
-/// fixture, and that the ring-buffer shift propagates each decision to its
-/// delivery stage:
-/// - `d_t ≈ 150.0` for `t in {0, 1, 2, 3, 4}`.
-/// - `anticipated_decision_mw` is `None` for `t in {5, 6, 7}`.
-/// - `committed_at(t) ≈ decision_at(t - 3)` for `t in {3, 4, 5, 6, 7}`.
-///
-/// The cut coefficients for the anticipated-state columns are corrupted for
-/// `k >= 2` in `state_to_lp_column`'s `Less` branch, so the policy at those
-/// stages receives no incentive to commit. At K=3 the corruption propagates
-/// through all three slot positions, making it a stricter test than K=2.
-#[test]
-fn d_t_commits_to_load_for_every_active_stage_k3() {
-    let k: usize = 3;
-    let n_stages: usize = 8;
-    let active_stages: Vec<usize> = (0..n_stages).filter(|&t| t + k < n_stages).collect();
-    let inactive_stages: Vec<usize> = (0..n_stages).filter(|&t| t + k >= n_stages).collect();
-    let committed_stages: Vec<usize> = (0..n_stages).filter(|&t| t >= k).collect();
-
-    let system = build_system_k3();
-    let config = build_config();
-    let mut setup = build_setup(system, &config);
+/// Train `iterations` then run the one-scenario simulation, returning the drained
+/// per-scenario results. The `mpsc::sync_channel` is dropped before the drain
+/// thread is joined — reversing that order deadlocks the join.
+fn run_simulation(setup: &mut StudySetup, iterations: usize) -> Vec<SimulationScenarioResult> {
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new: must succeed");
 
     let outcome = setup
-        .train(&mut solver, &comm, 15, ActiveSolver::new, None, None)
+        .train(
+            &mut solver,
+            &comm,
+            iterations,
+            ActiveSolver::new,
+            None,
+            None,
+        )
         .expect("training error: train() must not return Err");
     assert!(
         outcome.error.is_none(),
@@ -520,7 +491,42 @@ fn d_t_commits_to_load_for_every_active_stage_k3() {
         )
         .expect("simulation error: simulate() must not return Err");
     drop(result_tx);
-    let scenario_results = drain_handle.join().expect("drain thread must not panic");
+    drain_handle.join().expect("drain thread must not panic")
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+/// Assert `anticipated_decision_mw` commits to load level (150 MW) for every
+/// active decision stage (`t + K < n_stages`, i.e. `t in {0,1,2,3}`) and is
+/// `None` for the boundary stages, in a K=2, 6-stage fixture.
+///
+/// ## Economic reasoning (pins the asserted optimum)
+///
+/// In a 6-stage K=2 study with a 500x cost asymmetry (anticipated thermal at
+/// $10/MWh vs backup at $5000/MWh), load = 150 MW < max_gen = 200 MW and excess
+/// generation costs $0. The LP optimum is therefore `d_t = load = 150 MW` at every
+/// stage `t` where `t + K < n_stages` (`t in {0,1,2,3}`): over-committing to 200 MW
+/// costs an extra 50 MW × $10/MWh × 744 h = $372k/stage with no offsetting benefit.
+/// The 500x asymmetry only forces the anticipated thermal to dispatch at all
+/// (reaching load level), not to saturate at max_gen.
+///
+/// A regression in the anticipated-state cut-coefficient mapping
+/// (`state_to_lp_column`'s `Less` branch, for `k >= 2`) drops `d_t` to 0 at the
+/// intermediate active stages, forcing backup at $5000/MWh.
+#[test]
+fn d_t_commits_to_load_for_every_active_stage_k2() {
+    let k: usize = 2;
+    let n_stages: usize = 6;
+    // Active decision stages: t + K < n_stages  =>  t in {0, 1, 2, 3}.
+    let active_stages: Vec<usize> = (0..n_stages).filter(|&t| t + k < n_stages).collect();
+    let inactive_stages: Vec<usize> = (0..n_stages).filter(|&t| t + k >= n_stages).collect();
+
+    let system = build_system(&FIXTURE_K2);
+    let config = build_config(FIXTURE_K2.iterations);
+    let mut setup = build_setup(system, &config);
+    let scenario_results = run_simulation(&mut setup, FIXTURE_K2.iterations);
 
     assert_eq!(
         scenario_results.len(),
@@ -534,7 +540,97 @@ fn d_t_commits_to_load_for_every_active_stage_k3() {
         "scenario must contain one stage record per study stage",
     );
 
-    // The anticipated thermal has entity id=3 (see build_system_k3).
+    // The anticipated thermal has entity id=2 (see FIXTURE_K2).
+    let anticipated_thermal_id: i32 = 2;
+    let decision_at = |t: usize| -> Option<f64> {
+        scenario.stages[t]
+            .thermals
+            .iter()
+            .find(|th| th.thermal_id == anticipated_thermal_id)
+            .and_then(|th| th.anticipated_decision_mw)
+    };
+
+    // ── Active stages: decision must exist and commit to load = 150 MW ──
+    let load_mw = 150.0_f64;
+    let tol = 1e-3_f64;
+    for t in &active_stages {
+        let d_t = decision_at(*t).unwrap_or_else(|| {
+            panic!("anticipated_decision_mw must be Some at active stage t={t} (t + K < n_stages)")
+        });
+        assert!(
+            (d_t - load_mw).abs() < tol,
+            "d_t at stage {t} must saturate at load=150 MW: \
+             got {d_t} (delta = {delta:.6} MW, tol = {tol} MW). \
+             Pre-fix behaviour: d_t ≈ 0 for t >= 1 due to cut-coefficient \
+             corruption in state_to_lp_column (Less branch), forcing backup \
+             at $5000/MWh.",
+            delta = (d_t - load_mw).abs(),
+        );
+    }
+
+    // ── Inactive stages: decision must be None (strict-boundary predicate) ──
+    for t in &inactive_stages {
+        assert!(
+            decision_at(*t).is_none(),
+            "anticipated_decision_mw must be None at inactive stage t={t} \
+             (t + K >= n_stages; strict-boundary predicate excludes this stage)",
+        );
+    }
+}
+
+/// Assert that `anticipated_decision_mw` commits to load level (150 MW) for every
+/// active decision stage in a K=3, 8-stage fixture, and that the ring-buffer shift
+/// propagates each decision to its delivery stage:
+/// - `d_t ≈ 150.0` for `t in {0, 1, 2, 3, 4}`.
+/// - `anticipated_decision_mw` is `None` for `t in {5, 6, 7}`.
+/// - `committed_at(t) ≈ decision_at(t - 3)` for `t in {3, 4, 5, 6, 7}`.
+///
+/// ## Bug being guarded against
+///
+/// In an 8-stage K=3 study with a 500x cost asymmetry (anticipated thermal at
+/// $10/MWh vs backup at $5000/MWh), the LP should commit the anticipated
+/// thermal to exactly `load = 150 MW` at every stage `t` where `t + K < n_stages`
+/// (i.e. `t in {0, 1, 2, 3, 4}`). Over-committing to `max_gen = 200 MW` costs
+/// an extra 50 MW × $10/MWh × 744 h = $372k/stage with zero offsetting benefit
+/// (excess generation is free), so the LP optimum is `d_t = load = 150 MW`,
+/// not `max_gen = 200 MW`.
+///
+/// The K=3 propagation chain is longer than K=2: cuts at stage `t` propagate
+/// to predecessor's slot 1, which is `state_col[slot 2]`, whose value at K=3
+/// is `incoming_slot_2 - d_{t-1}` if the decision-write coefficient is at
+/// slot K-1 = 2. This variant exercises the multi-step propagation through
+/// all three slot positions, confirming the fix is general and not K=2-specific.
+///
+/// The cut coefficients for the anticipated-state columns are corrupted for
+/// `k >= 2` in `state_to_lp_column`'s `Less` branch, so the policy at those
+/// stages receives no incentive to commit. At K=3 the corruption propagates
+/// through all three slot positions, making it a stricter test than K=2.
+#[test]
+fn d_t_commits_to_load_for_every_active_stage_k3() {
+    let k: usize = 3;
+    let n_stages: usize = 8;
+    let active_stages: Vec<usize> = (0..n_stages).filter(|&t| t + k < n_stages).collect();
+    let inactive_stages: Vec<usize> = (0..n_stages).filter(|&t| t + k >= n_stages).collect();
+    let committed_stages: Vec<usize> = (0..n_stages).filter(|&t| t >= k).collect();
+
+    let system = build_system(&FIXTURE_K3);
+    let config = build_config(FIXTURE_K3.iterations);
+    let mut setup = build_setup(system, &config);
+    let scenario_results = run_simulation(&mut setup, FIXTURE_K3.iterations);
+
+    assert_eq!(
+        scenario_results.len(),
+        1,
+        "simulation must stream exactly one scenario result",
+    );
+    let scenario = &scenario_results[0];
+    assert_eq!(
+        scenario.stages.len(),
+        n_stages,
+        "scenario must contain one stage record per study stage",
+    );
+
+    // The anticipated thermal has entity id=3 (see FIXTURE_K3).
     let anticipated_thermal_id: i32 = 3;
     let decision_at = |t: usize| -> Option<f64> {
         scenario.stages[t]
