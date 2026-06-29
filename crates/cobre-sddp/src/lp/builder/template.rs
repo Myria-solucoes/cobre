@@ -2578,13 +2578,14 @@ mod tests {
     ///
     /// ## Why this test exists
     ///
-    /// The integration test at
-    /// `crates/cobre-sddp/tests/declaration_order_invariance_anticipated.rs`
-    /// is a tautology: it builds two `System`s with thermals declared in
-    /// different orders, but `SystemBuilder::build()` sorts by `EntityId` so
-    /// both systems present identical canonical input downstream. That test
-    /// proves **determinism** (same canonical input -> same output), not
-    /// **invariance** (different declaration orders -> same canonical result).
+    /// A full-`System` declaration-order test is a tautology: building two
+    /// `System`s with thermals declared in different orders proves only
+    /// **determinism** (same canonical input -> same output), because
+    /// `SystemBuilder::build()` sorts by `EntityId` so both present identical
+    /// canonical input downstream — not **invariance** (different declaration
+    /// orders -> same canonical result). That canonicalization is covered
+    /// directly by the `cobre-core` proptest
+    /// `build_canonical_order_invariant_under_input_permutation`.
     ///
     /// The Cobre hard rule on declaration-order invariance requires bit-for-bit
     /// identical results regardless of input entity ordering. This unit test

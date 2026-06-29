@@ -108,13 +108,15 @@ K, each re-defining its own `StubComm`/setup. One binary with a K table replaces
 
 ### G — DOI tests that are tautologies (MEDIUM)
 
-`declaration_order_invariance_anticipated.rs`'s own module doc admits it is "structurally
-a tautology": because `SystemBuilder::build()` sorts entities before any downstream layer,
-both orderings present identical canonical input, so the full-SDDP run cannot detect an
-ordering bug even in principle — while consuming slow-test budget. Declaration-order
-invariance is a **sort contract**: it should be a unit test on `build()` comparing the
-sorted vectors, not a training run. (This matters for §2: the determinism guard the golden
-hashes lean on must be made real, not tautological.)
+The full-SDDP DOI training tests were structurally tautologies: because
+`SystemBuilder::build()` sorts entities before any downstream layer, both orderings
+present identical canonical input, so the full-SDDP run cannot detect an ordering bug
+even in principle — while consuming slow-test budget. Declaration-order invariance is a
+**sort contract**: it should be a unit test on `build()` comparing the sorted vectors,
+not a training run. The canonicalization is now guarded directly by the `cobre-core`
+proptest `build_canonical_order_invariant_under_input_permutation`, and the tautological
+training tests are retired. (This matters for §2: the determinism guard the golden hashes
+lean on is now real, not tautological.)
 
 ### H — Raw `#[ignore]` benchmark-as-test (LOW)
 
