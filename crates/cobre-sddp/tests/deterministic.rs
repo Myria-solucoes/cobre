@@ -2022,23 +2022,6 @@ fn incremental_lb_reduces_load_model_count() {
     );
 }
 
-/// Bit-for-bit equivalence spot check for the incremental cut-management path:
-/// D01's converged trace must match its expected cost. All D-cases share this
-/// pipeline, so D01 passing exercises the same incremental LB management.
-#[test]
-fn incremental_bit_for_bit_d01_trace() {
-    let case_dir = Path::new("../../examples/deterministic/d01-thermal-dispatch");
-    let (result, _solver) = run_deterministic_with_solver(case_dir);
-
-    assert_cost(result.final_lb, 182_500.0, 1e-6, "D01-trace");
-
-    assert!(
-        result.final_gap.abs() < 1e-6,
-        "D01-trace: gap={:.2e} should be < 1e-6",
-        result.final_gap
-    );
-}
-
 /// Multi-hydro PAR(2) regression test with inflow truncation.
 ///
 /// ## Case setup

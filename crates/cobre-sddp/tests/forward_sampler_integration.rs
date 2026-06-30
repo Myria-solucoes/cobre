@@ -29,7 +29,6 @@
 #![allow(clippy::needless_update)]
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use chrono::NaiveDate;
 use cobre_core::{
@@ -51,8 +50,7 @@ use cobre_core::{
 };
 use cobre_sddp::{
     InflowNonNegativityMethod, StoppingMode, StoppingRule, StoppingRuleSet, StudySetup,
-    hydro_models::PrepareHydroModelsResult,
-    setup::{ConstructionConfig, prepare_stochastic},
+    hydro_models::PrepareHydroModelsResult, setup::ConstructionConfig,
 };
 use cobre_solver::ActiveSolver;
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
@@ -64,43 +62,6 @@ use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make
 // ---------------------------------------------------------------------------
 // Shared test infrastructure
 // ---------------------------------------------------------------------------
-
-/// Run the SDDP training pipeline on a pre-loaded case directory.
-///
-/// Uses `StubComm`, `ActiveSolver`, seed 42, and 1 thread.
-/// Returns the `TrainingResult`.
-fn run_case_from_dir(case_dir: &Path) -> cobre_sddp::TrainingResult {
-    use cobre_io::parse_config;
-    use cobre_sddp::prepare_hydro_models;
-
-    let config_path = case_dir.join("config.json");
-    let config = parse_config(&config_path).expect("config must parse");
-
-    let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
-
-    let training_source = config
-        .training_scenario_source(&config_path)
-        .expect("training_scenario_source must resolve");
-    let prepare_result = prepare_stochastic(system, case_dir, &config, 42, &training_source)
-        .expect("prepare_stochastic must succeed");
-    let system = prepare_result.system;
-    let stochastic = prepare_result.stochastic;
-
-    let hydro_models =
-        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
-
-    let mut setup =
-        StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
-
-    let comm = StubComm;
-    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
-
-    let outcome = setup
-        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
-        .expect("train must return Ok");
-    assert!(outcome.error.is_none(), "expected no training error");
-    outcome.result
-}
 
 fn hydro_stage_bounds() -> HydroStageBounds {
     HydroStageBounds {
@@ -620,43 +581,6 @@ fn run_programmatic(
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
-/// Verify that the `ForwardSampler::InSample` path produces the D01 lower bound
-/// and iteration count.
-///
-/// D01 is a 2-stage, 2-thermal deterministic dispatch case. Expected cost is
-/// 182,500 $ (hand-derivable: see `tests/deterministic.rs::d01_thermal_dispatch`).
-///
-/// Uses the full IO path (`load_case` + `prepare_stochastic` + `StudySetup::new`),
-/// the same path the D01 regression suite exercises, so `ForwardSampler` dispatch
-/// is confirmed transparent in the complete pipeline.
-#[test]
-fn insample_equivalence_d01() {
-    let case_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/cobre-sddp has a parent dir")
-        .parent()
-        .expect("crates has a parent dir (workspace root)")
-        .join("examples/deterministic/d01-thermal-dispatch");
-
-    let result = run_case_from_dir(&case_dir);
-
-    // Tolerance matches the `d01_thermal_dispatch` regression test.
-    let expected_lb = 182_500.0_f64;
-    let diff = (result.final_lb - expected_lb).abs();
-    assert!(
-        diff <= 1e-6,
-        "InSample equivalence: expected LB {expected_lb}, got {} (diff={diff})",
-        result.final_lb
-    );
-
-    // D01 uses iteration_limit=10; a deterministic case converges quickly.
-    assert!(
-        result.iterations <= 10,
-        "InSample equivalence: expected iterations <= 10, got {}",
-        result.iterations
-    );
-}
 
 /// Verify that `SamplingScheme::OutOfSample` converges to a lower bound
 /// within 5% relative tolerance of the `InSample` lower bound.
