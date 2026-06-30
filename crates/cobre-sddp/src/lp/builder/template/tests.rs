@@ -2717,3 +2717,262 @@ fn build_filling_v_target_empty_for_non_filling() {
         "non-filling hydro ⇒ empty V_target map"
     );
 }
+
+/// Assert two `StageTemplate`s are byte-identical: CSC structure
+/// (`col_starts`, `row_indices`, `values`), bounds (`col_lower`/`col_upper`,
+/// `row_lower`/`row_upper`), `objective`, and the full dense matrix — every
+/// `f64` compared by `to_bits()` so it is true bit-identity, not approximate.
+fn assert_templates_byte_identical(tpl_a: &StageTemplate, tpl_b: &StageTemplate) {
+    assert_eq!(tpl_a.num_cols, tpl_b.num_cols, "num_cols");
+    assert_eq!(tpl_a.num_rows, tpl_b.num_rows, "num_rows");
+    assert_eq!(tpl_a.num_nz, tpl_b.num_nz, "num_nz");
+    assert_eq!(tpl_a.n_state, tpl_b.n_state, "n_state");
+
+    assert_eq!(tpl_a.col_starts, tpl_b.col_starts, "col_starts");
+    assert_eq!(tpl_a.row_indices, tpl_b.row_indices, "row_indices");
+
+    let bits = |xs: &[f64]| xs.iter().map(|v| v.to_bits()).collect::<Vec<u64>>();
+    assert_eq!(bits(&tpl_a.values), bits(&tpl_b.values), "values");
+    assert_eq!(bits(&tpl_a.col_lower), bits(&tpl_b.col_lower), "col_lower");
+    assert_eq!(bits(&tpl_a.col_upper), bits(&tpl_b.col_upper), "col_upper");
+    assert_eq!(bits(&tpl_a.objective), bits(&tpl_b.objective), "objective");
+    assert_eq!(bits(&tpl_a.row_lower), bits(&tpl_b.row_lower), "row_lower");
+    assert_eq!(bits(&tpl_a.row_upper), bits(&tpl_b.row_upper), "row_upper");
+
+    let dense_a = csc_to_dense(tpl_a);
+    let dense_b = csc_to_dense(tpl_b);
+    for i in 0..tpl_a.num_rows {
+        for j in 0..tpl_a.num_cols {
+            assert_eq!(
+                dense_a[i][j].to_bits(),
+                dense_b[i][j].to_bits(),
+                "dense coefficient mismatch at row {i} col {j}"
+            );
+        }
+    }
+}
+
+/// One-bus, one-hydro FPHA system whose single stage carries `n_blks` blocks
+/// under `block_mode`. The FPHA generation rows put the average-storage `γᵥ/2`
+/// coefficient on both the incoming and outgoing storage columns, so the
+/// byte-identity check actually exercises the storage-bearing rows.
+fn one_hydro_block_system(block_mode: BlockMode, n_blks: usize) -> System {
+    use cobre_core::scenario::{InflowModel, LoadModel};
+
+    let bus = Bus {
+        id: EntityId(1),
+        name: "B1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        deficit_segments: vec![DeficitSegment {
+            depth_mw: None,
+            cost_per_mwh: 500.0,
+        }],
+        excess_cost: 0.0,
+    };
+
+    let hydro = fixture_hydro(2);
+
+    let blocks: Vec<Block> = (0..n_blks)
+        .map(|b| Block {
+            index: b,
+            name: format!("BLK{b}"),
+            duration_hours: 300.0 + 100.0 * f64::from(u32::try_from(b).unwrap_or(0)),
+        })
+        .collect();
+
+    let stages: Vec<Stage> = vec![Stage {
+        index: 0,
+        id: 0,
+        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+        season_id: Some(0),
+        blocks,
+        block_mode,
+        state_config: StageStateConfig {
+            storage: true,
+            inflow_lags: false,
+        },
+        risk_config: StageRiskConfig::Expectation,
+        scenario_config: ScenarioSourceConfig {
+            branching_factor: 1,
+            noise_method: NoiseMethod::Saa,
+        },
+    }];
+
+    let inflow_models = vec![InflowModel {
+        hydro_id: EntityId(2),
+        stage_id: 0,
+        mean_m3s: 80.0,
+        std_m3s: 20.0,
+        ar_coefficients: vec![],
+        residual_std_ratio: 1.0,
+        annual: None,
+    }];
+
+    let load_models = vec![LoadModel {
+        bus_id: EntityId(1),
+        stage_id: 0,
+        mean_mw: 100.0,
+        std_mw: 0.0,
+    }];
+
+    let bounds = ResolvedBounds::new(
+        &BoundsCountsSpec {
+            n_hydros: 1,
+            n_thermals: 0,
+            n_lines: 0,
+            n_pumping: 0,
+            n_contracts: 0,
+            n_stages: 1,
+            k_max: 0,
+        },
+        &BoundsDefaults {
+            hydro: default_hydro_bounds(),
+            thermal: ThermalStageBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: 0.0,
+                cost_per_mwh: 0.0,
+            },
+            line: LineStageBounds {
+                direct_mw: 0.0,
+                reverse_mw: 0.0,
+            },
+            pumping: PumpingStageBounds {
+                min_flow_m3s: 0.0,
+                max_flow_m3s: 0.0,
+            },
+            contract: ContractStageBounds {
+                min_mw: 0.0,
+                max_mw: 0.0,
+                price_per_mwh: 0.0,
+            },
+        },
+    );
+    let penalties = ResolvedPenalties::new(
+        &PenaltiesCountsSpec {
+            n_hydros: 1,
+            n_buses: 1,
+            n_lines: 0,
+            n_ncs: 0,
+            n_stages: 1,
+        },
+        &PenaltiesDefaults {
+            hydro: default_hydro_penalties(),
+            bus: BusStagePenalties { excess_cost: 0.0 },
+            line: LineStagePenalties { exchange_cost: 0.0 },
+            ncs: NcsStagePenalties {
+                curtailment_cost: 0.0,
+            },
+        },
+    );
+
+    SystemBuilder::new()
+        .buses(vec![bus])
+        .hydros(vec![hydro])
+        .stages(stages)
+        .inflow_models(inflow_models)
+        .load_models(load_models)
+        .bounds(bounds)
+        .penalties(penalties)
+        .build()
+        .expect("one_hydro_block_system: valid")
+}
+
+/// Build the full stage-0 `StageTemplate` for the one-hydro FPHA study under
+/// `block_mode` with `n_blks` blocks, using a single FPHA plane so the
+/// generation row carries the average-storage anchor.
+fn block_template(block_mode: BlockMode, n_blks: usize) -> StageTemplate {
+    use crate::hydro_models::FphaPlane;
+
+    let system = one_hydro_block_system(block_mode, n_blks);
+    let par_lp = PrecomputedPar::default();
+    let production = ProductionModelSet::new(
+        vec![vec![ResolvedProductionModel::Fpha {
+            planes: vec![FphaPlane {
+                intercept: 1.0,
+                gamma_v: 0.2,
+                gamma_q: 0.5,
+                gamma_s: 0.05,
+            }],
+        }]],
+        1,
+        1,
+    );
+    let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+    let resolved_params = ResolvedParameters {
+        per_param: vec![],
+        id_to_slot: vec![],
+    };
+
+    let (ctx, _, _) = super::build_template_build_ctx(
+        &system,
+        InflowNonNegativityMethod::None,
+        &par_lp,
+        &production,
+        &hydro_models.evaporation,
+        &resolved_params,
+    );
+    let state = state_layout_for(&ctx);
+    let stage = &system.stages()[0];
+    super::build_single_stage_template(&ctx, &state, stage, 0).template
+}
+
+/// `K = 1` chronological build collapses to the parallel LP: the
+/// `storage_internal` interior-column family is empty, there is one water row,
+/// and FPHA rides the single incoming/outgoing storage pair — so the two
+/// templates are byte-identical (§9 contract). This anchors the layout half of
+/// the chronological feature against any regression that perturbs the `K = 1`
+/// column/row/value layout.
+#[test]
+fn chronological_k1_byte_identical_to_parallel() {
+    let parallel = block_template(BlockMode::Parallel, 1);
+    let chronological = block_template(BlockMode::Chronological, 1);
+    assert_templates_byte_identical(&parallel, &chronological);
+}
+
+/// `theta` and `n_state` are pure functions of `(N, L, A, k_max)` and are
+/// `n_blks`-free by construction (`StateLayout::new` never sees `block_mode` or
+/// `n_blks`): per-block storage lives strictly in the control region, never in
+/// the state region (§2). Building a chronological `K ≥ 2` stage therefore
+/// changes neither — only the control-region column count grows, by exactly
+/// `n_h * (n_blks − 1)` interior storage columns.
+#[test]
+fn theta_and_n_state_invariant_to_block_mode() {
+    let hydro_count = 1_usize;
+    let max_par_order = 0_usize;
+    let n_anticipated = 0_usize;
+    let k_max = 0_usize;
+    let n_blks = 3_usize;
+
+    let state = crate::test_support::state_layout_full(
+        hydro_count,
+        max_par_order,
+        n_anticipated,
+        k_max,
+        vec![],
+    );
+    let parallel_theta = state.theta;
+    let parallel_n_state = state.n_state;
+
+    let parallel = block_template(BlockMode::Parallel, n_blks);
+    let chronological = block_template(BlockMode::Chronological, n_blks);
+
+    assert_eq!(
+        parallel.n_state, parallel_n_state,
+        "parallel template n_state must equal StateLayout n_state"
+    );
+    assert_eq!(
+        chronological.n_state, parallel_n_state,
+        "chronological build must not change n_state"
+    );
+    assert_eq!(
+        parallel_theta, state.theta,
+        "building chronological must not change theta"
+    );
+
+    assert_eq!(
+        chronological.num_cols,
+        parallel.num_cols + hydro_count * (n_blks - 1),
+        "chronological adds exactly n_h*(n_blks-1) interior storage columns"
+    );
+}

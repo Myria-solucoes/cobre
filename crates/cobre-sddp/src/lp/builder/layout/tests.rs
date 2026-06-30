@@ -256,6 +256,262 @@ fn stage_layout_zero_anticipated_matches_pre_anticipated_offsets() {
     );
 }
 
+// ── storage_internal interior-boundary sizing ────────────────────────────
+
+/// Owns a two-hydro, constant-productivity `TemplateBuildCtx` for the
+/// `storage_internal` sizing assertions. No FPHA/filling/evaporation, so only
+/// the block geometry (`n_blks`, `block_mode`) and `n_hydros` drive the family.
+struct TwoHydroFixtures {
+    par_lp: PrecomputedPar,
+    hydros: Vec<Hydro>,
+    cascade: CascadeTopology,
+    bounds: ResolvedBounds,
+    penalties: ResolvedPenalties,
+    resolved_generic_bounds: ResolvedGenericConstraintBounds,
+    resolved_load_factors: ResolvedLoadFactors,
+    resolved_exchange_factors: ResolvedExchangeFactors,
+    resolved_ncs_bounds: ResolvedNcsBounds,
+    resolved_ncs_factors: ResolvedNcsFactors,
+    resolved_parameters: ResolvedParameters,
+    production_models: ProductionModelSet,
+    evaporation_models: EvaporationModelSet,
+}
+
+impl TwoHydroFixtures {
+    fn new() -> Self {
+        use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
+
+        let constant = ResolvedProductionModel::ConstantProductivity { productivity: 0.0 };
+        let models = vec![vec![constant.clone()], vec![constant]];
+        let hydros = vec![
+            membership_hydro(1, false, None, None),
+            membership_hydro(2, false, None, None),
+        ];
+        let cascade = CascadeTopology::build(&hydros);
+        Self {
+            par_lp: PrecomputedPar::default(),
+            hydros,
+            cascade,
+            bounds: ResolvedBounds::empty(),
+            penalties: ResolvedPenalties::empty(),
+            resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
+            resolved_load_factors: ResolvedLoadFactors::empty(),
+            resolved_exchange_factors: ResolvedExchangeFactors::empty(),
+            resolved_ncs_bounds: ResolvedNcsBounds::empty(),
+            resolved_ncs_factors: ResolvedNcsFactors::empty(),
+            resolved_parameters: ResolvedParameters {
+                per_param: vec![],
+                id_to_slot: vec![],
+            },
+            production_models: ProductionModelSet::new(models, 2, 1),
+            evaporation_models: EvaporationModelSet::new(vec![
+                EvaporationModel::None,
+                EvaporationModel::None,
+            ]),
+        }
+    }
+
+    fn make_ctx(&self) -> TemplateBuildCtx<'_> {
+        TemplateBuildCtx {
+            hydros: &self.hydros,
+            thermals: &[],
+            lines: &[],
+            buses: &[],
+            load_models: &[],
+            cascade: &self.cascade,
+            resolved: ResolvedTables {
+                bounds: &self.bounds,
+                penalties: &self.penalties,
+                resolved_generic_bounds: &self.resolved_generic_bounds,
+                resolved_load_factors: &self.resolved_load_factors,
+                resolved_exchange_factors: &self.resolved_exchange_factors,
+                resolved_ncs_bounds: &self.resolved_ncs_bounds,
+                resolved_ncs_factors: &self.resolved_ncs_factors,
+                resolved_parameters: &self.resolved_parameters,
+            },
+            hydro_pos: BTreeMap::new(),
+            thermal_pos: BTreeMap::new(),
+            line_pos: BTreeMap::new(),
+            bus_pos: BTreeMap::new(),
+            par_lp: &self.par_lp,
+            production_models: &self.production_models,
+            evaporation_models: &self.evaporation_models,
+            generic_constraints: &[],
+            non_controllable_sources: &[],
+            pumping_stations: &[],
+            pumping_pos: BTreeMap::new(),
+            n_pumping: 0,
+            contracts: &[],
+            contract_pos: BTreeMap::new(),
+            n_contract_import: 0,
+            n_contract_export: 0,
+            diversion_upstream: HashMap::new(),
+            n_hydros: 2,
+            n_thermals: 0,
+            n_lines: 0,
+            n_buses: 0,
+            max_par_order: 0,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
+            anticipated_windows: vec![],
+            study_stage_ids: vec![],
+            has_penalty: false,
+            cumulative_discount_factors: vec![1.0],
+            total_hours_per_stage: vec![744.0],
+            filling_v_target: BTreeMap::new(),
+        }
+    }
+}
+
+/// Build a `Stage` with `n_blks` equal-duration blocks under `block_mode`.
+fn stage_with_blocks(block_mode: BlockMode, n_blks: usize) -> Stage {
+    let mut stage = minimal_stage();
+    stage.block_mode = block_mode;
+    stage.blocks = (0..n_blks)
+        .map(|index| Block {
+            index,
+            name: format!("BLK{index}"),
+            duration_hours: 744.0,
+        })
+        .collect();
+    stage
+}
+
+/// `storage_internal` spans the `K − 1` interior boundaries per hydro only in
+/// chronological mode with `K ≥ 2`: empty in parallel mode and at `K = 1`, with
+/// `turbine.start` re-anchored to `storage_internal.end`.
+#[test]
+fn chronological_storage_internal_sizing() {
+    let fixtures = TwoHydroFixtures::new();
+    let ctx = fixtures.make_ctx();
+    let state = state_layout_for(&ctx);
+    let anchor = state.control_region_start();
+
+    let parallel = StageLayout::new(&ctx, &state, &stage_with_blocks(BlockMode::Parallel, 3), 0);
+    assert_eq!(
+        parallel.storage_internal.start, parallel.storage_internal.end,
+        "parallel K=3 storage_internal is empty"
+    );
+    assert_eq!(
+        parallel.storage_internal_start, anchor,
+        "parallel storage_internal_start anchors at control_region_start()"
+    );
+    assert_eq!(
+        parallel.turbine.start, anchor,
+        "parallel turbine.start anchors at control_region_start()"
+    );
+
+    let chrono_k1 = StageLayout::new(
+        &ctx,
+        &state,
+        &stage_with_blocks(BlockMode::Chronological, 1),
+        0,
+    );
+    assert_eq!(
+        chrono_k1.storage_internal.start, chrono_k1.storage_internal.end,
+        "chronological K=1 storage_internal is empty"
+    );
+    assert_eq!(
+        chrono_k1.storage_internal_start, anchor,
+        "chronological K=1 storage_internal_start anchors at control_region_start()"
+    );
+    assert_eq!(
+        chrono_k1.turbine.start, anchor,
+        "chronological K=1 turbine.start anchors at control_region_start()"
+    );
+
+    let chrono_k3 = StageLayout::new(
+        &ctx,
+        &state,
+        &stage_with_blocks(BlockMode::Chronological, 3),
+        0,
+    );
+    assert_eq!(
+        chrono_k3.storage_internal_start, anchor,
+        "chronological K=3 storage_internal_start anchors at control_region_start()"
+    );
+    assert_eq!(
+        chrono_k3.storage_internal.end - chrono_k3.storage_internal.start,
+        4,
+        "chronological K=3 storage_internal spans n_h * (K - 1) = 2 * 2 columns"
+    );
+    assert_eq!(
+        chrono_k3.turbine.start, chrono_k3.storage_internal.end,
+        "chronological K=3 turbine.start re-anchors to storage_internal.end"
+    );
+}
+
+/// `block_storage_col` resolves all `K + 1` boundaries: the two endpoints to the
+/// state columns (`k = 0 → storage_in[h]`, `k = K → storage[h] = h`) and the
+/// `K − 1` interiors into the `storage_internal` family at stride `n_blks − 1`. At
+/// `K = 1` only the two endpoints resolve (no interior column is addressed).
+#[test]
+fn block_storage_col_resolves_all_boundaries() {
+    let fixtures = TwoHydroFixtures::new();
+    let ctx = fixtures.make_ctx();
+    let state = state_layout_for(&ctx);
+
+    let chrono_k3 = StageLayout::new(
+        &ctx,
+        &state,
+        &stage_with_blocks(BlockMode::Chronological, 3),
+        0,
+    );
+    let h = 1;
+    assert_eq!(
+        chrono_k3.block_storage_col(h, 0),
+        chrono_k3.col_storage_in_start() + h,
+        "k = 0 resolves to the incoming-state column storage_in[h]"
+    );
+    assert_eq!(
+        chrono_k3.block_storage_col(h, 3),
+        h,
+        "k = K resolves to the outgoing-state column storage[h] = storage.start + h = h"
+    );
+    let interior_1 = chrono_k3.block_storage_col(h, 1);
+    let interior_2 = chrono_k3.block_storage_col(h, 2);
+    assert_eq!(
+        interior_1,
+        chrono_k3.storage_internal_start + h * 2,
+        "k = 1 resolves to storage_internal_start + h * (K - 1) + 0"
+    );
+    assert_eq!(
+        interior_2,
+        chrono_k3.storage_internal_start + h * 2 + 1,
+        "k = 2 resolves to storage_internal_start + h * (K - 1) + 1"
+    );
+    assert!(
+        chrono_k3.storage_internal.contains(&interior_1)
+            && chrono_k3.storage_internal.contains(&interior_2),
+        "both interior columns lie within the storage_internal range"
+    );
+
+    let chrono_k1 = StageLayout::new(
+        &ctx,
+        &state,
+        &stage_with_blocks(BlockMode::Chronological, 1),
+        0,
+    );
+    assert!(
+        chrono_k1.storage_internal.is_empty(),
+        "K = 1 has no interior storage columns"
+    );
+    for h in 0..ctx.n_hydros {
+        assert_eq!(
+            chrono_k1.block_storage_col(h, 0),
+            chrono_k1.col_storage_in_start() + h,
+            "K = 1 endpoint k = 0 resolves to storage_in[h]"
+        );
+        assert_eq!(
+            chrono_k1.block_storage_col(h, 1),
+            h,
+            "K = 1 endpoint k = K = 1 resolves to storage[h] = h"
+        );
+    }
+}
+
 // ── FPHA-local inverse map ───────────────────────────────────────────────
 
 /// Owns the data needed to construct a three-hydro `TemplateBuildCtx` with a

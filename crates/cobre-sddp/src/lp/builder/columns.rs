@@ -96,10 +96,21 @@ fn fill_storage_columns(
                 crate::lp_builder::Phase::PreFilling
             );
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
-        bufs.col_lower[h_idx] = if floor_off { 0.0 } else { hb.min_storage_hm3 };
+        let storage_lower = if floor_off { 0.0 } else { hb.min_storage_hm3 };
+        bufs.col_lower[h_idx] = storage_lower;
         bufs.col_upper[h_idx] = hb.max_storage_hm3;
         bufs.col_lower[layout.col_storage_in_start() + h_idx] = f64::NEG_INFINITY;
         bufs.col_upper[layout.col_storage_in_start() + h_idx] = f64::INFINITY;
+        // Interior Sᵏ reuse the outgoing column's EXACT bounds, floor_off included:
+        // the frozen-identity chain pins each interior to the inert IC, so a hard
+        // floor above IC would reject the pin (the endpoint's reason). Keep objective
+        // 0.0 — a nonzero cost distorts the stage cost. Empty range ⇒ no-op in
+        // parallel mode and at K = 1.
+        for k in 1..layout.n_blks {
+            let col = layout.block_storage_col(h_idx, k);
+            bufs.col_lower[col] = storage_lower;
+            bufs.col_upper[col] = hb.max_storage_hm3;
+        }
     }
 }
 
@@ -902,6 +913,512 @@ fn fill_z_inflow_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
         let col = layout.col_z_inflow_start() + h_idx;
         bufs.col_lower[col] = f64::NEG_INFINITY;
         bufs.col_upper[col] = f64::INFINITY;
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::float_cmp,
+    clippy::needless_range_loop,
+    clippy::similar_names
+)]
+mod interior_storage_bound_tests {
+    use std::collections::{BTreeMap, HashMap};
+
+    use cobre_core::entities::hydro::HydroGenerationModel;
+    use cobre_core::{
+        Block, BlockMode, BoundsCountsSpec, BoundsDefaults, BusStagePenalties, CascadeTopology,
+        ContractStageBounds, EntityId, Hydro, HydroStageBounds, HydroStagePenalties,
+        LineStageBounds, LineStagePenalties, NcsStagePenalties, NoiseMethod, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingStageBounds, ResolvedBounds, ResolvedExchangeFactors,
+        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
+        ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, ThermalStageBounds,
+    };
+    use cobre_stochastic::par::precompute::PrecomputedPar;
+
+    use crate::hydro_models::{
+        EvaporationModel, EvaporationModelSet, ProductionModelSet, ResolvedProductionModel,
+    };
+    use crate::resolved_parameters::ResolvedParameters;
+
+    use super::super::layout::ResolvedTables;
+    use super::super::test_support::state_layout_for;
+    use super::{ColumnBufs, StageLayout, TemplateBuildCtx, fill_storage_columns};
+
+    const N_STAGES: usize = 1;
+    const STAGE_IDX: usize = 0;
+    const N_BLKS: usize = 3;
+    const MIN_STORAGE_HM3: f64 = 50.0;
+    const MAX_STORAGE_HM3: f64 = 175.0;
+
+    /// One Operating run-of-river hydro (`ConstantProductivity`, no filling, no
+    /// commissioning window ⇒ `floor_off == false`), so the endpoint outgoing
+    /// storage column takes the hard `[MIN_STORAGE_HM3, MAX_STORAGE_HM3]` floor and
+    /// interior == endpoint is the unambiguous expectation. No FPHA/evaporation, so
+    /// the layout reserves only the structural storage families.
+    fn operating_hydro() -> Hydro {
+        Hydro {
+            id: EntityId(1),
+            name: "H1".to_string(),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: MIN_STORAGE_HM3,
+            max_storage_hm3: MAX_STORAGE_HM3,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: super::super::test_support::zero_hydro_penalties(),
+        }
+    }
+
+    /// `ResolvedBounds` for one hydro carrying the distinct `[MIN, MAX]` storage
+    /// range so the assertions bite (a wrong cell read would not equal MIN/MAX).
+    fn bounds_one_hydro() -> ResolvedBounds {
+        ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: MIN_STORAGE_HM3,
+                    max_storage_hm3: MAX_STORAGE_HM3,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 100.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 250.0,
+                    max_diversion_m3s: None,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        )
+    }
+
+    /// All-zero penalties for one hydro across `N_STAGES` stages so no fixture-side
+    /// cost contaminates the storage objective/scale assertions, and so the full
+    /// template build's penalty reads land on a populated cell.
+    fn penalties_one_hydro() -> ResolvedPenalties {
+        ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 0,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.0,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 0.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 0.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        )
+    }
+
+    /// A `Stage` with `N_BLKS` equal-duration blocks under `block_mode`.
+    fn stage_with_blocks(block_mode: BlockMode) -> Stage {
+        Stage {
+            index: STAGE_IDX,
+            id: STAGE_IDX as i32,
+            start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: chrono::NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: (0..N_BLKS)
+                .map(|index| Block {
+                    index,
+                    name: format!("BLK{index}"),
+                    duration_hours: 248.0,
+                })
+                .collect(),
+            block_mode,
+            state_config: StageStateConfig {
+                storage: false,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }
+    }
+
+    /// Owns the borrow targets for a one-hydro `TemplateBuildCtx`.
+    struct InteriorStorageFixtures {
+        par_lp: PrecomputedPar,
+        hydros: Vec<Hydro>,
+        cascade: CascadeTopology,
+        bounds: ResolvedBounds,
+        penalties: ResolvedPenalties,
+        production_models: ProductionModelSet,
+        evaporation_models: EvaporationModelSet,
+        resolved_generic_bounds: cobre_core::ResolvedGenericConstraintBounds,
+        resolved_load_factors: ResolvedLoadFactors,
+        resolved_exchange_factors: ResolvedExchangeFactors,
+        resolved_ncs_bounds: ResolvedNcsBounds,
+        resolved_ncs_factors: ResolvedNcsFactors,
+        resolved_parameters: ResolvedParameters,
+    }
+
+    impl InteriorStorageFixtures {
+        fn new() -> Self {
+            let hydros = vec![operating_hydro()];
+            let cascade = CascadeTopology::build(&hydros);
+            Self {
+                par_lp: PrecomputedPar::default(),
+                hydros,
+                cascade,
+                bounds: bounds_one_hydro(),
+                penalties: penalties_one_hydro(),
+                production_models: ProductionModelSet::new(
+                    vec![vec![
+                        ResolvedProductionModel::ConstantProductivity {
+                            productivity: 1.0
+                        };
+                        N_STAGES
+                    ]],
+                    1,
+                    N_STAGES,
+                ),
+                evaporation_models: EvaporationModelSet::new(vec![EvaporationModel::None]),
+                resolved_generic_bounds: cobre_core::ResolvedGenericConstraintBounds::empty(),
+                resolved_load_factors: ResolvedLoadFactors::empty(),
+                resolved_exchange_factors: ResolvedExchangeFactors::empty(),
+                resolved_ncs_bounds: ResolvedNcsBounds::empty(),
+                resolved_ncs_factors: ResolvedNcsFactors::empty(),
+                resolved_parameters: ResolvedParameters {
+                    per_param: vec![],
+                    id_to_slot: vec![],
+                },
+            }
+        }
+
+        fn make_ctx(&self) -> TemplateBuildCtx<'_> {
+            let mut hydro_pos = BTreeMap::new();
+            hydro_pos.insert(self.hydros[0].id, 0_usize);
+            TemplateBuildCtx {
+                hydros: &self.hydros,
+                thermals: &[],
+                lines: &[],
+                buses: &[],
+                load_models: &[],
+                cascade: &self.cascade,
+                resolved: ResolvedTables {
+                    bounds: &self.bounds,
+                    penalties: &self.penalties,
+                    resolved_generic_bounds: &self.resolved_generic_bounds,
+                    resolved_load_factors: &self.resolved_load_factors,
+                    resolved_exchange_factors: &self.resolved_exchange_factors,
+                    resolved_ncs_bounds: &self.resolved_ncs_bounds,
+                    resolved_ncs_factors: &self.resolved_ncs_factors,
+                    resolved_parameters: &self.resolved_parameters,
+                },
+                hydro_pos,
+                thermal_pos: BTreeMap::new(),
+                line_pos: BTreeMap::new(),
+                bus_pos: BTreeMap::new(),
+                par_lp: &self.par_lp,
+                production_models: &self.production_models,
+                evaporation_models: &self.evaporation_models,
+                generic_constraints: &[],
+                non_controllable_sources: &[],
+                pumping_stations: &[],
+                pumping_pos: BTreeMap::new(),
+                n_pumping: 0,
+                contracts: &[],
+                contract_pos: BTreeMap::new(),
+                n_contract_import: 0,
+                n_contract_export: 0,
+                diversion_upstream: HashMap::new(),
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_buses: 0,
+                max_par_order: 0,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
+                anticipated_windows: vec![],
+                study_stage_ids: vec![],
+                has_penalty: false,
+                cumulative_discount_factors: vec![1.0],
+                total_hours_per_stage: vec![744.0],
+                filling_v_target: BTreeMap::new(),
+            }
+        }
+    }
+
+    /// Run `fill_storage_columns` against raw, unscaled buffers for `stage`,
+    /// returning the bound/objective buffers plus the resolved storage-column
+    /// offsets by value (the borrowed `StateLayout` cannot escape).
+    fn run_fill(fixtures: &InteriorStorageFixtures, stage: &Stage) -> RawFill {
+        let ctx = fixtures.make_ctx();
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, stage, STAGE_IDX);
+        let mut col_lower = vec![0.0_f64; layout.num_cols];
+        let mut col_upper = vec![f64::INFINITY; layout.num_cols];
+        let mut objective = vec![0.0_f64; layout.num_cols];
+        let mut bufs = ColumnBufs {
+            col_lower: &mut col_lower,
+            col_upper: &mut col_upper,
+            objective: &mut objective,
+        };
+        fill_storage_columns(&ctx, stage, STAGE_IDX, &layout, &mut bufs);
+        // The actual interior columns are the `storage_internal` range members
+        // (empty in parallel mode and at K = 1); `block_storage_col(0, k)` for
+        // interior `k` resolves into this range only in chronological K ≥ 2.
+        let interior: Vec<usize> = layout.storage_internal.clone().collect();
+        RawFill {
+            col_lower,
+            col_upper,
+            objective,
+            endpoint: layout.block_storage_col(0, layout.n_blks),
+            interior,
+            storage_internal_empty: layout.storage_internal.is_empty(),
+        }
+    }
+
+    /// Raw `fill_storage_columns` output plus the storage column offsets the
+    /// assertions read.
+    struct RawFill {
+        col_lower: Vec<f64>,
+        col_upper: Vec<f64>,
+        objective: Vec<f64>,
+        endpoint: usize,
+        interior: Vec<usize>,
+        storage_internal_empty: bool,
+    }
+
+    /// Interior `Sᵏ` columns inherit the endpoint outgoing-storage bounds, carry a
+    /// `0.0` objective, and take the matrix-derived empty-column scale `1.0` while
+    /// they carry no row coefficients. Parallel mode produces no interior columns,
+    /// with storage bounds and objective unchanged.
+    #[test]
+    fn interior_storage_columns_inherit_stage_bounds_objective_scale() {
+        let fixtures = InteriorStorageFixtures::new();
+
+        // Bounds + objective: raw, unscaled buffers in chronological K = 3.
+        let chrono = run_fill(&fixtures, &stage_with_blocks(BlockMode::Chronological));
+        assert!(
+            !chrono.storage_internal_empty,
+            "chronological K=3 must reserve interior storage columns"
+        );
+        assert_eq!(chrono.interior.len(), N_BLKS - 1, "K - 1 interior columns");
+        let endpoint_lower = chrono.col_lower[chrono.endpoint];
+        let endpoint_upper = chrono.col_upper[chrono.endpoint];
+        assert_eq!(
+            endpoint_lower, MIN_STORAGE_HM3,
+            "endpoint floor is the hard min"
+        );
+        assert_eq!(endpoint_upper, MAX_STORAGE_HM3, "endpoint cap is the max");
+        for &col in &chrono.interior {
+            assert_eq!(
+                chrono.col_lower[col], endpoint_lower,
+                "interior col {col} lower bound must equal the endpoint storage lower bound"
+            );
+            assert_eq!(
+                chrono.col_upper[col], endpoint_upper,
+                "interior col {col} upper bound must equal the endpoint storage upper bound"
+            );
+            assert_eq!(
+                chrono.objective[col], 0.0,
+                "interior col {col} objective must stay 0.0"
+            );
+        }
+
+        // Scale: the matrix-derived scale of a structurally-empty interior column is
+        // 1.0 while it carries no row coefficients (later water-balance/FPHA fills add
+        // them). Build the full chronological template and run the production scale
+        // computation on its CSC.
+        let ctx = fixtures.make_ctx();
+        let state = state_layout_for(&ctx);
+        let chrono_stage = stage_with_blocks(BlockMode::Chronological);
+        let layout = StageLayout::new(&ctx, &state, &chrono_stage, STAGE_IDX);
+        let template = super::super::template::build_single_stage_template(
+            &ctx,
+            &state,
+            &chrono_stage,
+            STAGE_IDX,
+        )
+        .template;
+        let col_scale = super::super::compute_col_scale(
+            template.num_cols,
+            &template.col_starts,
+            &template.values,
+        );
+        for k in 1..layout.n_blks {
+            let col = layout.block_storage_col(0, k);
+            assert_eq!(
+                col_scale[col], 1.0,
+                "interior col {col} scale must be the empty-column scale 1.0 while it carries no row coefficients"
+            );
+        }
+
+        // Parallel identity: the interior loop's range is empty in parallel mode, so
+        // it touches no column. Two independent parallel builds must therefore be
+        // bit-for-bit identical in bounds, objective, and dense matrix — and neither
+        // reserves interior columns. (A change perturbing the inert loop into the
+        // parallel column block would break this dense comparison.)
+        let parallel = run_fill(&fixtures, &stage_with_blocks(BlockMode::Parallel));
+        assert!(
+            parallel.storage_internal_empty,
+            "parallel storage_internal must be empty (no interior columns)"
+        );
+        assert_eq!(
+            parallel.interior,
+            Vec::<usize>::new(),
+            "parallel mode resolves no interior storage columns"
+        );
+
+        let build_parallel = || {
+            let par_ctx = fixtures.make_ctx();
+            let par_state = state_layout_for(&par_ctx);
+            let parallel_stage = stage_with_blocks(BlockMode::Parallel);
+            super::super::template::build_single_stage_template(
+                &par_ctx,
+                &par_state,
+                &parallel_stage,
+                STAGE_IDX,
+            )
+            .template
+        };
+        let tpl_a = build_parallel();
+        let tpl_b = build_parallel();
+        assert_eq!(tpl_a.num_cols, tpl_b.num_cols, "parallel num_cols stable");
+        let dense_a = csc_to_dense(&tpl_a);
+        let dense_b = csc_to_dense(&tpl_b);
+        for j in 0..tpl_a.num_cols {
+            assert_eq!(
+                tpl_a.col_lower[j].to_bits(),
+                tpl_b.col_lower[j].to_bits(),
+                "parallel col_lower differs at col {j}"
+            );
+            assert_eq!(
+                tpl_a.col_upper[j].to_bits(),
+                tpl_b.col_upper[j].to_bits(),
+                "parallel col_upper differs at col {j}"
+            );
+            assert_eq!(
+                tpl_a.objective[j].to_bits(),
+                tpl_b.objective[j].to_bits(),
+                "parallel objective differs at col {j}"
+            );
+        }
+        for i in 0..tpl_a.num_rows {
+            for j in 0..tpl_a.num_cols {
+                assert_eq!(
+                    dense_a[i][j].to_bits(),
+                    dense_b[i][j].to_bits(),
+                    "parallel matrix differs at row {i} col {j}"
+                );
+            }
+        }
+
+        let (endpoint, par_storage_internal_empty) = {
+            let par_ctx = fixtures.make_ctx();
+            let par_state = state_layout_for(&par_ctx);
+            let stage = stage_with_blocks(BlockMode::Parallel);
+            let l = StageLayout::new(&par_ctx, &par_state, &stage, STAGE_IDX);
+            (
+                l.block_storage_col(0, l.n_blks),
+                l.storage_internal.is_empty(),
+            )
+        };
+        assert!(
+            par_storage_internal_empty,
+            "parallel build reserves no interior storage columns"
+        );
+        assert_eq!(
+            tpl_a.col_lower[endpoint], MIN_STORAGE_HM3,
+            "parallel endpoint storage lower bound unchanged"
+        );
+        assert_eq!(
+            tpl_a.col_upper[endpoint], MAX_STORAGE_HM3,
+            "parallel endpoint storage upper bound unchanged"
+        );
+        assert_eq!(
+            tpl_a.objective[endpoint], 0.0,
+            "parallel endpoint storage objective unchanged"
+        );
+    }
+
+    /// Expand a CSC `StageTemplate` to a dense `Vec<Vec<f64>>` (mirrors the
+    /// `template/tests.rs` dense-comparison helper).
+    #[allow(clippy::cast_sign_loss)]
+    fn csc_to_dense(tpl: &cobre_solver::StageTemplate) -> Vec<Vec<f64>> {
+        let mut dense = vec![vec![0.0_f64; tpl.num_cols]; tpl.num_rows];
+        for j in 0..tpl.num_cols {
+            let start = tpl.col_starts[j] as usize;
+            let end = tpl.col_starts[j + 1] as usize;
+            for nz in start..end {
+                let row = tpl.row_indices[nz] as usize;
+                dense[row][j] = tpl.values[nz];
+            }
+        }
+        dense
     }
 }
 

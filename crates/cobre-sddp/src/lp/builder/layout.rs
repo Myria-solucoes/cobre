@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
 use cobre_core::{
-    Bus, CascadeTopology, ConstraintSense, EnergyContract, EntityId, GenericConstraint, Hydro,
-    Line, LoadModel, NonControllableSource, PumpingStation, ResolvedBounds,
+    BlockMode, Bus, CascadeTopology, ConstraintSense, EnergyContract, EntityId, GenericConstraint,
+    Hydro, Line, LoadModel, NonControllableSource, PumpingStation, ResolvedBounds,
     ResolvedExchangeFactors, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
     ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, Stage, Thermal,
 };
@@ -257,7 +257,21 @@ pub(crate) struct StageLayout<'a> {
     // Empty families normalise to `0..0`; the empty-block-cursor accessors
     // therefore read a dedicated cursor field, not the `0` a bare `range.start`
     // would return for a collapsed range.
-    /// Column range for turbined flow (one per hydro per block). `theta + 1`.
+    /// Column range for the interior storage boundaries `S¹ … Sᴷ⁻¹` (one column
+    /// per `(hydro, interior boundary)`, block-minor); empty `0..0` in parallel
+    /// mode and when `K = 1`.
+    // The Range read site lands with the per-block water-balance fill (which iterates
+    // it to address interior columns); the bounds loop and accessor address interiors
+    // through `storage_internal_start`, not this field. Until then only the layout
+    // unit test reads the Range.
+    #[allow(dead_code)]
+    pub(crate) storage_internal: Range<usize>,
+    /// Control-region anchor for `storage_internal` (= `control_region_start()`),
+    /// read even when the family is empty. Within-family address is
+    /// `storage_internal_start + h * (n_blks − 1) + (k − 1)` for interior boundary
+    /// `k ∈ 1..n_blks` — stride `n_blks − 1`, not `n_blks`.
+    pub(crate) storage_internal_start: usize,
+    /// Column range for turbined flow (one per hydro per block).
     pub(crate) turbine: Range<usize>,
     /// Column range for spillage (one per hydro per block).
     pub(crate) spillage: Range<usize>,
@@ -763,8 +777,13 @@ impl<'a> StageLayout<'a> {
         // Anchored at the handle's `control_region_start()` (the role-(a)/role-(b)
         // seam); each range starts at the previous range's `.end`, strided by THIS
         // stage's `n_blks` (the per-stage authority over the stage-0 global stride).
-        let decision_start = state.control_region_start();
-        let turbine_start = decision_start;
+        let n_interior = match stage.block_mode {
+            BlockMode::Chronological => n_blks.saturating_sub(1),
+            BlockMode::Parallel => 0,
+        };
+        let storage_internal_start = state.control_region_start();
+        let storage_internal_end = storage_internal_start + n_h * n_interior;
+        let turbine_start = storage_internal_end;
         let spillage_start = turbine_start + n_h * n_blks;
         let diversion_start = spillage_start + n_h * n_blks;
         let thermal_start = diversion_start + n_h * n_blks;
@@ -1008,6 +1027,8 @@ impl<'a> StageLayout<'a> {
             fpha_planes_per_hydro,
             evap_hydro_indices,
             generic_constraint_rows: generic.generic_constraint_rows,
+            storage_internal: storage_internal_start..storage_internal_end,
+            storage_internal_start,
             turbine: turbine_start..spillage_start,
             spillage: spillage_start..diversion_start,
             diversion: diversion_start..thermal_start,
@@ -1180,6 +1201,27 @@ impl<'a> StageLayout<'a> {
     pub(crate) fn deficit_col(&self, b_idx: usize, seg_idx: usize, blk: usize) -> usize {
         self.block_grid()
             .deficit(self.col_deficit_start(), b_idx, seg_idx, blk)
+    }
+
+    /// Storage column at chronological boundary `k ∈ 0..=K` (`K = self.n_blks`) for
+    /// hydro `h`: the single owner of the endpoints-vs-interior split, the storage
+    /// analogue of [`Self::block_col`] for flows. The two endpoints are STATE
+    /// columns — `k = 0 → S⁰` (incoming state) and `k = K → Sᴷ` (outgoing state) —
+    /// while `k ∈ 1..K` are interior CONTROL columns in the `storage_internal`
+    /// family (stride `n_blks − 1`, not `n_blks`). The `k == self.n_blks` arm MUST
+    /// precede the interior `_` arm, else `_` captures the outgoing endpoint and
+    /// addresses an interior column past the family. Outgoing storage returns `h`
+    /// because `state.storage.start == 0`, the same convention `resolve_hydro_storage`
+    /// uses (`state.storage.start + pos`). Never called in parallel mode (the
+    /// single-row balance path is used instead); at `K = 1` only the two endpoints
+    /// resolve (no interior).
+    #[inline]
+    pub(crate) fn block_storage_col(&self, h: usize, k: usize) -> usize {
+        match k {
+            0 => self.col_storage_in_start() + h,
+            k if k == self.n_blks => h,
+            _ => self.storage_internal_start + h * (self.n_blks - 1) + (k - 1),
+        }
     }
 
     // ── Role-(a) accessors (read through the borrowed StateLayout handle) ─────────
