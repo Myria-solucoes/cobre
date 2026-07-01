@@ -678,21 +678,23 @@ column of `data` can be attributed to its owning entity.
 Small JSON file describing the checkpoint at a high level. Human-readable and
 machine-readable by tooling that inspects policy files.
 
-| Field                  | Type      | Nullable | Description                                                                                                                      |
-| ---------------------- | --------- | -------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `cobre_version`        | string    | No       | Version of the cobre binary that wrote this checkpoint.                                                                          |
-| `created_at`           | string    | No       | ISO 8601 timestamp when the checkpoint was written.                                                                              |
-| `completed_iterations` | integer   | No       | Number of training iterations completed at checkpoint time.                                                                      |
-| `final_lower_bound`    | number    | No       | Lower bound value after the final completed iteration.                                                                           |
-| `best_upper_bound`     | number    | Yes      | Best upper bound observed during training. `null` when upper bound evaluation was disabled.                                      |
-| `state_dimension`      | integer   | No       | Length of each cut's coefficient vector. Equals the `state_dimension` of every per-stage cut and state file.                     |
-| `num_stages`           | integer   | No       | Number of stages. Must match the case configuration on resume.                                                                   |
-| `max_iterations`       | integer   | No       | Maximum iterations configured for the run.                                                                                       |
-| `forward_passes`       | integer   | No       | Number of forward passes per iteration configured for the run.                                                                   |
-| `warm_start_cuts`      | integer   | No       | Number of cuts loaded from a previous policy at run start. `0` for fresh runs.                                                   |
-| `warm_start_counts`    | integer[] | No       | Per-stage warm-start cut counts (one per stage, 0-based). Empty in old checkpoints; supersedes `warm_start_cuts` when non-empty. |
-| `rng_seed`             | integer   | No       | RNG seed used by the scenario sampler. Required for reproducibility.                                                             |
-| `total_visited_states` | integer   | No       | Total number of visited state vectors across all stages. `0` when `exports.states` is off.                                       |
+| Field                           | Type      | Nullable | Description                                                                                                                      |
+| ------------------------------- | --------- | -------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `cobre_version`                 | string    | No       | Version of the cobre binary that wrote this checkpoint.                                                                          |
+| `created_at`                    | string    | No       | ISO 8601 timestamp when the checkpoint was written.                                                                              |
+| `completed_iterations`          | integer   | No       | Number of training iterations completed at checkpoint time.                                                                      |
+| `final_lower_bound`             | number    | No       | Lower bound value after the final completed iteration.                                                                           |
+| `best_upper_bound`              | number    | Yes      | Best upper bound observed during training. `null` when upper bound evaluation was disabled.                                      |
+| `state_dimension`               | integer   | No       | Length of each cut's coefficient vector. Equals the `state_dimension` of every per-stage cut and state file.                     |
+| `num_stages`                    | integer   | No       | Number of stages. Must match the case configuration on resume.                                                                   |
+| `max_iterations`                | integer   | No       | Maximum iterations configured for the run.                                                                                       |
+| `forward_passes`                | integer   | No       | Number of forward passes per iteration configured for the run.                                                                   |
+| `warm_start_cuts`               | integer   | No       | Number of cuts loaded from a previous policy at run start. `0` for fresh runs.                                                   |
+| `warm_start_counts`             | integer[] | No       | Per-stage warm-start cut counts (one per stage, 0-based). Empty in old checkpoints; supersedes `warm_start_cuts` when non-empty. |
+| `rng_seed`                      | integer   | No       | RNG seed used by the scenario sampler. Required for reproducibility.                                                             |
+| `total_visited_states`          | integer   | No       | Total number of visited state vectors across all stages. `0` when `exports.states` is off.                                       |
+| `training_block_mode`           | string    | No       | Block mode the policy was trained under (`parallel`, `chronological`, or `mixed`).                                               |
+| `training_block_mode_per_stage` | string[]  | No       | Per-stage training block modes; populated only for mixed-mode studies, empty otherwise.                                          |
 
 ---
 

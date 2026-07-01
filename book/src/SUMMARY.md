@@ -24,6 +24,7 @@
   - [Thermal Units](./guide/thermal-units.md)
   - [Network Topology](./guide/network-topology.md)
   - [Stochastic Modeling](./guide/stochastic-modeling.md)
+  - [Block Modes](./guide/block-modes.md)
 - [Configuration](./guide/configuration.md)
 - [Performance Accelerators](./guide/performance-accelerators.md)
 - [Running Studies](./guide/running-studies.md)

@@ -79,6 +79,8 @@ mod boundary_cuts {
             warm_start_counts,
             rng_seed: seed,
             total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
         };
         write_policy_checkpoint(policy_dir, &stage_cuts, &stage_bases, &metadata, &[])
             .expect("write checkpoint");
@@ -1527,6 +1529,8 @@ mod warm_start {
             warm_start_counts,
             rng_seed: seed,
             total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
         };
         write_policy_checkpoint(policy_dir, &stage_cuts, &stage_bases, &metadata, &[])
             .expect("write checkpoint");

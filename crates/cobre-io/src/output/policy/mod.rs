@@ -213,6 +213,8 @@ mod tests {
             warm_start_counts: vec![],
             rng_seed: 42,
             total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
         };
 
         let json = serde_json::to_string_pretty(&meta)
@@ -275,6 +277,8 @@ mod tests {
             warm_start_counts: vec![],
             rng_seed: 0,
             total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
         };
 
         let json = serde_json::to_string_pretty(&meta)
@@ -306,6 +310,8 @@ mod tests {
             warm_start_counts: vec![0; num_stages as usize],
             rng_seed: 42,
             total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
         }
     }
 
@@ -1019,6 +1025,8 @@ mod tests {
             warm_start_counts: vec![10, 10, 10],
             rng_seed: 12345,
             total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
         };
 
         let json = serde_json::to_string(&meta).expect("serialize must succeed");
@@ -1053,6 +1061,8 @@ mod tests {
             warm_start_counts: vec![],
             rng_seed: 0,
             total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
         };
 
         let json = serde_json::to_string(&meta).expect("serialize must succeed");
@@ -1229,6 +1239,8 @@ mod tests {
             warm_start_counts: vec![20; 4],
             rng_seed: 99999,
             total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
         };
 
         let stage_cuts_payloads: [StageCutsPayload<'_>; 0] = [];
@@ -1268,6 +1280,8 @@ mod tests {
             warm_start_counts: vec![10, 8, 6],
             rng_seed: 0,
             total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
         };
 
         let json = serde_json::to_string(&meta).expect("serialize must succeed");
@@ -1308,6 +1322,60 @@ mod tests {
         assert_eq!(
             meta.warm_start_cuts, 5,
             "warm_start_cuts scalar must still be read"
+        );
+    }
+
+    #[test]
+    fn policy_checkpoint_metadata_training_block_mode_absent_defaults_to_empty() {
+        let json = r#"{
+            "cobre_version": "0.0.1",
+            "created_at": "2026-01-01T00:00:00Z",
+            "completed_iterations": 5,
+            "final_lower_bound": 0.0,
+            "best_upper_bound": null,
+            "state_dimension": 2,
+            "num_stages": 3,
+            "max_iterations": 10,
+            "forward_passes": 1,
+            "warm_start_cuts": 5,
+            "rng_seed": 0,
+            "total_visited_states": 0
+        }"#;
+
+        let meta: PolicyCheckpointMetadata =
+            serde_json::from_str(json).expect("pre-field JSON must deserialize");
+
+        assert!(
+            meta.training_block_mode.is_empty(),
+            "absent training_block_mode must default to empty string"
+        );
+        assert!(
+            meta.training_block_mode_per_stage.is_empty(),
+            "absent training_block_mode_per_stage must default to empty vec"
+        );
+    }
+
+    #[test]
+    fn policy_checkpoint_metadata_training_block_mode_round_trips_mixed() {
+        let meta = make_metadata(3, 2);
+        let meta = PolicyCheckpointMetadata {
+            training_block_mode: "mixed".to_string(),
+            training_block_mode_per_stage: vec![
+                "parallel".to_string(),
+                "chronological".to_string(),
+                "parallel".to_string(),
+            ],
+            ..meta
+        };
+
+        let json = serde_json::to_string(&meta).expect("serialize must succeed");
+        let back: PolicyCheckpointMetadata =
+            serde_json::from_str(&json).expect("deserialize must succeed");
+
+        assert_eq!(back.training_block_mode, "mixed");
+        assert_eq!(
+            back.training_block_mode_per_stage,
+            vec!["parallel", "chronological", "parallel"]
         );
     }
 
@@ -1378,6 +1446,8 @@ mod tests {
             warm_start_counts: vec![10, 8, 6],
             rng_seed: 0,
             total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
         };
 
         write_policy_checkpoint(tmp.path(), &stage_cuts_payloads, &[], &metadata, &[])

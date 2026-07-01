@@ -132,6 +132,8 @@ pub struct StageCutsPayload<'a> {
 ///     warm_start_counts: vec![],
 ///     rng_seed: 42,
 ///     total_visited_states: 0,
+///     training_block_mode: "parallel".to_string(),
+///     training_block_mode_per_stage: vec![],
 /// };
 /// let json = serde_json::to_string_pretty(&meta).unwrap();
 /// assert!(json.contains("completed_iterations"));
@@ -177,6 +179,19 @@ pub struct PolicyCheckpointMetadata {
     /// defaults to `0` on deserialization.
     #[serde(default)]
     pub total_visited_states: u64,
+    /// Block mode the policy was trained under: the shared lowercase mode when
+    /// every study stage agrees, else `"mixed"`.
+    ///
+    /// Empty in checkpoints written before this field was added; an empty value
+    /// reads as "unknown / pre-field policy".
+    #[serde(default)]
+    pub training_block_mode: String,
+    /// Per-study-stage training block modes, in study-stage order.
+    ///
+    /// Populated only for mixed-mode studies (empty when all stages share one
+    /// mode, and in pre-field checkpoints).
+    #[serde(default)]
+    pub training_block_mode_per_stage: Vec<String>,
 }
 
 // ── Owned output types for deserialization ───────────────────────────────────

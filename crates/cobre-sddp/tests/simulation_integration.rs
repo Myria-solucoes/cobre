@@ -725,6 +725,8 @@ fn train_simulate_write_cycle() {
         warm_start_counts,
         rng_seed: 42,
         total_visited_states: 0,
+        training_block_mode: "parallel".to_string(),
+        training_block_mode_per_stage: vec![],
     };
 
     write_policy_checkpoint(

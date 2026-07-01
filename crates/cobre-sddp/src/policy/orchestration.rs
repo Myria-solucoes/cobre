@@ -30,9 +30,32 @@ use crate::stochastic_summary::{
     inflow_models_to_ar_rows, inflow_models_to_stats_rows,
 };
 
-use cobre_core::System;
+use cobre_core::{BlockMode, System};
 
 // ── Policy checkpoint ─────────────────────────────────────────────────────────
+
+fn block_mode_label(mode: BlockMode) -> &'static str {
+    match mode {
+        BlockMode::Parallel => "parallel",
+        BlockMode::Chronological => "chronological",
+    }
+}
+
+fn training_block_provenance(modes: &[BlockMode]) -> (String, Vec<String>) {
+    match modes.first() {
+        None => (String::new(), Vec::new()),
+        Some(&first) if modes.iter().all(|&m| m == first) => {
+            (block_mode_label(first).to_string(), Vec::new())
+        }
+        Some(_) => (
+            "mixed".to_string(),
+            modes
+                .iter()
+                .map(|&m| block_mode_label(m).to_string())
+                .collect(),
+        ),
+    }
+}
 
 /// Run-derived inputs to [`write_checkpoint`] (independent of the training
 /// result). Stored in the checkpoint metadata for resume validation and
@@ -98,6 +121,16 @@ pub fn write_checkpoint(
     let stage_bases = build_stage_basis_records(fcf, training_result, &basis_col_u8, &basis_row_u8);
 
     let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
+
+    let study_modes: Vec<BlockMode> = system
+        .stages()
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| s.block_mode)
+        .collect();
+    let (training_block_mode, training_block_mode_per_stage) =
+        training_block_provenance(&study_modes);
+
     let metadata = PolicyCheckpointMetadata {
         cobre_version: env!("CARGO_PKG_VERSION").to_string(),
         created_at: cobre_io::now_iso8601(),
@@ -115,6 +148,8 @@ pub fn write_checkpoint(
             .visited_archive
             .as_ref()
             .map_or(0, |a| (0..a.num_stages()).map(|t| a.count(t) as u64).sum()),
+        training_block_mode,
+        training_block_mode_per_stage,
     };
 
     let stage_states = if params.export_states {
@@ -223,5 +258,37 @@ pub fn export_stochastic_artifacts(
         {
             on_warning(&format!("fitting_report: {e}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BlockMode, training_block_provenance};
+
+    #[test]
+    fn uniform_parallel_study_summarizes_without_per_stage_list() {
+        let (summary, per_stage) =
+            training_block_provenance(&[BlockMode::Parallel, BlockMode::Parallel]);
+        assert_eq!(summary, "parallel");
+        assert!(per_stage.is_empty());
+    }
+
+    #[test]
+    fn uniform_chronological_study_summarizes_without_per_stage_list() {
+        let (summary, per_stage) =
+            training_block_provenance(&[BlockMode::Chronological, BlockMode::Chronological]);
+        assert_eq!(summary, "chronological");
+        assert!(per_stage.is_empty());
+    }
+
+    #[test]
+    fn mixed_study_reports_mixed_summary_and_full_per_stage_list() {
+        let (summary, per_stage) = training_block_provenance(&[
+            BlockMode::Parallel,
+            BlockMode::Chronological,
+            BlockMode::Parallel,
+        ]);
+        assert_eq!(summary, "mixed");
+        assert_eq!(per_stage, vec!["parallel", "chronological", "parallel"]);
     }
 }

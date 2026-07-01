@@ -86,6 +86,8 @@ use super::records::{
 ///     warm_start_counts: vec![0],
 ///     rng_seed: 0,
 ///     total_visited_states: 0,
+///     training_block_mode: "parallel".to_string(),
+///     training_block_mode_per_stage: vec![],
 /// };
 /// write_policy_checkpoint(Path::new("/tmp/policy"), &stage_cuts, &[], &metadata, &[])?;
 /// # Ok(())

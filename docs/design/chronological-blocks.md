@@ -399,23 +399,30 @@ turbined/spilled/generation (`extract_hydro_per_block`, addressing via
 `grid.flat`).
 
 **Change.** In chronological mode, fill each block row's storage from that block's
-boundaries via the accessor:
+boundaries via the accessor, and its evaporation triple from that block's own
+evaporation slot:
 
 ```
 storage_initial ← view.primal[block_storage_col(h, b)]      // Sᵇ
 storage_final   ← view.primal[block_storage_col(h, b + 1)]  // Sᵇ⁺¹
+ei ← evap_indices[local * n_blks + b]                       // block b's own triple of columns
+evaporation_m3s              ← view.primal[ei.evaporation_flow_col]
+evaporation_violation_pos    ← view.primal[ei.f_evap_plus_col]
+evaporation_violation_neg    ← view.primal[ei.f_evap_minus_col]
 ```
 
-So `block b`'s row reports `(Sᵇ, Sᵇ⁺¹)`. In parallel mode the existing behavior is
-unchanged (every block row reports `(S⁰, Sᴷ)`). Derived per-block stored-energy
-follows from the per-block initial storage.
+So `block b`'s row reports `(Sᵇ, Sᵇ⁺¹)` and its own evaporation reading. In
+parallel mode both stay unchanged (every block row repeats the stage-level
+storage pair `(S⁰, Sᴷ)` and the stage-level, block-0 evaporation reading).
+Derived per-block stored-energy follows from the per-block initial storage.
 
-**Output schema.** The existing `storage_initial_hm3` / `storage_final_hm3`
-columns in the `hydros` parquet become genuinely block-specific in chronological
-mode (same columns, block-resolved values) — no new columns required, and the
-`block_id`-partitioned shape already accommodates it. CLI/Python parity is
-automatic: both call `cobre_io::write_simulation_results`; the change lives in
-`SimulationHydroResult` population (shared extraction), not the writers.
+**Output schema.** The existing `storage_initial_hm3` / `storage_final_hm3` and
+evaporation columns in the `hydros` parquet become genuinely block-specific in
+chronological mode (same columns, block-resolved values) — no new columns
+required, and the `block_id`-partitioned shape already accommodates it. CLI/Python
+parity is automatic: both call `cobre_io::write_simulation_results`; the change
+lives in `SimulationHydroResult` population (shared extraction), not the
+writers.
 
 ## 7. Generic constraints and hydro bounds
 

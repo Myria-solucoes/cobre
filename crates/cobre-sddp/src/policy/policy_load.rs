@@ -389,6 +389,8 @@ mod tests {
             warm_start_counts: vec![],
             rng_seed: 0,
             total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
         };
 
         cobre_io::write_policy_checkpoint(dir, &payloads, &[], &metadata, &[]).unwrap();
@@ -641,6 +643,8 @@ mod tests {
             warm_start_counts: vec![],
             rng_seed: 42,
             total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
         }
     }
 
@@ -710,6 +714,8 @@ mod tests {
             warm_start_counts,
             rng_seed: 0,
             total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
         }
     }
 

@@ -1342,6 +1342,8 @@ fn d12_checkpoint_round_trip() {
         warm_start_counts,
         rng_seed: 42,
         total_visited_states: 0,
+        training_block_mode: "parallel".to_string(),
+        training_block_mode_per_stage: vec![],
     };
 
     write_policy_checkpoint(
@@ -3681,6 +3683,11 @@ mod chronological_telescoping {
     };
     use cobre_solver::ActiveSolver;
 
+    use cobre_io::output::policy::read_policy_checkpoint;
+    use cobre_sddp::orchestration::{CheckpointParams, write_checkpoint};
+    use cobre_sddp::policy_export::build_stage_cut_records;
+    use tempfile::TempDir;
+
     use super::common::builders::{
         BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage,
     };
@@ -3994,5 +4001,158 @@ mod chronological_telescoping {
              {parallel_lb} within LP tolerance {tol} (inert interiors); a divergence \
              signals the interior storage path bound"
         );
+    }
+
+    /// Train a policy under `train_mode`, write it to a fresh `TempDir` via the
+    /// shared `write_checkpoint` writer, and read it back.
+    ///
+    /// Returns the trained `StudySetup` (its `fcf` is the source of the written
+    /// cut records), the read-back checkpoint, and the `TempDir` whose drop
+    /// deletes the on-disk policy — kept alive by returning it.
+    fn train_and_checkpoint(
+        train_mode: BlockMode,
+    ) -> (cobre_sddp::StudySetup, cobre_io::PolicyCheckpoint, TempDir) {
+        let config = build_config();
+        let mut setup = build_setup_in_code(build_system(train_mode), &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+        assert!(
+            outcome.error.is_none(),
+            "training error: {:?}",
+            outcome.error
+        );
+        let result = outcome.result;
+
+        // System is not `Clone`; rebuild the identical train-mode system for the
+        // checkpoint writer (`build_system` is deterministic).
+        let system = build_system(train_mode);
+        let policy_dir = TempDir::new().expect("TempDir::new");
+        let params = CheckpointParams {
+            max_iterations: setup.loop_params.max_iterations,
+            forward_passes: setup.loop_params.forward_passes,
+            seed: setup.loop_params.seed,
+            export_states: config.exports.states,
+        };
+        write_checkpoint(policy_dir.path(), &setup, &system, &result, &params)
+            .expect("write_checkpoint must succeed");
+        let checkpoint =
+            read_policy_checkpoint(policy_dir.path()).expect("read_policy_checkpoint must succeed");
+
+        (setup, checkpoint, policy_dir)
+    }
+
+    /// Assert every checkpoint cut's coefficients and intercept are bit-for-bit
+    /// identical (`f64::to_bits`, never `==`) to the records written from `fcf`.
+    fn assert_cuts_bit_identical(
+        fcf: &cobre_sddp::FutureCostFunction,
+        checkpoint: &cobre_io::PolicyCheckpoint,
+    ) {
+        let written = build_stage_cut_records(fcf);
+        assert_eq!(
+            written.len(),
+            checkpoint.stage_cuts.len(),
+            "stage count must match between written FCF and read checkpoint"
+        );
+        for (stage, (stage_written, stage_read)) in
+            written.iter().zip(checkpoint.stage_cuts.iter()).enumerate()
+        {
+            assert_eq!(
+                stage_written.len(),
+                stage_read.cuts.len(),
+                "stage {stage}: cut count must match between written and read"
+            );
+            for (cut_idx, (w, r)) in stage_written.iter().zip(stage_read.cuts.iter()).enumerate() {
+                assert_eq!(
+                    w.intercept.to_bits(),
+                    r.intercept.to_bits(),
+                    "stage {stage} cut {cut_idx}: intercept bits differ ({} vs {})",
+                    w.intercept,
+                    r.intercept
+                );
+                assert_eq!(
+                    w.coefficients.len(),
+                    r.coefficients.len(),
+                    "stage {stage} cut {cut_idx}: coefficient length differs"
+                );
+                for (k, (wc, rc)) in w.coefficients.iter().zip(r.coefficients.iter()).enumerate() {
+                    assert_eq!(
+                        wc.to_bits(),
+                        rc.to_bits(),
+                        "stage {stage} cut {cut_idx} coeff {k}: bits differ ({wc} vs {rc})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Train in `train_mode`, checkpoint, then load into a `load_mode` study and
+    /// evaluate `theta` against the load-mode LP.
+    ///
+    /// Asserts (1) the written cut bytes survive the checkpoint round-trip, (2)
+    /// the cross-mode warm-start load succeeds, (3) the loaded cuts are byte-
+    /// identical to the written ones, and (4) a load-mode simulation runs the
+    /// cross-mode FCF without error. Only cut bytes are asserted portable; the
+    /// persisted basis is column-count-dependent (hence mode-dependent) and is
+    /// intentionally not asserted (design §5).
+    fn assert_cross_mode_load_preserves_cut_bytes(train_mode: BlockMode, load_mode: BlockMode) {
+        let (trained_setup, checkpoint, _policy_dir) = train_and_checkpoint(train_mode);
+        assert_cuts_bit_identical(&trained_setup.fcf, &checkpoint);
+
+        let config = build_config();
+        let mut setup2 = build_setup_in_code(build_system(load_mode), &config);
+
+        let warm_fcf = cobre_sddp::FutureCostFunction::new_with_warm_start(
+            &checkpoint.stage_cuts,
+            setup2.loop_params.forward_passes,
+            setup2.loop_params.max_iterations.saturating_add(1),
+        )
+        .expect("cross-mode warm-start load must succeed (cuts are n_blks-independent, design §5)");
+
+        assert_cuts_bit_identical(&warm_fcf, &checkpoint);
+
+        setup2.replace_fcf(warm_fcf);
+        setup2.simulation_config.n_scenarios = 1;
+
+        let comm = StubComm;
+        let mut pool = setup2
+            .create_workspace_pool(&comm, 1, ActiveSolver::new)
+            .expect("simulation workspace pool must build");
+        let io_capacity = setup2.simulation_config.io_channel_capacity.max(1);
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(io_capacity);
+        let drain = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
+
+        let run = setup2
+            .simulate(&mut pool.workspaces, &comm, &result_tx, None, None, &[])
+            .expect("cross-mode simulate must succeed (theta evaluates against the load-mode LP)");
+
+        drop(result_tx);
+        drop(drain.join().expect("drain thread must not panic"));
+
+        assert_eq!(
+            run.costs.len(),
+            1,
+            "cross-mode simulate must produce one scenario cost, confirming theta evaluated"
+        );
+    }
+
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    #[test]
+    fn cross_mode_policy_load_preserves_cut_bytes_parallel_to_chronological() {
+        assert_cross_mode_load_preserves_cut_bytes(BlockMode::Parallel, BlockMode::Chronological);
+    }
+
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    #[test]
+    fn cross_mode_policy_load_preserves_cut_bytes_chronological_to_parallel() {
+        assert_cross_mode_load_preserves_cut_bytes(BlockMode::Chronological, BlockMode::Parallel);
     }
 }
