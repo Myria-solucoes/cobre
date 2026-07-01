@@ -287,6 +287,8 @@ pub fn geometry(
         filled_min_storage_floor_col: 0..0,
         z_inflow_row_start,
         n_blks,
+        storage_internal_start: 0,
+        block_mode: cobre_core::BlockMode::Parallel,
         fpha_hydro_indices,
         evap_hydro_indices,
         filling_target_hydro_indices: vec![],

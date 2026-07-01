@@ -755,7 +755,7 @@ fn stage_geometry_from_layout_populates_contract_ranges() {
         .expect("one study stage");
     let state = state_layout_for(&ctx);
     let layout = super::super::layout::StageLayout::new(&ctx, &state, stage, 0);
-    let geometry = super::StageGeometry::from_layout(&layout);
+    let geometry = super::StageGeometry::from_layout(&layout, stage.block_mode);
 
     assert_eq!(geometry.contract_import.len(), 2, "1 import * 2 blocks");
     assert_eq!(geometry.contract_export.len(), 2, "1 export * 2 blocks");
@@ -795,7 +795,7 @@ fn stage_geometry_from_layout_empty_contracts_are_pumping_end_anchored() {
     let state = state_layout_for(&ctx);
     let layout = super::super::layout::StageLayout::new(&ctx, &state, stage, 0);
     let col_pumping_end = layout.col_pumping_start + layout.n_pumping * layout.n_blks;
-    let geometry = super::StageGeometry::from_layout(&layout);
+    let geometry = super::StageGeometry::from_layout(&layout, stage.block_mode);
 
     assert!(geometry.contract_import.is_empty());
     assert!(geometry.contract_export.is_empty());
@@ -3158,6 +3158,28 @@ fn chronological_water_balance_telescopes_to_parallel() {
         (chr_rhs_sum - par_rhs).abs() < 1e-12,
         "telescoped RHS {chr_rhs_sum} != parallel RHS {par_rhs}"
     );
+}
+
+/// `StageGeometry::block_storage_col` resolves the same column as the source
+/// `StageLayout::block_storage_col` for every boundary `k ∈ 0..=K` and every hydro,
+/// so the discarded-`StageLayout` accessor is faithfully mirrored onto the per-stage
+/// geometry the simulation read-path carries.
+#[test]
+fn stage_geometry_block_storage_col_matches_layout() {
+    let n_blks = 3_usize;
+    let (layout, _, _) = block_layout_and_template(BlockMode::Chronological, n_blks);
+    let geometry = super::StageGeometry::from_layout(&layout, BlockMode::Chronological);
+    let storage_in_start = layout.col_storage_in_start();
+
+    for h in 0..layout.n_h {
+        for k in 0..=n_blks {
+            assert_eq!(
+                geometry.block_storage_col(h, k, storage_in_start),
+                layout.block_storage_col(h, k),
+                "block_storage_col mismatch at hydro {h}, boundary {k}"
+            );
+        }
+    }
 }
 
 /// AC#3: a chronological `K = 1` build's water-balance row is byte-identical to the

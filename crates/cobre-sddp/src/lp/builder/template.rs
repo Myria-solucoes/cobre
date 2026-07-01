@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
-use cobre_core::{ContractType, EntityId, Hydro, ResolvedBounds, Stage, System};
+use cobre_core::{BlockMode, ContractType, EntityId, Hydro, ResolvedBounds, Stage, System};
 use cobre_solver::StageTemplate;
 use cobre_stochastic::normal::precompute::PrecomputedNormal;
 use cobre_stochastic::par::precompute::PrecomputedPar;
@@ -316,6 +316,17 @@ pub struct StageGeometry {
     /// Number of operating blocks (K) at this stage — the block-major stride for
     /// every equipment family.
     pub n_blks: usize,
+    /// Control-region anchor for the interior storage boundaries `S¹ … Sᴷ⁻¹`,
+    /// mirroring `StageLayout::storage_internal_start` (holds
+    /// `StateLayout::control_region_start()`, not `0`); the within-family address is
+    /// `storage_internal_start + h * (n_blks − 1) + (k − 1)` (stride `n_blks − 1`).
+    /// Dead in parallel mode and when `n_blks ≤ 1`: the interior family is empty, so no
+    /// `k` reaches the `_` arm of [`StageGeometry::block_storage_col`], which this feeds.
+    pub storage_internal_start: usize,
+    /// Block formulation mode at this stage. Selects per-block storage extraction
+    /// (`Chronological` reads each block's own `(Sᵇ, Sᵇ⁺¹)` boundary) versus the
+    /// stage-level `(S⁰, Sᴷ)` pair (`Parallel`); defaults to `Parallel`.
+    pub block_mode: BlockMode,
     /// System hydro indices using FPHA at this stage, in slot order. FPHA
     /// membership is per `(hydro, stage)`, so this is the stage-correct list.
     pub fpha_hydro_indices: Vec<usize>,
@@ -344,7 +355,7 @@ impl StageGeometry {
     /// `start` accessors (`col_generation_start`, the `col_*_slack` accessors)
     /// resolve the dedicated empty-block cursor rather than a bare `0` when the
     /// family collapses to `0..0`, matching the indexer convention.
-    fn from_layout(layout: &StageLayout<'_>) -> Self {
+    fn from_layout(layout: &StageLayout<'_>, block_mode: BlockMode) -> Self {
         // Most ranges are cloned from `StageLayout` own fields (already `0..0` when
         // empty). The `filling_*` families are built inline as
         // `start..start + indices.len()`, so an empty family is `start..start` (not
@@ -394,12 +405,35 @@ impl StageGeometry {
                     + layout.filled_min_storage_floor_hydro_indices.len(),
             z_inflow_row_start: layout.z_inflow_row_start,
             n_blks: layout.n_blks,
+            storage_internal_start: layout.storage_internal_start,
+            block_mode,
             fpha_hydro_indices: layout.fpha_hydro_indices.clone(),
             evap_hydro_indices: layout.evap_hydro_indices.clone(),
             filling_target_hydro_indices: layout.filling_target_hydro_indices.clone(),
             filled_min_storage_floor_hydro_indices: layout
                 .filled_min_storage_floor_hydro_indices
                 .clone(),
+        }
+    }
+
+    /// Storage column at chronological boundary `k ∈ 0..=K` (`K = self.n_blks`) for
+    /// hydro `h`, mirroring `StageLayout::block_storage_col`
+    /// so the simulation read-path resolves per-block boundaries without a
+    /// `StageLayout`. `k = 0 → S⁰` (incoming state, base `storage_in_start`);
+    /// `k = K → Sᴷ` (outgoing state, bare `h` because `state.storage.start == 0`);
+    /// `k ∈ 1..K → storage_internal_start + h * (n_blks − 1) + (k − 1)` (interior
+    /// CONTROL columns, stride `n_blks − 1`). The `k == self.n_blks` arm MUST precede
+    /// the interior `_` arm, else `_` captures the outgoing endpoint and addresses an
+    /// interior column past the family. The incoming-state base is passed in because
+    /// the state region is owned by [`StateLayout`](crate::indexer::StateLayout), not
+    /// `StageGeometry`.
+    #[inline]
+    #[must_use]
+    pub fn block_storage_col(&self, h: usize, k: usize, storage_in_start: usize) -> usize {
+        match k {
+            0 => storage_in_start + h,
+            k if k == self.n_blks => h,
+            _ => self.storage_internal_start + h * (self.n_blks - 1) + (k - 1),
         }
     }
 }
@@ -513,7 +547,7 @@ pub(super) fn build_single_stage_template(
     // Snapshot the per-stage equipment geometry BEFORE moving `layout`'s owned
     // `generic_constraint_rows` Vec into the output: `from_layout` only borrows,
     // so it must run while `layout` is intact.
-    let equipment_geometry = StageGeometry::from_layout(&layout);
+    let equipment_geometry = StageGeometry::from_layout(&layout, stage.block_mode);
 
     StageBuildOutput {
         template,

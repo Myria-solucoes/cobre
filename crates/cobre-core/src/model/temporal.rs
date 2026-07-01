@@ -24,11 +24,12 @@ use chrono::{Datelike, NaiveDate};
 ///
 /// See [Block Formulations](../math/block-formulations.md) for the
 /// mathematical treatment of each mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BlockMode {
     /// Independent sub-periods solved simultaneously; water balance is
     /// aggregated across all blocks in the stage.
+    #[default]
     Parallel,
 
     /// Sequential blocks with inter-block state transitions (intra-stage

@@ -1,4 +1,9 @@
-#![allow(clippy::unwrap_used, clippy::panic, clippy::too_many_lines)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::too_many_lines,
+    clippy::cast_precision_loss
+)]
 
 use std::collections::HashMap;
 
@@ -4938,4 +4943,445 @@ fn extract_stub_collections_contract_free_is_empty() {
     let (_inflow_lags, _pumping, contracts): (Vec<_>, Vec<_>, Vec<SimulationContractResult>) =
         extract_stub_collections(&view, &spec, 0);
     assert!(contracts.is_empty(), "no contracts => empty vector");
+}
+
+// -------------------------------------------------------------------------
+// Per-block chronological storage and evaporation
+// -------------------------------------------------------------------------
+
+/// One evaporating hydro, one operating block, `state_layout(1, 0)` gives
+/// `storage_in.start == 2` and `storage.start == 0`.
+fn entity_counts_1_hydro() -> EntityCounts {
+    EntityCounts {
+        hydro_ids: vec![7],
+        hydro_productivities: vec![0.0],
+        thermal_ids: vec![],
+        line_ids: vec![],
+        bus_ids: vec![],
+        pumping_station_ids: vec![],
+        contract_ids: vec![],
+        non_controllable_ids: vec![],
+    }
+}
+
+/// Build a single-hydro `K`-block `StageGeometry` in the given mode.
+///
+/// Control-region layout for `state_layout(1, 0)` (`control_region_start == 4`):
+/// interior storage `S¹ … Sᴷ⁻¹` at `[4, 4 + (K−1))`, then turbine `[t0, t0 + K)`,
+/// spillage `[t0 + K, t0 + 2K)`, then `K` evaporation triples. In parallel mode the
+/// interior family is empty and turbine begins at 4.
+fn single_hydro_block_geometry(block_mode: cobre_core::BlockMode, k: usize) -> StageGeometry {
+    use crate::indexer::EvaporationIndices;
+    let n_interior = match block_mode {
+        cobre_core::BlockMode::Chronological => k - 1,
+        cobre_core::BlockMode::Parallel => 0,
+    };
+    let storage_internal_start = 4;
+    let turbine_start = storage_internal_start + n_interior;
+    let spillage_start = turbine_start + k;
+    let evap_start = spillage_start + k;
+    let evap_indices: Vec<EvaporationIndices> = (0..k)
+        .map(|b| {
+            let base = evap_start + b * 3;
+            EvaporationIndices {
+                evaporation_flow_col: base,
+                f_evap_plus_col: base + 1,
+                f_evap_minus_col: base + 2,
+                evap_row: b,
+            }
+        })
+        .collect();
+    StageGeometry {
+        turbine: turbine_start..spillage_start,
+        spillage: spillage_start..evap_start,
+        n_blks: k,
+        storage_internal_start,
+        block_mode,
+        evap_indices,
+        evap_hydro_indices: vec![0],
+        ..StageGeometry::default()
+    }
+}
+
+/// Chronological block `b` reports `(Sᵇ, Sᵇ⁺¹)` read through the accessor, and the
+/// boundary chain's endpoints coincide with the state columns (`S⁰`/`Sᴷ`).
+#[test]
+fn extract_chronological_per_block_storage() {
+    let k = 3_usize;
+    let geom = single_hydro_block_geometry(cobre_core::BlockMode::Chronological, k);
+    let study_dims = crate::test_support::study_dims();
+    let state = crate::test_support::state_layout(1, 0);
+    let ec = zero_energy_conversion(1, 1);
+
+    // Boundary values: S⁰=10 (storage_in col 2), S¹=20 (col 4), S²=30 (col 5),
+    // S³=Sᴷ=40 (storage col 0). Turbine cols [6,9), evap triples at [12, ...).
+    let n_cols = geom.spillage.end + k * 3;
+    let mut primal = vec![0.0_f64; n_cols];
+    primal[0] = 40.0; // Sᴷ (outgoing state)
+    primal[2] = 10.0; // S⁰ (incoming state)
+    primal[4] = 20.0; // S¹ (interior)
+    primal[5] = 30.0; // S² (interior)
+    let dual = vec![0.0_f64; 4];
+
+    let spec = StageExtractionSpec {
+        study_dims: &study_dims,
+        geometry: &geom,
+        state: &state,
+        n_blks: k,
+        entity_counts: &entity_counts_1_hydro(),
+        inflow_m3s_per_hydro: &[],
+        block_hours: &[100.0, 100.0, 100.0],
+        generic_constraint_entries: &[],
+        ncs_col_start: 0,
+        n_ncs: 0,
+        ncs_entity_ids: &[],
+        ncs_col_upper: &[],
+        pumping_col_start: 0,
+        n_pumping: 0,
+        pumping_consumption_mw_per_m3s: &[],
+        contract_prices: &[],
+        contract_is_import: &[],
+        diversion_upstream: &HashMap::new(),
+        hydro_productivities: &[0.0],
+        col_scale: &[],
+        row_scale: &[],
+        cumulative_discount_factor: 1.0,
+        energy_conversion: &ec,
+        hydro_min_storage_hm3: &[0.0],
+        stage_index: 0,
+        n_stages: 1,
+        anticipated_windows: &[],
+        study_stage_ids: &[],
+    };
+    let view = SolutionView {
+        primal: &primal,
+        dual: &dual,
+        objective: 0.0,
+        objective_coeffs: &vec![0.0_f64; n_cols],
+        row_lower: &[],
+    };
+
+    let result = extract_stage_result(&view, &spec, 0);
+    assert_eq!(result.hydros.len(), k);
+
+    let boundaries = [10.0, 20.0, 30.0, 40.0];
+    for b in 0..k {
+        let row = &result.hydros[b];
+        assert_eq!(row.block_id, Some(b as u32));
+        assert_eq!(
+            row.storage_initial_hm3, boundaries[b],
+            "block {b} incoming == Sᵇ"
+        );
+        assert_eq!(
+            row.storage_final_hm3,
+            boundaries[b + 1],
+            "block {b} outgoing == Sᵇ⁺¹"
+        );
+    }
+
+    // Endpoints coincide with the state region.
+    assert_eq!(
+        result.hydros[0].storage_initial_hm3,
+        primal[state.storage_in.start]
+    );
+    assert_eq!(
+        result.hydros[k - 1].storage_final_hm3,
+        primal[state.storage.start]
+    );
+}
+
+/// Parallel mode: every block row reports the stage-level `(S⁰, Sᴷ)` state pair,
+/// `.to_bits()`-identical to the direct state-column reads.
+#[test]
+fn extract_parallel_per_block_storage_byte_identical() {
+    let k = 3_usize;
+    let geom = single_hydro_block_geometry(cobre_core::BlockMode::Parallel, k);
+    let study_dims = crate::test_support::study_dims();
+    let state = crate::test_support::state_layout(1, 0);
+    let ec = zero_energy_conversion(1, 1);
+
+    let n_cols = geom.spillage.end + k * 3;
+    let mut primal = vec![0.0_f64; n_cols];
+    primal[0] = 40.0; // Sᴷ (outgoing state)
+    primal[2] = 10.0; // S⁰ (incoming state)
+    let dual = vec![0.0_f64; 4];
+
+    let spec = StageExtractionSpec {
+        study_dims: &study_dims,
+        geometry: &geom,
+        state: &state,
+        n_blks: k,
+        entity_counts: &entity_counts_1_hydro(),
+        inflow_m3s_per_hydro: &[],
+        block_hours: &[100.0, 100.0, 100.0],
+        generic_constraint_entries: &[],
+        ncs_col_start: 0,
+        n_ncs: 0,
+        ncs_entity_ids: &[],
+        ncs_col_upper: &[],
+        pumping_col_start: 0,
+        n_pumping: 0,
+        pumping_consumption_mw_per_m3s: &[],
+        contract_prices: &[],
+        contract_is_import: &[],
+        diversion_upstream: &HashMap::new(),
+        hydro_productivities: &[0.0],
+        col_scale: &[],
+        row_scale: &[],
+        cumulative_discount_factor: 1.0,
+        energy_conversion: &ec,
+        hydro_min_storage_hm3: &[0.0],
+        stage_index: 0,
+        n_stages: 1,
+        anticipated_windows: &[],
+        study_stage_ids: &[],
+    };
+    let view = SolutionView {
+        primal: &primal,
+        dual: &dual,
+        objective: 0.0,
+        objective_coeffs: &vec![0.0_f64; n_cols],
+        row_lower: &[],
+    };
+
+    let result = extract_stage_result(&view, &spec, 0);
+    assert_eq!(result.hydros.len(), k);
+    let s0 = primal[state.storage_in.start];
+    let sk = primal[state.storage.start];
+    for row in &result.hydros {
+        assert_eq!(row.storage_initial_hm3.to_bits(), s0.to_bits());
+        assert_eq!(row.storage_final_hm3.to_bits(), sk.to_bits());
+    }
+}
+
+/// Chronological per-block stored energy derives from each block's own boundary:
+/// `(S − V_min) · ρ_acum · ENERGY_FACTOR`, with `V_min` / `ρ_acum` block-invariant.
+#[test]
+fn extract_chronological_per_block_stored_energy() {
+    use crate::energy_conversion::{EnergyConversion, EnergyConversionSet};
+    let k = 3_usize;
+    let geom = single_hydro_block_geometry(cobre_core::BlockMode::Chronological, k);
+    let study_dims = crate::test_support::study_dims();
+    let state = crate::test_support::state_layout(1, 0);
+
+    let rho_acum = 2.0_f64;
+    let v_min = 5.0_f64;
+    let ec = EnergyConversionSet::new(
+        vec![vec![EnergyConversion {
+            equivalent_productivity_mw_per_m3s: 0.0,
+            reference_volume_hm3: 0.0,
+            reference_outflow_m3s: 0.0,
+        }]],
+        vec![vec![rho_acum]],
+        1,
+        1,
+    );
+
+    let n_cols = geom.spillage.end + k * 3;
+    let mut primal = vec![0.0_f64; n_cols];
+    primal[0] = 40.0; // Sᴷ
+    primal[2] = 10.0; // S⁰
+    primal[4] = 20.0; // S¹
+    primal[5] = 30.0; // S²
+    let dual = vec![0.0_f64; 4];
+
+    let spec = StageExtractionSpec {
+        study_dims: &study_dims,
+        geometry: &geom,
+        state: &state,
+        n_blks: k,
+        entity_counts: &entity_counts_1_hydro(),
+        inflow_m3s_per_hydro: &[],
+        block_hours: &[100.0, 100.0, 100.0],
+        generic_constraint_entries: &[],
+        ncs_col_start: 0,
+        n_ncs: 0,
+        ncs_entity_ids: &[],
+        ncs_col_upper: &[],
+        pumping_col_start: 0,
+        n_pumping: 0,
+        pumping_consumption_mw_per_m3s: &[],
+        contract_prices: &[],
+        contract_is_import: &[],
+        diversion_upstream: &HashMap::new(),
+        hydro_productivities: &[0.0],
+        col_scale: &[],
+        row_scale: &[],
+        cumulative_discount_factor: 1.0,
+        energy_conversion: &ec,
+        hydro_min_storage_hm3: &[v_min],
+        stage_index: 0,
+        n_stages: 1,
+        anticipated_windows: &[],
+        study_stage_ids: &[],
+    };
+    let view = SolutionView {
+        primal: &primal,
+        dual: &dual,
+        objective: 0.0,
+        objective_coeffs: &vec![0.0_f64; n_cols],
+        row_lower: &[],
+    };
+
+    let result = extract_stage_result(&view, &spec, 0);
+    let boundaries = [10.0, 20.0, 30.0, 40.0];
+    let expected = |s: f64| -> f64 {
+        (s - v_min) * rho_acum * super::ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S
+    };
+    for b in 0..k {
+        let row = &result.hydros[b];
+        assert!((row.stored_energy_initial_mwh - expected(boundaries[b])).abs() < 1e-9);
+        assert!((row.stored_energy_final_mwh - expected(boundaries[b + 1])).abs() < 1e-9);
+    }
+}
+
+/// Chronological block `b` reads its OWN evaporation triple
+/// `evap_indices[local * n_blks + b]`, not block 0's.
+#[test]
+fn extract_chronological_per_block_evaporation() {
+    let k = 3_usize;
+    let geom = single_hydro_block_geometry(cobre_core::BlockMode::Chronological, k);
+    let study_dims = crate::test_support::study_dims();
+    let state = crate::test_support::state_layout(1, 0);
+    let ec = zero_energy_conversion(1, 1);
+
+    let n_cols = geom.spillage.end + k * 3;
+    let mut primal = vec![0.0_f64; n_cols];
+    primal[0] = 40.0;
+    primal[2] = 10.0;
+    primal[4] = 20.0;
+    primal[5] = 30.0;
+    // Distinct evaporation values per block: block b flow = 1.0 + b, neg = 0.1 + b,
+    // pos = 0.2 + b, laid out block-major at evap_indices[b].
+    for b in 0..k {
+        let ei = &geom.evap_indices[b];
+        primal[ei.evaporation_flow_col] = 1.0 + b as f64;
+        primal[ei.f_evap_plus_col] = 0.1 + b as f64;
+        primal[ei.f_evap_minus_col] = 0.2 + b as f64;
+    }
+    let dual = vec![0.0_f64; 4];
+
+    let spec = StageExtractionSpec {
+        study_dims: &study_dims,
+        geometry: &geom,
+        state: &state,
+        n_blks: k,
+        entity_counts: &entity_counts_1_hydro(),
+        inflow_m3s_per_hydro: &[],
+        block_hours: &[100.0, 100.0, 100.0],
+        generic_constraint_entries: &[],
+        ncs_col_start: 0,
+        n_ncs: 0,
+        ncs_entity_ids: &[],
+        ncs_col_upper: &[],
+        pumping_col_start: 0,
+        n_pumping: 0,
+        pumping_consumption_mw_per_m3s: &[],
+        contract_prices: &[],
+        contract_is_import: &[],
+        diversion_upstream: &HashMap::new(),
+        hydro_productivities: &[0.0],
+        col_scale: &[],
+        row_scale: &[],
+        cumulative_discount_factor: 1.0,
+        energy_conversion: &ec,
+        hydro_min_storage_hm3: &[0.0],
+        stage_index: 0,
+        n_stages: 1,
+        anticipated_windows: &[],
+        study_stage_ids: &[],
+    };
+    let view = SolutionView {
+        primal: &primal,
+        dual: &dual,
+        objective: 0.0,
+        objective_coeffs: &vec![0.0_f64; n_cols],
+        row_lower: &[],
+    };
+
+    let result = extract_stage_result(&view, &spec, 0);
+    for b in 0..k {
+        let row = &result.hydros[b];
+        assert_eq!(row.evaporation_m3s, Some(1.0 + b as f64), "block {b} flow");
+        assert!(
+            (row.evaporation_violation_neg_m3s - (0.1 + b as f64)).abs() < 1e-12,
+            "block {b} neg violation reads its own triple"
+        );
+        assert!(
+            (row.evaporation_violation_pos_m3s - (0.2 + b as f64)).abs() < 1e-12,
+            "block {b} pos violation reads its own triple"
+        );
+    }
+}
+
+/// Parallel mode: every block row's evaporation fields are `.to_bits()`-identical to
+/// the block-0 read (byte-identical to the pre-change behavior).
+#[test]
+fn extract_parallel_per_block_evaporation_byte_identical() {
+    let k = 3_usize;
+    let geom = single_hydro_block_geometry(cobre_core::BlockMode::Parallel, k);
+    let study_dims = crate::test_support::study_dims();
+    let state = crate::test_support::state_layout(1, 0);
+    let ec = zero_energy_conversion(1, 1);
+
+    let n_cols = geom.spillage.end + k * 3;
+    let mut primal = vec![0.0_f64; n_cols];
+    primal[0] = 40.0;
+    primal[2] = 10.0;
+    for b in 0..k {
+        let ei = &geom.evap_indices[b];
+        primal[ei.evaporation_flow_col] = 1.0 + b as f64;
+        primal[ei.f_evap_plus_col] = 0.1 + b as f64;
+        primal[ei.f_evap_minus_col] = 0.2 + b as f64;
+    }
+    let dual = vec![0.0_f64; 4];
+
+    let spec = StageExtractionSpec {
+        study_dims: &study_dims,
+        geometry: &geom,
+        state: &state,
+        n_blks: k,
+        entity_counts: &entity_counts_1_hydro(),
+        inflow_m3s_per_hydro: &[],
+        block_hours: &[100.0, 100.0, 100.0],
+        generic_constraint_entries: &[],
+        ncs_col_start: 0,
+        n_ncs: 0,
+        ncs_entity_ids: &[],
+        ncs_col_upper: &[],
+        pumping_col_start: 0,
+        n_pumping: 0,
+        pumping_consumption_mw_per_m3s: &[],
+        contract_prices: &[],
+        contract_is_import: &[],
+        diversion_upstream: &HashMap::new(),
+        hydro_productivities: &[0.0],
+        col_scale: &[],
+        row_scale: &[],
+        cumulative_discount_factor: 1.0,
+        energy_conversion: &ec,
+        hydro_min_storage_hm3: &[0.0],
+        stage_index: 0,
+        n_stages: 1,
+        anticipated_windows: &[],
+        study_stage_ids: &[],
+    };
+    let view = SolutionView {
+        primal: &primal,
+        dual: &dual,
+        objective: 0.0,
+        objective_coeffs: &vec![0.0_f64; n_cols],
+        row_lower: &[],
+    };
+
+    let result = extract_stage_result(&view, &spec, 0);
+    // Block 0's triple is the parallel stage-level read.
+    let flow0 = 1.0_f64;
+    let neg0 = 0.1_f64;
+    let pos0 = 0.2_f64;
+    for row in &result.hydros {
+        assert_eq!(row.evaporation_m3s.map(f64::to_bits), Some(flow0.to_bits()));
+        assert_eq!(row.evaporation_violation_neg_m3s.to_bits(), neg0.to_bits());
+        assert_eq!(row.evaporation_violation_pos_m3s.to_bits(), pos0.to_bits());
+    }
 }

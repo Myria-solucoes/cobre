@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
+use cobre_core::BlockMode;
 use cobre_core::ConstraintSense;
 use cobre_core::EntityId;
 
@@ -475,9 +476,8 @@ fn extract_hydro_no_turbine(
 
     let (evaporation_m3s, evaporation_violation_neg_m3s, evaporation_violation_pos_m3s) =
         if let Some(local_evap_idx) = lookup.evap[h] {
-            // `evap_indices` is block-major (`local * n_blks + blk`); block 0
-            // preserves the current single-block read. Per-block evaporation
-            // extraction is out of scope here.
+            // The aggregate `block_id: None` row reports block 0; it is not a
+            // per-block path (`extract_hydro_per_block` owns the per-block read).
             let ei = &spec.geometry.evap_indices[local_evap_idx * spec.geometry.n_blks];
             let evaporation_flow = view.primal[ei.evaporation_flow_col];
             let neg = view.primal[ei.f_evap_plus_col]; // f_evap_plus = under-evaporation
@@ -561,11 +561,16 @@ struct HydroStageContext {
     withdrawal_pos: f64,
     water_value: f64,
     fpha_local: Option<usize>,
+    /// Evaporation-local slot, `None` for a hydro with no evaporation at this stage;
+    /// the closure reads `evap_indices[evap_local * n_blks + b]` per block.
+    evap_local: Option<usize>,
     equivalent_productivity_mw_per_m3s: f64,
     accumulated_productivity_mw_per_m3s: f64,
     incremental_inflow_energy_mw: f64,
-    stored_energy_initial_mwh: f64,
-    stored_energy_final_mwh: f64,
+    /// `V_min` (hm³) and `ρ_acum`, both block-invariant, retained so the per-block
+    /// closure derives each boundary's stored energy without re-querying conversions.
+    v_min: f64,
+    rho_acum: f64,
     evaporation_m3s: Option<f64>,
     evaporation_violation_neg_m3s: f64,
     evaporation_violation_pos_m3s: f64,
@@ -616,10 +621,11 @@ impl HydroStageContext {
             .unwrap_or(0.0)
             * COST_SCALE_FACTOR;
         let fpha_local = lookup.fpha[h];
+        let evap_local = lookup.evap[h];
         let (evaporation_m3s, evaporation_violation_neg_m3s, evaporation_violation_pos_m3s) =
-            if let Some(lei) = lookup.evap[h] {
-                // Block-major `evap_indices`; block 0 preserves the single-block read
-                // (per-block evaporation extraction is out of scope here).
+            if let Some(lei) = evap_local {
+                // Block-major `evap_indices`; block 0 is the parallel-mode stage-level
+                // read. `extract_hydro_per_block` resolves each block's own triple.
                 let ei = &spec.geometry.evap_indices[lei * spec.geometry.n_blks];
                 let evaporation_flow = view.primal[ei.evaporation_flow_col];
                 let neg = view.primal[ei.f_evap_plus_col]; // f_evap_plus = under-evaporation
@@ -652,15 +658,12 @@ impl HydroStageContext {
             withdrawal_pos,
             water_value,
             fpha_local,
+            evap_local,
             equivalent_productivity_mw_per_m3s: conv.equivalent_productivity_mw_per_m3s,
             accumulated_productivity_mw_per_m3s: rho_acum,
             incremental_inflow_energy_mw: rho_acum * incremental_inflow,
-            stored_energy_initial_mwh: (storage_initial - v_min)
-                * rho_acum
-                * ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S,
-            stored_energy_final_mwh: (storage_final - v_min)
-                * rho_acum
-                * ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S,
+            v_min,
+            rho_acum,
             evaporation_m3s,
             evaporation_violation_neg_m3s,
             evaporation_violation_pos_m3s,
@@ -732,6 +735,60 @@ fn extract_hydro_per_block<'a>(
                 (0.0, 0.0, 0.0, 0.0)
             };
 
+        // Chronological block `b` reports its own boundary pair `(Sᵇ, Sᵇ⁺¹)` via the
+        // accessor (interior columns stride `n_blks − 1`, so the read cannot go
+        // through `grid.flat`); parallel keeps the stage-level `(S⁰, Sᴷ)`. The
+        // endpoints coincide with the state region: block 0 incoming == `ctx.storage_initial`
+        // (`S⁰`), block `K−1` outgoing == `ctx.storage_final` (`Sᴷ`).
+        let (storage_initial, storage_final) = match spec.geometry.block_mode {
+            BlockMode::Chronological => {
+                let in_col = spec
+                    .geometry
+                    .block_storage_col(h, b, spec.state.storage_in.start);
+                let out_col =
+                    spec.geometry
+                        .block_storage_col(h, b + 1, spec.state.storage_in.start);
+                debug_assert!(
+                    in_col < view.primal.len() && out_col < view.primal.len(),
+                    "per-block storage cols {in_col}/{out_col} out of primal bounds {}",
+                    view.primal.len(),
+                );
+                (view.primal[in_col], view.primal[out_col])
+            }
+            BlockMode::Parallel => (ctx.storage_initial, ctx.storage_final),
+        };
+        let stored_energy_initial_mwh =
+            (storage_initial - ctx.v_min) * ctx.rho_acum * ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S;
+        let stored_energy_final_mwh =
+            (storage_final - ctx.v_min) * ctx.rho_acum * ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S;
+
+        // Chronological block `b` reports its own block's evaporation triple
+        // (`evap_indices[local * n_blks + b]`); parallel keeps the stage-level block-0
+        // read. A hydro with no evaporation slot stays at the `ctx` defaults.
+        let (evaporation_m3s, evaporation_violation_neg_m3s, evaporation_violation_pos_m3s) =
+            match (spec.geometry.block_mode, ctx.evap_local) {
+                (BlockMode::Chronological, Some(local)) => {
+                    let ei = &spec.geometry.evap_indices[local * spec.geometry.n_blks + b];
+                    debug_assert!(
+                        ei.evaporation_flow_col < view.primal.len()
+                            && ei.f_evap_plus_col < view.primal.len()
+                            && ei.f_evap_minus_col < view.primal.len(),
+                        "per-block evaporation cols out of primal bounds {}",
+                        view.primal.len(),
+                    );
+                    (
+                        Some(view.primal[ei.evaporation_flow_col]),
+                        view.primal[ei.f_evap_plus_col], // f_evap_plus = under-evaporation (neg)
+                        view.primal[ei.f_evap_minus_col], // f_evap_minus = over-evaporation (pos)
+                    )
+                }
+                (BlockMode::Parallel, _) | (BlockMode::Chronological, None) => (
+                    ctx.evaporation_m3s,
+                    ctx.evaporation_violation_neg_m3s,
+                    ctx.evaporation_violation_pos_m3s,
+                ),
+            };
+
         #[allow(clippy::cast_possible_truncation)]
         SimulationHydroResult {
             stage_id,
@@ -739,19 +796,19 @@ fn extract_hydro_per_block<'a>(
             hydro_id,
             turbined_m3s: turbined,
             spillage_m3s: spillage,
-            evaporation_m3s: ctx.evaporation_m3s,
+            evaporation_m3s,
             diverted_inflow_m3s: Some(diverted_inflow),
             diverted_outflow_m3s: Some(diverted_outflow),
             incremental_inflow_m3s: ctx.incremental_inflow,
             inflow_m3s: ctx.incremental_inflow,
-            storage_initial_hm3: ctx.storage_initial,
-            storage_final_hm3: ctx.storage_final,
+            storage_initial_hm3: storage_initial,
+            storage_final_hm3: storage_final,
             generation_mw,
             equivalent_productivity_mw_per_m3s: ctx.equivalent_productivity_mw_per_m3s,
             accumulated_productivity_mw_per_m3s: ctx.accumulated_productivity_mw_per_m3s,
             incremental_inflow_energy_mw: ctx.incremental_inflow_energy_mw,
-            stored_energy_initial_mwh: ctx.stored_energy_initial_mwh,
-            stored_energy_final_mwh: ctx.stored_energy_final_mwh,
+            stored_energy_initial_mwh,
+            stored_energy_final_mwh,
             spillage_cost: spillage * view.objective_coeffs[s_col] / spec.col_scale_factor(s_col)
                 * COST_SCALE_FACTOR,
             water_value_per_hm3: ctx.water_value,
@@ -763,8 +820,8 @@ fn extract_hydro_per_block<'a>(
             generation_slack_mw: generation_slack,
             storage_violation_below_hm3: ctx.storage_violation_below,
             filling_target_violation_hm3: ctx.filling_target_violation,
-            evaporation_violation_pos_m3s: ctx.evaporation_violation_pos_m3s,
-            evaporation_violation_neg_m3s: ctx.evaporation_violation_neg_m3s,
+            evaporation_violation_pos_m3s,
+            evaporation_violation_neg_m3s,
             inflow_nonnegativity_slack_m3s: ctx.inflow_slack,
             water_withdrawal_violation_pos_m3s: ctx.withdrawal_pos,
             water_withdrawal_violation_neg_m3s: ctx.withdrawal_neg,
