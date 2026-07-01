@@ -35,6 +35,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Operational entities now sort canonically by `(operational_start_date, id)`
+  instead of `(operational_start_date, name)`.** The entity id is the stable
+  canonical key; entity names are user-chosen and vary between authors of the same
+  system, so a rename no longer changes the LP layout, cut ordering, or output
+  column order (whereas an id renumbering now does). A study whose same-date
+  entities were ordered differently by name than by id sees a reordered — but
+  numerically equivalent — LP; the optimum and reported costs are unchanged.
+
 - **Cobre is configured only through config/data files and `cobre` CLI
   arguments; environment variables are no longer an input channel.** The
   `COBRE_THREADS`, `COBRE_COLOR`, `COBRE_COMM_BACKEND`, `COBRE_W1_DIAG`,

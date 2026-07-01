@@ -261,12 +261,11 @@ fn test_realistic_multi_entity_system() {
     assert_eq!(buses[1].id, EntityId(2));
     assert_eq!(buses[2].id, EntityId(3));
 
-    // Equal dates sort by name ("hydro-12" < "upstream-A" < "upstream-B"), so ids
-    // are not in numerical order here.
+    // Equal dates sort by id ascending.
     let hydros = system.hydros();
-    assert_eq!(hydros[0].id, EntityId(12));
-    assert_eq!(hydros[1].id, EntityId(10));
-    assert_eq!(hydros[2].id, EntityId(11));
+    assert_eq!(hydros[0].id, EntityId(10));
+    assert_eq!(hydros[1].id, EntityId(11));
+    assert_eq!(hydros[2].id, EntityId(12));
 
     let cascade = system.cascade();
     assert_eq!(cascade.len(), 3);
@@ -496,7 +495,10 @@ fn test_diversion_invalid_reference_rejected() {
 }
 
 #[test]
-fn test_canonical_order_stable_under_id_renumbering() {
+fn test_canonical_order_stable_under_name_changes() {
+    // Canonical order is (operational_start_date, id): renaming entities with ids
+    // and dates held constant must not change processing order — names are
+    // user-chosen and must not influence the layout.
     let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
 
     let mut hydro_a = make_hydro(1, 1, None);
@@ -512,22 +514,28 @@ fn test_canonical_order_stable_under_id_renumbering() {
         .build()
         .expect("system must be valid");
 
-    let mut alpha_renumbered = hydro_a;
-    alpha_renumbered.id = EntityId(2);
-    let mut bravo_renumbered = hydro_b;
-    bravo_renumbered.id = EntityId(1);
+    // Rename both hydros (ids and dates unchanged), and reverse the input order.
+    let mut a_renamed = hydro_a;
+    a_renamed.name = "zulu".to_string();
+    let mut b_renamed = hydro_b;
+    b_renamed.name = "alfa".to_string();
 
     let system_b = SystemBuilder::new()
         .buses(vec![make_bus(1)])
-        .hydros(vec![alpha_renumbered, bravo_renumbered])
+        .hydros(vec![b_renamed, a_renamed])
         .build()
         .expect("system must be valid");
 
-    let names_a: Vec<&str> = system_a.hydros().iter().map(|h| h.name.as_str()).collect();
-    let names_b: Vec<&str> = system_b.hydros().iter().map(|h| h.name.as_str()).collect();
+    let ids_a: Vec<i32> = system_a.hydros().iter().map(|h| h.id.0).collect();
+    let ids_b: Vec<i32> = system_b.hydros().iter().map(|h| h.id.0).collect();
     assert_eq!(
-        names_a, names_b,
-        "renumbering ids with (date, name) held constant must not change processing order"
+        ids_a, ids_b,
+        "renaming with (date, id) held constant must not change processing order"
+    );
+    assert_eq!(
+        ids_a,
+        vec![1, 2],
+        "same-date entities order by id ascending"
     );
 }
 
@@ -553,9 +561,11 @@ fn test_canonical_order_sorts_by_distinct_date() {
 }
 
 #[test]
-fn test_canonical_order_name_tiebreak_on_equal_date() {
+fn test_canonical_order_id_tiebreak_on_equal_date() {
     let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
 
+    // id 1 has the name that sorts LAST ("B"); id 2 the name that sorts first ("A").
+    // The id tiebreak must win, so id 1 comes first regardless of name.
     let mut bus_b = make_bus(1);
     bus_b.name = "B".to_string();
     bus_b.operational_start_date = date;
@@ -564,10 +574,10 @@ fn test_canonical_order_name_tiebreak_on_equal_date() {
     bus_a.operational_start_date = date;
 
     let system = SystemBuilder::new()
-        .buses(vec![bus_b, bus_a])
+        .buses(vec![bus_a, bus_b])
         .build()
         .expect("system must be valid");
 
-    assert_eq!(system.buses()[0].name, "A");
-    assert_eq!(system.buses()[1].name, "B");
+    assert_eq!(system.buses()[0].id, EntityId(1));
+    assert_eq!(system.buses()[1].id, EntityId(2));
 }

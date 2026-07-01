@@ -121,9 +121,9 @@ pub(crate) struct RawAnticipatedConfig {
 ///
 /// Reads the JSON file, deserializes it through intermediate serde types,
 /// performs post-deserialization validation, then converts to `Vec<Thermal>`.
-/// The result is sorted by `id` ascending — the deterministic pre-sort
-/// `SystemBuilder::build` relies on to break `(operational_start_date, name)`
-/// ties when it applies the canonical entity order.
+/// The result is sorted by `id` ascending, so parser output is deterministic
+/// regardless of file row order (declaration-order invariance); the builder applies
+/// the same id as its `(operational_start_date, id)` canonical tiebreak.
 ///
 /// Parse-time validation for `anticipated_config`:
 /// - `lead_stages >= 1`
@@ -292,8 +292,8 @@ fn convert_thermals(raw: RawThermalFile, path: &Path) -> Result<Vec<Thermal>, Lo
         })
         .collect::<Result<_, LoadError>>()?;
 
-    // Pre-sort by id so equal (operational_start_date, name) keys break ties
-    // deterministically in SystemBuilder::build (declaration-order invariance).
+    // Sort by id so this parser's output is deterministic regardless of file row
+    // order (declaration-order invariance); id is the builder's canonical tiebreak.
     thermals.sort_by_key(|t| t.id.0);
     Ok(thermals)
 }

@@ -116,9 +116,9 @@ pub(crate) struct RawLineCapacity {
 /// Reads the JSON file, deserializes it through intermediate serde types,
 /// performs post-deserialization validation, then converts to `Vec<Line>` using
 /// the two-tier penalty resolution cascade (global → entity) for `exchange_cost`.
-/// The result is sorted by `id` ascending — the deterministic pre-sort
-/// `SystemBuilder::build` relies on to break `(operational_start_date, name)`
-/// ties when it applies the canonical entity order.
+/// The result is sorted by `id` ascending, so parser output is deterministic
+/// regardless of file row order (declaration-order invariance); the builder applies
+/// the same id as its `(operational_start_date, id)` canonical tiebreak.
 ///
 /// # Errors
 ///
@@ -250,8 +250,8 @@ fn convert_lines(
         })
         .collect::<Result<_, LoadError>>()?;
 
-    // Pre-sort by id so equal (operational_start_date, name) keys break ties
-    // deterministically in SystemBuilder::build (declaration-order invariance).
+    // Sort by id so this parser's output is deterministic regardless of file row
+    // order (declaration-order invariance); id is the builder's canonical tiebreak.
     lines.sort_by_key(|l| l.id.0);
     Ok(lines)
 }

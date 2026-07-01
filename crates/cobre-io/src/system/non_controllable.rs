@@ -118,9 +118,9 @@ pub(crate) struct RawNcs {
 /// performs post-deserialization validation, then converts to
 /// `Vec<NonControllableSource>` using the two-tier penalty resolution cascade
 /// (global → entity) for `curtailment_cost`. The result is sorted by `id`
-/// ascending — the deterministic pre-sort `SystemBuilder::build` relies on to
-/// break `(operational_start_date, name)` ties when it applies the canonical
-/// entity order.
+/// ascending, so parser output is deterministic regardless of file row order
+/// (declaration-order invariance); the builder applies the same id as its
+/// `(operational_start_date, id)` canonical tiebreak.
 ///
 /// # Errors
 ///
@@ -228,8 +228,8 @@ fn convert_ncs(
         })
         .collect::<Result<_, LoadError>>()?;
 
-    // Pre-sort by id so equal (operational_start_date, name) keys break ties
-    // deterministically in SystemBuilder::build (declaration-order invariance).
+    // Sort by id so this parser's output is deterministic regardless of file row
+    // order (declaration-order invariance); id is the builder's canonical tiebreak.
     sources.sort_by_key(|s| s.id.0);
     Ok(sources)
 }

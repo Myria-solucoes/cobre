@@ -39,10 +39,11 @@ use crate::{
 ///     .build()
 ///     .expect("valid system");
 ///
-/// // Canonical ordering: by operational_start_date, then by name; never by id.
-/// assert_eq!(system.buses()[0].name, "A"); // early date, name "A"
-/// assert_eq!(system.buses()[1].name, "Z"); // early date, name "Z"
-/// assert_eq!(system.buses()[2].name, "B"); // later date
+/// // Canonical ordering: by operational_start_date, then by id; never by name.
+/// // The two early-date buses order by id (2 then 3), not by name (which would be A then Z).
+/// assert_eq!(system.buses()[0].id, EntityId(2)); // early date, smaller id (name "Z")
+/// assert_eq!(system.buses()[1].id, EntityId(3)); // early date, larger id (name "A")
+/// assert_eq!(system.buses()[2].id, EntityId(1)); // later date
 /// ```
 pub struct SystemBuilder {
     buses: Vec<Bus>,
@@ -311,7 +312,7 @@ impl SystemBuilder {
 
     /// Sort every collection into canonical order, validate, and assemble the
     /// immutable [`System`]. Operational entities sort by
-    /// `(operational_start_date, name)`; stages and generic constraints sort by
+    /// `(operational_start_date, id)`; stages and generic constraints sort by
     /// `id`. All validation errors are collected before returning — no
     /// short-circuiting on the first error.
     ///
@@ -328,28 +329,24 @@ impl SystemBuilder {
     // thread those through every call and lose the fail-fast-on-duplicates short-circuit.
     #[allow(clippy::too_many_lines)]
     pub fn build(mut self) -> Result<System, Vec<ValidationError>> {
-        sort_canonical(&mut self.buses, |b| b.operational_start_date, |b| &b.name);
-        sort_canonical(&mut self.lines, |l| l.operational_start_date, |l| &l.name);
-        sort_canonical(&mut self.hydros, |h| h.operational_start_date, |h| &h.name);
-        sort_canonical(
-            &mut self.thermals,
-            |t| t.operational_start_date,
-            |t| &t.name,
-        );
+        sort_canonical(&mut self.buses, |b| b.operational_start_date, |b| b.id.0);
+        sort_canonical(&mut self.lines, |l| l.operational_start_date, |l| l.id.0);
+        sort_canonical(&mut self.hydros, |h| h.operational_start_date, |h| h.id.0);
+        sort_canonical(&mut self.thermals, |t| t.operational_start_date, |t| t.id.0);
         sort_canonical(
             &mut self.pumping_stations,
             |p| p.operational_start_date,
-            |p| &p.name,
+            |p| p.id.0,
         );
         sort_canonical(
             &mut self.contracts,
             |c| c.operational_start_date,
-            |c| &c.name,
+            |c| c.id.0,
         );
         sort_canonical(
             &mut self.non_controllable_sources,
             |n| n.operational_start_date,
-            |n| &n.name,
+            |n| n.id.0,
         );
         self.stages.sort_by_key(|s| s.id);
         self.generic_constraints.sort_by_key(|c| c.id.0);
@@ -471,15 +468,13 @@ impl SystemBuilder {
     }
 }
 
-/// Stable-sort entities by `(operational_start_date, name)`, never by `id`: the
-/// canonical order must be invariant under id renumbering to uphold the
-/// declaration-order hard rule (a tie preserves input order).
-fn sort_canonical<T>(
-    entities: &mut [T],
-    date: impl Fn(&T) -> NaiveDate,
-    name: impl Fn(&T) -> &str,
-) {
-    entities.sort_by(|a, b| date(a).cmp(&date(b)).then_with(|| name(a).cmp(name(b))));
+/// Sort entities by `(operational_start_date, id)`. The `id` tiebreak is unique
+/// within an entity type (duplicates are rejected), so this is a total order and
+/// upholds the declaration-order hard rule without relying on input order. The
+/// secondary key is the id, not the name, because names are user-chosen and vary
+/// between authors of the same system, whereas the id is the stable canonical key.
+fn sort_canonical<T>(entities: &mut [T], date: impl Fn(&T) -> NaiveDate, id: impl Fn(&T) -> i32) {
+    entities.sort_by(|a, b| date(a).cmp(&date(b)).then_with(|| id(a).cmp(&id(b))));
 }
 
 #[cfg(test)]
@@ -757,11 +752,11 @@ mod proptests {
     }
 
     /// Canonical key the builder applies to operational entities:
-    /// `(operational_start_date, name)`. Returned as owned tuples so the projected
+    /// `(operational_start_date, id)`. Returned as owned tuples so the projected
     /// post-`build()` order can be compared against the expected order.
     trait OpKey {
         fn op_date(&self) -> NaiveDate;
-        fn op_name(&self) -> &str;
+        fn op_id(&self) -> i32;
     }
 
     macro_rules! impl_op_key {
@@ -770,8 +765,8 @@ mod proptests {
                 fn op_date(&self) -> NaiveDate {
                     self.operational_start_date
                 }
-                fn op_name(&self) -> &str {
-                    &self.name
+                fn op_id(&self) -> i32 {
+                    self.id.0
                 }
             }
         };
@@ -785,21 +780,18 @@ mod proptests {
     impl_op_key!(EnergyContract);
     impl_op_key!(NonControllableSource);
 
-    fn project_op<T: OpKey>(entities: &[T]) -> Vec<(NaiveDate, String)> {
-        entities
-            .iter()
-            .map(|e| (e.op_date(), e.op_name().to_string()))
-            .collect()
+    fn project_op<T: OpKey>(entities: &[T]) -> Vec<(NaiveDate, i32)> {
+        entities.iter().map(|e| (e.op_date(), e.op_id())).collect()
     }
 
     /// Expected canonical projection: clone the reference set and apply the SAME
-    /// `(date, name)` key `build()` uses, then project. Computed, never hand-typed,
+    /// `(date, id)` key `build()` uses, then project. Computed, never hand-typed,
     /// so the expectation tracks the contract rather than a guessed order.
-    fn expected_op<T: OpKey>(mut reference: Vec<T>) -> Vec<(NaiveDate, String)> {
+    fn expected_op<T: OpKey>(mut reference: Vec<T>) -> Vec<(NaiveDate, i32)> {
         reference.sort_by(|a, b| {
             a.op_date()
                 .cmp(&b.op_date())
-                .then_with(|| a.op_name().cmp(b.op_name()))
+                .then_with(|| a.op_id().cmp(&b.op_id()))
         });
         project_op(&reference)
     }
