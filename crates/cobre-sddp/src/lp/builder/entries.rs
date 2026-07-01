@@ -6099,9 +6099,12 @@ mod pumping_water_tests {
 
     /// AC#2: a chronological `K = 2` evaporating hydro emits `K` evaporation rows,
     /// each with `−slope/2` on its own `(Sᵏ⁻¹, Sᵏ)` pair; each block's evaporation
-    /// flow appears in that block's water row with `+τ_k`; and each block's flow
-    /// column is BOUNDED `[−q_max, +q_max]` with nonzero slack objectives (the
-    /// wrong-bounds bug: leaving the extra per-block flow columns unbounded).
+    /// flow appears in that block's water row with `+τ_k`; each block's flow column
+    /// is BOUNDED `[−q_max, +q_max]` (the wrong-bounds bug: leaving the extra
+    /// per-block flow columns unbounded); and each block's directional slack
+    /// objective is the cost times THAT block's `duration_hours` (block-scoped like
+    /// the flow's `+τ_k` term — not the stage-total hours on every block, which would
+    /// inflate the penalty `K`-fold).
     #[test]
     fn chronological_evaporation_per_block() {
         let (csc, rl, ru, cols, layout) =
@@ -6144,16 +6147,17 @@ mod pumping_water_tests {
             // Flow column bounded [−q_max, +q_max], NOT the default [0, +∞).
             assert_eq!(col_lower[flow_col], -q_max, "block {k}: flow lower −q_max");
             assert_eq!(col_upper[flow_col], q_max, "block {k}: flow upper +q_max");
-            // Directional slacks carry nonzero objective.
-            let total_hours = 300.0_f64 + 444.0;
+            // Directional slacks carry nonzero objective, weighted by THIS block's
+            // hours (not the stage-total, which would inflate the penalty K-fold).
+            let block_hours = [300.0_f64, 444.0][blk];
             assert_eq!(
                 objective[layout.evap_f_plus_col(local, blk)],
-                7.0 * total_hours,
+                7.0 * block_hours,
                 "block {k}: f_plus objective"
             );
             assert_eq!(
                 objective[layout.evap_f_minus_col(local, blk)],
-                11.0 * total_hours,
+                11.0 * block_hours,
                 "block {k}: f_minus objective"
             );
         }

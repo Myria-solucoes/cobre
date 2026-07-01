@@ -47,7 +47,7 @@ pub(super) fn fill_stage_columns(
     fill_deficit_and_excess_columns(ctx, stage, stage_idx, layout, b);
     fill_inflow_slack_columns(ctx, stage_idx, layout, total_stage_hours, b);
     fill_fpha_generation_columns(ctx, stage_idx, layout, b);
-    fill_evaporation_columns(ctx, stage_idx, layout, total_stage_hours, b);
+    fill_evaporation_columns(ctx, stage, stage_idx, layout, b);
     fill_withdrawal_slack_columns(ctx, stage_idx, layout, total_stage_hours, b);
     fill_operational_slack_columns(ctx, stage, stage_idx, layout, b);
     fill_ncs_columns(ctx, stage, stage_idx, layout, b);
@@ -523,16 +523,20 @@ fn fill_fpha_generation_columns(
 /// Each block's evaporation-outflow column is bounded symmetrically `[-q_max,
 /// +q_max]` so a negative value can absorb net rainfall input on the lake surface,
 /// and carries zero objective. Each block's `f_evap_plus`/`f_evap_minus` are
-/// `[0, +inf)` and carry the directional violation costs scaled by
-/// `total_stage_hours`. Growing the column block to `K` triples (layout) without
-/// setting these bounds/objectives per block would leave the `K−1` extra flow
-/// columns unbounded `[0, +∞)` and the extra slacks with zero objective (free
-/// per-block violations). At `n_blks == 1` the loop is the single triple.
+/// `[0, +inf)` and carry the directional violation costs scaled by **that block's**
+/// `duration_hours` (mirrors `fill_block_family`; the evaporation flow enters the
+/// water balance per block, so its slack cost must be block-scoped, not
+/// `total_stage_hours` on every block — that would inflate the penalty `K`-fold at
+/// `K ≥ 2`). Growing the column block to `K` triples (layout) without setting these
+/// bounds/objectives per block would leave the `K−1` extra flow columns unbounded
+/// `[0, +∞)` and the extra slacks with zero objective (free per-block violations).
+/// At `n_blks == 1` the loop is the single triple and `blocks[0].duration_hours ==
+/// total_stage_hours`.
 fn fill_evaporation_columns(
     ctx: &TemplateBuildCtx<'_>,
+    stage: &Stage,
     stage_idx: usize,
     layout: &StageLayout,
-    total_stage_hours: f64,
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (local_idx, &h_idx) in layout.evap_hydro_indices.iter().enumerate() {
@@ -570,8 +574,9 @@ fn fill_evaporation_columns(
             bufs.col_lower[col_f_minus] = 0.0;
             bufs.col_upper[col_f_minus] = f64::INFINITY;
             // f_evap_plus = under-evaporation, f_evap_minus = over-evaporation.
-            bufs.objective[col_f_plus] = hp.evaporation_violation_neg_cost * total_stage_hours;
-            bufs.objective[col_f_minus] = hp.evaporation_violation_pos_cost * total_stage_hours;
+            let block_hours = stage.blocks[blk].duration_hours;
+            bufs.objective[col_f_plus] = hp.evaporation_violation_neg_cost * block_hours;
+            bufs.objective[col_f_minus] = hp.evaporation_violation_pos_cost * block_hours;
         }
     }
 }
@@ -3478,6 +3483,416 @@ mod block_family_slack_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::float_cmp,
+    clippy::similar_names
+)]
+mod evaporation_slack_objective_tests {
+    use std::collections::{BTreeMap, HashMap};
+
+    use cobre_core::entities::hydro::HydroGenerationModel;
+    use cobre_core::{
+        Block, BlockMode, BoundsCountsSpec, BoundsDefaults, BusStagePenalties, CascadeTopology,
+        ContractStageBounds, EntityId, Hydro, HydroStageBounds, HydroStagePenalties,
+        LineStageBounds, LineStagePenalties, NcsStagePenalties, NoiseMethod, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingStageBounds, ResolvedBounds, ResolvedExchangeFactors,
+        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
+        ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, ThermalStageBounds,
+    };
+    use cobre_stochastic::par::precompute::PrecomputedPar;
+
+    use crate::hydro_models::{
+        EvaporationModel, EvaporationModelSet, LinearizedEvaporation, ProductionModelSet,
+        ResolvedProductionModel,
+    };
+    use crate::resolved_parameters::ResolvedParameters;
+
+    use super::super::layout::ResolvedTables;
+    use super::super::test_support::{state_layout_for, zero_hydro_penalties};
+    use super::{ColumnBufs, StageLayout, TemplateBuildCtx, fill_evaporation_columns};
+
+    const N_STAGES: usize = 1;
+    const STAGE_IDX: usize = 0;
+    const NEG_COST: f64 = 3.0;
+    const POS_COST: f64 = 7.0;
+
+    /// One Operating hydro carrying a `Linearized` evaporation model, so
+    /// `identify_evap_hydros` reserves the `EVAP_COLS_PER_HYDRO` triple per block.
+    fn evaporating_hydro() -> Hydro {
+        Hydro {
+            id: EntityId(1),
+            name: "H1".to_string(),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 50.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 45.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: zero_hydro_penalties(),
+        }
+    }
+
+    fn bounds_one_hydro() -> ResolvedBounds {
+        ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 100.0,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 50.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 45.0,
+                    max_diversion_m3s: None,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        )
+    }
+
+    /// One hydro's penalties with distinct nonzero evaporation-violation costs so a
+    /// pos/neg cross-wire and a missing per-block weighting are both observable.
+    fn penalties_one_hydro() -> ResolvedPenalties {
+        let mut penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 0,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.0,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 0.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 0.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+        let hp = penalties.hydro_penalties_mut(0, STAGE_IDX);
+        hp.evaporation_violation_neg_cost = NEG_COST;
+        hp.evaporation_violation_pos_cost = POS_COST;
+        penalties
+    }
+
+    /// A `Stage` with `block_durations.len()` blocks under `block_mode`. The
+    /// durations differ per block so a per-block divisor confusion in the code under
+    /// test cannot be masked by equal blocks.
+    fn stage_with_blocks(block_mode: BlockMode, block_durations: &[f64]) -> Stage {
+        Stage {
+            index: STAGE_IDX,
+            id: STAGE_IDX as i32,
+            start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: chrono::NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: block_durations
+                .iter()
+                .enumerate()
+                .map(|(index, &duration_hours)| Block {
+                    index,
+                    name: format!("BLK{index}"),
+                    duration_hours,
+                })
+                .collect(),
+            block_mode,
+            state_config: StageStateConfig {
+                storage: false,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }
+    }
+
+    /// Owns the borrow targets for a one-evaporating-hydro `TemplateBuildCtx`.
+    struct EvapFixtures {
+        par_lp: PrecomputedPar,
+        hydros: Vec<Hydro>,
+        cascade: CascadeTopology,
+        bounds: ResolvedBounds,
+        penalties: ResolvedPenalties,
+        production_models: ProductionModelSet,
+        evaporation_models: EvaporationModelSet,
+        resolved_generic_bounds: cobre_core::ResolvedGenericConstraintBounds,
+        resolved_load_factors: ResolvedLoadFactors,
+        resolved_exchange_factors: ResolvedExchangeFactors,
+        resolved_ncs_bounds: ResolvedNcsBounds,
+        resolved_ncs_factors: ResolvedNcsFactors,
+        resolved_parameters: ResolvedParameters,
+    }
+
+    impl EvapFixtures {
+        fn new() -> Self {
+            let hydros = vec![evaporating_hydro()];
+            let cascade = CascadeTopology::build(&hydros);
+            let evaporation_models = EvaporationModelSet::new(vec![EvaporationModel::Linearized {
+                coefficients: vec![
+                    LinearizedEvaporation {
+                        intercept_m3s: 1.0,
+                        volume_slope_m3s_per_hm3: 0.0,
+                    };
+                    N_STAGES
+                ],
+                reference_volumes_hm3: vec![50.0; N_STAGES],
+            }]);
+            Self {
+                par_lp: PrecomputedPar::default(),
+                hydros,
+                cascade,
+                bounds: bounds_one_hydro(),
+                penalties: penalties_one_hydro(),
+                production_models: ProductionModelSet::new(
+                    vec![vec![
+                        ResolvedProductionModel::ConstantProductivity {
+                            productivity: 1.0
+                        };
+                        N_STAGES
+                    ]],
+                    1,
+                    N_STAGES,
+                ),
+                evaporation_models,
+                resolved_generic_bounds: cobre_core::ResolvedGenericConstraintBounds::empty(),
+                resolved_load_factors: ResolvedLoadFactors::empty(),
+                resolved_exchange_factors: ResolvedExchangeFactors::empty(),
+                resolved_ncs_bounds: ResolvedNcsBounds::empty(),
+                resolved_ncs_factors: ResolvedNcsFactors::empty(),
+                resolved_parameters: ResolvedParameters {
+                    per_param: vec![],
+                    id_to_slot: vec![],
+                },
+            }
+        }
+
+        fn make_ctx(&self) -> TemplateBuildCtx<'_> {
+            let mut hydro_pos = BTreeMap::new();
+            hydro_pos.insert(self.hydros[0].id, 0_usize);
+            TemplateBuildCtx {
+                hydros: &self.hydros,
+                thermals: &[],
+                lines: &[],
+                buses: &[],
+                load_models: &[],
+                cascade: &self.cascade,
+                resolved: ResolvedTables {
+                    bounds: &self.bounds,
+                    penalties: &self.penalties,
+                    resolved_generic_bounds: &self.resolved_generic_bounds,
+                    resolved_load_factors: &self.resolved_load_factors,
+                    resolved_exchange_factors: &self.resolved_exchange_factors,
+                    resolved_ncs_bounds: &self.resolved_ncs_bounds,
+                    resolved_ncs_factors: &self.resolved_ncs_factors,
+                    resolved_parameters: &self.resolved_parameters,
+                },
+                hydro_pos,
+                thermal_pos: BTreeMap::new(),
+                line_pos: BTreeMap::new(),
+                bus_pos: BTreeMap::new(),
+                par_lp: &self.par_lp,
+                production_models: &self.production_models,
+                evaporation_models: &self.evaporation_models,
+                generic_constraints: &[],
+                non_controllable_sources: &[],
+                pumping_stations: &[],
+                pumping_pos: BTreeMap::new(),
+                n_pumping: 0,
+                contracts: &[],
+                contract_pos: BTreeMap::new(),
+                n_contract_import: 0,
+                n_contract_export: 0,
+                diversion_upstream: HashMap::new(),
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_buses: 0,
+                max_par_order: 0,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
+                anticipated_windows: vec![],
+                study_stage_ids: vec![],
+                has_penalty: false,
+                cumulative_discount_factors: vec![1.0],
+                total_hours_per_stage: vec![744.0],
+                filling_v_target: BTreeMap::new(),
+            }
+        }
+    }
+
+    /// Per-block `f_evap_plus`/`f_evap_minus` objectives plus the layout's `n_blks`.
+    struct EvapFill {
+        f_plus: Vec<f64>,
+        f_minus: Vec<f64>,
+        n_blks: usize,
+    }
+
+    fn run_fill(fixtures: &EvapFixtures, stage: &Stage) -> EvapFill {
+        let ctx = fixtures.make_ctx();
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, stage, STAGE_IDX);
+        let mut col_lower = vec![0.0_f64; layout.num_cols];
+        let mut col_upper = vec![f64::INFINITY; layout.num_cols];
+        let mut objective = vec![0.0_f64; layout.num_cols];
+        let mut bufs = ColumnBufs {
+            col_lower: &mut col_lower,
+            col_upper: &mut col_upper,
+            objective: &mut objective,
+        };
+        fill_evaporation_columns(&ctx, stage, STAGE_IDX, &layout, &mut bufs);
+        let f_plus = (0..layout.n_blks)
+            .map(|blk| objective[layout.evap_f_plus_col(0, blk)])
+            .collect();
+        let f_minus = (0..layout.n_blks)
+            .map(|blk| objective[layout.evap_f_minus_col(0, blk)])
+            .collect();
+        EvapFill {
+            f_plus,
+            f_minus,
+            n_blks: layout.n_blks,
+        }
+    }
+
+    /// In chronological K ≥ 2 each block's evaporation-violation slack objective is
+    /// the directional cost times THAT block's `duration_hours` — not the stage-total
+    /// hours on every block (the pre-fix inflation) — and the per-block sum telescopes
+    /// to `cost * total_stage_hours` (the single-slack parallel total).
+    #[test]
+    fn chronological_evap_slack_objective_is_block_weighted() {
+        let block_durations = [300.0, 444.0, 148.0];
+        let total_hours: f64 = block_durations.iter().sum();
+        let fixtures = EvapFixtures::new();
+        let chrono = run_fill(
+            &fixtures,
+            &stage_with_blocks(BlockMode::Chronological, &block_durations),
+        );
+
+        assert_eq!(
+            chrono.n_blks,
+            block_durations.len(),
+            "layout must reserve one evap triple per block"
+        );
+        for (blk, &hours) in block_durations.iter().enumerate() {
+            assert_eq!(
+                chrono.f_plus[blk],
+                NEG_COST * hours,
+                "blk {blk}: f_evap_plus objective must be neg_cost * this block's hours"
+            );
+            assert_eq!(
+                chrono.f_minus[blk],
+                POS_COST * hours,
+                "blk {blk}: f_evap_minus objective must be pos_cost * this block's hours"
+            );
+        }
+        let plus_sum: f64 = chrono.f_plus.iter().sum();
+        let minus_sum: f64 = chrono.f_minus.iter().sum();
+        assert_eq!(
+            plus_sum,
+            NEG_COST * total_hours,
+            "Σ f_evap_plus over blocks must telescope to neg_cost * total_stage_hours"
+        );
+        assert_eq!(
+            minus_sum,
+            POS_COST * total_hours,
+            "Σ f_evap_minus over blocks must telescope to pos_cost * total_stage_hours"
+        );
+    }
+
+    /// Parallel (`n_blks == 1`): the single evaporation slack objective is
+    /// `cost * total_stage_hours` (`blocks[0].duration_hours == total_stage_hours`),
+    /// unchanged by the per-block weighting.
+    #[test]
+    fn parallel_evap_slack_objective_equals_total_stage_hours() {
+        let total_hours = 744.0;
+        let fixtures = EvapFixtures::new();
+        let parallel = run_fill(
+            &fixtures,
+            &stage_with_blocks(BlockMode::Parallel, &[total_hours]),
+        );
+
+        assert_eq!(parallel.n_blks, 1, "parallel mode reserves one block");
+        assert_eq!(
+            parallel.f_plus[0],
+            NEG_COST * total_hours,
+            "parallel f_evap_plus objective must equal neg_cost * total_stage_hours"
+        );
+        assert_eq!(
+            parallel.f_minus[0],
+            POS_COST * total_hours,
+            "parallel f_evap_minus objective must equal pos_cost * total_stage_hours"
+        );
     }
 }
 
