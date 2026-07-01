@@ -38,8 +38,8 @@
 //! All 24 variable names from the variable catalog are recognised. Block-capable
 //! variables accept an optional second argument (`hydro_turbined`, `hydro_spillage`,
 //! `hydro_diversion`, `hydro_outflow`, `hydro_generation`, `hydro_inflow`,
-//! `hydro_storage_initial`, `hydro_storage_final`, …); stage-only variables
-//! (`hydro_storage`, `hydro_evaporation`, `hydro_withdrawal`,
+//! `hydro_evaporation`, `hydro_storage_initial`, `hydro_storage_final`, …);
+//! stage-only variables (`hydro_storage`, `hydro_withdrawal`,
 //! `anticipated_decision`) must not have a block argument. Use
 //! `anticipated_decision(thermal_id)` to reference the per-stage commitment column of an
 //! anticipated thermal unit (no block index accepted).
@@ -742,16 +742,6 @@ fn build_variable_ref(
                 hydro_id: entity_id,
             })
         }
-        "hydro_evaporation" => {
-            if block_id.is_some() {
-                return Err(format!(
-                    "variable \"{name}\" does not accept a block argument"
-                ));
-            }
-            Ok(VariableRef::HydroEvaporation {
-                hydro_id: entity_id,
-            })
-        }
         "hydro_withdrawal" => {
             if block_id.is_some() {
                 return Err(format!(
@@ -763,6 +753,10 @@ fn build_variable_ref(
             })
         }
         // Block-capable variables.
+        "hydro_evaporation" => Ok(VariableRef::HydroEvaporation {
+            hydro_id: entity_id,
+            block_id,
+        }),
         "hydro_inflow" => Ok(VariableRef::HydroInflow {
             hydro_id: entity_id,
             block_id,
@@ -1241,6 +1235,7 @@ mod tests {
                 "hydro_evaporation(0)",
                 VariableRef::HydroEvaporation {
                     hydro_id: EntityId(0),
+                    block_id: None,
                 },
             ),
             (

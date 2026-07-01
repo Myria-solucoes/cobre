@@ -11,6 +11,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Generic constraints can reference per-block hydro storage and evaporation.**
+  `hydro_storage_initial(h)` and `hydro_storage_final(h)` reference a stage's
+  initial (`S⁰`) and final (`Sᴷ`) storage; supplying a block index —
+  `hydro_storage_initial(h, k)` / `hydro_storage_final(h, k)` — references the
+  storage boundary at the start / end of block `k` (available on chronological
+  stages; a parallel stage exposes only its two endpoints, so an interior block
+  reference there is rejected). `hydro_evaporation(h, k)` selects block `k`'s
+  evaporation, mirroring the block-index convention used by the flow variables;
+  bare `hydro_evaporation(h)` is the stage evaporation in parallel mode (every
+  block shares the stage's storage endpoints) but is rejected on a chronological
+  stage with more than one block, where the blocks differ and a block must be
+  named. A block reference a stage cannot expose is rejected at load with a
+  message naming the constraint, the block, and the stage's block count.
+
 - **Every `system/*.json` entity now carries a required `operational_start_date`
   field (an ISO-8601 `YYYY-MM-DD` calendar date).** Buses, hydros, thermals,
   lines, non-controllable sources, pumping stations, and energy contracts must

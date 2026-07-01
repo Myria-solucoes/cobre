@@ -834,6 +834,7 @@ fn hydro_evaporation_maps_to_evaporation_flow_col() {
     let result = resolve_variable_ref(
         &VariableRef::HydroEvaporation {
             hydro_id: EntityId(10),
+            block_id: None,
         },
         0,
         0, // stage_idx
@@ -909,6 +910,7 @@ fn hydro_evaporation_no_evap_model_returns_empty() {
     let result = resolve_variable_ref(
         &VariableRef::HydroEvaporation {
             hydro_id: EntityId(20),
+            block_id: None,
         },
         0,
         0,
@@ -921,6 +923,98 @@ fn hydro_evaporation_no_evap_model_returns_empty() {
     );
 
     assert!(result.is_empty());
+}
+
+/// At `K = 3`, `HydroEvaporation{None}` resolves to the single block-0 column (one
+/// entry, NOT a sum over blocks); `Some(k)` selects distinct per-block columns and
+/// an out-of-range block resolves to empty.
+#[test]
+fn hydro_evaporation_none_resolves_block_zero_not_sum() {
+    let evap_indexer = crate::test_support::geometry(
+        &crate::test_support::GeometryDims {
+            hydro_count: 2,
+            n_buses: 1,
+            n_blks: 3,
+            ..Default::default()
+        },
+        vec![],
+        &[],
+        vec![0],
+    );
+
+    let prod_models = ProductionModelSet::new(
+        vec![
+            vec![ResolvedProductionModel::ConstantProductivity { productivity: 1.0 }],
+            vec![ResolvedProductionModel::ConstantProductivity { productivity: 1.0 }],
+        ],
+        2,
+        1,
+    );
+
+    let hpos: BTreeMap<EntityId, usize> =
+        [(EntityId(10), 0), (EntityId(20), 1)].into_iter().collect();
+    let tpos: BTreeMap<EntityId, usize> = BTreeMap::new();
+    let bpos: BTreeMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
+    let lpos: BTreeMap<EntityId, usize> = BTreeMap::new();
+
+    let positions = super::EntityPositionMaps {
+        hydro: &hpos,
+        thermal: &tpos,
+        bus: &bpos,
+        line: &lpos,
+    };
+    let cascade = empty_cascade();
+    let diversion_upstream: HashMap<EntityId, Vec<usize>> = HashMap::new();
+    let cascade_refs = CascadeRefs {
+        cascade: &cascade,
+        diversion_upstream: &diversion_upstream,
+    };
+    let no_stations: Vec<PumpingStation> = Vec::new();
+    let empty_pumping_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
+    let pumping_refs = PumpingRefs {
+        col_pumping_start: 0,
+        pumping_stations: &no_stations,
+        pumping_pos: &empty_pumping_pos,
+    };
+    let state = StateLayout::new(2, 0, 0, 0, vec![], &[0, 0]);
+    let geom = make_geom(&evap_indexer, &state, 3, &[]);
+    let no_contracts: Vec<EnergyContract> = Vec::new();
+    let empty_contract_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
+    let contract_refs = ContractRefs {
+        contracts: &no_contracts,
+        contract_pos: &empty_contract_pos,
+    };
+
+    let resolve = |block_id: Option<usize>| {
+        resolve_variable_ref(
+            &VariableRef::HydroEvaporation {
+                hydro_id: EntityId(10),
+                block_id,
+            },
+            0,
+            0,
+            &geom,
+            &prod_models,
+            &positions,
+            &cascade_refs,
+            &pumping_refs,
+            &contract_refs,
+        )
+    };
+
+    let none = resolve(None);
+    assert_eq!(
+        none.len(),
+        1,
+        "None resolves to one column, not a K-block sum"
+    );
+    assert_eq!(none, resolve(Some(0)), "None resolves to block 0");
+    assert_ne!(resolve(Some(0)), resolve(Some(1)));
+    assert_ne!(resolve(Some(1)), resolve(Some(2)));
+    assert!(
+        resolve(Some(3)).is_empty(),
+        "out-of-range block resolves to empty"
+    );
 }
 
 // ── Pumping tests ─────────────────────────────────────────────────────────
@@ -1211,6 +1305,7 @@ fn block_independent_kinds_classify_true() {
     assert!(variable_ref_is_block_independent(
         &VariableRef::HydroEvaporation {
             hydro_id: EntityId(10),
+            block_id: None,
         }
     ));
     assert!(variable_ref_is_block_independent(
@@ -2563,10 +2658,10 @@ fn hydro_storage_final_shares_interior_column_with_next_initial() {
     assert_eq!(final_0, vec![(STORAGE_INTERNAL_START, 1.0)]);
 }
 
-/// `block_id = None` resolves the current `block_idx`'s own boundary (the
-/// caller's per-block expansion), so each block yields its own boundary column.
+/// `block_id = None` resolves to the fixed stage endpoint — `S⁰` for initial,
+/// `Sᴷ` for final — independent of the caller's `block_idx`.
 #[test]
-fn hydro_storage_boundary_none_resolves_per_block() {
+fn hydro_storage_boundary_none_resolves_stage_endpoint() {
     let indexer = make_indexer();
     let state = make_state();
     let geom = make_chronological_geom(&indexer, &state);
@@ -2576,61 +2671,37 @@ fn hydro_storage_boundary_none_resolves_per_block() {
     let bpos = make_bus_pos();
     let lpos = make_line_pos();
 
-    let per_block_initial: Vec<(usize, f64)> = (0..3)
-        .map(|blk| {
-            let r = call(
-                VariableRef::HydroStorageInitial {
-                    hydro_id: EntityId(10),
-                    block_id: None,
-                },
-                blk,
-                &geom,
-                &prod,
-                &hpos,
-                &tpos,
-                &bpos,
-                &lpos,
-            );
-            assert_eq!(r.len(), 1);
-            r[0]
-        })
-        .collect();
-    assert_eq!(
-        per_block_initial,
-        vec![
-            (geom.block_storage_col(0, 0), 1.0),
-            (geom.block_storage_col(0, 1), 1.0),
-            (geom.block_storage_col(0, 2), 1.0),
-        ]
-    );
+    for blk in 0..3 {
+        let initial = call(
+            VariableRef::HydroStorageInitial {
+                hydro_id: EntityId(10),
+                block_id: None,
+            },
+            blk,
+            &geom,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+        );
+        assert_eq!(initial, vec![(geom.block_storage_col(0, 0), 1.0)]);
 
-    let per_block_final: Vec<(usize, f64)> = (0..3)
-        .map(|blk| {
-            let r = call(
-                VariableRef::HydroStorageFinal {
-                    hydro_id: EntityId(10),
-                    block_id: None,
-                },
-                blk,
-                &geom,
-                &prod,
-                &hpos,
-                &tpos,
-                &bpos,
-                &lpos,
-            );
-            assert_eq!(r.len(), 1);
-            r[0]
-        })
-        .collect();
-    assert_eq!(
-        per_block_final,
-        vec![
-            (geom.block_storage_col(0, 1), 1.0),
-            (geom.block_storage_col(0, 2), 1.0),
-            (geom.block_storage_col(0, 3), 1.0),
-        ]
-    );
+        let final_ = call(
+            VariableRef::HydroStorageFinal {
+                hydro_id: EntityId(10),
+                block_id: None,
+            },
+            blk,
+            &geom,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+        );
+        assert_eq!(final_, vec![(geom.block_storage_col(0, 3), 1.0)]);
+    }
 }
 
 /// A `hydro_pos` miss resolves to an empty vec for both boundary variants.
@@ -2660,22 +2731,25 @@ fn hydro_storage_boundary_unknown_id_returns_empty() {
     }
 }
 
-/// Both storage boundary variants are block-DEPENDENT (`false`), while the
-/// stage-final alias `HydroStorage` stays block-INDEPENDENT (`true`).
+/// Both storage boundary variants resolve to a fixed column (a stage endpoint or a
+/// named boundary), so they are block-INDEPENDENT (`true`) for `None` and `Some`
+/// alike, like the stage-final alias `HydroStorage`.
 #[test]
-fn storage_boundary_variants_are_block_dependent() {
-    assert!(!variable_ref_is_block_independent(
-        &VariableRef::HydroStorageInitial {
-            hydro_id: EntityId(10),
-            block_id: None,
-        }
-    ));
-    assert!(!variable_ref_is_block_independent(
-        &VariableRef::HydroStorageFinal {
-            hydro_id: EntityId(10),
-            block_id: None,
-        }
-    ));
+fn storage_boundary_variants_are_block_independent() {
+    for block_id in [None, Some(1)] {
+        assert!(variable_ref_is_block_independent(
+            &VariableRef::HydroStorageInitial {
+                hydro_id: EntityId(10),
+                block_id,
+            }
+        ));
+        assert!(variable_ref_is_block_independent(
+            &VariableRef::HydroStorageFinal {
+                hydro_id: EntityId(10),
+                block_id,
+            }
+        ));
+    }
     assert!(variable_ref_is_block_independent(
         &VariableRef::HydroStorage {
             hydro_id: EntityId(10),

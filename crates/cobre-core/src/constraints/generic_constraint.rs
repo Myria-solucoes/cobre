@@ -12,11 +12,14 @@
 //!
 //! [`VariableRef`] covers all 24 LP variable types defined in the spec (§15).
 //! Each variant carries the entity ID and, for block-capable variables, an
-//! optional block ID. `Some(i)` references block `i`. `None` selects between a
-//! single collapsed stage-level row (block-independent expression: every term is
-//! stage-level) and one row per block (block-dependent expression: any
-//! block-level term, e.g. [`VariableRef::HydroInflow`]) — it **never** means
-//! "sum over blocks".
+//! optional block ID. `Some(i)` references block `i`. `None` is not
+//! block-specific and resolves by the variable's nature: per-block flows (e.g.
+//! [`VariableRef::HydroInflow`]) follow the materialized row's block — a single
+//! collapsed stage-level row for a block-independent expression, one row per
+//! block otherwise; stage-level stocks ([`VariableRef::HydroStorage`] and the
+//! storage-boundary variants at their stage endpoints S⁰/Sᴷ) resolve to a single
+//! fixed column; [`VariableRef::HydroEvaporation`] with `None` resolves to block 0
+//! (the stage evaporation in parallel mode). No variant sums over blocks.
 //!
 //! # Examples
 //!
@@ -106,12 +109,18 @@ pub enum VariableRef {
         /// Block selector; see the module header for `None` semantics.
         block_id: Option<usize>,
     },
-    /// Signed evaporation flow from a hydro reservoir (m³/s). Stage-level, not
-    /// block-specific. Positive values represent net evaporative outflow;
-    /// negative values represent net rainfall input absorbed by the reservoir.
+    /// Signed evaporation flow from a hydro reservoir (m³/s). Positive values
+    /// represent net evaporative outflow; negative values represent net rainfall
+    /// input absorbed by the reservoir. `Some(k)` selects block `k`; `None` selects
+    /// block 0, which in parallel mode is the stage evaporation (every block shares
+    /// the same stage endpoints). In chronological mode with `K > 1` the blocks
+    /// differ, so a `None` reference is rejected by generic-constraint validation —
+    /// a block must be named.
     HydroEvaporation {
         /// Hydro plant identifier.
         hydro_id: EntityId,
+        /// Block selector; `None` = block 0 (the stage evaporation in parallel mode).
+        block_id: Option<usize>,
     },
     /// Water withdrawal from a hydro reservoir (m³/s). Stage-level, not block-specific.
     HydroWithdrawal {
@@ -240,34 +249,31 @@ pub enum VariableRef {
         /// Block selector; `None` expands to one row per block.
         block_id: Option<usize>,
     },
-    /// Start-of-block storage boundary `Sᵉᶠᶠ_ᵇˡᵏ` for a hydro reservoir (hm³).
+    /// Start-of-block storage boundary for a hydro reservoir (hm³).
     ///
-    /// References the incoming storage column of block `block_id`; `Initial{0}`
-    /// is the pinned stage-initial anchor `S⁰`. Block-dependent — a `None`
-    /// selector expands to one row per block per the `block_id = None` contract in
-    /// the module header.
+    /// `Some(k)` references the incoming storage column of block `k` (boundary
+    /// `Sᵏ`); `None` references the stage-initial anchor `S⁰`. A stage-level stock:
+    /// resolves to a single fixed column, never a per-block expansion.
     ///
-    /// Appended at the END of the enum to preserve every existing variant's
-    /// postcard discriminant.
+    /// Appended at the END of the enum to keep its postcard discriminant stable.
     HydroStorageInitial {
         /// Hydro plant identifier.
         hydro_id: EntityId,
-        /// Block selector; `None` expands to one row per block.
+        /// Block selector; `None` = stage-initial `S⁰`.
         block_id: Option<usize>,
     },
-    /// End-of-block storage boundary `Sᵉᶠᶠ_ᵇˡᵏ⁺¹` for a hydro reservoir (hm³).
+    /// End-of-block storage boundary for a hydro reservoir (hm³).
     ///
-    /// References the outgoing storage column of block `block_id`; `Final{K-1}`
-    /// equals the stage-final `HydroStorage`. Block-dependent — a `None` selector
-    /// expands to one row per block per the `block_id = None` contract in the
-    /// module header.
+    /// `Some(k)` references the outgoing storage column of block `k` (boundary
+    /// `Sᵏ⁺¹`); `None` references the stage-final `Sᴷ`, equal to `HydroStorage`.
+    /// A stage-level stock: resolves to a single fixed column, never a per-block
+    /// expansion.
     ///
-    /// Appended at the END of the enum to preserve every existing variant's
-    /// postcard discriminant.
+    /// Appended at the END of the enum to keep its postcard discriminant stable.
     HydroStorageFinal {
         /// Hydro plant identifier.
         hydro_id: EntityId,
-        /// Block selector; `None` expands to one row per block.
+        /// Block selector; `None` = stage-final `Sᴷ`.
         block_id: Option<usize>,
     },
 }
@@ -421,6 +427,7 @@ mod tests {
                 "HydroEvaporation",
                 VariableRef::HydroEvaporation {
                     hydro_id: EntityId(0),
+                    block_id: None,
                 },
             ),
             (

@@ -1132,14 +1132,15 @@ fn one_hydro_system(
     builder.build().expect("one_hydro_system: valid")
 }
 
-/// A chronological `K=3` per-block ramp `hydro_storage_final(h, b) −
-/// hydro_storage_initial(h, b) ≤ Δ` with `block_id = None` expands to exactly `K`
-/// generic rows; row `blk` carries `+1.0` on `block_storage_col(h, blk+1)` and
-/// `−1.0` on `block_storage_col(h, blk)`. Boundary columns (N=1, storage.start=0,
-/// storage_in.start=2, storage_internal_start=4, K=3): S⁰=2, S¹=4, S²=5, S³=0.
+/// A chronological `K=3` stage net-storage constraint `hydro_storage_final(h) −
+/// hydro_storage_initial(h) ≤ Δ` with `block_id = None` collapses to a single
+/// stage-level row: `+1.0` on the stage-final boundary `Sᴷ` and `−1.0` on the
+/// stage-initial boundary `S⁰` (both `None` selectors are stage endpoints, so the
+/// expression is block-independent). Boundary columns (N=1, storage.start=0,
+/// storage_in.start=2, K=3): S⁰=2, Sᴷ=0.
 #[test]
 #[allow(clippy::cast_possible_wrap)]
-fn generic_constraint_chronological_per_block_ramp_expands_to_k_rows() {
+fn generic_constraint_chronological_stage_net_storage_one_row() {
     use cobre_core::ResolvedGenericConstraintBounds;
     use cobre_core::{
         BlockMode, ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm,
@@ -1201,38 +1202,22 @@ fn generic_constraint_chronological_per_block_ramp_expands_to_k_rows() {
 
     assert_eq!(
         t.num_rows,
-        baseline_rows + n_blks,
-        "per-block ramp with block_id=None must expand to exactly K rows"
+        baseline_rows + 1,
+        "stage net storage (block_id=None) collapses to exactly one row"
     );
 
-    // Boundary columns per block: initial k=blk, final k=blk+1.
-    let boundary_col = |k: usize| -> usize {
-        match k {
-            0 => 2,                         // S⁰ = storage_in.start + 0
-            3 => 0,                         // Sᴷ = storage.start + 0
-            interior => 4 + (interior - 1), // storage_internal_start + (k - 1)
-        }
-    };
-
-    for blk in 0..n_blks {
-        let generic_row = baseline_rows + blk;
-        let final_col = boundary_col(blk + 1);
-        let initial_col = boundary_col(blk);
-
-        let final_entries = csc_entries_at(t, final_col, generic_row);
-        let final_total: f64 = final_entries.iter().sum();
-        assert!(
-            (final_total - 1.0).abs() < f64::EPSILON,
-            "row {blk}: expected +1.0 on final boundary col {final_col}, got {final_total}"
-        );
-
-        let initial_entries = csc_entries_at(t, initial_col, generic_row);
-        let initial_total: f64 = initial_entries.iter().sum();
-        assert!(
-            (initial_total + 1.0).abs() < f64::EPSILON,
-            "row {blk}: expected -1.0 on initial boundary col {initial_col}, got {initial_total}"
-        );
-    }
+    // S⁰ = storage_in.start + 0 = 2; Sᴷ = storage.start + 0 = 0.
+    let generic_row = baseline_rows;
+    let final_total: f64 = csc_entries_at(t, 0, generic_row).iter().sum();
+    assert!(
+        (final_total - 1.0).abs() < f64::EPSILON,
+        "expected +1.0 on stage-final Sᴷ (col 0), got {final_total}"
+    );
+    let initial_total: f64 = csc_entries_at(t, 2, generic_row).iter().sum();
+    assert!(
+        (initial_total + 1.0).abs() < f64::EPSILON,
+        "expected -1.0 on stage-initial S⁰ (col 2), got {initial_total}"
+    );
 }
 
 /// A `block_id = Some(b)` ramp produces exactly one generic row referencing block

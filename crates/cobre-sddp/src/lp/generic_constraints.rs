@@ -209,15 +209,15 @@ pub(crate) fn resolve_variable_ref(
         VariableRef::HydroStorage { hydro_id } => resolve_hydro_storage(*hydro_id, geom, hydro_pos),
 
         VariableRef::HydroStorageInitial { hydro_id, block_id } => {
-            resolve_hydro_storage_boundary(*hydro_id, *block_id, block_idx, 0, geom, hydro_pos)
+            resolve_hydro_storage_boundary(*hydro_id, *block_id, 0, geom, hydro_pos)
         }
 
         VariableRef::HydroStorageFinal { hydro_id, block_id } => {
-            resolve_hydro_storage_boundary(*hydro_id, *block_id, block_idx, 1, geom, hydro_pos)
+            resolve_hydro_storage_boundary(*hydro_id, *block_id, 1, geom, hydro_pos)
         }
 
-        VariableRef::HydroEvaporation { hydro_id } => {
-            resolve_hydro_evaporation(*hydro_id, geom, hydro_pos)
+        VariableRef::HydroEvaporation { hydro_id, block_id } => {
+            resolve_hydro_evaporation(*hydro_id, *block_id, geom, hydro_pos)
         }
 
         VariableRef::HydroInflow { hydro_id, block_id } => resolve_hydro_inflow(
@@ -389,19 +389,19 @@ pub(crate) fn resolve_variable_ref(
 }
 
 /// Whether a single [`VariableRef`] resolves to the *same* LP column(s) regardless
-/// of `block_idx` — **block-independent** ("stock"). Only three kinds qualify:
-/// [`VariableRef::HydroStorage`] (the block-independent stage-final storage alias
-/// `Sᴷ`), [`VariableRef::HydroEvaporation`], and [`VariableRef::AnticipatedDecision`].
+/// of `block_idx` — **block-independent** ("stock"). Five kinds qualify:
+/// [`VariableRef::HydroStorage`] (stage-final alias `Sᴷ`),
+/// [`VariableRef::AnticipatedDecision`], [`VariableRef::HydroEvaporation`] (a fixed
+/// single-block column or the all-block sum — both `block_idx`-independent), and the
+/// two storage-boundary variants [`VariableRef::HydroStorageInitial`] /
+/// [`VariableRef::HydroStorageFinal`], each resolving to a fixed boundary column
+/// (`Sᵏ` / `S⁰` / `Sᴷ`) that does not follow the materialized row's block.
 ///
 /// [`VariableRef::HydroInflow`] is block-DEPENDENT: its upstream-release terms are
 /// per-block columns. Classifying it "stock" would collapse a multi-block expression
 /// to one mis-priced stage-level row reading upstream columns at a single arbitrary
 /// block, silently dropping the other blocks. [`VariableRef::PumpingFlow`] /
-/// [`VariableRef::PumpingPower`] are block-level for the same reason.
-/// [`VariableRef::HydroStorageInitial`] / [`VariableRef::HydroStorageFinal`] are the
-/// two block-dependent storage boundary variants — each row references its own
-/// block's boundary via [`GenericResolverGeom::block_storage_col`], so classifying
-/// them "stock" would collapse to one mis-priced boundary. The stub kinds
+/// [`VariableRef::PumpingPower`] are block-level for the same reason. The stub kinds
 /// (withdrawal, contracts, non-controllable) resolve to no columns and are
 /// conservatively block-level, so only *provably* stock variables enable the
 /// single-row collapse.
@@ -412,11 +412,11 @@ pub(crate) fn resolve_variable_ref(
 fn variable_ref_is_block_independent(var_ref: &VariableRef) -> bool {
     match var_ref {
         VariableRef::HydroStorage { .. }
+        | VariableRef::HydroStorageInitial { .. }
+        | VariableRef::HydroStorageFinal { .. }
         | VariableRef::HydroEvaporation { .. }
         | VariableRef::AnticipatedDecision { .. } => true,
         VariableRef::HydroInflow { .. }
-        | VariableRef::HydroStorageInitial { .. }
-        | VariableRef::HydroStorageFinal { .. }
         | VariableRef::HydroTurbined { .. }
         | VariableRef::HydroSpillage { .. }
         | VariableRef::HydroDiversion { .. }
@@ -466,22 +466,26 @@ fn resolve_hydro_storage(
     }
 }
 
-/// Resolve `HydroStorageInitial`/`HydroStorageFinal` to a single per-block storage
-/// boundary column via [`GenericResolverGeom::block_storage_col`]:
-/// `boundary_offset = 0` → initial `block_storage_col(pos, eff_blk)`;
-/// `boundary_offset = 1` → final `block_storage_col(pos, eff_blk + 1)`. Returns an
-/// empty vec on a `hydro_pos` miss (mirrors [`resolve_hydro_storage`]).
+/// Resolve `HydroStorageInitial`/`HydroStorageFinal` to a single fixed storage
+/// boundary column via [`GenericResolverGeom::block_storage_col`].
+/// `boundary_offset = 0` (initial): `Some(k)` → boundary `k`, `None` → stage-initial
+/// `S⁰` (boundary `0`). `boundary_offset = 1` (final): `Some(k)` → boundary `k + 1`,
+/// `None` → stage-final `Sᴷ` (boundary `K`). Both are stage-level stocks (fixed
+/// column, no per-block expansion). Returns an empty vec on a `hydro_pos` miss
+/// (mirrors [`resolve_hydro_storage`]).
 fn resolve_hydro_storage_boundary(
     hydro_id: EntityId,
     block_id: Option<usize>,
-    block_idx: usize,
     boundary_offset: usize,
     geom: &GenericResolverGeom<'_>,
     hydro_pos: &BTreeMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     if let Some(&pos) = hydro_pos.get(&hydro_id) {
-        let eff_blk = block_id.unwrap_or(block_idx);
-        vec![(geom.block_storage_col(pos, eff_blk + boundary_offset), 1.0)]
+        let boundary = match block_id {
+            Some(k) => k + boundary_offset,
+            None => boundary_offset * geom.n_blks,
+        };
+        vec![(geom.block_storage_col(pos, boundary), 1.0)]
     } else {
         vec![]
     }
@@ -559,8 +563,14 @@ fn resolve_hydro_inflow(
 
 /// Resolve `HydroEvaporation` to the evaporation-outflow column for the matching
 /// hydro; empty vec when the hydro has no linearized evaporation at this stage.
+/// `Some(k)` selects block `k` (empty when out of range); `None` selects block 0.
+/// In parallel mode every block's evaporation is linearized against the same stage
+/// endpoints, so block 0 is the stage evaporation; `None` in chronological `K > 1`
+/// (where blocks differ) is rejected upstream by generic-constraint validation, so
+/// it is not reached here for a valid study.
 fn resolve_hydro_evaporation(
     hydro_id: EntityId,
+    block_id: Option<usize>,
     geom: &GenericResolverGeom<'_>,
     hydro_pos: &BTreeMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
@@ -572,11 +582,13 @@ fn resolve_hydro_evaporation(
     let Some(local_idx) = geom.evap_hydro_indices.iter().position(|&p| p == sys_pos) else {
         return vec![];
     };
-    // `evap_indices` is block-major (`local * n_blks + blk`); block 0 preserves the
-    // current single-block resolution. Per-block evaporation in generic constraints
-    // is out of scope here.
-    let evaporation_flow_col = geom.evap_indices[local_idx * geom.n_blks].evaporation_flow_col;
-    vec![(evaporation_flow_col, 1.0)]
+    // `evap_indices` is block-major (`local * n_blks + blk`); `None` maps to block 0.
+    let base = local_idx * geom.n_blks;
+    let blk = block_id.unwrap_or(0);
+    if blk >= geom.n_blks {
+        return vec![];
+    }
+    vec![(geom.evap_indices[base + blk].evaporation_flow_col, 1.0)]
 }
 
 /// Resolve `HydroOutflow` to two block-level columns (turbine before spillage). A
