@@ -1,4 +1,4 @@
-use cobre_core::{CoefficientRef, ConstraintSense, ContractType, Stage};
+use cobre_core::{BlockMode, CoefficientRef, ConstraintSense, ContractType, Stage};
 
 use crate::generic_constraints::resolve_variable_ref;
 use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
@@ -138,7 +138,31 @@ pub(super) fn resolve_shortcircuit_target(
 /// non-`PreFilling` downstream by [`fill_prefilling_shortcircuit`] (the contract
 /// home); the standard `Operating`/`Filling` fill runs unchanged for every other
 /// hydro.
+///
+/// In `BlockMode::Chronological` the single per-hydro row becomes `K` chained rows
+/// via [`fill_chronological_water_entries`]; summing them telescopes to this
+/// parallel row, so `K = 1` is byte-identical to parallel.
 pub(super) fn fill_state_and_water_entries(
+    ctx: &TemplateBuildCtx<'_>,
+    stage: &Stage,
+    stage_idx: usize,
+    layout: &StageLayout,
+    col_entries: &mut [Vec<(usize, f64)>],
+) {
+    match stage.block_mode {
+        BlockMode::Parallel => {
+            fill_parallel_water_entries(ctx, stage, stage_idx, layout, col_entries);
+        }
+        BlockMode::Chronological => {
+            fill_chronological_water_entries(ctx, stage, stage_idx, layout, col_entries);
+        }
+    }
+}
+
+/// Parallel single-row water-balance fill: one equality row per hydro summing all
+/// blocks, with per-block flow terms scaled by `τ_k` and the inflow/AR-lag/
+/// evaporation/withdrawal families scaled once by the stage total `ζ = Σ_k τ_k`.
+fn fill_parallel_water_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
     stage_idx: usize,
@@ -223,7 +247,7 @@ pub(super) fn fill_state_and_water_entries(
     }
 
     for (local_idx, &h_idx) in layout.evap_hydro_indices.iter().enumerate() {
-        let col_evaporation_flow = layout.evap_flow_col(local_idx);
+        let col_evaporation_flow = layout.evap_flow_col(local_idx, 0);
         let row = row_water + h_idx;
         col_entries[col_evaporation_flow].push((row, zeta));
     }
@@ -247,9 +271,110 @@ pub(super) fn fill_state_and_water_entries(
     }
 }
 
+/// Chronological per-block water-balance fill: each Operating/Filling hydro emits
+/// `K` chained rows (block-major `row_water + h·K + (k−1)`, `k ∈ 1..=K`), each the
+/// parallel row PER BLOCK with `τ_k` replacing the stage total `ζ` EVERYWHERE — the
+/// per-block flow terms, the AR-lag `ψ`, the inflow-penalty slack, and the
+/// withdrawal slacks. A stray `ζ` would double-apply (`Σ_k τ_k = ζ`) and break the
+/// telescoping identity that recovers the parallel row (`Sᵏ` cancels to `Sᴷ − S⁰`):
+/// every coefficient here is `τ_k`. The inflow STATE (`z_inflow` and its definition
+/// row) stays stage-level — only the volume contribution splits across blocks.
+///
+/// A `PreFilling` hydro emits `K` per-block frozen identities `Sᵏ − Sᵏ⁻¹ = 0` (only
+/// those two storage entries per block, no flow/inflow/loss term — any coupling left
+/// on a frozen row makes `β_h` stale-nonzero, a wrong cut that compiles), and its
+/// incremental inflow short-circuits per block via [`fill_prefilling_shortcircuit`].
+/// The chain `S⁰ = … = Sᴷ` pins the interior columns, keeping `V̂_h` dead
+/// (`∂Q/∂V̂_h = 0`). Each evaporating hydro's block-`k` flow enters block `k`'s water
+/// row with `+τ_k` in the trailing loop (a `PreFilling` hydro is excluded from
+/// `evap_hydro_indices` upstream, so its frozen rows stay coupling-free).
+fn fill_chronological_water_entries(
+    ctx: &TemplateBuildCtx<'_>,
+    stage: &Stage,
+    stage_idx: usize,
+    layout: &StageLayout,
+    col_entries: &mut [Vec<(usize, f64)>],
+) {
+    let n_h = layout.n_h;
+    let n_blks = layout.n_blks;
+    let lag_order = layout.lag_order;
+    let row_water = layout.row_water_balance_start();
+    let col_inflow_lags_start = layout.col_inflow_lags_start();
+    let has_par = ctx.par_lp.n_stages() > 0 && ctx.par_lp.n_hydros() == n_h;
+
+    for h_idx in 0..n_h {
+        let hydro = &ctx.hydros[h_idx];
+
+        if is_prefilling(ctx, stage, h_idx) {
+            for k in 1..=n_blks {
+                let row = row_water + h_idx * n_blks + (k - 1);
+                col_entries[layout.block_storage_col(h_idx, k)].push((row, 1.0));
+                col_entries[layout.block_storage_col(h_idx, k - 1)].push((row, -1.0));
+            }
+            fill_prefilling_shortcircuit(ctx, stage, h_idx, layout, col_entries);
+            continue;
+        }
+
+        let psi = has_par.then(|| ctx.par_lp.psi_slice(stage_idx, h_idx));
+        for k in 1..=n_blks {
+            let blk = k - 1;
+            let row = row_water + h_idx * n_blks + blk;
+            let tau_k = stage.blocks[blk].duration_hours * M3S_TO_HM3;
+
+            col_entries[layout.block_storage_col(h_idx, k)].push((row, 1.0));
+            col_entries[layout.block_storage_col(h_idx, k - 1)].push((row, -1.0));
+
+            col_entries[layout.turbine_col(h_idx, blk)].push((row, tau_k));
+            col_entries[layout.spillage_col(h_idx, blk)].push((row, tau_k));
+            col_entries[layout.diversion_col(h_idx, blk)].push((row, tau_k));
+            for &up_id in ctx.cascade.upstream(hydro.id) {
+                if let Some(&u_idx) = ctx.hydro_pos.get(&up_id) {
+                    col_entries[layout.turbine_col(u_idx, blk)].push((row, -tau_k));
+                    col_entries[layout.spillage_col(u_idx, blk)].push((row, -tau_k));
+                }
+            }
+            if let Some(sources) = ctx.diversion_upstream.get(&hydro.id) {
+                for &d_idx in sources {
+                    col_entries[layout.diversion_col(d_idx, blk)].push((row, -tau_k));
+                }
+            }
+
+            if let Some(psi) = psi {
+                for (lag, &psi_val) in psi.iter().enumerate() {
+                    if psi_val != 0.0 && lag < lag_order {
+                        let col = col_inflow_lags_start + lag * n_h + h_idx;
+                        col_entries[col].push((row, -tau_k * psi_val));
+                    }
+                }
+            }
+
+            if ctx.has_penalty {
+                col_entries[layout.col_inflow_slack_start() + h_idx].push((row, -tau_k));
+            }
+            col_entries[layout.col_withdrawal_neg_start() + h_idx].push((row, -tau_k));
+            col_entries[layout.col_withdrawal_pos_start() + h_idx].push((row, tau_k));
+        }
+    }
+
+    // Evaporation flow into the per-block water balance (the term deferred from the
+    // chronological water fill): block k's flow enters block k's water row with
+    // `+τ_k`, mirroring the parallel single-row `+ζ`.
+    for (local_idx, &h_idx) in layout.evap_hydro_indices.iter().enumerate() {
+        for k in 1..=n_blks {
+            let blk = k - 1;
+            let tau_k = stage.blocks[blk].duration_hours * M3S_TO_HM3;
+            let row = row_water + h_idx * n_blks + blk;
+            col_entries[layout.evap_flow_col(local_idx, blk)].push((row, tau_k));
+        }
+    }
+}
+
 /// Re-route an absent `PreFilling` hydro `h`'s water interactions onto the FIRST
-/// non-`PreFilling` downstream hydro `d` (resolved by [`resolve_shortcircuit_target`]),
-/// whose water-balance row is `row_water + d_idx`.
+/// non-`PreFilling` downstream hydro `d` (resolved by [`resolve_shortcircuit_target`]).
+/// In `Parallel` mode every piece lands on `d`'s single row `row_water + d_idx`; in
+/// `Chronological` mode each piece lands on `d`'s block-`k` row
+/// `row_water + d_idx·K + (k−1)`, with the parallel stage-total `−ζ` on `z_h` split
+/// into `−τ_k` per block (`Σ_k τ_k = ζ` conserves the stage total).
 ///
 /// Route the REAL `ζ`/`τ_k` columns, never a synthesized coefficient: with the
 /// real columns on `d`'s row, the reduced cost of `d`'s pinned incoming-storage
@@ -263,13 +388,13 @@ pub(super) fn fill_state_and_water_entries(
 /// pinned `[0, 0]` in `PreFilling`), so referencing its release columns adds
 /// nothing. Each link's incremental inflow reaches `d` exactly once.
 ///
-/// Pieces landing on `d`'s row:
+/// Pieces landing on `d`'s row(s):
 ///
-/// - `h`'s incremental inflow, as the `z_h` column with `−ζ`. `z_h`'s own
-///   definition row + noise patch are left UNTOUCHED for `h`, so the routed column
-///   is scenario-exact; the deterministic base is part of `z_h` and must NOT also
-///   be added to `d`'s RHS (double-count).
-/// - `h`'s upstream releases (`u ∈ upstream(h)`, per block, `−τ_h`) and the
+/// - `h`'s incremental inflow, as the `z_h` column (`−ζ` in `Parallel`, `−τ_k` per
+///   block in `Chronological`). `z_h`'s own definition row + noise patch are left
+///   UNTOUCHED for `h`, so the routed column is scenario-exact; the deterministic
+///   base is part of `z_h` and must NOT also be added to `d`'s RHS (double-count).
+/// - `h`'s upstream releases (`u ∈ upstream(h)`, per block, `−τ_k`) and the
 ///   diversion-into-`h` columns, re-routed `upstream(h)→d` while `h` is absent.
 ///
 /// `h`'s withdrawal DEMAND transfers to `d` via `d`'s RHS (owned by
@@ -289,26 +414,40 @@ fn fill_prefilling_shortcircuit(
         return;
     };
     let n_blks = layout.n_blks;
-    let zeta = layout.zeta;
-    let row_d = layout.row_water_balance_start() + d_idx;
+    let row_water = layout.row_water_balance_start();
+    let z_h = layout.col_z_inflow_start() + h_idx;
 
-    let mut route = |col: usize, coeff: f64| {
-        col_entries[col].push((row_d, coeff));
+    let row_d_for = |blk: usize| match stage.block_mode {
+        BlockMode::Parallel => row_water + d_idx,
+        BlockMode::Chronological => row_water + d_idx * n_blks + blk,
     };
 
-    route(layout.col_z_inflow_start() + h_idx, -zeta);
+    // Parallel keeps the single stage-total `−ζ` push (a `Σ_k −τ_k` loop onto one row
+    // would inflate `z_h`'s routed-entry count, which
+    // `prefilling_upstream_inflow_lands_on_balance_row_only` pins); Chronological
+    // splits `−ζ` into per-block `−τ_k` on `d`'s block rows (`Σ_k τ_k = ζ`).
+    match stage.block_mode {
+        BlockMode::Parallel => col_entries[z_h].push((row_water + d_idx, -layout.zeta)),
+        BlockMode::Chronological => {
+            for blk in 0..n_blks {
+                let tau_k = stage.blocks[blk].duration_hours * M3S_TO_HM3;
+                col_entries[z_h].push((row_water + d_idx * n_blks + blk, -tau_k));
+            }
+        }
+    }
 
     for blk in 0..n_blks {
-        let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
+        let tau_k = stage.blocks[blk].duration_hours * M3S_TO_HM3;
+        let row_d = row_d_for(blk);
         for &up_id in ctx.cascade.upstream(hydro.id) {
             if let Some(&u_idx) = ctx.hydro_pos.get(&up_id) {
-                route(layout.turbine_col(u_idx, blk), -tau_h);
-                route(layout.spillage_col(u_idx, blk), -tau_h);
+                col_entries[layout.turbine_col(u_idx, blk)].push((row_d, -tau_k));
+                col_entries[layout.spillage_col(u_idx, blk)].push((row_d, -tau_k));
             }
         }
         if let Some(sources) = ctx.diversion_upstream.get(&hydro.id) {
             for &src_idx in sources {
-                route(layout.diversion_col(src_idx, blk), -tau_h);
+                col_entries[layout.diversion_col(src_idx, blk)].push((row_d, -tau_k));
             }
         }
     }
@@ -564,10 +703,15 @@ pub(super) fn fill_load_balance_entries(
 /// generation by the `V_in` head term — the wrong-but-compiling alternative that
 /// deterministic case D06 pins against.
 ///
+/// In `BlockMode::Chronological` block `k`'s plane row averages the block-local
+/// boundaries `(Sᵏ⁻¹, Sᵏ)` via `block_storage_col`, not the stage endpoints;
+/// `K = 1` resolves both boundaries back to `(S⁰, Sᴷ)`, byte-identical to parallel.
+///
 /// Driven by [`for_each_fpha_plane`] so the matrix coefficients and the row
 /// bounds set by [`super::rows::fill_fpha_rows`] share one row cursor.
 pub(super) fn fill_fpha_entries(
     ctx: &TemplateBuildCtx<'_>,
+    stage: &Stage,
     stage_idx: usize,
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
@@ -578,46 +722,59 @@ pub(super) fn fill_fpha_entries(
         stage_idx,
         layout,
         |local_idx, h_idx, blk, _p_idx, plane, row| {
-            let col_v = h_idx; // outgoing storage column
-            let col_v_in = col_storage_in_start + h_idx; // incoming storage column
+            let (col_v_in, col_v) = match stage.block_mode {
+                BlockMode::Parallel => (col_storage_in_start + h_idx, h_idx),
+                BlockMode::Chronological => (
+                    layout.block_storage_col(h_idx, blk),
+                    layout.block_storage_col(h_idx, blk + 1),
+                ),
+            };
             let col_q = layout.turbine_col(h_idx, blk);
             let col_s = layout.spillage_col(h_idx, blk);
             let col_g = layout.generation_col(local_idx, blk);
 
             col_entries[col_g].push((row, 1.0));
-            // Average storage: -gamma_v/2 on BOTH the outgoing and incoming storage
-            // columns, not on V_out alone (D06).
-            col_entries[col_v].push((row, -plane.gamma_v / 2.0));
+            // Average storage: -gamma_v/2 on BOTH the incoming (Sᵏ⁻¹) and outgoing
+            // (Sᵏ) storage columns, not on one alone (D06).
             col_entries[col_v_in].push((row, -plane.gamma_v / 2.0));
+            col_entries[col_v].push((row, -plane.gamma_v / 2.0));
             col_entries[col_q].push((row, -plane.gamma_q));
             col_entries[col_s].push((row, -plane.gamma_s));
         },
     );
 }
 
-/// Fill the evaporation equality row per evaporation hydro, encoding
-/// `evaporation_flow − slope/2·v − slope/2·v_in + f_plus − f_minus = intercept_m3s`
-/// (`slope` = `volume_slope_m3s_per_hm3`; `intercept_m3s` set by
-/// `super::rows::fill_stage_rows`):
+/// Fill the evaporation equality rows, one per `(evaporation hydro, block)`,
+/// encoding block `k`'s row
+/// `evaporation_flow_{h,k} − slope/2·Sᵏ⁻¹ − slope/2·Sᵏ + f_plus_{h,k} −
+/// f_minus_{h,k} = intercept_m3s` (`slope` = `volume_slope_m3s_per_hm3`;
+/// `intercept_m3s` set by `super::rows::fill_stage_rows`):
 ///
 /// ```text
 /// evaporation_flow column:  +1.0
-/// v_h     column:  -volume_slope_m3s_per_hm3 / 2   (outgoing storage)
-/// v_in_h  column:  -volume_slope_m3s_per_hm3 / 2   (incoming storage; fixed by storage-fixing row)
+/// Sᵏ⁻¹    column:  -volume_slope_m3s_per_hm3 / 2   (incoming block boundary)
+/// Sᵏ      column:  -volume_slope_m3s_per_hm3 / 2   (outgoing block boundary)
 /// f_plus  column:  +1.0
 /// f_minus column:  -1.0
 /// ```
 ///
-/// Like FPHA, the `slope/2` lands on BOTH storage columns: with `v_in` fixed to
-/// `V`, the effective RHS is `intercept_m3s + slope/2·V`, matching the linearized
-/// evaporation at the average volume `(v + V) / 2`.
+/// Like FPHA, the `slope/2` lands on BOTH storage columns to average the block-local
+/// storage `(Sᵏ⁻¹ + Sᵏ) / 2`. In parallel mode the single row uses the stage
+/// endpoints `(S⁰, Sᴷ)`; chronological `K = 1` resolves both boundaries back to
+/// those endpoints, byte-identical to parallel.
+///
+/// The evaporation flow's entry INTO the water-balance row (`+ζ` parallel / `+τ_k`
+/// chronological) lives with the water-balance fill, not here.
 pub(super) fn fill_evaporation_entries(
     ctx: &TemplateBuildCtx<'_>,
+    stage: &Stage,
     stage_idx: usize,
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
     let col_storage_in_start = layout.col_storage_in_start();
+    let n_blks = layout.n_blks;
+    let row_evap_start = layout.row_evap_start();
 
     for (local_idx, &h_idx) in layout.evap_hydro_indices.iter().enumerate() {
         let coeff = match ctx.evaporation_models.model(h_idx) {
@@ -643,19 +800,27 @@ pub(super) fn fill_evaporation_entries(
             }
         };
 
-        let col_evaporation_flow = layout.evap_flow_col(local_idx);
-        let col_f_plus = layout.evap_f_plus_col(local_idx);
-        let col_f_minus = layout.evap_f_minus_col(local_idx);
-        let col_v = h_idx; // outgoing storage column
-        let col_v_in = col_storage_in_start + h_idx; // incoming storage column
+        let half_slope = coeff.volume_slope_m3s_per_hm3 / 2.0;
+        for k in 1..=n_blks {
+            let blk = k - 1;
+            let (col_v_in, col_v) = match stage.block_mode {
+                BlockMode::Parallel => (col_storage_in_start + h_idx, h_idx),
+                BlockMode::Chronological => (
+                    layout.block_storage_col(h_idx, k - 1),
+                    layout.block_storage_col(h_idx, k),
+                ),
+            };
+            let col_evaporation_flow = layout.evap_flow_col(local_idx, blk);
+            let col_f_plus = layout.evap_f_plus_col(local_idx, blk);
+            let col_f_minus = layout.evap_f_minus_col(local_idx, blk);
+            let row = row_evap_start + local_idx * n_blks + blk;
 
-        let row = layout.row_evap_start() + local_idx;
-
-        col_entries[col_evaporation_flow].push((row, 1.0));
-        col_entries[col_v].push((row, -coeff.volume_slope_m3s_per_hm3 / 2.0));
-        col_entries[col_v_in].push((row, -coeff.volume_slope_m3s_per_hm3 / 2.0));
-        col_entries[col_f_plus].push((row, 1.0));
-        col_entries[col_f_minus].push((row, -1.0));
+            col_entries[col_evaporation_flow].push((row, 1.0));
+            col_entries[col_v_in].push((row, -half_slope));
+            col_entries[col_v].push((row, -half_slope));
+            col_entries[col_f_plus].push((row, 1.0));
+            col_entries[col_f_minus].push((row, -1.0));
+        }
     }
 }
 
@@ -990,8 +1155,8 @@ pub(super) fn build_stage_matrix_entries(
     fill_anticipated_state_out_def_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_load_balance_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_ncs_load_balance_entries(ctx, layout, &mut col_entries);
-    fill_fpha_entries(ctx, stage_idx, layout, &mut col_entries);
-    fill_evaporation_entries(ctx, stage_idx, layout, &mut col_entries);
+    fill_fpha_entries(ctx, stage, stage_idx, layout, &mut col_entries);
+    fill_evaporation_entries(ctx, stage, stage_idx, layout, &mut col_entries);
     fill_z_inflow_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_operational_violation_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_anticipated_fishing_entries(ctx, stage, layout, &mut col_entries);
@@ -2797,6 +2962,48 @@ mod pumping_water_tests {
                 water_withdrawal_violation_neg_cost: 0.0,
                 evaporation_violation_pos_cost: 0.0,
                 evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 0.0,
+            };
+            self.penalties = ResolvedPenalties::new(
+                &PenaltiesCountsSpec {
+                    n_hydros: self.hydros.len(),
+                    n_buses: self.buses.len(),
+                    n_lines: self.lines.len(),
+                    n_ncs: 0,
+                    n_stages: N_STAGES,
+                },
+                &PenaltiesDefaults {
+                    hydro,
+                    bus: BusStagePenalties { excess_cost: 0.0 },
+                    line: LineStagePenalties { exchange_cost: 0.0 },
+                    ncs: NcsStagePenalties {
+                        curtailment_cost: 0.0,
+                    },
+                },
+            );
+            self
+        }
+
+        /// Size a `ResolvedPenalties` carrying nonzero directional evaporation
+        /// violation costs so the per-block `f_evap_plus`/`f_evap_minus` slack
+        /// objectives are observable in the column build.
+        fn with_evap_penalties(mut self, neg_cost: f64, pos_cost: f64) -> Self {
+            let hydro = HydroStagePenalties {
+                spillage_cost: 0.0,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: pos_cost,
+                evaporation_violation_neg_cost: neg_cost,
                 inflow_nonnegativity_cost: 0.0,
             };
             self.penalties = ResolvedPenalties::new(
@@ -5541,5 +5748,472 @@ mod pumping_water_tests {
             );
             assert_eq!(row_upper[row], 0.0, "{label}: frozen RHS 0");
         }
+    }
+
+    // ── Chronological PreFilling per-block frozen identity + short-circuit ────────
+
+    /// Resolved offsets for a chronological H1→H2→H3 short-circuit probe (`n_blks = 2`).
+    struct ChrScOffsets {
+        n_blks: usize,
+        h2_idx: usize,
+        d_idx: usize,
+        z_h2: usize,
+        col_storage_in_h2: usize,
+        h1_turbine: Vec<usize>,
+        h1_spillage: Vec<usize>,
+    }
+
+    /// Build the cascade `H1(id 1) → H2(id 2, filling) → H3(id 3)` at the canonical
+    /// `PreFilling` stage under `BlockMode::Chronological`, with H2's resolved
+    /// per-stage withdrawal set to `withdrawal_h`. Returns the assembled CSC, the
+    /// `(row_lower, row_upper)` vectors, the resolved [`StageLayout`] (block-major
+    /// addressing reads through its accessors), and the offsets the assertions read.
+    #[allow(clippy::type_complexity)]
+    fn build_chronological_shortcircuit_case(
+        withdrawal_h: f64,
+    ) -> (
+        (Vec<i32>, Vec<i32>, Vec<f64>),
+        Vec<f64>,
+        Vec<f64>,
+        StageLayout<'static>,
+        ChrScOffsets,
+    ) {
+        let mut fixtures = PumpFixtures::new(
+            vec![
+                ret_hydro(1, Some(2), None, false),
+                ret_hydro(2, Some(3), Some(RET_ENTRY_STAGE_ID), true),
+                ret_hydro(3, None, None, false),
+            ],
+            Vec::new(),
+        );
+        let h2_idx = fixtures.hydro_pos[&EntityId(2)];
+        fixtures
+            .bounds
+            .hydro_bounds_mut(h2_idx, 0)
+            .water_withdrawal_m3s = withdrawal_h;
+        let ctx = Box::leak(Box::new(fixtures.make_ctx()));
+        let mut stage =
+            two_block_stage(usize::try_from(RET_PREFILLING_ID).unwrap(), [300.0, 444.0]);
+        stage.block_mode = cobre_core::BlockMode::Chronological;
+        let stage = Box::leak(Box::new(stage));
+        let state = Box::leak(Box::new(state_layout_for(ctx)));
+        let layout = StageLayout::new(ctx, state, stage, 0);
+        let (row_lower, row_upper) = super::super::rows::fill_stage_rows(ctx, stage, 0, &layout);
+        let csc = {
+            let mut entries = build_stage_matrix_entries(ctx, stage, 0, &layout);
+            for col in &mut entries {
+                col.sort_unstable_by_key(|&(row, _)| row);
+            }
+            assemble_csc(&entries)
+        };
+        let h1_idx = fixtures.hydro_pos[&EntityId(1)];
+        let d_idx = fixtures.hydro_pos[&EntityId(3)];
+        let offsets = ChrScOffsets {
+            n_blks: layout.n_blks,
+            h2_idx,
+            d_idx,
+            z_h2: layout.col_z_inflow_start() + h2_idx,
+            col_storage_in_h2: layout.col_storage_in_start() + h2_idx,
+            h1_turbine: (0..layout.n_blks)
+                .map(|blk| layout.turbine_col(h1_idx, blk))
+                .collect(),
+            h1_spillage: (0..layout.n_blks)
+                .map(|blk| layout.spillage_col(h1_idx, blk))
+                .collect(),
+        };
+        (csc, row_lower, row_upper, layout, offsets)
+    }
+
+    /// AC#1: a chronological `K = 2` `PreFilling` hydro H2 emits `K` block-major
+    /// frozen-identity rows `row_water + h·K + (k−1)`, each carrying EXACTLY two
+    /// entries: `+1.0` on `Sᵏ` and `−1.0` on `Sᵏ⁻¹`, and nothing else (no
+    /// flow/inflow/loss/withdrawal term — any coupling makes `β_h` stale-nonzero).
+    /// The per-hydro `h·K` stride is what eliminates the single-row collision into a
+    /// neighbour's block row.
+    #[test]
+    fn chronological_prefilling_frozen_identity_per_block() {
+        let (csc, row_lower, row_upper, layout, off) = build_chronological_shortcircuit_case(9.0);
+        let h = off.h2_idx;
+        let n_blks = off.n_blks;
+
+        for k in 1..=n_blks {
+            let blk = k - 1;
+            let row = layout.row_water_balance_start() + h * n_blks + blk;
+            assert_eq!(
+                csc_at(&csc, layout.block_storage_col(h, k), row),
+                1.0,
+                "block {k}: Sᵏ carries +1.0 on the frozen-identity row"
+            );
+            assert_eq!(
+                csc_at(&csc, layout.block_storage_col(h, k - 1), row),
+                -1.0,
+                "block {k}: Sᵏ⁻¹ carries −1.0 on the frozen-identity row"
+            );
+            // No other column touches this block row (frozen identity Sᵏ − Sᵏ⁻¹ = 0):
+            // count CSC entries landing on it across EVERY column.
+            let entries_on_row = (0..csc.0.len() - 1)
+                .filter(|&col| csc_at(&csc, col, row) != 0.0)
+                .count();
+            assert_eq!(
+                entries_on_row, 2,
+                "block {k}: frozen-identity row must have EXACTLY two entries (Sᵏ, Sᵏ⁻¹)"
+            );
+            assert_eq!(row_lower[row], 0.0, "block {k}: frozen RHS lower == 0");
+            assert_eq!(row_upper[row], 0.0, "block {k}: frozen RHS upper == 0");
+        }
+    }
+
+    /// AC#2: H2's per-block short-circuit lands `−τ_k` on the DOWNSTREAM target H3's
+    /// block-`k` rows — H2's incremental inflow (`z_{H2}`) and H2's upstream H1
+    /// releases — and NOTHING on H2's own (frozen) block rows. H1 is NOT a standard
+    /// upstream of H3 (the cascade edge is H1→H2→H3), so a nonzero `−τ_k` on H1's
+    /// columns at H3's block row can only come from the re-route.
+    #[test]
+    fn chronological_prefilling_shortcircuit_per_block() {
+        let withdrawal_h = 17.5_f64;
+        let (csc, _rl, row_upper, layout, off) =
+            build_chronological_shortcircuit_case(withdrawal_h);
+        let n_blks = off.n_blks;
+
+        for k in 1..=n_blks {
+            let blk = k - 1;
+            let tau_k = [300.0_f64, 444.0][blk] * M3S_TO_HM3;
+            let row_d = layout.row_water_balance_start() + off.d_idx * n_blks + blk;
+            let row_h = layout.row_water_balance_start() + off.h2_idx * n_blks + blk;
+
+            assert_eq!(
+                csc_at(&csc, off.z_h2, row_d),
+                -tau_k,
+                "block {k}: z_{{H2}} carries −τ_k on H3's block row (re-routed inflow)"
+            );
+            assert_eq!(
+                csc_at(&csc, off.z_h2, row_h),
+                0.0,
+                "block {k}: z_{{H2}} carries nothing on H2's own frozen block row"
+            );
+            assert_eq!(
+                csc_at(&csc, off.h1_turbine[blk], row_d),
+                -tau_k,
+                "block {k}: H1 turbine carries −τ_k on H3's block row (cascade re-route)"
+            );
+            assert_eq!(
+                csc_at(&csc, off.h1_spillage[blk], row_d),
+                -tau_k,
+                "block {k}: H1 spillage carries −τ_k on H3's block row"
+            );
+            assert_eq!(
+                csc_at(&csc, off.h1_turbine[blk], row_h),
+                0.0,
+                "block {k}: H1 turbine absent from H2's own frozen block row"
+            );
+            assert_eq!(
+                csc_at(&csc, off.col_storage_in_h2, row_d),
+                0.0,
+                "block {k}: H2's incoming storage stays on H2's row, not routed to H3"
+            );
+        }
+
+        // Withdrawal demand transfers per block: H3's block-`k` row_upper drops by
+        // τ_k·withdrawal_h versus a no-withdrawal build (H3's own withdrawal is 0).
+        let (_csc0, _rl0, row_upper0, layout0, off0) = build_chronological_shortcircuit_case(0.0);
+        for k in 1..=n_blks {
+            let blk = k - 1;
+            let tau_k = [300.0_f64, 444.0][blk] * M3S_TO_HM3;
+            let row_d = layout.row_water_balance_start() + off.d_idx * n_blks + blk;
+            let row_d0 = layout0.row_water_balance_start() + off0.d_idx * n_blks + blk;
+            assert_eq!(
+                row_upper0[row_d0] - row_upper[row_d],
+                tau_k * withdrawal_h,
+                "block {k}: H3's block RHS drops by τ_k·withdrawal_{{H2}}"
+            );
+        }
+    }
+
+    /// AC#3: a chronological `K = 1` `PreFilling` build is byte-identical to the
+    /// parallel `PreFilling` build — `τ_1 = ζ`, no interior boundary, the single
+    /// chained frozen row IS the parallel frozen row, and the per-block short-circuit
+    /// collapses to the single-row `−ζ`/`−ζ·withdrawal` parallel form. Covers the CSC
+    /// arrays and both RHS vectors.
+    #[test]
+    fn chronological_k1_prefilling_byte_identical() {
+        let withdrawal_h = 11.0_f64;
+        let build = |block_mode: cobre_core::BlockMode| {
+            let mut fixtures = PumpFixtures::new(
+                vec![
+                    ret_hydro(1, Some(2), None, false),
+                    ret_hydro(2, Some(3), Some(RET_ENTRY_STAGE_ID), true),
+                    ret_hydro(3, None, None, false),
+                ],
+                Vec::new(),
+            );
+            let h2_idx = fixtures.hydro_pos[&EntityId(2)];
+            fixtures
+                .bounds
+                .hydro_bounds_mut(h2_idx, 0)
+                .water_withdrawal_m3s = withdrawal_h;
+            let ctx = fixtures.make_ctx();
+            let mut stage =
+                two_block_stage(usize::try_from(RET_PREFILLING_ID).unwrap(), [372.0, 372.0]);
+            stage.blocks.truncate(1);
+            stage.block_mode = block_mode;
+            let state = state_layout_for(&ctx);
+            let layout = StageLayout::new(&ctx, &state, &stage, 0);
+            let (rl, ru) = super::super::rows::fill_stage_rows(&ctx, &stage, 0, &layout);
+            let csc = {
+                let mut entries = build_stage_matrix_entries(&ctx, &stage, 0, &layout);
+                for col in &mut entries {
+                    col.sort_unstable_by_key(|&(row, _)| row);
+                }
+                assemble_csc(&entries)
+            };
+            (csc, rl, ru)
+        };
+
+        let (csc_p, rl_p, ru_p) = build(cobre_core::BlockMode::Parallel);
+        let (csc_c, rl_c, ru_c) = build(cobre_core::BlockMode::Chronological);
+
+        assert_eq!(
+            csc_p.0, csc_c.0,
+            "K=1 PreFilling col_starts must be byte-identical"
+        );
+        assert_eq!(
+            csc_p.1, csc_c.1,
+            "K=1 PreFilling row_indices must be byte-identical"
+        );
+        assert_eq!(
+            csc_p.2, csc_c.2,
+            "K=1 PreFilling values must be byte-identical"
+        );
+        assert_eq!(
+            rl_p, rl_c,
+            "K=1 PreFilling row_lower must be byte-identical"
+        );
+        assert_eq!(
+            ru_p, ru_c,
+            "K=1 PreFilling row_upper must be byte-identical"
+        );
+    }
+
+    // ── Per-block FPHA & evaporation (block-local average storage) ───────────────
+
+    use crate::hydro_models::{FphaPlane, LinearizedEvaporation, ResolvedProductionModel};
+
+    const FPHA_GAMMA_V: f64 = 0.2;
+    const EVAP_SLOPE: f64 = 0.03;
+    const EVAP_INTERCEPT: f64 = 1.5;
+
+    /// One non-filling hydro with a single-plane FPHA production model and a
+    /// linearized evaporation model, built under `block_mode` with two blocks
+    /// `[300.0, 444.0]` (truncated to one for the `K = 1` cases). Returns the
+    /// assembled CSC, the `(row_lower, row_upper)` vectors, the column
+    /// `(col_lower, col_upper, objective)` vectors, and the resolved `StageLayout`.
+    #[allow(clippy::type_complexity)]
+    fn build_fpha_evap_case(
+        block_mode: cobre_core::BlockMode,
+        durations: &[f64],
+    ) -> (
+        (Vec<i32>, Vec<i32>, Vec<f64>),
+        Vec<f64>,
+        Vec<f64>,
+        (Vec<f64>, Vec<f64>, Vec<f64>),
+        StageLayout<'static>,
+    ) {
+        let mut fixtures = PumpFixtures::new(vec![ret_hydro(1, None, None, false)], Vec::new())
+            .with_evap_penalties(7.0, 11.0);
+        fixtures.production_models = ProductionModelSet::new(
+            vec![vec![ResolvedProductionModel::Fpha {
+                planes: vec![FphaPlane {
+                    intercept: 1.0,
+                    gamma_v: FPHA_GAMMA_V,
+                    gamma_q: 0.5,
+                    gamma_s: 0.05,
+                }],
+            }]],
+            1,
+            N_STAGES,
+        );
+        fixtures.evaporation_models =
+            EvaporationModelSet::new(vec![EvaporationModel::Linearized {
+                coefficients: vec![LinearizedEvaporation {
+                    intercept_m3s: EVAP_INTERCEPT,
+                    volume_slope_m3s_per_hm3: EVAP_SLOPE,
+                }],
+                reference_volumes_hm3: vec![0.0],
+            }]);
+        let ctx = Box::leak(Box::new(fixtures.make_ctx()));
+        let mut stage = two_block_stage(0, [300.0, 444.0]);
+        stage.blocks.truncate(durations.len());
+        for (blk, &d) in durations.iter().enumerate() {
+            stage.blocks[blk].duration_hours = d;
+        }
+        stage.block_mode = block_mode;
+        let stage = Box::leak(Box::new(stage));
+        let state = Box::leak(Box::new(state_layout_for(ctx)));
+        let layout = StageLayout::new(ctx, state, stage, 0);
+        let (row_lower, row_upper) = super::super::rows::fill_stage_rows(ctx, stage, 0, &layout);
+        let cols = super::super::columns::fill_stage_columns(ctx, stage, 0, &layout);
+        let csc = {
+            let mut entries = build_stage_matrix_entries(ctx, stage, 0, &layout);
+            for col in &mut entries {
+                col.sort_unstable_by_key(|&(row, _)| row);
+            }
+            assemble_csc(&entries)
+        };
+        (csc, row_lower, row_upper, cols, layout)
+    }
+
+    /// AC#1: a chronological `K = 2` FPHA plane row for block `k` carries `−γᵥ/2`
+    /// on BOTH `block_storage_col(h, k−1)` (Sᵏ⁻¹) and `block_storage_col(h, k)` (Sᵏ)
+    /// — the block-local average storage, both columns (D06), never one.
+    #[test]
+    fn chronological_fpha_uses_block_local_average() {
+        let (csc, _rl, _ru, _cols, layout) =
+            build_fpha_evap_case(cobre_core::BlockMode::Chronological, &[300.0, 444.0]);
+        let h = 0_usize;
+        let half_gamma_v = -FPHA_GAMMA_V / 2.0;
+        // One plane, so block `k`'s FPHA row is at row_fpha_start + blk.
+        for k in 1..=2 {
+            let blk = k - 1;
+            let row = layout.row_fpha_start() + blk;
+            assert_eq!(
+                csc_at(&csc, layout.block_storage_col(h, k - 1), row),
+                half_gamma_v,
+                "block {k}: −γᵥ/2 on Sᵏ⁻¹"
+            );
+            assert_eq!(
+                csc_at(&csc, layout.block_storage_col(h, k), row),
+                half_gamma_v,
+                "block {k}: −γᵥ/2 on Sᵏ"
+            );
+        }
+        // S⁰, the interior boundary S¹, and Sᴷ are three distinct columns, so the
+        // two block rows average genuinely block-local storage (no aliasing).
+        let s0 = layout.block_storage_col(h, 0);
+        let s1 = layout.block_storage_col(h, 1);
+        let s2 = layout.block_storage_col(h, 2);
+        assert_ne!(s0, s1, "S⁰ and S¹ distinct");
+        assert_ne!(s1, s2, "S¹ and Sᴷ distinct");
+        assert_ne!(s0, s2, "S⁰ and Sᴷ distinct");
+    }
+
+    /// AC#2: a chronological `K = 2` evaporating hydro emits `K` evaporation rows,
+    /// each with `−slope/2` on its own `(Sᵏ⁻¹, Sᵏ)` pair; each block's evaporation
+    /// flow appears in that block's water row with `+τ_k`; and each block's flow
+    /// column is BOUNDED `[−q_max, +q_max]` with nonzero slack objectives (the
+    /// wrong-bounds bug: leaving the extra per-block flow columns unbounded).
+    #[test]
+    fn chronological_evaporation_per_block() {
+        let (csc, rl, ru, cols, layout) =
+            build_fpha_evap_case(cobre_core::BlockMode::Chronological, &[300.0, 444.0]);
+        let (col_lower, col_upper, objective) = cols;
+        let h = 0_usize;
+        let local = 0_usize;
+        let n_blks = 2_usize;
+        let half_slope = -EVAP_SLOPE / 2.0;
+        let q_max = (EVAP_INTERCEPT + EVAP_SLOPE * 100.0).abs() * 2.0;
+
+        for k in 1..=n_blks {
+            let blk = k - 1;
+            let evap_row = layout.row_evap_start() + local * n_blks + blk;
+            let tau_k = [300.0_f64, 444.0][blk] * M3S_TO_HM3;
+
+            // Block-local average storage on the evaporation row.
+            assert_eq!(
+                csc_at(&csc, layout.block_storage_col(h, k - 1), evap_row),
+                half_slope,
+                "block {k}: −slope/2 on Sᵏ⁻¹"
+            );
+            assert_eq!(
+                csc_at(&csc, layout.block_storage_col(h, k), evap_row),
+                half_slope,
+                "block {k}: −slope/2 on Sᵏ"
+            );
+            // The equality-row intercept is replicated per block.
+            assert_eq!(rl[evap_row], EVAP_INTERCEPT, "block {k}: evap RHS lower");
+            assert_eq!(ru[evap_row], EVAP_INTERCEPT, "block {k}: evap RHS upper");
+
+            let flow_col = layout.evap_flow_col(local, blk);
+            // Flow enters block k's water row with +τ_k.
+            let water_row = layout.row_water_balance_start() + h * n_blks + blk;
+            assert_eq!(
+                csc_at(&csc, flow_col, water_row),
+                tau_k,
+                "block {k}: evap flow carries +τ_k on its water row"
+            );
+            // Flow column bounded [−q_max, +q_max], NOT the default [0, +∞).
+            assert_eq!(col_lower[flow_col], -q_max, "block {k}: flow lower −q_max");
+            assert_eq!(col_upper[flow_col], q_max, "block {k}: flow upper +q_max");
+            // Directional slacks carry nonzero objective.
+            let total_hours = 300.0_f64 + 444.0;
+            assert_eq!(
+                objective[layout.evap_f_plus_col(local, blk)],
+                7.0 * total_hours,
+                "block {k}: f_plus objective"
+            );
+            assert_eq!(
+                objective[layout.evap_f_minus_col(local, blk)],
+                11.0 * total_hours,
+                "block {k}: f_minus objective"
+            );
+        }
+    }
+
+    /// AC#3: a chronological `K = 1` FPHA + evaporation build is byte-identical to
+    /// the parallel build — one water row, one FPHA plane row on `(S⁰, Sᴷ)`, one
+    /// evaporation row/triple, and the flow's single `+ζ` water term. Covers the
+    /// CSC arrays, both RHS vectors, and the column bound/objective vectors.
+    #[test]
+    fn chronological_k1_fpha_evap_byte_identical() {
+        let (csc_p, rl_p, ru_p, (cl_p, cu_p, obj_p), _lp) =
+            build_fpha_evap_case(cobre_core::BlockMode::Parallel, &[372.0]);
+        let (csc_c, rl_c, ru_c, (cl_c, cu_c, obj_c), _lc) =
+            build_fpha_evap_case(cobre_core::BlockMode::Chronological, &[372.0]);
+
+        assert_eq!(csc_p.0, csc_c.0, "K=1 col_starts byte-identical");
+        assert_eq!(csc_p.1, csc_c.1, "K=1 row_indices byte-identical");
+        assert_eq!(csc_p.2, csc_c.2, "K=1 values byte-identical");
+        assert_eq!(rl_p, rl_c, "K=1 row_lower byte-identical");
+        assert_eq!(ru_p, ru_c, "K=1 row_upper byte-identical");
+        assert_eq!(cl_p, cl_c, "K=1 col_lower byte-identical");
+        assert_eq!(cu_p, cu_c, "K=1 col_upper byte-identical");
+        assert_eq!(obj_p, obj_c, "K=1 objective byte-identical");
+    }
+
+    /// A parallel two-block FPHA + evaporation build is byte-identical to the
+    /// pre-change parallel build in structure: the single FPHA row uses the stage
+    /// endpoints `(S⁰, Sᴷ)` and the single evaporation row/triple with the flow's
+    /// `+ζ` water term (the parallel path is unchanged by the per-block work).
+    #[test]
+    fn parallel_fpha_evap_uses_stage_endpoints() {
+        let (csc, rl, _ru, cols, layout) =
+            build_fpha_evap_case(cobre_core::BlockMode::Parallel, &[300.0, 444.0]);
+        let (col_lower, col_upper, _obj) = cols;
+        let h = 0_usize;
+        let local = 0_usize;
+        let col_s_in = layout.col_storage_in_start() + h;
+        let col_s_out = h;
+
+        // Single FPHA row (one plane) on the stage endpoints, −γᵥ/2 on both.
+        let fpha_row = layout.row_fpha_start();
+        assert_eq!(csc_at(&csc, col_s_in, fpha_row), -FPHA_GAMMA_V / 2.0);
+        assert_eq!(csc_at(&csc, col_s_out, fpha_row), -FPHA_GAMMA_V / 2.0);
+
+        // Single evaporation row (block 0 slot) on the stage endpoints.
+        let evap_row = layout.row_evap_start();
+        assert_eq!(csc_at(&csc, col_s_in, evap_row), -EVAP_SLOPE / 2.0);
+        assert_eq!(csc_at(&csc, col_s_out, evap_row), -EVAP_SLOPE / 2.0);
+        assert_eq!(rl[evap_row], EVAP_INTERCEPT);
+
+        // Flow enters the single water row with +ζ (Σ_k τ_k).
+        let flow_col = layout.evap_flow_col(local, 0);
+        let zeta = (300.0_f64 + 444.0) * M3S_TO_HM3;
+        assert_eq!(
+            csc_at(&csc, flow_col, layout.row_water_balance_start() + h),
+            zeta,
+            "parallel evap flow carries +ζ on the single water row"
+        );
+        let q_max = (EVAP_INTERCEPT + EVAP_SLOPE * 100.0).abs() * 2.0;
+        assert_eq!(col_lower[flow_col], -q_max);
+        assert_eq!(col_upper[flow_col], q_max);
     }
 }

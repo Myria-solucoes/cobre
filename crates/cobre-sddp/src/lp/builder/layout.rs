@@ -308,7 +308,9 @@ pub(crate) struct StageLayout<'a> {
     /// Column-block cursor at which the evaporation block begins, even when empty
     /// (`generation_col_start + n_fpha_hydros * n_blks`).
     pub(crate) evap_col_start: usize,
-    /// Per-evaporation-hydro column/row indices, parallel to `evap_hydro_indices`.
+    /// Per-`(evaporation hydro, block)` column/row indices, block-major
+    /// (`local * n_blks + blk`). At `n_blks == 1` the slot for evap hydro `i` is
+    /// `i`, parallel to `evap_hydro_indices`.
     pub(crate) evap_indices: Vec<EvaporationIndices>,
     /// Column range for under-withdrawal slack (one per hydro). `0..0` with no
     /// hydros.
@@ -332,7 +334,12 @@ pub(crate) struct StageLayout<'a> {
     /// Row index of the first z-inflow definition constraint. Row 0; state pinning
     /// uses column bounds, so no state-fixing rows precede the z-inflow block.
     pub(crate) z_inflow_row_start: usize,
-    /// Row range for water balance constraints (one per hydro).
+    /// Row range for water balance constraints: `n_h` rows in parallel mode,
+    /// `n_h * n_blks` in chronological mode (the `K` chained per-hydro rows). Rows
+    /// are block-major like `load_balance`: the row for `(h, k)` is
+    /// `water_balance.start + h * n_blks + k` (entity-outer, block-inner) via
+    /// [`BlockGrid::flat`](crate::indexer::BlockGrid::flat); the transposed
+    /// `k * n_h + h` is the wrong-but-compiling alternative.
     pub(crate) water_balance: Range<usize>,
     /// Row range for load balance constraints (one per bus per block).
     pub(crate) load_balance: Range<usize>,
@@ -436,22 +443,32 @@ fn build_fpha_rows(planes_per_hydro: &[usize], n_blks: usize, start_row: usize) 
     start_row + n_blks * total_planes
 }
 
-/// Evaporation column/row indices per evaporation hydro. Within-hydro columns at
-/// [`EVAP_FLOW_OFFSET`] / [`EVAP_F_PLUS_OFFSET`] / [`EVAP_F_MINUS_OFFSET`], strided
-/// by [`EVAP_COLS_PER_HYDRO`]; one row per hydro.
+/// Evaporation column/row indices per `(evaporation hydro, block)`, block-major
+/// (`local * n_blks + blk`) to mirror the block-strided generation columns.
+/// Within-triple columns at [`EVAP_FLOW_OFFSET`] / [`EVAP_F_PLUS_OFFSET`] /
+/// [`EVAP_F_MINUS_OFFSET`], strided by [`EVAP_COLS_PER_HYDRO`]; one row per
+/// `(hydro, block)`. At `n_blks == 1` the slot for hydro `i` is `i`, so a reader
+/// indexing by the hydro-local index alone still lands on block 0.
 fn build_evap_indices(
     n_evap_hydros: usize,
+    n_blks: usize,
     col_start: usize,
     row_start: usize,
 ) -> Vec<EvaporationIndices> {
-    (0..n_evap_hydros)
-        .map(|i| EvaporationIndices {
-            evaporation_flow_col: col_start + i * EVAP_COLS_PER_HYDRO + EVAP_FLOW_OFFSET,
-            f_evap_plus_col: col_start + i * EVAP_COLS_PER_HYDRO + EVAP_F_PLUS_OFFSET,
-            f_evap_minus_col: col_start + i * EVAP_COLS_PER_HYDRO + EVAP_F_MINUS_OFFSET,
-            evap_row: row_start + i,
-        })
-        .collect()
+    let mut out = Vec::with_capacity(n_evap_hydros * n_blks);
+    for i in 0..n_evap_hydros {
+        for blk in 0..n_blks {
+            let slot = i * n_blks + blk;
+            let triple_base = col_start + slot * EVAP_COLS_PER_HYDRO;
+            out.push(EvaporationIndices {
+                evaporation_flow_col: triple_base + EVAP_FLOW_OFFSET,
+                f_evap_plus_col: triple_base + EVAP_F_PLUS_OFFSET,
+                f_evap_minus_col: triple_base + EVAP_F_MINUS_OFFSET,
+                evap_row: row_start + slot,
+            });
+        }
+    }
+    out
 }
 
 // ── Private helper functions ───────────────────────────────────────────────────
@@ -822,10 +839,12 @@ impl<'a> StageLayout<'a> {
         };
 
         // Evaporation columns after FPHA generation; `evap_col_start` is the
-        // empty-block cursor `col_evap_start` reads.
+        // empty-block cursor `col_evap_start` reads. One `EVAP_COLS_PER_HYDRO`
+        // triple per `(evap hydro, block)`, so the block grows by `n_blks` in
+        // chronological mode (`n_blks == 1` leaves it at the single-triple size).
         let n_evap_hydros = evap_hydro_indices.len();
         let evap_col_start = generation_end;
-        let evap_col_end = evap_col_start + n_evap_hydros * EVAP_COLS_PER_HYDRO;
+        let evap_col_end = evap_col_start + n_evap_hydros * n_blks * EVAP_COLS_PER_HYDRO;
         let post_equipment_col_start = evap_col_start;
 
         // ── Role-(b) constraint row ranges ───────────────────────────────────
@@ -833,7 +852,12 @@ impl<'a> StageLayout<'a> {
         // state-fixing row range precedes them.
         let z_inflow_row_start = 0_usize;
         let water_balance_start = z_inflow_row_start + n_h;
-        let water_balance = water_balance_start..water_balance_start + n_h;
+        let n_water_blocks = match stage.block_mode {
+            BlockMode::Chronological => n_blks,
+            BlockMode::Parallel => 1,
+        };
+        let n_water_rows = n_h * n_water_blocks;
+        let water_balance = water_balance_start..water_balance_start + n_water_rows;
         let load_balance_start = water_balance.end;
         let load_balance_end = load_balance_start + ctx.n_buses * n_blks;
         let load_balance = load_balance_start..load_balance_end;
@@ -845,8 +869,10 @@ impl<'a> StageLayout<'a> {
 
         // Evaporation rows follow FPHA rows; `evap_rows_end` is the post-equipment
         // row cursor the empty operational-violation row families collapse onto.
-        let evap_indices = build_evap_indices(n_evap_hydros, evap_col_start, fpha_rows_end);
-        let evap_rows_end = fpha_rows_end + n_evap_hydros;
+        // One row per `(evap hydro, block)`, so the block grows by `n_blks` — the
+        // cursor chain below MUST stay in lockstep or every downstream row shifts.
+        let evap_indices = build_evap_indices(n_evap_hydros, n_blks, evap_col_start, fpha_rows_end);
+        let evap_rows_end = fpha_rows_end + n_evap_hydros * n_blks;
         let post_equipment_row_start = evap_rows_end;
 
         // Withdrawal slacks + the four operational-violation slack families (after
@@ -1172,27 +1198,35 @@ impl<'a> StageLayout<'a> {
         self.block_col(self.col_generation_below_start(), h_idx, blk)
     }
 
-    /// Evaporation-outflow column for evaporation-local index `local_idx`.
-    ///
-    /// Reserves [`EVAP_COLS_PER_HYDRO`] columns per evaporating hydro; this
-    /// accessor returns the [`EVAP_FLOW_OFFSET`] column. Stage-level (no block).
+    /// Base column of the `(evap hydro local_idx, block blk)` triple, block-major
+    /// (`(local_idx * n_blks + blk) * EVAP_COLS_PER_HYDRO`). Single owner of the
+    /// evaporation block stride; the three offset accessors add their offset to it.
+    /// The transposed `blk * n_evap_hydros + local_idx` stride compiles and silently
+    /// aliases one hydro's block onto another's.
     #[inline]
-    pub(crate) fn evap_flow_col(&self, local_idx: usize) -> usize {
-        self.col_evap_start() + local_idx * EVAP_COLS_PER_HYDRO + EVAP_FLOW_OFFSET
+    fn evap_triple_base(&self, local_idx: usize, blk: usize) -> usize {
+        self.col_evap_start() + (local_idx * self.n_blks + blk) * EVAP_COLS_PER_HYDRO
     }
 
-    /// `f_evap_plus` (under-evaporation slack) column for evaporation-local
-    /// index `local_idx` (the [`EVAP_F_PLUS_OFFSET`] column). Stage-level.
+    /// Evaporation-outflow column for `(evap hydro local_idx, block blk)` (the
+    /// [`EVAP_FLOW_OFFSET`] column of the block's triple).
     #[inline]
-    pub(crate) fn evap_f_plus_col(&self, local_idx: usize) -> usize {
-        self.col_evap_start() + local_idx * EVAP_COLS_PER_HYDRO + EVAP_F_PLUS_OFFSET
+    pub(crate) fn evap_flow_col(&self, local_idx: usize, blk: usize) -> usize {
+        self.evap_triple_base(local_idx, blk) + EVAP_FLOW_OFFSET
     }
 
-    /// `f_evap_minus` (over-evaporation slack) column for evaporation-local
-    /// index `local_idx` (the [`EVAP_F_MINUS_OFFSET`] column). Stage-level.
+    /// `f_evap_plus` (under-evaporation slack) column for `(evap hydro local_idx,
+    /// block blk)` (the [`EVAP_F_PLUS_OFFSET`] column of the block's triple).
     #[inline]
-    pub(crate) fn evap_f_minus_col(&self, local_idx: usize) -> usize {
-        self.col_evap_start() + local_idx * EVAP_COLS_PER_HYDRO + EVAP_F_MINUS_OFFSET
+    pub(crate) fn evap_f_plus_col(&self, local_idx: usize, blk: usize) -> usize {
+        self.evap_triple_base(local_idx, blk) + EVAP_F_PLUS_OFFSET
+    }
+
+    /// `f_evap_minus` (over-evaporation slack) column for `(evap hydro local_idx,
+    /// block blk)` (the [`EVAP_F_MINUS_OFFSET`] column of the block's triple).
+    #[inline]
+    pub(crate) fn evap_f_minus_col(&self, local_idx: usize, blk: usize) -> usize {
+        self.evap_triple_base(local_idx, blk) + EVAP_F_MINUS_OFFSET
     }
 
     /// Deficit column for bus `b_idx`, segment `seg_idx`, block `blk`. Three-term
@@ -1392,17 +1426,17 @@ impl<'a> StageLayout<'a> {
         self.generation_col_start
     }
 
-    /// Start of evaporation columns ([`EVAP_COLS_PER_HYDRO`] stage-level per evap
-    /// hydro); address the three via `evap_flow_col` / `evap_f_plus_col` /
-    /// `evap_f_minus_col`.
+    /// Start of evaporation columns ([`EVAP_COLS_PER_HYDRO`] per `(evap hydro,
+    /// block)`, block-major); address the three via `evap_flow_col` /
+    /// `evap_f_plus_col` / `evap_f_minus_col`.
     #[inline]
     #[must_use]
     pub(crate) fn col_evap_start(&self) -> usize {
         self.evap_col_start
     }
 
-    /// Start of evaporation constraint rows (one per evap hydro):
-    /// `row_evap_start() + local_evap_idx`.
+    /// Start of evaporation constraint rows (one per `(evap hydro, block)`,
+    /// block-major): `row_evap_start() + local_evap_idx * n_blks + blk`.
     #[inline]
     #[must_use]
     pub(crate) fn row_evap_start(&self) -> usize {

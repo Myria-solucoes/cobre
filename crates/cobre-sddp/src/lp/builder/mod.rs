@@ -175,15 +175,14 @@ pub(crate) const COST_SCALE_FACTOR: f64 = 1_000_000.0;
 /// a positive one is evaporative outflow.
 pub(crate) const EVAPORATION_FLOW_SAFETY_MARGIN: f64 = 2.0;
 
-/// Number of LP columns per evaporating hydro (stage-level, NOT per-block):
-/// evaporation outflow, `f_evap_plus`, `f_evap_minus`. Base column for local index
-/// `i` is `col_evap_start + i * EVAP_COLS_PER_HYDRO`.
-///
-/// The stride MUST be the per-hydro column count and the local index the outer
-/// factor: writing `blk * n_evap_hydros + i` (a transposed/block-major stride)
-/// compiles and silently aliases one hydro's evaporation columns onto another's.
-/// Single owner of the stride — [`StageLayout`]'s evaporation accessors and the
-/// indexer's `EvaporationIndices` constructor both reference this const.
+/// Number of LP columns per `(evaporating hydro, block)` triple: evaporation
+/// outflow, `f_evap_plus`, `f_evap_minus`. Base column for evap-local index `i`,
+/// block `blk` is `col_evap_start + (i * n_blks + blk) * EVAP_COLS_PER_HYDRO`
+/// (hydro-outer, block-middle, offset-inner). The transposed
+/// `blk * n_evap_hydros + i` stride compiles and silently aliases one hydro's
+/// block onto another's. Single owner of the stride — [`StageLayout`]'s
+/// evaporation accessors and the indexer's `EvaporationIndices` constructor both
+/// reference this const.
 ///
 /// [`StageLayout`]: layout::StageLayout
 pub(crate) const EVAP_COLS_PER_HYDRO: usize = 3;

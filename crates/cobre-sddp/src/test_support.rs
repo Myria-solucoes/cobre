@@ -215,15 +215,20 @@ pub fn geometry(
         fpha_row_cursor += planes * n_blks;
     }
 
-    let evap_indices: Vec<EvaporationIndices> = (0..n_evap_hydros)
-        .map(|i| EvaporationIndices {
-            evaporation_flow_col: evap_col_start + i * EVAP_COLS_PER_HYDRO + EVAP_FLOW_OFFSET,
-            f_evap_plus_col: evap_col_start + i * EVAP_COLS_PER_HYDRO + EVAP_F_PLUS_OFFSET,
-            f_evap_minus_col: evap_col_start + i * EVAP_COLS_PER_HYDRO + EVAP_F_MINUS_OFFSET,
-            evap_row: fpha_row_cursor + i,
-        })
-        .collect();
-    let evap_col_end = evap_col_start + n_evap_hydros * EVAP_COLS_PER_HYDRO;
+    let mut evap_indices: Vec<EvaporationIndices> = Vec::with_capacity(n_evap_hydros * n_blks);
+    for i in 0..n_evap_hydros {
+        for blk in 0..n_blks {
+            let slot = i * n_blks + blk;
+            let triple_base = evap_col_start + slot * EVAP_COLS_PER_HYDRO;
+            evap_indices.push(EvaporationIndices {
+                evaporation_flow_col: triple_base + EVAP_FLOW_OFFSET,
+                f_evap_plus_col: triple_base + EVAP_F_PLUS_OFFSET,
+                f_evap_minus_col: triple_base + EVAP_F_MINUS_OFFSET,
+                evap_row: fpha_row_cursor + slot,
+            });
+        }
+    }
+    let evap_col_end = evap_col_start + n_evap_hydros * n_blks * EVAP_COLS_PER_HYDRO;
 
     let (withdrawal_slack_neg, withdrawal_slack_pos) = if hydro_count > 0 {
         let neg = evap_col_end..evap_col_end + hydro_count;

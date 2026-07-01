@@ -2976,3 +2976,693 @@ fn theta_and_n_state_invariant_to_block_mode() {
         "chronological adds exactly n_h*(n_blks-1) interior storage columns"
     );
 }
+
+/// Build the one-hydro FPHA study's stage-0 `StageLayout` AND `StageTemplate` from
+/// one shared `TemplateBuildCtx`, so the column/row accessors the chronological
+/// water tests call (`block_storage_col`, `turbine_col`, `row_water_balance_start`)
+/// agree with the template they query by construction.
+fn block_layout_and_template(
+    block_mode: BlockMode,
+    n_blks: usize,
+) -> (StageLayout<'static>, StageTemplate, Vec<f64>) {
+    use crate::hydro_models::FphaPlane;
+
+    let system = Box::leak(Box::new(one_hydro_block_system(block_mode, n_blks)));
+    let par_lp = Box::leak(Box::new(PrecomputedPar::default()));
+    let production = Box::leak(Box::new(ProductionModelSet::new(
+        vec![vec![ResolvedProductionModel::Fpha {
+            planes: vec![FphaPlane {
+                intercept: 1.0,
+                gamma_v: 0.2,
+                gamma_q: 0.5,
+                gamma_s: 0.05,
+            }],
+        }]],
+        1,
+        1,
+    )));
+    let hydro_models = Box::leak(Box::new(PrepareHydroModelsResult::default_from_system(
+        system,
+    )));
+    let resolved_params = Box::leak(Box::new(ResolvedParameters {
+        per_param: vec![],
+        id_to_slot: vec![],
+    }));
+
+    let (ctx, _, _) = super::build_template_build_ctx(
+        system,
+        InflowNonNegativityMethod::None,
+        par_lp,
+        production,
+        &hydro_models.evaporation,
+        resolved_params,
+    );
+    let ctx = Box::leak(Box::new(ctx));
+    let state = Box::leak(Box::new(state_layout_for(ctx)));
+    let stage = &system.stages()[0];
+
+    let template = super::build_single_stage_template(ctx, state, stage, 0).template;
+    let layout = StageLayout::new(ctx, state, stage, 0);
+    let tau: Vec<f64> = stage
+        .blocks
+        .iter()
+        .map(|b| b.duration_hours * super::super::M3S_TO_HM3)
+        .collect();
+    (layout, template, tau)
+}
+
+/// AC#1: a chronological `K = 2` Operating hydro emits two chained rows; block
+/// `k`'s row carries `+1.0` on `Sᵏ`, `−1.0` on `Sᵏ⁻¹`, and `+τ_k` on that block's
+/// turbine column.
+#[test]
+fn chronological_water_balance_chained_rows() {
+    let (layout, t, tau) = block_layout_and_template(BlockMode::Chronological, 2);
+    let h = 0_usize;
+    let row0 = layout.row_water_balance_start() + h * 2;
+    let row1 = layout.row_water_balance_start() + h * 2 + 1;
+
+    let entry = |col: usize, row: usize| -> f64 {
+        let es = csc_entries_for_col(&t, col);
+        let vals: Vec<f64> = es
+            .iter()
+            .filter(|(r, _)| *r == row)
+            .map(|(_, v)| *v)
+            .collect();
+        assert_eq!(vals.len(), 1, "exactly one entry at (col {col}, row {row})");
+        vals[0]
+    };
+
+    assert_eq!(entry(layout.block_storage_col(h, 1), row0), 1.0);
+    assert_eq!(entry(layout.block_storage_col(h, 0), row0), -1.0);
+    assert_eq!(entry(layout.turbine_col(h, 0), row0), tau[0]);
+
+    assert_eq!(entry(layout.block_storage_col(h, 2), row1), 1.0);
+    assert_eq!(entry(layout.block_storage_col(h, 1), row1), -1.0);
+    assert_eq!(entry(layout.turbine_col(h, 1), row1), tau[1]);
+}
+
+/// AC#2: summing the `K` chronological water rows coefficient-wise (over every
+/// column) reproduces the parallel single-row build. The interior `Sⁱ` terms cancel
+/// to `+1.0` on `Sᴷ` and `−1.0` on `S⁰`, and every `τ_k`-scaled flow term sums to
+/// its `ζ`-scaled parallel coefficient (`Σ_k τ_k = ζ`).
+#[test]
+fn chronological_water_balance_telescopes_to_parallel() {
+    let n_blks = 3_usize;
+    let h = 0_usize;
+    let (par_layout, par_t, _) = block_layout_and_template(BlockMode::Parallel, n_blks);
+    let (chr_layout, chr_t, _) = block_layout_and_template(BlockMode::Chronological, n_blks);
+
+    let dense_par = csc_to_dense(&par_t);
+    let dense_chr = csc_to_dense(&chr_t);
+
+    // Interior storage columns are shifted into chronological's control region, so
+    // parallel and chronological do NOT share control-region column indices; compare
+    // per SEMANTIC column via each layout's accessors.
+    let par_row = par_layout.row_water_balance_start() + h;
+    let chr_sum = |chr_col: usize| -> f64 {
+        (0..n_blks)
+            .map(|k| dense_chr[chr_layout.row_water_balance_start() + h * n_blks + k][chr_col])
+            .sum()
+    };
+    let assert_telescopes = |par_col: usize, chr_col: usize, label: &str| {
+        let summed = chr_sum(chr_col);
+        let expected = dense_par[par_row][par_col];
+        assert!(
+            (summed - expected).abs() < 1e-12,
+            "{label}: chronological telescoped sum {summed} != parallel {expected}"
+        );
+    };
+
+    // Storage endpoints: Sᴷ (outgoing) telescopes to +1, S⁰ (incoming) to −1.
+    assert_telescopes(
+        h,
+        chr_layout.block_storage_col(h, n_blks),
+        "outgoing storage Sᴷ",
+    );
+    assert_telescopes(
+        par_layout.col_storage_in_start() + h,
+        chr_layout.block_storage_col(h, 0),
+        "incoming storage S⁰",
+    );
+
+    // Per-block flow columns share their semantic accessor (same block index); each
+    // block's τ_k sum reproduces the parallel ζ-scaled flow coefficient.
+    for blk in 0..n_blks {
+        assert_telescopes(
+            par_layout.turbine_col(h, blk),
+            chr_layout.turbine_col(h, blk),
+            "turbine",
+        );
+        assert_telescopes(
+            par_layout.spillage_col(h, blk),
+            chr_layout.spillage_col(h, blk),
+            "spillage",
+        );
+        assert_telescopes(
+            par_layout.diversion_col(h, blk),
+            chr_layout.diversion_col(h, blk),
+            "diversion",
+        );
+    }
+
+    // Withdrawal slacks: parallel applies ±ζ once; chronological's per-block ±τ_k sum
+    // recovers ±ζ.
+    assert_telescopes(
+        par_layout.col_withdrawal_neg_start() + h,
+        chr_layout.col_withdrawal_neg_start() + h,
+        "withdrawal neg",
+    );
+    assert_telescopes(
+        par_layout.col_withdrawal_pos_start() + h,
+        chr_layout.col_withdrawal_pos_start() + h,
+        "withdrawal pos",
+    );
+
+    // Interior boundaries Sⁱ (chronological-only) appear +1 in row i−1 and −1 in
+    // row i, so they net to zero across the K rows.
+    for k in 1..n_blks {
+        let summed = chr_sum(chr_layout.block_storage_col(h, k));
+        assert!(
+            summed.abs() < 1e-12,
+            "interior boundary S{k} must cancel across the K rows, got {summed}"
+        );
+    }
+
+    // The telescoped RHS recovers the parallel RHS: Σ_k τ_k·(base − withdrawal) =
+    // ζ·(base − withdrawal).
+    let chr_rhs_sum: f64 = (0..n_blks)
+        .map(|k| chr_t.row_lower[chr_layout.row_water_balance_start() + h * n_blks + k])
+        .sum();
+    let par_rhs = par_t.row_lower[par_row];
+    assert!(
+        (chr_rhs_sum - par_rhs).abs() < 1e-12,
+        "telescoped RHS {chr_rhs_sum} != parallel RHS {par_rhs}"
+    );
+}
+
+/// AC#3: a chronological `K = 1` build's water-balance row is byte-identical to the
+/// parallel build's — the single chained row IS the parallel row (`τ_1 = ζ`, no
+/// interior boundary). The full-template anchor is
+/// [`chronological_k1_byte_identical_to_parallel`]; this isolates the water row.
+#[test]
+fn chronological_k1_water_row_byte_identical() {
+    let parallel = block_template(BlockMode::Parallel, 1);
+    let (chrono_layout, chrono, _tau) = block_layout_and_template(BlockMode::Chronological, 1);
+    let row = chrono_layout.row_water_balance_start();
+
+    let dense_par = csc_to_dense(&parallel);
+    let dense_chr = csc_to_dense(&chrono);
+    assert_eq!(parallel.num_cols, chrono.num_cols, "K=1 column count");
+    for col in 0..parallel.num_cols {
+        assert_eq!(
+            dense_par[row][col].to_bits(),
+            dense_chr[row][col].to_bits(),
+            "K=1 water row coefficient mismatch at col {col}"
+        );
+    }
+    assert_eq!(
+        parallel.row_lower[row].to_bits(),
+        chrono.row_lower[row].to_bits(),
+        "K=1 water row_lower"
+    );
+    assert_eq!(
+        parallel.row_upper[row].to_bits(),
+        chrono.row_upper[row].to_bits(),
+        "K=1 water row_upper"
+    );
+}
+
+/// §9 contract "D06 preserved per block": at `K ≥ 2` each per-block FPHA plane row
+/// carries `−γᵥ/2` on BOTH block-local storage columns `block_storage_col(h, k−1)`
+/// (`Sᵏ⁻¹`) and `block_storage_col(h, k)` (`Sᵏ`) — the FPHA average-storage rule
+/// applied to the block's own `(Sᵏ⁻¹, Sᵏ)` pair. Placing it on the outgoing column
+/// alone (or on the stage endpoints instead of the block boundaries) understates the
+/// head term and is the wrong-but-compiling alternative D06 pins against.
+#[test]
+fn chronological_d06_gamma_v_on_both_block_columns() {
+    let n_blks = 2_usize;
+    let (layout, t, _tau) = block_layout_and_template(BlockMode::Chronological, n_blks);
+    let h = 0_usize;
+    // `block_template`/`block_layout_and_template` fix the single FPHA plane's
+    // gamma_v; the row coefficient is `−gamma_v/2` after the objective-neutral
+    // matrix fill (matrix values are not cost-scaled).
+    let half_gamma_v = -0.2 / 2.0;
+
+    let entry = |col: usize, row: usize| -> f64 {
+        csc_entries_for_col(&t, col)
+            .iter()
+            .filter(|(r, _)| *r == row)
+            .map(|(_, v)| *v)
+            .sum()
+    };
+
+    for k in 1..=n_blks {
+        let blk = k - 1;
+        let row = layout.row_fpha_start() + blk;
+        assert_eq!(
+            entry(layout.block_storage_col(h, k - 1), row),
+            half_gamma_v,
+            "block {k}: −γᵥ/2 on Sᵏ⁻¹ (D06 both-columns)"
+        );
+        assert_eq!(
+            entry(layout.block_storage_col(h, k), row),
+            half_gamma_v,
+            "block {k}: −γᵥ/2 on Sᵏ (D06 both-columns)"
+        );
+    }
+}
+
+/// §5 cross-mode cut-row byte-comparability invariant: for a chronological `K ≥ 2`
+/// FPHA study, the matrix-derived column scale at an interior `block_storage_col(h,
+/// k)` equals the endpoint storage-column scale. Identical state-column scaling
+/// across the storage family is what keeps rendered cut rows (`−coeff·col_scale[col]`)
+/// byte-comparable; a divergent interior scale would silently desynchronise the cut
+/// rendering.
+#[test]
+fn chronological_interior_storage_scale_matches_endpoint() {
+    let n_blks = 3_usize;
+    let (layout, t, _tau) = block_layout_and_template(BlockMode::Chronological, n_blks);
+    let h = 0_usize;
+
+    let col_scale = super::super::compute_col_scale(t.num_cols, &t.col_starts, &t.values);
+
+    // The outgoing endpoint Sᴷ (`block_storage_col(h, K)`) is the reference storage
+    // column whose scale every interior boundary must match.
+    let endpoint_scale = col_scale[layout.block_storage_col(h, n_blks)];
+    for k in 1..n_blks {
+        let interior_col = layout.block_storage_col(h, k);
+        assert_eq!(
+            col_scale[interior_col].to_bits(),
+            endpoint_scale.to_bits(),
+            "interior boundary S{k} scale must equal the endpoint Sᴷ scale (§5 \
+             byte-comparability); divergence signals FPHA/evap coefficients differ \
+             between interior and endpoint storage columns"
+        );
+    }
+}
+
+// ── Filling / PreFilling block anchors (D38–D42, σ_fill on Sᴷ) ─────────────
+
+const FILL_N_STAGES: usize = 5;
+const FILL_ENTRY_ID: i32 = 4;
+const FILL_PRE_START_ID: i32 = 3;
+const FILL_MIN_STORAGE_HM3: f64 = 60.0;
+const FILL_RATE_M3S: f64 = 5.0;
+const FILL_PRE_HYDRO_ID: i32 = 2;
+const FILL_FILL_HYDRO_ID: i32 = 3;
+
+/// A `FILL_N_STAGES`-stage, one-bus cascade under `block_mode` with `n_blks` blocks.
+/// H2 (`FILL_PRE_HYDRO_ID`) is a filling hydro whose `start_stage_id` sits at
+/// `FILL_PRE_START_ID`, so at stage id 0 it is `PreFilling`; H3
+/// (`FILL_FILL_HYDRO_ID`) is a filling hydro with `start_stage_id = 0`, so at stage
+/// id 0 it is `Filling`. Both share `entry = FILL_ENTRY_ID`. A backup thermal and a
+/// bus deficit segment keep the LP feasible regardless of the frozen filling storage.
+fn filling_block_system(block_mode: BlockMode, n_blks: usize) -> System {
+    use cobre_core::scenario::{InflowModel, LoadModel};
+
+    let bus = Bus {
+        id: EntityId(1),
+        name: "B1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        deficit_segments: vec![DeficitSegment {
+            depth_mw: None,
+            cost_per_mwh: 500.0,
+        }],
+        excess_cost: 0.0,
+    };
+
+    let filling_hydro = |id: i32, downstream: Option<i32>, start: i32| Hydro {
+        id: EntityId(id),
+        name: format!("H{id}"),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        bus_id: EntityId(1),
+        downstream_id: downstream.map(EntityId),
+        entry_stage_id: Some(FILL_ENTRY_ID),
+        exit_stage_id: None,
+        min_storage_hm3: FILL_MIN_STORAGE_HM3,
+        max_storage_hm3: 200.0,
+        min_outflow_m3s: 0.0,
+        max_outflow_m3s: None,
+        generation_model: HydroGenerationModel::ConstantProductivity,
+        min_turbined_m3s: 0.0,
+        max_turbined_m3s: 100.0,
+        specific_productivity_mw_per_m3s_per_m: None,
+        min_generation_mw: 0.0,
+        max_generation_mw: 250.0,
+        tailrace: None,
+        hydraulic_losses: None,
+        efficiency: None,
+        evaporation_coefficients_mm: None,
+        evaporation_reference_volumes_hm3: None,
+        diversion: None,
+        filling: Some(FillingConfig {
+            start_stage_id: start,
+            filling_min_rate_m3s: FILL_RATE_M3S,
+        }),
+        penalties: hydro_penalties_zero(),
+    };
+
+    let hydros = vec![
+        filling_hydro(
+            FILL_PRE_HYDRO_ID,
+            Some(FILL_FILL_HYDRO_ID),
+            FILL_PRE_START_ID,
+        ),
+        filling_hydro(FILL_FILL_HYDRO_ID, None, 0),
+    ];
+
+    let blocks: Vec<Block> = (0..n_blks)
+        .map(|b| Block {
+            index: b,
+            name: format!("BLK{b}"),
+            duration_hours: 360.0 + 24.0 * f64::from(u32::try_from(b).unwrap_or(0)),
+        })
+        .collect();
+
+    let stages: Vec<Stage> = (0..FILL_N_STAGES)
+        .map(|i| Stage {
+            index: i,
+            id: i as i32,
+            start_date: NaiveDate::from_ymd_opt(2024, (i % 12 + 1) as u32, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, ((i % 12 + 1) % 12 + 1) as u32, 1).unwrap(),
+            season_id: Some(0),
+            blocks: blocks.clone(),
+            block_mode,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        })
+        .collect();
+
+    let inflow_models: Vec<InflowModel> = (0..FILL_N_STAGES)
+        .flat_map(|i| {
+            [FILL_PRE_HYDRO_ID, FILL_FILL_HYDRO_ID].map(|hid| InflowModel {
+                hydro_id: EntityId(hid),
+                stage_id: i as i32,
+                mean_m3s: 80.0,
+                std_m3s: 0.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+        })
+        .collect();
+
+    let load_models: Vec<LoadModel> = (0..FILL_N_STAGES)
+        .map(|i| LoadModel {
+            bus_id: EntityId(1),
+            stage_id: i as i32,
+            mean_mw: 100.0,
+            std_mw: 0.0,
+        })
+        .collect();
+
+    let mut bounds = ResolvedBounds::new(
+        &BoundsCountsSpec {
+            n_hydros: 2,
+            n_thermals: 0,
+            n_lines: 0,
+            n_pumping: 0,
+            n_contracts: 0,
+            n_stages: FILL_N_STAGES,
+            k_max: 0,
+        },
+        &BoundsDefaults {
+            hydro: HydroStageBounds {
+                min_storage_hm3: FILL_MIN_STORAGE_HM3,
+                max_storage_hm3: 200.0,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 100.0,
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: None,
+                min_generation_mw: 0.0,
+                max_generation_mw: 250.0,
+                max_diversion_m3s: None,
+                filling_min_rate_m3s: FILL_RATE_M3S,
+                water_withdrawal_m3s: 0.0,
+            },
+            thermal: ThermalStageBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: 0.0,
+                cost_per_mwh: 0.0,
+            },
+            line: LineStageBounds {
+                direct_mw: 0.0,
+                reverse_mw: 0.0,
+            },
+            pumping: PumpingStageBounds {
+                min_flow_m3s: 0.0,
+                max_flow_m3s: 0.0,
+            },
+            contract: ContractStageBounds {
+                min_mw: 0.0,
+                max_mw: 0.0,
+                price_per_mwh: 0.0,
+            },
+        },
+    );
+    for h_idx in [0_usize, 1] {
+        for stage_idx in 0..FILL_N_STAGES {
+            let hb = bounds.hydro_bounds_mut(h_idx, stage_idx);
+            hb.min_storage_hm3 = FILL_MIN_STORAGE_HM3;
+            hb.filling_min_rate_m3s = FILL_RATE_M3S;
+        }
+    }
+
+    let penalties = ResolvedPenalties::new(
+        &PenaltiesCountsSpec {
+            n_hydros: 2,
+            n_buses: 1,
+            n_lines: 0,
+            n_ncs: 0,
+            n_stages: FILL_N_STAGES,
+        },
+        &PenaltiesDefaults {
+            hydro: default_hydro_penalties(),
+            bus: BusStagePenalties { excess_cost: 0.0 },
+            line: LineStagePenalties { exchange_cost: 0.0 },
+            ncs: NcsStagePenalties {
+                curtailment_cost: 0.0,
+            },
+        },
+    );
+
+    SystemBuilder::new()
+        .buses(vec![bus])
+        .hydros(hydros)
+        .stages(stages)
+        .inflow_models(inflow_models)
+        .load_models(load_models)
+        .bounds(bounds)
+        .penalties(penalties)
+        .build()
+        .expect("filling_block_system: valid filling cascade")
+}
+
+/// Build the stage-0 `StageLayout` and `StageTemplate` for [`filling_block_system`]
+/// under `block_mode` with `n_blks` blocks, alongside the resolved `filling_v_target`
+/// fold the σ_fill row RHS reads. Stage 0 places H2 in `PreFilling` and H3 in
+/// `Filling`. `Box::leak` matches [`block_layout_and_template`]: the ctx/state must
+/// outlive the borrowed `StageLayout`.
+fn filling_block_layout_and_template(
+    block_mode: BlockMode,
+    n_blks: usize,
+) -> (
+    StageLayout<'static>,
+    StageTemplate,
+    std::collections::BTreeMap<(usize, i32), f64>,
+) {
+    let system = Box::leak(Box::new(filling_block_system(block_mode, n_blks)));
+    let par_lp = Box::leak(Box::new(PrecomputedPar::default()));
+    let production = Box::leak(Box::new(ProductionModelSet::new(
+        vec![
+            vec![
+                ResolvedProductionModel::ConstantProductivity { productivity: 1.0 };
+                FILL_N_STAGES
+            ];
+            2
+        ],
+        2,
+        FILL_N_STAGES,
+    )));
+    let hydro_models = Box::leak(Box::new(PrepareHydroModelsResult::default_from_system(
+        system,
+    )));
+    let resolved_params = Box::leak(Box::new(ResolvedParameters {
+        per_param: vec![],
+        id_to_slot: vec![],
+    }));
+
+    let (ctx, _, _) = super::build_template_build_ctx(
+        system,
+        InflowNonNegativityMethod::None,
+        par_lp,
+        production,
+        &hydro_models.evaporation,
+        resolved_params,
+    );
+    let ctx = Box::leak(Box::new(ctx));
+    let state = Box::leak(Box::new(state_layout_for(ctx)));
+    let stage = &system.stages()[0];
+
+    let template = super::build_single_stage_template(ctx, state, stage, 0).template;
+    let layout = StageLayout::new(ctx, state, stage, 0);
+    (layout, template, ctx.filling_v_target.clone())
+}
+
+/// §9 contract "D38–D42 preserved per block": at `K ≥ 2` a `PreFilling` hydro's `K`
+/// water rows are frozen identities (`Sᵏ − Sᵏ⁻¹ = 0`) and its spillage AND turbine
+/// columns are frozen `[0, 0]` on every block (no dam, no machinery). A `Filling`
+/// hydro at the same stage keeps its per-block spillage FREE (the D40 over-dam relief
+/// valve) while its turbine stays frozen `[0, 0]` (no machinery until entry).
+#[test]
+fn chronological_prefilling_d38_d42_per_block() {
+    let n_blks = 2_usize;
+    let (layout, t, _v_target) =
+        filling_block_layout_and_template(BlockMode::Chronological, n_blks);
+
+    // Positional indices after the SystemBuilder id-sort: H2 → 0 (PreFilling at
+    // stage 0), H3 → 1 (Filling at stage 0).
+    let h_pre = 0_usize;
+    let h_fill = 1_usize;
+
+    let entry = |col: usize, row: usize| -> f64 {
+        csc_entries_for_col(&t, col)
+            .iter()
+            .filter(|(r, _)| *r == row)
+            .map(|(_, v)| *v)
+            .sum()
+    };
+
+    for k in 1..=n_blks {
+        let blk = k - 1;
+        let row = layout.row_water_balance_start() + h_pre * n_blks + blk;
+        assert_eq!(
+            entry(layout.block_storage_col(h_pre, k), row),
+            1.0,
+            "PreFilling block {k}: +1 on Sᵏ (frozen identity, D38/D39/D42)"
+        );
+        assert_eq!(
+            entry(layout.block_storage_col(h_pre, k - 1), row),
+            -1.0,
+            "PreFilling block {k}: −1 on Sᵏ⁻¹ (frozen identity, D38/D39/D42)"
+        );
+        assert_eq!(
+            t.row_lower[row], 0.0,
+            "PreFilling block {k}: frozen-identity RHS lower == 0"
+        );
+        assert_eq!(
+            t.row_upper[row], 0.0,
+            "PreFilling block {k}: frozen-identity RHS upper == 0"
+        );
+
+        let spill_pre = layout.spillage_col(h_pre, blk);
+        assert_eq!(
+            (t.col_lower[spill_pre], t.col_upper[spill_pre]),
+            (0.0, 0.0),
+            "PreFilling block {k}: spillage frozen [0,0] (no dam to spill from, D38/D39/D42)"
+        );
+        let turb_pre = layout.turbine_col(h_pre, blk);
+        assert_eq!(
+            (t.col_lower[turb_pre], t.col_upper[turb_pre]),
+            (0.0, 0.0),
+            "PreFilling block {k}: turbine frozen [0,0] (no machinery, D38/D39/D42)"
+        );
+
+        // A Filling hydro's spillage is the legitimate D40 relief valve: free upward.
+        let spill_fill = layout.spillage_col(h_fill, blk);
+        assert_eq!(
+            t.col_lower[spill_fill], 0.0,
+            "Filling block {k}: spillage lower == 0"
+        );
+        assert_eq!(
+            t.col_upper[spill_fill],
+            f64::INFINITY,
+            "Filling block {k}: spillage FREE (D40 relief valve), not frozen"
+        );
+    }
+}
+
+/// §9 contract "Filling-phase target on `Sᴷ`": at `K ≥ 2` a `Filling`-phase hydro's
+/// `σ_fill` row references the stage-final storage `block_storage_col(h, K)` (= `Sᴷ`,
+/// which aliases the outgoing endpoint `h`), its `V_target` fold value is UNCHANGED
+/// from the parallel build (`build_filling_v_target` is keyed `(hydro, stage)` and
+/// `ζ`-scaled, so the τ_k-replaces-ζ water change leaves it untouched), and its
+/// per-block spillage stays FREE (D40).
+#[test]
+fn chronological_filling_target_on_final_storage() {
+    let n_blks = 2_usize;
+    let (chr_layout, chr_t, chr_v_target) =
+        filling_block_layout_and_template(BlockMode::Chronological, n_blks);
+    let (_par_layout, _par_t, par_v_target) =
+        filling_block_layout_and_template(BlockMode::Parallel, n_blks);
+
+    // H3 is the Filling hydro at stage 0 (positional index 1 after the id-sort).
+    let h_fill = 1_usize;
+    assert_eq!(
+        chr_layout.filling_target_hydro_indices,
+        vec![h_fill],
+        "exactly the Filling hydro H3 emits a σ_fill target at stage 0"
+    );
+
+    // The σ_fill row places +1 on the OUTGOING storage column, which in chronological
+    // mode is the stage-final Sᴷ (block_storage_col aliases the outgoing endpoint to
+    // the dense hydro index h_fill).
+    let sk_col = chr_layout.block_storage_col(h_fill, n_blks);
+    assert_eq!(
+        sk_col, h_fill,
+        "block_storage_col(h, K) aliases the outgoing endpoint (= dense hydro index)"
+    );
+    let row = chr_layout.row_filling_target_start();
+    let entry = |col: usize| -> f64 {
+        csc_entries_for_col(&chr_t, col)
+            .iter()
+            .filter(|(r, _)| *r == row)
+            .map(|(_, v)| *v)
+            .sum()
+    };
+    assert_eq!(
+        entry(sk_col),
+        1.0,
+        "σ_fill row references Sᴷ (block_storage_col(h, K)), the stage-final storage"
+    );
+    assert_eq!(
+        entry(chr_layout.col_filling_target_start()),
+        1.0,
+        "σ_fill row carries +1 on its σ_fill slack column"
+    );
+
+    // The ζ-scaled V_target fold is mode-independent: build_filling_v_target never
+    // sees block_mode, so replacing ζ with per-block τ_k in the water rows must not
+    // move the target RHS.
+    let stage0_id = 0_i32;
+    let chr_target = chr_v_target[&(h_fill, stage0_id)];
+    let par_target = par_v_target[&(h_fill, stage0_id)];
+    assert_eq!(
+        chr_target.to_bits(),
+        par_target.to_bits(),
+        "Filling V_target fold must be byte-identical across modes (keyed (hydro, \
+         stage), ζ-scaled)"
+    );
+    assert_eq!(
+        chr_t.row_lower[row].to_bits(),
+        chr_target.to_bits(),
+        "σ_fill row RHS (≥ lower) equals the V_target fold value"
+    );
+
+    // Per-block spillage stays the free D40 relief valve, not frozen.
+    for blk in 0..n_blks {
+        let spill = chr_layout.spillage_col(h_fill, blk);
+        assert_eq!(
+            (chr_t.col_lower[spill], chr_t.col_upper[spill]),
+            (0.0, f64::INFINITY),
+            "Filling block {blk}: per-block spillage FREE (D40), not frozen"
+        );
+    }
+}

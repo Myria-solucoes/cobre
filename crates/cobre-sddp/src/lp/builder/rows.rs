@@ -1,4 +1,4 @@
-use cobre_core::Stage;
+use cobre_core::{BlockMode, Stage};
 
 use crate::hydro_models::EvaporationModel;
 
@@ -55,7 +55,29 @@ pub(super) fn fill_stage_rows(
 /// target's RHS below. The solve-time noise patch is neutralized by zeroing the
 /// hydro's `noise_scale`, so the `0` RHS survives; a nonzero RHS here would break
 /// the frozen identity even with the noise patch zeroed.
+///
+/// In `BlockMode::Chronological` the single per-hydro RHS splits into `K` per-block
+/// row bounds `τ_k·(base − withdrawal)` (block-major, mirroring the entries side);
+/// summing them recovers the parallel `ζ·(base − withdrawal)` since `Σ_k τ_k = ζ`.
 fn fill_water_balance_rows(
+    ctx: &TemplateBuildCtx<'_>,
+    stage: &Stage,
+    stage_idx: usize,
+    layout: &StageLayout,
+    row_lower: &mut [f64],
+    row_upper: &mut [f64],
+) {
+    match stage.block_mode {
+        BlockMode::Parallel => {
+            fill_parallel_water_rows(ctx, stage, stage_idx, layout, row_lower, row_upper);
+        }
+        BlockMode::Chronological => {
+            fill_chronological_water_rows(ctx, stage, stage_idx, layout, row_lower, row_upper);
+        }
+    }
+}
+
+fn fill_parallel_water_rows(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
     stage_idx: usize,
@@ -110,6 +132,73 @@ fn fill_water_balance_rows(
         let row_d = layout.row_water_balance_start() + d_idx;
         row_lower[row_d] -= delta;
         row_upper[row_d] -= delta;
+    }
+}
+
+/// Per-block water-balance RHS for chronological mode: each Operating/Filling hydro
+/// gets `K` rows `τ_k·(base − withdrawal)` (block-major `row_water + h·K + (k−1)`),
+/// with `τ_k` replacing `ζ` so `Σ_k` recovers the parallel total. A `PreFilling`
+/// hydro gets `K` frozen-identity rows with RHS `0` (block-major), and its
+/// withdrawal transfers per block (`−τ_k·withdrawal_h`) to the short-circuit
+/// target's block rows, mirroring the entries side.
+fn fill_chronological_water_rows(
+    ctx: &TemplateBuildCtx<'_>,
+    stage: &Stage,
+    stage_idx: usize,
+    layout: &StageLayout,
+    row_lower: &mut [f64],
+    row_upper: &mut [f64],
+) {
+    let n_blks = layout.n_blks;
+    let has_par = ctx.par_lp.n_stages() > 0 && ctx.par_lp.n_hydros() == layout.n_h;
+    for h_idx in 0..layout.n_h {
+        if super::entries::is_prefilling(ctx, stage, h_idx) {
+            for k in 1..=n_blks {
+                let row = layout.row_water_balance_start() + h_idx * n_blks + (k - 1);
+                row_lower[row] = 0.0;
+                row_upper[row] = 0.0;
+            }
+            continue;
+        }
+        let base = if has_par {
+            ctx.par_lp.deterministic_base(stage_idx, h_idx)
+        } else {
+            0.0
+        };
+        let withdrawal = ctx
+            .resolved
+            .bounds
+            .hydro_bounds(h_idx, stage_idx)
+            .water_withdrawal_m3s;
+        for k in 1..=n_blks {
+            let blk = k - 1;
+            let row = layout.row_water_balance_start() + h_idx * n_blks + blk;
+            let tau_k = stage.blocks[blk].duration_hours * super::M3S_TO_HM3;
+            let rhs = tau_k * (base - withdrawal);
+            row_lower[row] = rhs;
+            row_upper[row] = rhs;
+        }
+    }
+
+    for h_idx in 0..layout.n_h {
+        if !super::entries::is_prefilling(ctx, stage, h_idx) {
+            continue;
+        }
+        let Some(d_idx) = super::entries::resolve_shortcircuit_target(ctx, stage, h_idx) else {
+            continue;
+        };
+        let withdrawal_h = ctx
+            .resolved
+            .bounds
+            .hydro_bounds(h_idx, stage_idx)
+            .water_withdrawal_m3s;
+        for k in 1..=n_blks {
+            let blk = k - 1;
+            let tau_k = stage.blocks[blk].duration_hours * super::M3S_TO_HM3;
+            let row_d = layout.row_water_balance_start() + d_idx * n_blks + blk;
+            row_lower[row_d] -= tau_k * withdrawal_h;
+            row_upper[row_d] -= tau_k * withdrawal_h;
+        }
     }
 }
 
@@ -249,10 +338,11 @@ fn fill_fpha_rows(
     );
 }
 
-/// Fill evaporation row bounds: equality `row_lower == row_upper == intercept_m3s`.
-/// The volume-dependent term lives in the matrix entries
-/// ([`super::entries::fill_evaporation_entries`]), so the row bounds encode only
-/// the constant intercept.
+/// Fill evaporation row bounds: equality `row_lower == row_upper == intercept_m3s`,
+/// one row per `(evap hydro, block)` (block-major `row_evap_start + local * n_blks +
+/// blk`, in lockstep with the entries side). The volume-dependent term lives in the
+/// matrix entries ([`super::entries::fill_evaporation_entries`]), so the row bounds
+/// encode only the constant intercept, replicated across the hydro's `K` block rows.
 fn fill_evaporation_rows(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -260,6 +350,7 @@ fn fill_evaporation_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
+    let n_blks = layout.n_blks;
     for (local_idx, &h_idx) in layout.evap_hydro_indices.iter().enumerate() {
         match ctx.evaporation_models.model(h_idx) {
             EvaporationModel::Linearized { coefficients, .. } => {
@@ -269,9 +360,11 @@ fn fill_evaporation_rows(
                     coefficients.len()
                 );
                 let intercept_m3s = coefficients[stage_idx].intercept_m3s;
-                let row = layout.row_evap_start() + local_idx;
-                row_lower[row] = intercept_m3s;
-                row_upper[row] = intercept_m3s;
+                for blk in 0..n_blks {
+                    let row = layout.row_evap_start() + local_idx * n_blks + blk;
+                    row_lower[row] = intercept_m3s;
+                    row_upper[row] = intercept_m3s;
+                }
             }
             EvaporationModel::None => {
                 debug_assert!(

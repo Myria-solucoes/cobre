@@ -3650,3 +3650,349 @@ fn d33_converges_to_known_optimum() {
     );
     assert_cost(result.final_lb, 553.333_333_333_3, 1e-2, "D33");
 }
+
+/// Chronological-blocks telescoping ⇒ parallel bound-agreement anchor.
+///
+/// Pins the §9 "telescoping ⇒ parallel agreement when interiors are inert" contract
+/// at the solved-bound level: with `γᵥ = 0` (constant productivity), no
+/// storage-dependent evaporation, and non-binding interior storage bounds, a
+/// chronological (`K = 2`) run's converged lower bound equals the matched parallel
+/// run's. The water rows telescope unconditionally (`Sᵏ` cancels to `Sᴷ − S⁰`,
+/// `Σ τ_k = ζ`); the bound agreement holds only because nothing makes the interior
+/// storage path bind.
+mod chronological_telescoping {
+    use cobre_core::scenario::{InflowModel, LoadModel};
+    use cobre_core::temporal::{
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig,
+    };
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, DeficitSegment,
+        EntityId, HydroGenerationModel, HydroStageBounds, HydroStagePenalties, HydroStorage,
+        InitialConditions, LineStageBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
+        ResolvedPenalties, SystemBuilder, ThermalStageBounds,
+    };
+    use cobre_io::config::{
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
+        TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+    };
+    use cobre_solver::ActiveSolver;
+
+    use super::common::builders::{
+        BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage,
+    };
+    use super::common::{StubComm, build_setup_in_code};
+
+    const N_STAGES: usize = 3;
+    const N_ITERATIONS: u32 = 12;
+    const HYDRO_ID: i32 = 1;
+
+    fn zero_hydro_stage_penalties() -> HydroStagePenalties {
+        HydroStagePenalties {
+            spillage_cost: 0.0,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 0.0,
+        }
+    }
+
+    /// Two-block, constant-productivity hydro + backup thermal on one bus, built under
+    /// `block_mode`. Constant productivity means `γᵥ = 0`; no evaporation coefficients
+    /// means no storage-dependent loss; the wide `[0, 500]` storage bounds never bind —
+    /// the three conditions the inert-interior contract requires.
+    fn build_system(block_mode: BlockMode) -> cobre_core::System {
+        use chrono::NaiveDate;
+
+        let bus = make_bus(
+            EntityId(2),
+            BusSpec {
+                name: "B1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 500.0,
+                }],
+                excess_cost: 0.0,
+            },
+        );
+
+        let hydro = make_hydro(
+            EntityId(HYDRO_ID),
+            HydroSpec {
+                name: "H1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                bus_id: EntityId(2),
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 500.0,
+                max_turbined_m3s: 100.0,
+                generation_model: HydroGenerationModel::ConstantProductivity,
+                specific_productivity_mw_per_m3s_per_m: Some(0.5),
+                max_generation_mw: 250.0,
+                penalties: zero_hydro_penalties(),
+                ..Default::default()
+            },
+        );
+
+        // Two blocks with distinct durations so the chronological chain is a genuine
+        // K = 2 chain (τ_0 ≠ τ_1) whose telescoped total still recovers the parallel ζ.
+        let blocks = vec![
+            Block {
+                index: 0,
+                name: "B0".to_string(),
+                duration_hours: 300.0,
+            },
+            Block {
+                index: 1,
+                name: "B1".to_string(),
+                duration_hours: 444.0,
+            },
+        ];
+
+        let stages: Vec<Stage> = (0..N_STAGES)
+            .map(|i| {
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: NaiveDate::from_ymd_opt(2024, (i % 12 + 1) as u32, 1).unwrap(),
+                        end_date: NaiveDate::from_ymd_opt(2024, ((i % 12 + 1) % 12 + 1) as u32, 1)
+                            .unwrap(),
+                        season_id: Some(0),
+                        blocks: blocks.clone(),
+                        block_mode,
+                        state_config: StageStateConfig {
+                            storage: true,
+                            inflow_lags: false,
+                        },
+                        risk_config: StageRiskConfig::Expectation,
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor: 1,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                    },
+                )
+            })
+            .collect();
+
+        // Deterministic: zero-variance inflow and load so the optimum is a single
+        // scenario and both modes converge to the same bound.
+        let inflow_models: Vec<InflowModel> = (0..N_STAGES)
+            .map(|i| InflowModel {
+                hydro_id: EntityId(HYDRO_ID),
+                stage_id: i32::try_from(i).expect("stage index fits i32"),
+                mean_m3s: 60.0,
+                std_m3s: 0.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..N_STAGES)
+            .map(|i| LoadModel {
+                bus_id: EntityId(2),
+                stage_id: i32::try_from(i).expect("stage index fits i32"),
+                mean_mw: 120.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let default_hydro_bounds = || HydroStageBounds {
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 500.0,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            max_diversion_m3s: None,
+            filling_min_rate_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        };
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 400.0,
+                    cost_per_mwh: 100.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: zero_hydro_stage_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        let initial_conditions = InitialConditions {
+            storage: vec![HydroStorage {
+                hydro_id: EntityId(HYDRO_ID),
+                value_hm3: 200.0,
+            }],
+            filling_storage: vec![],
+            past_inflows: vec![],
+            past_anticipated_commitments: vec![],
+            recent_observations: vec![],
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(vec![super::common::builders::make_thermal(
+                EntityId(3),
+                super::common::builders::ThermalSpec {
+                    name: "T_backup".to_string(),
+                    operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    bus_id: EntityId(2),
+                    cost_per_mwh: 100.0,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 400.0,
+                    anticipated_config: None,
+                    ..Default::default()
+                },
+            )])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .initial_conditions(initial_conditions)
+            .build()
+            .expect("build_system: valid constant-productivity study")
+    }
+
+    fn zero_hydro_penalties() -> cobre_core::entities::hydro::HydroPenalties {
+        cobre_core::entities::hydro::HydroPenalties {
+            spillage_cost: 0.0,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 0.0,
+        }
+    }
+
+    fn build_config() -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::None,
+                },
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                forward_passes: Some(1),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
+                    limit: N_ITERATIONS,
+                }]),
+                stopping_mode: "any".to_string(),
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                scenario_source: None,
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    fn train_final_lb(block_mode: BlockMode) -> f64 {
+        let system = build_system(block_mode);
+        let config = build_config();
+        let mut setup = build_setup_in_code(system, &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+        assert!(
+            outcome.error.is_none(),
+            "training error: {:?}",
+            outcome.error
+        );
+        outcome.result.final_lb
+    }
+
+    #[test]
+    fn chronological_telescopes_to_parallel_when_interiors_inert() {
+        let parallel_lb = train_final_lb(BlockMode::Parallel);
+        let chronological_lb = train_final_lb(BlockMode::Chronological);
+        // LP-tolerance agreement: the two are different LPs (chronological adds inert
+        // interior columns and chained rows), so compare to an absolute-relative
+        // tolerance that absorbs HiGHS/CLP FP noise while catching a genuine
+        // divergence (a binding interior path would shift the bound far more).
+        let tol = 1e-6 * parallel_lb.abs().max(1.0);
+        assert!(
+            (chronological_lb - parallel_lb).abs() <= tol,
+            "chronological bound {chronological_lb} must equal parallel bound \
+             {parallel_lb} within LP tolerance {tol} (inert interiors); a divergence \
+             signals the interior storage path bound"
+        );
+    }
+}

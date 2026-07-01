@@ -8,10 +8,11 @@
 //! state-vector concern lives on [`StateLayout`](super::StateLayout) and the
 //! non-state study shape on [`StudyDimensions`](super::StudyDimensions).
 
-/// Column and row indices for the evaporation constraint of one hydro.
+/// Column and row indices for one evaporation constraint.
 ///
-/// Locates the three evaporation columns and one evaporation row assigned to
-/// a single hydro within a stage LP.  Columns are stage-level (not per-block).
+/// Locates the three evaporation columns and one evaporation row of a single
+/// `(hydro, block)` pair within a stage LP. The producing layout holds one entry
+/// per `(evap hydro, block)`, block-major.
 #[derive(Debug, Clone, Copy)]
 pub struct EvaporationIndices {
     /// Column index of the stage-averaged evaporation-outflow variable (m³/s).

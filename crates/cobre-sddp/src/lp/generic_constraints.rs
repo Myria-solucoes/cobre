@@ -517,7 +517,10 @@ fn resolve_hydro_evaporation(
     let Some(local_idx) = geom.evap_hydro_indices.iter().position(|&p| p == sys_pos) else {
         return vec![];
     };
-    let evaporation_flow_col = geom.evap_indices[local_idx].evaporation_flow_col;
+    // `evap_indices` is block-major (`local * n_blks + blk`); block 0 preserves the
+    // current single-block resolution. Per-block evaporation in generic constraints
+    // is out of scope here.
+    let evaporation_flow_col = geom.evap_indices[local_idx * geom.n_blks].evaporation_flow_col;
     vec![(evaporation_flow_col, 1.0)]
 }
 

@@ -475,7 +475,10 @@ fn extract_hydro_no_turbine(
 
     let (evaporation_m3s, evaporation_violation_neg_m3s, evaporation_violation_pos_m3s) =
         if let Some(local_evap_idx) = lookup.evap[h] {
-            let ei = &spec.geometry.evap_indices[local_evap_idx];
+            // `evap_indices` is block-major (`local * n_blks + blk`); block 0
+            // preserves the current single-block read. Per-block evaporation
+            // extraction is out of scope here.
+            let ei = &spec.geometry.evap_indices[local_evap_idx * spec.geometry.n_blks];
             let evaporation_flow = view.primal[ei.evaporation_flow_col];
             let neg = view.primal[ei.f_evap_plus_col]; // f_evap_plus = under-evaporation
             let pos = view.primal[ei.f_evap_minus_col]; // f_evap_minus = over-evaporation
@@ -615,7 +618,9 @@ impl HydroStageContext {
         let fpha_local = lookup.fpha[h];
         let (evaporation_m3s, evaporation_violation_neg_m3s, evaporation_violation_pos_m3s) =
             if let Some(lei) = lookup.evap[h] {
-                let ei = &spec.geometry.evap_indices[lei];
+                // Block-major `evap_indices`; block 0 preserves the single-block read
+                // (per-block evaporation extraction is out of scope here).
+                let ei = &spec.geometry.evap_indices[lei * spec.geometry.n_blks];
                 let evaporation_flow = view.primal[ei.evaporation_flow_col];
                 let neg = view.primal[ei.f_evap_plus_col]; // f_evap_plus = under-evaporation
                 let pos = view.primal[ei.f_evap_minus_col]; // f_evap_minus = over-evaporation

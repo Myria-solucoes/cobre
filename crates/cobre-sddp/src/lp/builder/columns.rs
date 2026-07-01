@@ -517,13 +517,17 @@ fn fill_fpha_generation_columns(
     }
 }
 
-/// Evaporation columns: 3 stage-level per evaporation hydro (evaporation outflow,
-/// `f_evap_plus`, `f_evap_minus`).
+/// Evaporation columns: one `EVAP_COLS_PER_HYDRO` triple (evaporation outflow,
+/// `f_evap_plus`, `f_evap_minus`) per evaporation hydro per block.
 ///
-/// The evaporation-outflow column is bounded symmetrically `[-q_max, +q_max]` so a
-/// negative value can absorb net rainfall input on the lake surface, and carries
-/// zero objective. `f_evap_plus`/`f_evap_minus` are `[0, +inf)` and carry the
-/// directional violation costs scaled by `total_stage_hours`.
+/// Each block's evaporation-outflow column is bounded symmetrically `[-q_max,
+/// +q_max]` so a negative value can absorb net rainfall input on the lake surface,
+/// and carries zero objective. Each block's `f_evap_plus`/`f_evap_minus` are
+/// `[0, +inf)` and carry the directional violation costs scaled by
+/// `total_stage_hours`. Growing the column block to `K` triples (layout) without
+/// setting these bounds/objectives per block would leave the `K−1` extra flow
+/// columns unbounded `[0, +∞)` and the extra slacks with zero objective (free
+/// per-block violations). At `n_blks == 1` the loop is the single triple.
 fn fill_evaporation_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -532,11 +536,7 @@ fn fill_evaporation_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (local_idx, &h_idx) in layout.evap_hydro_indices.iter().enumerate() {
-        let col_evaporation_flow = layout.evap_flow_col(local_idx);
-        let col_f_plus = layout.evap_f_plus_col(local_idx);
-        let col_f_minus = layout.evap_f_minus_col(local_idx);
-        // Signed: a negative outflow reads as net rainfall input (inflow).
-        match ctx.evaporation_models.model(h_idx) {
+        let (q_max_abs, hp) = match ctx.evaporation_models.model(h_idx) {
             EvaporationModel::Linearized { coefficients, .. } => {
                 let coeff = &coefficients[stage_idx];
                 let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
@@ -544,8 +544,10 @@ fn fill_evaporation_columns(
                     + coeff.volume_slope_m3s_per_hm3 * hb.max_storage_hm3)
                     .abs()
                     * EVAPORATION_FLOW_SAFETY_MARGIN;
-                bufs.col_lower[col_evaporation_flow] = -q_max_abs;
-                bufs.col_upper[col_evaporation_flow] = q_max_abs;
+                (
+                    q_max_abs,
+                    ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx),
+                )
             }
             EvaporationModel::None => {
                 // Should never happen: evap_hydro_indices only contains linearized hydros.
@@ -555,15 +557,22 @@ fn fill_evaporation_columns(
                 );
                 continue;
             }
+        };
+        for blk in 0..layout.n_blks {
+            let col_evaporation_flow = layout.evap_flow_col(local_idx, blk);
+            let col_f_plus = layout.evap_f_plus_col(local_idx, blk);
+            let col_f_minus = layout.evap_f_minus_col(local_idx, blk);
+            // Signed: a negative outflow reads as net rainfall input (inflow).
+            bufs.col_lower[col_evaporation_flow] = -q_max_abs;
+            bufs.col_upper[col_evaporation_flow] = q_max_abs;
+            bufs.col_lower[col_f_plus] = 0.0;
+            bufs.col_upper[col_f_plus] = f64::INFINITY;
+            bufs.col_lower[col_f_minus] = 0.0;
+            bufs.col_upper[col_f_minus] = f64::INFINITY;
+            // f_evap_plus = under-evaporation, f_evap_minus = over-evaporation.
+            bufs.objective[col_f_plus] = hp.evaporation_violation_neg_cost * total_stage_hours;
+            bufs.objective[col_f_minus] = hp.evaporation_violation_pos_cost * total_stage_hours;
         }
-        bufs.col_lower[col_f_plus] = 0.0;
-        bufs.col_upper[col_f_plus] = f64::INFINITY;
-        bufs.col_lower[col_f_minus] = 0.0;
-        bufs.col_upper[col_f_minus] = f64::INFINITY;
-        // f_evap_plus = under-evaporation, f_evap_minus = over-evaporation.
-        let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
-        bufs.objective[col_f_plus] = hp.evaporation_violation_neg_cost * total_stage_hours;
-        bufs.objective[col_f_minus] = hp.evaporation_violation_pos_cost * total_stage_hours;
     }
 }
 

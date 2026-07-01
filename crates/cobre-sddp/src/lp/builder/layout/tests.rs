@@ -512,6 +512,60 @@ fn block_storage_col_resolves_all_boundaries() {
     }
 }
 
+/// The water-balance block spans `n_h` rows in parallel mode and `n_h * n_blks`
+/// in chronological mode (the `K` chained per-hydro rows), with `K = 1`
+/// chronological collapsing to the parallel count. `load_balance.start` chains off
+/// `water_balance.end` in every case.
+#[test]
+fn chronological_water_balance_row_count() {
+    let fixtures = TwoHydroFixtures::new();
+    let ctx = fixtures.make_ctx();
+    let state = state_layout_for(&ctx);
+
+    let parallel = StageLayout::new(&ctx, &state, &stage_with_blocks(BlockMode::Parallel, 3), 0);
+    assert_eq!(
+        parallel.water_balance.end - parallel.water_balance.start,
+        2,
+        "parallel n_h=2 n_blks=3 water_balance spans n_h = 2 rows"
+    );
+    assert_eq!(
+        parallel.load_balance.start, parallel.water_balance.end,
+        "parallel load_balance.start chains off water_balance.end"
+    );
+
+    let chrono_k3 = StageLayout::new(
+        &ctx,
+        &state,
+        &stage_with_blocks(BlockMode::Chronological, 3),
+        0,
+    );
+    assert_eq!(
+        chrono_k3.water_balance.end - chrono_k3.water_balance.start,
+        6,
+        "chronological n_h=2 n_blks=3 water_balance spans n_h * n_blks = 6 rows"
+    );
+    assert_eq!(
+        chrono_k3.load_balance.start, chrono_k3.water_balance.end,
+        "chronological K=3 load_balance.start chains off water_balance.end"
+    );
+
+    let chrono_k1 = StageLayout::new(
+        &ctx,
+        &state,
+        &stage_with_blocks(BlockMode::Chronological, 1),
+        0,
+    );
+    assert_eq!(
+        chrono_k1.water_balance.end - chrono_k1.water_balance.start,
+        2,
+        "chronological n_h=2 n_blks=1 water_balance spans n_h = 2 rows, identical to parallel"
+    );
+    assert_eq!(
+        chrono_k1.load_balance.start, chrono_k1.water_balance.end,
+        "chronological K=1 load_balance.start chains off water_balance.end"
+    );
+}
+
 // ── FPHA-local inverse map ───────────────────────────────────────────────
 
 /// Owns the data needed to construct a three-hydro `TemplateBuildCtx` with a
@@ -2279,33 +2333,38 @@ fn column_accessors_match_open_coded_formulas() {
         }
     }
 
-    // Evaporation accessors: stage-level, EVAP_COLS_PER_HYDRO-strided. The
-    // three within-hydro offsets must map flow→0, f_plus→1, f_minus→2.
+    // Evaporation accessors: block-major (`local * n_blks + blk`) triple,
+    // EVAP_COLS_PER_HYDRO-strided. The three within-triple offsets must map
+    // flow→0, f_plus→1, f_minus→2.
     for local_idx in [0_usize, 1, 4] {
-        assert_eq!(
-            layout.evap_flow_col(local_idx),
-            layout.col_evap_start() + local_idx * EVAP_COLS_PER_HYDRO + EVAP_FLOW_OFFSET,
-            "evap_flow_col"
-        );
-        assert_eq!(
-            layout.evap_f_plus_col(local_idx),
-            layout.col_evap_start() + local_idx * EVAP_COLS_PER_HYDRO + EVAP_F_PLUS_OFFSET,
-            "evap_f_plus_col"
-        );
-        assert_eq!(
-            layout.evap_f_minus_col(local_idx),
-            layout.col_evap_start() + local_idx * EVAP_COLS_PER_HYDRO + EVAP_F_MINUS_OFFSET,
-            "evap_f_minus_col"
-        );
-        // The three columns are consecutive and ordered flow < plus < minus.
-        assert_eq!(
-            layout.evap_f_plus_col(local_idx),
-            layout.evap_flow_col(local_idx) + 1
-        );
-        assert_eq!(
-            layout.evap_f_minus_col(local_idx),
-            layout.evap_flow_col(local_idx) + 2
-        );
+        for blk in 0..n_blks {
+            let triple_base =
+                layout.col_evap_start() + (local_idx * n_blks + blk) * EVAP_COLS_PER_HYDRO;
+            assert_eq!(
+                layout.evap_flow_col(local_idx, blk),
+                triple_base + EVAP_FLOW_OFFSET,
+                "evap_flow_col"
+            );
+            assert_eq!(
+                layout.evap_f_plus_col(local_idx, blk),
+                triple_base + EVAP_F_PLUS_OFFSET,
+                "evap_f_plus_col"
+            );
+            assert_eq!(
+                layout.evap_f_minus_col(local_idx, blk),
+                triple_base + EVAP_F_MINUS_OFFSET,
+                "evap_f_minus_col"
+            );
+            // The three columns are consecutive and ordered flow < plus < minus.
+            assert_eq!(
+                layout.evap_f_plus_col(local_idx, blk),
+                layout.evap_flow_col(local_idx, blk) + 1
+            );
+            assert_eq!(
+                layout.evap_f_minus_col(local_idx, blk),
+                layout.evap_flow_col(local_idx, blk) + 2
+            );
+        }
     }
     // The evap offset consts are exactly 0/1/2 in order.
     assert_eq!(EVAP_FLOW_OFFSET, 0);
