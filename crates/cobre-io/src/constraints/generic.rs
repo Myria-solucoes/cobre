@@ -35,10 +35,11 @@
 //! Until the parameter loader is wired, callers pass `&HashMap::new()` and
 //! expressions must not contain `@name` tokens.
 //!
-//! All 22 variable names from the variable catalog are recognised. Block-capable
+//! All 24 variable names from the variable catalog are recognised. Block-capable
 //! variables accept an optional second argument (`hydro_turbined`, `hydro_spillage`,
-//! `hydro_diversion`, `hydro_outflow`, `hydro_generation`, `hydro_inflow`, …); stage-only
-//! variables (`hydro_storage`, `hydro_evaporation`, `hydro_withdrawal`,
+//! `hydro_diversion`, `hydro_outflow`, `hydro_generation`, `hydro_inflow`,
+//! `hydro_storage_initial`, `hydro_storage_final`, …); stage-only variables
+//! (`hydro_storage`, `hydro_evaporation`, `hydro_withdrawal`,
 //! `anticipated_decision`) must not have a block argument. Use
 //! `anticipated_decision(thermal_id)` to reference the per-stage commitment column of an
 //! anticipated thermal unit (no block index accepted).
@@ -719,9 +720,9 @@ fn parse_variable_ref(tokens: &[Token], pos: usize) -> Result<(VariableRef, usiz
 
 /// Build a [`VariableRef`] from the parsed variable name, entity ID, and optional block ID.
 ///
-/// Returns `Err(String)` if the variable name is not one of the 22 known names, or
+/// Returns `Err(String)` if the variable name is not one of the 24 known names, or
 /// if a block argument is provided for a stage-only variable (no block argument expected).
-// Rationale: one exhaustive match over the 22 variable names; splitting would scatter the
+// Rationale: one exhaustive match over the 24 variable names; splitting would scatter the
 // canonical catalog and drop the compile-time exhaustiveness check.
 #[allow(clippy::too_many_lines)]
 fn build_variable_ref(
@@ -763,6 +764,14 @@ fn build_variable_ref(
         }
         // Block-capable variables.
         "hydro_inflow" => Ok(VariableRef::HydroInflow {
+            hydro_id: entity_id,
+            block_id,
+        }),
+        "hydro_storage_initial" => Ok(VariableRef::HydroStorageInitial {
+            hydro_id: entity_id,
+            block_id,
+        }),
+        "hydro_storage_final" => Ok(VariableRef::HydroStorageFinal {
             hydro_id: entity_id,
             block_id,
         }),
@@ -848,7 +857,7 @@ fn build_variable_ref(
             })
         }
         other => Err(format!(
-            "unknown variable name \"{other}\": not one of the 22 supported LP variable types"
+            "unknown variable name \"{other}\": not one of the 24 supported LP variable types"
         )),
     }
 }
@@ -1075,6 +1084,78 @@ mod tests {
             VariableRef::HydroInflow {
                 hydro_id: EntityId(3),
                 block_id: Some(0),
+            }
+        );
+    }
+
+    /// `hydro_storage_initial` is block-capable: a bare entity id threads
+    /// `block_id: None`, and a block argument threads `block_id: Some(k)`.
+    #[test]
+    fn test_build_hydro_storage_initial_block_none_and_some() {
+        let none = build_variable_ref("hydro_storage_initial", EntityId(4), None).unwrap();
+        assert_eq!(
+            none,
+            VariableRef::HydroStorageInitial {
+                hydro_id: EntityId(4),
+                block_id: None,
+            }
+        );
+        let some = build_variable_ref("hydro_storage_initial", EntityId(4), Some(2)).unwrap();
+        assert_eq!(
+            some,
+            VariableRef::HydroStorageInitial {
+                hydro_id: EntityId(4),
+                block_id: Some(2),
+            }
+        );
+    }
+
+    /// `hydro_storage_final` is block-capable: a bare entity id threads
+    /// `block_id: None`, and a block argument threads `block_id: Some(k)`.
+    #[test]
+    fn test_build_hydro_storage_final_block_none_and_some() {
+        let none = build_variable_ref("hydro_storage_final", EntityId(4), None).unwrap();
+        assert_eq!(
+            none,
+            VariableRef::HydroStorageFinal {
+                hydro_id: EntityId(4),
+                block_id: None,
+            }
+        );
+        let some = build_variable_ref("hydro_storage_final", EntityId(4), Some(1)).unwrap();
+        assert_eq!(
+            some,
+            VariableRef::HydroStorageFinal {
+                hydro_id: EntityId(4),
+                block_id: Some(1),
+            }
+        );
+    }
+
+    /// A two-term ramp expression `hydro_storage_final(5, 1) - hydro_storage_initial(5, 1)`
+    /// parses to the two block-qualified storage-boundary terms.
+    #[test]
+    fn test_expr_storage_ramp_two_terms() {
+        let expr = parse_expression(
+            "hydro_storage_final(5, 1) - hydro_storage_initial(5, 1)",
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(expr.terms.len(), 2);
+        assert!((lit(&expr.terms[0]) - 1.0).abs() < f64::EPSILON);
+        assert_eq!(
+            expr.terms[0].variable,
+            VariableRef::HydroStorageFinal {
+                hydro_id: EntityId(5),
+                block_id: Some(1),
+            }
+        );
+        assert!((lit(&expr.terms[1]) - (-1.0)).abs() < f64::EPSILON);
+        assert_eq!(
+            expr.terms[1].variable,
+            VariableRef::HydroStorageInitial {
+                hydro_id: EntityId(5),
+                block_id: Some(1),
             }
         );
     }

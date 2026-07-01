@@ -81,6 +81,7 @@ fn make_geom_with_contracts<'a>(
     let reverse: &'a std::collections::HashMap<usize, usize> = Box::leak(Box::new(reverse));
     GenericResolverGeom {
         state,
+        storage_internal_start: indexer.storage_internal_start,
         turbine: &indexer.turbine,
         spillage: &indexer.spillage,
         diversion: &indexer.diversion,
@@ -2388,6 +2389,296 @@ fn hydro_inflow_is_block_dependent() {
         &VariableRef::HydroInflow {
             hydro_id: EntityId(0),
             block_id: None,
+        }
+    ));
+}
+
+// ── Per-block storage boundary tests ──────────────────────────────────────
+//
+// A K=3 chronological geom: `make_indexer` (n_blks=3) + `make_state` (N=4,
+// storage=[0,4), storage_in.start=8), overriding `storage_internal_start` to a
+// non-zero interior anchor so the interior-boundary formula is exercised (the
+// `test_support::geometry` fixture hardcodes it to 0). Interior stride is
+// `n_blks - 1 = 2`; for hydro pos 0 the boundaries are S⁰=8, S¹=12, S²=13, S³=0.
+
+const STORAGE_INTERNAL_START: usize = 12;
+
+/// Build the K=3 chronological geom with a non-zero `storage_internal_start`.
+fn make_chronological_geom<'a>(
+    indexer: &'a StageGeometry,
+    state: &'a StateLayout,
+) -> GenericResolverGeom<'a> {
+    let mut geom = make_geom(indexer, state, 2, &[]);
+    geom.storage_internal_start = STORAGE_INTERNAL_START;
+    geom
+}
+
+/// Resolve every boundary (`k = 0`, interior, `k = K`) of both variants on a K=3
+/// chronological geom against the mirrored `block_storage_col`.
+#[test]
+fn hydro_storage_boundary_resolves_each_boundary() {
+    let indexer = make_indexer();
+    let state = make_state();
+    let geom = make_chronological_geom(&indexer, &state);
+    let prod = make_production_models();
+    let hpos = make_hydro_pos();
+    let tpos = make_thermal_pos();
+    let bpos = make_bus_pos();
+    let lpos = make_line_pos();
+
+    // Hydro EntityId(10) at pos 0; K = 3.
+    // Initial{0} = S⁰ = storage_in.start + 0 = 8.
+    let initial_0 = call(
+        VariableRef::HydroStorageInitial {
+            hydro_id: EntityId(10),
+            block_id: Some(0),
+        },
+        0,
+        &geom,
+        &prod,
+        &hpos,
+        &tpos,
+        &bpos,
+        &lpos,
+    );
+    assert_eq!(initial_0, vec![(geom.block_storage_col(0, 0), 1.0)]);
+    assert_eq!(initial_0, vec![(state.storage_in.start + 0, 1.0)]);
+
+    // Initial{1} = S¹ = storage_internal_start + 0 = 12 (interior boundary).
+    let initial_1 = call(
+        VariableRef::HydroStorageInitial {
+            hydro_id: EntityId(10),
+            block_id: Some(1),
+        },
+        0,
+        &geom,
+        &prod,
+        &hpos,
+        &tpos,
+        &bpos,
+        &lpos,
+    );
+    assert_eq!(initial_1, vec![(geom.block_storage_col(0, 1), 1.0)]);
+    assert_eq!(initial_1, vec![(STORAGE_INTERNAL_START, 1.0)]);
+
+    // Final{2} = S³ = Sᴷ = storage.start + 0 = 0 (K=3, last block).
+    let final_2 = call(
+        VariableRef::HydroStorageFinal {
+            hydro_id: EntityId(10),
+            block_id: Some(2),
+        },
+        0,
+        &geom,
+        &prod,
+        &hpos,
+        &tpos,
+        &bpos,
+        &lpos,
+    );
+    assert_eq!(final_2, vec![(geom.block_storage_col(0, 3), 1.0)]);
+    assert_eq!(final_2, vec![(state.storage.start + 0, 1.0)]);
+}
+
+/// `HydroStorageFinal{K-1}` resolves to the SAME column as `HydroStorage` (Sᴷ).
+#[test]
+fn hydro_storage_final_last_block_equals_hydro_storage() {
+    let indexer = make_indexer();
+    let state = make_state();
+    let geom = make_chronological_geom(&indexer, &state);
+    let prod = make_production_models();
+    let hpos = make_hydro_pos();
+    let tpos = make_thermal_pos();
+    let bpos = make_bus_pos();
+    let lpos = make_line_pos();
+
+    let final_last = call(
+        VariableRef::HydroStorageFinal {
+            hydro_id: EntityId(10),
+            block_id: Some(2),
+        },
+        0,
+        &geom,
+        &prod,
+        &hpos,
+        &tpos,
+        &bpos,
+        &lpos,
+    );
+    let storage = call(
+        VariableRef::HydroStorage {
+            hydro_id: EntityId(10),
+        },
+        0,
+        &geom,
+        &prod,
+        &hpos,
+        &tpos,
+        &bpos,
+        &lpos,
+    );
+    assert_eq!(final_last, storage);
+    assert_eq!(final_last, vec![(state.storage.start + 0, 1.0)]);
+}
+
+/// A block's final boundary is the next block's initial: `Final{0}` and
+/// `Initial{1}` both resolve to the interior column `S¹`.
+#[test]
+fn hydro_storage_final_shares_interior_column_with_next_initial() {
+    let indexer = make_indexer();
+    let state = make_state();
+    let geom = make_chronological_geom(&indexer, &state);
+    let prod = make_production_models();
+    let hpos = make_hydro_pos();
+    let tpos = make_thermal_pos();
+    let bpos = make_bus_pos();
+    let lpos = make_line_pos();
+
+    let final_0 = call(
+        VariableRef::HydroStorageFinal {
+            hydro_id: EntityId(10),
+            block_id: Some(0),
+        },
+        0,
+        &geom,
+        &prod,
+        &hpos,
+        &tpos,
+        &bpos,
+        &lpos,
+    );
+    let initial_1 = call(
+        VariableRef::HydroStorageInitial {
+            hydro_id: EntityId(10),
+            block_id: Some(1),
+        },
+        0,
+        &geom,
+        &prod,
+        &hpos,
+        &tpos,
+        &bpos,
+        &lpos,
+    );
+    assert_eq!(final_0, initial_1);
+    assert_eq!(final_0, vec![(STORAGE_INTERNAL_START, 1.0)]);
+}
+
+/// `block_id = None` resolves the current `block_idx`'s own boundary (the
+/// caller's per-block expansion), so each block yields its own boundary column.
+#[test]
+fn hydro_storage_boundary_none_resolves_per_block() {
+    let indexer = make_indexer();
+    let state = make_state();
+    let geom = make_chronological_geom(&indexer, &state);
+    let prod = make_production_models();
+    let hpos = make_hydro_pos();
+    let tpos = make_thermal_pos();
+    let bpos = make_bus_pos();
+    let lpos = make_line_pos();
+
+    let per_block_initial: Vec<(usize, f64)> = (0..3)
+        .map(|blk| {
+            let r = call(
+                VariableRef::HydroStorageInitial {
+                    hydro_id: EntityId(10),
+                    block_id: None,
+                },
+                blk,
+                &geom,
+                &prod,
+                &hpos,
+                &tpos,
+                &bpos,
+                &lpos,
+            );
+            assert_eq!(r.len(), 1);
+            r[0]
+        })
+        .collect();
+    assert_eq!(
+        per_block_initial,
+        vec![
+            (geom.block_storage_col(0, 0), 1.0),
+            (geom.block_storage_col(0, 1), 1.0),
+            (geom.block_storage_col(0, 2), 1.0),
+        ]
+    );
+
+    let per_block_final: Vec<(usize, f64)> = (0..3)
+        .map(|blk| {
+            let r = call(
+                VariableRef::HydroStorageFinal {
+                    hydro_id: EntityId(10),
+                    block_id: None,
+                },
+                blk,
+                &geom,
+                &prod,
+                &hpos,
+                &tpos,
+                &bpos,
+                &lpos,
+            );
+            assert_eq!(r.len(), 1);
+            r[0]
+        })
+        .collect();
+    assert_eq!(
+        per_block_final,
+        vec![
+            (geom.block_storage_col(0, 1), 1.0),
+            (geom.block_storage_col(0, 2), 1.0),
+            (geom.block_storage_col(0, 3), 1.0),
+        ]
+    );
+}
+
+/// A `hydro_pos` miss resolves to an empty vec for both boundary variants.
+#[test]
+fn hydro_storage_boundary_unknown_id_returns_empty() {
+    let indexer = make_indexer();
+    let state = make_state();
+    let geom = make_chronological_geom(&indexer, &state);
+    let prod = make_production_models();
+    let hpos = make_hydro_pos();
+    let tpos = make_thermal_pos();
+    let bpos = make_bus_pos();
+    let lpos = make_line_pos();
+
+    for var_ref in [
+        VariableRef::HydroStorageInitial {
+            hydro_id: EntityId(999),
+            block_id: Some(1),
+        },
+        VariableRef::HydroStorageFinal {
+            hydro_id: EntityId(999),
+            block_id: None,
+        },
+    ] {
+        let result = call(var_ref, 0, &geom, &prod, &hpos, &tpos, &bpos, &lpos);
+        assert!(result.is_empty(), "unknown id must resolve to empty vec");
+    }
+}
+
+/// Both storage boundary variants are block-DEPENDENT (`false`), while the
+/// stage-final alias `HydroStorage` stays block-INDEPENDENT (`true`).
+#[test]
+fn storage_boundary_variants_are_block_dependent() {
+    assert!(!variable_ref_is_block_independent(
+        &VariableRef::HydroStorageInitial {
+            hydro_id: EntityId(10),
+            block_id: None,
+        }
+    ));
+    assert!(!variable_ref_is_block_independent(
+        &VariableRef::HydroStorageFinal {
+            hydro_id: EntityId(10),
+            block_id: None,
+        }
+    ));
+    assert!(variable_ref_is_block_independent(
+        &VariableRef::HydroStorage {
+            hydro_id: EntityId(10),
         }
     ));
 }

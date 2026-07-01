@@ -867,6 +867,7 @@ pub(super) fn fill_generic_constraint_entries(
     // clone the layout.
     let geom = crate::generic_constraints::GenericResolverGeom {
         state: layout.state,
+        storage_internal_start: layout.storage_internal_start,
         turbine: &layout.turbine,
         spillage: &layout.spillage,
         diversion: &layout.diversion,

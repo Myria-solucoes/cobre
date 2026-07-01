@@ -44,6 +44,9 @@ use crate::indexer::{BlockGrid, EvaporationIndices, StateLayout};
 pub(crate) struct GenericResolverGeom<'a> {
     /// Role-(a) state-region handle (storage + z-inflow column owner).
     pub state: &'a StateLayout,
+    /// Role-(a)-adjacent: control-region anchor for the interior storage
+    /// boundaries `S¹ … Sᴷ⁻¹`, feeding [`Self::block_storage_col`]'s `_` arm.
+    pub storage_internal_start: usize,
     /// Turbine column range (one per hydro per block).
     pub turbine: &'a Range<usize>,
     /// Spillage column range.
@@ -88,6 +91,23 @@ impl GenericResolverGeom<'_> {
     #[inline]
     fn block_grid(&self) -> BlockGrid {
         BlockGrid::new(self.n_blks, self.max_deficit_segments)
+    }
+
+    /// Storage column at chronological boundary `k ∈ 0..=K` (`K = self.n_blks`) for
+    /// hydro `h`, mirroring `StageLayout::block_storage_col` so the resolver reaches
+    /// per-block boundaries without a `StageLayout`. The two endpoints are STATE
+    /// columns — `k = 0 → S⁰` (`storage_in.start + h`), `k = K → Sᴷ`
+    /// (`storage.start + h`) — while `k ∈ 1..K` are interior CONTROL columns
+    /// (stride `n_blks − 1`). The `k == self.n_blks` arm MUST precede the interior
+    /// `_` arm, else `_` captures the outgoing endpoint and addresses an interior
+    /// column past the family.
+    #[inline]
+    fn block_storage_col(&self, h: usize, k: usize) -> usize {
+        match k {
+            0 => self.state.storage_in.start + h,
+            k if k == self.n_blks => self.state.storage.start + h,
+            _ => self.storage_internal_start + h * (self.n_blks - 1) + (k - 1),
+        }
     }
 }
 
@@ -187,6 +207,14 @@ pub(crate) fn resolve_variable_ref(
     let grid = geom.block_grid();
     match var_ref {
         VariableRef::HydroStorage { hydro_id } => resolve_hydro_storage(*hydro_id, geom, hydro_pos),
+
+        VariableRef::HydroStorageInitial { hydro_id, block_id } => {
+            resolve_hydro_storage_boundary(*hydro_id, *block_id, block_idx, 0, geom, hydro_pos)
+        }
+
+        VariableRef::HydroStorageFinal { hydro_id, block_id } => {
+            resolve_hydro_storage_boundary(*hydro_id, *block_id, block_idx, 1, geom, hydro_pos)
+        }
 
         VariableRef::HydroEvaporation { hydro_id } => {
             resolve_hydro_evaporation(*hydro_id, geom, hydro_pos)
@@ -362,14 +390,18 @@ pub(crate) fn resolve_variable_ref(
 
 /// Whether a single [`VariableRef`] resolves to the *same* LP column(s) regardless
 /// of `block_idx` — **block-independent** ("stock"). Only three kinds qualify:
-/// [`VariableRef::HydroStorage`], [`VariableRef::HydroEvaporation`], and
-/// [`VariableRef::AnticipatedDecision`].
+/// [`VariableRef::HydroStorage`] (the block-independent stage-final storage alias
+/// `Sᴷ`), [`VariableRef::HydroEvaporation`], and [`VariableRef::AnticipatedDecision`].
 ///
 /// [`VariableRef::HydroInflow`] is block-DEPENDENT: its upstream-release terms are
 /// per-block columns. Classifying it "stock" would collapse a multi-block expression
 /// to one mis-priced stage-level row reading upstream columns at a single arbitrary
 /// block, silently dropping the other blocks. [`VariableRef::PumpingFlow`] /
-/// [`VariableRef::PumpingPower`] are block-level for the same reason. The stub kinds
+/// [`VariableRef::PumpingPower`] are block-level for the same reason.
+/// [`VariableRef::HydroStorageInitial`] / [`VariableRef::HydroStorageFinal`] are the
+/// two block-dependent storage boundary variants — each row references its own
+/// block's boundary via [`GenericResolverGeom::block_storage_col`], so classifying
+/// them "stock" would collapse to one mis-priced boundary. The stub kinds
 /// (withdrawal, contracts, non-controllable) resolve to no columns and are
 /// conservatively block-level, so only *provably* stock variables enable the
 /// single-row collapse.
@@ -383,6 +415,8 @@ fn variable_ref_is_block_independent(var_ref: &VariableRef) -> bool {
         | VariableRef::HydroEvaporation { .. }
         | VariableRef::AnticipatedDecision { .. } => true,
         VariableRef::HydroInflow { .. }
+        | VariableRef::HydroStorageInitial { .. }
+        | VariableRef::HydroStorageFinal { .. }
         | VariableRef::HydroTurbined { .. }
         | VariableRef::HydroSpillage { .. }
         | VariableRef::HydroDiversion { .. }
@@ -427,6 +461,27 @@ fn resolve_hydro_storage(
 ) -> Vec<(usize, f64)> {
     if let Some(&pos) = hydro_pos.get(&hydro_id) {
         vec![(geom.state.storage.start + pos, 1.0)]
+    } else {
+        vec![]
+    }
+}
+
+/// Resolve `HydroStorageInitial`/`HydroStorageFinal` to a single per-block storage
+/// boundary column via [`GenericResolverGeom::block_storage_col`]:
+/// `boundary_offset = 0` → initial `block_storage_col(pos, eff_blk)`;
+/// `boundary_offset = 1` → final `block_storage_col(pos, eff_blk + 1)`. Returns an
+/// empty vec on a `hydro_pos` miss (mirrors [`resolve_hydro_storage`]).
+fn resolve_hydro_storage_boundary(
+    hydro_id: EntityId,
+    block_id: Option<usize>,
+    block_idx: usize,
+    boundary_offset: usize,
+    geom: &GenericResolverGeom<'_>,
+    hydro_pos: &BTreeMap<EntityId, usize>,
+) -> Vec<(usize, f64)> {
+    if let Some(&pos) = hydro_pos.get(&hydro_id) {
+        let eff_blk = block_id.unwrap_or(block_idx);
+        vec![(geom.block_storage_col(pos, eff_blk + boundary_offset), 1.0)]
     } else {
         vec![]
     }

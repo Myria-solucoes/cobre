@@ -10,7 +10,7 @@
 //!
 //! # Variable Reference Catalog
 //!
-//! [`VariableRef`] covers all 22 LP variable types defined in the spec (§15).
+//! [`VariableRef`] covers all 24 LP variable types defined in the spec (§15).
 //! Each variant carries the entity ID and, for block-capable variables, an
 //! optional block ID. `Some(i)` references block `i`. `None` selects between a
 //! single collapsed stage-level row (block-independent expression: every term is
@@ -59,7 +59,7 @@ use crate::EntityId;
 
 /// Reference to a single LP variable in a generic constraint expression.
 ///
-/// The 22 variants cover the full variable catalog defined in
+/// The 24 variants cover the full variable catalog defined in
 /// `internal-structures.md §15`. See the module header for the `block_id = None`
 /// block-independent vs block-dependent row-materialization contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,6 +235,36 @@ pub enum VariableRef {
     /// Appended at the END of the enum to preserve every existing variant's
     /// postcard discriminant.
     HydroInflow {
+        /// Hydro plant identifier.
+        hydro_id: EntityId,
+        /// Block selector; `None` expands to one row per block.
+        block_id: Option<usize>,
+    },
+    /// Start-of-block storage boundary `Sᵉᶠᶠ_ᵇˡᵏ` for a hydro reservoir (hm³).
+    ///
+    /// References the incoming storage column of block `block_id`; `Initial{0}`
+    /// is the pinned stage-initial anchor `S⁰`. Block-dependent — a `None`
+    /// selector expands to one row per block per the `block_id = None` contract in
+    /// the module header.
+    ///
+    /// Appended at the END of the enum to preserve every existing variant's
+    /// postcard discriminant.
+    HydroStorageInitial {
+        /// Hydro plant identifier.
+        hydro_id: EntityId,
+        /// Block selector; `None` expands to one row per block.
+        block_id: Option<usize>,
+    },
+    /// End-of-block storage boundary `Sᵉᶠᶠ_ᵇˡᵏ⁺¹` for a hydro reservoir (hm³).
+    ///
+    /// References the outgoing storage column of block `block_id`; `Final{K-1}`
+    /// equals the stage-final `HydroStorage`. Block-dependent — a `None` selector
+    /// expands to one row per block per the `block_id = None` contract in the
+    /// module header.
+    ///
+    /// Appended at the END of the enum to preserve every existing variant's
+    /// postcard discriminant.
+    HydroStorageFinal {
         /// Hydro plant identifier.
         hydro_id: EntityId,
         /// Block selector; `None` expands to one row per block.
@@ -496,12 +526,26 @@ mod tests {
                     block_id: None,
                 },
             ),
+            (
+                "HydroStorageInitial",
+                VariableRef::HydroStorageInitial {
+                    hydro_id: EntityId(0),
+                    block_id: Some(0),
+                },
+            ),
+            (
+                "HydroStorageFinal",
+                VariableRef::HydroStorageFinal {
+                    hydro_id: EntityId(0),
+                    block_id: None,
+                },
+            ),
         ];
 
         assert_eq!(
             variants.len(),
-            22,
-            "VariableRef must have exactly 22 variants"
+            24,
+            "VariableRef must have exactly 24 variants"
         );
 
         for (name, variant) in variants {
@@ -513,12 +557,13 @@ mod tests {
         }
     }
 
-    /// Pins the postcard discriminant of the last-appended variant. Postcard
-    /// encodes the variant index as a varint; for discriminants `< 0x80` the
-    /// first byte equals the discriminant. `HydroInflow` is appended last
-    /// (index 21 = `0x15`) and `AnticipatedDecision` (index 20 = `0x14`) must
-    /// keep its index — a mid-enum insertion would shift both and silently
-    /// break previously serialized policies.
+    /// Pins the postcard discriminants of the tail variants. Postcard encodes
+    /// the variant index as a varint; for discriminants `< 0x80` the first byte
+    /// equals the discriminant. `AnticipatedDecision` (index 20 = `0x14`),
+    /// `HydroInflow` (index 21 = `0x15`), `HydroStorageInitial` (index 22 =
+    /// `0x16`), and `HydroStorageFinal` (index 23 = `0x17`) must keep their
+    /// indices — a mid-enum insertion would shift them and silently break
+    /// previously serialized policies.
     #[cfg(feature = "serde")]
     #[test]
     fn test_variable_ref_postcard_discriminant_pin() {
@@ -539,6 +584,26 @@ mod tests {
         assert_eq!(
             anticipated[0], 0x14,
             "AnticipatedDecision must keep postcard discriminant 0x14"
+        );
+
+        let storage_initial = postcard::to_allocvec(&VariableRef::HydroStorageInitial {
+            hydro_id: EntityId(0),
+            block_id: None,
+        })
+        .expect("HydroStorageInitial serializes");
+        assert_eq!(
+            storage_initial[0], 0x16,
+            "HydroStorageInitial must serialize to postcard discriminant 0x16"
+        );
+
+        let storage_final = postcard::to_allocvec(&VariableRef::HydroStorageFinal {
+            hydro_id: EntityId(0),
+            block_id: None,
+        })
+        .expect("HydroStorageFinal serializes");
+        assert_eq!(
+            storage_final[0], 0x17,
+            "HydroStorageFinal must serialize to postcard discriminant 0x17"
         );
     }
 

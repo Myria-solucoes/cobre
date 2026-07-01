@@ -29,6 +29,7 @@
 //! |17 | `anticipated_decision(N)` in generic constraint targets an anticipated thermal | `constraints/generic_constraints.json` | `BusinessRuleViolation` |
 //! |18 | `thermal_generation(N)` in generic constraint when `N` is anticipated (warn) | `constraints/generic_constraints.json` | `SemanticAmbiguity` (warning) |
 //! |19 | Pumping `source_hydro_id != destination_hydro_id`  | `system/pumping_stations.json`        | `InvalidValue`         |
+//! |20 | Per-block storage reference resolves to a real boundary (parallel `K>1` interior / out-of-range block rejected) | `constraints/generic_constraints.json` | `BusinessRuleViolation` |
 //!
 //! ## Layer 5b rules (stages, penalties, and scenario domain) — `validate_semantic_stages_penalties_scenarios`
 //!
@@ -71,6 +72,7 @@
 
 use super::{ValidationContext, schema::ParsedData};
 
+mod constraints;
 mod correlation;
 mod hydro;
 mod pumping;
@@ -98,6 +100,7 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     thermal::check_thermal_bounds_override_stage_range(data, ctx);
     thermal::check_anticipated_decision_target_is_anticipated(data, ctx);
     thermal::warn_thermal_generation_on_anticipated_thermal(data, ctx);
+    constraints::check_per_block_storage_interior_reference(data, ctx);
     pumping::check_pumping_semantics(data, ctx);
 }
 

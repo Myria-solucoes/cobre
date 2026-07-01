@@ -893,7 +893,9 @@ fn validate_variable_ref_entity(
         | VariableRef::HydroDiversion { hydro_id, .. }
         | VariableRef::HydroOutflow { hydro_id, .. }
         | VariableRef::HydroGeneration { hydro_id, .. }
-        | VariableRef::HydroInflow { hydro_id, .. } => {
+        | VariableRef::HydroInflow { hydro_id, .. }
+        | VariableRef::HydroStorageInitial { hydro_id, .. }
+        | VariableRef::HydroStorageFinal { hydro_id, .. } => {
             if !ids.hydro.contains(&hydro_id.0) {
                 ctx.add_error(
                     ErrorKind::InvalidReference,
@@ -2294,6 +2296,62 @@ mod tests {
                 terms: vec![LinearTerm::literal(
                     1.0,
                     VariableRef::HydroInflow {
+                        hydro_id: EntityId::from(99),
+                        block_id: Some(0),
+                    },
+                )],
+            },
+            sense: ConstraintSense::LessEqual,
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+        };
+        data.generic_constraints = vec![gc];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+        assert!(ctx.has_errors(), "expected referential errors");
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidReference)
+            .collect();
+        assert_eq!(
+            inv.len(),
+            1,
+            "expected exactly 1 InvalidReference, got: {inv:?}"
+        );
+        assert!(
+            inv[0].message.contains("non-existent Hydro 99"),
+            "error message must name non-existent Hydro 99, got: {}",
+            inv[0].message
+        );
+    }
+
+    /// A constraint referencing `hydro_storage_initial(99, 0)` where Hydro 99 does
+    /// not exist produces exactly one `InvalidReference` naming Hydro 99. The
+    /// hydro arm's `..` pattern absorbs `block_id`, matching `HydroStorage`.
+    #[test]
+    fn test_hydro_storage_initial_unknown_hydro_ref() {
+        use cobre_core::{
+            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
+            VariableRef,
+        };
+
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        let gc = GenericConstraint {
+            id: EntityId::from(1),
+            name: "test_constraint".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![LinearTerm::literal(
+                    1.0,
+                    VariableRef::HydroStorageInitial {
                         hydro_id: EntityId::from(99),
                         block_id: Some(0),
                     },

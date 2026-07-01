@@ -970,3 +970,353 @@ fn generic_constraint_two_hydros_sum_csc_entries() {
         "expected coefficient {prod_h2} for H2, got {total_h2}"
     );
 }
+
+/// Build a single-hydro, one-bus, `n_blks`-block, one-stage system under
+/// `block_mode` with `storage` state on, optionally carrying `constraint` +
+/// `bounds`. Column layout (N=1, no thermal/FPHA/evap): storage=[0,1),
+/// z_inflow=[1,2), storage_in=[2,3), theta=3, control region from col 4.
+#[allow(clippy::cast_possible_wrap)]
+fn one_hydro_system(
+    n_blks: usize,
+    block_mode: cobre_core::BlockMode,
+    constraint: Option<cobre_core::GenericConstraint>,
+    bounds: cobre_core::ResolvedGenericConstraintBounds,
+) -> cobre_core::System {
+    use chrono::NaiveDate;
+    use cobre_core::HydroGenerationModel;
+    use cobre_core::scenario::{InflowModel, LoadModel};
+    use cobre_core::temporal::{
+        Block, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
+    };
+
+    let hydro_id = EntityId(5);
+
+    let hydro = make_hydro(
+        hydro_id,
+        HydroSpec {
+            name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(1),
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            max_turbined_m3s: 100.0,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            max_generation_mw: 250.0,
+            ..Default::default()
+        },
+    );
+
+    let bus = make_bus(
+        EntityId(1),
+        BusSpec {
+            name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+            ..Default::default()
+        },
+    );
+
+    let blocks: Vec<Block> = (0..n_blks)
+        .map(|i| Block {
+            index: i,
+            name: format!("BLK{i}"),
+            duration_hours: 720.0,
+        })
+        .collect();
+
+    let stage = make_stage(
+        0,
+        StageSpec {
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: None,
+            blocks,
+            block_mode,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+            ..Default::default()
+        },
+    );
+
+    let inflow_models = vec![InflowModel {
+        hydro_id,
+        stage_id: 0,
+        mean_m3s: 50.0,
+        std_m3s: 0.0,
+        ar_coefficients: vec![],
+        residual_std_ratio: 0.0,
+        annual: None,
+    }];
+
+    let load_models = vec![LoadModel {
+        bus_id: EntityId(1),
+        stage_id: 0,
+        mean_mw: 100.0,
+        std_mw: 0.0,
+    }];
+
+    let resolved_bounds = ResolvedBounds::new(
+        &BoundsCountsSpec {
+            n_hydros: 1,
+            n_thermals: 0,
+            n_lines: 0,
+            n_pumping: 0,
+            n_contracts: 0,
+            n_stages: 1,
+            k_max: 0,
+        },
+        &BoundsDefaults {
+            hydro: default_hydro_bounds(),
+            thermal: ThermalStageBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: 0.0,
+                cost_per_mwh: 0.0,
+            },
+            line: LineStageBounds {
+                direct_mw: 0.0,
+                reverse_mw: 0.0,
+            },
+            pumping: PumpingStageBounds {
+                min_flow_m3s: 0.0,
+                max_flow_m3s: 0.0,
+            },
+            contract: ContractStageBounds {
+                min_mw: 0.0,
+                max_mw: 0.0,
+                price_per_mwh: 0.0,
+            },
+        },
+    );
+    let penalties = ResolvedPenalties::new(
+        &PenaltiesCountsSpec {
+            n_hydros: 1,
+            n_buses: 1,
+            n_lines: 0,
+            n_ncs: 0,
+            n_stages: 1,
+        },
+        &PenaltiesDefaults {
+            hydro: default_hydro_penalties(),
+            bus: BusStagePenalties { excess_cost: 0.0 },
+            line: LineStagePenalties { exchange_cost: 0.0 },
+            ncs: NcsStagePenalties {
+                curtailment_cost: 0.0,
+            },
+        },
+    );
+
+    let mut builder = SystemBuilder::new()
+        .buses(vec![bus])
+        .hydros(vec![hydro])
+        .stages(vec![stage])
+        .inflow_models(inflow_models)
+        .load_models(load_models)
+        .bounds(resolved_bounds)
+        .penalties(penalties);
+    if let Some(c) = constraint {
+        builder = builder
+            .generic_constraints(vec![c])
+            .resolved_generic_bounds(bounds);
+    }
+    builder.build().expect("one_hydro_system: valid")
+}
+
+/// A chronological `K=3` per-block ramp `hydro_storage_final(h, b) −
+/// hydro_storage_initial(h, b) ≤ Δ` with `block_id = None` expands to exactly `K`
+/// generic rows; row `blk` carries `+1.0` on `block_storage_col(h, blk+1)` and
+/// `−1.0` on `block_storage_col(h, blk)`. Boundary columns (N=1, storage.start=0,
+/// storage_in.start=2, storage_internal_start=4, K=3): S⁰=2, S¹=4, S²=5, S³=0.
+#[test]
+#[allow(clippy::cast_possible_wrap)]
+fn generic_constraint_chronological_per_block_ramp_expands_to_k_rows() {
+    use cobre_core::ResolvedGenericConstraintBounds;
+    use cobre_core::{
+        BlockMode, ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm,
+        SlackConfig, VariableRef,
+    };
+    use std::collections::HashMap;
+
+    let n_blks = 3_usize;
+    let hydro_id = EntityId(5);
+
+    let baseline = one_hydro_system(
+        n_blks,
+        BlockMode::Chronological,
+        None,
+        ResolvedGenericConstraintBounds::new(&HashMap::new(), std::iter::empty()),
+    );
+    let baseline_rows = build_templates_for(&baseline)[0].num_rows;
+
+    let constraint = GenericConstraint {
+        id: EntityId(100),
+        name: "gc_ramp".to_string(),
+        description: None,
+        expression: ConstraintExpression {
+            terms: vec![
+                LinearTerm::literal(
+                    1.0,
+                    VariableRef::HydroStorageFinal {
+                        hydro_id,
+                        block_id: None,
+                    },
+                ),
+                LinearTerm::literal(
+                    -1.0,
+                    VariableRef::HydroStorageInitial {
+                        hydro_id,
+                        block_id: None,
+                    },
+                ),
+            ],
+        },
+        sense: ConstraintSense::LessEqual,
+        slack: SlackConfig {
+            enabled: false,
+            penalty: None,
+        },
+    };
+
+    let id_map: HashMap<i32, usize> = [(100_i32, 0)].into_iter().collect();
+    let rows = vec![(100_i32, 0_i32, None::<i32>, 50.0_f64)];
+    let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+
+    let system = one_hydro_system(
+        n_blks,
+        BlockMode::Chronological,
+        Some(constraint),
+        generic_bounds,
+    );
+    let t = &build_templates_for(&system)[0];
+
+    assert_eq!(
+        t.num_rows,
+        baseline_rows + n_blks,
+        "per-block ramp with block_id=None must expand to exactly K rows"
+    );
+
+    // Boundary columns per block: initial k=blk, final k=blk+1.
+    let boundary_col = |k: usize| -> usize {
+        match k {
+            0 => 2,                         // S⁰ = storage_in.start + 0
+            3 => 0,                         // Sᴷ = storage.start + 0
+            interior => 4 + (interior - 1), // storage_internal_start + (k - 1)
+        }
+    };
+
+    for blk in 0..n_blks {
+        let generic_row = baseline_rows + blk;
+        let final_col = boundary_col(blk + 1);
+        let initial_col = boundary_col(blk);
+
+        let final_entries = csc_entries_at(t, final_col, generic_row);
+        let final_total: f64 = final_entries.iter().sum();
+        assert!(
+            (final_total - 1.0).abs() < f64::EPSILON,
+            "row {blk}: expected +1.0 on final boundary col {final_col}, got {final_total}"
+        );
+
+        let initial_entries = csc_entries_at(t, initial_col, generic_row);
+        let initial_total: f64 = initial_entries.iter().sum();
+        assert!(
+            (initial_total + 1.0).abs() < f64::EPSILON,
+            "row {blk}: expected -1.0 on initial boundary col {initial_col}, got {initial_total}"
+        );
+    }
+}
+
+/// A `block_id = Some(b)` ramp produces exactly one generic row referencing block
+/// `b`'s boundaries (`+1.0` on `block_storage_col(h, b+1)`, `−1.0` on
+/// `block_storage_col(h, b)`).
+#[test]
+#[allow(clippy::cast_possible_wrap)]
+fn generic_constraint_chronological_specific_block_ramp_one_row() {
+    use cobre_core::ResolvedGenericConstraintBounds;
+    use cobre_core::{
+        BlockMode, ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm,
+        SlackConfig, VariableRef,
+    };
+    use std::collections::HashMap;
+
+    let n_blks = 3_usize;
+    let hydro_id = EntityId(5);
+    let target_block = 1_usize;
+
+    let baseline = one_hydro_system(
+        n_blks,
+        BlockMode::Chronological,
+        None,
+        ResolvedGenericConstraintBounds::new(&HashMap::new(), std::iter::empty()),
+    );
+    let baseline_rows = build_templates_for(&baseline)[0].num_rows;
+
+    let constraint = GenericConstraint {
+        id: EntityId(100),
+        name: "gc_ramp_b1".to_string(),
+        description: None,
+        expression: ConstraintExpression {
+            terms: vec![
+                LinearTerm::literal(
+                    1.0,
+                    VariableRef::HydroStorageFinal {
+                        hydro_id,
+                        block_id: Some(target_block),
+                    },
+                ),
+                LinearTerm::literal(
+                    -1.0,
+                    VariableRef::HydroStorageInitial {
+                        hydro_id,
+                        block_id: Some(target_block),
+                    },
+                ),
+            ],
+        },
+        sense: ConstraintSense::LessEqual,
+        slack: SlackConfig {
+            enabled: false,
+            penalty: None,
+        },
+    };
+
+    let id_map: HashMap<i32, usize> = [(100_i32, 0)].into_iter().collect();
+    let rows = vec![(100_i32, 0_i32, Some(target_block as i32), 50.0_f64)];
+    let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+
+    let system = one_hydro_system(
+        n_blks,
+        BlockMode::Chronological,
+        Some(constraint),
+        generic_bounds,
+    );
+    let t = &build_templates_for(&system)[0];
+
+    assert_eq!(
+        t.num_rows,
+        baseline_rows + 1,
+        "block_id = Some(b) ramp must produce exactly one row"
+    );
+
+    // block 1 boundaries: initial k=1 = S¹ = 4, final k=2 = S² = 5.
+    let generic_row = baseline_rows;
+    let final_total: f64 = csc_entries_at(t, 5, generic_row).iter().sum();
+    assert!(
+        (final_total - 1.0).abs() < f64::EPSILON,
+        "expected +1.0 on S² (col 5), got {final_total}"
+    );
+    let initial_total: f64 = csc_entries_at(t, 4, generic_row).iter().sum();
+    assert!(
+        (initial_total + 1.0).abs() < f64::EPSILON,
+        "expected -1.0 on S¹ (col 4), got {initial_total}"
+    );
+}
