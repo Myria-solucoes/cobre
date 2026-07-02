@@ -12,10 +12,13 @@ discretized against a stage calendar that is in general **non-uniform**
    the plant's generation at a later stage (shipped; `AnticipatedConfig`).
 
 Today the second takes its lag **directly as a stage count**
-(`AnticipatedConfig::lead_stages: u32`, `crates/cobre-core/src/entities/thermal.rs`)
-with no time semantics — §4 shows this is not merely imprecise on a non-uniform
-calendar but **semantically broken** (many-to-one maturation collisions,
-delivery gaps). This memo (i) grounds the water-travel-time design against the
+(`AnticipatedConfig::lead_stages: u32`, `crates/cobre-core/src/entities/thermal.rs`).
+§4 shows a stage count is **semantically broken as a representation of a
+PHYSICAL lead** on a non-uniform calendar (many-to-one maturation collisions,
+delivery gaps) — while remaining the **intended** semantics when the modeler
+means "$\ell$ stages" (the shipped monthly/weekly GNL practice; a month is not
+a constant number of hours), so §4.4 keeps it first-class as the stage-count
+mode alongside the new physically-anchored `lead_time`. This memo (i) grounds the water-travel-time design against the
 DECOMP reference model, (ii) works the key stage-length × block-structure ×
 mode scenarios, (iii) derives the **one preprocessing engine** both features
 need, and (iv) proposes the anticipated-dispatch refactoring.
@@ -31,7 +34,7 @@ tree.) Four findings, each mapped to the cobre design:
 | #   | DECOMP (manual)                                                                                                                                                                                                                                                                                                                                                                  | cobre design element it validates                                                                                                                                                                                                                                                                                                                      |
 | --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 1   | §4.5.6 (the umbrella travel-time section: considered "nas restrições de balanço hídrico … e nos cortes de Benders") + §5.3: propagation via **fixed proportionality factors** $k_0^t, k_1^{t-1}, k_2^{t-2}, k_3^{t-3}$ on upstream defluence — arrivals at stage $t$ come from releases at $t, t{-}1, \dots$ with fractional factors, **including a same-stage share $k_0 > 0$** | The uniform-density overlap $k_d$ curve **and the exact-overlap convention** (companion memo §2.5.5): DECOMP keeps a same-stage fraction and carries fractional cross-stage mass — it does **not** fold                                                                                                                                                |
-| 2   | §5.3.1–§5.3.2: the Benders cut is the **textbook multi-lag $E^k$ cut**; the state vector is $x_t = (v_1, v_2, d_1, d_2)$ — storage **plus raw defluence volumes** $d_i^t = q_i^t + s_i^t$, cut terms on $x_t, x_{t-1}, \dots, x_{t-L}$                                                                                                                                           | Companion memo §2.2 proves this multi-lag form and the bucket lifting are the **same object in two coordinate systems** ($b = M\mathcal{D}$); cobre implements the lifted (Markov-1) coordinates                                                                                                                                                       |
+| 2   | §5.3.1–§5.3.2: the Benders cut is the **textbook multi-lag $E^k$ cut** (the term is formalized in the companion memo §2.1); the state vector is $x_t = (v_1, v_2, d_1, d_2)$ — storage **plus raw defluence volumes** $d_i^t = q_i^t + s_i^t$, cut terms on $x_t, x_{t-1}, \dots, x_{t-L}$                                                                                       | Companion memo §2.2 proves this multi-lag form and the bucket lifting are the **same object in two coordinate systems** ($b = M\mathcal{D}$); cobre implements the lifted (Markov-1) coordinates                                                                                                                                                       |
 | 3   | §4.5.15 (and the balance-by-patamar forms): the lagged arrival is distributed across the arrival stage's patamares as $(Q^{t-tv} + S^{t-tv})_k = \frac{d_k}{D}(Q^{t-tv} + S^{t-tv})$ — **duration-proportional**                                                                                                                                                                 | Sub-contract 3's fixed template delivery density $\rho$ (companion memo §2.5.3): DECOMP's $d_k/D$ **is** the uniform $\rho$ over a parallel stage's blocks                                                                                                                                                                                             |
 | 4   | §4.5.14.2, Figs. 5.5b/5.5c (**an ENA/inflow-propagation example**, not a defluence balance): $T_v = 15$ d against **weekly then monthly stages** — weekly stage arrivals composed as $\tfrac67$ of lag-2 plus $\tfrac17$ of lag-3 **inflows**; the monthly stage keeps $\tfrac{\Delta t - 15}{\Delta t}$ same-stage                                                              | The stage-clock overlap arithmetic on a **non-uniform calendar** with stage-varying depth — cited as **arithmetic cross-validation** (DECOMP uses one calendar engine for inflow and defluence propagation); the defluence-side anchors are rows 1–3. §3 scenario S1a reproduces the $\tfrac67 / \tfrac17$ **exactly** from the shared uniform density |
 
@@ -101,6 +104,16 @@ resolve_point(Δ, calendar)
       depth K(t) = |{ m > t : c(m) ≤ t }| }
 ```
 
+`resolve_point` also carries a **stage-count mode** (owner clarification, §4.4):
+when the lag is declared as `lead_stages = ℓ` rather than a physical $\Delta$,
+the calendar is **not consulted** and the resolution is the pure index shift —
+$c(m) = m - \ell$, $C(t) = \{t + \ell\}$, $K(t) = \ell$ — the degenerate point
+resolution ("the whole effect at exactly lag $\ell$ on the stage clock"; for a
+spread quantity the analogue would be forcing $k_\ell = 1$). This is the
+backwards-compatibility mode for uniform-**cadence** studies (monthly/weekly),
+whose stages are equal in cadence but **not in hours** — a month is 672–744 h,
+so "ℓ months" has no constant-hours representation at all.
+
 Placement (genericity-checked): split in two. The **interval-overlap primitive**
 (intersect a shifted window with calendar periods) must be a **new, hour-resolution,
 multi-slot** implementation — the existing `days_in_period` / `month_total_hours`
@@ -119,6 +132,10 @@ infrastructure-genericity hard rule (zero algorithm-specific references in
 `cobre-core`) plus the auto-loaded comment rules would be violated by documenting them
 there. The resolvers live in `cobre-sddp` (a sibling of the lag-transition precompute),
 consumed by setup (`StudySetup` construction), not by any hot path.
+`resolve_point`'s depth output composes with — never replaces — the
+delivery-stage commissioning gate: $K_i(t)$ and $C(t)$ come from the resolver,
+per-stage activity from the shipped `is_anticipated_decision_active`-style
+masking (two composing mechanisms, round-2 review).
 
 ### 2.2 Transition mechanics — in-LP vs out-of-LP (an asymmetry the unification should resolve)
 
@@ -155,7 +172,11 @@ offsets and per-stage depth is handled by masking (like storage and buckets), so
 per-stage. The in-LP path is not without precedent: the code already carries two
 in-LP anticipated constructs (the `anticipated_state_out` definition row and the
 matured-slot generation coupling), of which the per-slot ring is the natural
-generalization. Costs, stated honestly: ~$A \cdot k_{max}$ additional columns and
+generalization — and the `anticipated_state_out` column has since been relocated
+into the **stage-invariant state region** (offset a pure function of
+`(N, L, A, k_max)`, `n_blks`-independent), so the in-LP ring generalizes an
+already-landed structural simplification while the out-of-LP arm re-complicates
+the just-simplified resolver branch (round-2 review). Costs, stated honestly: ~$A \cdot k_{max}$ additional columns and
 definition rows per stage LP; the anticipated _mechanics_ change even for uniform
 calendars (same optimal values and cuts — pinned by a uniform-calendar
 **value/cut-identity anchor**, §4.3; note the anchor's dual-degeneracy caveat — a
@@ -231,7 +252,10 @@ Observations the matrix forces:
 - **S7/S8 are the mode-mixing guarantees**: the bucket is the mode-independent
   interface — each stage's own `block_mode` governs only its own deposit/delivery
   form, and cross-mode policy loading inherits exactly the coarse-train/
-  fine-simulate semantics the chronological feature already documents.
+  fine-simulate semantics the chronological feature already documents. (Mode,
+  not calendar: $B$ depends on stage **lengths**, so loading across different
+  **calendars** is rejected by the `state_dimension` check — the third
+  portability axis, water memo §8.3, round-2 review.)
 - **S5 shows depth ≠ nonzero-factor count**: intermediate buckets with zero
   deposit still carry transit mass through the ring shift. The per-stage mask
   excludes only slots that are structurally absent at that stage, not slots
@@ -251,7 +275,12 @@ Observations the matrix forces:
 `AnticipatedConfig { lead_stages: u32 }` deposits the commitment decided at
 stage $t$ at ring slot $K_i - 1$; it matures (fixes the plant's generation)
 exactly $K_i$ stage-shifts later. On a uniform calendar, stage-shifts and
-physical time agree. On the PMO calendar (4 weekly stages, days 0–28, then
+physical time agree. (Scope, owner-clarified: "breaks" below applies to a lead
+whose intent is **physical time**. When the modeler's intent is "$\ell$ stages"
+— the shipped practice for GNL plants in monthly/weekly-cadence studies, where
+a month is not a constant number of hours — `lead_stages` is the **intended**
+semantics, not a broken approximation of it, and is kept first-class as §4.4's
+stage-count mode.) On the PMO calendar (4 weekly stages, days 0–28, then
 monthly), a plant with a physical 30-day lead:
 
 | decision stage $t$ | starts day | + 30 d = matures day | maturation stage  | required $K(t)$ |
@@ -299,8 +328,17 @@ c(m) \;=\; \text{the stage containing } (\text{start}_m - \Delta),
 $$
 
 with $c(m)$ before the horizon start meaning the commitment comes from the
-**initial conditions** (`past_anticipated_commitments` — the input cobre
-already has). Properties, by construction:
+**initial conditions** (`past_anticipated_commitments`). Corrected scope
+(round-2 review): the shipped IC format
+(`AnticipatedCommitmentHistory::values_mw`, one MW value per early study stage
+`k < lead_stages`, validated `len == lead_stages`) is **stage-count-indexed** —
+the very semantics §4.1 shows is calendar-broken — so under delivery anchoring
+on a non-uniform calendar the IC needs the same **calendar-period convention**
+redesign as `past_defluences` (§7.3): the set of pre-study-committed delivery
+stages is calendar-derived (a coarse pre-study decider fans out over several
+fine early stages), not a fixed `lead_stages` count. The
+delivery-stage-indexed MW values survive; the length/period convention does
+not. Properties, by construction:
 
 - **No collisions**: each delivery stage has exactly one decider.
 - **No gaps**: every delivery stage (past the IC boundary) is committed.
@@ -349,27 +387,35 @@ underflowed.
 On a uniform calendar with $\Delta$ an exact stage multiple this degenerates
 **exactly** to today's model ($|C(t)| = 1$, $K_i(t) = $ `lead_stages`, no
 degeneracy), so the refactor is behavior-preserving where the current model is
-well-defined.
+well-defined. Under §4.4's **stage-count mode** the identity holds **by
+construction on every calendar** — the resolver IS the index shift — which is
+the backwards-compatibility guarantee for shipped monthly GNL configs (owner
+clarification: a month is not a constant number of hours, so those configs
+cannot even be re-expressed as a constant `lead_time`).
 
-**Recourse-feasibility contract (independent-review finding; pre-existing,
-widened by the refactor).** The delivered commitment is a **hard equality with no
-slack** (the matured slot pins the plant's stage generation via an equality row),
-while the commitment's bound comes from the **decision** stage's capacity and the
-delivery stage enforces **its own** per-stage `[min, max]_gen`. If capacity drops
-across the lead window (derating, maintenance schedules) — or a must-run floor
-rises — the delivery subproblem is **infeasible**, and cobre generates no
-feasibility cuts: that is a hard run failure, not a graceful degradation. (The
-same mechanism is why the §4.1 collision case is fatal: two deciders impose two
-contradictory equalities.) **Adopting one arm is a correctness PRECONDITION, not a
-UX nicety (FCF review): an infeasible delivery subproblem violates relatively
-complete recourse — an SDDP convergence hypothesis — so the feature is not sound
-without it.** The arms: (i) **validation (recommended)** — reject a config where
-any anticipated plant's generation bounds change within any of its active lead
-windows, the loud-diagnostic house style; (ii) relax the delivery row to a
-penalized bracket (changes shipped semantics); (iii) clamp the commitment bound to
-the minimum capacity over its delivery window (silently conservative). This
-applies to today's `lead_stages` model too — the refactor merely widens the
-exposed window set on non-uniform calendars.
+**Recourse-feasibility contract (re-grounded against the code, round-2 review;
+supersedes the earlier independent-review framing).** The delivered commitment is
+a **hard equality with no slack** (the matured slot pins the plant's stage
+generation via an equality row) — but the shipped model is already
+**delivery-anchored**: `fill_anticipated_columns` bounds the decision column with
+`thermal_bounds(plant, delivery_stage)` and prices it with the delivery stage's
+hours and discount, and `is_anticipated_decision_active` gates the decision on
+the **delivery** stage's commissioning window. A committed value therefore lies
+within the delivery stage's own `[min, max]_gen` **by construction**, and the
+capacity-drop infeasibility the earlier review described cannot arise from
+per-stage generation bounds in the shipped model. (The §4.1 collision case
+remains fatal for the reason given there: two deciders impose two contradictory
+equalities.) The finding therefore becomes: (i) a **preservation contract** — the
+refactored resolver must keep every decision column in $C(t)$ delivery-anchored
+(bounds, cost, hours, discount, commissioning each read at its own delivery stage
+$m$), pinned by a test; a decision-anchored rewrite would (re)introduce exactly
+the infeasibility the earlier review warned about, with no feasibility cuts to
+absorb it and relatively complete recourse — an SDDP convergence hypothesis —
+violated; and (ii) a **residual audit** — if any other mechanism can tighten
+delivery-stage feasibility beyond `thermal_bounds` (e.g. a generic constraint
+referencing the plant's generation), validation must cover it or the plan records
+that no such mechanism exists. Validation row 10 and D8 are re-scoped
+accordingly.
 
 **End-of-horizon disclosure (symmetric to water's, opposite sign).** The horizon
 gate drops the **decision** in the last $K_i$ stages — commitments that would
@@ -413,11 +459,30 @@ byte-identity of the LP is additionally achievable and should be pinned).
 
 ### 4.4 Config migration (surfaced fork)
 
-| Option                                                    | Behavior                                                                                                                                                                                                          | Assessment                                                                                                                    |
-| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| **A. Time-based field, stage-count legacy (recommended)** | Add `lead_time` (physical duration) as the primary spec; keep `lead_stages` accepted, valid **only** when every stage in the plant's active window has equal length — else a hard validation error naming the fix | Non-uniform breakage becomes a loud diagnostic; uniform studies unchanged; one deprecation path                               |
-| B. Time-based only (breaking)                             | Replace `lead_stages` outright                                                                                                                                                                                    | Cleanest end state; breaks every existing config now                                                                          |
-| C. Energy-commitment semantics                            | Reinterpret the commitment as energy spread by the water $k_d$ math                                                                                                                                               | Unifies discretizations fully but silently changes shipped dispatch semantics — rejected unless the owner wants new semantics |
+| Option                                                                         | Behavior                                                                                                                                                                                                                                                                                           | Assessment                                                                                                                                                                                                                                                                                                                                        |
+| ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **A. Dual semantics: time-based + stage-count (recommended; owner-clarified)** | Add `lead_time` (physical duration, hour clock, delivery-anchored resolver) for physically-anchored leads; keep `lead_stages` as a first-class **stage-count semantics** — a deliberate hour-clock override ($c(m) = m - \ell$, $K_i(t) = \ell$, calendar never consulted), NOT a deprecated alias | Backwards-compatible **by construction on every calendar**; the earlier equal-stage-length validity gate is DROPPED (it would wrongly reject the canonical monthly GNL study — monthly stages are not equal in hours, 672–744 h — and "ℓ months" has no constant-`lead_time` representation); cadence-transition advisory instead of a hard error |
+| B. Time-based only (breaking)                                                  | Replace `lead_stages` outright                                                                                                                                                                                                                                                                     | Cleanest end state; breaks every existing config now                                                                                                                                                                                                                                                                                              |
+| C. Energy-commitment semantics                                                 | Reinterpret the commitment as energy spread by the water $k_d$ math                                                                                                                                                                                                                                | Unifies discretizations fully but silently changes shipped dispatch semantics — rejected unless the owner wants new semantics                                                                                                                                                                                                                     |
+
+**The stage-count mode, formalized (owner clarification — backwards
+compatibility with shipped GNL practice).** Shipped monthly/weekly-cadence
+studies declare GNL anticipation as a stage count (`lead_stages = 2` in a
+monthly study means "two months ahead"), and a month is **not** a constant
+number of hours (672–744 h) — so the hour-clock resolver must be
+**overridable**, and an hours-equality validity gate is the wrong test (it
+would reject exactly these studies). Under `lead_stages = ℓ` the resolver takes
+the **degenerate stage-clock resolution**: the whole effect lands at exactly
+lag $\ell$ (the point-quantity form of "force $k_\ell = 1$"), i.e.
+$c(m) = m - \ell$, $C(t) = \{t + \ell\}$, $K_i(t) = \ell$ — the shipped
+machinery's semantics, preserved identically on **every** calendar, with no
+collisions or gaps possible (the index shift is single-valued by
+construction). Rules: `lead_time` and `lead_stages` are mutually exclusive per
+plant (validation); a study may mix modes across plants; on a cadence
+transition inside the plant's active window (weekly→monthly) the stage-count
+semantics stays well-defined but the physical lead varies, so setup logs an
+advisory naming `lead_time` as the physically-anchored alternative (validation
+row 5) — never a hard error.
 
 Units for `lead_time`: hours (matching $t_v$) with serde-side acceptance of
 `{days: N}` sugar — decided at implementation planning, not here.
@@ -432,7 +497,7 @@ Units for `lead_time`: hours (matching $t_v$) with serde-side acceptance of
    S1a reproduces the manual's worked factors exactly) and strictly more
    expressive where it does not (chronological block attribution).
 2. **Exactness**: the bucket state is the textbook multi-lag cut in lifted
-   coordinates (companion memo §2.2) — no approximation is introduced by the
+   coordinates (companion memo §2.1 definition, §2.2 proof) — no approximation is introduced by the
    lifting itself; the only approximations are named and bounded (cross-stage
    origin-block aggregation, sub-contract 3; uniform-release density, shared
    with DECOMP).
@@ -440,9 +505,12 @@ Units for `lead_time`: hours (matching $t_v$) with serde-side acceptance of
    stage-clock state discipline now governs water buckets AND the repaired
    anticipated state; both reuse the shipped masking pattern and one overlap
    engine — less new machinery than either feature built alone.
-4. **The anticipated fix is behavior-preserving on uniform calendars** and
-   turns a silent wrong answer on non-uniform calendars into either a correct
-   answer (delivery-anchored) or a hard diagnostic (legacy path).
+4. **The anticipated fix is behavior-preserving where the shipped model is
+   well-defined** — by construction on every calendar under the stage-count
+   mode (§4.4, owner-clarified), and on uniform calendars under `lead_time` —
+   and turns a physically-intended lead that a stage count cannot represent on
+   a non-uniform calendar into a correct delivery-anchored answer, with a
+   cadence-transition advisory on the stage-count path (validation row 5).
 
 **Weak / risks:**
 
@@ -511,7 +579,11 @@ Units for `lead_time`: hours (matching $t_v$) with serde-side acceptance of
   (`cobre-python`'s run paths), per the workspace parity rule. The IC input
   (`past_defluences`) rides the shared `cobre_io::Config`/schema path, so
   config-side parity is automatic; output-side parity is not and must be a
-  ticket, not an afterthought.
+  ticket, not an afterthought. Shape precedent (round-2 review):
+  `SimulationInflowLagResult` — the variable-depth per-hydro-per-lag sub-table —
+  is the structural template for per-arc-per-maturity bucket outputs; and any new
+  output surface requires the **manual** `cobre schema export` regeneration step
+  (schema content currency is not CI-gated).
 
 Open decisions for the owner: §4.4 config-migration option (A recommended);
 the §4.3 mechanism fork (in-LP ring recommended); whether the anticipated
@@ -530,7 +602,7 @@ are specified here so the implementation tickets pin them, not invent them.
 ### 7.1 Analytic regression-case designs (the feature's deterministic cases)
 
 Following the workspace convention (one analytic case per modeled feature, in the
-deterministic-case family), four cases with hand-computable expectations. Each is
+deterministic-case family), a set of cases with hand-computable expectations. Each is
 specified to be small enough to verify by hand and sharp enough that a plausible
 implementation bug flips its expected value.
 
@@ -580,7 +652,23 @@ $\kappa_{B0 \to B2} = 10/240$, $\kappa_{B1 \to B2} = 230/240$,
 $\chi = (0,\ 10/240,\ 1)$, delivery $\rho = (96\%,\ 4\%)$, duration-weighted
 deposit $= 250/720$. Companion anchor: the same system with $K = 1$ (single
 720 h block) must be **byte-identical to parallel mode with travel time ON**
-($\chi_{0,d} = k_d$; companion memo §2.5.2 fact 3).
+($\chi_{0,d} = k_d$; companion memo §2.5.2 fact 3). Additionally assert
+`state_dimension` equality between the parallel and chronological ($K = 3$)
+builds with travel time ON — the direct sub-contract-1 pin (round-3 review).
+
+**W-5 — confluence aggregation (the corrected-§7.2 case, round-3 review).** Two
+upstreams `u1`, `u2` with **different** travel times (e.g. 360 h and 1080 h)
+into one downstream `j`, uniform 720 h stages, parallel mode. Pins the
+per-downstream aggregate $B_d^{j,t} = \sum_i \sum_{m\ge1} k_{d-1+m,i}\,D_i^{t-m}$
+and its transition $B_d^{j,t+1} = B_{d+1}^{j,t} + \sum_i k_{d,i}\,D_i^t$ with
+$L_j = \max_i L_i$: assert per-stage arrivals at `j` equal the sum of both arcs'
+hand-computed delayed shares, and that the bucket subgradients price the
+**merged** maturity schedule (a regression to the single-term form
+$\sum_i k_{d,i} D_i^{t-d}$ — the §7.2 defect corrected in round 2 — mis-times
+`u2`'s deeper mass and flips the per-stage thermal split). Conservation:
+delivered + horizon drop = released, summed over both arcs. W-1..W-4 are all
+single-arc; this is the only case exercising lock #2's per-downstream
+aggregation.
 
 **A-1 — anticipated resolver + refactor anchor.** (a) Resolver unit tests, two
 **separate** fixtures: (i) the PMO collision/gap calendar (4 weekly + ~30-day
@@ -588,30 +676,41 @@ monthly, $\Delta = 30$ d) — expected delivery-anchored $c(m)$ / $K(t)$ / $C(t)
 values **computed from the calendar** (note: §4.1's table is the
 decision-anchored breakage illustration, not these outputs — the resolver's
 delivery-anchored values are derived, not read off it), including the
-IC-boundary deliveries; (ii) a 31-day-month fixture with a 30-day lead pinning
+IC-boundary deliveries under the redesigned `past_anticipated_commitments`
+period convention (§4.3, round-2 review); (ii) a 31-day-month fixture with a 30-day lead pinning
 the $K = 0$ degeneracy and its §4.3 exclude-with-diagnostic handling. (b)
 Refactor anchor: any existing anticipated deterministic case on a uniform
 calendar — identical optimal values, states, and cuts before/after the
 refactor (plus LP-byte identity if the conservative out-of-LP mechanism is
-chosen; §4.3).
+chosen; §4.3). The row-10/D8 delivery-anchoring preservation test additionally
+needs **stage-varying delivery-stage thermal bounds/cost** to discriminate —
+with bounds constant across the lead window the anchor is blind to delivery-
+vs decision-anchoring and the preservation test is vacuous (round-3 review).
+(c) Stage-count-mode anchor (owner clarification, §4.4): a monthly-calendar
+fixture with **unequal stage hours** (672–744 h) and `lead_stages = 2`,
+asserting the resolver output is the shipped index-shift semantics
+($c(m) = m - 2$, $K \equiv 2$, $|C(t)| = 1$) and the end-to-end behavior is
+identical to today's model — pinning that the hour clock is **never consulted**
+in this mode.
 
 ### 7.2 Validation-rule inventory (consolidated)
 
-| #   | Condition                                                                                                                                                            | Response                                                                                                                                                                                                                                                                                                                |
-| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | `travel_time_hours` negative or non-finite                                                                                                                           | hard error at config validation                                                                                                                                                                                                                                                                                         |
-| 2   | `travel_time_hours = 0` declared                                                                                                                                     | treat as undeclared (today's instantaneous model) + advisory log — never a bucket                                                                                                                                                                                                                                       |
-| 3   | $\max_t t_v/h_t$ below a smallness threshold                                                                                                                         | advisory log ("consider not declaring"); never a silent fold (§2.5.5 of the companion memo)                                                                                                                                                                                                                             |
-| 3b  | $t_v$ exceeding the remaining horizon at some stage (all cross-stage water drops past $T$)                                                                           | advisory log ("travel time exceeds the horizon from stage $t$; the arc is economically inert there") — sizing is safe ($L_{\text{arc}}(t)$ capped by $n_{\text{stages}} - t$), so advisory, not error                                                                                                                   |
-| 4   | `past_defluences` history shorter than $t_v^{\max}$ (REQUIRE option)                                                                                                 | hard error naming the missing periods; under the derive-fallback, logged caveat instead                                                                                                                                                                                                                                 |
-| 5   | legacy `lead_stages` with unequal stage lengths in the plant's active window                                                                                         | hard error naming `lead_time` as the fix (§4.4 option A)                                                                                                                                                                                                                                                                |
-| 6   | `lead_time` yielding $K(t) = 0$ at some stages                                                                                                                       | per-stage diagnostic; plant unconstrained at those delivery stages (§4.3 fork, recommended arm)                                                                                                                                                                                                                         |
-| 7   | policy load: recorded `state_dimension` ≠ current `n_state`                                                                                                          | hard error (the NEW load-time check — companion memo §6 item 5)                                                                                                                                                                                                                                                         |
-| 8   | $\sum_d k_d \ne 1$ per (arc, stage) after resolution                                                                                                                 | `debug_assert` (conservation contract, companion memo §6.1)                                                                                                                                                                                                                                                             |
-| 9   | $\sum_b w_b \chi_{b,d} \ne k_d$ per (arc, stage, lag)                                                                                                                | `debug_assert` (shared-density consistency, sub-contract 2)                                                                                                                                                                                                                                                             |
-| 10  | anticipated plant's `[min, max]_gen` changes within any of its active lead windows                                                                                   | hard error (the §4.3 recourse-feasibility contract, recommended arm — a delivered hard-equality commitment can otherwise be infeasible at the delivery stage; no feasibility cuts exist)                                                                                                                                |
-| 11  | downstream hydro of a declared arc exits (`exit_stage_id`) inside an arrival window                                                                                  | surfaced fork (§4.3 commissioning corner): drop-with-advisory (mirrors the terminal-drop convention) or hard error — the plan adopts one explicitly, never silently                                                                                                                                                     |
-| 12  | declared arc's downstream plant in `PreFilling`/`Filling` — or **before its entry window** (absent from the LP entirely, no balance row) — during any arrival window | correctness precondition (both FCF reviews — frozen or absent relief valves make a pinned arrival infeasible or silently non-conserving; no feasibility cuts): **validation** (reject) or **routing** (deliver via the incremental-inflow short-circuit) — one must land; water memo §3.3 recourse is conditional on it |
+| #   | Condition                                                                                                                                                                                                                                                   | Response                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `travel_time_hours` negative or non-finite                                                                                                                                                                                                                  | hard error at config validation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| 2   | `travel_time_hours = 0` declared                                                                                                                                                                                                                            | treat as undeclared (today's instantaneous model) + advisory log — never a bucket                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| 3   | $\max_t t_v/h_t$ below a smallness threshold                                                                                                                                                                                                                | advisory log ("consider not declaring"); never a silent fold (§2.5.5 of the companion memo)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| 3b  | $t_v$ exceeding the remaining horizon at some stage (all cross-stage water drops past $T$)                                                                                                                                                                  | advisory log ("travel time exceeds the horizon from stage $t$; the arc is economically inert there") — sizing is safe ($L_{\text{arc}}(t)$ capped by $n_{\text{stages}} - t$), so advisory, not error                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| 4   | `past_defluences` history shorter than $t_v^{\max}$ (REQUIRE option)                                                                                                                                                                                        | hard error naming the missing periods; under the derive-fallback, logged caveat instead                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| 5   | `lead_stages` (stage-count mode) with the plant's active window spanning a cadence transition (e.g. weekly→monthly)                                                                                                                                         | advisory log — the stage-count semantics stays well-defined (single-valued index shift; no collisions/gaps) but the physical lead varies across the transition; the advisory names `lead_time` as the physically-anchored alternative. Never a hard error: the earlier equal-stage-length gate would wrongly reject monthly studies, whose stages are not equal in hours (§4.4, owner clarification)                                                                                                                                                                                                                                                                                                                        |
+| 6   | `lead_time` yielding $K(t) = 0$ at some stages                                                                                                                                                                                                              | per-stage diagnostic; plant unconstrained at those delivery stages (§4.3 fork, recommended arm)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| 7   | policy load: recorded `state_dimension` ≠ current `n_state`                                                                                                                                                                                                 | hard error — the check EXISTS (`validate_policy_compatibility`; `load_boundary_cuts` adds an unconditional dimension check + per-slot manifest identity) but warm-start validation is **opt-in** (`config.policy.validate_compatibility`): force it on for bucket studies (corrected, round-2 review — companion memo §6 item 5)                                                                                                                                                                                                                                                                                                                                                                                            |
+| 8   | $\sum_d k_d \ne 1$ per (arc, stage) after resolution                                                                                                                                                                                                        | `debug_assert` (conservation contract, companion memo §6.1)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| 9   | $\sum_b w_b \chi_{b,d} \ne k_d$ per (arc, stage, lag)                                                                                                                                                                                                       | `debug_assert` (shared-density consistency, sub-contract 2)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| 10  | the anticipated refactor breaks delivery-anchoring (a decision column's bounds/cost/commissioning not read at its own delivery stage), or another mechanism (e.g. a generic constraint on the plant's generation) can exclude a committed value at delivery | preservation contract + test pin (re-grounded, round-2 review: shipped code is already delivery-anchored — `fill_anticipated_columns` reads `thermal_bounds(plant, delivery_stage)` — so per-stage `[min,max]_gen` variation cannot strand a commitment; the earlier bounds-change rejection rule is superseded, §4.3)                                                                                                                                                                                                                                                                                                                                                                                                      |
+| 11  | downstream hydro of a declared arc exits (`exit_stage_id`) inside an arrival window                                                                                                                                                                         | surfaced fork (§4.3 commissioning corner): drop-with-advisory (mirrors the terminal-drop convention) or hard error — the plan adopts one explicitly, never silently                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| 12  | declared arc's downstream plant in `PreFilling`/`Filling` — or **before its entry window** (absent from the LP entirely, no balance row) — during any arrival window                                                                                        | correctness precondition (both FCF reviews — frozen or absent relief valves make a pinned arrival infeasible or silently non-conserving; no feasibility cuts): **validation** (reject) or **routing** (deliver via the incremental-inflow short-circuit — which is **same-stage** today and needs new delayed-delivery machinery, round-2 review) — one must land; water memo §3.3 recourse is conditional on it                                                                                                                                                                                                                                                                                                            |
+| 13  | UPSTREAM plant of a declared arc: enters mid-horizon (no pre-study releases of its own), exits mid-horizon, or is in `Filling` during a release window                                                                                                      | three arms (water memo §4.2, round-3 refined): entry — a mid-horizon entrant seeds **ZERO** buckets (conservation-forced: pre-entry water already delivered same-stage via the short-circuit; a proxy seed would double-count); only a stage-0-active plant with unrecorded pre-study operation is the D5 proxy fork; exit — releases stop and the buckets drain through the ring shift over $L$ stages (assert, no special handling); `Filling` — turbine/diversion frozen but spillage FREE and part of the $(u+s)$ deposit, so a Filling upstream legitimately deposits spill (never freeze the deposit rows wholesale). Each arm needs a deterministic-case pin (entry conservation, exit drain, Filling-spill deposit) |
 
 ### 7.3 Config surface sketch (decided at planning, constrained here)
 
@@ -619,11 +718,18 @@ chosen; §4.3).
   (its outflow edge to `downstream_id`) — one scalar per arc, matching the
   DECOMP TVIAG pairing. **v1 scope: the main cascade arc only; diversion arcs
   excluded** (surfaced — a diversion travel time is the same machinery on
-  another arc set, deferred until a case needs it). Density-first resolver per
-  §2.3 makes a future per-arc curve a config-only extension.
+  another arc set, deferred until a case needs it); **pumping-conduit arcs
+  likewise excluded** — the pumped transfer (`fill_pumping_water_entries`, a
+  same-stage ±τ pair on its own reserved column, outside the $(u+s)$ deposit
+  set) is instantaneous by construction in v1 (round-2 review). Density-first
+  resolver per §2.3 makes a future per-arc curve a config-only extension.
 - **Anticipated:** `anticipated_config.lead_time` (physical duration, hours;
-  calendar-sugar forms decided at planning) added alongside the legacy
-  `lead_stages` per §4.4 option A.
+  calendar-sugar forms decided at planning) added alongside `lead_stages`,
+  which stays **first-class as the stage-count mode** (per-plant mutually
+  exclusive with `lead_time`; §4.4 option A, owner-clarified). The `past_anticipated_commitments` IC
+  length/period convention is redesigned alongside — the shipped
+  stage-count-indexed format does not survive delivery anchoring on a
+  non-uniform calendar (§4.3, round-2 review).
 - **IC:** `past_defluences` in the initial-conditions input, per arc, per
   pre-study calendar period following the `past_inflows` period convention
   (companion memo §4.2). Two wire constraints (state-transfer review): the field is
@@ -643,17 +749,17 @@ Every open decision, consolidated. Each is surfaced in detail at the cited
 section; this sheet is the action interface. D1–D8 are open; D0 is a standing
 prior decision listed for completeness.
 
-| #   | Decision                              | Options                                                                                                                                | Recommendation                                                                                                                                                                                                                                                                                                                                                                                      | What it changes downstream                                                                                                                                                                             |
-| --- | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| D1  | Shipping order (water §8.5)           | both-together (skeleton + block refinement, one landing) vs core-first (stage-uniform chronological attribution as documented interim) | **both-together**                                                                                                                                                                                                                                                                                                                                                                                   | plan epic structure; whether an interim distortion ships. De-risked: the state-transfer machinery is identical under both arms (χ/κ/ρ are within-stage coefficients that never touch the state vector) |
-| D2  | Anticipated config migration (§4.4)   | A: add time-based `lead_time`, legacy `lead_stages` valid only on uniform windows · B: breaking replace · C: energy semantics          | **A**                                                                                                                                                                                                                                                                                                                                                                                               | thermals.json schema; validation row 5; deprecation path                                                                                                                                               |
-| D3  | Ring mechanism (§4.3, §2.2)           | in-LP ring (per-slot definition rows; deletes the shift, keeps the stage-0 map) vs conservative out-of-LP rework                       | **split expert opinion** — state-transfer review: in-LP (unifies with storage, less code, code-validated against two precedents); FCF review: out-of-LP (in-LP changes the anticipated LP shape even on uniform calendars — larger blast radius for a behavior-touching follow-up whose unification payoff is then speculative). Both are correct; the choice is risk appetite for the D6 follow-up | whether `shift_anticipated_state` is deleted or generalized; anchor type (value/cut vs + LP-byte); blast radius of the anticipated follow-up plan                                                      |
-| D4  | Sub-stage lead $K=0$ semantics (§4.3) | exclude-from-anticipation + per-stage diagnostic vs hard validation error                                                              | **exclude + diagnostic**                                                                                                                                                                                                                                                                                                                                                                            | validation row 6; behavior on mixed calendars with coarse stages                                                                                                                                       |
-| D5  | Water IC input (water §4.3)           | REQUIRE `past_defluences` with derived-from-`past_inflows` fallback vs derive-only vs zero-seed                                        | **REQUIRE + derived fallback**                                                                                                                                                                                                                                                                                                                                                                      | initial-conditions schema; validation row 4; first-$L$-stages accuracy                                                                                                                                 |
-| D6  | Refactor sequencing (§6)              | anticipated refactor as follow-up plan sharing the resolver epic vs same plan as water                                                 | **follow-up plan**                                                                                                                                                                                                                                                                                                                                                                                  | plan boundaries; regression-net timing                                                                                                                                                                 |
-| D7  | Output design (§6)                    | what travel-time data ships: bucket states and/or delayed-arrival contributions; new columns vs per-arc file vs internal-only          | **open — owner picks visibility**; parity ticket either way                                                                                                                                                                                                                                                                                                                                         | simulation output schema; the Python-parity ticket                                                                                                                                                     |
-| D8  | Recourse-feasibility arm (§4.3)       | validation (reject bounds-change within active lead windows) vs penalized bracket vs clamp-to-window-min                               | **validation** — and adopting SOME arm is a correctness precondition (relatively complete recourse), not optional                                                                                                                                                                                                                                                                                   | validation row 10; applies to the CURRENT `lead_stages` model too                                                                                                                                      |
-| D0  | Terminal credit (standing)            | water §5 / §0.1 decision 3: defer `V_eff`; residual horizon buckets dropped, documented (broadened to every arc, §8.4 lock #3)         | previously locked — no action unless owner reopens                                                                                                                                                                                                                                                                                                                                                  | —                                                                                                                                                                                                      |
+| #   | Decision                                         | Options                                                                                                                                                                                                                                              | Recommendation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | What it changes downstream                                                                                                                                                                             |
+| --- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| D1  | Shipping order (water §8.5)                      | both-together (skeleton + block refinement, one landing) vs core-first (stage-uniform chronological attribution as documented interim)                                                                                                               | **both-together**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | plan epic structure; whether an interim distortion ships. De-risked: the state-transfer machinery is identical under both arms (χ/κ/ρ are within-stage coefficients that never touch the state vector) |
+| D2  | Anticipated config migration (§4.4)              | A: dual semantics — `lead_time` (hour clock) + `lead_stages` kept as a first-class stage-count mode (owner-clarified) · B: breaking replace · C: energy semantics                                                                                    | **A** — `lead_stages` is NOT deprecated: it is the only way to express "ℓ calendar stages" (a month is not a constant number of hours) and preserves shipped GNL configs by construction                                                                                                                                                                                                                                                                                                                                                                   | thermals.json schema; validation row 5 (advisory, not error); no forced migration                                                                                                                      |
+| D3  | Ring mechanism (§4.3, §2.2)                      | in-LP ring (per-slot definition rows; deletes the shift, keeps the stage-0 map) vs conservative out-of-LP rework                                                                                                                                     | **split expert opinion** — state-transfer review: in-LP (unifies with storage, less code, code-validated against two precedents); FCF review: out-of-LP (in-LP changes the anticipated LP shape even on uniform calendars — larger blast radius for a behavior-touching follow-up whose unification payoff is then speculative). Both are correct; the choice is risk appetite for the D6 follow-up. Round-2 note: the `anticipated_state_out` state-region relocation has landed, strengthening the in-LP arm (it generalizes the landed structure, §2.2) | whether `shift_anticipated_state` is deleted or generalized; anchor type (value/cut vs + LP-byte); blast radius of the anticipated follow-up plan                                                      |
+| D4  | Sub-stage lead $K=0$ semantics (§4.3)            | exclude-from-anticipation + per-stage diagnostic vs hard validation error                                                                                                                                                                            | **exclude + diagnostic**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | validation row 6; behavior on mixed calendars with coarse stages                                                                                                                                       |
+| D5  | Water IC input (water §4.3)                      | REQUIRE `past_defluences` with derived-from-`past_inflows` fallback vs derive-only vs zero-seed                                                                                                                                                      | **REQUIRE + derived fallback**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | initial-conditions schema; validation row 4; first-$L$-stages accuracy                                                                                                                                 |
+| D6  | Refactor sequencing (§6)                         | anticipated refactor as follow-up plan sharing the resolver epic vs same plan as water                                                                                                                                                               | **follow-up plan**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | plan boundaries; regression-net timing                                                                                                                                                                 |
+| D7  | Output design (§6)                               | what travel-time data ships: bucket states and/or delayed-arrival contributions; new columns vs per-arc file vs internal-only                                                                                                                        | **open — owner picks visibility**; parity ticket either way                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | simulation output schema; the Python-parity ticket                                                                                                                                                     |
+| D8  | Recourse-feasibility (§4.3, re-grounded round-2) | preservation contract (keep every decision column delivery-anchored — the shipped `fill_anticipated_columns` invariant — pinned by a test) + residual audit of non-`thermal_bounds` mechanisms; the earlier reject/bracket/clamp arms are superseded | **preservation contract + residual audit** — shipped code already delivery-anchors bounds/cost/commissioning, so the earlier bounds-change rejection guarded a non-existent failure; relatively complete recourse holds by construction while the invariant holds                                                                                                                                                                                                                                                                                          | validation row 10 (re-scoped); anchors the refactor's regression net                                                                                                                                   |
+| D0  | Terminal credit (standing)                       | water §5 / §0.1 decision 3: defer `V_eff`; residual horizon buckets dropped, documented (broadened to every arc, §8.4 lock #3)                                                                                                                       | previously locked — no action unless owner reopens                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | —                                                                                                                                                                                                      |
 
 Accepting all recommendations resolves D1–D6 and D8; D7 (output visibility)
 has no default and needs an explicit choice. With the sheet answered, both

@@ -35,16 +35,16 @@ claim is grounded against the cited cobre symbols.
 
 ## 0. Executive verdict
 
-| #   | Question                                                                           | Verdict                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| --- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | In-transit-bucket Markov-1 reframing equivalent to the textbook multi-lag E^k cut? | **VALIDATED** (proof in §2). The bucket cut _is_ the textbook cut in lifted coordinates. Convexity preserved. `k₀>0` handled cleanly.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| 2   | FCF/Benders impact under column-bound pinning?                                     | Buckets are ordinary Benders state: subgradient = `rc/col_scale` on the incoming bucket column, identical to storage. LB validity, monotonicity, a.s. finite convergence **preserved** (no new randomness). Cost: `+B` cut dimensions.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| 3   | Is "water in transit at study start" a required input?                             | **YES, genuinely required** . Recommend requiring it; a derive-from-`past_inflows` fallback is acceptable with a documented caveat. Genuine fork — §4.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| 4   | Does the augmented state value residual buckets at horizon end?                    | **No, not automatically** when `V_{T+1}=0`. An explicit terminal credit (`V_eff = V + V_in_transit`) is required to avoid penalizing end-of-horizon upstream release. §5.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| 5   | Determinism / contract risks?                                                      | Canonical bucket-column sort, `col_scale` sizing, GEMM `d`, broadcast payload length, and one new reduction site to keep order-fixed. New `sddp.md` contracts proposed. §6.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| 6   | Best representation?                                                               | **RESOLVED: k-weighted volume buckets aggregated per downstream plant** (§7, §8.4 lock #2). Minimizes cut dimensionality (a sufficient statistic), and the chronological block-resolved deposit ($\sum_b \chi_{b,d}\,\tau_b\,D^b$, §2.5.2) is intrinsically a weighted volume the raw-lagged form cannot carry.                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| 7   | Variable stage length via `StageLagTransition`-style accumulation?                 | **Yes** — the calendar-fraction overlap arithmetic produces volume-conserving, stage-dependent k-factors and depths. Stage-varying active-bucket sets reuse the `anticipated_state` (k_max global / per-stage active / padding-masked) pattern. §8.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| 8   | Does the chronological substrate change the state vector? (new)                    | **No — by design (§2.5).** The bucket count `B` is a **stage-clock** quantity (the §2.5.1 window-overlap depth per arc, computed against the real stage calendar — `⌈t_v/h_t⌉` only on a uniform calendar; every declared arc, `t_v>0`, carries ≥1 bucket, the resolved §2.5.5 fork), computed before `block_mode` is consulted, so the state vector and cut layout are **`block_mode`-independent**. `block_mode` changes only **how the same stage's arrival mass is placed and attributed** (parallel: single row, stage-uniform deposit `k_d`; chronological: `κ`-routed rows, block-resolved deposit `χ_{b,d}`) — coefficient concerns, both stateless. Cross-stage transport is a **stage-level scalar bucket**, identical in both modes. |
+| #   | Question                                                                                                     | Verdict                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| --- | ------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | In-transit-bucket Markov-1 reframing equivalent to the textbook multi-lag E^k cut (term formalized in §2.1)? | **VALIDATED** (proof in §2). The bucket cut _is_ the textbook cut in lifted coordinates. Convexity preserved. `k₀>0` handled cleanly.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| 2   | FCF/Benders impact under column-bound pinning?                                                               | Buckets are ordinary Benders state: subgradient = `rc/col_scale` on the incoming bucket column, identical to storage. LB validity, monotonicity, a.s. finite convergence **preserved** (no new randomness). Cost: `+B` cut dimensions.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| 3   | Is "water in transit at study start" a required input?                                                       | **YES, genuinely required** . Recommend requiring it; a derive-from-`past_inflows` fallback is acceptable with a documented caveat. Genuine fork — §4.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| 4   | Does the augmented state value residual buckets at horizon end?                                              | **No, not automatically** when `V_{T+1}=0`. An explicit terminal credit (`V_eff = V + V_in_transit`) is required to avoid penalizing end-of-horizon upstream release. §5.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| 5   | Determinism / contract risks?                                                                                | Canonical bucket-column sort, `col_scale` sizing, GEMM `d`, broadcast payload length, and one new reduction site to keep order-fixed. New `sddp.md` contracts proposed. §6.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| 6   | Best representation?                                                                                         | **RESOLVED: k-weighted volume buckets aggregated per downstream plant** (§7, §8.4 lock #2). Minimizes cut dimensionality (a sufficient statistic), and the chronological block-resolved deposit ($\sum_b \chi_{b,d}\,\tau_b\,D^b$, §2.5.2) is intrinsically a weighted volume the raw-lagged form cannot carry.                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| 7   | Variable stage length via `StageLagTransition`-style accumulation?                                           | **Yes** — the calendar-fraction overlap arithmetic produces volume-conserving, stage-dependent k-factors and depths. Stage-varying active-bucket sets reuse the `anticipated_state` (k_max global / per-stage active / padding-masked) pattern. §8.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| 8   | Does the chronological substrate change the state vector? (new)                                              | **No — by design (§2.5).** The bucket count `B` is a **stage-clock** quantity (the §2.5.1 window-overlap depth per arc, computed against the real stage calendar — `⌈t_v/h_t⌉` only on a uniform calendar; every declared arc, `t_v>0`, carries ≥1 bucket, the resolved §2.5.5 fork), computed before `block_mode` is consulted, so the state vector and cut layout are **`block_mode`-independent**. `block_mode` changes only **how the same stage's arrival mass is placed and attributed** (parallel: single row, stage-uniform deposit `k_d`; chronological: `κ`-routed rows, block-resolved deposit `χ_{b,d}`) — coefficient concerns, both stateless. Cross-stage transport is a **stage-level scalar bucket**, identical in both modes. |
 
 ---
 
@@ -75,6 +75,8 @@ in the **§8.4 disposition table**; the note above records the amendments):
 1. **Initial condition (§4.3):** REQUIRE `past_defluences` (registro VI); when
    absent, derive a logged proxy from `past_inflows`; never silently zero-seed.
    Seed at stage-0 incoming bucket column bounds (mirror `build_initial_state`).
+   (Scope: this governs the **stage-0 IC seed** only; a mid-horizon upstream
+   entrant's ring self-seeds to zero by conservation — §4.2, round-3 review.)
 2. **Representation (§7.3):** ~~raw-lagged-defluence per source plant~~ —
    **SUPERSEDED, see §8.4 lock #2**: resolved to **k-weighted volume buckets
    aggregated per downstream plant** (the chronological block-resolved deposit is a
@@ -108,19 +110,19 @@ record.
 
 Following SDDP.jl conventions, augmented with cobre symbols.
 
-| Symbol                                | Meaning                                                                                                                                                                                                                                                                                                       |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| $t$                                   | stage index, $t=1,\dots,T$                                                                                                                                                                                                                                                                                    |
-| $v_h^t$                               | outgoing storage of hydro $h$ (hm³) — Benders state                                                                                                                                                                                                                                                           |
-| $\hat v$                              | trial (visited) state                                                                                                                                                                                                                                                                                         |
-| $D_i^t$                               | total _defluence_ of plant $i$ at stage $t$ = $\sum_{\text{blk}} \tau_{\text{blk}}\,(u_{i,\text{blk}}+s_{i,\text{blk}}+\text{div})$ (hm³). Turbine $u$, spill $s$                                                                                                                                             |
-| $\tau_k$                              | per-block flow→volume factor $=\,$`stage.blocks[k].duration_hours · M3S_TO_HM3`; the per-block coefficient in **both** water-balance fills (`fill_parallel_water_entries` uses `tau_h` on the single row's flow terms, `fill_chronological_water_entries` uses `tau_k` on block `k`'s row for **every** term) |
-| $\zeta$                               | per-stage rate factor `StageLayout::zeta` $=\sum_k \tau_k$ (the stage total). In parallel mode it scales the once-per-stage families (inflow / AR-lag / withdrawal / evaporation); in chronological mode there is **no** `ζ` — each block's row carries `τ_k` and the rows telescope so `Σ_k τ_k = ζ`         |
-| $k_d$                                 | propagation factor: fraction of an upstream release arriving $d$ stages later, $\sum_d k_d = 1$                                                                                                                                                                                                               |
-| $L$                                   | max travel-time lag in stages                                                                                                                                                                                                                                                                                 |
-| $b_d^t$                               | in-transit _bucket_: volume that will arrive downstream in $d$ stages (incoming state at start of $t$)                                                                                                                                                                                                        |
-| $V_t(\cdot)$, $\underline V_t(\cdot)$ | true / lower-approximated recourse                                                                                                                                                                                                                                                                            |
-| $\theta$                              | epigraph (future-cost) variable, the global scalar column `StateLayout::theta`                                                                                                                                                                                                                                |
+| Symbol                                | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| $t$                                   | stage index, $t=1,\dots,T$                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| $v_h^t$                               | outgoing storage of hydro $h$ (hm³) — Benders state                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| $\hat v$                              | trial (visited) state                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| $D_i^t$                               | total _defluence_ of plant $i$ at stage $t$ = $\sum_{\text{blk}} \tau_{\text{blk}}\,(u_{i,\text{blk}}+s_{i,\text{blk}})$ (hm³) on the **main cascade arc**; turbine $u$, spill $s$. Diversion is a **separate arc** (the `diversion_upstream` map routes it to its own target plant in both water-balance fills), excluded from the v1 travel-time scope (unification memo §7.3); folding `div` into the cascade $D_i$ would misroute the diverted share onto the cascade bucket (round-2 review) |
+| $\tau_k$                              | per-block flow→volume factor $=\,$`stage.blocks[k].duration_hours · M3S_TO_HM3`; the per-block coefficient in **both** water-balance fills (`fill_parallel_water_entries` uses `tau_h` on the single row's flow terms, `fill_chronological_water_entries` uses `tau_k` on block `k`'s row for **every** term)                                                                                                                                                                                     |
+| $\zeta$                               | per-stage rate factor `StageLayout::zeta` $=\sum_k \tau_k$ (the stage total). In parallel mode it scales the once-per-stage families (inflow / AR-lag / withdrawal / evaporation); in chronological mode there is **no** `ζ` — each block's row carries `τ_k` and the rows telescope so `Σ_k τ_k = ζ`                                                                                                                                                                                             |
+| $k_d$                                 | propagation factor: fraction of an upstream release arriving $d$ stages later, $\sum_d k_d = 1$                                                                                                                                                                                                                                                                                                                                                                                                   |
+| $L$                                   | max travel-time lag in stages                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| $b_d^t$                               | in-transit _bucket_: volume that will arrive downstream in $d$ stages (incoming state at start of $t$)                                                                                                                                                                                                                                                                                                                                                                                            |
+| $V_t(\cdot)$, $\underline V_t(\cdot)$ | true / lower-approximated recourse                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| $\theta$                              | epigraph (future-cost) variable, the global scalar column `StateLayout::theta`                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 **The current cobre state vector** (`StateLayout`, file
 `crates/cobre-sddp/src/lp/indexer/state_layout.rs`) is, in column order:
@@ -243,7 +245,45 @@ $$
 
 and a Benders cut on $V_t^F$ carries subgradient components against **several prior
 stages' decision vectors** — the textbook
-$\alpha_5 \ge w_6 + \pi_6\!\left[E_5^1\Delta x_5 + E_4^2\Delta x_4 + E_3^3\Delta x_3\right]$.
+$\alpha_5 \ge w_6 + \pi_6\!\left[E_5^1\Delta x_5 + E_4^2\Delta x_4 + E_3^3\Delta x_3\right]$
+(the term "textbook" is formalized in the box below; that display is its
+$t = 6$, $L = 3$ instance).
+
+> **Definition — the "textbook" multi-lag formulation.** Wherever this memo (and
+> the unification memo) says **"textbook"**, it means the classical treatment of
+> **time-lagged linking variables in nested Benders / SDDP** — the hydrothermal
+> formulation lineage of Pereira & Pinto (1991), whose authoritative reference
+> instance for this design is the DECOMP manual's travel-time formulation
+> (§5.3.1–§5.3.2; the external anchor mapped in the unification memo §1). Formally:
+> the stage-$t$ subproblem's constraints receive earlier stages' decisions through
+> **fixed lag-coupling matrices** $E_j^{k}$ — the block through which the stage-$j$
+> decision vector $x_j$ enters the stage-$(j{+}k)$ constraint set at lag $k$ —
+>
+> $$
+> A_t\,x_t \;=\; b_t \;+\; \sum_{k=1}^{L} E_{t-k}^{k}\,x_{t-k}
+> $$
+>
+> (sign convention: lagged terms as RHS credit, matching arrivals entering the
+> water balance as inflow). The value function therefore carries the **raw
+> decision memory**, $V_t^F(x_{t-1},\dots,x_{t-L})$, and LP duality gives the
+> Benders cut generated at stage $t$ around trial values $\hat x_{t-1},\dots$:
+>
+> $$
+> \alpha_{t-1} \;\ge\; w_t \;+\; \pi_t^\top \sum_{k=1}^{L}
+> E_{t-k}^{k}\,\big(x_{t-k}-\hat x_{t-k}\big),
+> $$
+>
+> with $w_t$ the subproblem objective at the trial point and $\pi_t$ its
+> constraint duals — **one subgradient block per lagged stage**, which is the
+> defining feature (and the bookkeeping cost) of the textbook form. For water
+> travel time the lag blocks are the propagation factors — $E_{t-d}^{d}$ carries
+> $k_d$ on the upstream release columns — and the textbook **state** is the
+> un-lifted raw-lagged stack, DECOMP's $x_t = (v_1, v_2, d_1, d_2)$ (unification
+> memo §1, row 2). §2.2 proves the bucket lifting is this same object in Markov-1
+> coordinates: $b = M\mathcal D$, and the $E^k$ blocks reappear as the rows of
+> $M^\top$. Reference: Pereira, M.V.F. & Pinto, L.M.V.G. (1991), "Multi-stage
+> stochastic optimization applied to energy planning", _Mathematical Programming_
+> 52; _Modelo DECOMP — Manual de Referência_ (CEPEL, Outubro 2021), §5.3.
 
 ### 2.2 The lifting
 
@@ -287,18 +327,81 @@ invertibility of any particular $M_t$ is a remark, not a requirement.
    with coefficients $k_1,\dots,k_L$ (feeding future state). Today's code is the
    special case $k_0=1,\ k_{\ge1}=0$.
 
-3. **The bucket cut IS the textbook cut.** If $k_L\neq0$, $M$ is invertible, and
+3. **The bucket cut IS the textbook cut (§2.1 definition) — the design-equivalence
+   claim.** Why this claim exists (it is the §0 Q1 question, and the reason §2 was
+   written at all): cobre's cut pool, `StateLayout`, and broadcast payload all
+   assume a **one-step** state vector, so cobre must generate ordinary one-step
+   cuts on $(v, b)$ — while the reference model (DECOMP) generates multi-lag cuts
+   on $(v, \mathcal D)$ with subgradient blocks against several prior stages. If
+   the two cut families were not the same object, the lifting would buy the
+   one-step machinery at the price of a weaker (or merely different) FCF
+   approximation, and DECOMP parity would be structurally out of reach. The claim
+   rules that out: the two families are identical up to the fixed linear change of
+   coordinates $b = M\mathcal D$.
+
+   **The two value functions, plainly.** There is only **one** cost-to-go being
+   approximated. Beyond storage, the travel-time physics requires exactly one
+   piece of memory at the start of stage $t$: what water is still in the channel
+   and when it arrives. The two symbols are the same quantity in two
+   parameterizations of that memory:
+
+   - $V_t^F(v, \mathcal D)$ — memory carried as the **raw past releases**
+     $\mathcal D = (D^{t-1},\dots,D^{t-L})$: DECOMP's state. Future arrivals are
+     recomputed from $\mathcal D$ on demand via the k-factors.
+   - $V_t^A(v, b)$ — the same memory carried as the **already-mixed arrival
+     schedule** $b_d$ = volume maturing in $d$ stages: cobre's state. The
+     k-factors were applied at deposit time; nothing needs recomputing.
+
+   Since $b = M\mathcal D$ is a fixed linear re-encoding,
+   $V_t^A(v,b) := V_t^F(v, M^{-1}b)$ is the **same function with re-labeled
+   axes**, not a second object — the "transformation" in the proof is that
+   relabeling and nothing else. Per arc the dimension is $L$ either way, so the
+   choice of coordinates is not about size; it is about transition/deposit
+   structure (§7: buckets aggregate per downstream plant and carry the
+   chronological block-resolved deposit; raw defluences do neither). And $M$,
+   $M^{-1}$ never appear in code — no bucket is ever converted back to defluences
+   at run time; the map is purely a **proof device**: because it is linear and
+   invertible, hyperplanes map to hyperplanes with validity and support points
+   preserved, which is exactly what the proof below needs in order to identify
+   the two cut families.
+
+   _Proof._ If $k_L\neq0$, $M$ is invertible, and
    $V_t^A(v,b):=V_t^F(v,M^{-1}b)$. Both are convex (§2.3). Any SDDP cut on $V_t^A$,
+
    $$
    \theta \ge \alpha + \beta_v^\top v + \beta_b^\top b,
    $$
+
    pulls back through $b=M\mathcal D$ to
+
    $$
    V_t^F(v,\mathcal D) \ge \alpha + \beta_v^\top v + (M^\top\beta_b)^\top \mathcal D,
    $$
+
    whose $\mathcal D$-subgradient $M^\top\beta_b$ has a nonzero component on **every**
-   prior-stage defluence $D_i^{t-1},\dots,D_i^{t-L}$. The textbook $E^k$ matrices are
-   precisely the rows of $M^\top$ (the k-factor structure). $\square$
+   prior-stage defluence $D_i^{t-1},\dots,D_i^{t-L}$ — a multi-lag cut of exactly
+   the §2.1 textbook shape. Conversely, $\mathcal D = M^{-1}b$ maps any textbook
+   cut forward to a one-step bucket cut. $\square$
+
+   **Where the $E^k$ matrices land in this identification.** Recall (§2.1 box)
+   that $E_{t-m}^{m}$ is fixed constraint **data**, not a cut coefficient: the
+   block through which the lag-$m$ release $D^{t-m}$ enters stage $t$'s constraint
+   rows — for travel time, its water-balance row carries the single factor $k_m$
+   (τ-scaled onto the release columns). The remaining shares of that same release,
+   $k_{m+1}, k_{m+2}, \dots$, sit in the E-matrices of the **later** arrival
+   stages ($E_{t-m}^{m+1}$ couples $D^{t-m}$ into stage $t{+}1$'s balance, and so
+   on). Row $m$ of $M^\top$ is $\big(k_m,\ k_{m+1},\ \dots,\ k_{L-1+m}\big)$
+   (zeros past $k_L$) — that release's **k-factor profile collected across its
+   arrival stages**, i.e. the $D^{t-m}$-entries of the whole E-family stacked into
+   one vector. So "the $E^k$ structure" and "the rows of $M^\top$" carry the same
+   numbers in two bookkeepings: the textbook lag-$m$ cut coefficient contracts
+   those entries against the arrival stages' duals (directly via
+   $\pi_t^\top E_{t-m}^{m}$, and through the nested cuts for the later shares),
+   while the pulled-back bucket coefficient contracts the same profile against
+   the bucket subgradients,
+   $(M^\top\beta_b)_m = \sum_{d} k_{d-1+m}\,\beta_{b,d}$ — with $\beta_{b,d}$,
+   the marginal value of a unit of in-transit water at maturity slot $d$, playing
+   the role the telescoped future-stage duals play in the textbook form.
 
 **Interpretation.** "The cut depends on many prior stages" and "an ordinary one-step
 cut on the augmented state" are the **same object in two coordinate systems**, related
@@ -648,7 +751,7 @@ split; the uniform assumption is a modeling choice about prices too.
 claim resting on its own section of the manual (CEPEL, Outubro 2021). **Defluence
 anchors:** §5.3 propagates upstream **defluence** with fixed fractional factors
 $k_0^t, k_1^{t-1}, \dots$ (symbolic in the manual's figure) **including a same-stage
-$k_0 > 0$** — exact overlap, no fold; its Benders cut is the textbook multi-lag form
+$k_0 > 0$** — exact overlap, no fold; its Benders cut is the textbook multi-lag form (§2.1)
 over a state carrying raw defluence volumes (the un-lifted coordinates of §2.2); and
 the lagged **defluence** arrival is spread over the arrival stage's patamares
 duration-proportionally, $(Q^{t-tv}+S^{t-tv})_k = \tfrac{d_k}{D}(Q^{t-tv}+S^{t-tv})$ —
@@ -895,6 +998,9 @@ stage-uniform) or $\chi_{\text{blk},d}$ (chronological, block-resolved, §2.5.2)
 $D_i^t$ column (the `z_inflow` analogue) is compatible with the **parallel** deposit
 only — a single aggregate cannot carry the chronological per-block weights — so it is
 at most a parallel-mode implementation convenience, not part of the formulation.
+One physical note (round-2 review): evaporation remains a function of the plant's
+**own** average storage — in-transit bucket volume is river water, not reservoir
+surface, and correctly carries no evaporation exposure.
 
 The augmented layout, preserving the "pure function of dimensions" invariant (§1, fact 1),
 inserts a bucket block at a **fixed** position (recommend immediately after
@@ -945,6 +1051,45 @@ branches (insurance FCF review): the bucket branch in `state_to_lp_column` is an
 storage-like — NOT the `z_inflow`-style lag remap and NOT the anticipated
 shift-remap; copying either neighboring branch compiles and mis-places every bucket
 cut coefficient.
+
+**Round-2 inventory additions (verified against the tree).** The manifest
+**consumer** joins the writer: `load_boundary_cuts` validates per-slot
+`(entity_type, entity_id, subindex)` identity (via `slot_identity`) and is where a
+bucket `EntityType` is consumed; `build_terminal_entity_manifest` delegates to the
+writer, so the new arm propagates. `StateLayout::new`'s signature (and setup's
+`build_state_layout`) gains the `B` parameter threaded from the resolver. Sites
+that **auto-scale** from `n_state` and need no rewrite — the trial-state MPI
+allgatherv (`state_exchange.rs`), the backward accumulators
+(`agg_coefficients` / `state_duals_buf`), and `StageGeometry::theta_col` (fully
+layout-derived; the discount fold reads it, so the v0.9.1 hand-derived-theta bug
+class does not recur) — are named so the plan does not mistake them for untouched:
+they move with the layout by construction, and the audit obligation is for any
+OTHER hand-derived offset past the insertion point (the `PatchBuffer` `cat6_start`
+above is the known instance). Simulation output extraction
+(`simulation/extraction.rs`, the per-entity state readers like
+`compute_anticipated_decision_mw`) needs a new bucket reader only if D7 ships
+bucket outputs — cross-referenced there.
+
+**Two state-transfer contracts, stated explicitly (round-2 review; both are the
+D15 bug class — per-opening vs per-visit confusion):**
+
+1. **Bucket incoming columns are pinned once per stage-visit** via the state-col
+   patch (`fill_col_state_patches`), never per opening — buckets are
+   decision-driven state, unlike the per-opening NCS availability patch. The
+   **lower-bound evaluation path** (`evaluate_lower_bound` → `lb_evaluate_stage_0`)
+   and the **backward trial-point path** both consume the same `PatchBuffer` fill
+   and inherit the single-owner fix, and each is named in the plan's test net.
+2. The **forward and simulation state-assembly sites**
+   (`training/forward/stage_solve.rs` and its `simulation/pipeline.rs` twin)
+   plain-copy `unscaled_primal[..n_state]` and then overwrite the lag and
+   anticipated blocks in place — the bucket block must sit in the **shift-gap**
+   those overwrites do not touch, which the storage-convention identity mapping
+   (outgoing bucket column = state index) guarantees; assert it.
+
+The DCS scoring/basis path needs no bucket-specific code once the
+`CutStateProjection` walk and `n_state` include the buckets
+(`score_violated_candidates` iterates the projection;
+`reconstruct_basis_uniform_basic` copies the widened column block).
 
 ### 3.2 The cut
 
@@ -1019,7 +1164,12 @@ anticipated padding (the explicit PAR(p)-A over-estimation guard).
   where the plant is absent from the LP entirely and the arrival has no balance row
   at all — during any of the arc's arrival windows) or **routing** (send the
   delivery through the incremental-inflow short-circuit those phases already use,
-  landing it on the first non-frozen downstream). Until one lands, the recourse
+  landing it on the first non-frozen downstream — noting, round-2 review, that the
+  shipped short-circuit (`fill_prefilling_shortcircuit`) is
+  **same-stage/instantaneous**: it re-routes current-stage terms onto the
+  substitute row and cannot carry a delayed bucket delivery as-is, so the routing
+  arm requires new delivery-row re-targeting machinery, which tilts the default
+  toward validation). Until one lands, the recourse
   claim is conditional. (Surfaced in the unification memo's validation inventory.)
 
 ### 3.4 Practical convergence cost of a larger state vector
@@ -1088,6 +1238,28 @@ uniform-within-period density and overlap arithmetic as the in-study $k_d$
 (§2.5.4), so pre-study and in-study water obey one discretization. A $t_v^{\max}$
 that reaches further back than the supplied history is a validation error under the
 §4.3 REQUIRE option (or triggers the derived fallback with its logged caveat).
+
+**Upstream commissioning (round-2 review).** The seed and the deposits must
+respect the UPSTREAM plant's commissioning state — the memos elsewhere cover only
+the downstream side (unification memo validation rows 11–12):
+
+- an upstream that **enters mid-horizon** ($t_e > 0$) seeds **zero** buckets at
+  entry — conservation-FORCED, not a fork (round-3 review): during stages
+  $0..t_e$ the reach's water already reaches downstream **same-stage** via the
+  pre-entry short-circuit, so seeding the arc's buckets from a `past_inflows`
+  proxy at $t_e$ would deliver that water a second time (water creation). The
+  in-study ring self-seeds to zero naturally (no deposits before entry);
+- a plant **active from stage 0** whose pre-study operation is unrecorded is the
+  ordinary §4.3 fork (decided with D5): no pre-study short-circuit ever
+  delivered the pre-study flow, so the derived `past_inflows` proxy is clean
+  there and is the operative default when `past_defluences` is absent;
+- an upstream **in `Filling`** has turbine and diversion frozen but spillage
+  **free** (the D40 relief valve), and spillage is part of the $(u+s)$ deposit — a
+  Filling upstream therefore **legitimately deposits spill** into the bucket;
+  never freeze the deposit rows wholesale during Filling;
+- an upstream that **exits mid-horizon** stops releasing and its buckets drain
+  through the ring shift over the following $L$ stages — no special handling, but
+  the plan asserts it.
 
 ### 4.3 Derive vs require — a genuine fork
 
@@ -1201,16 +1373,20 @@ the bucket state is part of the graph's recurring state so it wraps naturally.
    wire format (`BASIS_BROADCAST_WIRE_VERSION = 1`) encodes the length explicitly, so a
    larger `n_state` round-trips **without a version bump**. But a **cross-version policy
    load** (an old policy/cut set without buckets, loaded by bucket-aware code) has a
-   mismatched `state_dimension` and **must be rejected**. Caveat (verified): the
-   existing `FutureCostFunction::from_deserialized` / `CutPool::from_deserialized`
-   checks validate only **internal** consistency — cross-stage agreement and coefficient
-   length against the **recorded** `state_dimension` — they do **not** compare the
-   recorded dimension against the current run's `n_state`. The implementation must add
-   that explicit load-time check (recorded `state_dimension` == current `n_state`,
-   hard error on mismatch); relying on a downstream coefficient-length panic at cut
-   application is not a rejection contract. The `cut/wire.rs` record carries the
-   coefficient length, so within a version it round-trips; ensure the bucket dims are
-   in `state_dimension` so the new check catches a stale policy.
+   mismatched `state_dimension` and **must be rejected**. Caveat (corrected, round-2
+   review): the `FutureCostFunction::from_deserialized` / `CutPool::from_deserialized`
+   checks validate only **internal** consistency (cross-stage agreement, coefficient
+   length vs the **recorded** `state_dimension`) — but a dedicated
+   policy-compatibility layer already performs the cross-version rejection:
+   `validate_policy_compatibility` rejects `metadata.state_dimension != current` on
+   the CLI and Python warm-start paths, and `load_boundary_cuts` checks the dimension
+   unconditionally plus per-slot `(entity_type, entity_id, subindex)` manifest
+   identity. Two residuals for the plan: the warm-start check is **opt-in**
+   (`config.policy.validate_compatibility`) — a bucket study must force it on, or the
+   failure mode reverts to a coefficient-length panic when a user disables it; and
+   the bucket dims must land in `state_dimension` (nearly automatic once `n_state`
+   includes them) so both layers catch a stale policy. The `cut/wire.rs` record
+   carries the coefficient length, so within a version it round-trips.
 
 6. **Bit-reproducible reductions.** The bucket subgradient components join the
    **existing** expectation/CVaR reduction over openings — no new reduction class, but
@@ -1287,7 +1463,10 @@ and code reuse. Raw-lagged wins on both **for a linear cascade**.
 
 The future cost depends only on the **arrival schedule at $j$**, not on which upstream
 contributed. Define the aggregate
-$B_d^{j} = \sum_{i\in\text{up}(j)} k_{d,i} D_i^{t-d}$. It evolves Markov-1:
+$B_d^{j,t} = \sum_{i\in\text{up}(j)} b_{d,i}^t = \sum_{i\in\text{up}(j)}\sum_{m\ge1} k_{d-1+m,i}\,D_i^{t-m}$ — the §2.2
+per-arc bucket summed over arcs (an earlier draft's single-term
+$\sum_i k_{d,i}D_i^{t-d}$ is inconsistent with the transition below; corrected,
+round-2 review). It evolves Markov-1:
 
 $$
 B_d^{j,t+1} = B_{d+1}^{j,t} + \sum_{i\in\text{up}(j)} k_{d,i}\,D_i^{t}.
@@ -1429,14 +1608,23 @@ gives up the second — and it is important not to conflate the two axes:
 - **State-preservation is GIVEN UP whenever `B > 0`.** A travel-time policy with any
   cross-stage bucket has a **larger** state vector ($n\_state + B$). It is therefore
   **not loadable into a non-travel-time policy**, and a non-bucket policy is not loadable
-  into bucket-aware code: the recorded `state_dimension` differs and the consistency
-  check in `FutureCostFunction::from_deserialized` / `new_with_warm_start` must
-  **reject** the mismatch (§6 item 5). This is cross-**version** (with-vs-without travel
+  into bucket-aware code: the recorded `state_dimension` differs and the
+  **policy-compatibility layer** rejects the mismatch — `validate_policy_compatibility`
+  (opt-in; force it on for bucket studies) plus `load_boundary_cuts`' unconditional
+  check; the `from_deserialized` / `new_with_warm_start` internal checks alone cannot
+  catch it (§6 item 5, round-3 review). This is cross-**version** (with-vs-without travel
   time), **not** cross-**mode** (parallel-vs-chronological) — the latter is preserved.
   Under the resolved exact-overlap convention (§2.5.5) every declared arc carries at
   least one bucket, so **any** study that uses travel time is state-expanding and pays
   the cross-version break; a study with no declared arc has `B = 0` and gives up
   nothing.
+- **Cross-CALENDAR portability is also given up (round-2 review).** Sub-contract 1
+  makes $B$ a function of the stage **lengths**, so the same declared arcs on a
+  different stage calendar generally yield a different $B$, hence a different
+  `n_state` — a policy trained on one calendar is rejected on another by the same
+  `state_dimension` check (mechanically safe, never silent). The portability
+  taxonomy is therefore three axes: cross-**mode** preserved, cross-**version** and
+  cross-**calendar** broken-by-rejection.
 
 **Pre-existing risk the plan must track (not a blocker).** The added cross-stage cut
 dimensions amplify a known latent CLP-backend issue: cut-row demotion in
@@ -1552,7 +1740,7 @@ lengths)` on the stage clock, **independent of `n_blks` and `block_mode`** — t
   cross-stage water as state. Both layers come from the one shared arrival density
   (§2.5.4).
 - The cross-stage bucket augmented state is **exact** (not approximate); buckets are the
-  textbook multi-lag cut in lifted coordinates; convexity, LB validity, monotonicity and
+  textbook multi-lag cut (§2.1 definition) in lifted coordinates; convexity, LB validity, monotonicity and
   a.s. finite convergence all hold (§2–§3). State expansion (`+B`) is `block_mode`-
   independent and paid for **every declared arc** ($L_{\text{arc}}(t) \ge 1$, §2.5.1 +
   the resolved §2.5.5 convention); a study with no declared arc pays nothing.
