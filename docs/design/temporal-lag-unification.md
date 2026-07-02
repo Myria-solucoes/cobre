@@ -324,11 +324,18 @@ stage $m$ must be decided $\Delta$ ahead," so the decider is derived from the
 **delivery** stage:
 
 $$
-c(m) \;=\; \text{the stage containing } (\text{start}_m - \Delta),
+c(m) \;=\; \text{the stage containing } (\text{end}_m - \Delta),
 $$
 
-with $c(m)$ before the horizon start meaning the commitment comes from the
-**initial conditions** (`past_anticipated_commitments`). Corrected scope
+anchored at the delivery stage's **end** (boundary ties resolve to the earlier
+stage), so a sub-stage lead $\Delta < h_m$ gives $\text{end}_m - \Delta \in
+[\text{start}_m, \text{end}_m)$ and hence $c(m) = m$ (the degeneracy fork below);
+a start-anchored $\text{start}_m - \Delta$ could never reach $c(m) = m$ for
+$\Delta > 0$. On a uniform calendar with $\Delta$ an exact stage multiple this
+still gives $c(m) = m - \ell$ (the boundary $\text{end}_{m-\ell}$ ties to the
+earlier stage), so it degenerates exactly to the shipped model. With $c(m)$
+before the horizon start the commitment comes from the **initial conditions**
+(`past_anticipated_commitments`). Corrected scope
 (round-2 review): the shipped IC format
 (`AnticipatedCommitmentHistory::values_mw`, one MW value per early study stage
 `k < lead_stages`, validated `len == lead_stages`) is **stage-count-indexed** —

@@ -36,6 +36,7 @@ pub mod simulation;
 pub mod solve;
 pub mod solver_stats;
 pub mod stochastic;
+pub mod temporal_lag;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod training;

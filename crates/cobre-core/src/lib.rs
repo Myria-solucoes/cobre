@@ -96,7 +96,7 @@ pub use model::scenario::{
 pub use model::temporal::{
     Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig,
     SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageRiskConfig, StageStateConfig,
-    Transition,
+    Transition, window_period_overlaps,
 };
 pub use stats::welford::WelfordAccumulator;
 pub use system::{System, SystemBuilder};

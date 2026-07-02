@@ -15,6 +15,9 @@
 
 use chrono::{Datelike, NaiveDate};
 
+pub mod overlap;
+pub use overlap::window_period_overlaps;
+
 // ---------------------------------------------------------------------------
 // Supporting enums
 // ---------------------------------------------------------------------------
