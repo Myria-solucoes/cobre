@@ -52,6 +52,7 @@ impl IterationScratch {
         template_0_num_rows: usize,
         hydro_count: usize,
         max_par_order: usize,
+        b_total: usize,
         n_anticipated: usize,
         k_max: usize,
         stage_ctx: &StageContext<'_>,
@@ -68,13 +69,19 @@ impl IterationScratch {
             .collect();
 
         // The LB path never calls `fill_load_patches` (Category 4), so the
-        // `n_load_buses` and `max_blocks` args are 0. Category 6
-        // (anticipated_state_fixing) capacity MUST be sized by the actual
-        // `n_anticipated * k_max`: passing zero leaves the LB anticipated-state
-        // rows at their `0 == 0` default, silently forcing every
-        // anticipated_state column to zero and ignoring past `initial_state`
-        // commitments.
-        let patch_buf = PatchBuffer::new(hydro_count, max_par_order, 0, 0, n_anticipated, k_max);
+        // `n_load_buses` and `max_blocks` args are 0. Bucket and anticipated
+        // column capacity MUST be sized by the actual `b_total` /
+        // `n_anticipated * k_max`: undersizing leaves those state slots
+        // unpinned or panics in `fill_col_state_patches`.
+        let patch_buf = PatchBuffer::new(
+            hydro_count,
+            max_par_order,
+            0,
+            0,
+            b_total,
+            n_anticipated,
+            k_max,
+        );
 
         let cut_batches: Vec<RowBatch> = (0..num_stages)
             .map(|_| RowBatch {
@@ -235,6 +242,7 @@ mod tests {
             max_par_order,
             0,
             0,
+            0,
             &stage_ctx,
         );
 
@@ -291,6 +299,7 @@ mod tests {
             max_par_order,
             0,
             0,
+            0,
             &stage_ctx,
         );
 
@@ -342,6 +351,7 @@ mod tests {
             template_0_num_rows,
             hydro_count,
             max_par_order,
+            0,
             n_anticipated,
             k_max,
             &stage_ctx,
@@ -405,6 +415,7 @@ mod tests {
             max_par_order,
             0,
             0,
+            0,
             &stage_ctx,
         );
 
@@ -414,6 +425,47 @@ mod tests {
             scratch.patch_buf.indices.len(),
             expected_capacity,
             "zero-anticipated patch_buf must match the pre-anticipated layout",
+        );
+    }
+
+    /// Regression: `IterationScratch::new` must size the lower-bound patch
+    /// buffer's column region to include `b_total` travel-time bucket slots —
+    /// omitting it leaves no room for the bucket incoming columns, so
+    /// `fill_col_state_patches` panics (undersized buffer) once a bucket-aware
+    /// layout reaches the LB path.
+    #[test]
+    fn iteration_scratch_new_sizes_patch_buffer_for_buckets() {
+        let max_local_fwd = 1;
+        let num_stages = 2;
+        let n_state = 5;
+        let fcf_pool_0_capacity = 4;
+        let template_0_num_rows = 4;
+        let hydro_count = 2;
+        let max_par_order = 1;
+        let b_total = 3;
+
+        let templates = vec![minimal_template(); num_stages];
+        let stage_ctx = make_stage_ctx(&templates);
+
+        let scratch = IterationScratch::new(
+            max_local_fwd,
+            num_stages,
+            n_state,
+            fcf_pool_0_capacity,
+            template_0_num_rows,
+            hydro_count,
+            max_par_order,
+            b_total,
+            0,
+            0,
+            &stage_ctx,
+        );
+
+        // Column-bound region: N*(1+L) + b_total + A*K = 2*2 + 3 + 0 = 7.
+        assert_eq!(
+            scratch.patch_buf.state_col_patch_count(),
+            hydro_count * (1 + max_par_order) + b_total,
+            "patch_buf column region must include b_total bucket slots",
         );
     }
 }

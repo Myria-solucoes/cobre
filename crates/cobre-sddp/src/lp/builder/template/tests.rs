@@ -224,6 +224,7 @@ fn fixture_hydro(id: i32) -> Hydro {
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 0.0,
@@ -1558,6 +1559,7 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         cumulative_discount_factors: ctx_a.cumulative_discount_factors.clone(),
         total_hours_per_stage: ctx_a.total_hours_per_stage.clone(),
         filling_v_target: ctx_a.filling_v_target.clone(),
+        arc_spread_k: ctx_a.arc_spread_k.clone(),
     };
 
     // Sanity: ctx_b really has the swapped ordering.
@@ -1911,6 +1913,7 @@ fn one_hydro_active_violations(n_stages: usize) -> System {
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 0.0,
@@ -2524,6 +2527,7 @@ fn vtarget_filling_hydro(id: i32, start: i32, entry: i32) -> Hydro {
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: None,
+        travel_time_hours: None,
         entry_stage_id: Some(entry),
         exit_stage_id: None,
         min_storage_hm3: 0.0,
@@ -3319,6 +3323,7 @@ fn filling_block_system(block_mode: BlockMode, n_blks: usize) -> System {
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(1),
         downstream_id: downstream.map(EntityId),
+        travel_time_hours: None,
         entry_stage_id: Some(FILL_ENTRY_ID),
         exit_stage_id: None,
         min_storage_hm3: FILL_MIN_STORAGE_HM3,

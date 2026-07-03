@@ -783,6 +783,8 @@ mod lb_conformance {
             hydro_count,
             max_par_order,
             0,
+            Vec::new(),
+            0,
             0,
             vec![],
             &vec![max_par_order; hydro_count],
@@ -802,7 +804,7 @@ mod lb_conformance {
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(2);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;

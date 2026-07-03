@@ -63,6 +63,8 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
         hydro_count,
         max_par_order,
         0,
+        Vec::new(),
+        0,
         0,
         vec![],
         &vec![max_par_order; hydro_count],

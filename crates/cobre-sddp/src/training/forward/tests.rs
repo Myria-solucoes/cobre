@@ -264,6 +264,7 @@ fn make_stochastic_context_1_hydro_3_stages() -> StochasticContext {
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(0),
         downstream_id: None,
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 0.0,
@@ -584,6 +585,7 @@ fn single_workspace(
         patch_buf: crate::lp_builder::PatchBuffer::new(
             state.hydro_count,
             state.max_par_order,
+            0,
             0,
             0,
             0,
@@ -1940,6 +1942,7 @@ fn make_stochastic_1h_1s(mean_m3s: f64, std_m3s: f64) -> StochasticContext {
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(0),
         downstream_id: None,
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 0.0,
@@ -2444,6 +2447,7 @@ fn make_stochastic_context_1_hydro_1_load_bus(mean_mw: f64, std_mw: f64) -> Stoc
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(0),
         downstream_id: None,
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 0.0,
@@ -2701,7 +2705,7 @@ fn forward_pass_load_noise_positive_realization() {
     let n_load_buses = 1usize;
     let stochastic = make_stochastic_context_1_hydro_1_load_bus(300.0, 30.0);
     let state = crate::test_support::state_layout(1, 0);
-    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0);
+    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0);
     let mut ws = SolverWorkspace {
         rank: 0,
         worker_id: 0,
@@ -2862,7 +2866,7 @@ fn forward_pass_load_noise_clamped_to_zero() {
     let n_load_buses = 1usize;
     let stochastic = make_stochastic_context_1_hydro_1_load_bus(-1000.0, 1.0);
     let state = crate::test_support::state_layout(1, 0);
-    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0);
+    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0);
     let mut ws = SolverWorkspace {
         rank: 0,
         worker_id: 0,
@@ -3621,6 +3625,7 @@ mod dcs_forward {
             max_par_order: 0,
             n_load_buses: 0,
             max_blocks: 0,
+            b_total: 0,
             downstream_par_order: 0,
             max_openings: 1,
             initial_pool_capacity: 16,
@@ -3632,7 +3637,14 @@ mod dcs_forward {
             k_max: 0,
         };
         let solver = ActiveSolver::new().expect("ActiveSolver::new()");
-        SolverWorkspace::new(0, 0, solver, PatchBuffer::new(1, 0, 0, 0, 0, 0), 1, sizing)
+        SolverWorkspace::new(
+            0,
+            0,
+            solver,
+            PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
+            1,
+            sizing,
+        )
     }
 
     fn dcs_params(start_iteration: u64) -> DcsParams {

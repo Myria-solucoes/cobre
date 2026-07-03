@@ -110,7 +110,16 @@ mod tests {
 
     fn state_layout(hydro_count: usize, max_par_order: usize) -> StateLayout {
         let lag_counts = vec![max_par_order; hydro_count];
-        StateLayout::new(hydro_count, max_par_order, 0, 0, vec![], &lag_counts)
+        StateLayout::new(
+            hydro_count,
+            max_par_order,
+            0,
+            Vec::new(),
+            0,
+            0,
+            vec![],
+            &lag_counts,
+        )
     }
 
     /// Build a `SolutionView` whose `reduced_costs[col]` equals `col as f64`, so

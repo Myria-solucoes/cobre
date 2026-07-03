@@ -341,6 +341,7 @@ fn make_stochastic_context(n_stages: usize) -> StochasticContext {
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(0),
         downstream_id: None,
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 0.0,
@@ -498,7 +499,7 @@ fn single_workspace(solver: MockSolver) -> Vec<SolverWorkspace<MockSolver>> {
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0), // N=1, L=0
+        patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0), // N=1, L=0
         current_state: Vec::with_capacity(1),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
@@ -585,6 +586,7 @@ fn make_stochastic_context_1_hydro_1_load_bus_sim(mean_mw: f64, std_mw: f64) -> 
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(0),
         downstream_id: None,
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 0.0,
@@ -742,7 +744,7 @@ fn simulation_load_patches_applied() {
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0),
+        patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0),
         current_state: Vec::with_capacity(1),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
@@ -1107,7 +1109,7 @@ fn simulation_inflow_extraction_unaffected() {
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0),
+        patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0),
         current_state: Vec::with_capacity(1),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
@@ -1290,6 +1292,7 @@ fn make_stochastic_1h_1s(mean_m3s: f64, std_m3s: f64) -> StochasticContext {
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(0),
         downstream_id: None,
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 0.0,
@@ -1442,7 +1445,7 @@ fn single_workspace_with_hydros(
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(hydro_count, 0, 0, 0, 0, 0),
+        patch_buf: PatchBuffer::new(hydro_count, 0, 0, 0, 0, 0, 0),
         current_state: Vec::with_capacity(hydro_count),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
@@ -1894,6 +1897,7 @@ mod dcs_simulation {
             max_par_order: 0,
             n_load_buses: 0,
             max_blocks: 0,
+            b_total: 0,
             downstream_par_order: 0,
             max_openings: 1,
             initial_pool_capacity: 16,
@@ -1905,7 +1909,14 @@ mod dcs_simulation {
             k_max: 0,
         };
         let solver = ActiveSolver::new().expect("ActiveSolver::new()");
-        SolverWorkspace::new(0, 0, solver, PatchBuffer::new(1, 0, 0, 0, 0, 0), 1, sizing)
+        SolverWorkspace::new(
+            0,
+            0,
+            solver,
+            PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
+            1,
+            sizing,
+        )
     }
 
     fn dcs_params() -> DcsParams {

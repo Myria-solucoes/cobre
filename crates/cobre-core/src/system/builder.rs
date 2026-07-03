@@ -552,6 +552,7 @@ mod proptests {
             operational_start_date: date,
             bus_id: EntityId(bus_id),
             downstream_id: None,
+            travel_time_hours: None,
             entry_stage_id: None,
             exit_stage_id: None,
             min_storage_hm3: 0.0,

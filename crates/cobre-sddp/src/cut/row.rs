@@ -392,7 +392,16 @@ mod tests {
     /// per-hydro AR-order truncation.
     fn state_layout(hydro_count: usize, max_par_order: usize) -> StateLayout {
         let lag_counts = vec![max_par_order; hydro_count];
-        StateLayout::new(hydro_count, max_par_order, 0, 0, vec![], &lag_counts)
+        StateLayout::new(
+            hydro_count,
+            max_par_order,
+            0,
+            Vec::new(),
+            0,
+            0,
+            vec![],
+            &lag_counts,
+        )
     }
 
     /// All-enabled per-pool projection of `state` — these builder tests use

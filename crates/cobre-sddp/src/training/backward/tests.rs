@@ -309,7 +309,7 @@ fn single_workspace(solver: MockSolver, n_state: usize) -> Vec<SolverWorkspace<M
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
+        patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
         current_state: Vec::with_capacity(n_state),
         scratch: crate::workspace::ScratchBuffers {
             noise_buf: Vec::new(),
@@ -347,6 +347,55 @@ fn single_workspace(solver: MockSolver, n_state: usize) -> Vec<SolverWorkspace<M
         backward_accum: BackwardAccumulators::default(),
         worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
     }]
+}
+
+/// Single `MockSolver` workspace with a bucket-aware `PatchBuffer`
+/// (`hydro_count = 0`, `max_par_order = 0`), for the `patch_opening_bounds`
+/// bucket-pinning regression.
+fn bucket_only_workspace(solver: MockSolver, b_total: usize) -> SolverWorkspace<MockSolver> {
+    use crate::lp_builder::PatchBuffer;
+    SolverWorkspace {
+        rank: 0,
+        worker_id: 0,
+        solver: ProfiledSolver::new(solver),
+        patch_buf: PatchBuffer::new(0, 0, 0, 0, b_total, 0, 0),
+        current_state: Vec::new(),
+        scratch: crate::workspace::ScratchBuffers {
+            noise_buf: Vec::new(),
+            inflow_m3s_buf: Vec::new(),
+            lag_matrix_buf: Vec::new(),
+            par_inflow_buf: Vec::new(),
+            eta_floor_buf: Vec::new(),
+            zero_targets_buf: Vec::new(),
+            ncs_col_upper_buf: Vec::new(),
+            ncs_col_lower_buf: Vec::new(),
+            ncs_col_indices_buf: Vec::new(),
+            ncs_col_lower_active_buf: Vec::new(),
+            ncs_col_upper_active_buf: Vec::new(),
+            last_ncs_col_start: usize::MAX,
+            ncs_col_upper_extract_buf: Vec::new(),
+            load_rhs_buf: Vec::new(),
+            row_lower_buf: Vec::new(),
+            z_inflow_rhs_buf: Vec::new(),
+            effective_eta_buf: Vec::new(),
+            unscaled_primal: Vec::new(),
+            unscaled_dual: Vec::new(),
+            lag_accumulator: vec![],
+            lag_weight_accum: 0.0,
+            downstream_accumulator: Vec::new(),
+            downstream_weight_accum: 0.0,
+            downstream_completed_lags: Vec::new(),
+            downstream_n_completed: 0,
+            recon_slot_lookup: Vec::new(),
+            trajectory_costs_buf: Vec::new(),
+            raw_noise_buf: Vec::new(),
+            perm_scratch: Vec::new(),
+            anticipated_state_buf: Vec::new(),
+        },
+        scratch_basis: Basis::new(0, 0),
+        backward_accum: BackwardAccumulators::default(),
+        worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+    }
 }
 
 /// Create an empty `BasisStore` for `num_scenarios` scenarios and
@@ -437,6 +486,7 @@ fn make_stochastic_context(
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(0),
         downstream_id: None,
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 0.0,
@@ -2276,7 +2326,7 @@ fn test_backward_pass_parallel_cut_determinism() {
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver_1),
-        patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
+        patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
         current_state: Vec::with_capacity(n_state),
         scratch: crate::workspace::ScratchBuffers {
             noise_buf: Vec::new(),
@@ -2391,7 +2441,7 @@ fn test_backward_pass_parallel_cut_determinism() {
             rank: 0,
             worker_id: idx,
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
-            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -2568,6 +2618,7 @@ fn make_stochastic_context_with_load(
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(0),
         downstream_id: None,
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 0.0,
@@ -2707,7 +2758,7 @@ fn backward_pass_load_patches_applied() {
     let state = crate::test_support::state_layout(1, 0);
 
     // PatchBuffer: n_hydros=1, max_par_order=0, n_load_buses=1, max_blocks=1.
-    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1, 0, 0);
+    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1, 0, 0, 0);
 
     // Template: 2 rows (row 0 = state-fixing, row 1 = water-balance).
     // base_rows=[1] → inflow RHS row starts at index 1.
@@ -2896,7 +2947,7 @@ fn backward_pass_no_load_buses_unchanged() {
     let state = crate::test_support::state_layout(1, 0);
 
     // PatchBuffer with no load buses: n_load_buses=0, max_blocks=1.
-    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 0, 0, 0, 0);
+    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 0, 0, 0, 0, 0);
 
     let template = StageTemplate {
         num_cols: 3,
@@ -3075,7 +3126,7 @@ fn backward_pass_cut_coefficients_unaffected() {
     let stochastic = make_stochastic_context_with_load(n_stages, n_openings, 200.0, 20.0);
     let state = crate::test_support::state_layout(1, 0);
 
-    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1, 0, 0);
+    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1, 0, 0, 0);
 
     let template = StageTemplate {
         num_cols: 3,
@@ -3581,7 +3632,7 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
             rank: 0,
             worker_id: i32::try_from(idx).expect("worker_id fits in i32"),
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
-            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -3952,7 +4003,7 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
             rank: 0,
             worker_id: i32::try_from(idx).expect("idx fits in i32"),
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
-            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -4185,7 +4236,7 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
             rank: 0,
             worker_id: i32::try_from(idx).expect("idx fits in i32"),
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
-            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -4488,6 +4539,92 @@ fn run_one_trial_point_with_stores(
     Ok(workspaces)
 }
 
+/// Regression: the backward trial-point path (`patch_opening_bounds`) inherits
+/// the `PatchBuffer` single-owner fix — every travel-time bucket incoming column
+/// is pinned to `x_hat`, a value constant across the opening loop (the
+/// decision-driven trial point), not re-derived per opening (contrast NCS
+/// availability, which genuinely varies per opening).
+#[test]
+fn patch_opening_bounds_pins_bucket_incoming_columns_per_stage_visit() {
+    let state =
+        crate::test_support::state_layout_with_buckets(0, 0, 2, vec![(0, 0), (0, 1)], 0, 0, vec![]);
+    assert_eq!(state.n_state, 2);
+
+    let stochastic = make_stochastic_context(1, 1);
+    let template = crate::test_support::bucket_only_template(state.theta + 1, state.n_state);
+
+    let templates: &'static _ = Box::leak(Box::new(vec![template]));
+    let base_rows: &'static _ = Box::leak(Box::new(vec![0_usize]));
+    let ctx: StageContext<'static> = StageContext {
+        geometry_per_stage: &[],
+        templates,
+        base_rows,
+        noise_scale: &[],
+        n_hydros: 0,
+        n_load_buses: 0,
+        load_balance_row_starts: &[],
+        load_bus_indices: &[],
+        block_counts_per_stage: &[],
+        ncs_col_starts: &[],
+        n_ncs: 0,
+        ncs_stochastic_dense_col: &[],
+        ncs_stochastic_windows: &[],
+        anticipated_windows: &[],
+        study_stage_ids: &[],
+        ncs_max_gen: &[],
+        ncs_allow_curtailment: &[],
+        discount_factors: &[],
+        cumulative_discount_factors: &[],
+        stage_lag_transitions: &[],
+        noise_group_ids: &[],
+        downstream_par_order: 0,
+    };
+
+    let horizon = HorizonMode::Finite { num_stages: 1 };
+    let study_dims = crate::test_support::study_dims();
+    let training_ctx = TrainingContext {
+        horizon: &horizon,
+        state: &state,
+        cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(&state, 1),
+        study_dims: &study_dims,
+        inflow_method: &InflowNonNegativityMethod::None,
+        stochastic: &stochastic,
+        initial_state: &[],
+        inflow_scheme: SamplingScheme::InSample,
+        load_scheme: SamplingScheme::InSample,
+        ncs_scheme: SamplingScheme::InSample,
+        stages: &[],
+        historical_library: None,
+        external_inflow_library: None,
+        external_load_library: None,
+        external_ncs_library: None,
+        recent_accum_seed: &[],
+        recent_weight_seed: 0.0,
+        dcs: None,
+    };
+
+    let x_hat = vec![7.0_f64, 11.0];
+    let raw_noise: Vec<f64> = Vec::new();
+    let mut ws = bucket_only_workspace(MockSolver::always_ok(solution_1_0(0.0, 0.0)), 2);
+
+    super::patch_opening_bounds(&mut ws, &ctx, &training_ctx, &raw_noise, &x_hat, 0);
+
+    let cp = ws.patch_buf.state_col_patch_count();
+    assert_eq!(
+        cp, 2,
+        "state_col_patch_count must equal b_total when N=0, A=0"
+    );
+    for (i, &expected) in x_hat.iter().enumerate() {
+        let col = state.buckets_in.start + i;
+        let pos = ws.patch_buf.col_indices[..cp]
+            .iter()
+            .position(|&c| c == col)
+            .unwrap_or_else(|| panic!("bucket incoming column {col} must be pinned"));
+        assert_eq!(ws.patch_buf.col_lower[pos], expected);
+        assert_eq!(ws.patch_buf.col_upper[pos], expected);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // resolve_backward_basis_* unit tests
 // ---------------------------------------------------------------------------
@@ -4658,7 +4795,7 @@ fn handshake_passes_with_local_backend() {
             rank: 0,
             worker_id: i32::try_from(idx).expect("idx fits i32"),
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
-            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -5085,6 +5222,7 @@ fn dcs_active_workspace() -> Vec<SolverWorkspace<ActiveSolver>> {
         max_par_order: 0,
         n_load_buses: 0,
         max_blocks: 0,
+        b_total: 0,
         downstream_par_order: 0,
         max_openings: 1,
         initial_pool_capacity: 16,
@@ -5100,7 +5238,7 @@ fn dcs_active_workspace() -> Vec<SolverWorkspace<ActiveSolver>> {
         0,
         0,
         solver,
-        PatchBuffer::new(1, 0, 0, 0, 0, 0),
+        PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
         1,
         sizing,
     )]

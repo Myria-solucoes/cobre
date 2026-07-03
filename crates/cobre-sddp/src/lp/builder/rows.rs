@@ -25,6 +25,7 @@ pub(super) fn fill_stage_rows(
         &mut row_lower,
         &mut row_upper,
     );
+    fill_bucket_definition_rows(layout, &mut row_lower, &mut row_upper);
     fill_filling_target_rows(ctx, stage.id, layout, &mut row_lower, &mut row_upper);
     fill_filled_min_storage_floor_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
     fill_load_balance_rows(
@@ -199,6 +200,21 @@ fn fill_chronological_water_rows(
             row_lower[row_d] -= tau_k * withdrawal_h;
             row_upper[row_d] -= tau_k * withdrawal_h;
         }
+    }
+}
+
+/// Fill the travel-time bucket-definition equality row bounds (`0 == 0`), one
+/// row per declared `(plant, lag)` bucket. Dense and ALWAYS active regardless
+/// of stage (mirrors [`fill_anticipated_fishing_rows`]'s always-active dense
+/// offset, not the sparse `active_pos` offset
+/// [`fill_anticipated_state_out_def_rows`] uses) — every declared bucket keeps
+/// a definition row at every stage. Empty when `layout.state.b_total == 0`.
+fn fill_bucket_definition_rows(layout: &StageLayout, row_lower: &mut [f64], row_upper: &mut [f64]) {
+    let row_start = layout.row_bucket_definition_start();
+    for b in 0..layout.state.b_total {
+        let row = row_start + b;
+        row_lower[row] = 0.0;
+        row_upper[row] = 0.0;
     }
 }
 

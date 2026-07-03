@@ -16,6 +16,7 @@ use crate::indexer::{CutStateProjection, EvaporationIndices, StateLayout, StudyD
 use crate::lp_builder::{
     EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET, StageGeometry,
 };
+use cobre_solver::StageTemplate;
 
 /// Equipment dimensions for the [`geometry`] / [`study_dims_for`] test builders.
 ///
@@ -322,6 +323,8 @@ pub fn state_layout(hydro_count: usize, max_par_order: usize) -> StateLayout {
         hydro_count,
         max_par_order,
         0,
+        Vec::new(),
+        0,
         0,
         vec![],
         &effective_lag_count,
@@ -346,11 +349,70 @@ pub fn state_layout_full(
     StateLayout::new(
         hydro_count,
         max_par_order,
+        0,
+        Vec::new(),
         n_anticipated,
         k_max,
         anticipated_lead_stages,
         &effective_lag_count,
     )
+}
+
+/// Build a finalized [`StateLayout`] with a declared travel-time bucket block
+/// (`buckets_out`/`buckets_in`), optionally combined with anticipated
+/// thermals. `effective_lag_count` is dense (full `max_par_order` for every
+/// hydro), matching [`state_layout_full`].
+#[must_use]
+pub fn state_layout_with_buckets(
+    hydro_count: usize,
+    max_par_order: usize,
+    b_total: usize,
+    bucket_column_order: Vec<(usize, usize)>,
+    n_anticipated: usize,
+    k_max: usize,
+    anticipated_lead_stages: Vec<usize>,
+) -> StateLayout {
+    let effective_lag_count = vec![max_par_order; hydro_count];
+    StateLayout::new(
+        hydro_count,
+        max_par_order,
+        b_total,
+        bucket_column_order,
+        n_anticipated,
+        k_max,
+        anticipated_lead_stages,
+        &effective_lag_count,
+    )
+}
+
+/// Bucket-only [`StageTemplate`] (no hydro rows): `num_cols` state + control
+/// columns, zero rows. Every column is free (`col_lower = -inf`, `col_upper =
+/// +inf`) and the row buffers stay empty; `n_hydro = 0` matches an
+/// `n_hydros = 0` fixture spec so noise transformation never runs. Used by the
+/// lower-bound and backward consumer-path regressions that pin travel-time
+/// bucket incoming columns without needing a real water-balance row.
+#[must_use]
+pub fn bucket_only_template(num_cols: usize, n_state: usize) -> StageTemplate {
+    StageTemplate {
+        num_cols,
+        num_rows: 0,
+        num_nz: 0,
+        col_starts: vec![0_i32; num_cols + 1],
+        row_indices: Vec::new(),
+        values: Vec::new(),
+        col_lower: vec![f64::NEG_INFINITY; num_cols],
+        col_upper: vec![f64::INFINITY; num_cols],
+        objective: vec![0.0; num_cols],
+        row_lower: Vec::new(),
+        row_upper: Vec::new(),
+        n_state,
+        n_transfer: 0,
+        n_dual_relevant: 0,
+        n_hydro: 0,
+        max_par_order: 0,
+        col_scale: Vec::new(),
+        row_scale: Vec::new(),
+    }
 }
 
 /// Build the all-enabled per-pool [`CutStateProjection`] vector (one entry per stage)

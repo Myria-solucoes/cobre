@@ -354,6 +354,7 @@ mod anticipated_backward_cut {
                 values_mw: fixture.seeds_mw.to_vec(),
             }],
             recent_observations: vec![],
+            past_defluences: vec![],
         };
 
         SystemBuilder::new()
@@ -1138,6 +1139,7 @@ mod anticipated_pre_horizon_seed_delivery {
                 values_mw: fixture.seeds_mw.to_vec(),
             }],
             recent_observations: vec![],
+            past_defluences: vec![],
         };
 
         let policy_graph = PolicyGraph {
@@ -2130,6 +2132,7 @@ mod anticipated_d_t_saturation {
                 values_mw: fixture.seeds_mw.to_vec(),
             }],
             recent_observations: vec![],
+            past_defluences: vec![],
         };
 
         SystemBuilder::new()
@@ -2707,6 +2710,7 @@ mod anticipated_forward_pass {
                 values_mw: vec![100.0, 50.0],
             }],
             recent_observations: vec![],
+            past_defluences: vec![],
         };
 
         SystemBuilder::new()
@@ -3306,6 +3310,7 @@ mod anticipated_closed_form_lb_k1_single_thermal {
                 values_mw: vec![0.0],
             }],
             recent_observations: vec![],
+            past_defluences: vec![],
         };
 
         SystemBuilder::new()
@@ -3780,6 +3785,7 @@ mod anticipated_numerical_reconciliation_k2 {
                 values_mw: vec![0.0, 0.0],
             }],
             recent_observations: vec![],
+            past_defluences: vec![],
         };
 
         // Set explicitly (not relying on `PolicyGraph::default()`) so a future
@@ -4330,6 +4336,7 @@ mod anticipated_bridge_st_cruz_nova_k1 {
                 values_mw: vec![204.5647],
             }],
             recent_observations: vec![],
+            past_defluences: vec![],
         };
 
         let policy_graph = PolicyGraph {
@@ -4859,6 +4866,7 @@ mod anticipated_convergence_slow {
                 values_mw: vec![40.0, 20.0],
             }],
             recent_observations: vec![],
+            past_defluences: vec![],
         };
 
         SystemBuilder::new()

@@ -297,6 +297,7 @@ mod tests {
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(1),
             downstream_id: downstream.map(EntityId::from),
+            travel_time_hours: None,
             entry_stage_id: None,
             exit_stage_id: None,
             min_storage_hm3: 0.0,

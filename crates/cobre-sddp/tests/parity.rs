@@ -584,6 +584,8 @@ mod determinism {
             hydro_count,
             max_par_order,
             0,
+            Vec::new(),
+            0,
             0,
             vec![],
             &vec![max_par_order; hydro_count],
@@ -1135,7 +1137,7 @@ mod determinism {
                     0,
                     i32::try_from(idx).expect("worker_id fits in i32"),
                     MockSolver3H::new(100.0),
-                    PatchBuffer::new(fx.state.hydro_count, fx.state.max_par_order, 0, 0, 0, 0),
+                    PatchBuffer::new(fx.state.hydro_count, fx.state.max_par_order, 0, 0, 0, 0, 0),
                     fx.state.n_state,
                     WorkspaceSizing {
                         hydro_count: fx.state.hydro_count,

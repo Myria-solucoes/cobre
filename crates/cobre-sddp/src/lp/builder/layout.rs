@@ -135,6 +135,12 @@ pub(crate) struct TemplateBuildCtx<'a> {
     /// Empty for a non-filling build (parity-neutral). See
     /// [`build_filling_v_target`](super::template::build_filling_v_target).
     pub(crate) filling_v_target: BTreeMap<(usize, i32), f64>,
+    /// Per-declared-arc resolved stage-clock weights, keyed by the arc's
+    /// upstream hydro system index (parallel-mode fill only; the chronological
+    /// block-resolved factors are ticket-014's concern). Absent for an
+    /// undeclared arc — the fill's `k_0 = 1`, no-deposit branch. See
+    /// [`build_arc_spread_k`](crate::setup::bucket_topology::build_arc_spread_k).
+    pub(crate) arc_spread_k: HashMap<usize, Vec<Vec<f64>>>,
 }
 
 /// Column/row offsets for one stage's anticipated-thermal layout.
@@ -341,6 +347,16 @@ pub(crate) struct StageLayout<'a> {
     /// [`BlockGrid::flat`](crate::indexer::BlockGrid::flat); the transposed
     /// `k * n_h + h` is the wrong-but-compiling alternative.
     pub(crate) water_balance: Range<usize>,
+    /// Row range for travel-time bucket definition rows: `b_d^out − b_{d+1}^in
+    /// − deposit_d = 0`, one row per declared `(plant, lag)` bucket — dense and
+    /// ALWAYS active regardless of stage (mirrors `storage`, never masked like
+    /// `anticipated_state`). Row `b` corresponds to
+    /// `state.bucket_column_order[b]`. Placed immediately after
+    /// [`Self::water_balance`], so `load_balance` and every row cursor after it
+    /// shift by `state.b_total`. Empty `start..start` when `state.b_total == 0`
+    /// (the B==0 byte-identity anchor: `load_balance` collapses back onto
+    /// `water_balance.end`).
+    pub(crate) bucket_definition: Range<usize>,
     /// Row range for load balance constraints (one per bus per block).
     pub(crate) load_balance: Range<usize>,
     /// Row cursor at which the evaporation row block begins (`fpha_rows_end`),
@@ -858,7 +874,13 @@ impl<'a> StageLayout<'a> {
         };
         let n_water_rows = n_h * n_water_blocks;
         let water_balance = water_balance_start..water_balance_start + n_water_rows;
-        let load_balance_start = water_balance.end;
+        // Dense and always-active (unlike the anticipated-fishing/state-out-def
+        // rows): every declared bucket keeps a definition row at every stage,
+        // sized from the stage-invariant `state.b_total`, never from this
+        // stage's own resolved depth.
+        let bucket_definition_start = water_balance.end;
+        let bucket_definition = bucket_definition_start..bucket_definition_start + state.b_total;
+        let load_balance_start = bucket_definition.end;
         let load_balance_end = load_balance_start + ctx.n_buses * n_blks;
         let load_balance = load_balance_start..load_balance_end;
 
@@ -1080,6 +1102,7 @@ impl<'a> StageLayout<'a> {
             post_equipment_col_start,
             z_inflow_row_start,
             water_balance,
+            bucket_definition,
             load_balance,
             fpha_rows_end,
             min_outflow_rows: oper.min_outflow_rows,
@@ -1395,6 +1418,13 @@ impl<'a> StageLayout<'a> {
     #[must_use]
     pub(crate) fn row_water_balance_start(&self) -> usize {
         self.water_balance.start
+    }
+
+    /// First travel-time bucket-definition row; reads `self.bucket_definition.start`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn row_bucket_definition_start(&self) -> usize {
+        self.bucket_definition.start
     }
 
     /// First load-balance row; reads `self.load_balance.start`.

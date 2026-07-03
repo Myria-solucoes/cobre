@@ -299,6 +299,9 @@ pub struct WorkspaceSizing {
     pub n_load_buses: usize,
     /// Maximum number of blocks per stage (0 if no stochastic load).
     pub max_blocks: usize,
+    /// Global travel-time bucket count; pre-sizes the `PatchBuffer`
+    /// column-bound region's bucket slots. `0` when no arc is declared.
+    pub b_total: usize,
     /// PAR order of the downstream (coarser) resolution; `0` for
     /// uniform-resolution studies (no downstream transition).
     pub downstream_par_order: usize,
@@ -685,6 +688,7 @@ impl<S: SolverInterface> WorkspacePool<S> {
                         sizing.max_par_order,
                         sizing.n_load_buses,
                         sizing.max_blocks,
+                        sizing.b_total,
                         sizing.n_anticipated,
                         sizing.k_max,
                     ),
@@ -735,6 +739,7 @@ impl<S: SolverInterface> WorkspacePool<S> {
                     sizing.max_par_order,
                     sizing.n_load_buses,
                     sizing.max_blocks,
+                    sizing.b_total,
                     sizing.n_anticipated,
                     sizing.k_max,
                 ),
@@ -2226,7 +2231,7 @@ mod tests {
             0,
             0,
             MockSolver,
-            crate::lp_builder::PatchBuffer::new(0, 0, 0, 0, 0, 0),
+            crate::lp_builder::PatchBuffer::new(0, 0, 0, 0, 0, 0, 0),
             0,
             WorkspaceSizing::default(),
         );

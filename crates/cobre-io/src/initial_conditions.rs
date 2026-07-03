@@ -18,6 +18,9 @@
 //! - `past_anticipated_commitments` — committed MW values for each anticipated
 //!   thermal plant, ordered by delivery stage ascending. Optional; defaults to
 //!   an empty array when no anticipated thermals are present.
+//! - `past_defluences` — past release values per arc (m³/s), keyed by the
+//!   upstream hydro whose release feeds the arc, following the `past_inflows`
+//!   period convention. Optional; defaults to an empty array when absent.
 //!
 //! ```json
 //! {
@@ -74,8 +77,8 @@
 
 use chrono::NaiveDate;
 use cobre_core::{
-    AnticipatedCommitmentHistory, EntityId, HydroPastInflows, HydroStorage, InitialConditions,
-    RecentObservation,
+    AnticipatedCommitmentHistory, EntityId, HydroPastDefluences, HydroPastInflows, HydroStorage,
+    InitialConditions, RecentObservation,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -138,6 +141,13 @@ pub(crate) struct RawInitialConditions {
     /// one anticipated thermal. Optional; defaults to empty.
     #[serde(default)]
     past_anticipated_commitments: Vec<RawAnticipatedCommitmentHistory>,
+
+    /// Past defluence (release) values per arc [m³/s], keyed by the upstream
+    /// hydro whose release feeds the arc, ordered from most recent to oldest
+    /// following the `past_inflows` period convention. Optional; defaults to
+    /// empty.
+    #[serde(default)]
+    past_defluences: Vec<RawHydroPastDefluences>,
 }
 
 /// Initial reservoir volume for one hydro plant, in hm³.
@@ -165,6 +175,23 @@ struct RawHydroPastInflows {
     /// one per entry. When present, length must equal `values_m3s.length`.
     /// Each value must reference a season ID defined in `season_definitions`.
     /// Absent from legacy JSON files (backward compatible).
+    #[serde(default)]
+    season_ids: Option<Vec<u32>>,
+}
+
+/// Past defluence (release) values per arc for one upstream hydro plant.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawHydroPastDefluences {
+    /// Upstream hydro plant identifier whose release feeds the arc.
+    hydro_id: i32,
+    /// Past defluence values [m³/s], ordered from most recent (index 0) to
+    /// oldest, following the `past_inflows` period convention.
+    values_m3s: Vec<f64>,
+    /// Optional season IDs corresponding to each entry in `values_m3s`, one per
+    /// entry. When present, length must equal `values_m3s.length`. Absent from
+    /// legacy JSON files (backward compatible).
     #[serde(default)]
     season_ids: Option<Vec<u32>>,
 }
@@ -626,12 +653,24 @@ fn convert(raw: RawInitialConditions) -> InitialConditions {
         .collect();
     past_anticipated_commitments.sort_by_key(|e| e.thermal_id.0);
 
+    let mut past_defluences: Vec<HydroPastDefluences> = raw
+        .past_defluences
+        .into_iter()
+        .map(|e| HydroPastDefluences {
+            hydro_id: EntityId(e.hydro_id),
+            values_m3s: e.values_m3s,
+            season_ids: e.season_ids,
+        })
+        .collect();
+    past_defluences.sort_by_key(|e| e.hydro_id.0);
+
     InitialConditions {
         storage,
         filling_storage,
         past_inflows,
         past_anticipated_commitments,
         recent_observations,
+        past_defluences,
     }
 }
 
@@ -1617,5 +1656,43 @@ mod tests {
             }
             other => panic!("expected SchemaError, got: {other:?}"),
         }
+    }
+
+    // ── AC: past_defluences absent → empty; present → parsed and sorted ───────
+
+    /// Given a `initial_conditions.json` without a `past_defluences` key,
+    /// `parse_initial_conditions` returns `Ok(ic)` with an empty
+    /// `past_defluences` vec.
+    #[test]
+    fn test_past_defluences_absent_defaults_to_empty() {
+        let f = write_json(VALID_JSON);
+        let ic = parse_initial_conditions(f.path()).unwrap();
+        assert!(
+            ic.past_defluences.is_empty(),
+            "absent past_defluences must default to empty vec"
+        );
+    }
+
+    /// Given a valid `initial_conditions.json` with `past_defluences`, the values
+    /// are parsed and sorted by `hydro_id` (declaration-order invariance).
+    #[test]
+    fn test_parse_valid_past_defluences() {
+        let json = r#"{
+          "storage": [],
+          "filling_storage": [],
+          "past_defluences": [
+            { "hydro_id": 1, "values_m3s": [200.0, 100.0] },
+            { "hydro_id": 0, "values_m3s": [600.0, 500.0], "season_ids": [3, 2] }
+          ]
+        }"#;
+        let f = write_json(json);
+        let ic = parse_initial_conditions(f.path()).unwrap();
+        assert_eq!(ic.past_defluences.len(), 2);
+        assert_eq!(ic.past_defluences[0].hydro_id, EntityId(0));
+        assert_eq!(ic.past_defluences[0].values_m3s, vec![600.0, 500.0]);
+        assert_eq!(ic.past_defluences[0].season_ids, Some(vec![3, 2]));
+        assert_eq!(ic.past_defluences[1].hydro_id, EntityId(1));
+        assert_eq!(ic.past_defluences[1].values_m3s, vec![200.0, 100.0]);
+        assert_eq!(ic.past_defluences[1].season_ids, None);
     }
 }

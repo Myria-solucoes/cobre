@@ -856,7 +856,7 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -914,7 +914,7 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(3);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -974,7 +974,7 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(2);
         // CVaR(alpha=0.5, lambda=1.0): pure CVaR; upper bound per scenario =
         // p / alpha = 0.5 / 0.5 = 1.0. With 2 equal-probability scenarios the
@@ -1041,7 +1041,7 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(2);
         let rm = RiskMeasure::CVaR {
             alpha: 1.0,
@@ -1103,7 +1103,7 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1160,7 +1160,7 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let comm = FailingBcastComm;
@@ -1224,7 +1224,7 @@ mod tests {
         // Start with 0 cuts (empty FCF).
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![50.0_f64]; // non-zero initial state
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(2);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1287,7 +1287,7 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(2);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1373,7 +1373,7 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(2);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1436,7 +1436,7 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1493,7 +1493,7 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1750,7 +1750,7 @@ mod tests {
             }
         }
 
-        let mut patch_buf = PatchBuffer::new(0, 0, 0, 0, 0, 0);
+        let mut patch_buf = PatchBuffer::new(0, 0, 0, 0, 0, 0, 0);
         let initial_state: Vec<f64> = Vec::new();
         let actual_n_openings = opening_tree.n_openings(0);
         let mut solver =
@@ -1796,7 +1796,7 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1965,6 +1965,7 @@ mod tests {
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
+            travel_time_hours: None,
             entry_stage_id: Some(entry),
             exit_stage_id: None,
             min_storage_hm3: 0.0,
@@ -2475,7 +2476,7 @@ mod tests {
         let state = crate::test_support::state_layout(2, 0);
         let fcf = make_fcf(templates.templates.len(), state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0);
         let opening_tree = filling_opening_tree(1);
         let rm = RiskMeasure::Expectation;
 
@@ -2522,5 +2523,88 @@ mod tests {
             lb.is_finite(),
             "lower bound over the filling-structured LP must be finite, got {lb}"
         );
+    }
+
+    /// Regression: the LB-eval consumer path (`evaluate_lower_bound` →
+    /// `lb_evaluate_stage_0`) inherits the `PatchBuffer` single-owner fix —
+    /// every travel-time bucket incoming column is pinned to `initial_state`, a
+    /// value constant across the opening loop (not re-derived per opening), so a
+    /// single-opening stage-0 evaluation already exercises the per-stage-visit
+    /// pinning contract.
+    #[test]
+    fn evaluate_lower_bound_pins_bucket_incoming_columns() {
+        let state = crate::test_support::state_layout_with_buckets(
+            0,
+            0,
+            2,
+            vec![(0, 0), (0, 1)],
+            0,
+            0,
+            vec![],
+        );
+        assert_eq!(state.n_state, 2);
+
+        let template = crate::test_support::bucket_only_template(state.theta + 1, state.n_state);
+        let fcf = make_fcf(1, state.n_state);
+        let initial_state = vec![7.0_f64, 11.0];
+        let mut patch_buf = PatchBuffer::new(0, 0, 0, 0, state.b_total, 0, 0);
+        let opening_tree = simple_opening_tree(1);
+        let rm = RiskMeasure::Expectation;
+        let comm = LocalComm;
+        let mut solver = MockSolver::with_objectives(vec![0.0]);
+
+        let spec = LbEvalSpec {
+            template: &template,
+            base_row: 0,
+            noise_scale: &[],
+            n_hydros: 0,
+            opening_tree: &opening_tree,
+            risk_measure: &rm,
+            stochastic: None,
+            n_load_buses: 0,
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            stage_id: 0,
+            block_count: 0,
+            ncs_generation: 0..0,
+            z_inflow_row_start: 0,
+            inflow_method: &InflowNonNegativityMethod::None,
+        };
+        let (mut row_batch, mut lb_scratch) = make_lb_locals();
+        let mut bundle = LbEvalScratchBundle::from_scratch_fields(
+            &mut patch_buf,
+            &mut row_batch,
+            None,
+            &mut lb_scratch,
+        );
+
+        evaluate_lower_bound(
+            &mut solver,
+            &fcf,
+            &initial_state,
+            &state,
+            &crate::test_support::cut_state_projection(&state),
+            &mut bundle,
+            &spec,
+            &comm,
+        )
+        .unwrap();
+
+        let cp = bundle.patch_buf.state_col_patch_count();
+        assert_eq!(
+            cp, 2,
+            "state_col_patch_count must equal b_total when N=0, A=0"
+        );
+        for (i, &expected) in initial_state.iter().enumerate() {
+            let col = state.buckets_in.start + i;
+            let pos = bundle.patch_buf.col_indices[..cp]
+                .iter()
+                .position(|&c| c == col)
+                .unwrap_or_else(|| panic!("bucket incoming column {col} must be pinned"));
+            assert_eq!(bundle.patch_buf.col_lower[pos], expected);
+            assert_eq!(bundle.patch_buf.col_upper[pos], expected);
+        }
     }
 }

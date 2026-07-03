@@ -76,6 +76,8 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
         hydro_count,
         max_par_order,
         0,
+        Vec::new(),
+        0,
         0,
         vec![],
         &vec![max_par_order; hydro_count],
@@ -597,7 +599,7 @@ fn simulate_fixture(
         0,
         0,
         ActiveSolver::new().expect("ActiveSolver::new must succeed"),
-        PatchBuffer::new(fx.state.hydro_count, fx.state.max_par_order, 0, 0, 0, 0),
+        PatchBuffer::new(fx.state.hydro_count, fx.state.max_par_order, 0, 0, 0, 0, 0),
         fx.state.n_state,
         WorkspaceSizing {
             hydro_count: fx.state.hydro_count,

@@ -91,6 +91,10 @@ pub(crate) struct RawHydro {
     bus_id: i32,
     /// Downstream hydro plant in the cascade. `null` = no downstream.
     downstream_id: Option<i32>,
+    /// Travel time on the cascade arc to `downstream_id` \[hours\]. Absent or
+    /// null = instantaneous (v1 excludes diversion and pumping arcs).
+    #[serde(default)]
+    travel_time_hours: Option<f64>,
     /// Stage index when the plant enters service. Absent or null = always exists.
     #[serde(default)]
     entry_stage_id: Option<i32>,
@@ -728,6 +732,7 @@ fn convert_hydros(
                 operational_start_date,
                 bus_id: EntityId(raw_hydro.bus_id),
                 downstream_id: raw_hydro.downstream_id.map(EntityId),
+                travel_time_hours: raw_hydro.travel_time_hours,
                 entry_stage_id: raw_hydro.entry_stage_id,
                 exit_stage_id: raw_hydro.exit_stage_id,
                 min_storage_hm3: raw_hydro.reservoir.min_storage_hm3,
@@ -1624,6 +1629,46 @@ mod tests {
             matches!(err, LoadError::SchemaError { .. }),
             "unknown generation model should produce SchemaError, got: {err:?}"
         );
+    }
+
+    // ── AC: travel_time_hours (cascade arc) ───────────────────────────────────
+
+    /// Given a hydro with `"travel_time_hours": 360.0`, `parse_hydros` returns a
+    /// `Hydro` with `travel_time_hours == Some(360.0)`.
+    #[test]
+    fn test_travel_time_hours_deserializes_when_present() {
+        let json = r#"{
+          "hydros": [{
+            "id": 0, "name": "Upstream", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
+            "downstream_id": 1,
+            "travel_time_hours": 360.0,
+            "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
+            "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
+            "generation": {
+              "model": "constant_productivity",
+              "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0,
+              "min_generation_mw": 0.0, "max_generation_mw": 250.0
+            }
+          }]
+        }"#;
+        let f = write_json(json);
+        let global = make_global();
+        let hydros = parse_hydros(f.path(), &global).unwrap();
+
+        assert_eq!(hydros[0].travel_time_hours, Some(360.0));
+    }
+
+    /// Given a hydro with no `travel_time_hours` key, `parse_hydros` returns a
+    /// `Hydro` with `travel_time_hours == None` (backward compatible).
+    #[test]
+    fn test_travel_time_hours_absent_is_none() {
+        let json = format!(r#"{{ "hydros": [{MINIMAL_HYDRO_JSON}] }}"#);
+        let f = write_json(&json);
+        let global = make_global();
+        let hydros = parse_hydros(f.path(), &global).unwrap();
+
+        assert_eq!(hydros[0].travel_time_hours, None);
     }
 
     // ── AC: declaration-order invariance ──────────────────────────────────────

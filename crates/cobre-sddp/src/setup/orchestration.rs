@@ -238,6 +238,7 @@ impl StudySetup {
                 max_par_order: self.stage_data.state.max_par_order,
                 n_load_buses: self.stage_data.stage_templates.n_load_buses,
                 max_blocks: self.loop_params.max_blocks,
+                b_total: self.stage_data.state.b_total,
                 downstream_par_order: self.downstream_par_order,
                 max_openings: (0..self.stage_data.stage_templates.templates.len())
                     .map(|t| self.stochastic.opening_tree().n_openings(t))

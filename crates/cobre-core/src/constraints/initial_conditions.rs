@@ -31,6 +31,7 @@
 //!         AnticipatedCommitmentHistory { thermal_id: EntityId(20), values_mw: vec![100.0, 200.0] },
 //!     ],
 //!     recent_observations: vec![],
+//!     past_defluences: vec![],
 //! };
 //!
 //! assert_eq!(ic.storage.len(), 2);
@@ -38,6 +39,7 @@
 //! assert_eq!(ic.past_inflows.len(), 1);
 //! assert_eq!(ic.past_anticipated_commitments.len(), 1);
 //! assert_eq!(ic.recent_observations.len(), 0);
+//! assert_eq!(ic.past_defluences.len(), 0);
 //! ```
 
 use chrono::NaiveDate;
@@ -77,6 +79,26 @@ pub struct HydroPastInflows {
     /// Optional season ID per lag entry. When present, `season_ids.len()` must
     /// equal `values_m3s.len()`; when absent, lag entries get no temporal
     /// validation.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub season_ids: Option<Vec<u32>>,
+}
+
+/// Past defluence (release) history for the arc fed by a single upstream hydro.
+///
+/// Mirrors [`HydroPastInflows`]: entries are ordered from most recent (index 0)
+/// to oldest, following the `past_inflows` pre-study period convention. Keyed by
+/// the upstream hydro whose release crosses the arc.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct HydroPastDefluences {
+    /// Upstream hydro plant identifier whose release feeds the arc. Must
+    /// reference a hydro entity in the system.
+    pub hydro_id: EntityId,
+    /// Past defluence values in m³/s, ordered from most recent (index 0) to
+    /// oldest.
+    pub values_m3s: Vec<f64>,
+    /// Optional season ID per entry. When present, `season_ids.len()` must equal
+    /// `values_m3s.len()`; when absent, entries get no temporal validation.
     #[cfg_attr(feature = "serde", serde(default))]
     pub season_ids: Option<Vec<u32>>,
 }
@@ -181,6 +203,17 @@ pub struct InitialConditions {
     /// [`RecentObservation`] for the per-entry contract.
     #[cfg_attr(feature = "serde", serde(default))]
     pub recent_observations: Vec<RecentObservation>,
+    /// Past defluence (release) values per arc, keyed by the upstream hydro whose
+    /// release feeds the arc. In m³/s, following the `past_inflows` period
+    /// convention; empty when no arcs need seeding.
+    ///
+    /// Always emitted on output even when empty — omitting it would break the
+    /// postcard round-trip used by MPI broadcast.
+    ///
+    /// Field declaration order is part of the postcard wire format used by MPI
+    /// broadcast: append new fields at the end, never above this one.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub past_defluences: Vec<HydroPastDefluences>,
 }
 
 impl Default for InitialConditions {
@@ -192,6 +225,7 @@ impl Default for InitialConditions {
             past_inflows: Vec::new(),
             past_anticipated_commitments: Vec::new(),
             recent_observations: Vec::new(),
+            past_defluences: Vec::new(),
         }
     }
 }
@@ -224,6 +258,7 @@ mod tests {
             }],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
+            past_defluences: vec![],
         };
 
         assert_eq!(ic.storage.len(), 2);
@@ -294,6 +329,7 @@ mod tests {
             }],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
+            past_defluences: vec![],
         };
 
         let json = serde_json::to_string(&ic).unwrap();
@@ -313,6 +349,7 @@ mod tests {
             past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
+            past_defluences: vec![],
         };
 
         let json = serde_json::to_string(&ic).unwrap();
@@ -353,6 +390,7 @@ mod tests {
                     .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
                 value_m3s: 500.0,
             }],
+            past_defluences: vec![],
         };
         assert_eq!(ic.recent_observations.len(), 1);
         assert_eq!(ic.recent_observations[0].hydro_id, EntityId(0));
@@ -388,6 +426,7 @@ mod tests {
                     value_m3s: 480.0,
                 },
             ],
+            past_defluences: vec![],
         };
         let json = serde_json::to_string(&ic).unwrap();
         let deserialized: InitialConditions = serde_json::from_str(&json).unwrap();
@@ -482,6 +521,7 @@ mod tests {
                 },
             ],
             recent_observations: vec![],
+            past_defluences: vec![],
         };
         assert_eq!(ic.past_anticipated_commitments.len(), 2);
         assert_eq!(ic.past_anticipated_commitments[0].thermal_id, EntityId(3));
@@ -506,5 +546,113 @@ mod tests {
         };
         assert_eq!(ach.thermal_id, EntityId(0));
         assert!(ach.values_mw.is_empty());
+    }
+
+    // --- HydroPastDefluences / past_defluences tests ---
+
+    #[test]
+    fn test_hydro_past_defluences_construction_and_clone() {
+        let hpd = HydroPastDefluences {
+            hydro_id: EntityId(4),
+            values_m3s: vec![700.0, 650.0],
+            season_ids: Some(vec![4, 3]),
+        };
+        assert_eq!(hpd.hydro_id, EntityId(4));
+        assert_eq!(hpd.values_m3s, vec![700.0, 650.0]);
+        assert_eq!(hpd.season_ids, Some(vec![4, 3]));
+        assert_eq!(hpd.clone(), hpd);
+    }
+
+    #[test]
+    fn test_past_defluences_default_empty() {
+        let ic = InitialConditions::default();
+        assert!(ic.past_defluences.is_empty());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_initial_conditions_serde_default_past_defluences_absent() {
+        let json = r#"{"storage":[],"filling_storage":[]}"#;
+        let ic: InitialConditions = serde_json::from_str(json).unwrap();
+        assert!(ic.past_defluences.is_empty());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_past_defluences_postcard_round_trip() {
+        let ic = InitialConditions {
+            storage: vec![HydroStorage {
+                hydro_id: EntityId(0),
+                value_hm3: 1_000.0,
+            }],
+            filling_storage: vec![],
+            past_inflows: vec![],
+            past_anticipated_commitments: vec![],
+            recent_observations: vec![],
+            past_defluences: vec![
+                HydroPastDefluences {
+                    hydro_id: EntityId(0),
+                    values_m3s: vec![700.0, 650.0],
+                    season_ids: Some(vec![4, 3]),
+                },
+                HydroPastDefluences {
+                    hydro_id: EntityId(1),
+                    values_m3s: vec![120.0],
+                    season_ids: None,
+                },
+            ],
+        };
+
+        let bytes = postcard::to_allocvec(&ic).unwrap();
+        let restored: InitialConditions = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(ic, restored);
+        assert_eq!(bytes, postcard::to_allocvec(&restored).unwrap());
+        assert_eq!(restored.past_defluences.len(), 2);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_past_defluences_postcard_field_order_is_last() {
+        let base = InitialConditions {
+            storage: vec![HydroStorage {
+                hydro_id: EntityId(0),
+                value_hm3: 1_000.0,
+            }],
+            filling_storage: vec![],
+            past_inflows: vec![HydroPastInflows {
+                hydro_id: EntityId(0),
+                values_m3s: vec![600.0],
+                season_ids: None,
+            }],
+            past_anticipated_commitments: vec![],
+            recent_observations: vec![RecentObservation {
+                hydro_id: EntityId(0),
+                start_date: NaiveDate::from_ymd_opt(2026, 4, 1)
+                    .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
+                end_date: NaiveDate::from_ymd_opt(2026, 4, 4)
+                    .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
+                value_m3s: 500.0,
+            }],
+            past_defluences: vec![],
+        };
+        let mut with_defl = base.clone();
+        with_defl.past_defluences = vec![HydroPastDefluences {
+            hydro_id: EntityId(0),
+            values_m3s: vec![700.0, 650.0],
+            season_ids: None,
+        }];
+
+        let prefix = postcard::to_allocvec(&base).unwrap();
+        let full = postcard::to_allocvec(&with_defl).unwrap();
+
+        // past_defluences is the trailing field: an empty-vs-populated change is
+        // confined to the tail, so every byte through recent_observations is
+        // identical. A non-last field would shift recent_observations' bytes.
+        assert!(full.len() > prefix.len());
+        assert_eq!(
+            &full[..prefix.len() - 1],
+            &prefix[..prefix.len() - 1],
+            "past_defluences must serialize after recent_observations (append-last wire contract)"
+        );
     }
 }

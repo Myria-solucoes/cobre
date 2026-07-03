@@ -83,6 +83,7 @@ fn make_hydro(id: i32, model: HydroGenerationModel) -> cobre_core::entities::hyd
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId::from(10),
         downstream_id: None,
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 100.0,

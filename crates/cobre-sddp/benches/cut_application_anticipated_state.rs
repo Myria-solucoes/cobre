@@ -78,7 +78,7 @@ fn bench_cut_application_baseline(c: &mut Criterion) {
     // `StateLayout::new` finalizes the mask and column-map cache in its
     // constructor, mirroring production `build_wired_indexer`.
     let lag_counts: Vec<usize> = vec![L_BASELINE; N];
-    let state = StateLayout::new(N, L_BASELINE, 0, 0, vec![], &lag_counts);
+    let state = StateLayout::new(N, L_BASELINE, 0, Vec::new(), 0, 0, vec![], &lag_counts);
     debug_assert_eq!(
         state.n_state, N_STATE,
         "baseline n_state must equal {N_STATE}"
@@ -119,6 +119,8 @@ fn bench_cut_application_with_anticipated(c: &mut Criterion) {
     let state = StateLayout::new(
         N,
         L_ANTICIPATED,
+        0,
+        Vec::new(),
         N_ANTICIPATED,
         K_MAX,
         anticipated_lead_stages,

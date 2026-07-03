@@ -119,6 +119,8 @@ pub struct HydroSpec {
     pub bus_id: EntityId,
     /// Downstream cascade plant; None = run-of-river or final.
     pub downstream_id: Option<EntityId>,
+    /// Travel time on the cascade arc to `downstream_id`; None = instantaneous.
+    pub travel_time_hours: Option<f64>,
     /// Commissioning stage; None = always present.
     pub entry_stage_id: Option<i32>,
     /// Decommissioning stage; None = never retired.
@@ -168,6 +170,7 @@ impl Default for HydroSpec {
             operational_start_date: neutral_date(),
             bus_id: EntityId(0),
             downstream_id: None,
+            travel_time_hours: None,
             entry_stage_id: None,
             exit_stage_id: None,
             min_storage_hm3: 0.0,
@@ -221,6 +224,7 @@ pub fn make_hydro(
         operational_start_date,
         bus_id,
         downstream_id,
+        travel_time_hours,
         entry_stage_id,
         exit_stage_id,
         min_storage_hm3,
@@ -249,6 +253,7 @@ pub fn make_hydro(
         operational_start_date,
         bus_id,
         downstream_id,
+        travel_time_hours,
         entry_stage_id,
         exit_stage_id,
         min_storage_hm3,

@@ -268,7 +268,7 @@ mod tests {
             0,
             0,
             solver,
-            PatchBuffer::new(0, 0, 0, 0, 0, 0),
+            PatchBuffer::new(0, 0, 0, 0, 0, 0, 0),
             0,
             WorkspaceSizing::default(),
         )

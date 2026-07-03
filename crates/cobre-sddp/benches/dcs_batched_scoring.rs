@@ -179,7 +179,7 @@ fn make_primal(n_state: usize, seed: u64) -> Vec<f64> {
 }
 
 fn bench_one(c: &mut Criterion, k: usize, n_state: usize) {
-    let state = StateLayout::new(n_state, 0, 0, 0, vec![], &vec![0; n_state]);
+    let state = StateLayout::new(n_state, 0, 0, Vec::new(), 0, 0, vec![], &vec![0; n_state]);
     let cut_state = CutStateProjection::new(
         &state,
         cobre_core::temporal::StageStateConfig {

@@ -58,10 +58,13 @@ pub struct StageTemplates {
     pub n_hydros: usize,
     /// Per-stage row index of the first load-balance constraint.
     ///
-    /// `load_balance_row_starts[s]` equals `row_water_balance_start + n_hydros`
-    /// for stage `s`.  Length equals `templates.len()`.  Used by the forward,
-    /// backward, and simulation passes to locate load-balance rows for
-    /// stochastic load patching.
+    /// `load_balance_row_starts[s]` is `StageLayout::row_load_balance_start()`
+    /// for stage `s` — NOT a hand-derived `row_water_balance_start + n_hydros`
+    /// offset, which only held before the chronological per-block water rows
+    /// and the travel-time bucket-definition rows existed between the two.
+    /// Length equals `templates.len()`.  Used by the forward, backward, and
+    /// simulation passes to locate load-balance rows for stochastic load
+    /// patching.
     pub load_balance_row_starts: Vec<usize>,
     /// Number of buses with stochastic load noise (i.e. with `std_mw > 0`).
     ///
@@ -755,9 +758,17 @@ pub fn build_stage_templates(
     } else {
         vec![0; ctx.n_hydros]
     };
+    // Recomputes the bucket topology (pure function of `system`) instead of
+    // threading it in from the caller: keeps this role-(a) `StateLayout` in
+    // agreement with the one `setup` stores on `StageData.state` without
+    // widening this function's signature — the accepted redundant-but-
+    // deterministic cost of a second call.
+    let bucket_topology = crate::setup::bucket_topology::build_bucket_topology(system);
     let state_layout = crate::indexer::StateLayout::new(
         ctx.n_hydros,
         ctx.max_par_order,
+        bucket_topology.b_total,
+        bucket_topology.column_order,
         ctx.n_anticipated,
         ctx.k_max,
         ctx.anticipated_lead_stages.clone(),
@@ -1034,6 +1045,10 @@ fn build_template_build_ctx<'a>(
         &stage_id_to_idx,
     );
 
+    // Resolved once here (SETUP time, never per stage-solve): `resolve_spread`
+    // is O(declared arcs * n_stages), not called again per LP fill.
+    let arc_spread_k = crate::setup::bucket_topology::build_arc_spread_k(system);
+
     let ctx = TemplateBuildCtx {
         hydros,
         thermals: system.thermals(),
@@ -1083,6 +1098,7 @@ fn build_template_build_ctx<'a>(
         cumulative_discount_factors,
         total_hours_per_stage,
         filling_v_target,
+        arc_spread_k,
     };
 
     (ctx, load_bus_indices, diversion_upstream_output)

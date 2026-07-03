@@ -56,6 +56,8 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
         hydro_count,
         max_par_order,
         0,
+        Vec::new(),
+        0,
         0,
         vec![],
         &vec![max_par_order; hydro_count],
@@ -501,7 +503,7 @@ fn single_workspace(solver: MockSolver) -> Vec<SolverWorkspace<MockSolver>> {
         0,
         0,
         solver,
-        PatchBuffer::new(1, 0, 0, 0, 0, 0),
+        PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
         1,
         WorkspaceSizing {
             hydro_count: 1,
@@ -1474,7 +1476,7 @@ fn test_simulation_parallel_cost_determinism() {
                 0,
                 idx,
                 MockSolver::always_ok(solution.clone()),
-                PatchBuffer::new(1, 0, 0, 0, 0, 0),
+                PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
                 1,
                 WorkspaceSizing {
                     hydro_count: 1,

@@ -26,13 +26,13 @@ use crate::lp_builder::StageGeometry;
 /// (N=4 hydros, L=0 lags, no anticipated thermals), so the role-(a) storage /
 /// z-inflow columns the resolver reads through the handle equal the indexer's.
 fn make_state() -> StateLayout {
-    StateLayout::new(4, 0, 0, 0, vec![], &[0, 0, 0, 0])
+    StateLayout::new(4, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0, 0, 0])
 }
 
 /// Build the [`StateLayout`] matching [`make_indexer_with_anticipated`]'s state
 /// dimensions (N=0 hydros, L=0, A=1 anticipated plant, k_max=2, K=[2]).
 fn make_state_anticipated() -> StateLayout {
-    StateLayout::new(0, 0, 1, 2, vec![2], &[])
+    StateLayout::new(0, 0, 0, Vec::new(), 1, 2, vec![2], &[])
 }
 
 /// Build the [`GenericResolverGeom`] view from a test [`StageGeometry`] (role
@@ -131,6 +131,7 @@ fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
         operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(0),
         downstream_id: downstream_id.map(EntityId),
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 0.0,
@@ -823,7 +824,7 @@ fn hydro_evaporation_maps_to_evaporation_flow_col() {
         pumping_stations: &no_stations,
         pumping_pos: &empty_pumping_pos,
     };
-    let state = StateLayout::new(2, 0, 0, 0, vec![], &[0, 0]);
+    let state = StateLayout::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0]);
     let geom = make_geom(&evap_indexer, &state, 1, &[]);
     let no_contracts: Vec<EnergyContract> = Vec::new();
     let empty_contract_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
@@ -899,7 +900,7 @@ fn hydro_evaporation_no_evap_model_returns_empty() {
         pumping_stations: &no_stations,
         pumping_pos: &empty_pumping_pos,
     };
-    let state = StateLayout::new(2, 0, 0, 0, vec![], &[0, 0]);
+    let state = StateLayout::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0]);
     let geom = make_geom(&evap_indexer, &state, 1, &[]);
     let no_contracts: Vec<EnergyContract> = Vec::new();
     let empty_contract_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
@@ -976,7 +977,7 @@ fn hydro_evaporation_none_resolves_block_zero_not_sum() {
         pumping_stations: &no_stations,
         pumping_pos: &empty_pumping_pos,
     };
-    let state = StateLayout::new(2, 0, 0, 0, vec![], &[0, 0]);
+    let state = StateLayout::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0]);
     let geom = make_geom(&evap_indexer, &state, 3, &[]);
     let no_contracts: Vec<EnergyContract> = Vec::new();
     let empty_contract_pos: BTreeMap<EntityId, usize> = BTreeMap::new();

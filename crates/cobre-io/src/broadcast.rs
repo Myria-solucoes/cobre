@@ -389,6 +389,7 @@ mod tests {
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(bus_id),
             downstream_id: None,
+            travel_time_hours: None,
             entry_stage_id: None,
             exit_stage_id: None,
             min_storage_hm3: 0.0,
@@ -608,6 +609,7 @@ mod tests {
                 },
             ],
             recent_observations: vec![],
+            past_defluences: vec![],
         };
 
         let bytes = postcard::to_allocvec(&original).unwrap();
@@ -645,6 +647,7 @@ mod tests {
             past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
+            past_defluences: vec![],
         };
 
         let bytes = postcard::to_allocvec(&original).unwrap();

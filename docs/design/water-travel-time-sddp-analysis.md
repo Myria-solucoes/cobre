@@ -524,16 +524,25 @@ boundary; the resolved §2.5.5 fork). The depth uses only $t_v$ and the **stage
 calendar**; **`n_blks` and `block_mode` do not appear**. The global bucket count is
 $B = \sum_{\text{arc}} \max\big(\max_t L_{\text{arc}}(t),\ L_{\text{arc}}(\text{IC})\big)$
 (or the aggregated-per-downstream-plant form of §7), where
-$L_{\text{arc}}(\text{IC})$ is the depth of the **pre-study anchors** (§4.2): an
-arrival window's width equals its **releasing period's** length, and the IC
-periods follow the `past_inflows` convention, which may be **coarser** than the
-early study stages — a monthly pre-study release with a short $t_v$ spreads over
-every fine study stage its window touches, reaching **deeper slots than any
-in-study anchor** (e.g. monthly pre-study period, daily study stages, $t_v = 24$ h:
-the IC window spans ~30 daily stages while every in-study anchor has
-$L_{\text{arc}} = 1$). Omitting the IC anchor from the max truncates the deep IC
-buckets — water non-conservation in exactly the early stages short-term
-scheduling cares about. The per-stage/arc **active mask** rides the
+$L_{\text{arc}}(\text{IC})$ is the depth of the **pre-study anchors** (§4.2). At
+study start the in-transit residual is the mass released in $[-t_v, 0)$, arriving
+over the study-clock interval $[0, t_v)$, so
+$L_{\text{arc}}(\text{IC}) = \lvert\texttt{window\_period\_overlaps}(0,\ t_v,\
+\text{study\_durations})\rvert$ — anchored at **study start** against the
+**study** calendar, with **no** $k_0$ same-stage exemption (pre-study water has
+no same-stage share), unlike the in-study $L_{\text{arc}}(t)$ which subtracts 1.
+This exceeds $\max_t L_{\text{arc}}(t)$ by **at most one bucket**, and only on a
+**fine-first / coarse-next** study calendar ($h_0 < t_v$ with the stage
+containing $t_v$ wider than $h_0$; e.g. study durations $[24, 720, 720, \dots]$ h,
+$t_v = 30$ h: $L_{\text{arc}}(\text{IC}) = 2$ while every in-study anchor has
+$L_{\text{arc}} = 1$). On a uniform calendar the two coincide (no deepening).
+Omitting the IC anchor from the max truncates that one legitimate early bucket on
+fine-first calendars — water non-conservation in exactly the early stages
+short-term scheduling cares about. The coarseness of the pre-study
+`past_defluences`/`past_inflows` data is a **seeding-value** precision concern
+(how the coarse aggregate is distributed into these buckets — the IC seed step),
+not a depth concern: the bucket **count** depends only on $t_v$ and the study
+calendar, never on the pre-study period width. The per-stage/arc **active mask** rides the
 $k_{max}$-global / $K_i$-active / padding-masked discipline `anticipated_state`
 uses (`state_layout.rs::set_nonzero_mask`, §8.2). Mask by the **full outgoing
 reachable set** — own-release deposits ($L_{\text{arc}}(t)$ is only this

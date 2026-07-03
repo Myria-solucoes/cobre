@@ -68,6 +68,8 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
         hydro_count,
         max_par_order,
         0,
+        Vec::new(),
+        0,
         0,
         vec![],
         &vec![max_par_order; hydro_count],
@@ -765,7 +767,7 @@ fn train_simulate_write_cycle() {
         0,
         0,
         sim_solver,
-        PatchBuffer::new(fx.state.hydro_count, fx.state.max_par_order, 0, 0, 0, 0),
+        PatchBuffer::new(fx.state.hydro_count, fx.state.max_par_order, 0, 0, 0, 0, 0),
         fx.state.n_state,
         WorkspaceSizing {
             hydro_count: fx.state.hydro_count,
@@ -1469,7 +1471,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         0,
         0,
         sim_solver,
-        PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0),
+        PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0),
         state.n_state,
         WorkspaceSizing {
             hydro_count: state.hydro_count,

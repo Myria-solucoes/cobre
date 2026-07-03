@@ -68,7 +68,7 @@ mod tests;
 pub(crate) use trial_point::{StageOpeningSolver, process_trial_point_backward};
 
 #[cfg(test)]
-pub(crate) use lp_setup::{load_backward_lp, resolve_backward_basis};
+pub(crate) use lp_setup::{load_backward_lp, patch_opening_bounds, resolve_backward_basis};
 
 /// Per-`(rank, worker_id, opening)` solver delta collected during a single
 /// backward stage, as returned inside [`BackwardResult::stage_stats`].

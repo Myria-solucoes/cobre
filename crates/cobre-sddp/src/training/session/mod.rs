@@ -158,6 +158,7 @@ where
                 max_par_order: state.max_par_order,
                 n_load_buses: stage_ctx.n_load_buses,
                 max_blocks: config.loop_config.max_blocks,
+                b_total: state.b_total,
                 downstream_par_order: stage_ctx.downstream_par_order,
                 max_openings: (0..ranks.num_stages)
                     .map(|t| training_ctx.stochastic.opening_tree().n_openings(t))
@@ -261,6 +262,7 @@ where
             stage_ctx.templates[0].num_rows,
             state.hydro_count,
             state.max_par_order,
+            state.b_total,
             state.n_anticipated,
             state.k_max,
             stage_ctx,
@@ -1341,6 +1343,7 @@ mod tests {
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(0),
             downstream_id: None,
+            travel_time_hours: None,
             entry_stage_id: None,
             exit_stage_id: None,
             min_storage_hm3: 0.0,

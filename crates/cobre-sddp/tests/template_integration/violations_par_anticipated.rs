@@ -328,7 +328,7 @@ fn parameter_coefficient_persists_across_stage_template_uses() {
     let b_max: usize = 3;
 
     let capacity_formula = n + m * b_max + n;
-    let mut buf = PatchBuffer::new(n, l, m, b_max, 0, 0);
+    let mut buf = PatchBuffer::new(n, l, m, b_max, 0, 0, 0);
 
     assert_eq!(
         buf.indices.len(),
@@ -345,7 +345,7 @@ fn parameter_coefficient_persists_across_stage_template_uses() {
 
     // Category 3 — AR dynamics / noise.
     buf.fill_forward_patches(
-        &StateLayout::new(n, l, 0, 0, vec![], &vec![l; n]),
+        &StateLayout::new(n, l, 0, Vec::new(), 0, 0, vec![], &vec![l; n]),
         &state,
         &noise,
         base_row,

@@ -2,6 +2,7 @@ use cobre_core::{BlockMode, CoefficientRef, ConstraintSense, ContractType, Stage
 
 use crate::generic_constraints::resolve_variable_ref;
 use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
+use crate::indexer::StateLayout;
 
 use super::M3S_TO_HM3;
 use super::fpha_cursor::for_each_fpha_plane;
@@ -177,6 +178,8 @@ fn fill_parallel_water_entries(
     let col_storage_in_start = layout.col_storage_in_start();
     let col_inflow_lags_start = layout.col_inflow_lags_start();
 
+    fill_bucket_definition_entries(layout, col_entries);
+
     for h_idx in 0..n_h {
         let hydro = &ctx.hydros[h_idx];
         let row = row_water + h_idx;
@@ -199,6 +202,16 @@ fn fill_parallel_water_entries(
 
         col_entries[h_idx].push((row, 1.0));
         col_entries[col_storage_in_start + h_idx].push((row, -1.0));
+
+        // The maturing-now bucket: `b_1^in` aggregates every upstream arc's past
+        // deposits targeting this stage (the confluence sum lives in the state
+        // variable itself, so this is a SINGLE entry regardless of upstream
+        // count). Absent when `h_idx` has no declared incoming arc.
+        if let Some(range) = plant_bucket_range(layout.state, h_idx) {
+            let col_b1_in = layout.state.buckets_in.start + range.start;
+            col_entries[col_b1_in].push((row, -1.0));
+        }
+
         for blk in 0..n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
             let col_turbine = layout.turbine_col(h_idx, blk);
@@ -209,8 +222,17 @@ fn fill_parallel_water_entries(
             col_entries[col_diversion].push((row, tau_h));
             for &up_id in ctx.cascade.upstream(hydro.id) {
                 if let Some(&u_idx) = ctx.hydro_pos.get(&up_id) {
-                    col_entries[layout.turbine_col(u_idx, blk)].push((row, -tau_h));
-                    col_entries[layout.spillage_col(u_idx, blk)].push((row, -tau_h));
+                    fill_arc_release_block_entries(
+                        ctx,
+                        layout,
+                        u_idx,
+                        h_idx,
+                        stage_idx,
+                        blk,
+                        tau_h,
+                        row,
+                        col_entries,
+                    );
                 }
             }
             if let Some(sources) = ctx.diversion_upstream.get(&hydro.id) {
@@ -269,6 +291,119 @@ fn fill_parallel_water_entries(
         let row = row_water + h_idx;
         col_entries[col].push((row, zeta));
     }
+}
+
+/// Fill the travel-time bucket-definition rows' structural ring-shift terms:
+/// `+1.0` on `b_d^out` and, when a deeper bucket exists for the same plant,
+/// `-1.0` on `b_{d+1}^in` (absent at `d == L_j`: `b_{L+1}^in` does not exist).
+/// Mode-independent (buckets are stage-level, never block-resolved), so this
+/// runs once per stage regardless of upstream releases — the deposit terms
+/// riding those releases are emitted separately by
+/// [`fill_arc_release_block_entries`]. A no-op when `state.b_total == 0`.
+fn fill_bucket_definition_entries(layout: &StageLayout, col_entries: &mut [Vec<(usize, f64)>]) {
+    let state = layout.state;
+    let row_start = layout.row_bucket_definition_start();
+    for b in 0..state.b_total {
+        let row = row_start + b;
+        col_entries[state.buckets_out.start + b].push((row, 1.0));
+
+        let (plant_idx, _lag) = state.bucket_column_order[b];
+        let has_deeper_bucket = state
+            .bucket_column_order
+            .get(b + 1)
+            .is_some_and(|&(p, _)| p == plant_idx);
+        if has_deeper_bucket {
+            col_entries[state.buckets_in.start + b + 1].push((row, -1.0));
+        }
+    }
+}
+
+/// One upstream release's per-block contribution to the downstream water
+/// balance (arc `u_idx → h_idx`), split by the arc's resolved stage-clock
+/// weight `k`: same-stage share `-k_0·τ_blk` on the balance row `row_balance`,
+/// and, for a multi-lag arc, deposits `-k_d·τ_blk` (`d = 1..=depth`) into the
+/// plant's bucket-definition rows. The SAME release column carries `k_0` on
+/// the balance row and `k_1..k_d` into the definition rows (the `k_0 > 0`
+/// co-existence, water memo §2.2) — never the once-per-stage `ζ`-family.
+///
+/// `ctx.arc_spread_k` has no entry for an undeclared arc, so this emits
+/// exactly today's `-τ_blk` and no deposit (the B==0 byte-identity anchor).
+fn fill_arc_release_block_entries(
+    ctx: &TemplateBuildCtx<'_>,
+    layout: &StageLayout,
+    u_idx: usize,
+    h_idx: usize,
+    stage_idx: usize,
+    blk: usize,
+    tau_h: f64,
+    row_balance: usize,
+    col_entries: &mut [Vec<(usize, f64)>],
+) {
+    let col_turbine = layout.turbine_col(u_idx, blk);
+    let col_spillage = layout.spillage_col(u_idx, blk);
+
+    let Some(k) = ctx
+        .arc_spread_k
+        .get(&u_idx)
+        .map(|k_by_stage| &k_by_stage[stage_idx])
+    else {
+        col_entries[col_turbine].push((row_balance, -tau_h));
+        col_entries[col_spillage].push((row_balance, -tau_h));
+        return;
+    };
+
+    debug_assert!(
+        (k.iter().sum::<f64>() - 1.0).abs() < 1e-9,
+        "arc {u_idx} -> {h_idx} stage {stage_idx}: stage-clock weights must sum to 1.0, got {k:?}"
+    );
+
+    if k[0] != 0.0 {
+        col_entries[col_turbine].push((row_balance, -k[0] * tau_h));
+        col_entries[col_spillage].push((row_balance, -k[0] * tau_h));
+    }
+
+    let depth = k.len() - 1;
+    if depth == 0 {
+        return;
+    }
+    let range = plant_bucket_range(layout.state, h_idx).unwrap_or_else(|| {
+        unreachable!(
+            "hydro {h_idx} receives a depth-{depth} deposit at stage {stage_idx} but has no \
+             bucket range (BucketTopology/arc_spread_k disagreement)"
+        )
+    });
+    let row_bucket_def_start = layout.row_bucket_definition_start();
+    for (d, &k_d) in k.iter().enumerate().skip(1) {
+        if k_d == 0.0 {
+            continue;
+        }
+        debug_assert!(
+            d - 1 < range.len(),
+            "lag {d} exceeds plant {h_idx}'s declared bucket depth {}",
+            range.len()
+        );
+        let row_def = row_bucket_def_start + range.start + (d - 1);
+        col_entries[col_turbine].push((row_def, -k_d * tau_h));
+        col_entries[col_spillage].push((row_def, -k_d * tau_h));
+    }
+}
+
+/// The bucket-out/-in sub-range `[start, end)` (relative to
+/// `buckets_out`/`buckets_in`'s own start) for downstream plant `plant_idx`, or
+/// `None` when it declares no incoming arc. `bucket_column_order` groups each
+/// plant's lags contiguously in ascending lag order
+/// ([`crate::setup::bucket_topology::build_bucket_topology`]), so a linear scan
+/// over the (small) order finds the block's bounds.
+fn plant_bucket_range(state: &StateLayout, plant_idx: usize) -> Option<std::ops::Range<usize>> {
+    let start = state
+        .bucket_column_order
+        .iter()
+        .position(|&(p, _)| p == plant_idx)?;
+    let end = state.bucket_column_order[start..]
+        .iter()
+        .position(|&(p, _)| p != plant_idx)
+        .map_or(state.bucket_column_order.len(), |offset| start + offset);
+    Some(start..end)
 }
 
 /// Chronological per-block water-balance fill: each Operating/Filling hydro emits
@@ -1912,6 +2047,7 @@ mod zero_cost_tests {
                 n_contract_import: 0,
                 n_contract_export: 0,
                 diversion_upstream: HashMap::new(),
+                arc_spread_k: HashMap::new(),
                 n_hydros: 0,
                 n_thermals,
                 n_lines: 0,
@@ -2452,11 +2588,12 @@ mod pumping_water_tests {
         NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds,
         PumpingStation, ResolvedBounds, ResolvedExchangeFactors, ResolvedGenericConstraintBounds,
         ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, SlackConfig,
-        Thermal, ThermalStageBounds, VariableRef,
+        Stage, Thermal, ThermalStageBounds, VariableRef,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
     use crate::hydro_models::{EvaporationModel, EvaporationModelSet, ProductionModelSet};
+    use crate::indexer::StateLayout;
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::super::M3S_TO_HM3;
@@ -2485,6 +2622,7 @@ mod pumping_water_tests {
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: downstream_id.map(EntityId),
+            travel_time_hours: None,
             entry_stage_id: None,
             exit_stage_id: None,
             min_storage_hm3: 0.0,
@@ -3062,6 +3200,7 @@ mod pumping_water_tests {
                 n_contract_import: self.n_contract_import,
                 n_contract_export: self.n_contract_export,
                 diversion_upstream: HashMap::new(),
+                arc_spread_k: HashMap::new(),
                 n_hydros: self.hydros.len(),
                 n_thermals: self.thermals.len(),
                 n_lines: self.lines.len(),
@@ -4090,6 +4229,297 @@ mod pumping_water_tests {
         );
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Water travel-time: parallel-mode arrival split + bucket definition rows
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Sort each column's entries by row (mirroring `build_single_stage_template`)
+    /// and assemble the CSC.
+    fn build_sorted_csc(
+        ctx: &TemplateBuildCtx<'_>,
+        stage: &Stage,
+        stage_idx: usize,
+        layout: &StageLayout,
+    ) -> (Vec<i32>, Vec<i32>, Vec<f64>) {
+        let mut entries = build_stage_matrix_entries(ctx, stage, stage_idx, layout);
+        for col in &mut entries {
+            col.sort_unstable_by_key(|&(row, _)| row);
+        }
+        assemble_csc(&entries)
+    }
+
+    /// Sum the CSC values landing on `(col, row)`; multiple per-block pushes to
+    /// one cell would otherwise hide behind a single positional read.
+    fn coeff_at(csc: &(Vec<i32>, Vec<i32>, Vec<f64>), col: usize, row: i32) -> f64 {
+        let start = usize::try_from(csc.0[col]).unwrap();
+        let end = usize::try_from(csc.0[col + 1]).unwrap();
+        csc.1[start..end]
+            .iter()
+            .zip(&csc.2[start..end])
+            .filter(|&(&r, _)| r == row)
+            .map(|(_, &v)| v)
+            .sum()
+    }
+
+    /// One declared arc `k = [1/2, 1/2]` (depth 1, the plant's only bucket):
+    /// the downstream balance row carries `-1/2 * tau_h` on the upstream's own
+    /// turbine/spillage columns (NOT `-tau_h`) plus `-1.0` on the plant's
+    /// `b_1^in` column, and the single bucket-definition row deposits
+    /// `-1/2 * tau_h` into the same upstream columns with `+1.0` on `b_1^out` —
+    /// `b_{L+1}^in` does not exist since `d == L_j`.
+    #[test]
+    fn declared_arc_arrival_split_and_single_definition_row() {
+        let up = 1;
+        let down = 2;
+        let fixtures = PumpFixtures::new_full(
+            vec![
+                fixture_hydro_ds(up, Some(down)),
+                fixture_hydro_ds(down, None),
+            ],
+            Vec::new(),
+            vec![fixture_bus(1)],
+            Vec::new(),
+            Vec::new(),
+        );
+        let up_idx = fixtures.hydro_pos[&EntityId(up)];
+        let down_idx = fixtures.hydro_pos[&EntityId(down)];
+
+        let mut arc_spread_k = HashMap::new();
+        arc_spread_k.insert(up_idx, vec![vec![0.5, 0.5]]);
+        let ctx = TemplateBuildCtx {
+            arc_spread_k,
+            ..fixtures.make_ctx()
+        };
+
+        let stage = two_block_stage(0, [300.0, 444.0]);
+        let state = StateLayout::new(
+            ctx.n_hydros,
+            ctx.max_par_order,
+            1,
+            vec![(down_idx, 1)],
+            ctx.n_anticipated,
+            ctx.k_max,
+            ctx.anticipated_lead_stages.clone(),
+            &vec![0; ctx.n_hydros],
+        );
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+        let csc = build_sorted_csc(&ctx, &stage, 0, &layout);
+
+        let down_row = i32::try_from(layout.row_water_balance_start() + down_idx).unwrap();
+        let def_row = i32::try_from(layout.row_bucket_definition_start()).unwrap();
+        let col_b1_in = state.buckets_in.start;
+        let col_b1_out = state.buckets_out.start;
+
+        for blk in 0..layout.n_blks {
+            let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
+            assert_eq!(
+                coeff_at(&csc, layout.turbine_col(up_idx, blk), down_row),
+                -0.5 * tau_h,
+                "blk {blk}: balance row must carry -k_0*tau_h, not -tau_h"
+            );
+            assert_eq!(
+                coeff_at(&csc, layout.spillage_col(up_idx, blk), down_row),
+                -0.5 * tau_h,
+                "blk {blk}: balance row spillage must carry -k_0*tau_h"
+            );
+            assert_eq!(
+                coeff_at(&csc, layout.turbine_col(up_idx, blk), def_row),
+                -0.5 * tau_h,
+                "blk {blk}: definition row must carry -k_1*tau_h on the SAME release column"
+            );
+            assert_eq!(
+                coeff_at(&csc, layout.spillage_col(up_idx, blk), def_row),
+                -0.5 * tau_h,
+                "blk {blk}: definition row spillage must carry -k_1*tau_h"
+            );
+        }
+        assert_eq!(
+            coeff_at(&csc, col_b1_in, down_row),
+            -1.0,
+            "the maturing-now bucket b_1^in must carry -1.0 on the balance row"
+        );
+        assert_eq!(
+            coeff_at(&csc, col_b1_out, def_row),
+            1.0,
+            "the definition row must carry +1.0 on b_1^out"
+        );
+        // b_{L+1}^in does not exist: the plant's only bucket is depth 1, so
+        // buckets_in has exactly one column (no b_2^in to reference).
+        assert_eq!(state.buckets_in.len(), 1);
+    }
+
+    /// Confluence: two upstreams feeding one downstream plant sum their
+    /// travel-time deposits into the SAME per-plant bucket definition row
+    /// (water memo §7.2), not one row per arc.
+    #[test]
+    fn confluence_two_upstreams_sum_deposits_into_single_definition_row() {
+        let up_a = 1;
+        let up_b = 2;
+        let down = 3;
+        let fixtures = PumpFixtures::new_full(
+            vec![
+                fixture_hydro_ds(up_a, Some(down)),
+                fixture_hydro_ds(up_b, Some(down)),
+                fixture_hydro_ds(down, None),
+            ],
+            Vec::new(),
+            vec![fixture_bus(1)],
+            Vec::new(),
+            Vec::new(),
+        );
+        let up_a_idx = fixtures.hydro_pos[&EntityId(up_a)];
+        let up_b_idx = fixtures.hydro_pos[&EntityId(up_b)];
+        let down_idx = fixtures.hydro_pos[&EntityId(down)];
+
+        let mut arc_spread_k = HashMap::new();
+        arc_spread_k.insert(up_a_idx, vec![vec![0.5, 0.5]]);
+        arc_spread_k.insert(up_b_idx, vec![vec![0.25, 0.75]]);
+        let ctx = TemplateBuildCtx {
+            arc_spread_k,
+            ..fixtures.make_ctx()
+        };
+
+        let stage = two_block_stage(0, [300.0, 444.0]);
+        let state = StateLayout::new(
+            ctx.n_hydros,
+            ctx.max_par_order,
+            1,
+            vec![(down_idx, 1)],
+            ctx.n_anticipated,
+            ctx.k_max,
+            ctx.anticipated_lead_stages.clone(),
+            &vec![0; ctx.n_hydros],
+        );
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+        let csc = build_sorted_csc(&ctx, &stage, 0, &layout);
+
+        let def_row = i32::try_from(layout.row_bucket_definition_start()).unwrap();
+        for blk in 0..layout.n_blks {
+            let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
+            assert_eq!(
+                coeff_at(&csc, layout.turbine_col(up_a_idx, blk), def_row),
+                -0.5 * tau_h,
+                "blk {blk}: upstream A's deposit must land on the shared definition row"
+            );
+            assert_eq!(
+                coeff_at(&csc, layout.spillage_col(up_a_idx, blk), def_row),
+                -0.5 * tau_h
+            );
+            assert_eq!(
+                coeff_at(&csc, layout.turbine_col(up_b_idx, blk), def_row),
+                -0.75 * tau_h,
+                "blk {blk}: upstream B's deposit must land on the SAME shared definition row"
+            );
+            assert_eq!(
+                coeff_at(&csc, layout.spillage_col(up_b_idx, blk), def_row),
+                -0.75 * tau_h
+            );
+        }
+        // A single aggregated bucket for the downstream plant, not one per arc.
+        assert_eq!(state.b_total, 1);
+        assert_eq!(state.buckets_out.len(), 1);
+    }
+
+    /// `B == 0` (no declared arc, `state.b_total == 0`): the emitted water
+    /// entries are byte-identical to today's shape — no bucket-definition rows
+    /// exist at all (`load_balance` collapses back onto `water_balance.end`)
+    /// and the upstream release carries exactly `-tau_h` (the W-1 anchor).
+    #[test]
+    fn b_zero_water_entries_are_byte_identical_to_undeclared_arc() {
+        let up = 1;
+        let down = 2;
+        let fixtures = PumpFixtures::new_full(
+            vec![
+                fixture_hydro_ds(up, Some(down)),
+                fixture_hydro_ds(down, None),
+            ],
+            Vec::new(),
+            vec![fixture_bus(1)],
+            Vec::new(),
+            Vec::new(),
+        );
+        let up_idx = fixtures.hydro_pos[&EntityId(up)];
+        let down_idx = fixtures.hydro_pos[&EntityId(down)];
+
+        let ctx = fixtures.make_ctx();
+        let stage = two_block_stage(0, [300.0, 444.0]);
+        let state = state_layout_for(&ctx);
+        assert_eq!(state.b_total, 0, "fixture must declare no travel-time arc");
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        // No bucket-row gap: load_balance starts exactly where water_balance
+        // ends, and the bucket-definition row cursor collapses onto it.
+        assert_eq!(
+            layout.row_bucket_definition_start(),
+            layout.row_load_balance_start(),
+            "B==0 must leave no bucket-definition rows between water_balance and load_balance"
+        );
+        assert_eq!(
+            layout.row_load_balance_start(),
+            layout.row_water_balance_start() + layout.n_h,
+            "B==0 must reproduce today's row_water_balance_start + n_hydros offset"
+        );
+
+        let csc = build_sorted_csc(&ctx, &stage, 0, &layout);
+        let down_row = i32::try_from(layout.row_water_balance_start() + down_idx).unwrap();
+        for blk in 0..layout.n_blks {
+            let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
+            assert_eq!(
+                coeff_at(&csc, layout.turbine_col(up_idx, blk), down_row),
+                -tau_h,
+                "blk {blk}: undeclared arc must carry exactly -tau_h (today's shape)"
+            );
+            assert_eq!(
+                coeff_at(&csc, layout.spillage_col(up_idx, blk), down_row),
+                -tau_h,
+                "blk {blk}: undeclared arc must carry exactly -tau_h (today's shape)"
+            );
+        }
+    }
+
+    /// The conservation `debug_assert` fires when a declared arc's `k` does not
+    /// sum to 1.0 — the guard is real, not dead code.
+    #[test]
+    #[should_panic(expected = "stage-clock weights must sum to 1.0")]
+    fn declared_arc_non_conserving_k_panics_in_debug() {
+        let up = 1;
+        let down = 2;
+        let fixtures = PumpFixtures::new_full(
+            vec![
+                fixture_hydro_ds(up, Some(down)),
+                fixture_hydro_ds(down, None),
+            ],
+            Vec::new(),
+            vec![fixture_bus(1)],
+            Vec::new(),
+            Vec::new(),
+        );
+        let up_idx = fixtures.hydro_pos[&EntityId(up)];
+        let down_idx = fixtures.hydro_pos[&EntityId(down)];
+
+        let mut arc_spread_k = HashMap::new();
+        arc_spread_k.insert(up_idx, vec![vec![0.5, 0.3]]); // sums to 0.8: violates conservation.
+        let ctx = TemplateBuildCtx {
+            arc_spread_k,
+            ..fixtures.make_ctx()
+        };
+
+        let stage = two_block_stage(0, [300.0, 444.0]);
+        let state = StateLayout::new(
+            ctx.n_hydros,
+            ctx.max_par_order,
+            1,
+            vec![(down_idx, 1)],
+            ctx.n_anticipated,
+            ctx.k_max,
+            ctx.anticipated_lead_stages.clone(),
+            &vec![0; ctx.n_hydros],
+        );
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let _ = build_stage_matrix_entries(&ctx, &stage, 0, &layout);
+    }
+
     /// End-to-end: a generic constraint referencing `pumping_flow` and
     /// `pumping_power` resolves to the REAL pumping column(s) through the
     /// resolver's sole caller (`fill_generic_constraint_entries`), and the
@@ -4210,6 +4640,7 @@ mod pumping_water_tests {
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: downstream.map(EntityId),
+            travel_time_hours: None,
             entry_stage_id: entry,
             exit_stage_id: None,
             min_storage_hm3: 0.0,

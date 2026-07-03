@@ -1163,7 +1163,7 @@ mod tests {
             rank: 0,
             worker_id: 0,
             solver: ProfiledSolver::new(solver),
-            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -1273,6 +1273,7 @@ mod tests {
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(0),
             downstream_id: None,
+            travel_time_hours: None,
             entry_stage_id: None,
             exit_stage_id: None,
             min_storage_hm3: 0.0,

@@ -3892,6 +3892,7 @@ mod chronological_telescoping {
             past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
+            past_defluences: vec![],
         };
 
         SystemBuilder::new()

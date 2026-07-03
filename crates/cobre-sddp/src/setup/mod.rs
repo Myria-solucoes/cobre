@@ -27,6 +27,7 @@
 //! ```
 
 mod accessors;
+pub(crate) mod bucket_topology;
 pub(crate) mod methodology_config;
 mod orchestration;
 pub mod params;
@@ -193,6 +194,15 @@ pub struct StudySetup {
     /// the simulation pipeline for stored-energy calculations.
     pub(crate) hydro_min_storage_hm3: Vec<f64>,
 
+    /// Water travel-time in-transit bucket topology: canonical column order,
+    /// global bucket count, and per-stage reachability mask. Empty
+    /// (`b_total == 0`) when the system declares no travel-time arc.
+    // Voice 4: no read site consumes this yet — the state layout reads
+    // `b_total`/`column_order` to size and order the bucket block. The
+    // `#[allow(dead_code)]` refires once that reader lands.
+    #[allow(dead_code)]
+    pub(crate) bucket_topology: bucket_topology::BucketTopology,
+
     /// Per-stage warm-start basis cache for warm-start / resume training.
     ///
     /// Populated by the CLI / Python paths via
@@ -302,8 +312,18 @@ impl StudySetup {
             &scalar_parameters,
         )?;
 
-        let (state_layout, study_dims) =
-            build_wired_indexer(system, &stage_templates, inflow_method, &stochastic);
+        // Computed here (not inside `build_wired_indexer`) so the one
+        // `BucketTopology` this constructor derives from `system` also seeds the
+        // `StudySetup.bucket_topology` field below, with no second call.
+        let bucket_topology = bucket_topology::build_bucket_topology(system);
+
+        let (state_layout, study_dims) = build_wired_indexer(
+            system,
+            &stage_templates,
+            inflow_method,
+            &stochastic,
+            &bucket_topology,
+        );
 
         let initial_state = build_initial_state(system, &study_dims, &state_layout);
 
@@ -442,6 +462,7 @@ impl StudySetup {
             downstream_par_order,
             energy_conversion,
             hydro_min_storage_hm3,
+            bucket_topology,
             warm_start_basis_cache: None,
         })
     }
@@ -621,12 +642,14 @@ fn build_energy_and_templates(
 }
 
 /// Build the canonical [`StateLayout`] and the [`StudyDimensions`] from the
-/// (representative) stage-0 LP layout and the PAR effective lag counts.
+/// (representative) stage-0 LP layout, the PAR effective lag counts, and the
+/// bucket topology.
 fn build_wired_indexer(
     system: &System,
     stage_templates: &crate::lp_builder::StageTemplates,
     inflow_method: crate::InflowNonNegativityMethod,
     stochastic: &StochasticContext,
+    bucket_topology: &bucket_topology::BucketTopology,
 ) -> (StateLayout, StudyDimensions) {
     let stage_templates_ref = &stage_templates.templates;
     let has_inflow_penalty =
@@ -688,6 +711,8 @@ fn build_wired_indexer(
     let state = StateLayout::new(
         hydro_count,
         max_par_order,
+        bucket_topology.b_total,
+        bucket_topology.column_order.clone(),
         n_anticipated,
         k_max,
         anticipated_lead_stages,

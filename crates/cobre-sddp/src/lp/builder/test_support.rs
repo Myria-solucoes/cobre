@@ -33,6 +33,8 @@ pub(super) fn state_layout_for(ctx: &TemplateBuildCtx<'_>) -> StateLayout {
     StateLayout::new(
         ctx.n_hydros,
         ctx.max_par_order,
+        0,
+        Vec::new(),
         ctx.n_anticipated,
         ctx.k_max,
         ctx.anticipated_lead_stages.clone(),

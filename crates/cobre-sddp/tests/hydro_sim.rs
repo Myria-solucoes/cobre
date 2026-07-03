@@ -842,7 +842,16 @@ mod sparse_dense {
 
         // The [0, 1, 2] arg is per-hydro effective_lag_count; mixed orders zero out
         // some lag slots. StateLayout::new finalizes the mask as production setup does.
-        let state = StateLayout::new(n_hydro, max_par_order, 0, 0, vec![], &[0, 1, 2]);
+        let state = StateLayout::new(
+            n_hydro,
+            max_par_order,
+            0,
+            Vec::new(),
+            0,
+            0,
+            vec![],
+            &[0, 1, 2],
+        );
         // Expected mask = storage [0,1,2] + lag0 of h1,h2 [4,5] + lag1 of h2 [8].
         let mask = &state.nonzero_state_indices;
         assert_eq!(

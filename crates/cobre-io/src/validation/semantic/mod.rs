@@ -30,6 +30,11 @@
 //! |18 | `thermal_generation(N)` in generic constraint when `N` is anticipated (warn) | `constraints/generic_constraints.json` | `SemanticAmbiguity` (warning) |
 //! |19 | Pumping `source_hydro_id != destination_hydro_id`  | `system/pumping_stations.json`        | `InvalidValue`         |
 //! |20 | Per-block storage reference resolves to a real boundary (parallel `K>1` interior / out-of-range block rejected) | `constraints/generic_constraints.json` | `BusinessRuleViolation` |
+//! |21 | `travel_time_hours` negative or non-finite                             | `system/hydros.json`                  | `InvalidValue`         |
+//! |22 | `travel_time_hours == 0.0` — treated as undeclared, no arc created     | `system/hydros.json`                  | `ModelQuality` (warning) |
+//! |23 | Declared arc: `max_t(t_v/h_t)` below a smallness threshold             | `system/hydros.json`                  | `ModelQuality` (warning) |
+//! |24 | Declared arc: `t_v` exceeds the remaining study horizon at some stage  | `system/hydros.json`                  | `ModelQuality` (warning) |
+//! |25 | Declared arc: `past_defluences` history shorter than the required pre-study depth (derived-from-`past_inflows` fallback logs a caveat instead) | `initial_conditions.json` | `BusinessRuleViolation` (or `ModelQuality` warning) |
 //!
 //! ## Layer 5b rules (stages, penalties, and scenario domain) — `validate_semantic_stages_penalties_scenarios`
 //!
@@ -81,6 +86,7 @@ mod season;
 mod sobol;
 mod stages;
 mod thermal;
+mod travel_time;
 
 #[cfg(test)]
 mod test_support;
@@ -102,6 +108,7 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     thermal::warn_thermal_generation_on_anticipated_thermal(data, ctx);
     constraints::check_per_block_storage_interior_reference(data, ctx);
     pumping::check_pumping_semantics(data, ctx);
+    travel_time::validate_travel_time(data, ctx);
 }
 
 // ── validate_semantic_stages_penalties_scenarios ──────────────────────────────

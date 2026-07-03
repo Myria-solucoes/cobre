@@ -179,6 +179,10 @@ pub struct Hydro {
     /// Identifier of the downstream hydro plant in the cascade.
     /// None = run-of-river (outflow leaves the system) or final plant.
     pub downstream_id: Option<EntityId>,
+    /// Travel time on the cascade arc to `downstream_id` \[hours\]. None =
+    /// instantaneous (v1 excludes diversion and pumping arcs).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub travel_time_hours: Option<f64>,
     /// Stage index when the plant enters service. None = always exists.
     pub entry_stage_id: Option<i32>,
     /// Stage index when the plant is decommissioned. None = never decommissioned.
@@ -262,6 +266,7 @@ mod tests {
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(10),
             downstream_id: None,
+            travel_time_hours: None,
             entry_stage_id: None,
             exit_stage_id: None,
             min_storage_hm3: 100.0,
@@ -305,6 +310,7 @@ mod tests {
         let hydro = minimal_hydro(HydroGenerationModel::ConstantProductivity);
 
         assert_eq!(hydro.downstream_id, None);
+        assert_eq!(hydro.travel_time_hours, None);
         assert_eq!(hydro.entry_stage_id, None);
         assert_eq!(hydro.exit_stage_id, None);
         assert_eq!(hydro.max_outflow_m3s, None);
@@ -325,6 +331,7 @@ mod tests {
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(20),
             downstream_id: Some(EntityId::from(3)),
+            travel_time_hours: Some(360.0),
             entry_stage_id: Some(1),
             exit_stage_id: Some(600),
             min_storage_hm3: 50.0,
@@ -361,6 +368,7 @@ mod tests {
         };
 
         assert_eq!(hydro.downstream_id, Some(EntityId::from(3)));
+        assert_eq!(hydro.travel_time_hours, Some(360.0));
         assert_eq!(hydro.entry_stage_id, Some(1));
         assert_eq!(hydro.exit_stage_id, Some(600));
         assert_eq!(hydro.max_outflow_m3s, Some(100_000.0));
@@ -496,6 +504,7 @@ mod tests {
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(20),
             downstream_id: Some(EntityId::from(3)),
+            travel_time_hours: Some(360.0),
             entry_stage_id: Some(1),
             exit_stage_id: Some(600),
             min_storage_hm3: 50.0,
@@ -605,6 +614,36 @@ mod tests {
 
         let parsed: Hydro = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.specific_productivity_mw_per_m3s_per_m, Some(0.0085));
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn travel_time_hours_defaults_to_none_in_json() {
+        let hydro = minimal_hydro(HydroGenerationModel::ConstantProductivity);
+        assert_eq!(hydro.travel_time_hours, None);
+
+        let json = serde_json::to_string(&hydro).expect("serialize");
+        let parsed: Hydro = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.travel_time_hours, None);
+
+        // serde(default): a key omitted entirely also deserializes to None.
+        let json_without_key = json.replace(",\"travel_time_hours\":null", "");
+        let parsed_missing: Hydro =
+            serde_json::from_str(&json_without_key).expect("deserialize without key");
+        assert_eq!(parsed_missing.travel_time_hours, None);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn travel_time_hours_round_trips_when_some() {
+        let mut hydro = minimal_hydro(HydroGenerationModel::ConstantProductivity);
+        hydro.travel_time_hours = Some(360.0);
+
+        let json = serde_json::to_string(&hydro).expect("serialize");
+        assert!(json.contains("travel_time_hours"));
+
+        let parsed: Hydro = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.travel_time_hours, Some(360.0));
     }
 
     #[cfg(feature = "serde")]

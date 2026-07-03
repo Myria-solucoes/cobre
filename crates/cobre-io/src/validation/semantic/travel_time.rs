@@ -1,0 +1,585 @@
+//! Layer 5a — water travel-time arc validation (config-time gates only).
+//!
+//! Validates `Hydro::travel_time_hours` and its `InitialConditions::past_defluences`
+//! history before the arc is sized into any solver-side state. Runtime
+//! conservation checks and recourse-feasibility rows live downstream, not here.
+//!
+//! | # | Rule                                                                    | `ErrorKind`               |
+//! |---|--------------------------------------------------------------------------|---------------------------|
+//! | 1 | `travel_time_hours` negative or non-finite                              | `InvalidValue`            |
+//! | 2 | `travel_time_hours == 0.0` — treated as undeclared, no arc created      | `ModelQuality` (warning)  |
+//! | 3 | `max_t(t_v / h_t)` below [`NEGLIGIBLE_RATIO_THRESHOLD`]                  | `ModelQuality` (warning)  |
+//! | 4 | `t_v` exceeds the remaining study horizon at some stage                 | `ModelQuality` (warning)  |
+//! | 5 | `past_defluences` history shorter than the arc's required pre-study depth | `BusinessRuleViolation` (or `ModelQuality` warning under the derived-fallback) |
+
+use cobre_core::window_period_overlaps;
+
+use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
+
+/// Below this `max_t(t_v/h_t)` ratio, cross-stage transport carries a
+/// mass-fraction the memo's worked example (6h travel time over 720h monthly
+/// stages, ratio ~=0.8%) calls negligible.
+const NEGLIGIBLE_RATIO_THRESHOLD: f64 = 0.01;
+
+pub(super) fn validate_travel_time(data: &ParsedData, ctx: &mut ValidationContext) {
+    let study_durations = study_stage_durations(data);
+    let pre_study_desc = pre_study_period_durations_desc(data);
+
+    for hydro in &data.hydros {
+        let Some(t) = hydro.travel_time_hours else {
+            continue;
+        };
+        let hydro_id = hydro.id.0;
+
+        if !t.is_finite() || t < 0.0 {
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "system/hydros.json",
+                Some(format!("Hydro {hydro_id}")),
+                format!("Hydro {hydro_id}: travel_time_hours must be finite and >= 0.0, got {t}"),
+            );
+            continue;
+        }
+
+        if t == 0.0 {
+            ctx.add_warning(
+                ErrorKind::ModelQuality,
+                "system/hydros.json",
+                Some(format!("Hydro {hydro_id}")),
+                format!(
+                    "Hydro {hydro_id}: travel_time_hours == 0.0 is treated as undeclared \
+                     (instantaneous transfer); no cross-stage arc is created"
+                ),
+            );
+            continue;
+        }
+
+        check_negligible_ratio(hydro_id, t, &study_durations, ctx);
+        check_horizon_inertness(hydro_id, t, &study_durations, ctx);
+        check_history_depth(hydro_id, t, &pre_study_desc, data, ctx);
+    }
+}
+
+/// Study-stage (`id >= 0`) durations in canonical (ascending `id`) order,
+/// each summed from its blocks (blocks sum to the stage duration).
+fn study_stage_durations(data: &ParsedData) -> Vec<f64> {
+    data.stages
+        .stages
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| s.blocks.iter().map(|b| b.duration_hours).sum())
+        .collect()
+}
+
+/// Pre-study (`id < 0`) period durations, most-recent-first (the `past_inflows`
+/// / `past_defluences` index convention) — the reverse of the canonical
+/// ascending-`id` order. Pre-study stages carry no blocks; duration comes from
+/// the calendar dates.
+// Rationale: pre-study period lengths are on the order of years (<1e6 hours),
+// far under f64's exact-integer range (2^52); a checked conversion buys nothing.
+#[allow(clippy::cast_precision_loss)]
+fn pre_study_period_durations_desc(data: &ParsedData) -> Vec<f64> {
+    let mut pre_study: Vec<_> = data
+        .stages
+        .stages
+        .iter()
+        .filter(|s| s.id < 0)
+        .map(|s| (s.end_date - s.start_date).num_hours() as f64)
+        .collect();
+    pre_study.reverse();
+    pre_study
+}
+
+/// Row 3: `max_t(t_v/h_t)` below [`NEGLIGIBLE_RATIO_THRESHOLD`] is an advisory
+/// ("consider not declaring"), never a silent fold.
+fn check_negligible_ratio(
+    hydro_id: i32,
+    t: f64,
+    study_durations: &[f64],
+    ctx: &mut ValidationContext,
+) {
+    if study_durations.is_empty() {
+        return;
+    }
+    let max_ratio = study_durations
+        .iter()
+        .fold(f64::NEG_INFINITY, |acc, &h| acc.max(t / h));
+    if max_ratio >= NEGLIGIBLE_RATIO_THRESHOLD {
+        return;
+    }
+    ctx.add_warning(
+        ErrorKind::ModelQuality,
+        "system/hydros.json",
+        Some(format!("Hydro {hydro_id}")),
+        format!(
+            "Hydro {hydro_id}: travel_time_hours ({t}) is negligible relative to every study \
+             stage length (max t_v/h_t = {max_ratio:.4} < {NEGLIGIBLE_RATIO_THRESHOLD}); \
+             consider not declaring this arc"
+        ),
+    );
+}
+
+/// Row 3b: `t_v` exceeding the remaining study horizon at some stage — the
+/// arc's release never arrives before the horizon ends from that stage
+/// onward. Routed through [`window_period_overlaps`] (the one shared overlap
+/// engine every travel-time/lag computation in this feature reuses) rather
+/// than a hand-rolled remaining-hours sum, so a future change to the arrival
+/// window's definition cannot silently diverge this check from the rest of
+/// the feature. Sizing stays safe (depth is capped by `n_stages - t`), so
+/// this is an advisory, never an error.
+fn check_horizon_inertness(
+    hydro_id: i32,
+    t: f64,
+    study_durations: &[f64],
+    ctx: &mut ValidationContext,
+) {
+    for stage_t in 0..study_durations.len() {
+        let future = &study_durations[stage_t..];
+        if !window_period_overlaps(t, future[0], future).is_empty() {
+            continue;
+        }
+        ctx.add_warning(
+            ErrorKind::ModelQuality,
+            "system/hydros.json",
+            Some(format!("Hydro {hydro_id}")),
+            format!(
+                "Hydro {hydro_id}: travel_time_hours ({t}) exceeds the remaining study horizon \
+                 from stage {stage_t}; the arc is economically inert from stage {stage_t} onward"
+            ),
+        );
+        return;
+    }
+}
+
+/// The number of most-recent pre-study periods a declared arc's
+/// `past_defluences` (or its derived-fallback proxy) must supply, so that
+/// `[start_0 - t_v, start_0)` is fully covered.
+///
+/// A declared arc (`t > 0.0`, checked by the caller) always needs at least one
+/// period of pre-study history: floored at 1 so an empty pre-study calendar
+/// (no periods to walk) cannot vacuously report a zero requirement and let a
+/// history-free arc pass row 5 unchecked.
+fn required_history_periods(t: f64, pre_study_desc: &[f64]) -> usize {
+    window_period_overlaps(0.0, t, pre_study_desc).len().max(1)
+}
+
+/// Row 5 / D5: hard error naming the missing pre-study periods, unless the
+/// derived-from-`past_inflows` fallback is active (that proxy has at least as
+/// much depth as required), in which case it is a logged caveat instead.
+/// Never silently zero-seeds.
+fn check_history_depth(
+    hydro_id: i32,
+    t: f64,
+    pre_study_desc: &[f64],
+    data: &ParsedData,
+    ctx: &mut ValidationContext,
+) {
+    let required = required_history_periods(t, pre_study_desc);
+
+    let defluences_len = data
+        .initial_conditions
+        .past_defluences
+        .iter()
+        .find(|e| e.hydro_id.0 == hydro_id)
+        .map_or(0, |e| e.values_m3s.len());
+    if defluences_len >= required {
+        return;
+    }
+
+    let inflows_len = data
+        .initial_conditions
+        .past_inflows
+        .iter()
+        .find(|e| e.hydro_id.0 == hydro_id)
+        .map_or(0, |e| e.values_m3s.len());
+
+    if inflows_len >= required {
+        ctx.add_warning(
+            ErrorKind::ModelQuality,
+            "initial_conditions.json",
+            Some(format!("Hydro {hydro_id}")),
+            format!(
+                "Hydro {hydro_id}: past_defluences history ({defluences_len} period(s)) is \
+                 shorter than the arc's required depth ({required} period(s)); deriving a proxy \
+                 from past_inflows (pass-through assumption) — provide past_defluences directly \
+                 for higher first-stage accuracy"
+            ),
+        );
+        return;
+    }
+
+    ctx.add_error(
+        ErrorKind::BusinessRuleViolation,
+        "initial_conditions.json",
+        Some(format!("Hydro {hydro_id}")),
+        format!(
+            "Hydro {hydro_id}: declared arc (travel_time_hours={t}) requires past_defluences \
+             history of at least {required} pre-study period(s); only {defluences_len} were \
+             provided ({missing} missing) and past_inflows provides only {inflows_len} \
+             period(s), insufficient for the derived fallback",
+            missing = required - defluences_len
+        ),
+    );
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::too_many_lines,
+    clippy::doc_markdown,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
+mod tests {
+    use super::super::test_support::*;
+    use super::*;
+    use crate::stages::StagesData;
+    use cobre_core::entities::Hydro;
+    use cobre_core::temporal::{Block, PolicyGraph, PolicyGraphType, Stage};
+    use cobre_core::{EntityId, HydroPastDefluences, HydroPastInflows};
+
+    fn make_hydro_with_travel_time(id: i32, downstream_id: i32, t: Option<f64>) -> Hydro {
+        let mut h = make_hydro(id, Some(downstream_id));
+        h.travel_time_hours = t;
+        h
+    }
+
+    /// One study stage (`id`) carrying a single block of `duration_hours`.
+    fn make_study_stage(id: i32, duration_hours: f64) -> Stage {
+        let mut stage = make_stage(id);
+        stage.blocks = vec![Block {
+            index: 0,
+            name: "FLAT".to_string(),
+            duration_hours,
+        }];
+        stage
+    }
+
+    /// `n_study` study stages of `study_duration_hours` each, preceded by
+    /// `n_pre_study` pre-study stages of `pre_study_duration_hours` each
+    /// (`id = -1` most recent through `id = -n_pre_study` oldest).
+    fn make_stages_with_pre_study(
+        n_study: i32,
+        study_duration_hours: f64,
+        n_pre_study: i32,
+        pre_study_duration_hours_per_period: f64,
+    ) -> StagesData {
+        let mut stages: Vec<Stage> = Vec::new();
+        for id in (1..=n_pre_study).rev() {
+            let mut stage = make_stage(-id);
+            let days = (pre_study_duration_hours_per_period / 24.0).round() as i64;
+            stage.start_date = chrono::NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
+            stage.end_date = stage.start_date + chrono::Duration::days(days);
+            stages.push(stage);
+        }
+        for id in 0..n_study {
+            stages.push(make_study_stage(id, study_duration_hours));
+        }
+        StagesData {
+            stages,
+            policy_graph: PolicyGraph {
+                graph_type: PolicyGraphType::FiniteHorizon,
+                annual_discount_rate: 0.06,
+                transitions: vec![],
+                season_map: None,
+            },
+        }
+    }
+
+    fn past_defluences(hydro_id: i32, n: usize) -> Vec<HydroPastDefluences> {
+        vec![HydroPastDefluences {
+            hydro_id: EntityId::from(hydro_id),
+            values_m3s: vec![100.0; n],
+            season_ids: None,
+        }]
+    }
+
+    fn past_inflows(hydro_id: i32, n: usize) -> Vec<HydroPastInflows> {
+        vec![HydroPastInflows {
+            hydro_id: EntityId::from(hydro_id),
+            values_m3s: vec![100.0; n],
+            season_ids: None,
+        }]
+    }
+
+    // ── Row 1: negative / non-finite ──────────────────────────────────────────
+
+    #[test]
+    fn test_negative_travel_time_hard_errors_naming_hydro() {
+        let hydro = make_hydro_with_travel_time(1, 2, Some(-5.0));
+        let stages = make_stages_with_pre_study(3, 720.0, 2, 720.0);
+        let data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
+
+        let mut ctx = ValidationContext::new();
+        validate_travel_time(&data, &mut ctx);
+
+        assert!(ctx.has_errors(), "negative travel_time_hours must error");
+        let errors = ctx.errors();
+        assert!(
+            errors.iter().any(|e| e.kind == ErrorKind::InvalidValue
+                && e.message.contains("Hydro 1")
+                && e.message.contains("travel_time_hours")),
+            "error must name the offending hydro, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_nan_travel_time_hard_errors() {
+        let hydro = make_hydro_with_travel_time(3, 4, Some(f64::NAN));
+        let stages = make_stages_with_pre_study(3, 720.0, 2, 720.0);
+        let data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
+
+        let mut ctx = ValidationContext::new();
+        validate_travel_time(&data, &mut ctx);
+
+        assert!(ctx.has_errors(), "NaN travel_time_hours must error");
+        assert!(
+            ctx.errors()
+                .iter()
+                .any(|e| e.kind == ErrorKind::InvalidValue && e.message.contains("Hydro 3")),
+        );
+    }
+
+    #[test]
+    fn test_positive_travel_time_no_row1_error() {
+        let hydro = make_hydro_with_travel_time(1, 2, Some(48.0));
+        let stages = make_stages_with_pre_study(3, 720.0, 2, 720.0);
+        let mut data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
+        data.initial_conditions.past_defluences = past_defluences(1, 2);
+
+        let mut ctx = ValidationContext::new();
+        validate_travel_time(&data, &mut ctx);
+
+        assert!(
+            !ctx.has_errors(),
+            "a well-formed declared arc must not hard-error, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    // ── Row 2: zero == undeclared, advisory only ────────────────────────────────
+
+    #[test]
+    fn test_zero_travel_time_is_advisory_not_error() {
+        let hydro = make_hydro_with_travel_time(1, 2, Some(0.0));
+        let stages = make_stages_with_pre_study(3, 720.0, 0, 720.0);
+        let data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
+
+        let mut ctx = ValidationContext::new();
+        validate_travel_time(&data, &mut ctx);
+
+        assert!(
+            !ctx.has_errors(),
+            "travel_time_hours == 0.0 is not an error"
+        );
+        assert!(
+            ctx.warnings()
+                .iter()
+                .any(|w| w.kind == ErrorKind::ModelQuality
+                    && w.message.contains("Hydro 1")
+                    && w.message.contains("undeclared")),
+            "expected an advisory naming the hydro, got: {:?}",
+            ctx.warnings()
+        );
+    }
+
+    #[test]
+    fn test_none_travel_time_no_diagnostics() {
+        let hydro = make_hydro_with_travel_time(1, 2, None);
+        let stages = make_stages_with_pre_study(3, 720.0, 0, 720.0);
+        let data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
+
+        let mut ctx = ValidationContext::new();
+        validate_travel_time(&data, &mut ctx);
+
+        assert!(!ctx.has_errors());
+        assert!(
+            ctx.warnings().is_empty(),
+            "None travel_time_hours (today's instantaneous model) must be silent"
+        );
+    }
+
+    // ── Row 3: negligible ratio advisory ─────────────────────────────────────
+
+    #[test]
+    fn test_negligible_ratio_emits_advisory() {
+        // t_v/h_t = 6/720 ~= 0.0083 < 0.01 threshold.
+        let hydro = make_hydro_with_travel_time(1, 2, Some(6.0));
+        let stages = make_stages_with_pre_study(3, 720.0, 1, 720.0);
+        let mut data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
+        data.initial_conditions.past_defluences = past_defluences(1, 1);
+
+        let mut ctx = ValidationContext::new();
+        validate_travel_time(&data, &mut ctx);
+
+        assert!(!ctx.has_errors());
+        assert!(
+            ctx.warnings()
+                .iter()
+                .any(|w| w.message.contains("negligible") && w.message.contains("Hydro 1")),
+            "expected a negligible-ratio advisory, got: {:?}",
+            ctx.warnings()
+        );
+    }
+
+    #[test]
+    fn test_non_negligible_ratio_no_advisory() {
+        // t_v/h_t = 360/720 = 0.5, well above the threshold.
+        let hydro = make_hydro_with_travel_time(1, 2, Some(360.0));
+        let stages = make_stages_with_pre_study(3, 720.0, 1, 720.0);
+        let mut data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
+        data.initial_conditions.past_defluences = past_defluences(1, 1);
+
+        let mut ctx = ValidationContext::new();
+        validate_travel_time(&data, &mut ctx);
+
+        assert!(
+            !ctx.warnings()
+                .iter()
+                .any(|w| w.message.contains("negligible")),
+            "a non-negligible ratio must not advise, got: {:?}",
+            ctx.warnings()
+        );
+    }
+
+    // ── Row 3b: horizon-inertness advisory ────────────────────────────────────
+
+    #[test]
+    fn test_travel_time_exceeds_tail_horizon_emits_advisory() {
+        // 3 monthly (720h) study stages; t_v = 1500h exceeds the last stage's
+        // remaining horizon (720h at stage 2, 1440h at stage 1) but not stage
+        // 0's (2160h) — inert from stage 1 onward.
+        let hydro = make_hydro_with_travel_time(1, 2, Some(1500.0));
+        let stages = make_stages_with_pre_study(3, 720.0, 2, 720.0);
+        let mut data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
+        data.initial_conditions.past_defluences = past_defluences(1, 2);
+
+        let mut ctx = ValidationContext::new();
+        validate_travel_time(&data, &mut ctx);
+
+        assert!(!ctx.has_errors());
+        assert!(
+            ctx.warnings()
+                .iter()
+                .any(|w| w.message.contains("economically inert") && w.message.contains("stage 1")),
+            "expected the first-onset inert-stage advisory, got: {:?}",
+            ctx.warnings()
+        );
+    }
+
+    #[test]
+    fn test_travel_time_within_horizon_no_inertness_advisory() {
+        let hydro = make_hydro_with_travel_time(1, 2, Some(48.0));
+        let stages = make_stages_with_pre_study(3, 720.0, 1, 720.0);
+        let mut data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
+        data.initial_conditions.past_defluences = past_defluences(1, 1);
+
+        let mut ctx = ValidationContext::new();
+        validate_travel_time(&data, &mut ctx);
+
+        assert!(
+            !ctx.warnings()
+                .iter()
+                .any(|w| w.message.contains("economically inert")),
+            "a short travel time within every stage's reach must not advise, got: {:?}",
+            ctx.warnings()
+        );
+    }
+
+    // ── Row 5 / D5: past_defluences depth (both fallback arms) ────────────────
+
+    #[test]
+    fn test_insufficient_history_no_fallback_hard_errors() {
+        // t_v = 1000h needs 2 pre-study periods of 720h; only 1 provided, and
+        // past_inflows is empty too — no fallback available.
+        let hydro = make_hydro_with_travel_time(1, 2, Some(1000.0));
+        let stages = make_stages_with_pre_study(3, 720.0, 2, 720.0);
+        let mut data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
+        data.initial_conditions.past_defluences = past_defluences(1, 1);
+
+        let mut ctx = ValidationContext::new();
+        validate_travel_time(&data, &mut ctx);
+
+        assert!(
+            ctx.has_errors(),
+            "insufficient history with no fallback must hard-error"
+        );
+        let errors = ctx.errors();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message.contains("Hydro 1")
+                    && e.message.contains("2 pre-study period")),
+            "error must name the required depth and the hydro, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_insufficient_history_with_fallback_logs_caveat_and_passes() {
+        // Same shortfall as above, but past_inflows now covers the required depth.
+        let hydro = make_hydro_with_travel_time(1, 2, Some(1000.0));
+        let stages = make_stages_with_pre_study(3, 720.0, 2, 720.0);
+        let mut data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
+        data.initial_conditions.past_defluences = past_defluences(1, 1);
+        data.initial_conditions.past_inflows = past_inflows(1, 2);
+
+        let mut ctx = ValidationContext::new();
+        validate_travel_time(&data, &mut ctx);
+
+        assert!(
+            !ctx.has_errors(),
+            "a usable derived fallback must not hard-error, got: {:?}",
+            ctx.errors()
+        );
+        assert!(
+            ctx.warnings()
+                .iter()
+                .any(|w| w.kind == ErrorKind::ModelQuality
+                    && w.message.contains("Hydro 1")
+                    && w.message.contains("past_inflows")),
+            "expected a logged derived-fallback caveat, got: {:?}",
+            ctx.warnings()
+        );
+    }
+
+    #[test]
+    fn test_sufficient_history_no_row5_diagnostics() {
+        let hydro = make_hydro_with_travel_time(1, 2, Some(1000.0));
+        let stages = make_stages_with_pre_study(3, 720.0, 2, 720.0);
+        let mut data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
+        data.initial_conditions.past_defluences = past_defluences(1, 2);
+
+        let mut ctx = ValidationContext::new();
+        validate_travel_time(&data, &mut ctx);
+
+        assert!(!ctx.has_errors());
+        assert!(
+            !ctx.warnings()
+                .iter()
+                .any(|w| w.message.contains("past_defluences") || w.message.contains("proxy")),
+            "sufficient history must not advise, got: {:?}",
+            ctx.warnings()
+        );
+    }
+
+    #[test]
+    fn test_empty_pre_study_calendar_still_requires_history() {
+        // No pre-study stages declared at all: required_history_periods floors
+        // to 1, so a declared arc with zero past_defluences and zero
+        // past_inflows still hard-errors rather than vacuously passing.
+        let hydro = make_hydro_with_travel_time(1, 2, Some(48.0));
+        let stages = make_stages_with_pre_study(3, 720.0, 0, 720.0);
+        let data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
+
+        let mut ctx = ValidationContext::new();
+        validate_travel_time(&data, &mut ctx);
+
+        assert!(
+            ctx.has_errors(),
+            "a declared arc with no pre-study calendar and no history must still error"
+        );
+    }
+}
