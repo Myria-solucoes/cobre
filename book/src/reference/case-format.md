@@ -483,6 +483,7 @@ start of the study.
 | `storage`             | Yes      | Array of `{ "hydro_id": integer, "value_hm3": number }` entries for operating hydros                              |
 | `filling_storage`     | Yes      | Array of `{ "hydro_id": integer, "value_hm3": number }` entries for filling hydros                                |
 | `past_inflows`        | No       | Array of `{ "hydro_id": integer, "values_m3s": [number], "season_ids": [integer] }` for PAR(p) lag initialization |
+| `past_defluences`     | No       | Array of `{ "hydro_id": integer, "values_m3s": [number], "season_ids": [integer] }` — pre-study releases in transit at study start, per declared travel-time arc |
 | `recent_observations` | No       | Array of observed inflow entries for mid-season study starts (see below)                                          |
 
 Each `hydro_id` must be unique within its array and must not appear in both
@@ -597,6 +598,7 @@ Key fields:
 | `hydros[].name`                                   | Yes      | Human-readable plant name                                                                                     |
 | `hydros[].bus_id`                                 | Yes      | Bus where generation is injected                                                                              |
 | `hydros[].downstream_id`                          | No       | Downstream plant ID in the cascade; `null` = tailwater                                                        |
+| `hydros[].travel_time_hours`                      | No       | Cascade-arc travel time in hours to `downstream_id`; `null`/`0` = instantaneous                               |
 | `hydros[].entry_stage_id`                         | No       | Stage when plant enters service; `null` = always exists                                                       |
 | `hydros[].exit_stage_id`                          | No       | Stage when plant is decommissioned; `null` = never                                                            |
 | `hydros[].reservoir`                              | Yes      | `min_storage_hm3` and `max_storage_hm3` (both >= 0)                                                           |

@@ -11,6 +11,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Water travel time now delays a hydro release before it reaches its
+  downstream plant.** The `travel_time_hours` field on the upstream hydro's
+  cascade arc to `downstream_id` declares, in hours, how long the arc's release
+  stays in transit before it reaches the downstream plant's water balance; v1
+  covers the main cascade arc only — diversion and pumping-conduit arcs do not
+  carry travel time. The in-transit volume is carried as augmented Benders
+  state — one state slot per downstream plant per maturity — until it matures
+  onto the receiving plant's balance. A hydro whose `travel_time_hours` is
+  absent or `0.0` keeps the existing instantaneous-transfer behavior: no arc is
+  declared and no state is added. `past_defluences` on `InitialConditions`
+  supplies the pre-study releases already in transit at study start for a
+  declared arc; config validation requires history at least as deep as the
+  arc's travel time and either finds it directly, derives a proxy from
+  `past_inflows` with a logged caveat, or rejects the study when neither is
+  available. A declared arc that releases while its downstream plant has not
+  yet reached operating status (still `PreFilling`/`Filling`, or before its
+  `entry_stage_id`) is also rejected at validation. Simulation writes a new
+  `simulation/in_transit/` output (`stage_id`, `hydro_id`, `lag`,
+  `in_transit_volume_hm3`, `delayed_arrival_hm3` per downstream plant per
+  maturity lag), emitted by both the CLI and the Python bindings and absent for
+  a study with no declared travel-time arc. In-transit volume that would mature
+  past the study's last stage is dropped rather than credited to terminal
+  storage — a documented target-stage imprecision at the end of the horizon.
+
 - **Generic constraints can reference per-block hydro storage and evaporation.**
   `hydro_storage_initial(h)` and `hydro_storage_final(h)` reference a stage's
   initial (`S⁰`) and final (`Sᴷ`) storage; supplying a block index —

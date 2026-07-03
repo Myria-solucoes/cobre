@@ -215,6 +215,20 @@ pub(crate) fn inflow_lags_schema() -> Schema {
     ])
 }
 
+/// Schema for `simulation/in_transit/` — travel-time in-transit water volumes.
+///
+/// One row per (stage, downstream plant, maturity lag). Written only when the
+/// system declares a travel-time arc.
+pub(crate) fn in_transit_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("stage_id", DataType::Int32, false),
+        Field::new("hydro_id", DataType::Int32, false),
+        Field::new("lag", DataType::Int32, false),
+        Field::new("in_transit_volume_hm3", DataType::Float64, false),
+        Field::new("delayed_arrival_hm3", DataType::Float64, false),
+    ])
+}
+
 /// Schema for `simulation/violations/generic/` — generic constraint violations.
 ///
 /// See output-schemas.md SS5.11.
@@ -931,6 +945,7 @@ mod tests {
             (contracts_schema(), "contracts"),
             (non_controllables_schema(), "non_controllables"),
             (inflow_lags_schema(), "inflow_lags"),
+            (in_transit_schema(), "in_transit"),
             (generic_violations_schema(), "generic_violations"),
             (convergence_schema(), "convergence"),
             (iteration_timing_schema(), "iteration_timing"),
@@ -959,6 +974,7 @@ mod tests {
             ("contracts", 8),
             ("non_controllables", 10),
             ("inflow_lags", 4),
+            ("in_transit", 5),
             ("generic_violations", 5),
             ("convergence", 14),
             ("iteration_timing", 19),

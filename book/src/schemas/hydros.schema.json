@@ -403,6 +403,15 @@
             }
           ],
           "description": "Tailrace elevation model. Absent or null = no tailrace."
+        },
+        "travel_time_hours": {
+          "default": null,
+          "description": "Travel time on the cascade arc to `downstream_id` \\[hours\\]. Absent or\nnull = instantaneous (v1 excludes diversion and pumping arcs).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
         }
       },
       "required": [

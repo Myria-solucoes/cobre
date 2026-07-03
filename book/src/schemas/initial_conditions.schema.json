@@ -24,6 +24,43 @@
       ],
       "type": "object"
     },
+    "RawHydroPastDefluences": {
+      "additionalProperties": false,
+      "description": "Past defluence (release) values per arc for one upstream hydro plant.",
+      "properties": {
+        "hydro_id": {
+          "description": "Upstream hydro plant identifier whose release feeds the arc.",
+          "format": "int32",
+          "type": "integer"
+        },
+        "season_ids": {
+          "default": null,
+          "description": "Optional season IDs corresponding to each entry in `values_m3s`, one per\nentry. When present, length must equal `values_m3s.length`. Absent from\nlegacy JSON files (backward compatible).",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "values_m3s": {
+          "description": "Past defluence values [m³/s], ordered from most recent (index 0) to\noldest, following the `past_inflows` period convention.",
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "hydro_id",
+        "values_m3s"
+      ],
+      "type": "object"
+    },
     "RawHydroPastInflows": {
       "additionalProperties": false,
       "description": "Past inflow values for PAR(p) lag initialization for one hydro plant.",
@@ -136,6 +173,13 @@
       "description": "Past committed MW values for each anticipated thermal plant, ordered by\ndelivery stage ascending. Present only when the study includes at least\none anticipated thermal. Optional; defaults to empty.",
       "items": {
         "$ref": "#/$defs/RawAnticipatedCommitmentHistory"
+      },
+      "type": "array"
+    },
+    "past_defluences": {
+      "description": "Past defluence (release) values per arc [m³/s], keyed by the upstream\nhydro whose release feeds the arc, ordered from most recent to oldest\nfollowing the `past_inflows` period convention. Optional; defaults to\nempty.",
+      "items": {
+        "$ref": "#/$defs/RawHydroPastDefluences"
       },
       "type": "array"
     },

@@ -584,6 +584,11 @@ fn fill_arc_release_chrono_block_entries(
          sum(kappa) + sum(chi[1..]) must equal 1.0"
     );
     if blk == 0 {
+        debug_assert!(
+            (resolution.k.iter().sum::<f64>() - 1.0).abs() < 1e-9,
+            "arc {u_idx} stage {stage_idx}: stage-clock weights must sum to 1.0, got {:?}",
+            resolution.k
+        );
         for (d, &k_d) in resolution.k.iter().enumerate() {
             let aggregated: f64 = resolution
                 .chi
@@ -4546,6 +4551,201 @@ mod pumping_water_tests {
         assert_eq!(state.buckets_in.len(), 1);
     }
 
+    /// Row 13 (Filling arm): a `Filling`-phase upstream (turbine/diversion
+    /// frozen, spillage FREE — the D40 relief valve) still deposits its
+    /// spillage share into the downstream balance row and the bucket
+    /// definition row — `fill_arc_release_block_entries` never special-cases
+    /// the RELEASING hydro's own commissioning phase, so the `(u+s)` deposit
+    /// rides unchanged. Cross-checked against `columns.rs`: the coefficient
+    /// carries real flow because the spillage column is actually free at this
+    /// stage, not a coefficient on a column pinned to zero.
+    #[test]
+    fn filling_upstream_spillage_still_deposits_into_bucket() {
+        use cobre_core::entities::hydro::FillingConfig;
+
+        let up = 1;
+        let down = 2;
+        let mut up_hydro = fixture_hydro_ds(up, Some(down));
+        up_hydro.filling = Some(FillingConfig {
+            start_stage_id: 0,
+            filling_min_rate_m3s: 0.0,
+        });
+        up_hydro.entry_stage_id = Some(5);
+        let fixtures = PumpFixtures::new_full(
+            vec![up_hydro, fixture_hydro_ds(down, None)],
+            Vec::new(),
+            vec![fixture_bus(1)],
+            Vec::new(),
+            Vec::new(),
+        )
+        .with_resolved_penalties();
+        let up_idx = fixtures.hydro_pos[&EntityId(up)];
+        let down_idx = fixtures.hydro_pos[&EntityId(down)];
+
+        let mut arc_spread_k = HashMap::new();
+        arc_spread_k.insert(up_idx, vec![vec![0.5, 0.5]]);
+        let ctx = TemplateBuildCtx {
+            arc_spread_k,
+            ..fixtures.make_ctx()
+        };
+
+        let stage = two_block_stage(0, [300.0, 444.0]);
+        let state = StateLayout::new(
+            ctx.n_hydros,
+            ctx.max_par_order,
+            1,
+            vec![(down_idx, 1)],
+            ctx.n_anticipated,
+            ctx.k_max,
+            ctx.anticipated_lead_stages.clone(),
+            &vec![0; ctx.n_hydros],
+        );
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+        let csc = build_sorted_csc(&ctx, &stage, 0, &layout);
+
+        let down_row = i32::try_from(layout.row_water_balance_start() + down_idx).unwrap();
+        let def_row = i32::try_from(layout.row_bucket_definition_start()).unwrap();
+
+        for blk in 0..layout.n_blks {
+            let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
+            assert_eq!(
+                coeff_at(&csc, layout.spillage_col(up_idx, blk), down_row),
+                -0.5 * tau_h,
+                "blk {blk}: a Filling upstream's spillage must still carry -k_0*tau_h on the \
+                 balance row"
+            );
+            assert_eq!(
+                coeff_at(&csc, layout.spillage_col(up_idx, blk), def_row),
+                -0.5 * tau_h,
+                "blk {blk}: a Filling upstream's spillage must still deposit -k_1*tau_h into \
+                 the bucket"
+            );
+        }
+
+        let (_col_lower, col_upper, _objective) =
+            super::super::columns::fill_stage_columns(&ctx, &stage, 0, &layout);
+        for blk in 0..layout.n_blks {
+            assert_eq!(
+                col_upper[layout.spillage_col(up_idx, blk)],
+                f64::INFINITY,
+                "blk {blk}: a Filling upstream's spillage column must stay free (D40), not frozen"
+            );
+        }
+    }
+
+    /// Row 13 (exit arm): an upstream past its own `exit_stage_id` still
+    /// emits the SAME arc-release deposit coefficients as an active upstream
+    /// — `fill_arc_release_block_entries` never special-cases the RELEASING
+    /// hydro's own commissioning phase. Combined with the commissioning
+    /// freeze pinning its turbine/spillage columns to `[0, 0]` post-exit
+    /// (verified below via `columns.rs`), the realized deposit is zero with
+    /// no special-cased code path, so the bucket drains through the pure
+    /// ring shift (the state-assembly copy-gap) with no replenishment.
+    #[test]
+    fn exited_upstream_arc_deposit_coefficients_unchanged_no_special_case() {
+        let up = 1;
+        let down = 2;
+        let mut up_hydro = fixture_hydro_ds(up, Some(down));
+        up_hydro.exit_stage_id = Some(1);
+        let fixtures = PumpFixtures::new_full(
+            vec![up_hydro, fixture_hydro_ds(down, None)],
+            Vec::new(),
+            vec![fixture_bus(1)],
+            Vec::new(),
+            Vec::new(),
+        )
+        .with_resolved_penalties();
+        let up_idx = fixtures.hydro_pos[&EntityId(up)];
+        let down_idx = fixtures.hydro_pos[&EntityId(down)];
+
+        let mut arc_spread_k = HashMap::new();
+        arc_spread_k.insert(up_idx, vec![vec![0.5, 0.5]]);
+        let ctx = TemplateBuildCtx {
+            arc_spread_k,
+            ..fixtures.make_ctx()
+        };
+        let state = StateLayout::new(
+            ctx.n_hydros,
+            ctx.max_par_order,
+            1,
+            vec![(down_idx, 1)],
+            ctx.n_anticipated,
+            ctx.k_max,
+            ctx.anticipated_lead_stages.clone(),
+            &vec![0; ctx.n_hydros],
+        );
+
+        // `stage_idx` stays 0 for both builds (the single-stage fixture's
+        // established decoupling from `stage.id`); only `stage.id` moves
+        // across the upstream's `exit_stage_id` boundary.
+        let mut stage_active = two_block_stage(0, [300.0, 444.0]);
+        stage_active.id = 0;
+        let layout_active = StageLayout::new(&ctx, &state, &stage_active, 0);
+        let csc_active = build_sorted_csc(&ctx, &stage_active, 0, &layout_active);
+
+        let mut stage_exited = two_block_stage(0, [300.0, 444.0]);
+        stage_exited.id = 1;
+        let layout_exited = StageLayout::new(&ctx, &state, &stage_exited, 0);
+        let csc_exited = build_sorted_csc(&ctx, &stage_exited, 0, &layout_exited);
+
+        let down_row_active =
+            i32::try_from(layout_active.row_water_balance_start() + down_idx).unwrap();
+        let def_row_active = i32::try_from(layout_active.row_bucket_definition_start()).unwrap();
+        let down_row_exited =
+            i32::try_from(layout_exited.row_water_balance_start() + down_idx).unwrap();
+        let def_row_exited = i32::try_from(layout_exited.row_bucket_definition_start()).unwrap();
+
+        for blk in 0..layout_active.n_blks {
+            for (col_active, col_exited) in [
+                (
+                    layout_active.turbine_col(up_idx, blk),
+                    layout_exited.turbine_col(up_idx, blk),
+                ),
+                (
+                    layout_active.spillage_col(up_idx, blk),
+                    layout_exited.spillage_col(up_idx, blk),
+                ),
+            ] {
+                assert_eq!(
+                    coeff_at(&csc_active, col_active, down_row_active),
+                    coeff_at(&csc_exited, col_exited, down_row_exited),
+                    "blk {blk}: the balance-row deposit coefficient must not depend on the \
+                     upstream's own exit_stage_id"
+                );
+                assert_eq!(
+                    coeff_at(&csc_active, col_active, def_row_active),
+                    coeff_at(&csc_exited, col_exited, def_row_exited),
+                    "blk {blk}: the bucket-definition deposit coefficient must not depend on \
+                     the upstream's own exit_stage_id"
+                );
+            }
+        }
+
+        // The freeze that actually zeroes the realized deposit lives in
+        // columns.rs, not here: post-exit, both columns are pinned [0, 0].
+        let (_lo_active, col_upper_active, _obj_active) =
+            super::super::columns::fill_stage_columns(&ctx, &stage_active, 0, &layout_active);
+        let (_lo_exited, col_upper_exited, _obj_exited) =
+            super::super::columns::fill_stage_columns(&ctx, &stage_exited, 0, &layout_exited);
+        for blk in 0..layout_active.n_blks {
+            assert!(
+                col_upper_active[layout_active.turbine_col(up_idx, blk)] > 0.0,
+                "blk {blk}: the active upstream's turbine column must be free before exit"
+            );
+            assert_eq!(
+                col_upper_exited[layout_exited.turbine_col(up_idx, blk)],
+                0.0,
+                "blk {blk}: the exited upstream's turbine column must be pinned to 0"
+            );
+            assert_eq!(
+                col_upper_exited[layout_exited.spillage_col(up_idx, blk)],
+                0.0,
+                "blk {blk}: the exited upstream's spillage column must be pinned to 0 \
+                 (post-exit reverts to PreFilling, which freezes spillage too)"
+            );
+        }
+    }
+
     /// Confluence: two upstreams feeding one downstream plant sum their
     /// travel-time deposits into the SAME per-plant bucket definition row
     /// (water memo §7.2), not one row per arc.
@@ -4929,6 +5129,62 @@ mod pumping_water_tests {
             par_csc, chr_csc,
             "K=1 chronological with travel time ON must be byte-identical to parallel"
         );
+    }
+
+    /// The `Σ_d k_d == 1.0` stage-clock conservation (row 8) fires at the
+    /// CHRONOLOGICAL deposit site too, independently of the per-column and
+    /// aggregation identities below it — mirrors the parallel-site guard
+    /// (`declared_arc_non_conserving_k_panics_in_debug`), closing the gap
+    /// where only the chrono-specific identities were fill-time-asserted.
+    #[test]
+    #[should_panic(expected = "stage-clock weights must sum to 1.0")]
+    fn row_8_chrono_stage_clock_sum_panics_on_disagreement() {
+        let up = 1;
+        let down = 2;
+        let fixtures = PumpFixtures::new_full(
+            vec![
+                fixture_hydro_ds(up, Some(down)),
+                fixture_hydro_ds(down, None),
+            ],
+            Vec::new(),
+            vec![fixture_bus(1)],
+            Vec::new(),
+            Vec::new(),
+        );
+        let up_idx = fixtures.hydro_pos[&EntityId(up)];
+        let down_idx = fixtures.hydro_pos[&EntityId(down)];
+
+        // k = [0.3, 0.3] sums to 0.6 — violates row 8's stage-clock
+        // conservation, even though kappa/chi's own per-column identity
+        // (0.5 + 0.5 == 1.0) holds.
+        let bad_resolution = SpreadResolution {
+            depth: 1,
+            k: vec![0.3, 0.3],
+            chi: vec![vec![0.5, 0.5]],
+            kappa: vec![vec![0.5]],
+            delivery: vec![vec![1.0]],
+        };
+        let mut arc_spread_chrono = HashMap::new();
+        arc_spread_chrono.insert(up_idx, vec![Some(bad_resolution)]);
+        let ctx = TemplateBuildCtx {
+            arc_spread_chrono,
+            ..fixtures.make_ctx()
+        };
+
+        let stage = chronological_stage(0, &[720.0]);
+        let state = StateLayout::new(
+            ctx.n_hydros,
+            ctx.max_par_order,
+            1,
+            vec![(down_idx, 1)],
+            ctx.n_anticipated,
+            ctx.k_max,
+            ctx.anticipated_lead_stages.clone(),
+            &vec![0; ctx.n_hydros],
+        );
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let _ = build_stage_matrix_entries(&ctx, &stage, 0, &layout);
     }
 
     /// The `Σ_b w_b·χ_{b,d} == k_d` shared-density consistency (row 9) fires

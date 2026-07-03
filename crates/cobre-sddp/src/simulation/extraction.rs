@@ -30,7 +30,7 @@ use crate::simulation::types::{
     ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult, SimulationCostResult,
     SimulationExchangeResult, SimulationGenericViolationResult, SimulationHydroResult,
     SimulationInflowLagResult, SimulationNonControllableResult, SimulationPumpingResult,
-    SimulationStageResult, SimulationThermalResult,
+    SimulationStageResult, SimulationThermalResult, SimulationTransitBucketResult,
 };
 
 /// Reverse lookups from system hydro index to local FPHA/evaporation/filling-slack
@@ -200,6 +200,58 @@ fn compute_anticipated_committed_mw(
         view.primal.len(),
     );
     Some(view.primal[col])
+}
+
+/// Extract the travel-time in-transit bucket records for one stage, in the
+/// canonical [`StateLayout::bucket_column_order`] `(downstream plant, lag)`
+/// order — the same column order the LP fill and cut projection use, so the
+/// output row/column order is declaration-order invariant.
+///
+/// Empty when `state.b_total == 0` (no arc declared), which keeps the table
+/// absent for a non-travel-time study. The in-transit volume is the outgoing
+/// bucket state `buckets_out`; the delayed-arrival delivery is the incoming
+/// lag-1 bucket `b_1^in` (`buckets_in` at the plant's first bucket), reported
+/// only at `lag == 1` where the water matures onto the balance row.
+fn extract_transit_buckets(
+    view: &SolutionView<'_>,
+    spec: &StageExtractionSpec<'_>,
+    stage_id: u32,
+) -> Vec<SimulationTransitBucketResult> {
+    let state = spec.state;
+    if state.b_total == 0 {
+        return Vec::new();
+    }
+    debug_assert!(
+        state.buckets_out.start + state.b_total <= view.primal.len()
+            && state.buckets_in.start + state.b_total <= view.primal.len(),
+        "bucket primal out of bounds: b_total {}, primal len {}",
+        state.b_total,
+        view.primal.len(),
+    );
+    let mut results = Vec::with_capacity(state.b_total);
+    for (b, &(plant_idx, lag)) in state.bucket_column_order.iter().enumerate() {
+        debug_assert!(
+            plant_idx < spec.entity_counts.hydro_ids.len(),
+            "bucket plant index {plant_idx} out of bounds for hydro_ids len {}",
+            spec.entity_counts.hydro_ids.len(),
+        );
+        let hydro_id = spec.entity_counts.hydro_ids[plant_idx];
+        let in_transit_volume_hm3 = view.primal[state.buckets_out.start + b];
+        let delayed_arrival_hm3 = if lag == 1 {
+            view.primal[state.buckets_in.start + b]
+        } else {
+            0.0
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        results.push(SimulationTransitBucketResult {
+            stage_id,
+            hydro_id,
+            lag: lag as u32,
+            in_transit_volume_hm3,
+            delayed_arrival_hm3,
+        });
+    }
+    results
 }
 
 /// System entity counts needed to populate per-entity result [`Vec`]s. Every ID
@@ -1159,6 +1211,7 @@ pub(crate) fn extract_stage_result_with_lookups(
         contracts,
         non_controllables,
         inflow_lags,
+        transit_buckets: extract_transit_buckets(view, spec, stage_id),
         generic_violations,
     }
 }

@@ -288,6 +288,35 @@ mod tests {
         );
     }
 
+    /// Row 13 (entry arm): a mid-horizon upstream entrant (`entry_stage_id`
+    /// mid-study) supplies zero-valued `past_defluences` -- the physically
+    /// correct value, since the plant did not exist pre-study -- and every
+    /// stage-0 bucket the arc feeds comes out zero. [`build_initial_bucket_state`]
+    /// never reads `entry_stage_id`; conservation is forced by the input
+    /// data, not a code branch.
+    #[test]
+    fn test_mid_horizon_entrant_zero_history_zero_seeds_stage_0_buckets() {
+        let downstream = hydro(1, None, None);
+        let mut upstream = hydro(2, Some(1), Some(24.0));
+        upstream.entry_stage_id = Some(2);
+        let system = build_system(
+            vec![downstream, upstream],
+            study_stages(4, 12.0),
+            vec![defluence(2, vec![0.0])],
+        );
+
+        let topology = build_bucket_topology(&system);
+        assert_eq!(topology.per_plant_depth, vec![2], "sanity: 2-bucket depth");
+
+        let seed = build_initial_bucket_state(&system, &topology);
+
+        assert!(
+            seed.iter().all(|&v| v.abs() < 1e-9),
+            "a mid-horizon entrant's zero-valued pre-study history must zero-seed \
+             every stage-0 bucket, got {seed:?}"
+        );
+    }
+
     /// Confluence: two upstreams with different `t_v` feeding one downstream
     /// plant sum their unrolled shares into the SAME per-plant bucket block.
     #[test]

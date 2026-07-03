@@ -25,6 +25,7 @@
   - [Network Topology](./guide/network-topology.md)
   - [Stochastic Modeling](./guide/stochastic-modeling.md)
   - [Block Modes](./guide/block-modes.md)
+  - [Water Travel Time](./guide/water-travel-time.md)
 - [Configuration](./guide/configuration.md)
 - [Performance Accelerators](./guide/performance-accelerators.md)
 - [Running Studies](./guide/running-studies.md)

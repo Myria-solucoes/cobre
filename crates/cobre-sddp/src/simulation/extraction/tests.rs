@@ -5385,3 +5385,235 @@ fn extract_parallel_per_block_evaporation_byte_identical() {
         assert_eq!(row.evaporation_violation_pos_m3s.to_bits(), pos0.to_bits());
     }
 }
+
+// -------------------------------------------------------------------------
+// Travel-time in-transit bucket extraction
+// -------------------------------------------------------------------------
+
+/// Primal for a (`hydro_count = 2`, `max_par_order = 1`) bucketed layout with
+/// `buckets_out.len()` buckets. Layout: `storage`[0,2) `lags`[2,4)
+/// `buckets_out`[4,4+B) `z_inflow`[4+B,6+B) `storage_in`[6+B,8+B)
+/// `buckets_in`[8+B,8+2B) `theta`=8+2B.
+fn make_bucket_primal(buckets_out: &[f64], buckets_in: &[f64]) -> Vec<f64> {
+    assert_eq!(buckets_out.len(), buckets_in.len());
+    let b = buckets_out.len();
+    let theta = 8 + 2 * b;
+    let mut p = vec![0.0_f64; theta + 1];
+    p[0] = 100.0;
+    p[1] = 200.0;
+    p[2] = 50.0;
+    p[3] = 60.0;
+    for (i, &v) in buckets_out.iter().enumerate() {
+        p[4 + i] = v;
+    }
+    p[6 + b] = 90.0;
+    p[7 + b] = 180.0;
+    for (i, &v) in buckets_in.iter().enumerate() {
+        p[8 + b + i] = v;
+    }
+    p[theta] = 999.5;
+    p
+}
+
+/// Shape + canonical order + delayed-arrival: one downstream plant (state index
+/// 0 = `hydro_id` 10) with two maturity buckets. `in_transit_volume_hm3` reads
+/// the outgoing bucket state; `delayed_arrival_hm3` reads the incoming `b_1^in`
+/// only at `lag == 1`.
+#[test]
+fn extract_transit_buckets_shape_canonical_order_and_delayed_arrival() {
+    let geometry = crate::test_support::geom(2, 1);
+    let study_dims = crate::test_support::study_dims();
+    let state =
+        crate::test_support::state_layout_with_buckets(2, 1, 2, vec![(0, 1), (0, 2)], 0, 0, vec![]);
+    let primal = make_bucket_primal(&[11.0, 22.0], &[7.0, 8.0]);
+    let dual = vec![0.0; 4];
+    let ec = zero_energy_conversion(2, 1);
+
+    let result = extract_stage_result(
+        &SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &[],
+            row_lower: &[],
+        },
+        &StageExtractionSpec {
+            study_dims: &study_dims,
+            geometry: &geometry,
+            state: &state,
+            n_blks: geometry.n_blks,
+            entity_counts: &make_entity_counts_2_hydros(),
+            inflow_m3s_per_hydro: &[],
+            block_hours: &[],
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices: &[],
+            contract_is_import: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities: &[1.0, 1.0],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[0.0; 2],
+            stage_index: 0,
+            n_stages: 1,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+        },
+        5,
+    );
+
+    let tb = &result.transit_buckets;
+    assert_eq!(tb.len(), 2, "one row per declared bucket");
+    assert_eq!(tb[0].stage_id, 5);
+    assert_eq!(tb[0].hydro_id, 10);
+    assert_eq!(tb[0].lag, 1);
+    assert_eq!(tb[0].in_transit_volume_hm3, 11.0);
+    assert_eq!(tb[0].delayed_arrival_hm3, 7.0);
+    assert_eq!(tb[1].hydro_id, 10);
+    assert_eq!(tb[1].lag, 2);
+    assert_eq!(tb[1].in_transit_volume_hm3, 22.0);
+    assert_eq!(
+        tb[1].delayed_arrival_hm3, 0.0,
+        "delayed arrival is non-zero only at the maturing lag 1"
+    );
+}
+
+/// Absent when undeclared: `b_total == 0` produces no in-transit rows, keeping
+/// the whole table off for a non-travel-time study.
+#[test]
+fn extract_transit_buckets_absent_when_b_total_zero() {
+    let geometry = crate::test_support::geom(2, 1);
+    let study_dims = crate::test_support::study_dims();
+    let state = crate::test_support::state_layout(2, 1);
+    let primal = make_primal_2_1([100.0, 200.0], [50.0, 60.0], [90.0, 180.0], 999.5);
+    let dual = vec![0.0; 4];
+    let ec = zero_energy_conversion(2, 1);
+
+    let result = extract_stage_result(
+        &SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &[],
+            row_lower: &[],
+        },
+        &StageExtractionSpec {
+            study_dims: &study_dims,
+            geometry: &geometry,
+            state: &state,
+            n_blks: geometry.n_blks,
+            entity_counts: &make_entity_counts_2_hydros(),
+            inflow_m3s_per_hydro: &[],
+            block_hours: &[],
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices: &[],
+            contract_is_import: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities: &[1.0, 1.0],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[0.0; 2],
+            stage_index: 0,
+            n_stages: 1,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+        },
+        0,
+    );
+
+    assert!(result.transit_buckets.is_empty());
+}
+
+/// Row order follows the canonical `bucket_column_order` (grouped by plant,
+/// ascending lag) with each plant's `b_1^in` reported only at its lag-1 row.
+/// Together with `bucket_topology`'s declaration-order-invariant column order,
+/// this pins the output table to a deterministic row/column order regardless of
+/// hydro input ordering.
+#[test]
+fn extract_transit_buckets_rows_follow_canonical_column_order() {
+    let geometry = crate::test_support::geom(2, 1);
+    let study_dims = crate::test_support::study_dims();
+    // Plant 0 (hydro_id 10) depth 2, plant 1 (hydro_id 20) depth 1.
+    let state = crate::test_support::state_layout_with_buckets(
+        2,
+        1,
+        3,
+        vec![(0, 1), (0, 2), (1, 1)],
+        0,
+        0,
+        vec![],
+    );
+    let primal = make_bucket_primal(&[11.0, 22.0, 33.0], &[7.0, 8.0, 9.0]);
+    let dual = vec![0.0; 4];
+    let ec = zero_energy_conversion(2, 1);
+
+    let result = extract_stage_result(
+        &SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &[],
+            row_lower: &[],
+        },
+        &StageExtractionSpec {
+            study_dims: &study_dims,
+            geometry: &geometry,
+            state: &state,
+            n_blks: geometry.n_blks,
+            entity_counts: &make_entity_counts_2_hydros(),
+            inflow_m3s_per_hydro: &[],
+            block_hours: &[],
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices: &[],
+            contract_is_import: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities: &[1.0, 1.0],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[0.0; 2],
+            stage_index: 0,
+            n_stages: 1,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+        },
+        0,
+    );
+
+    let seq: Vec<(i32, u32)> = result
+        .transit_buckets
+        .iter()
+        .map(|r| (r.hydro_id, r.lag))
+        .collect();
+    assert_eq!(seq, vec![(10, 1), (10, 2), (20, 1)]);
+    // Each plant's delayed arrival lands only on its lag-1 row.
+    assert_eq!(result.transit_buckets[0].delayed_arrival_hm3, 7.0);
+    assert_eq!(result.transit_buckets[1].delayed_arrival_hm3, 0.0);
+    assert_eq!(result.transit_buckets[2].delayed_arrival_hm3, 9.0);
+    assert_eq!(result.transit_buckets[2].in_transit_volume_hm3, 33.0);
+}

@@ -19,9 +19,10 @@ use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{
     buses_schema, contracts_schema, convergence_schema, costs_schema, exchanges_schema,
-    generic_violations_schema, hydro_energy_productivity_schema, hydros_schema, inflow_lags_schema,
-    iteration_timing_schema, non_controllables_schema, pumping_stations_schema, rank_timing_schema,
-    retry_histogram_schema, row_selection_schema, solver_iterations_schema, thermals_schema,
+    generic_violations_schema, hydro_energy_productivity_schema, hydros_schema, in_transit_schema,
+    inflow_lags_schema, iteration_timing_schema, non_controllables_schema, pumping_stations_schema,
+    rank_timing_schema, retry_histogram_schema, row_selection_schema, solver_iterations_schema,
+    thermals_schema,
 };
 
 // ─── Entity type codes (SS3) ─────────────────────────────────────────────────
@@ -254,6 +255,7 @@ fn write_variables_csv(path: &Path) -> Result<(), OutputError> {
         ("contracts", contracts_schema()),
         ("non_controllables", non_controllables_schema()),
         ("inflow_lags", inflow_lags_schema()),
+        ("in_transit", in_transit_schema()),
         ("generic_violations", generic_violations_schema()),
         ("convergence", convergence_schema()),
         ("iteration_timing", iteration_timing_schema()),
@@ -317,6 +319,7 @@ fn unit_for(file: &str, column: &str) -> &'static str {
     match column {
         "stage_id"
         | "block_id"
+        | "lag"
         | "iteration"
         | "rank"
         | "forward_passes"
@@ -366,7 +369,9 @@ fn unit_for(file: &str, column: &str) -> &'static str {
         "storage_initial_hm3"
         | "storage_final_hm3"
         | "storage_violation_below_hm3"
-        | "filling_target_violation_hm3" => return "hm3",
+        | "filling_target_violation_hm3"
+        | "in_transit_volume_hm3"
+        | "delayed_arrival_hm3" => return "hm3",
         "total_cost"
         | "immediate_cost"
         | "future_cost"
@@ -582,6 +587,15 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("inflow_lags", "hydro_id") => "Hydro plant identifier",
         ("inflow_lags", "lag_index") => "AR lag index (1-based)",
         ("inflow_lags", "inflow_m3s") => "Historical inflow for this lag",
+        ("in_transit", "stage_id") => "Stage index",
+        ("in_transit", "hydro_id") => "Downstream hydro plant identifier",
+        ("in_transit", "lag") => "Maturity bucket index (1-based)",
+        ("in_transit", "in_transit_volume_hm3") => {
+            "Outgoing in-transit water volume at this maturity"
+        }
+        ("in_transit", "delayed_arrival_hm3") => {
+            "Water delivered this stage (non-zero only at lag 1)"
+        }
         ("generic_violations", "stage_id") => "Stage index",
         ("generic_violations", "block_id") => "Block index within stage (nullable)",
         ("generic_violations", "constraint_id") => "Generic constraint identifier",
@@ -1338,8 +1352,8 @@ mod tests {
 
         let row_count = rdr.records().count();
         assert_eq!(
-            row_count, 209,
-            "variables.csv must have exactly 209 data rows (one per column across all schemas)"
+            row_count, 214,
+            "variables.csv must have exactly 214 data rows (one per column across all schemas)"
         );
     }
 

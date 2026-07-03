@@ -95,3 +95,125 @@ diversion differ — they are frozen in BOTH `PreFilling` and `Filling` (no inst
 machinery), whereas spillage is legitimately free in `Filling`.
 Read: `lp/builder/columns.rs` (`fill_spillage_columns`). Cases: D38, D39, D42
 (phantom PreFilling spill removed); D40 (legitimate Filling-phase spill retained).
+
+## Water travel time
+
+A declared upstream→downstream arc introduces in-transit "bucket" state: one
+Markov-1 volume slot per `(downstream plant, lag)` absorbs water in flight. With
+the feature compiled in but no arc declared (`b_total == 0`), every path below
+collapses to the pre-bucket layout byte-for-byte; the moment any arc is
+declared, each of the following is a contract.
+
+### In-transit bucket dynamics & sign
+
+The bucket-definition row is a ring shift, `b_d^out = b_{d+1}^in + k_d·D_i`:
+`fill_bucket_definition_entries` emits the structural `+1`/`−1` terms and
+`fill_arc_release_block_entries` deposits the arc's `k_d`-weighted release from
+the SAME release column that also carries `k_0` onto the balance row — never a
+separate once-per-stage family. Incoming buckets are pinned via column bounds,
+resolved through `StateLayout::state_to_lp_incoming_column`'s explicit bucket
+arm, never the `anticipated_state` catch-all. Subgradient extraction divides the
+incoming bucket column's reduced cost by `col_scale` (`extract_duals_from_view`,
+the same rc/col_scale contract as storage); the cut row renders the **outgoing**
+bucket column through `StateLayout::lp_column_for_state`'s identity arm and
+multiplies `col_scale` back on via `push_scaled_coefficient` — divided on
+extract, multiplied on render, identical to storage. Swapping which column is
+pinned/read, or dividing on render instead of extract, prices the in-transit
+water in the wrong direction — a wrong bound that still compiles. A fold
+implementation (crossing mass absorbed same-stage, no bucket at all) can reach
+the same total cost as the correct one, so total cost alone cannot discriminate
+— only the dual's sign/magnitude and the per-stage delivery split do.
+Read: `lp/builder/entries.rs` (`fill_bucket_definition_entries`,
+`fill_arc_release_block_entries`), `lp/indexer/state_layout.rs`
+(`StateLayout::state_to_lp_incoming_column`, `StateLayout::lp_column_for_state`),
+`training/backward/duals_extraction.rs` (`extract_duals_from_view`), `cut/row.rs`
+(`push_scaled_coefficient`, `push_cut_row`). Pinned by the bucket-arm
+column-resolution tests (outgoing resolves by identity, incoming resolves to the
+pinned column via an explicit arm, never the anticipated catch-all) and the
+per-stage-visit bucket-pinning regressions in the backward pass and lower-bound
+evaluation; a sub-stage-delay bucket-dual regression is the fold-discriminating
+pin for the sign/magnitude itself.
+
+### k-factor conservation
+
+`resolve_spread` sums the stage-clock weights to `Σ_d k_d = 1` per arc per
+anchor stage (`debug_assert`-enforced), and `fill_arc_release_block_entries`
+asserts the same sum immediately before it deposits. A closed-form ceiling
+depth (e.g. `⌈t_v/h_t⌉`) is a plausible-looking replacement for the resolver's
+overlap-based depth and silently drops trailing mass on a non-uniform calendar
+— conservation violated, not a compile error.
+Read: `temporal_lag/mod.rs` (`resolve_spread`), `lp/builder/entries.rs`
+(`fill_arc_release_block_entries`). Pinned by the resolver's monthly-then-weekly
+counterexample regression (asserting the correct, deeper depth against the
+closed-form ceiling's shallower, wrong one) and the stage-level conservation
+regression exercising the `Σ_d k_d = 1` debug_assert directly across
+non-uniform calendars; a mixed-calendar end-to-end regression extends the pin
+to delivered-plus-horizon-drop equalling released, per arc, to floating-point
+tolerance.
+
+### Canonical bucket ordering
+
+Bucket columns sort by the downstream plant's canonical
+`(operational_start_date, id)` index — the same order `System::hydros` already
+carries — then by lag; never by raw declared id, never by cascade-traversal
+order. `build_bucket_topology` derives `column_order` from that canonical
+iteration alone. Emitting buckets in traversal order instead makes the state
+layout input-declaration-order-dependent, breaking the
+declaration-order-invariance hard rule.
+Read: `setup/bucket_topology.rs` (`build_bucket_topology`,
+`BucketTopology::column_order`). Pinned by the bucket column-order
+declaration-invariance regression: two systems differing only in the
+declaration order of their hydros produce identical `column_order`,
+`per_plant_depth`, and `b_total`.
+
+### Terminal credit deferred
+
+The finite horizon's zero terminal value (`HorizonMode::Finite`, the only
+implemented mode) gives every bucket outgoing at the last stage zero value; no
+terminal credit routes that residual in-transit volume into downstream storage.
+`horizon_cap_active` caps each stage's active lag at `n_stages − 1 − t`, the
+deepest lag whose target stage still lands inside the horizon, so a bucket slot
+past the horizon is dropped by construction rather than retained and silently
+zeroed elsewhere — the residual mass has no receiving stage. This under-values
+end-of-horizon upstream release; it is a documented target-stage imprecision,
+not a bug to patch by capping `BucketTopology::per_plant_depth`/`column_order`
+too — those size from the global max over every anchor and must retain what the
+earliest stages need.
+Read: `setup/bucket_topology.rs` (`horizon_cap_active`). Pinned by the
+horizon-depth-cap regression (the last stage's active-lag cap reaches zero, so
+no slot targets past the horizon) and a sub-stage-delay case's last-stage
+release, whose dropped share surfaces as an uneven per-stage delivery split
+rather than a credited one.
+
+### Sub-contracts: mode-independent sizing, aggregation consistency, fixed delivery density
+
+The bucket state stays a pure function of stage lengths, never of
+`n_blks`/`block_mode`, only because each of the following holds:
+
+- **Depth from stage lengths alone.** Bucket depth and `b_total` derive from
+  the per-stage calendar and the pre-study anchor alone
+  (`study_stage_durations`, `build_bucket_topology`) — never from `n_blks` or
+  `block_mode`. Deriving any part of the depth inside a block-aware code path
+  re-couples the state dimension to how a stage happens to be resolved.
+- **Shared arrival density.** A chronological stage's per-block deposit shares
+  `chi`/`kappa` and the stage-level `k` come from the same shared arrival
+  density (`resolve_spread`'s `k`/`chi`/`kappa`, `resolve_block_factors`), so
+  `Σ_b w_b·χ_{b,d} = k_d` holds by construction. Building `chi`/`kappa` from one
+  density and `k` from another lets the chronological and parallel cuts
+  diverge and silently breaks conservation.
+- **Fixed delivery density.** A maturing bucket delivers into its arrival
+  stage's blocks through a fixed, `block_mode`-independent template density
+  (`resolve_chrono_arrival_density`), never by tracking which origin block a
+  unit came from. Tracking origin-to-arrival-block correlation would grow the
+  bucket into a per-block vector whose length scales with the receiving
+  stage's `n_blks` — re-violating the depth-from-stage-lengths property above.
+
+Read: `temporal_lag/mod.rs` (`resolve_spread`'s `chi`/`kappa`/`delivery`
+fields, `resolve_block_factors`), `lp/builder/entries.rs`
+(`fill_chronological_water_entries`, `resolve_chrono_arrival_density`). Pinned
+by the shared-density-consistency regression exercising the aggregation
+debug_assert directly, the chronological block-table regression matching the
+worked kappa/chi numbers, and the `K = 1` chronological-vs-parallel
+byte-identity regression; a state-dimension-equality regression across
+parallel and chronological builds is the direct pin for mode-independent
+sizing.
