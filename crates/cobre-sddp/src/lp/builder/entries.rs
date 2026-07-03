@@ -299,6 +299,9 @@ fn fill_parallel_water_entries(
 /// Fill the travel-time bucket-definition rows' structural ring-shift terms:
 /// `+1.0` on `b_d^out` and, when a deeper bucket exists for the same plant,
 /// `-1.0` on `b_{d+1}^in` (absent at `d == L_j`: `b_{L+1}^in` does not exist).
+/// Only buckets REACHABLE this stage (`layout.bucket_row_pos`) get a row; a
+/// masked-out bucket's outgoing column is frozen `[0, 0]` instead (see
+/// `columns::fill_bucket_columns`), so no row needs to define it.
 /// Mode-independent (buckets are stage-level, never block-resolved), so this
 /// runs once per stage regardless of upstream releases — the deposit terms
 /// riding those releases are emitted separately by
@@ -306,8 +309,9 @@ fn fill_parallel_water_entries(
 fn fill_bucket_definition_entries(layout: &StageLayout, col_entries: &mut [Vec<(usize, f64)>]) {
     let state = layout.state;
     let row_start = layout.row_bucket_definition_start();
-    for b in 0..state.b_total {
-        let row = row_start + b;
+    for (b, pos) in layout.bucket_row_pos.iter().enumerate() {
+        let Some(pos) = *pos else { continue };
+        let row = row_start + pos;
         col_entries[state.buckets_out.start + b].push((row, 1.0));
 
         let (plant_idx, _lag) = state.bucket_column_order[b];
@@ -385,7 +389,14 @@ fn fill_arc_release_block_entries(
             "lag {d} exceeds plant {h_idx}'s declared bucket depth {}",
             range.len()
         );
-        let row_def = row_bucket_def_start + range.start + (d - 1);
+        let b = range.start + (d - 1);
+        // A lag beyond this stage's reachable cap has no definition row to
+        // deposit into — its target stage is outside `[0, n_stages)`, so the
+        // share is dropped rather than misdirected onto another lag's row.
+        let Some(pos) = layout.bucket_row_pos[b] else {
+            continue;
+        };
+        let row_def = row_bucket_def_start + pos;
         col_entries[col_turbine].push((row_def, -k_d * tau_h));
         col_entries[col_spillage].push((row_def, -k_d * tau_h));
     }
@@ -632,7 +643,13 @@ fn fill_arc_release_chrono_block_entries(
             "lag {d} exceeds plant {h_idx}'s declared bucket depth {}",
             range.len()
         );
-        let row_def = row_bucket_def_start + range.start + (d - 1);
+        let b = range.start + (d - 1);
+        // See the parallel-mode fill's identical drop: a lag beyond this
+        // stage's reachable cap has no row to deposit into.
+        let Some(pos) = layout.bucket_row_pos[b] else {
+            continue;
+        };
+        let row_def = row_bucket_def_start + pos;
         col_entries[col_turbine].push((row_def, -chi_d * tau_k));
         col_entries[col_spillage].push((row_def, -chi_d * tau_k));
     }
@@ -2249,6 +2266,7 @@ mod zero_cost_tests {
                 diversion_upstream: HashMap::new(),
                 arc_spread_k: HashMap::new(),
                 arc_spread_chrono: HashMap::new(),
+                per_stage_mask: Vec::new(),
                 n_hydros: 0,
                 n_thermals,
                 n_lines: 0,
@@ -3404,6 +3422,7 @@ mod pumping_water_tests {
                 diversion_upstream: HashMap::new(),
                 arc_spread_k: HashMap::new(),
                 arc_spread_chrono: HashMap::new(),
+                per_stage_mask: Vec::new(),
                 n_hydros: self.hydros.len(),
                 n_thermals: self.thermals.len(),
                 n_lines: self.lines.len(),
@@ -4491,6 +4510,7 @@ mod pumping_water_tests {
         arc_spread_k.insert(up_idx, vec![vec![0.5, 0.5]]);
         let ctx = TemplateBuildCtx {
             arc_spread_k,
+            per_stage_mask: vec![vec![1..2]],
             ..fixtures.make_ctx()
         };
 
@@ -4586,6 +4606,7 @@ mod pumping_water_tests {
         arc_spread_k.insert(up_idx, vec![vec![0.5, 0.5]]);
         let ctx = TemplateBuildCtx {
             arc_spread_k,
+            per_stage_mask: vec![vec![1..2]],
             ..fixtures.make_ctx()
         };
 
@@ -4662,6 +4683,7 @@ mod pumping_water_tests {
         arc_spread_k.insert(up_idx, vec![vec![0.5, 0.5]]);
         let ctx = TemplateBuildCtx {
             arc_spread_k,
+            per_stage_mask: vec![vec![1..2]],
             ..fixtures.make_ctx()
         };
         let state = StateLayout::new(
@@ -4774,6 +4796,7 @@ mod pumping_water_tests {
         arc_spread_k.insert(up_b_idx, vec![vec![0.25, 0.75]]);
         let ctx = TemplateBuildCtx {
             arc_spread_k,
+            per_stage_mask: vec![vec![1..2]],
             ..fixtures.make_ctx()
         };
 
@@ -4899,6 +4922,7 @@ mod pumping_water_tests {
         arc_spread_k.insert(up_idx, vec![vec![0.5, 0.3]]); // sums to 0.8: violates conservation.
         let ctx = TemplateBuildCtx {
             arc_spread_k,
+            per_stage_mask: vec![vec![1..2]],
             ..fixtures.make_ctx()
         };
 
@@ -4982,6 +5006,7 @@ mod pumping_water_tests {
         arc_spread_chrono.insert(up_idx, vec![Some(resolution)]);
         let ctx = TemplateBuildCtx {
             arc_spread_chrono,
+            per_stage_mask: vec![vec![1..2]],
             ..fixtures.make_ctx()
         };
 
@@ -5078,6 +5103,7 @@ mod pumping_water_tests {
         arc_spread_k.insert(up_idx, vec![k]);
         let par_ctx = TemplateBuildCtx {
             arc_spread_k,
+            per_stage_mask: vec![vec![1..2]],
             ..par_fixtures.make_ctx()
         };
         let mut par_stage = chronological_stage(0, &[720.0]);
@@ -5101,6 +5127,7 @@ mod pumping_water_tests {
         arc_spread_chrono.insert(up_idx, vec![Some(resolution)]);
         let chr_ctx = TemplateBuildCtx {
             arc_spread_chrono,
+            per_stage_mask: vec![vec![1..2]],
             ..chr_fixtures.make_ctx()
         };
         let chr_stage = chronological_stage(0, &[720.0]);
@@ -5168,6 +5195,7 @@ mod pumping_water_tests {
         arc_spread_chrono.insert(up_idx, vec![Some(bad_resolution)]);
         let ctx = TemplateBuildCtx {
             arc_spread_chrono,
+            per_stage_mask: vec![vec![1..2]],
             ..fixtures.make_ctx()
         };
 
@@ -5221,6 +5249,7 @@ mod pumping_water_tests {
         arc_spread_chrono.insert(up_idx, vec![Some(bad_resolution)]);
         let ctx = TemplateBuildCtx {
             arc_spread_chrono,
+            per_stage_mask: vec![vec![1..2]],
             ..fixtures.make_ctx()
         };
 

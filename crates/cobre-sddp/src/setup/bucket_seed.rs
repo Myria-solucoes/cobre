@@ -260,7 +260,7 @@ mod tests {
         }
     }
 
-    /// AC #1: single arc, `k = [1/2, 1/2]`, one pre-study release `D^{-1}` ⇒
+    /// Single arc, `k = [1/2, 1/2]`, one pre-study release `D^{-1}` ⇒
     /// `b_1 = k_1 · D^{-1} = 1/2 · D^{-1}` (`D^{-1}` the period-duration-scaled
     /// volume, mirroring the memo's already-volume-scaled `D_i^t`).
     #[test]
@@ -288,7 +288,7 @@ mod tests {
         );
     }
 
-    /// Row 13 (entry arm): a mid-horizon upstream entrant (`entry_stage_id`
+    /// A mid-horizon upstream entrant (`entry_stage_id`
     /// mid-study) supplies zero-valued `past_defluences` -- the physically
     /// correct value, since the plant did not exist pre-study -- and every
     /// stage-0 bucket the arc feeds comes out zero. [`build_initial_bucket_state`]

@@ -26,7 +26,7 @@ use crate::resolved_parameters::ResolvedParameters;
 use super::super::test_support::{state_layout_for, zero_hydro_penalties};
 use super::{
     EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET, ResolvedTables,
-    StageLayout, TemplateBuildCtx,
+    StageLayout, TemplateBuildCtx, build_bucket_row_pos,
 };
 
 // ── Fixture helpers ───────────────────────────────────────────────────────
@@ -119,6 +119,7 @@ impl ZeroEntityFixtures {
             diversion_upstream: HashMap::new(),
             arc_spread_k: HashMap::new(),
             arc_spread_chrono: HashMap::new(),
+            per_stage_mask: Vec::new(),
             n_hydros: 0,
             n_thermals: 0,
             n_lines: 0,
@@ -351,6 +352,7 @@ impl TwoHydroFixtures {
             diversion_upstream: HashMap::new(),
             arc_spread_k: HashMap::new(),
             arc_spread_chrono: HashMap::new(),
+            per_stage_mask: Vec::new(),
             n_hydros: 2,
             n_thermals: 0,
             n_lines: 0,
@@ -677,6 +679,7 @@ impl FphaMixFixtures {
             diversion_upstream: HashMap::new(),
             arc_spread_k: HashMap::new(),
             arc_spread_chrono: HashMap::new(),
+            per_stage_mask: Vec::new(),
             n_hydros: 3,
             n_thermals: 0,
             n_lines: 0,
@@ -851,6 +854,7 @@ impl FillingMembershipFixtures {
             diversion_upstream: HashMap::new(),
             arc_spread_k: HashMap::new(),
             arc_spread_chrono: HashMap::new(),
+            per_stage_mask: Vec::new(),
             n_hydros: 2,
             n_thermals: 0,
             n_lines: 0,
@@ -1746,6 +1750,7 @@ impl AntFixturesWithNStages {
             diversion_upstream: HashMap::new(),
             arc_spread_k: HashMap::new(),
             arc_spread_chrono: HashMap::new(),
+            per_stage_mask: Vec::new(),
             n_hydros: 0,
             n_thermals: 0,
             n_lines: 0,
@@ -2013,6 +2018,7 @@ impl PumpingFixtures {
             diversion_upstream: HashMap::new(),
             arc_spread_k: HashMap::new(),
             arc_spread_chrono: HashMap::new(),
+            per_stage_mask: Vec::new(),
             n_hydros: 0,
             n_thermals: 0,
             n_lines: 0,
@@ -2578,4 +2584,54 @@ fn group2_accessors_return_post_equipment_cursor_when_no_hydros() {
             "{name} must equal post_equipment_row_start() when n_hydros == 0"
         );
     }
+}
+
+/// Consumption side of `setup::bucket_topology`'s
+/// `test_horizon_cap_drops_lag_targeting_past_last_stage` (that test pins the
+/// MASK — `per_stage_mask == [1..3, 1..2, 1..1]` for a depth-3 plant over 3
+/// stages; this pins that `build_bucket_row_pos` actually gates row emission
+/// from it): stage 0 already drops the deepest lag (cap = 2), stage 1 drops
+/// the two deepest (cap = 1), and stage 2 (the terminal stage, cap = 0) drops
+/// all three.
+#[test]
+fn build_bucket_row_pos_gates_fewer_rows_as_horizon_cap_shrinks() {
+    let column_order = vec![(0_usize, 1_usize), (0, 2), (0, 3)];
+    let per_stage_mask = vec![vec![1..3], vec![1..2], vec![1..1]];
+
+    let (pos_stage0, n_stage0) = build_bucket_row_pos(&column_order, &per_stage_mask, 0);
+    assert_eq!(
+        pos_stage0,
+        vec![Some(0), Some(1), None],
+        "stage 0: cap = 2, lags 1 and 2 keep a row, lag 3 does not"
+    );
+    assert_eq!(n_stage0, 2);
+
+    let (pos_stage1, n_stage1) = build_bucket_row_pos(&column_order, &per_stage_mask, 1);
+    assert_eq!(
+        pos_stage1,
+        vec![Some(0), None, None],
+        "stage 1: cap = 1, only lag 1 keeps a row"
+    );
+    assert_eq!(n_stage1, 1);
+
+    let (pos_stage2, n_stage2) = build_bucket_row_pos(&column_order, &per_stage_mask, 2);
+    assert_eq!(
+        pos_stage2,
+        vec![None, None, None],
+        "stage 2 (terminal): cap = 0, no lag keeps a row"
+    );
+    assert_eq!(
+        n_stage2, 0,
+        "the terminal stage emits zero bucket-definition rows"
+    );
+}
+
+/// `column_order.is_empty()` (B==0) short-circuits before indexing
+/// `per_stage_mask`, so an empty mask vec (a fixture that never builds one) is
+/// safe — the B==0 byte-identity anchor at the `build_bucket_row_pos` level.
+#[test]
+fn build_bucket_row_pos_b_zero_short_circuits_without_indexing_mask() {
+    let (pos, n) = build_bucket_row_pos(&[], &[], 0);
+    assert!(pos.is_empty());
+    assert_eq!(n, 0);
 }

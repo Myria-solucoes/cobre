@@ -168,22 +168,31 @@ declaration order of their hydros produce identical `column_order`,
 
 ### Terminal credit deferred
 
-The finite horizon's zero terminal value (`HorizonMode::Finite`, the only
-implemented mode) gives every bucket outgoing at the last stage zero value; no
-terminal credit routes that residual in-transit volume into downstream storage.
 `horizon_cap_active` caps each stage's active lag at `n_stages − 1 − t`, the
-deepest lag whose target stage still lands inside the horizon, so a bucket slot
-past the horizon is dropped by construction rather than retained and silently
-zeroed elsewhere — the residual mass has no receiving stage. This under-values
-end-of-horizon upstream release; it is a documented target-stage imprecision,
-not a bug to patch by capping `BucketTopology::per_plant_depth`/`column_order`
-too — those size from the global max over every anchor and must retain what the
-earliest stages need.
-Read: `setup/bucket_topology.rs` (`horizon_cap_active`). Pinned by the
-horizon-depth-cap regression (the last stage's active-lag cap reaches zero, so
-no slot targets past the horizon) and a sub-stage-delay case's last-stage
-release, whose dropped share surfaces as an uneven per-stage delivery split
-rather than a credited one.
+deepest lag whose target stage still lands inside the horizon;
+`build_bucket_row_pos` gates the per-stage LP fill on that cap, so a lag beyond
+it gets no bucket-definition row at that stage — dropped by construction, not
+retained and silently zeroed elsewhere. `fill_arc_release_block_entries` /
+`fill_arc_release_chrono_block_entries` drop the matching deposit share rather
+than write it to a stale row index, and `fill_bucket_columns` freezes the
+masked slot's outgoing column `[0, 0]` (the commissioning-dormant-column
+convention) so no row is needed to define it. The complementary guarantee is
+why dropping the row is safe: the finite horizon's zero terminal value
+(`HorizonMode::Finite`, the only implemented mode) makes a masked slot's cut
+coefficient structurally zero, so no solution loses value by never routing
+water into it — the residual mass has no receiving stage either way. This
+under-values end-of-horizon upstream release; it is a documented target-stage
+imprecision, not a bug to patch by capping
+`BucketTopology::per_plant_depth`/`column_order` too — those size from the
+global max over every anchor and must retain what the earliest stages need.
+Read: `setup/bucket_topology.rs` (`horizon_cap_active`), `lp/builder/layout.rs`
+(`build_bucket_row_pos`), `lp/builder/columns.rs` (`fill_bucket_columns`).
+Pinned by the horizon-depth-cap regression (the last stage's active-lag cap
+reaches zero, so no slot targets past the horizon), `build_bucket_row_pos`'s
+own consumption regression (that same cap sequence emitting correspondingly
+fewer rows), and a sub-stage-delay case's last-stage release, whose dropped
+share surfaces as an uneven per-stage delivery split rather than a credited
+one.
 
 ### Sub-contracts: mode-independent sizing, aggregation consistency, fixed delivery density
 

@@ -1682,3 +1682,539 @@ mod determinism {
             .collect()
     }
 }
+
+mod water_travel_time_no_arc_byte_identity {
+    //! With the water travel-time feature compiled in but no arc declared on any
+    //! hydro, `b_total == 0` and the `StateLayout`/LP/cuts/outputs must collapse
+    //! to the pre-bucket baseline byte-for-byte (`.claude/rules/sddp.md`, "Water
+    //! travel time"). This module makes that guarantee an explicit regression at
+    //! two scales:
+    //!
+    //! - [`synthetic_no_arc_state_layout_matches_pre_bucket_formula`] and
+    //!   [`k1_chronological_byte_identical_to_parallel_with_no_arc_declared`]
+    //!   build a tiny in-code system (no solver, no baseline) and check the
+    //!   `StateLayout` dimensions and the `K = 1` chronological/parallel
+    //!   templates directly.
+    //! - [`d06_state_layout_matches_pre_bucket_formula`] and
+    //!   `d06_parity_hash_matches_existing_baseline_{highs,clp}` exercise a real
+    //!   golden deterministic case (D06, which declares no arc): its
+    //!   `StateLayout` and its full train+simulate parity hash, reusing
+    //!   [`common::parity_hash::run_golden_case`](super::common::parity_hash::run_golden_case)
+    //!   against the EXISTING committed baseline — no new baseline is written.
+
+    use std::path::{Path, PathBuf};
+
+    use cobre_core::scenario::{InflowModel, LoadModel};
+    use cobre_core::temporal::{BlockMode, Stage};
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, DeficitSegment,
+        EntityId, HydroGenerationModel, HydroStageBounds, HydroStagePenalties, HydroStorage,
+        InitialConditions, LineStageBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
+        ResolvedPenalties, SystemBuilder, ThermalStageBounds,
+    };
+    use cobre_sddp::{
+        StudySetup,
+        hydro_models::prepare_hydro_models,
+        indexer::StateLayout,
+        setup::{StudyParams, prepare_stochastic},
+    };
+    use cobre_solver::StageTemplate;
+
+    use super::common::build_setup_in_code;
+    use super::common::builders::{
+        BusSpec, HydroSpec, StageSpec, ThermalSpec, make_bus, make_hydro, make_stage, make_thermal,
+    };
+
+    const N_STAGES: usize = 3;
+    const HYDRO_ID: i32 = 1;
+
+    fn zero_hydro_penalties() -> cobre_core::entities::hydro::HydroPenalties {
+        cobre_core::entities::hydro::HydroPenalties {
+            spillage_cost: 0.0,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 0.0,
+        }
+    }
+
+    fn zero_hydro_stage_penalties() -> HydroStagePenalties {
+        HydroStagePenalties {
+            spillage_cost: 0.0,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 0.0,
+        }
+    }
+
+    /// One bus, one standalone hydro (no `downstream_id`/`travel_time_hours` —
+    /// no arc declared) with a backup thermal, `N_STAGES` stages each carrying a
+    /// single default-length block (`StageSpec::default()`'s block: the `K = 1`
+    /// case under test).
+    fn build_system(block_mode: BlockMode) -> cobre_core::System {
+        use chrono::NaiveDate;
+
+        let bus = make_bus(
+            EntityId(2),
+            BusSpec {
+                name: "B1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 500.0,
+                }],
+                excess_cost: 0.0,
+            },
+        );
+
+        let hydro = make_hydro(
+            EntityId(HYDRO_ID),
+            HydroSpec {
+                name: "H1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                bus_id: EntityId(2),
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 500.0,
+                max_turbined_m3s: 100.0,
+                generation_model: HydroGenerationModel::ConstantProductivity,
+                specific_productivity_mw_per_m3s_per_m: Some(0.5),
+                max_generation_mw: 250.0,
+                penalties: zero_hydro_penalties(),
+                ..Default::default()
+            },
+        );
+
+        let stages: Vec<Stage> = (0..N_STAGES)
+            .map(|i| {
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: NaiveDate::from_ymd_opt(2024, (i % 12 + 1) as u32, 1).unwrap(),
+                        end_date: NaiveDate::from_ymd_opt(2024, ((i % 12 + 1) % 12 + 1) as u32, 1)
+                            .unwrap(),
+                        season_id: Some(0),
+                        block_mode,
+                        ..StageSpec::default()
+                    },
+                )
+            })
+            .collect();
+
+        let inflow_models: Vec<InflowModel> = (0..N_STAGES)
+            .map(|i| InflowModel {
+                hydro_id: EntityId(HYDRO_ID),
+                stage_id: i32::try_from(i).expect("stage index fits i32"),
+                mean_m3s: 60.0,
+                std_m3s: 0.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..N_STAGES)
+            .map(|i| LoadModel {
+                bus_id: EntityId(2),
+                stage_id: i32::try_from(i).expect("stage index fits i32"),
+                mean_mw: 120.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let default_hydro_bounds = || HydroStageBounds {
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 500.0,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            max_diversion_m3s: None,
+            filling_min_rate_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        };
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 400.0,
+                    cost_per_mwh: 100.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: zero_hydro_stage_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        let initial_conditions = InitialConditions {
+            storage: vec![HydroStorage {
+                hydro_id: EntityId(HYDRO_ID),
+                value_hm3: 200.0,
+            }],
+            filling_storage: vec![],
+            past_inflows: vec![],
+            past_anticipated_commitments: vec![],
+            recent_observations: vec![],
+            past_defluences: vec![],
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(vec![make_thermal(
+                EntityId(3),
+                ThermalSpec {
+                    name: "T_backup".to_string(),
+                    operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    bus_id: EntityId(2),
+                    cost_per_mwh: 100.0,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 400.0,
+                    anticipated_config: None,
+                    ..Default::default()
+                },
+            )])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .initial_conditions(initial_conditions)
+            .build()
+            .expect("build_system: valid no-arc single-block study")
+    }
+
+    fn build_config() -> cobre_io::Config {
+        use cobre_io::config::{
+            Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+            InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+            RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
+            TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+        };
+
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::None,
+                },
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                forward_passes: Some(1),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
+                stopping_mode: "any".to_string(),
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                scenario_source: None,
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    fn build_templates(block_mode: BlockMode) -> Vec<StageTemplate> {
+        let system = build_system(block_mode);
+        let config = build_config();
+        let setup = build_setup_in_code(system, &config);
+        setup.stage_data.stage_templates.templates.clone()
+    }
+
+    /// Field-by-field byte-identity check: CSC structure (`col_starts`,
+    /// `row_indices`, `values`), bounds, `objective`, scaling, and the
+    /// state/transfer/dual-relevant/hydro/PAR-order dimensions. Every `f64`
+    /// slice compares by `to_bits()` — true bit-identity, not approximate.
+    fn assert_templates_byte_identical(tpl_a: &StageTemplate, tpl_b: &StageTemplate, stage: usize) {
+        assert_eq!(tpl_a.num_cols, tpl_b.num_cols, "stage {stage}: num_cols");
+        assert_eq!(tpl_a.num_rows, tpl_b.num_rows, "stage {stage}: num_rows");
+        assert_eq!(tpl_a.num_nz, tpl_b.num_nz, "stage {stage}: num_nz");
+        assert_eq!(tpl_a.n_state, tpl_b.n_state, "stage {stage}: n_state");
+        assert_eq!(
+            tpl_a.n_transfer, tpl_b.n_transfer,
+            "stage {stage}: n_transfer"
+        );
+        assert_eq!(
+            tpl_a.n_dual_relevant, tpl_b.n_dual_relevant,
+            "stage {stage}: n_dual_relevant"
+        );
+        assert_eq!(tpl_a.n_hydro, tpl_b.n_hydro, "stage {stage}: n_hydro");
+        assert_eq!(
+            tpl_a.max_par_order, tpl_b.max_par_order,
+            "stage {stage}: max_par_order"
+        );
+
+        assert_eq!(
+            tpl_a.col_starts, tpl_b.col_starts,
+            "stage {stage}: col_starts"
+        );
+        assert_eq!(
+            tpl_a.row_indices, tpl_b.row_indices,
+            "stage {stage}: row_indices"
+        );
+
+        let bits = |xs: &[f64]| xs.iter().map(|v| v.to_bits()).collect::<Vec<u64>>();
+        assert_eq!(
+            bits(&tpl_a.values),
+            bits(&tpl_b.values),
+            "stage {stage}: values"
+        );
+        assert_eq!(
+            bits(&tpl_a.col_lower),
+            bits(&tpl_b.col_lower),
+            "stage {stage}: col_lower"
+        );
+        assert_eq!(
+            bits(&tpl_a.col_upper),
+            bits(&tpl_b.col_upper),
+            "stage {stage}: col_upper"
+        );
+        assert_eq!(
+            bits(&tpl_a.objective),
+            bits(&tpl_b.objective),
+            "stage {stage}: objective"
+        );
+        assert_eq!(
+            bits(&tpl_a.row_lower),
+            bits(&tpl_b.row_lower),
+            "stage {stage}: row_lower"
+        );
+        assert_eq!(
+            bits(&tpl_a.row_upper),
+            bits(&tpl_b.row_upper),
+            "stage {stage}: row_upper"
+        );
+        assert_eq!(
+            bits(&tpl_a.col_scale),
+            bits(&tpl_b.col_scale),
+            "stage {stage}: col_scale"
+        );
+        assert_eq!(
+            bits(&tpl_a.row_scale),
+            bits(&tpl_b.row_scale),
+            "stage {stage}: row_scale"
+        );
+    }
+
+    /// Shared pre-bucket-formula assertion: `b_total == 0`, `buckets_out` /
+    /// `buckets_in` / `bucket_column_order` empty, and `n_state` equal to the
+    /// pre-bucket `N*(1+L) + A*k_max` — computed from the layout's OWN public
+    /// dimensions (`hydro_count`, `max_par_order`, `n_anticipated`, `k_max`), not
+    /// a hand-picked literal, so the check holds for any no-arc case.
+    fn assert_no_arc_state_layout(state: &StateLayout) {
+        assert_eq!(state.b_total, 0, "no arc declared: b_total must be 0");
+        assert!(
+            state.buckets_out.is_empty(),
+            "buckets_out must be empty when b_total == 0"
+        );
+        assert!(
+            state.buckets_in.is_empty(),
+            "buckets_in must be empty when b_total == 0"
+        );
+        assert!(
+            state.bucket_column_order.is_empty(),
+            "bucket_column_order must be empty when b_total == 0"
+        );
+
+        let pre_bucket_n_state =
+            state.hydro_count * (1 + state.max_par_order) + state.n_anticipated * state.k_max;
+        assert_eq!(
+            state.n_state, pre_bucket_n_state,
+            "n_state must equal the pre-bucket formula N*(1+L) + A*k_max when B == 0"
+        );
+    }
+
+    /// Synthetic no-arc system: `StateLayout` collapses to the pre-bucket
+    /// formula with no `.sha256` baseline involved.
+    #[test]
+    fn synthetic_no_arc_state_layout_matches_pre_bucket_formula() {
+        let system = build_system(BlockMode::Parallel);
+        let config = build_config();
+        let setup = build_setup_in_code(system, &config);
+        assert_no_arc_state_layout(setup.stage_state());
+    }
+
+    /// `K = 1` chronological build collapses to the parallel LP with travel
+    /// time off: no in-transit arc is declared on the hydro, so — independent of
+    /// the chronological/parallel structural claim itself — every stage
+    /// template must be byte-identical between the two block modes.
+    #[test]
+    fn k1_chronological_byte_identical_to_parallel_with_no_arc_declared() {
+        let parallel = build_templates(BlockMode::Parallel);
+        let chronological = build_templates(BlockMode::Chronological);
+
+        assert_eq!(
+            parallel.len(),
+            chronological.len(),
+            "stage count must match between block modes"
+        );
+        for (stage, (p, c)) in parallel.iter().zip(chronological.iter()).enumerate() {
+            assert_templates_byte_identical(p, c, stage);
+        }
+    }
+
+    /// D06 (`d06-fpha-variable-head`) is one of the pinned golden parity-hash
+    /// cases (`common::parity_hash::case_dir`) and declares no travel-time arc;
+    /// the directory suffix here duplicates that private mapping because it is
+    /// not reachable from this module.
+    fn d06_case_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/deterministic/d06-fpha-variable-head")
+    }
+
+    /// Build D06's `StudySetup` (mirrors `common::parity_hash::run_golden_case`'s
+    /// construction) without training/simulating, so the caller can inspect the
+    /// built `StateLayout` directly.
+    fn build_d06_setup() -> StudySetup {
+        let dir = d06_case_dir();
+        let config_path = dir.join("config.json");
+
+        let config = cobre_io::parse_config(&config_path).expect("config must parse");
+        let system = cobre_io::load_case(&dir).expect("load_case must succeed");
+
+        let prep_source = config
+            .training_scenario_source(&config_path)
+            .expect("training_scenario_source must parse");
+        let pr = prepare_stochastic(system, &dir, &config, 42, &prep_source)
+            .expect("prepare_stochastic must succeed");
+        let system = pr.system;
+        let stochastic = pr.stochastic;
+
+        let hydro_models =
+            prepare_hydro_models(&system, &dir, false).expect("prepare_hydro_models must succeed");
+
+        let sentinel = Path::new("config.json");
+        let training_source = config
+            .training_scenario_source(sentinel)
+            .expect("training_scenario_source must parse");
+        let simulation_source = config
+            .simulation_scenario_source(sentinel)
+            .expect("simulation_scenario_source must parse");
+
+        let params =
+            StudyParams::from_config(&config).expect("StudyParams::from_config must succeed");
+        let construction = params.into_construction_config();
+
+        StudySetup::from_broadcast_params(
+            &system,
+            stochastic,
+            construction,
+            hydro_models,
+            &training_source,
+            &simulation_source,
+        )
+        .expect("StudySetup must build")
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    fn d06_state_layout_matches_pre_bucket_formula() {
+        let setup = build_d06_setup();
+        assert_no_arc_state_layout(setup.stage_state());
+    }
+
+    /// Reuses [`common::parity_hash::run_golden_case`](super::common::parity_hash::run_golden_case)
+    /// against the EXISTING committed D06 baseline — no new baseline is
+    /// written; a mismatch here means the no-arc build is no longer
+    /// byte-identical to the pre-feature baseline.
+    #[cfg(feature = "highs")]
+    #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    fn d06_parity_hash_matches_existing_baseline_highs() {
+        super::common::parity_hash::run_golden_case(
+            "parity_baselines",
+            "D06",
+            cobre_solver::highs::HighsSolver::new,
+        );
+    }
+
+    /// CLP counterpart of
+    /// [`d06_parity_hash_matches_existing_baseline_highs`] against the
+    /// EXISTING committed CLP baseline.
+    #[cfg(feature = "clp")]
+    #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    fn d06_parity_hash_matches_existing_baseline_clp() {
+        super::common::parity_hash::run_golden_case(
+            "parity_baselines_clp",
+            "D06",
+            cobre_solver::clp::ClpSolver::new,
+        );
+    }
+}

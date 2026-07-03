@@ -204,15 +204,16 @@ fn fill_chronological_water_rows(
 }
 
 /// Fill the travel-time bucket-definition equality row bounds (`0 == 0`), one
-/// row per declared `(plant, lag)` bucket. Dense and ALWAYS active regardless
-/// of stage (mirrors [`fill_anticipated_fishing_rows`]'s always-active dense
-/// offset, not the sparse `active_pos` offset
-/// [`fill_anticipated_state_out_def_rows`] uses) — every declared bucket keeps
-/// a definition row at every stage. Empty when `layout.state.b_total == 0`.
+/// row per (plant, lag) bucket REACHABLE at this stage
+/// (`layout.bucket_row_pos`, sparse like
+/// [`fill_anticipated_state_out_def_rows`]'s `active_pos` offset, not
+/// [`fill_anticipated_fishing_rows`]'s always-active dense one) — a lag beyond
+/// this stage's horizon-reachable cap gets no row. Empty when
+/// `layout.state.b_total == 0`.
 fn fill_bucket_definition_rows(layout: &StageLayout, row_lower: &mut [f64], row_upper: &mut [f64]) {
     let row_start = layout.row_bucket_definition_start();
-    for b in 0..layout.state.b_total {
-        let row = row_start + b;
+    for pos in layout.bucket_row_pos.iter().flatten() {
+        let row = row_start + pos;
         row_lower[row] = 0.0;
         row_upper[row] = 0.0;
     }

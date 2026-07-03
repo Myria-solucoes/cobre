@@ -35,6 +35,7 @@ pub(super) fn fill_stage_columns(
     };
 
     fill_storage_columns(ctx, stage, stage_idx, layout, b);
+    fill_bucket_columns(layout, b);
     fill_ar_lag_columns(layout, b);
     fill_anticipated_state_columns(layout, b);
     fill_theta_column(layout, b);
@@ -110,6 +111,27 @@ fn fill_storage_columns(
             let col = layout.block_storage_col(h_idx, k);
             bufs.col_lower[col] = storage_lower;
             bufs.col_upper[col] = hb.max_storage_hm3;
+        }
+    }
+}
+
+/// Travel-time bucket state columns.
+///
+/// Outgoing buckets default to `[0, INF)` (a physical volume); a lag beyond
+/// this stage's horizon-reachable mask gets no definition row
+/// (`entries::fill_bucket_definition_entries`), so its outgoing column is
+/// frozen `[0, 0]` here rather than left free — the same commissioning-
+/// dormant-column convention as NCS/thermal/line/station/contract, not a
+/// solver-dependent degenerate default. Incoming buckets stay at the open
+/// `[0, INF)` default: pinned every solve by `fill_col_state_patches`, dense
+/// over every bucket regardless of masking.
+fn fill_bucket_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
+    let state = layout.state;
+    for (b, pos) in layout.bucket_row_pos.iter().enumerate() {
+        if pos.is_none() {
+            let col = state.buckets_out.start + b;
+            bufs.col_lower[col] = 0.0;
+            bufs.col_upper[col] = 0.0;
         }
     }
 }
@@ -1209,6 +1231,7 @@ mod interior_storage_bound_tests {
                 diversion_upstream: HashMap::new(),
                 arc_spread_k: HashMap::new(),
                 arc_spread_chrono: HashMap::new(),
+                per_stage_mask: Vec::new(),
                 n_hydros: 1,
                 n_thermals: 0,
                 n_lines: 0,
@@ -1694,6 +1717,7 @@ mod diversion_bound_tests {
                 diversion_upstream: HashMap::new(),
                 arc_spread_k: HashMap::new(),
                 arc_spread_chrono: HashMap::new(),
+                per_stage_mask: Vec::new(),
                 n_hydros: 1,
                 n_thermals: 0,
                 n_lines: 0,
@@ -2066,6 +2090,7 @@ mod filling_phase_gating_tests {
                 diversion_upstream: HashMap::new(),
                 arc_spread_k: HashMap::new(),
                 arc_spread_chrono: HashMap::new(),
+                per_stage_mask: Vec::new(),
                 n_hydros: 1,
                 n_thermals: 0,
                 n_lines: 0,
@@ -2908,6 +2933,7 @@ mod anticipated_objective_tests {
                 diversion_upstream: HashMap::new(),
                 arc_spread_k: HashMap::new(),
                 arc_spread_chrono: HashMap::new(),
+                per_stage_mask: Vec::new(),
                 n_hydros: 0,
                 n_thermals: 2,
                 n_lines: 0,
@@ -3389,6 +3415,7 @@ mod block_family_slack_tests {
                 diversion_upstream: HashMap::new(),
                 arc_spread_k: HashMap::new(),
                 arc_spread_chrono: HashMap::new(),
+                per_stage_mask: Vec::new(),
                 n_hydros: N_HYDROS,
                 n_thermals: 0,
                 n_lines: 0,
@@ -3790,6 +3817,7 @@ mod evaporation_slack_objective_tests {
                 diversion_upstream: HashMap::new(),
                 arc_spread_k: HashMap::new(),
                 arc_spread_chrono: HashMap::new(),
+                per_stage_mask: Vec::new(),
                 n_hydros: 1,
                 n_thermals: 0,
                 n_lines: 0,
@@ -4108,6 +4136,7 @@ mod contract_column_tests {
                 diversion_upstream: HashMap::new(),
                 arc_spread_k: HashMap::new(),
                 arc_spread_chrono: HashMap::new(),
+                per_stage_mask: Vec::new(),
                 n_hydros: 0,
                 n_thermals: 0,
                 n_lines: 0,

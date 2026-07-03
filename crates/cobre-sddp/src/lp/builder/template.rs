@@ -1049,6 +1049,12 @@ fn build_template_build_ctx<'a>(
     // is O(declared arcs * n_stages), not called again per LP fill.
     let arc_spread_k = crate::setup::bucket_topology::build_arc_spread_k(system);
     let arc_spread_chrono = crate::setup::bucket_topology::build_arc_spread_chrono(system);
+    // Recomputes the bucket topology (pure function of `system`) rather than
+    // threading it in from the caller, mirroring `build_stage_templates`'s own
+    // recomputation for `StateLayout` — the accepted redundant-but-deterministic
+    // cost of a second call.
+    let per_stage_mask =
+        crate::setup::bucket_topology::build_bucket_topology(system).per_stage_mask;
 
     let ctx = TemplateBuildCtx {
         hydros,
@@ -1101,6 +1107,7 @@ fn build_template_build_ctx<'a>(
         filling_v_target,
         arc_spread_k,
         arc_spread_chrono,
+        per_stage_mask,
     };
 
     (ctx, load_bus_indices, diversion_upstream_output)
