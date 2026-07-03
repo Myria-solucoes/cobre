@@ -10,7 +10,11 @@ use crate::error::CliError;
 
 use super::RunContext;
 
-/// Load a policy checkpoint from disk and optionally validate its compatibility.
+/// Load a policy checkpoint from disk and validate its compatibility.
+///
+/// Validation is opt-in via `config.policy.validate_compatibility`, except for
+/// a bucket study (`b_total > 0`), which forces it on regardless of the flag —
+/// see [`cobre_sddp::validate_policy_compatibility_effective`].
 fn load_and_validate_checkpoint(
     policy_dir: &Path,
     system: &System,
@@ -23,20 +27,22 @@ fn load_and_validate_checkpoint(
         }
     })?;
 
-    if let Some(config) = root_config
-        && config.policy.validate_compatibility
-    {
-        // Rationale: the cast cannot truncate — `n_stages` is the validated study
-        // horizon (a `u16`-scale stage count), far below `u32::MAX`.
-        #[allow(clippy::cast_possible_truncation)]
-        let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
-        let state_dim =
-            u32::try_from(setup.fcf.state_dimension).map_err(|e| CliError::Internal {
-                message: format!("state_dimension overflows u32: {e}"),
-            })?;
-        cobre_sddp::validate_policy_compatibility(&checkpoint.metadata, state_dim, n_stages)
-            .map_err(CliError::from)?;
-    }
+    // Rationale: the cast cannot truncate — `n_stages` is the validated study
+    // horizon (a `u16`-scale stage count), far below `u32::MAX`.
+    #[allow(clippy::cast_possible_truncation)]
+    let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
+    let state_dim = u32::try_from(setup.fcf.state_dimension).map_err(|e| CliError::Internal {
+        message: format!("state_dimension overflows u32: {e}"),
+    })?;
+    let configured_validate = root_config.is_some_and(|c| c.policy.validate_compatibility);
+    cobre_sddp::validate_policy_compatibility_effective(
+        &checkpoint.metadata,
+        state_dim,
+        n_stages,
+        configured_validate,
+        setup.stage_state().b_total,
+    )
+    .map_err(CliError::from)?;
 
     Ok(checkpoint)
 }

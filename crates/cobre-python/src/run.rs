@@ -925,14 +925,18 @@ pub(crate) fn apply_training_policy_mode(
         let checkpoint = cobre_io::output::policy::read_policy_checkpoint(&policy_dir)
             .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
 
-        if config.policy.validate_compatibility {
-            #[allow(clippy::cast_possible_truncation)]
-            let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
-            #[allow(clippy::cast_possible_truncation)]
-            let state_dim = setup.fcf.state_dimension as u32;
-            cobre_sddp::validate_policy_compatibility(&checkpoint.metadata, state_dim, n_stages)
-                .map_err(|e| format!("policy validation error: {e}"))?;
-        }
+        #[allow(clippy::cast_possible_truncation)]
+        let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let state_dim = setup.fcf.state_dimension as u32;
+        cobre_sddp::validate_policy_compatibility_effective(
+            &checkpoint.metadata,
+            state_dim,
+            n_stages,
+            config.policy.validate_compatibility,
+            setup.stage_state().b_total,
+        )
+        .map_err(|e| format!("policy validation error: {e}"))?;
 
         // Reserve one extra slot for cuts added in the final iteration.
         let warm_fcf = cobre_sddp::FutureCostFunction::new_with_warm_start(
@@ -966,14 +970,18 @@ pub(crate) fn apply_training_policy_mode(
         let checkpoint = cobre_io::output::policy::read_policy_checkpoint(&policy_dir)
             .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
 
-        if config.policy.validate_compatibility {
-            #[allow(clippy::cast_possible_truncation)]
-            let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
-            #[allow(clippy::cast_possible_truncation)]
-            let state_dim = setup.fcf.state_dimension as u32;
-            cobre_sddp::validate_policy_compatibility(&checkpoint.metadata, state_dim, n_stages)
-                .map_err(|e| format!("policy validation error: {e}"))?;
-        }
+        #[allow(clippy::cast_possible_truncation)]
+        let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let state_dim = setup.fcf.state_dimension as u32;
+        cobre_sddp::validate_policy_compatibility_effective(
+            &checkpoint.metadata,
+            state_dim,
+            n_stages,
+            config.policy.validate_compatibility,
+            setup.stage_state().b_total,
+        )
+        .map_err(|e| format!("policy validation error: {e}"))?;
 
         let completed = u64::from(checkpoint.metadata.completed_iterations);
 
@@ -1063,14 +1071,18 @@ pub(crate) fn reconstruct_policy_from_checkpoint(
     let checkpoint = cobre_io::output::policy::read_policy_checkpoint(policy_dir)
         .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
 
-    if config.policy.validate_compatibility {
-        #[allow(clippy::cast_possible_truncation)]
-        let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
-        #[allow(clippy::cast_possible_truncation)]
-        let state_dim = setup.fcf.state_dimension as u32;
-        cobre_sddp::validate_policy_compatibility(&checkpoint.metadata, state_dim, n_stages)
-            .map_err(|e| format!("policy validation error: {e}"))?;
-    }
+    #[allow(clippy::cast_possible_truncation)]
+    let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let state_dim = setup.fcf.state_dimension as u32;
+    cobre_sddp::validate_policy_compatibility_effective(
+        &checkpoint.metadata,
+        state_dim,
+        n_stages,
+        config.policy.validate_compatibility,
+        setup.stage_state().b_total,
+    )
+    .map_err(|e| format!("policy validation error: {e}"))?;
 
     let loaded_fcf = cobre_sddp::FutureCostFunction::from_deserialized(&checkpoint.stage_cuts)
         .map_err(|e| format!("FCF reconstruction error: {e}"))?;

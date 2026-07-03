@@ -1048,6 +1048,7 @@ fn build_template_build_ctx<'a>(
     // Resolved once here (SETUP time, never per stage-solve): `resolve_spread`
     // is O(declared arcs * n_stages), not called again per LP fill.
     let arc_spread_k = crate::setup::bucket_topology::build_arc_spread_k(system);
+    let arc_spread_chrono = crate::setup::bucket_topology::build_arc_spread_chrono(system);
 
     let ctx = TemplateBuildCtx {
         hydros,
@@ -1099,6 +1100,7 @@ fn build_template_build_ctx<'a>(
         total_hours_per_stage,
         filling_v_target,
         arc_spread_k,
+        arc_spread_chrono,
     };
 
     (ctx, load_bus_indices, diversion_upstream_output)

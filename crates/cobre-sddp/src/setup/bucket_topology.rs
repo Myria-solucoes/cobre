@@ -11,9 +11,9 @@
 
 use std::{collections::HashMap, ops::Range};
 
-use cobre_core::{EntityId, System, window_period_overlaps};
+use cobre_core::{BlockMode, EntityId, System, window_period_overlaps};
 
-use crate::temporal_lag::resolve_spread;
+use crate::temporal_lag::{SpreadResolution, resolve_spread};
 
 /// Canonical bucket ordering, global bucket count, and per-stage reachability
 /// mask, stored on [`super::StudySetup`].
@@ -106,6 +106,71 @@ fn ic_only_depth(t_v: f64, study_durations: &[f64]) -> usize {
     window_period_overlaps(0.0, t_v, study_durations).len()
 }
 
+/// Caps a stage's active lag at `n_stages − stage − 1`, the deepest lag whose
+/// target stage `stage + lag` still lands inside `[0, n_stages)` — the same
+/// horizon bound `is_anticipated_decision_active` enforces as
+/// `stage_idx + K_i < n_stages`. A lag beyond the cap has no receiving stage;
+/// [`build_bucket_topology`] drops it from the mask here rather than
+/// retaining and zeroing it downstream, the target-stage imprecision the
+/// deferred terminal bucket credit (`V_eff`) would otherwise absorb under the
+/// zero-terminal-value horizon [`crate::horizon_mode::HorizonMode::Finite`]
+/// implements. Never caps [`BucketTopology::per_plant_depth`] or
+/// [`BucketTopology::column_order`], which size from the global max over
+/// every stage anchor and must retain what the earliest stages need.
+fn horizon_cap_active(active: usize, stage: usize, n_stages: usize) -> usize {
+    active.min(n_stages - 1 - stage)
+}
+
+/// Pre-study (`id < 0`) period durations in hours, most-recent-first (index 0
+/// = the period immediately preceding stage 0) — the `past_inflows` /
+/// `past_defluences` index convention, the reverse of the canonical
+/// ascending-`id` order. Pre-study stages carry no blocks; duration comes
+/// from the calendar dates.
+// Rationale: pre-study period lengths are on the order of years, far under
+// f64's exact-integer range; a checked conversion buys nothing.
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn pre_study_period_durations_desc(system: &System) -> Vec<f64> {
+    let mut pre_study: Vec<f64> = system
+        .stages()
+        .iter()
+        .filter(|s| s.id < 0)
+        .map(|s| (s.end_date - s.start_date).num_hours() as f64)
+        .collect();
+    pre_study.reverse();
+    pre_study
+}
+
+/// The number of most-recent pre-study periods a declared arc's history must
+/// supply so `[start_0 - t_v, start_0)` is fully covered — floored at 1 so an
+/// empty pre-study calendar cannot vacuously report zero. Mirrors `cobre-io`'s
+/// `validate_travel_time` row-5 gate; the bucket seed's source-selection
+/// re-derives the same sufficiency check that validation already enforced.
+pub(crate) fn required_history_periods(t_v: f64, pre_study_desc: &[f64]) -> usize {
+    window_period_overlaps(0.0, t_v, pre_study_desc)
+        .len()
+        .max(1)
+}
+
+/// Fraction of pre-study period `m`'s release — spanning
+/// `[t_v - cumulative_before - period_duration, t_v - cumulative_before)` in
+/// real time before stage 0 — landing in study stage `d` (0-indexed, at
+/// `result[d]`). The IC-anchor analogue of [`resolve_spread`]'s `k`: resolved
+/// directly against the forward calendar rather than a concatenated local one
+/// anchored at period `m` — equivalent, since [`window_period_overlaps`]
+/// depends only on relative offsets, never the absolute origin.
+pub(crate) fn ic_anchor_k(
+    t_v: f64,
+    cumulative_before: f64,
+    period_duration: f64,
+    study_durations: &[f64],
+) -> Vec<f64> {
+    let window_start = t_v - cumulative_before - period_duration;
+    window_period_overlaps(window_start, period_duration, study_durations)
+        .into_iter()
+        .map(|overlap| overlap / period_duration)
+        .collect()
+}
+
 /// Build the [`BucketTopology`] from the resolved system: group declared arcs
 /// per downstream plant (confluence aggregates every contributing arc into
 /// one block of depth `max_i L_i`, never one block per arc), size each
@@ -151,7 +216,12 @@ pub(crate) fn build_bucket_topology(system: &System) -> BucketTopology {
             // net deposit at this stage still carries mass through the ring
             // shift and must stay in the active range.
             let active = own_release_by_stage[stage].max(ic_depth.saturating_sub(stage));
-            mask_row.push(1..(active + 1));
+            let capped = horizon_cap_active(active, stage, n_stages);
+            debug_assert!(
+                stage + capped < n_stages,
+                "capped active lag {capped} at stage {stage} must not target n_stages={n_stages} or beyond"
+            );
+            mask_row.push(1..(capped + 1));
         }
     }
 
@@ -197,6 +267,50 @@ pub(crate) fn build_arc_spread_k(system: &System) -> HashMap<usize, Vec<Vec<f64>
     }
 
     arc_spread_k
+}
+
+/// Per-declared-arc, per-CHRONOLOGICAL-stage full [`SpreadResolution`] (`chi`,
+/// `kappa`, `delivery`, plus the same `k`/`depth` [`build_arc_spread_k`]
+/// stores), resolved with the sending stage's own block partition
+/// (`resolve_spread(.., Some(blocks))`). Keyed like `build_arc_spread_k`;
+/// `by_stage[stage_idx]` is `None` for a study stage whose own `block_mode` is
+/// `Parallel` (no block-resolved routing to compute there — the parallel fill
+/// reads `build_arc_spread_k` instead).
+pub(crate) fn build_arc_spread_chrono(
+    system: &System,
+) -> HashMap<usize, Vec<Option<SpreadResolution>>> {
+    let study_durations = study_stage_durations(system);
+    let n_stages = study_durations.len();
+    let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
+    debug_assert_eq!(study_stages.len(), n_stages);
+
+    let mut arc_spread_chrono = HashMap::new();
+
+    for (u_idx, hydro) in system.hydros().iter().enumerate() {
+        let Some(t_v) = hydro.travel_time_hours.filter(|&t| t > 0.0) else {
+            continue;
+        };
+        if hydro.downstream_id.is_none() {
+            continue;
+        }
+        let extended = extend_for_resolution(&study_durations, t_v);
+        let by_stage: Vec<Option<SpreadResolution>> = (0..n_stages)
+            .map(|stage_idx| {
+                if study_stages[stage_idx].block_mode != BlockMode::Chronological {
+                    return None;
+                }
+                let blocks: Vec<f64> = study_stages[stage_idx]
+                    .blocks
+                    .iter()
+                    .map(|b| b.duration_hours)
+                    .collect();
+                Some(resolve_spread(t_v, stage_idx, &extended, Some(&blocks)))
+            })
+            .collect();
+        arc_spread_chrono.insert(u_idx, by_stage);
+    }
+
+    arc_spread_chrono
 }
 
 #[cfg(test)]
@@ -290,6 +404,13 @@ mod tests {
                 branching_factor: 1,
                 noise_method: NoiseMethod::Saa,
             },
+        }
+    }
+
+    fn chronological_stage_with_durations(id: i32, block_hours: &[f64]) -> Stage {
+        Stage {
+            block_mode: BlockMode::Chronological,
+            ..stage_with_durations(id, block_hours)
         }
     }
 
@@ -427,6 +548,65 @@ mod tests {
     }
 
     #[test]
+    fn test_horizon_cap_drops_lag_targeting_past_last_stage() {
+        let downstream = hydro(1, None, None);
+        let upstream = hydro(2, Some(1), Some(72.0));
+        let durations = [24.0, 24.0, 24.0];
+        let system = build_system(
+            vec![downstream, upstream],
+            stages_with_durations(&durations),
+        );
+
+        let extended = extend_for_resolution(&durations, 72.0);
+        let uncapped_active_by_stage: Vec<usize> = (0..durations.len())
+            .map(|t| in_study_depth(72.0, t, &extended))
+            .collect();
+        let ic_depth = ic_only_depth(72.0, &durations);
+        assert_eq!(
+            uncapped_active_by_stage,
+            vec![3, 3, 3],
+            "every anchor's own-release depth must reach 3 stages ahead, past the 3-stage horizon"
+        );
+        assert_eq!(ic_depth, 3, "the IC anchor must also reach 3 stages ahead");
+
+        let topology = build_bucket_topology(&system);
+
+        assert_eq!(
+            topology.per_plant_depth,
+            vec![3],
+            "global depth sizing is unaffected by the per-stage horizon cap"
+        );
+        assert_eq!(topology.b_total, 3);
+        assert_eq!(topology.column_order, vec![(0, 1), (0, 2), (0, 3)]);
+
+        assert_eq!(
+            topology.per_stage_mask[0],
+            vec![1..3],
+            "cap = 3 - 1 - 0 = 2"
+        );
+        assert_eq!(
+            topology.per_stage_mask[1],
+            vec![1..2],
+            "cap = 3 - 1 - 1 = 1"
+        );
+        assert_eq!(
+            topology.per_stage_mask[2],
+            vec![1..1],
+            "cap = 3 - 1 - 2 = 0: the last stage targets nothing past T"
+        );
+
+        for (stage, mask_row) in topology.per_stage_mask.iter().enumerate() {
+            for range in mask_row {
+                let max_lag = range.end.saturating_sub(1);
+                assert!(
+                    stage + max_lag < durations.len(),
+                    "stage {stage} lag {max_lag} must not target a stage at or past n_stages"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_column_order_is_declaration_order_invariant() {
         let downstream = hydro(1, None, None);
         let upstream = hydro(2, Some(1), Some(48.0));
@@ -482,5 +662,45 @@ mod tests {
             max_depth, topology.per_plant_depth[0],
             "the deepest in-study k vector must match the topology's per-plant depth"
         );
+    }
+
+    #[test]
+    fn test_build_arc_spread_chrono_gates_on_stage_block_mode() {
+        let downstream = hydro(1, None, None);
+        let upstream = hydro(2, Some(1), Some(250.0));
+        let system = build_system(
+            vec![downstream, upstream],
+            vec![
+                chronological_stage_with_durations(0, &[240.0, 240.0, 240.0]),
+                stage_with_durations(1, &[720.0]),
+            ],
+        );
+
+        let arc_spread_chrono = build_arc_spread_chrono(&system);
+        let upstream_idx = 1;
+        let by_stage = arc_spread_chrono
+            .get(&upstream_idx)
+            .expect("declared arc must have an entry");
+
+        assert!(
+            by_stage[0].is_some(),
+            "chronological stage 0 must resolve chi/kappa/delivery"
+        );
+        assert!(
+            by_stage[1].is_none(),
+            "parallel stage 1 has no block-resolved routing to compute"
+        );
+
+        let resolution = by_stage[0].as_ref().expect("checked above");
+        assert_eq!(resolution.kappa.len(), 3, "one kappa row per block");
+        assert_eq!(resolution.chi.len(), 3, "one chi row per block");
+        for (b, chi_b) in resolution.chi.iter().enumerate() {
+            let kappa_sum: f64 = resolution.kappa[b].iter().sum();
+            let chi_cross: f64 = chi_b[1..].iter().sum();
+            assert!(
+                (kappa_sum + chi_cross - 1.0).abs() < 1e-9,
+                "block {b}: per-column conservation must hold"
+            );
+        }
     }
 }

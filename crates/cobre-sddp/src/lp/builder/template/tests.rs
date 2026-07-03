@@ -1560,6 +1560,7 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         total_hours_per_stage: ctx_a.total_hours_per_stage.clone(),
         filling_v_target: ctx_a.filling_v_target.clone(),
         arc_spread_k: ctx_a.arc_spread_k.clone(),
+        arc_spread_chrono: ctx_a.arc_spread_chrono.clone(),
     };
 
     // Sanity: ctx_b really has the swapped ordering.

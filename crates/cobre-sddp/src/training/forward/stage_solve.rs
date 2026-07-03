@@ -357,6 +357,11 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         state,
         &anticipated_decision,
     );
+    crate::stage_solve::debug_assert_bucket_copy_gap_intact(
+        &ws.current_state,
+        &unscaled_primal,
+        state,
+    );
     // Last read of `unscaled_primal`; restore it so the next stage reuses the
     // warmed allocation.
     ws.scratch.unscaled_primal = unscaled_primal;

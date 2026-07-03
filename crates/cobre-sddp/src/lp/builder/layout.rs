@@ -13,6 +13,7 @@ use crate::hydro_models::{
     EvaporationModel, EvaporationModelSet, ProductionModelSet, ResolvedProductionModel,
 };
 use crate::indexer::{BlockGrid, EvaporationIndices, StateLayout};
+use crate::temporal_lag::SpreadResolution;
 
 use super::{
     EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET,
@@ -136,11 +137,17 @@ pub(crate) struct TemplateBuildCtx<'a> {
     /// [`build_filling_v_target`](super::template::build_filling_v_target).
     pub(crate) filling_v_target: BTreeMap<(usize, i32), f64>,
     /// Per-declared-arc resolved stage-clock weights, keyed by the arc's
-    /// upstream hydro system index (parallel-mode fill only; the chronological
-    /// block-resolved factors are ticket-014's concern). Absent for an
+    /// upstream hydro system index (parallel-mode fill; [`Self::arc_spread_chrono`]
+    /// carries the chronological block-resolved factors). Absent for an
     /// undeclared arc — the fill's `k_0 = 1`, no-deposit branch. See
     /// [`build_arc_spread_k`](crate::setup::bucket_topology::build_arc_spread_k).
     pub(crate) arc_spread_k: HashMap<usize, Vec<Vec<f64>>>,
+    /// Per-declared-arc, per-chronological-stage full [`SpreadResolution`]
+    /// (`chi`/`kappa`/`delivery`), keyed like [`Self::arc_spread_k`].
+    /// `by_stage[stage_idx]` is `None` when that study stage's own `block_mode`
+    /// is `Parallel` (the parallel fill reads [`Self::arc_spread_k`] instead).
+    /// See [`build_arc_spread_chrono`](crate::setup::bucket_topology::build_arc_spread_chrono).
+    pub(crate) arc_spread_chrono: HashMap<usize, Vec<Option<SpreadResolution>>>,
 }
 
 /// Column/row offsets for one stage's anticipated-thermal layout.

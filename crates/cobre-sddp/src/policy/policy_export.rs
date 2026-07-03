@@ -22,11 +22,13 @@ const ENTITY_TYPE_HYDRO_STORAGE: u8 = 0;
 const ENTITY_TYPE_HYDRO_INFLOW_LAG: u8 = 1;
 /// `EntityType::AnticipatedThermalState` discriminant from `schemas/policy.fbs`.
 const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
+/// `EntityType::HydroTransitBucket` discriminant from `schemas/policy.fbs`.
+const ENTITY_TYPE_HYDRO_TRANSIT_BUCKET: u8 = 3;
 
 /// Build the per-slot entity-identity manifest for one stage's cut pool: one
 /// [`EntitySlot`] per enabled cut-state dimension of `projection`.
 ///
-/// Slots are emitted in `projection`'s storage → lag → anticipated order, so slot
+/// Slots are emitted in `projection`'s storage → lag → buckets → anticipated order, so slot
 /// `j` describes the entity owning positional coefficient `j` — the order a
 /// consumer matches the manifest against the cut coefficients. Each slot is
 /// classified by the global [`StateLayout`] region containing its incoming-state
@@ -85,10 +87,26 @@ pub fn build_stage_entity_manifest(
                     stage_id,
                 ),
             }
+        } else if global_layout.buckets_in.contains(&col) {
+            let b = col - global_layout.buckets_in.start;
+            let (plant_idx, lag) = global_layout.bucket_column_order[b];
+            let hydro = &hydros[plant_idx];
+            EntitySlot {
+                entity_type: ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
+                entity_id: hydro.id.0,
+                subindex: lag as u32,
+                was_active: hydro_operating_active(
+                    hydro.filling.as_ref(),
+                    hydro.entry_stage_id,
+                    hydro.exit_stage_id,
+                    stage_id,
+                ),
+            }
         } else {
             debug_assert!(
                 global_layout.anticipated_state.contains(&col),
-                "incoming column {col} must lie in storage_in, inflow_lags, or anticipated_state"
+                "incoming column {col} must lie in storage_in, inflow_lags, buckets_in, or \
+                 anticipated_state"
             );
             let offset = col - global_layout.anticipated_state.start;
             let plant_pos = offset % n_anticipated;
@@ -286,7 +304,7 @@ pub fn build_stage_states_payloads<'a>(
 mod tests {
     use super::{
         ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG,
-        ENTITY_TYPE_HYDRO_STORAGE, build_stage_entity_manifest,
+        ENTITY_TYPE_HYDRO_STORAGE, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, build_stage_entity_manifest,
     };
     use crate::indexer::{CutStateProjection, StateLayout};
     use crate::lp_builder::hydro_operating_active;
@@ -535,6 +553,52 @@ mod tests {
         );
         assert_eq!(manifest[7].entity_id, 1);
         assert_eq!(manifest[7].subindex, 1);
+    }
+
+    /// Bucket block classification (`N=2, L=2, B=2, A=1, k_max=2`): the two
+    /// travel-time bucket slots sit between the lag block and the anticipated block,
+    /// each carrying `entity_type == HydroTransitBucket`, `entity_id ==` the
+    /// downstream hydro id (`bucket_column_order[b].0` into `system.hydros()`), and
+    /// `subindex ==` the maturity lag `d` (`bucket_column_order[b].1`).
+    #[test]
+    fn bucket_slots_classify_as_transit_bucket_with_downstream_id_and_lag() {
+        let system = system_2h_1ant((None, None), (None, None));
+        let global =
+            test_support::state_layout_with_buckets(2, 2, 2, vec![(0, 1), (1, 2)], 1, 2, vec![2]);
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
+
+        assert_eq!(manifest.len(), projection.n_state());
+        assert_eq!(
+            manifest.len(),
+            10,
+            "2 storage + 4 lag + 2 buckets + 2 anticipated"
+        );
+
+        for (slot, (expected_id, expected_lag)) in [(6, (1, 1)), (7, (2, 2))] {
+            assert_eq!(
+                manifest[slot].entity_type, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
+                "slot {slot} must be a transit-bucket slot"
+            );
+            assert_eq!(
+                manifest[slot].entity_id, expected_id,
+                "slot {slot} downstream hydro id"
+            );
+            assert_eq!(
+                manifest[slot].subindex, expected_lag,
+                "slot {slot} maturity lag d"
+            );
+        }
+
+        assert_eq!(
+            manifest[5].entity_type, ENTITY_TYPE_HYDRO_INFLOW_LAG,
+            "buckets must follow the lag block"
+        );
+        assert_eq!(
+            manifest[8].entity_type, ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+            "buckets must precede the anticipated block"
+        );
     }
 
     /// Storage-only projection (`inflow_lags: false`): the lag block is dropped, so

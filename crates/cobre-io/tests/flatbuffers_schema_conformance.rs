@@ -168,6 +168,7 @@ fn entity_type_name(byte: u8) -> &'static str {
         0 => "HydroStorage",
         1 => "HydroInflowLag",
         2 => "AnticipatedThermalState",
+        3 => "HydroTransitBucket",
         other => panic!("unexpected entity_type byte {other}"),
     }
 }
@@ -205,7 +206,7 @@ fn assert_manifest_json_matches(manifest_json: &Value, expected: &[EntitySlot]) 
     }
 }
 
-/// Manifest fixture exercising all three `entity_type` bytes and a `-1` id, so the
+/// Manifest fixture exercising every `entity_type` byte and a `-1` id, so the
 /// writer→flatc and flatc→reader paths cover every field including a signed id.
 fn conformance_manifest() -> Vec<EntitySlot> {
     vec![
@@ -220,6 +221,12 @@ fn conformance_manifest() -> Vec<EntitySlot> {
             entity_id: -1,
             subindex: 3,
             was_active: false,
+        },
+        EntitySlot {
+            entity_type: 3,
+            entity_id: 42,
+            subindex: 2,
+            was_active: true,
         },
     ]
 }
@@ -310,7 +317,8 @@ fn stage_cuts_reader_consumes_flatc_buffer() {
         ],
         "entity_manifest": [
             {"entity_type": "AnticipatedThermalState", "entity_id": 7, "subindex": 1, "was_active": true},
-            {"entity_type": "HydroInflowLag", "entity_id": -1, "subindex": 3, "was_active": false}
+            {"entity_type": "HydroInflowLag", "entity_id": -1, "subindex": 3, "was_active": false},
+            {"entity_type": "HydroTransitBucket", "entity_id": 42, "subindex": 2, "was_active": true}
         ]
     });
     let buf = flatc_encode(&document, "StageCuts");
@@ -333,7 +341,7 @@ fn stage_cuts_reader_consumes_flatc_buffer() {
     assert_eq!(cut.coefficients, vec![0.1, 0.2, 0.3]);
     assert!(cut.is_active);
 
-    assert_eq!(result.entity_manifest.len(), 2);
+    assert_eq!(result.entity_manifest.len(), 3);
     let m0 = &result.entity_manifest[0];
     assert_eq!(m0.entity_type, 2, "AnticipatedThermalState byte");
     assert_eq!(m0.entity_id, 7);
@@ -344,6 +352,11 @@ fn stage_cuts_reader_consumes_flatc_buffer() {
     assert_eq!(m1.entity_id, -1);
     assert_eq!(m1.subindex, 3);
     assert!(!m1.was_active);
+    let m2 = &result.entity_manifest[2];
+    assert_eq!(m2.entity_type, 3, "HydroTransitBucket byte");
+    assert_eq!(m2.entity_id, 42);
+    assert_eq!(m2.subindex, 2);
+    assert!(m2.was_active);
 }
 
 /// Reduced-dimension manifest: storage-only (two `HydroStorage` slots, zero lag

@@ -631,6 +631,11 @@ fn solve_simulation_stage<S: SolverInterface>(
         state,
         &geometry.anticipated_decision,
     );
+    crate::stage_solve::debug_assert_bucket_copy_gap_intact(
+        &ws.current_state,
+        unscaled_primal_ref,
+        state,
+    );
 
     Ok((immediate_cost, result))
 }

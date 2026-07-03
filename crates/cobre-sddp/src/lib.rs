@@ -134,7 +134,7 @@ pub use lp::builder::{StageTemplates, build_stage_templates};
 // ── policy_load ───────────────────────────────────────────────────────────────
 pub use policy::policy_load::{
     build_basis_cache_from_checkpoint, inject_boundary_cuts, load_boundary_cuts,
-    validate_policy_compatibility,
+    validate_policy_compatibility, validate_policy_compatibility_effective,
 };
 // ── provenance ────────────────────────────────────────────────────────────────
 pub use policy::provenance::{

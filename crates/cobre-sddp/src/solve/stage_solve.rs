@@ -8,6 +8,7 @@ use crate::{
     context::StageContext,
     cut::pool::CutPool,
     error::SddpError,
+    indexer::StateLayout,
     workspace::{CapturedBasis, SolverWorkspace},
 };
 
@@ -179,6 +180,34 @@ pub(crate) fn fill_unscaled_dual(out: &mut Vec<f64>, scaled: &[f64], row_scale: 
             d * scale
         }));
     }
+}
+
+/// Assert the bucket state rode the state-assembly plain copy untouched.
+///
+/// The forward/simulation assembly plain-copies `unscaled_primal[..n_state]`
+/// into the advanced state, then overwrites only `inflow_lags` and
+/// `anticipated_state` in place; `buckets_out` sits in the shift-gap those
+/// overwrites never reach because the outgoing bucket column equals its
+/// state-vector index (the `storage` identity convention). Call after both
+/// overwrites, before the caller moves `unscaled_primal` back into scratch.
+// Rationale: this checks a verbatim copy invariant (`extend_from_slice`), not
+// a numerical result, so exact equality is the correct comparison — a
+// tolerance would mask the one bug this guards against (an overwrite landing
+// on the bucket range).
+#[allow(clippy::float_cmp)]
+pub(crate) fn debug_assert_bucket_copy_gap_intact(
+    assembled_state: &[f64],
+    unscaled_primal: &[f64],
+    layout: &StateLayout,
+) {
+    debug_assert!(
+        layout
+            .buckets_out
+            .clone()
+            .all(|j| assembled_state[j] == unscaled_primal[j]),
+        "bucket state must equal the LP primal's buckets_out column: the \
+         lag/anticipated overwrites must never touch the bucket shift-gap"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -503,5 +532,43 @@ mod tests {
                  got {other:?}"
             ),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 7: bucket copy-gap assertion helper
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn debug_assert_bucket_copy_gap_intact_passes_when_bucket_matches_primal() {
+        let layout = crate::test_support::state_layout_with_buckets(
+            0,
+            0,
+            2,
+            vec![(0, 0), (0, 1)],
+            0,
+            0,
+            vec![],
+        );
+        let primal = vec![7.0, 11.0];
+        let assembled = primal.clone();
+        super::debug_assert_bucket_copy_gap_intact(&assembled, &primal, &layout);
+    }
+
+    #[test]
+    #[should_panic(expected = "bucket state must equal the LP primal's buckets_out column")]
+    fn debug_assert_bucket_copy_gap_intact_panics_when_bucket_diverges() {
+        let layout = crate::test_support::state_layout_with_buckets(
+            0,
+            0,
+            2,
+            vec![(0, 0), (0, 1)],
+            0,
+            0,
+            vec![],
+        );
+        let primal = vec![7.0, 11.0];
+        let mut assembled = primal.clone();
+        assembled[1] = 999.0; // simulate an accidental overwrite of the bucket block
+        super::debug_assert_bucket_copy_gap_intact(&assembled, &primal, &layout);
     }
 }

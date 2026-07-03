@@ -71,6 +71,34 @@ pub fn validate_policy_compatibility(
     Ok(())
 }
 
+/// Run [`validate_policy_compatibility`] when `configured_validate` is set OR
+/// the current study is bucket-aware (`current_b_total > 0`), forcing the
+/// check on for a bucket study regardless of the user's flag.
+///
+/// A bucket-free policy's `state_dimension` always differs from a bucket
+/// study's; skipping this check would let a stale policy reach
+/// `CutPool::new_with_warm_start`/`from_deserialized`, whose
+/// coefficient-length `copy_from_slice` panics on the user-facing path
+/// instead of failing cleanly here.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] when validation runs (opted-in or
+/// forced) and `metadata.state_dimension` or `metadata.num_stages` mismatches.
+pub fn validate_policy_compatibility_effective(
+    metadata: &PolicyCheckpointMetadata,
+    current_state_dimension: u32,
+    current_num_stages: u32,
+    configured_validate: bool,
+    current_b_total: usize,
+) -> Result<(), SddpError> {
+    if configured_validate || current_b_total > 0 {
+        validate_policy_compatibility(metadata, current_state_dimension, current_num_stages)
+    } else {
+        Ok(())
+    }
+}
+
 /// Build a basis cache from deserialized checkpoint basis records.
 ///
 /// Returns a `Vec<Option<CapturedBasis>>`, one entry per stage; stages without a
@@ -303,7 +331,10 @@ pub fn inject_boundary_cuts(
 mod tests {
     use cobre_io::{EntitySlot, PolicyCheckpointMetadata, StageCutsPayload};
 
-    use super::{load_boundary_cuts, resolve_warm_start_counts, validate_policy_compatibility};
+    use super::{
+        load_boundary_cuts, resolve_warm_start_counts, validate_policy_compatibility,
+        validate_policy_compatibility_effective,
+    };
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -486,20 +517,28 @@ mod tests {
 
     /// Build a 2-slot storage manifest with the given hydro ids, both active.
     fn storage_manifest(id0: i32, id1: i32) -> Vec<EntitySlot> {
-        vec![
-            EntitySlot {
-                entity_type: 0,
-                entity_id: id0,
-                subindex: 0,
-                was_active: true,
-            },
-            EntitySlot {
-                entity_type: 0,
-                entity_id: id1,
-                subindex: 0,
-                was_active: true,
-            },
-        ]
+        vec![storage_slot(id0), storage_slot(id1)]
+    }
+
+    /// A single active `HydroStorage` slot (`entity_type 0`, `subindex 0`).
+    fn storage_slot(id: i32) -> EntitySlot {
+        EntitySlot {
+            entity_type: 0,
+            entity_id: id,
+            subindex: 0,
+            was_active: true,
+        }
+    }
+
+    /// A single active `HydroTransitBucket` slot (`entity_type 3`): `id` is the
+    /// downstream hydro, `lag` the maturity subindex.
+    fn bucket_slot(id: i32, lag: u32) -> EntitySlot {
+        EntitySlot {
+            entity_type: 3,
+            entity_id: id,
+            subindex: lag,
+            was_active: true,
+        }
     }
 
     /// Given a checkpoint whose source-stage manifest matches the current study's
@@ -628,6 +667,85 @@ mod tests {
         );
     }
 
+    /// A manifest carrying a `HydroTransitBucket` slot (`entity_type 3`, the
+    /// downstream hydro id, the maturity lag as `subindex`) round-trips: written to a
+    /// checkpoint and reloaded against a slot-for-slot matching current manifest,
+    /// `load_boundary_cuts` returns `Ok` with no warning — the bucket slot passes
+    /// `slot_identity`.
+    #[test]
+    fn load_boundary_cuts_matching_bucket_manifest_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = vec![storage_slot(1), bucket_slot(2, 1)];
+        write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &manifest);
+
+        let current = vec![storage_slot(1), bucket_slot(2, 1)];
+        let mut warnings: Vec<String> = Vec::new();
+        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, &mut |m| {
+            warnings.push(m.to_string());
+        })
+        .unwrap();
+
+        assert_eq!(cuts.len(), 2, "matching bucket manifest must load all cuts");
+        assert!(
+            warnings.is_empty(),
+            "a slot-for-slot bucket match must emit no warning: {warnings:?}"
+        );
+    }
+
+    /// A policy exported WITHOUT travel-time buckets (slot 1 typed `HydroStorage`)
+    /// loaded by bucket-aware code whose terminal manifest types slot 1 as
+    /// `HydroTransitBucket` (type 3) is rejected: the per-slot identity check names
+    /// slot 1 and the differing types. Asserts the `load_boundary_cuts` rejection
+    /// primitive fires on the bucket-vs-non-bucket case (the end-to-end force-on
+    /// wiring lands separately).
+    #[test]
+    fn load_boundary_cuts_missing_bucket_slot_identity_rejects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let boundary = storage_manifest(1, 2);
+        write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &boundary);
+
+        let current = vec![storage_slot(1), bucket_slot(2, 1)];
+        let result = load_boundary_cuts(tmp.path(), 0, 2, &current, &mut ignore_warnings());
+
+        assert!(
+            result.is_err(),
+            "bucket-vs-non-bucket at slot 1 must reject"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("slot 1"), "error must name slot 1: {msg}");
+        assert!(
+            msg.contains("entity_type=3"),
+            "error must name the current bucket type 3: {msg}"
+        );
+        assert!(
+            msg.contains("entity_type=0"),
+            "error must name the boundary storage type 0: {msg}"
+        );
+    }
+
+    /// A policy exported WITHOUT travel-time buckets has a smaller `state_dimension`
+    /// than the bucket-aware current study, so `load_boundary_cuts` rejects on the
+    /// `state_dimension` guard before per-slot identity. Pairs with the force-on
+    /// wiring that lands separately.
+    #[test]
+    fn load_boundary_cuts_no_bucket_export_dimension_mismatch_rejects() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &storage_manifest(1, 2));
+
+        let current = vec![storage_slot(1), storage_slot(2), bucket_slot(2, 1)];
+        let result = load_boundary_cuts(tmp.path(), 0, 3, &current, &mut ignore_warnings());
+
+        assert!(
+            result.is_err(),
+            "no-bucket export vs bucket study must reject"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("state_dimension"),
+            "error must cite state_dimension: {msg}"
+        );
+    }
+
     fn sample_metadata() -> PolicyCheckpointMetadata {
         PolicyCheckpointMetadata {
             cobre_version: "0.2.2".to_string(),
@@ -685,6 +803,52 @@ mod tests {
         assert!(
             msg.contains("state_dimension"),
             "should report state_dimension mismatch first: {msg}"
+        );
+    }
+
+    // ── validate_policy_compatibility_effective tests ─────────────────────────
+
+    /// Given a bucket study (`current_b_total > 0`) with `configured_validate`
+    /// unset (`false`) and a stale bucket-free policy whose `state_dimension`
+    /// does not match, `validate_policy_compatibility_effective` still runs the
+    /// check and returns a clean `Validation` error — not a coefficient-length
+    /// panic downstream in `CutPool::new_with_warm_start`.
+    #[test]
+    fn bucket_study_forces_validation_and_rejects_stale_policy() {
+        let meta = sample_metadata(); // state_dimension: 10, num_stages: 12
+        let result = validate_policy_compatibility_effective(&meta, 8, 12, false, 3);
+        assert!(
+            result.is_err(),
+            "a bucket study must force validation on even when unset"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("state_dimension"), "{msg}");
+        assert!(msg.contains("10"), "should include policy value: {msg}");
+        assert!(msg.contains('8'), "should include current value: {msg}");
+    }
+
+    /// Given a bucket study with `configured_validate` unset and a policy whose
+    /// dimensions match, `validate_policy_compatibility_effective` accepts it.
+    #[test]
+    fn bucket_study_forced_validation_accepts_matching_policy() {
+        let meta = sample_metadata(); // state_dimension: 10, num_stages: 12
+        let result = validate_policy_compatibility_effective(&meta, 10, 12, false, 3);
+        assert!(
+            result.is_ok(),
+            "a matching-dimension policy must be accepted under the forced check"
+        );
+    }
+
+    /// A bucket-free study (`current_b_total == 0`) with `configured_validate`
+    /// unset keeps the pre-existing opt-in behavior: no validation runs even
+    /// though the metadata would otherwise mismatch.
+    #[test]
+    fn bucket_free_study_keeps_opt_in_behavior() {
+        let meta = sample_metadata();
+        let result = validate_policy_compatibility_effective(&meta, 8, 24, false, 0);
+        assert!(
+            result.is_ok(),
+            "opt-in validation must stay skipped for a bucket-free study"
         );
     }
 

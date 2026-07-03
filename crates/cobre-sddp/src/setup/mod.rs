@@ -27,6 +27,7 @@
 //! ```
 
 mod accessors;
+pub(crate) mod bucket_seed;
 pub(crate) mod bucket_topology;
 pub(crate) mod methodology_config;
 mod orchestration;
@@ -325,7 +326,8 @@ impl StudySetup {
             &bucket_topology,
         );
 
-        let initial_state = build_initial_state(system, &study_dims, &state_layout);
+        let mut initial_state = build_initial_state(system, &study_dims, &state_layout);
+        splice_bucket_seed(&mut initial_state, &state_layout, system, &bucket_topology);
 
         let n_stages = stage_templates.templates.len();
         let max_iterations = max_iterations_from_rules(&stopping_rule_set);
@@ -1206,6 +1208,23 @@ fn build_initial_state(
     }
 
     state
+}
+
+/// Write the travel-time bucket seed into `state`'s declared `buckets_out`
+/// slots — the same index space [`StateLayout::state_to_lp_incoming_column`]
+/// remaps to the pinned `buckets_in` LP column, so no separate pin wiring is
+/// needed beyond this splice.
+fn splice_bucket_seed(
+    state: &mut [f64],
+    layout: &StateLayout,
+    system: &System,
+    topology: &bucket_topology::BucketTopology,
+) {
+    let seed = bucket_seed::build_initial_bucket_state(system, topology);
+    debug_assert_eq!(seed.len(), layout.b_total);
+    for (b, &value) in seed.iter().enumerate() {
+        state[layout.buckets_out.start + b] = value;
+    }
 }
 
 // ---------------------------------------------------------------------------

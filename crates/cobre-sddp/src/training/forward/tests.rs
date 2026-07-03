@@ -3921,3 +3921,238 @@ mod dcs_forward {
         );
     }
 }
+
+// -----------------------------------------------------------------------
+// Bucket copy-gap regression (forward pass)
+// -----------------------------------------------------------------------
+//
+// Exercises `run_forward_stage` over a bucket-aware state layout (storage +
+// one AR lag + one travel-time bucket + one anticipated-thermal slot) with a
+// `MockSolver` returning a fixed primal, proving the bucket state rides the
+// state-assembly plain copy: the lag-shift overwrite lands on index 1 and the
+// anticipated-shift overwrite lands on index 3, never on the bucket index 2.
+mod bucket_copy_gap {
+    use cobre_solver::{LpSolution, SolverInterface, StageTemplate};
+
+    use super::super::{StageKey, run_forward_stage};
+    use super::MockSolver;
+    use crate::context::{StageContext, TrainingContext};
+    use crate::cut::FutureCostFunction;
+    use crate::horizon_mode::HorizonMode;
+    use crate::inflow_method::InflowNonNegativityMethod;
+    use crate::lp_builder::{PatchBuffer, StageGeometry};
+    use crate::trajectory::TrajectoryRecord;
+    use crate::workspace::{BasisStore, SolverWorkspace, WorkspaceSizing};
+
+    /// Column layout for `N=1, L=1, B=1, A=1, K_max=1`:
+    /// `[storage(0), lag0(1), bucket_out(2), ant_state0(3), ant_state_out(4),
+    /// z_inflow(5), storage_in(6), bucket_in(7), theta(8), decision(9)]`.
+    /// `n_state = 4` (storage, lag0, `bucket_out`, `ant_state0`) — the state
+    /// region is the LP's first `n_state` columns by construction.
+    const NUM_COLS: usize = 10;
+    const BUCKET_COL: usize = 2;
+    const BUCKET_VALUE: f64 = 777.0;
+    const Z_INFLOW_COL: usize = 5;
+    const Z_INFLOW_VALUE: f64 = 55.0;
+    const DECISION_COL: usize = 9;
+    const DECISION_VALUE: f64 = 999.0;
+
+    fn bucket_template() -> StageTemplate {
+        StageTemplate {
+            num_cols: NUM_COLS,
+            num_rows: 0,
+            num_nz: 0,
+            col_starts: vec![0_i32; NUM_COLS + 1],
+            row_indices: Vec::new(),
+            values: Vec::new(),
+            col_lower: vec![f64::NEG_INFINITY; NUM_COLS],
+            col_upper: vec![f64::INFINITY; NUM_COLS],
+            objective: vec![0.0; NUM_COLS],
+            row_lower: Vec::new(),
+            row_upper: Vec::new(),
+            n_state: 4,
+            n_transfer: 0,
+            n_dual_relevant: 1,
+            n_hydro: 1,
+            max_par_order: 1,
+            col_scale: Vec::new(),
+            row_scale: Vec::new(),
+        }
+    }
+
+    /// Canned primal: `storage=100`, `lag0=200` (pre-overwrite), `bucket_out=777`,
+    /// `ant_state0=400` (pre-overwrite), `ant_state_out=0`, `z_inflow=55`,
+    /// `storage_in=0`, `bucket_in=0`, `theta=0`, `decision=999`. The `MockSolver`
+    /// returns this verbatim regardless of the bounds `run_forward_stage` patches.
+    fn bucket_solution() -> LpSolution {
+        let mut primal = vec![0.0_f64; NUM_COLS];
+        primal[0] = 100.0;
+        primal[1] = 200.0;
+        primal[BUCKET_COL] = BUCKET_VALUE;
+        primal[3] = 400.0;
+        primal[Z_INFLOW_COL] = Z_INFLOW_VALUE;
+        primal[DECISION_COL] = DECISION_VALUE;
+        LpSolution {
+            objective: 0.0,
+            primal,
+            dual: Vec::new(),
+            reduced_costs: vec![0.0; NUM_COLS],
+            iterations: 0,
+            solve_time_seconds: 0.0,
+        }
+    }
+
+    fn bucket_workspace() -> SolverWorkspace<MockSolver> {
+        let sizing = WorkspaceSizing {
+            hydro_count: 1,
+            max_par_order: 1,
+            n_load_buses: 0,
+            max_blocks: 0,
+            b_total: 1,
+            downstream_par_order: 0,
+            max_openings: 1,
+            initial_pool_capacity: 16,
+            n_state: 4,
+            max_local_fwd: 1,
+            total_forward_passes: 1,
+            noise_dim: 1,
+            n_anticipated: 1,
+            k_max: 1,
+        };
+        SolverWorkspace::new(
+            0,
+            0,
+            MockSolver::always_ok(bucket_solution()),
+            PatchBuffer::new(1, 1, 0, 0, 1, 1, 1),
+            4,
+            sizing,
+        )
+    }
+
+    /// Run one forward stage over the bucket-aware layout, returning the
+    /// captured advanced state (`records[0].state`).
+    fn run_bucket_forward_stage() -> Vec<f64> {
+        let state =
+            crate::test_support::state_layout_with_buckets(1, 1, 1, vec![(0, 0)], 1, 1, vec![1]);
+        let template = bucket_template();
+        let templates = vec![template.clone()];
+        let base_rows = vec![0_usize];
+        let stochastic = super::make_stochastic_context_1_hydro_3_stages();
+        let horizon = HorizonMode::Finite { num_stages: 1 };
+        let fcf = FutureCostFunction::new(1, state.n_state, 1, 1, &[0]);
+
+        let mut ws = bucket_workspace();
+        ws.current_state.clear();
+        ws.current_state
+            .extend_from_slice(&[10.0, 20.0, 30.0, 40.0]);
+
+        let geometry = StageGeometry {
+            anticipated_decision: DECISION_COL..DECISION_COL + 1,
+            ..StageGeometry::default()
+        };
+        let geometry_per_stage = vec![geometry];
+
+        let ctx = StageContext {
+            geometry_per_stage: &geometry_per_stage,
+            templates: &templates,
+            base_rows: &base_rows,
+            noise_scale: &[],
+            n_hydros: 0,
+            n_load_buses: 0,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[1usize],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        };
+        let study_dims = crate::test_support::study_dims();
+        let training_ctx = TrainingContext {
+            horizon: &horizon,
+            state: &state,
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(&state, 1),
+            study_dims: &study_dims,
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic: &stochastic,
+            initial_state: &[],
+            inflow_scheme: cobre_core::scenario::SamplingScheme::InSample,
+            load_scheme: cobre_core::scenario::SamplingScheme::InSample,
+            ncs_scheme: cobre_core::scenario::SamplingScheme::InSample,
+            stages: &[],
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            recent_accum_seed: &[],
+            recent_weight_seed: 0.0,
+            dcs: None,
+        };
+
+        ws.solver.load_model(&template);
+
+        let mut basis_store = BasisStore::new(1, 1);
+        let mut records = vec![TrajectoryRecord {
+            primal: Vec::new(),
+            dual: Vec::new(),
+            stage_cost: 0.0,
+            state: Vec::new(),
+        }];
+        let key = StageKey {
+            t: 0,
+            m: 0,
+            local_m: 0,
+            num_stages: 1,
+            iteration: 1,
+            raw_noise: &[],
+            basis_row_capacity: template.num_rows,
+            terminal_has_boundary_cuts: false,
+            pool: &fcf.pools[0],
+            dcs: None,
+        };
+        let mut slices = basis_store.split_workers_mut(1);
+        run_forward_stage(
+            &mut ws,
+            &mut slices[0],
+            &ctx,
+            &training_ctx,
+            &key,
+            &mut records,
+        )
+        .expect("bucket forward stage solve must succeed");
+
+        records[0].state.clone()
+    }
+
+    /// The bucket state (`state[buckets_out]`) rides the state-assembly plain
+    /// copy: it equals the LP primal's `bucket_out` column, untouched by the
+    /// lag-shift (which overwrites index 1) or the anticipated-shift (index 3).
+    #[test]
+    fn bucket_state_survives_lag_and_anticipated_overwrites() {
+        let advanced = run_bucket_forward_stage();
+        assert_eq!(
+            advanced[BUCKET_COL], BUCKET_VALUE,
+            "bucket state must equal the LP primal's bucket_out column"
+        );
+        // Neighboring overwrites genuinely ran (not vacuous no-ops): the lag
+        // slot picks up the accumulated z_inflow value, and the anticipated
+        // slot picks up the decision-column value.
+        assert_eq!(
+            advanced[1], Z_INFLOW_VALUE,
+            "lag0 must be overwritten by the lag shift"
+        );
+        assert_eq!(
+            advanced[3], DECISION_VALUE,
+            "ant_state0 must be overwritten by the anticipated shift"
+        );
+    }
+}

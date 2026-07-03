@@ -1,4 +1,4 @@
-use cobre_core::{BlockMode, CoefficientRef, ConstraintSense, ContractType, Stage};
+use cobre_core::{BlockMode, CoefficientRef, ConstraintSense, ContractType, EntityId, Stage};
 
 use crate::generic_constraints::resolve_variable_ref;
 use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
@@ -150,6 +150,11 @@ pub(super) fn fill_state_and_water_entries(
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
+    // Mode-independent (the bucket ring-shift structure never depends on
+    // block_mode, sub-contract 1): runs once regardless of which per-mode fill
+    // follows.
+    fill_bucket_definition_entries(layout, col_entries);
+
     match stage.block_mode {
         BlockMode::Parallel => {
             fill_parallel_water_entries(ctx, stage, stage_idx, layout, col_entries);
@@ -177,8 +182,6 @@ fn fill_parallel_water_entries(
     let row_water = layout.row_water_balance_start();
     let col_storage_in_start = layout.col_storage_in_start();
     let col_inflow_lags_start = layout.col_inflow_lags_start();
-
-    fill_bucket_definition_entries(layout, col_entries);
 
     for h_idx in 0..n_h {
         let hydro = &ctx.hydros[h_idx];
@@ -450,6 +453,25 @@ fn fill_chronological_water_entries(
             continue;
         }
 
+        // Arrival: the incoming maturing bucket `b_1^in` delivers over THIS
+        // stage's blocks by the fixed template density rho (sub-contract 3) —
+        // one shared entry per block, mirroring the parallel single-row `-1.0`.
+        if let Some(range) = plant_bucket_range(layout.state, h_idx) {
+            let rho = resolve_chrono_arrival_density(ctx, stage, stage_idx, hydro.id, n_blks);
+            debug_assert!(
+                (rho.iter().sum::<f64>() - 1.0).abs() < 1e-9,
+                "hydro {h_idx} stage {stage_idx}: delivery density rho must sum to 1.0"
+            );
+            let col_b1_in = layout.state.buckets_in.start + range.start;
+            for (b_prime, &rho_val) in rho.iter().enumerate() {
+                if rho_val == 0.0 {
+                    continue;
+                }
+                let row = row_water + h_idx * n_blks + b_prime;
+                col_entries[col_b1_in].push((row, -rho_val));
+            }
+        }
+
         let psi = has_par.then(|| ctx.par_lp.psi_slice(stage_idx, h_idx));
         for k in 1..=n_blks {
             let blk = k - 1;
@@ -464,8 +486,17 @@ fn fill_chronological_water_entries(
             col_entries[layout.diversion_col(h_idx, blk)].push((row, tau_k));
             for &up_id in ctx.cascade.upstream(hydro.id) {
                 if let Some(&u_idx) = ctx.hydro_pos.get(&up_id) {
-                    col_entries[layout.turbine_col(u_idx, blk)].push((row, -tau_k));
-                    col_entries[layout.spillage_col(u_idx, blk)].push((row, -tau_k));
+                    fill_arc_release_chrono_block_entries(
+                        ctx,
+                        layout,
+                        stage,
+                        u_idx,
+                        h_idx,
+                        stage_idx,
+                        blk,
+                        row_water,
+                        col_entries,
+                    );
                 }
             }
             if let Some(sources) = ctx.diversion_upstream.get(&hydro.id) {
@@ -502,6 +533,170 @@ fn fill_chronological_water_entries(
             col_entries[layout.evap_flow_col(local_idx, blk)].push((row, tau_k));
         }
     }
+}
+
+/// One upstream release's per-block contribution to the downstream chained
+/// rows (arc `u_idx → h_idx`, block `blk`), block-resolved (water memo §2.5.2):
+/// same-stage routing `-κ_{blk→b'}·τ_blk` onto every downstream block
+/// `b' ∈ [blk, n_blks)` (`κ`'s self-inclusive index 0 is `blk` routing to
+/// itself), and crossing deposits `-χ_{blk,d}·τ_blk` (`d = 1..=depth`) into the
+/// plant's bucket-definition rows — the SAME release column carrying both,
+/// mirroring the parallel arrival-split's `k_0`/`k_d` co-existence. Also
+/// verifies the shared-density aggregation `Σ_b w_b·χ_{b,d} == k_d` once per
+/// (arc, stage) (`blk == 0`) — sub-contract 2.
+///
+/// `ctx.arc_spread_chrono` has no entry for an undeclared arc (or a stage whose
+/// own `block_mode` is `Parallel`), so this emits exactly today's `-τ_blk` on
+/// the same block's row and no routing/deposit — the B==0/K==1 byte-identity
+/// anchor.
+fn fill_arc_release_chrono_block_entries(
+    ctx: &TemplateBuildCtx<'_>,
+    layout: &StageLayout,
+    stage: &Stage,
+    u_idx: usize,
+    h_idx: usize,
+    stage_idx: usize,
+    blk: usize,
+    row_water: usize,
+    col_entries: &mut [Vec<(usize, f64)>],
+) {
+    let n_blks = layout.n_blks;
+    let row_base = row_water + h_idx * n_blks;
+    let tau_k = stage.blocks[blk].duration_hours * M3S_TO_HM3;
+    let col_turbine = layout.turbine_col(u_idx, blk);
+    let col_spillage = layout.spillage_col(u_idx, blk);
+
+    let Some(resolution) = ctx
+        .arc_spread_chrono
+        .get(&u_idx)
+        .and_then(|by_stage| by_stage[stage_idx].as_ref())
+    else {
+        col_entries[col_turbine].push((row_base + blk, -tau_k));
+        col_entries[col_spillage].push((row_base + blk, -tau_k));
+        return;
+    };
+
+    let kappa_b = &resolution.kappa[blk];
+    let chi_b = &resolution.chi[blk];
+    debug_assert!(
+        (kappa_b.iter().sum::<f64>() + chi_b[1..].iter().sum::<f64>() - 1.0).abs() < 1e-9,
+        "arc {u_idx} block {blk} stage {stage_idx}: per-column conservation \
+         sum(kappa) + sum(chi[1..]) must equal 1.0"
+    );
+    if blk == 0 {
+        for (d, &k_d) in resolution.k.iter().enumerate() {
+            let aggregated: f64 = resolution
+                .chi
+                .iter()
+                .zip(&stage.blocks)
+                .map(|(chi_row, b)| (b.duration_hours * M3S_TO_HM3 / layout.zeta) * chi_row[d])
+                .sum();
+            debug_assert!(
+                (aggregated - k_d).abs() < 1e-9,
+                "arc {u_idx} stage {stage_idx}: block deposits must aggregate to k_d (d={d})"
+            );
+        }
+    }
+
+    for (j, &kappa_val) in kappa_b.iter().enumerate() {
+        if kappa_val == 0.0 {
+            continue;
+        }
+        let row = row_base + blk + j;
+        col_entries[col_turbine].push((row, -kappa_val * tau_k));
+        col_entries[col_spillage].push((row, -kappa_val * tau_k));
+    }
+
+    let depth = chi_b.len() - 1;
+    if depth == 0 {
+        return;
+    }
+    let range = plant_bucket_range(layout.state, h_idx).unwrap_or_else(|| {
+        unreachable!(
+            "hydro {h_idx} receives a depth-{depth} deposit at stage {stage_idx} but has no \
+             bucket range (BucketTopology/arc_spread_chrono disagreement)"
+        )
+    });
+    let row_bucket_def_start = layout.row_bucket_definition_start();
+    for (d, &chi_d) in chi_b.iter().enumerate().skip(1) {
+        if chi_d == 0.0 {
+            continue;
+        }
+        debug_assert!(
+            d - 1 < range.len(),
+            "lag {d} exceeds plant {h_idx}'s declared bucket depth {}",
+            range.len()
+        );
+        let row_def = row_bucket_def_start + range.start + (d - 1);
+        col_entries[col_turbine].push((row_def, -chi_d * tau_k));
+        col_entries[col_spillage].push((row_def, -chi_d * tau_k));
+    }
+}
+
+/// Resolve the fixed-template delivery density `ρ` (sub-contract 3) that
+/// splits THIS stage's incoming maturing bucket across its `n_blks` rows: the
+/// sending stage's (`stage_idx - 1`) own `resolve_spread` delivery row for
+/// `d = 1` — re-anchored fresh every stage (no per-origin/per-lag memory, the
+/// documented bounded approximation). Falls back to the duration-weighted
+/// uniform density (sub-contract 3's alternate "uniform-over-the-early-blocks"
+/// formula) when no matching chronological sending-stage table exists (the
+/// study's first stage, or a parallel-to-chronological transition).
+///
+/// A confluence whose contributing arcs disagree on this density has no
+/// resolved policy; `check_chronological_confluence_heterogeneous_travel_time`
+/// (`cobre-io`) rejects that input at config time, so the `debug_assert!`
+/// below is a defensive backstop, not the enforcement point.
+fn resolve_chrono_arrival_density(
+    ctx: &TemplateBuildCtx<'_>,
+    stage: &Stage,
+    stage_idx: usize,
+    downstream_id: EntityId,
+    n_blks: usize,
+) -> Vec<f64> {
+    let uniform = || {
+        let total: f64 = stage.blocks.iter().map(|b| b.duration_hours).sum();
+        stage
+            .blocks
+            .iter()
+            .map(|b| b.duration_hours / total)
+            .collect::<Vec<f64>>()
+    };
+
+    let mut chosen: Option<Vec<f64>> = None;
+    for &up_id in ctx.cascade.upstream(downstream_id) {
+        let Some(&u_idx) = ctx.hydro_pos.get(&up_id) else {
+            continue;
+        };
+        let Some(by_stage) = ctx.arc_spread_chrono.get(&u_idx) else {
+            continue;
+        };
+        let candidate = (stage_idx > 0)
+            .then(|| {
+                by_stage[stage_idx - 1]
+                    .as_ref()
+                    .and_then(|r| r.delivery.first())
+                    .filter(|d| d.len() == n_blks)
+                    .cloned()
+            })
+            .flatten()
+            .unwrap_or_else(uniform);
+        match &chosen {
+            None => chosen = Some(candidate),
+            Some(existing) => {
+                debug_assert!(
+                    existing.len() == candidate.len()
+                        && existing
+                            .iter()
+                            .zip(&candidate)
+                            .all(|(&a, &b)| (a - b).abs() < 1e-9),
+                    "confluence with heterogeneous chronological delivery densities into \
+                     one downstream plant is not yet supported (arc {u_idx} disagrees at \
+                     stage {stage_idx})"
+                );
+            }
+        }
+    }
+    chosen.unwrap_or_else(uniform)
 }
 
 /// Re-route an absent `PreFilling` hydro `h`'s water interactions onto the FIRST
@@ -2048,6 +2243,7 @@ mod zero_cost_tests {
                 n_contract_export: 0,
                 diversion_upstream: HashMap::new(),
                 arc_spread_k: HashMap::new(),
+                arc_spread_chrono: HashMap::new(),
                 n_hydros: 0,
                 n_thermals,
                 n_lines: 0,
@@ -2595,6 +2791,7 @@ mod pumping_water_tests {
     use crate::hydro_models::{EvaporationModel, EvaporationModelSet, ProductionModelSet};
     use crate::indexer::StateLayout;
     use crate::resolved_parameters::ResolvedParameters;
+    use crate::temporal_lag::{SpreadResolution, resolve_spread};
 
     use super::super::M3S_TO_HM3;
     use super::super::columns::{ColumnBufs, fill_pumping_columns};
@@ -3201,6 +3398,7 @@ mod pumping_water_tests {
                 n_contract_export: self.n_contract_export,
                 diversion_upstream: HashMap::new(),
                 arc_spread_k: HashMap::new(),
+                arc_spread_chrono: HashMap::new(),
                 n_hydros: self.hydros.len(),
                 n_thermals: self.thermals.len(),
                 n_lines: self.lines.len(),
@@ -4505,6 +4703,272 @@ mod pumping_water_tests {
         };
 
         let stage = two_block_stage(0, [300.0, 444.0]);
+        let state = StateLayout::new(
+            ctx.n_hydros,
+            ctx.max_par_order,
+            1,
+            vec![(down_idx, 1)],
+            ctx.n_anticipated,
+            ctx.k_max,
+            ctx.anticipated_lead_stages.clone(),
+            &vec![0; ctx.n_hydros],
+        );
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let _ = build_stage_matrix_entries(&ctx, &stage, 0, &layout);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Water travel-time: chronological block-resolved deposits/routing/delivery
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// A chronological `Stage` with the given per-block durations, otherwise
+    /// mirroring [`two_block_stage`]'s fixture defaults.
+    fn chronological_stage(index: usize, block_hours: &[f64]) -> Stage {
+        let mut stage = two_block_stage(
+            index,
+            [
+                block_hours[0],
+                block_hours.get(1).copied().unwrap_or(block_hours[0]),
+            ],
+        );
+        stage.blocks = block_hours
+            .iter()
+            .enumerate()
+            .map(|(i, &h)| cobre_core::Block {
+                index: i,
+                name: format!("B{i}"),
+                duration_hours: h,
+            })
+            .collect();
+        stage.block_mode = cobre_core::BlockMode::Chronological;
+        stage
+    }
+
+    /// Example (iii) of the water travel-time memo: `t_v = 250h` against a
+    /// 720h stage of 3×240h chronological blocks. Pins
+    /// `κ_{B0→B1}=230/240, κ_{B0→B2}=10/240, κ_{B1→B2}=230/240,
+    /// χ=(0, 10/240, 1)`-shaped on the emitted matrix entries.
+    #[test]
+    fn example_iii_kappa_and_chi_match_worked_numbers() {
+        let up = 1;
+        let down = 2;
+        let fixtures = PumpFixtures::new_full(
+            vec![
+                fixture_hydro_ds(up, Some(down)),
+                fixture_hydro_ds(down, None),
+            ],
+            Vec::new(),
+            vec![fixture_bus(1)],
+            Vec::new(),
+            Vec::new(),
+        );
+        let up_idx = fixtures.hydro_pos[&EntityId(up)];
+        let down_idx = fixtures.hydro_pos[&EntityId(down)];
+
+        let t_v = 250.0_f64;
+        let block_hours = [240.0, 240.0, 240.0];
+        let resolution = resolve_spread(t_v, 0, &[720.0, 720.0], Some(&block_hours));
+
+        // Sanity: the resolver reproduces the memo's worked numbers exactly.
+        assert!((resolution.kappa[0][1] - 230.0 / 240.0).abs() < 1e-9);
+        assert!((resolution.kappa[0][2] - 10.0 / 240.0).abs() < 1e-9);
+        assert!((resolution.kappa[1][1] - 230.0 / 240.0).abs() < 1e-9);
+        assert!(resolution.chi[0][1].abs() < 1e-9);
+        assert!((resolution.chi[1][1] - 10.0 / 240.0).abs() < 1e-9);
+        assert!((resolution.chi[2][1] - 1.0).abs() < 1e-9);
+
+        let mut arc_spread_chrono = HashMap::new();
+        arc_spread_chrono.insert(up_idx, vec![Some(resolution)]);
+        let ctx = TemplateBuildCtx {
+            arc_spread_chrono,
+            ..fixtures.make_ctx()
+        };
+
+        let stage = chronological_stage(0, &block_hours);
+        let state = StateLayout::new(
+            ctx.n_hydros,
+            ctx.max_par_order,
+            1,
+            vec![(down_idx, 1)],
+            ctx.n_anticipated,
+            ctx.k_max,
+            ctx.anticipated_lead_stages.clone(),
+            &vec![0; ctx.n_hydros],
+        );
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+        let csc = build_sorted_csc(&ctx, &stage, 0, &layout);
+
+        let def_row = i32::try_from(layout.row_bucket_definition_start()).unwrap();
+        let row_water = layout.row_water_balance_start();
+        let row_b1 = i32::try_from(row_water + down_idx * 3 + 1).unwrap();
+        let row_b2 = i32::try_from(row_water + down_idx * 3 + 2).unwrap();
+        let tau = |b: usize| stage.blocks[b].duration_hours * M3S_TO_HM3;
+
+        // Block B0: routes 230/240 to B1, 10/240 to B2; no crossing deposit.
+        assert_eq!(
+            coeff_at(&csc, layout.turbine_col(up_idx, 0), row_b1),
+            -(230.0 / 240.0) * tau(0)
+        );
+        assert_eq!(
+            coeff_at(&csc, layout.spillage_col(up_idx, 0), row_b1),
+            -(230.0 / 240.0) * tau(0)
+        );
+        assert_eq!(
+            coeff_at(&csc, layout.turbine_col(up_idx, 0), row_b2),
+            -(10.0 / 240.0) * tau(0)
+        );
+        assert_eq!(coeff_at(&csc, layout.turbine_col(up_idx, 0), def_row), 0.0);
+
+        // Block B1: routes 230/240 to B2; deposits 10/240 into the bucket.
+        assert_eq!(
+            coeff_at(&csc, layout.turbine_col(up_idx, 1), row_b2),
+            -(230.0 / 240.0) * tau(1)
+        );
+        assert_eq!(
+            coeff_at(&csc, layout.turbine_col(up_idx, 1), def_row),
+            -(10.0 / 240.0) * tau(1)
+        );
+
+        // Block B2: nothing in-stage; deposits its full release into the bucket.
+        assert_eq!(
+            coeff_at(&csc, layout.turbine_col(up_idx, 2), def_row),
+            -tau(2)
+        );
+        assert_eq!(
+            coeff_at(&csc, layout.spillage_col(up_idx, 2), def_row),
+            -tau(2)
+        );
+    }
+
+    /// `K = 1` (a single block spanning the whole stage) with travel time ON is
+    /// byte-identical to the parallel fill (the memo's K=1 parity anchor):
+    /// `χ_{0,d} = k_d` collapses κ to self-routing and χ to the parallel deposit.
+    #[test]
+    fn k1_chronological_with_travel_time_is_byte_identical_to_parallel() {
+        let up = 1;
+        let down = 2;
+        let t_v = 250.0_f64;
+        let stage_durations = [720.0, 720.0];
+
+        let make_fixtures = || {
+            PumpFixtures::new_full(
+                vec![
+                    fixture_hydro_ds(up, Some(down)),
+                    fixture_hydro_ds(down, None),
+                ],
+                Vec::new(),
+                vec![fixture_bus(1)],
+                Vec::new(),
+                Vec::new(),
+            )
+        };
+        let up_idx = make_fixtures().hydro_pos[&EntityId(up)];
+        let down_idx = make_fixtures().hydro_pos[&EntityId(down)];
+
+        let resolution = resolve_spread(t_v, 0, &stage_durations, Some(&[720.0]));
+        let k = resolution.k.clone();
+
+        // Parallel build. `chronological_stage` (not `two_block_stage`, which
+        // always carries 2 blocks) gives a single 720h block so `n_blks == 1`
+        // on both sides of the comparison; the mode is then forced back to
+        // `Parallel` for this side.
+        let par_fixtures = make_fixtures();
+        let mut arc_spread_k = HashMap::new();
+        arc_spread_k.insert(up_idx, vec![k]);
+        let par_ctx = TemplateBuildCtx {
+            arc_spread_k,
+            ..par_fixtures.make_ctx()
+        };
+        let mut par_stage = chronological_stage(0, &[720.0]);
+        par_stage.block_mode = cobre_core::BlockMode::Parallel;
+        let par_state = StateLayout::new(
+            par_ctx.n_hydros,
+            par_ctx.max_par_order,
+            1,
+            vec![(down_idx, 1)],
+            par_ctx.n_anticipated,
+            par_ctx.k_max,
+            par_ctx.anticipated_lead_stages.clone(),
+            &vec![0; par_ctx.n_hydros],
+        );
+        let par_layout = StageLayout::new(&par_ctx, &par_state, &par_stage, 0);
+        let par_csc = build_sorted_csc(&par_ctx, &par_stage, 0, &par_layout);
+
+        // Chronological build (K=1), same arc data via arc_spread_chrono.
+        let chr_fixtures = make_fixtures();
+        let mut arc_spread_chrono = HashMap::new();
+        arc_spread_chrono.insert(up_idx, vec![Some(resolution)]);
+        let chr_ctx = TemplateBuildCtx {
+            arc_spread_chrono,
+            ..chr_fixtures.make_ctx()
+        };
+        let chr_stage = chronological_stage(0, &[720.0]);
+        let chr_state = StateLayout::new(
+            chr_ctx.n_hydros,
+            chr_ctx.max_par_order,
+            1,
+            vec![(down_idx, 1)],
+            chr_ctx.n_anticipated,
+            chr_ctx.k_max,
+            chr_ctx.anticipated_lead_stages.clone(),
+            &vec![0; chr_ctx.n_hydros],
+        );
+        let chr_layout = StageLayout::new(&chr_ctx, &chr_state, &chr_stage, 0);
+        let chr_csc = build_sorted_csc(&chr_ctx, &chr_stage, 0, &chr_layout);
+
+        assert_eq!(
+            par_layout.num_cols, chr_layout.num_cols,
+            "K=1 must carry the same column count in both modes"
+        );
+        assert_eq!(
+            par_layout.num_rows, chr_layout.num_rows,
+            "K=1 must carry the same row count in both modes"
+        );
+        assert_eq!(
+            par_csc, chr_csc,
+            "K=1 chronological with travel time ON must be byte-identical to parallel"
+        );
+    }
+
+    /// The `Σ_b w_b·χ_{b,d} == k_d` shared-density consistency (row 9) fires
+    /// when a hand-built resolution's block deposits disagree with its own
+    /// stage-level `k` — the guard is real, not dead code.
+    #[test]
+    #[should_panic(expected = "block deposits must aggregate to k_d")]
+    fn row_9_shared_density_consistency_panics_on_disagreement() {
+        let up = 1;
+        let down = 2;
+        let fixtures = PumpFixtures::new_full(
+            vec![
+                fixture_hydro_ds(up, Some(down)),
+                fixture_hydro_ds(down, None),
+            ],
+            Vec::new(),
+            vec![fixture_bus(1)],
+            Vec::new(),
+            Vec::new(),
+        );
+        let up_idx = fixtures.hydro_pos[&EntityId(up)];
+        let down_idx = fixtures.hydro_pos[&EntityId(down)];
+
+        // k_1 = 0.5 but the single block's chi deposits 0.0 into lag 1 —
+        // violates sub-contract 2's aggregation identity.
+        let bad_resolution = SpreadResolution {
+            depth: 1,
+            k: vec![0.5, 0.5],
+            chi: vec![vec![1.0, 0.0]],
+            kappa: vec![vec![1.0]],
+            delivery: vec![vec![1.0]],
+        };
+        let mut arc_spread_chrono = HashMap::new();
+        arc_spread_chrono.insert(up_idx, vec![Some(bad_resolution)]);
+        let ctx = TemplateBuildCtx {
+            arc_spread_chrono,
+            ..fixtures.make_ctx()
+        };
+
+        let stage = chronological_stage(0, &[720.0]);
         let state = StateLayout::new(
             ctx.n_hydros,
             ctx.max_par_order,

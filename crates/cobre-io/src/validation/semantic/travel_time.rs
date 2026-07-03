@@ -11,8 +11,9 @@
 //! | 3 | `max_t(t_v / h_t)` below [`NEGLIGIBLE_RATIO_THRESHOLD`]                  | `ModelQuality` (warning)  |
 //! | 4 | `t_v` exceeds the remaining study horizon at some stage                 | `ModelQuality` (warning)  |
 //! | 5 | `past_defluences` history shorter than the arc's required pre-study depth | `BusinessRuleViolation` (or `ModelQuality` warning under the derived-fallback) |
+//! | 6 | Chronological confluence: 2+ declared arcs into one downstream plant with differing `travel_time_hours`, while any study stage is chronological | `NotImplemented` |
 
-use cobre_core::window_period_overlaps;
+use cobre_core::{BlockMode, EntityId, window_period_overlaps};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
@@ -57,6 +58,73 @@ pub(super) fn validate_travel_time(data: &ParsedData, ctx: &mut ValidationContex
         check_negligible_ratio(hydro_id, t, &study_durations, ctx);
         check_horizon_inertness(hydro_id, t, &study_durations, ctx);
         check_history_depth(hydro_id, t, &pre_study_desc, data, ctx);
+    }
+
+    check_chronological_confluence_heterogeneous_travel_time(data, ctx);
+}
+
+/// Row 6: rejects a superset of the true heterogeneous-confluence cases (any
+/// chronological study stage, not only the ones whose per-stage-pair spread
+/// resolution actually disagrees) — this infrastructure crate has no access
+/// to that downstream, per-arc computation and must not reproduce it.
+fn check_chronological_confluence_heterogeneous_travel_time(
+    data: &ParsedData,
+    ctx: &mut ValidationContext,
+) {
+    let any_chronological = data
+        .stages
+        .stages
+        .iter()
+        .any(|s| s.id >= 0 && s.block_mode == BlockMode::Chronological);
+    if !any_chronological {
+        return;
+    }
+
+    let mut by_downstream: Vec<(EntityId, Vec<(i32, f64)>)> = Vec::new();
+    for hydro in &data.hydros {
+        let Some(t) = hydro
+            .travel_time_hours
+            .filter(|&t| t.is_finite() && t > 0.0)
+        else {
+            continue;
+        };
+        let Some(downstream_id) = hydro.downstream_id else {
+            continue;
+        };
+        match by_downstream
+            .iter_mut()
+            .find(|(id, _)| *id == downstream_id)
+        {
+            Some((_, arcs)) => arcs.push((hydro.id.0, t)),
+            None => by_downstream.push((downstream_id, vec![(hydro.id.0, t)])),
+        }
+    }
+
+    for (downstream_id, arcs) in &by_downstream {
+        if arcs.len() < 2 {
+            continue;
+        }
+        let first_t = arcs[0].1;
+        if arcs.iter().all(|&(_, t)| (t - first_t).abs() < 1e-9) {
+            continue;
+        }
+        let arc_desc = arcs
+            .iter()
+            .map(|(id, t)| format!("hydro {id} (travel_time_hours={t})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        ctx.add_error(
+            ErrorKind::NotImplemented,
+            "system/hydros.json",
+            Some(format!("Hydro {downstream_id}")),
+            format!(
+                "Hydro {downstream_id}: chronological confluence with heterogeneous travel \
+                 times is unsupported in v1 — {} declared arcs feed this downstream plant with \
+                 differing travel_time_hours ({arc_desc}); align the arcs' travel_time_hours or \
+                 keep every study stage in Parallel mode",
+                arcs.len()
+            ),
+        );
     }
 }
 
@@ -580,6 +648,91 @@ mod tests {
         assert!(
             ctx.has_errors(),
             "a declared arc with no pre-study calendar and no history must still error"
+        );
+    }
+
+    // ── Row 6: chronological confluence with heterogeneous travel time ───────
+
+    /// Hydro 1 and hydro 2 both feed downstream hydro 3 with `travel_time_hours`
+    /// `t1`/`t2`; the middle study stage runs `Chronological` when
+    /// `chronological` is `true` (else every stage stays the default `Parallel`).
+    fn confluence_data(t1: f64, t2: f64, chronological: bool) -> ParsedData {
+        let hydro1 = make_hydro_with_travel_time(1, 3, Some(t1));
+        let hydro2 = make_hydro_with_travel_time(2, 3, Some(t2));
+        let hydro3 = make_hydro(3, None);
+        let mut stages = make_stages_with_pre_study(3, 720.0, 1, 720.0);
+        if chronological {
+            stages
+                .stages
+                .iter_mut()
+                .find(|s| s.id == 1)
+                .unwrap()
+                .block_mode = BlockMode::Chronological;
+        }
+        let mut data = make_data(
+            vec![hydro1, hydro2, hydro3],
+            vec![],
+            vec![],
+            stages,
+            vec![],
+            vec![],
+        );
+        data.initial_conditions.past_defluences = vec![
+            past_defluences(1, 1).remove(0),
+            past_defluences(2, 1).remove(0),
+        ];
+        data
+    }
+
+    #[test]
+    fn test_chronological_confluence_heterogeneous_travel_time_hard_errors() {
+        let data = confluence_data(48.0, 96.0, true);
+
+        let mut ctx = ValidationContext::new();
+        validate_travel_time(&data, &mut ctx);
+
+        assert!(
+            ctx.has_errors(),
+            "chronological confluence with differing travel_time_hours must hard-error"
+        );
+        let errors = ctx.errors();
+        assert!(
+            errors.iter().any(|e| e.kind == ErrorKind::NotImplemented
+                && e.message.contains("Hydro 3")
+                && e.message.contains("chronological confluence")),
+            "error must name the downstream plant and the condition, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_chronological_confluence_equal_travel_time_no_row6_error() {
+        let data = confluence_data(48.0, 48.0, true);
+
+        let mut ctx = ValidationContext::new();
+        validate_travel_time(&data, &mut ctx);
+
+        assert!(
+            !ctx.errors()
+                .iter()
+                .any(|e| e.kind == ErrorKind::NotImplemented),
+            "equal travel_time_hours confluence must not be rejected, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    #[test]
+    fn test_parallel_confluence_heterogeneous_travel_time_no_row6_error() {
+        let data = confluence_data(48.0, 96.0, false);
+
+        let mut ctx = ValidationContext::new();
+        validate_travel_time(&data, &mut ctx);
+
+        assert!(
+            !ctx.errors()
+                .iter()
+                .any(|e| e.kind == ErrorKind::NotImplemented),
+            "a parallel-mode confluence must not be rejected, got: {:?}",
+            ctx.errors()
         );
     }
 }

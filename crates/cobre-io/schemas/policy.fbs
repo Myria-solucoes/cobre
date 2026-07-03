@@ -43,6 +43,7 @@ enum EntityType : byte {
   HydroStorage = 0,
   HydroInflowLag = 1,
   AnticipatedThermalState = 2,
+  HydroTransitBucket = 3,
 }
 
 /// Per-slot entity identity for one state-vector dimension. Element type of
@@ -50,7 +51,8 @@ enum EntityType : byte {
 ///
 /// `subindex` is the secondary index within the owning entity: the 1-based AR
 /// lag order for `HydroInflowLag`, the ring-buffer slot for
-/// `AnticipatedThermalState`, and `0` for `HydroStorage`.
+/// `AnticipatedThermalState`, the maturity lag `d` for `HydroTransitBucket`
+/// (`entity_id` is the downstream hydro), and `0` for `HydroStorage`.
 table EntitySlot {
   /// Dimension class of this state slot.
   entity_type:EntityType (id: 0);
