@@ -61,6 +61,38 @@ fn run_deterministic_with_solver(case_dir: &Path) -> (cobre_sddp::TrainingResult
     (outcome.result, solver)
 }
 
+/// Train a case (`StubComm`, `ActiveSolver`, seed 42, 1 thread) and return the
+/// setup (for post-train state introspection via `stage_state()`, or driving
+/// a subsequent simulation), the canonicalized system, and the training result.
+fn run_deterministic_with_setup(
+    case_dir: &Path,
+) -> (StudySetup, cobre_core::System, cobre_sddp::TrainingResult) {
+    let config_path = case_dir.join("config.json");
+    let config = cobre_io::parse_config(&config_path).expect("config must parse");
+
+    let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
+
+    let prepare_result =
+        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
+            .expect("prepare_stochastic must succeed");
+    let system = prepare_result.system;
+    let stochastic = prepare_result.stochastic;
+
+    let hydro_models =
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
+
+    let mut setup = build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models);
+
+    let comm = StubComm;
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+
+    let outcome = setup
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+        .expect("train must return Ok");
+    assert!(outcome.error.is_none(), "expected no training error");
+    (setup, system, outcome.result)
+}
+
 /// Train a case (`StubComm`, `ActiveSolver`, seed 42, 1 thread) and return the result.
 fn run_deterministic(case_dir: &Path) -> cobre_sddp::TrainingResult {
     let config_path = case_dir.join("config.json");
@@ -3510,8 +3542,7 @@ fn d43_storage_only_cut_converges() {
     }
 }
 
-/// D44: sub-stage-delay bucket dual and per-stage thermal split (water memo
-/// `docs/design/temporal-lag-unification.md` S7.1 — the bucket-value case).
+/// D44: sub-stage-delay bucket dual and per-stage thermal split.
 ///
 /// ## System
 ///
@@ -3723,7 +3754,7 @@ fn pad_calendar_for_resolution(stage_hours: &[f64], travel_time_hours: f64) -> V
 }
 
 /// D45: mixed-calendar depth-3 counterexample and end-to-end water
-/// conservation (water memo `docs/design/temporal-lag-unification.md` S7.1).
+/// conservation.
 ///
 /// ## Calendar
 ///
@@ -3732,7 +3763,7 @@ fn pad_calendar_for_resolution(stage_hours: &[f64], travel_time_hours: f64) -> V
 /// arrival window `[360, 1080)` overlaps four periods — `k_0 = 1/2`
 /// (same-stage), `k_1 = k_2 = 7/30`, `k_3 = 1/30` — so `L = 3`, not the
 /// closed-form ceiling `ceil(360/720) = 1`, which would drop `8/30` of the
-/// release (`.claude/rules/sddp.md` "k-factor conservation"). Four stages is
+/// release (the k-factor conservation contract). Four stages is
 /// exactly deep enough for the monthly anchor's depth-3 delivery to land
 /// fully within the horizon (target stage `0 + 3 = 3`, the last one), so this
 /// case's release delivers in full with zero horizon drop — the depth-3
@@ -3753,9 +3784,9 @@ fn pad_calendar_for_resolution(stage_hours: &[f64], travel_time_hours: f64) -> V
 ///    horizon).
 /// 3. Global-max sizing with per-stage masking: the bucket block's global
 ///    depth (`state.n_buckets`) is the deepest per-anchor reach; the
-///    documented per-stage cap (`.claude/rules/sddp.md` "Terminal credit
-///    deferred": `active.min(n_stages - 1 - stage)`) shrinks that reach
-///    stage by stage down to zero at the terminal stage.
+///    documented per-stage cap (the "terminal credit deferred" contract:
+///    `active.min(n_stages - 1 - stage)`) shrinks that reach stage by stage
+///    down to zero at the terminal stage.
 #[test]
 fn d45_travel_time_mixed_calendar_conservation() {
     const K_TOL: f64 = 1e-9;
@@ -3766,7 +3797,6 @@ fn d45_travel_time_mixed_calendar_conservation() {
 
     let stage_hours = [720.0, 168.0, 168.0, 168.0];
 
-    // ---- (1) resolve_spread at the monthly anchor: the depth-3 counterexample ----
     let monthly = cobre_sddp::lead_time::resolve_spread(TRAVEL_TIME_HOURS, 0, &stage_hours, None);
     assert_eq!(
         monthly.stage_reach, 3,
@@ -3791,33 +3821,14 @@ fn d45_travel_time_mixed_calendar_conservation() {
         );
     }
 
-    // ---- run the case ----
     let case_dir = Path::new("../../examples/deterministic/d45-travel-time-mixed-calendar");
-    let config_path = case_dir.join("config.json");
-    let config = cobre_io::parse_config(&config_path).expect("config must parse");
-    let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
-    let pr = prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-        .expect("prepare_stochastic must succeed");
-    let system = pr.system;
-    let stochastic = pr.stochastic;
-    let hydro_models =
-        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
-    let mut setup = build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models);
-
-    let comm = StubComm;
-    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
-    let outcome = setup
-        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
-        .expect("train must return Ok");
-    assert!(outcome.error.is_none(), "D45: expected no training error");
-    let result = outcome.result;
+    let (setup, _system, result) = run_deterministic_with_setup(case_dir);
     assert!(
         result.final_gap.abs() < 1e-6,
         "D45: gap={:.2e}",
         result.final_gap
     );
 
-    // ---- (3) global-max sizing with per-stage masking ----
     let state = setup.stage_state();
     assert_eq!(
         state.n_buckets, 3,
@@ -3852,7 +3863,7 @@ fn d45_travel_time_mixed_calendar_conservation() {
         capped[N_STAGES - 1]
     );
 
-    // ---- (2) end-to-end conservation ----
+    let comm = StubComm;
     let mut pool = setup
         .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("D45: simulation workspace pool must build");
@@ -3922,8 +3933,7 @@ fn d45_travel_time_mixed_calendar_conservation() {
     );
 }
 
-/// D46: chronological block-resolved attribution (water memo
-/// `docs/design/temporal-lag-unification.md` S7.1). Cascade `U -> J`,
+/// D46: chronological block-resolved attribution. Cascade `U -> J`,
 /// `travel_time_hours = 250` on `U`'s arc; stage 0 is 720 h resolved into 3
 /// chronological blocks of 240 h each, stage 1 a single 720 h receiving
 /// stage. The block-table / K=1-parity / state-dimension pins live in
@@ -3940,8 +3950,7 @@ fn d46_travel_time_chronological_converges() {
     );
 }
 
-/// D47: confluence aggregation (water memo
-/// `docs/design/temporal-lag-unification.md` S7.1). Two upstreams `U1`
+/// D47: confluence aggregation. Two upstreams `U1`
 /// (`travel_time_hours = 360`) and `U2` (`travel_time_hours = 1080`) both feed
 /// downstream `J` (run-of-river), 3 uniform 720 h stages, parallel mode.
 ///
@@ -3960,8 +3969,8 @@ fn d46_travel_time_chronological_converges() {
 /// `J` receives `U1`'s 50 hm3 same-stage share at stage 0; `U1`'s 50 hm3
 /// lag-1 share AND `U2`'s 50 hm3 lag-1 share both mature at stage 1 (100 hm3
 /// total — the confluence sum); `U2`'s 50 hm3 lag-2 share matures at stage 2.
-/// A single-term transition (`Σ_i k_{d,i} D_i^{t−d}`, the corrected §7.2
-/// defect) would mis-time `U2`'s deeper mass instead of this schedule.
+/// A single-term transition (`Σ_i k_{d,i} D_i^{t−d}`) would mis-time `U2`'s
+/// deeper mass instead of this schedule.
 #[test]
 fn d47_travel_time_confluence_aggregation() {
     const TOL: f64 = 1e-6;
@@ -3970,7 +3979,6 @@ fn d47_travel_time_confluence_aggregation() {
 
     let stage_hours = [720.0, 720.0, 720.0];
 
-    // ---- per-arc k-factors, verified directly before asserting anything downstream ----
     let u1 = cobre_sddp::lead_time::resolve_spread(360.0, 0, &stage_hours, None);
     assert_eq!(u1.stage_reach, 1, "U1: depth must be 1");
     for (lag, (&actual, &expected)) in u1.stage_weights.iter().zip([0.5, 0.5].iter()).enumerate() {
@@ -3997,33 +4005,14 @@ fn d47_travel_time_confluence_aggregation() {
         );
     }
 
-    // ---- run the case ----
     let case_dir = Path::new("../../examples/deterministic/d47-travel-time-confluence");
-    let config_path = case_dir.join("config.json");
-    let config = cobre_io::parse_config(&config_path).expect("config must parse");
-    let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
-    let pr = prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-        .expect("prepare_stochastic must succeed");
-    let system = pr.system;
-    let stochastic = pr.stochastic;
-    let hydro_models =
-        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
-    let mut setup = build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models);
-
-    let comm = StubComm;
-    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
-    let outcome = setup
-        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
-        .expect("train must return Ok");
-    assert!(outcome.error.is_none(), "D47: expected no training error");
-    let result = outcome.result;
+    let (setup, system, result) = run_deterministic_with_setup(case_dir);
     assert!(
         result.final_gap.abs() < 1e-6,
         "D47: gap={:.2e}",
         result.final_gap
     );
 
-    // ---- merged depth: ONE per-j bucket block of depth 2, not one per arc ----
     let state = setup.stage_state();
     assert_eq!(
         state.n_buckets, 2,
@@ -4042,7 +4031,7 @@ fn d47_travel_time_confluence_aggregation() {
          index, lags 1 and 2), never a separate block per upstream arc"
     );
 
-    // ---- run the simulation for the per-stage arrival + conservation checks ----
+    let comm = StubComm;
     let mut pool = setup
         .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("D47: simulation workspace pool must build");
@@ -4066,7 +4055,6 @@ fn d47_travel_time_confluence_aggregation() {
     let scenario = &scenario_results[0];
     assert_eq!(scenario.stages.len(), 3, "D47: exactly three stages");
 
-    // ---- aggregated per-stage arrivals: measured against the hand-derived sum ----
     let expected_arrivals_hm3 = [50.0, 100.0, 50.0];
     let mut released_hm3 = 0.0_f64;
     let mut delivered_hm3 = 0.0_f64;
@@ -4107,7 +4095,6 @@ fn d47_travel_time_confluence_aggregation() {
         );
     }
 
-    // ---- conservation summed over both arcs ----
     let terminal_stage = scenario.stages.last().expect("D47: at least one stage");
     let horizon_drop_hm3: f64 = terminal_stage
         .transit_buckets
@@ -4774,7 +4761,8 @@ mod chronological_telescoping {
 /// Chronological block-resolved attribution for a declared travel-time arc: the
 /// resolver's block tables, the `K = 1` chronological-vs-parallel byte-identity
 /// anchor, and the parallel-vs-chronological state-dimension equality
-/// (`.claude/rules/sddp.md` "Water travel time" sub-contracts).
+/// (mode-independent sizing, the shared-density aggregation identity, and the
+/// fixed-delivery-density contract).
 mod chronological_attribution {
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{Block, BlockMode, Stage};
@@ -5288,10 +5276,9 @@ mod chronological_attribution {
 
     /// `K = 1` chronological (single 720 h block) must be byte-identical to
     /// the parallel build, WITH the travel-time arc declared (`χ_{0,d} = k_d`
-    /// — `.claude/rules/sddp.md`'s "Sub-contracts" fixed-delivery-density
-    /// fact). A single chronological block has no interior routing to
-    /// diverge on, so every stage template must match the parallel LP
-    /// exactly, bit for bit.
+    /// — the fixed-delivery-density contract). A single chronological block
+    /// has no interior routing to diverge on, so every stage template must
+    /// match the parallel LP exactly, bit for bit.
     #[test]
     fn k1_chronological_byte_identical_to_parallel_with_travel_time_on() {
         let parallel = build_setup(BlockMode::Parallel, single_block("B0", 720.0));
@@ -5313,8 +5300,8 @@ mod chronological_attribution {
         }
     }
 
-    /// Sub-contract 1 (mode-independent sizing): the bucket state is a pure
-    /// function of stage lengths, never of `n_blks`/`block_mode`. Builds the
+    /// Mode-independent sizing: the bucket state is a pure function of stage
+    /// lengths, never of `n_blks`/`block_mode`. Builds the
     /// SAME cascade in parallel (`K = 1`) and chronological (`K = 3`) mode and
     /// asserts `state.n_state`/`state.n_buckets` are equal — a state dimension
     /// that instead tracked `n_blks` would silently misalign the trial-state

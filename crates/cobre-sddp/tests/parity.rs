@@ -1686,9 +1686,9 @@ mod determinism {
 mod water_travel_time_no_arc_byte_identity {
     //! With the water travel-time feature compiled in but no arc declared on any
     //! hydro, `n_buckets == 0` and the `StateLayout`/LP/cuts/outputs must collapse
-    //! to the pre-bucket baseline byte-for-byte (`.claude/rules/sddp.md`, "Water
-    //! travel time"). This module makes that guarantee an explicit regression at
-    //! two scales:
+    //! to the pre-bucket baseline byte-for-byte (the `n_buckets` == 0
+    //! byte-identity anchor). This module makes that guarantee an explicit
+    //! regression at two scales:
     //!
     //! - [`synthetic_no_arc_state_layout_matches_pre_transit_bucket_formula`] and
     //!   [`k1_chronological_byte_identical_to_parallel_with_no_arc_declared`]

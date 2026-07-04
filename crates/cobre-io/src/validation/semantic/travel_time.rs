@@ -20,8 +20,8 @@ use cobre_core::{BlockMode, EntityId, Hydro, window_period_overlaps};
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
 /// Below this `max_t(t_v/h_t)` ratio, cross-stage transport carries a
-/// mass-fraction the memo's worked example (6h travel time over 720h monthly
-/// stages, ratio ~=0.8%) calls negligible.
+/// mass-fraction (e.g. 6h travel time over a 720h monthly stage, ratio
+/// ~=0.8%) small enough to treat as negligible.
 const NEGLIGIBLE_RATIO_THRESHOLD: f64 = 0.01;
 
 pub(super) fn validate_travel_time(data: &ParsedData, ctx: &mut ValidationContext) {
@@ -99,8 +99,8 @@ fn arrival_depth(t: f64, anchor: usize, study_durations: &[f64]) -> usize {
 /// Row 12: rejects a declared arc that releases while its downstream has not
 /// yet entered — the `PreFilling` short-circuit is same-stage and cannot
 /// carry a delayed delivery into an absent balance row, and a `Filling`
-/// downstream's sufficiency budget does not model bucket-borne arrivals
-/// (water memo §3.3). Checking only the release (anchor) stage suffices: a
+/// downstream's sufficiency budget does not model bucket-borne arrivals.
+/// Checking only the release (anchor) stage suffices: a
 /// downstream's phase never reverts to non-Operating except via
 /// `exit_stage_id`, which [`hydro_not_yet_entered`] excludes and row 11 owns.
 fn check_recourse_downstream_not_operating(

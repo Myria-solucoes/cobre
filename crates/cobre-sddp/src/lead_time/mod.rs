@@ -1,21 +1,19 @@
 //! Resolution of calendar-anchored lags into per-stage and per-block
 //! factors, built on `cobre_core`'s [`window_period_overlaps`]
-//! interval-overlap primitive. Two entry points share the overlap engine
-//! (`docs/design/temporal-lag-unification.md` §2.1): [`resolve_spread`]
-//! resolves a spreadable quantity's stage-clock and block-clock weights;
-//! [`resolve_point`] resolves a point commitment (anticipated dispatch) into
-//! a single decider per delivery stage.
+//! interval-overlap primitive. Two entry points share the overlap engine:
+//! [`resolve_spread`] resolves a spreadable quantity's stage-clock and
+//! block-clock weights; [`resolve_point`] resolves a point commitment
+//! (anticipated dispatch) into a single decider per delivery stage.
 //!
 //! [`resolve_spread`] is the sole resolver dependency for the water
-//! travel-time feature (`docs/design/water-travel-time-sddp-analysis.md`
-//! §2.5, `docs/design/temporal-lag-unification.md` §3). Every factor it
-//! returns — stage-clock `stage_weights` (the k-factors), block-resolved
+//! travel-time feature. Every factor it returns — stage-clock
+//! `stage_weights` (the k-factors), block-resolved
 //! `block_deposits`/`within_stage_routing` (the χ/κ factors), and
 //! per-arrival-stage `arrival_density` (the delivery density) — overlaps
 //! `arrival_window`'s ONE shared uniform arrival density against nested
-//! calendar partitions (stage clock ⊃ block clock), so the
-//! aggregation-consistency identity `Σ_b w_b·χ_{b,d} == k_d` holds by
-//! construction rather than by convention.
+//! calendar partitions (stage clock ⊃ block clock), so the shared-density
+//! aggregation identity `Σ_b w_b·χ_{b,d} == k_d` holds by construction
+//! rather than by convention.
 
 use cobre_core::window_period_overlaps;
 
@@ -133,7 +131,7 @@ pub fn resolve_spread(
                 .sum();
             debug_assert!(
                 (aggregated - stage_weight).abs() < 1e-9,
-                "block deposits must aggregate to the stage-level k_d (sub-contract 2)"
+                "block deposits must aggregate to the stage-level k_d (shared-density aggregation identity)"
             );
         }
     }
@@ -162,10 +160,10 @@ pub fn resolve_spread(
 /// call site is a compile error, not a silent mix-up.
 #[derive(Debug, Clone)]
 struct BlockFactors {
-    /// Per-source-block deposit (`chi` in the design memo); see
+    /// Per-source-block deposit (the `chi` factor); see
     /// [`SpreadResolution::block_deposits`].
     deposits: Vec<Vec<f64>>,
-    /// Per-source-block within-stage routing (`kappa` in the design memo);
+    /// Per-source-block within-stage routing (the `kappa` factor);
     /// see [`SpreadResolution::within_stage_routing`].
     routing: Vec<Vec<f64>>,
 }
@@ -257,18 +255,18 @@ fn resolve_delivery(
 
 /// A calendar-anchored point-commitment lag: a physical lead time on the
 /// hour clock, or a first-class stage-count shift that never reads the
-/// calendar (`docs/design/temporal-lag-unification.md` §4.4).
+/// calendar.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LeadTime {
-    /// Physical lead time in hours, delivery-anchored (§4.3).
+    /// Physical lead time in hours, delivery-anchored.
     Time(f64),
-    /// Stage-count shift; the calendar is never consulted (§4.4).
+    /// Stage-count shift; the calendar is never consulted.
     Stages(u32),
 }
 
 /// Resolved point-commitment lag: the delivery-anchored decider, the
 /// per-decision-stage outgoing commitment sets, and the per-decision-stage
-/// depths (`docs/design/temporal-lag-unification.md` §4.3).
+/// depths.
 #[derive(Debug, Clone)]
 pub struct PointResolution {
     /// Decision stage `c(m)` for each delivery stage `m`; `None` is a
@@ -282,7 +280,7 @@ pub struct PointResolution {
 
 /// Resolve a point-commitment lag into the delivery-anchored decider, the
 /// per-decision-stage outgoing commitment sets, and the per-decision-stage
-/// depths (§4.3 physical mode, §4.4 stage-count mode).
+/// depths.
 ///
 /// `stage_lengths_hours` must have length `n_stages`; [`LeadTime::Stages`] never
 /// reads it.
@@ -334,7 +332,7 @@ fn cumulative_stage_boundaries(stage_lengths_hours: &[f64]) -> Vec<f64> {
 /// `c(m)` = the stage containing `end_m − Δ`, anchored at the delivery
 /// stage's end with boundary ties resolving to the earlier stage — a
 /// sub-stage lead (`Δ < h_m`) gives `c(m) = m`; a start-anchored `start_m −
-/// Δ` could never reach that (§4.3). `None` when the target precedes the
+/// Δ` could never reach that. `None` when the target precedes the
 /// horizon start.
 fn resolve_decider_physical(
     delta_hours: f64,
@@ -362,19 +360,16 @@ fn resolve_decider_physical(
         .collect()
 }
 
-/// `c(m) = m − ℓ` (or `None` if negative); the calendar is never read (§4.4)
-/// — enforced by construction, since this arm takes no stage-length
+/// `c(m) = m − ℓ` (or `None` if negative); the calendar is never read —
+/// enforced by construction, since this arm takes no stage-length
 /// parameter.
 fn resolve_decider_stage_count(lead_stages: u32, n_stages: usize) -> Vec<Option<usize>> {
     let lead = usize::try_from(lead_stages).unwrap_or(usize::MAX);
     (0..n_stages).map(|m| m.checked_sub(lead)).collect()
 }
 
-/// Builds `C(t)` and `K(t)` from `decider` in one forward pass: each
-/// delivery `m` with decider `d` both joins `decision_sets[d]` and widens a
-/// sweep interval `[d, m)` (`d <= m` always, since `c(m)` never exceeds
-/// `m`), so a difference-array prefix sum yields `K(t) = |{m>t : c(m)<=t}|`
-/// without an O(n²) rescan.
+/// Builds `C(t)` and `K(t)` from `decider` via a difference-array prefix sum
+/// in one forward pass, avoiding an O(n²) rescan of every `(m, t)` pair.
 fn build_decision_sets_and_depth(
     decider: &[Option<usize>],
     n_stages: usize,

@@ -1,7 +1,6 @@
 """
 Generate Parquet scenario files for the d46-travel-time-chronological case
-(chronological block-resolved attribution: water memo
-`docs/design/temporal-lag-unification.md` S7.1).
+(chronological block-resolved attribution).
 
 Run with: uv tool run --with pyarrow -- python3 generate_parquet.py
 

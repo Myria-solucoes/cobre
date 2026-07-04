@@ -150,9 +150,8 @@ pub(super) fn fill_state_and_water_entries(
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
-    // Mode-independent (the bucket ring-shift structure never depends on
-    // block_mode, sub-contract 1): runs once regardless of which per-mode fill
-    // follows.
+    // Mode-independent sizing (the bucket ring-shift structure never depends
+    // on block_mode): runs once regardless of which per-mode fill follows.
     fill_transit_bucket_definition_entries(layout, col_entries);
 
     match stage.block_mode {
@@ -334,7 +333,7 @@ fn fill_transit_bucket_definition_entries(
 /// and, for a multi-lag arc, deposits `-k_d·τ_blk` (`d = 1..=depth`) into the
 /// plant's bucket-definition rows. The SAME release column carries `k_0` on
 /// the balance row and `k_1..k_d` into the definition rows (the `k_0 > 0`
-/// co-existence, water memo §2.2) — never the once-per-stage `ζ`-family.
+/// co-existence) — never the once-per-stage `ζ`-family.
 ///
 /// `ctx.arc_spread_k` has no entry for an undeclared arc, so this emits
 /// exactly today's `-τ_blk` and no deposit (the B==0 byte-identity anchor).
@@ -474,8 +473,9 @@ fn fill_chronological_water_entries(
         }
 
         // Arrival: the incoming maturing bucket `b_1^in` delivers over THIS
-        // stage's blocks by the fixed template density rho (sub-contract 3) —
-        // one shared entry per block, mirroring the parallel single-row `-1.0`.
+        // stage's blocks by the fixed template density rho (the
+        // fixed-delivery-density contract) — one shared entry per block,
+        // mirroring the parallel single-row `-1.0`.
         if let Some(range) = plant_transit_bucket_range(layout.state, h_idx) {
             let arrival_density =
                 resolve_chrono_arrival_density(ctx, stage, stage_idx, hydro.id, n_blks);
@@ -557,14 +557,14 @@ fn fill_chronological_water_entries(
 }
 
 /// One upstream release's per-block contribution to the downstream chained
-/// rows (arc `u_idx → h_idx`, block `blk`), block-resolved (water memo §2.5.2):
-/// same-stage routing `-κ_{blk→b'}·τ_blk` onto every downstream block
-/// `b' ∈ [blk, n_blks)` (`κ`'s self-inclusive index 0 is `blk` routing to
-/// itself), and crossing deposits `-χ_{blk,d}·τ_blk` (`d = 1..=depth`) into the
-/// plant's bucket-definition rows — the SAME release column carrying both,
-/// mirroring the parallel arrival-split's `k_0`/`k_d` co-existence. Also
-/// verifies the shared-density aggregation `Σ_b w_b·χ_{b,d} == k_d` once per
-/// (arc, stage) (`blk == 0`) — sub-contract 2.
+/// rows (arc `u_idx → h_idx`, block `blk`), block-resolved: same-stage
+/// routing `-κ_{blk→b'}·τ_blk` onto every downstream block `b' ∈ [blk,
+/// n_blks)` (`κ`'s self-inclusive index 0 is `blk` routing to itself), and
+/// crossing deposits `-χ_{blk,d}·τ_blk` (`d = 1..=depth`) into the plant's
+/// bucket-definition rows — the SAME release column carrying both, mirroring
+/// the parallel arrival-split's `k_0`/`k_d` co-existence. Also verifies the
+/// shared-density aggregation identity `Σ_b w_b·χ_{b,d} == k_d` once per
+/// (arc, stage) (`blk == 0`).
 ///
 /// `ctx.arc_spread_chrono` has no entry for an undeclared arc (or a stage whose
 /// own `block_mode` is `Parallel`), so this emits exactly today's `-τ_blk` on
@@ -668,14 +668,15 @@ fn fill_arc_release_chrono_block_entries(
     }
 }
 
-/// Resolve the fixed-template delivery density `ρ` (sub-contract 3) that
-/// splits THIS stage's incoming maturing bucket across its `n_blks` rows: the
-/// sending stage's (`stage_idx - 1`) own `resolve_spread` delivery row for
-/// `d = 1` — re-anchored fresh every stage (no per-origin/per-lag memory, the
-/// documented bounded approximation). Falls back to the duration-weighted
-/// uniform density (sub-contract 3's alternate "uniform-over-the-early-blocks"
-/// formula) when no matching chronological sending-stage table exists (the
-/// study's first stage, or a parallel-to-chronological transition).
+/// Resolve the fixed-template delivery density `ρ` (the fixed-delivery-density
+/// contract) that splits THIS stage's incoming maturing bucket across its
+/// `n_blks` rows: the sending stage's (`stage_idx - 1`) own `resolve_spread`
+/// delivery row for `d = 1` — re-anchored fresh every stage (no
+/// per-origin/per-lag memory, the documented bounded approximation). Falls
+/// back to the duration-weighted uniform density (the fixed-delivery-density
+/// fallback: uniform over the early blocks) when no matching chronological
+/// sending-stage table exists (the study's first stage, or a
+/// parallel-to-chronological transition).
 ///
 /// A confluence whose contributing arcs disagree on this density has no
 /// resolved policy; `check_chronological_confluence_heterogeneous_travel_time`
@@ -4062,11 +4063,6 @@ mod pumping_water_tests {
             },
         };
 
-        // Build the fixture, run the PRODUCTION assemble sequence
-        // (build_stage_matrix_entries -> fill_generic_constraint_entries via
-        // LpMatrixBuffers -> per-column row-sort -> assemble_csc, matching
-        // build_single_stage_template), and return the CSC triple plus the layout
-        // so the caller can probe the generic-constraint row.
         // Run the production assemble sequence into a CSC for a fixture. Takes the
         // fixture by reference so the caller can keep it alive and build a layout
         // from it for the offset reads — the per-call `StageLayout` borrows the
@@ -4784,8 +4780,8 @@ mod pumping_water_tests {
     }
 
     /// Confluence: two upstreams feeding one downstream plant sum their
-    /// travel-time deposits into the SAME per-plant bucket definition row
-    /// (water memo §7.2), not one row per arc.
+    /// travel-time deposits into the SAME per-plant bucket definition row,
+    /// not one row per arc.
     #[test]
     fn confluence_two_upstreams_sum_deposits_into_single_definition_row() {
         let up_a = 1;
@@ -4859,7 +4855,8 @@ mod pumping_water_tests {
     /// `B == 0` (no declared arc, `state.n_buckets == 0`): the emitted water
     /// entries are byte-identical to today's shape — no bucket-definition rows
     /// exist at all (`load_balance` collapses back onto `water_balance.end`)
-    /// and the upstream release carries exactly `-tau_h` (the W-1 anchor).
+    /// and the upstream release carries exactly `-tau_h` (the `n_buckets` == 0
+    /// byte-identity anchor).
     #[test]
     fn b_zero_water_entries_are_byte_identical_to_undeclared_arc() {
         let up = 1;
@@ -4987,8 +4984,8 @@ mod pumping_water_tests {
         stage
     }
 
-    /// Example (iii) of the water travel-time memo: `t_v = 250h` against a
-    /// 720h stage of 3×240h chronological blocks. Pins
+    /// A `t_v = 250h` travel time against a 720h stage of 3×240h
+    /// chronological blocks. Pins
     /// `κ_{B0→B1}=230/240, κ_{B0→B2}=10/240, κ_{B1→B2}=230/240,
     /// χ=(0, 10/240, 1)`-shaped on the emitted matrix entries.
     #[test]
@@ -5012,7 +5009,6 @@ mod pumping_water_tests {
         let block_hours = [240.0, 240.0, 240.0];
         let resolution = resolve_spread(t_v, 0, &[720.0, 720.0], Some(&block_hours));
 
-        // Sanity: the resolver reproduces the memo's worked numbers exactly.
         assert!((resolution.within_stage_routing[0][1] - 230.0 / 240.0).abs() < 1e-9);
         assert!((resolution.within_stage_routing[0][2] - 10.0 / 240.0).abs() < 1e-9);
         assert!((resolution.within_stage_routing[1][1] - 230.0 / 240.0).abs() < 1e-9);
@@ -5085,7 +5081,7 @@ mod pumping_water_tests {
     }
 
     /// `K = 1` (a single block spanning the whole stage) with travel time ON is
-    /// byte-identical to the parallel fill (the memo's K=1 parity anchor):
+    /// byte-identical to the parallel fill (the K=1 parity anchor):
     /// `χ_{0,d} = k_d` collapses κ to self-routing and χ to the parallel deposit.
     #[test]
     fn k1_chronological_with_travel_time_is_byte_identical_to_parallel() {
@@ -5255,7 +5251,7 @@ mod pumping_water_tests {
         let down_idx = fixtures.hydro_pos[&EntityId(down)];
 
         // k_1 = 0.5 but the single block's block_deposits value is 0.0 at
-        // lag 1 — violates sub-contract 2's aggregation identity.
+        // lag 1 — violates the shared-density aggregation identity.
         let bad_resolution = SpreadResolution {
             stage_reach: 1,
             stage_weights: vec![0.5, 0.5],

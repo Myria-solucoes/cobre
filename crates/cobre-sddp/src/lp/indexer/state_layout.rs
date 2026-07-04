@@ -1533,7 +1533,7 @@ mod tests {
     }
 
     /// `B == 0` (no declared travel-time arc) reproduces the exact pre-bucket
-    /// layout — the W-1 byte-identity anchor. Every offset below is the
+    /// layout — the `n_buckets` == 0 byte-identity anchor. Every offset below is the
     /// literal pre-bucket formula (`N=3, L=2, A=2, k_max=2`); a stray `+0`
     /// that reorders the sequential-offset chain would move one of these off
     /// its hardcoded value.

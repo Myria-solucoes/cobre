@@ -1,7 +1,6 @@
 """
 Generate Parquet scenario files for the d47-travel-time-confluence case
-(confluence aggregation: water memo
-`docs/design/temporal-lag-unification.md` S7.1).
+(confluence aggregation).
 
 Run with: uv tool run --with pyarrow -- python3 generate_parquet.py
 

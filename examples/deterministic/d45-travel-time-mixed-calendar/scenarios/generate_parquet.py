@@ -1,7 +1,6 @@
 """
 Generate Parquet scenario files for the d45-travel-time-mixed-calendar case
-(the mixed-calendar depth-3 counterexample: water memo
-`docs/design/temporal-lag-unification.md` S7.1).
+(the mixed-calendar depth-3 counterexample).
 
 Run with: uv tool run --with pyarrow -- python3 generate_parquet.py
 

@@ -1,9 +1,9 @@
 //! Stage-0 incoming travel-time bucket seed from pre-study upstream releases.
 //!
 //! [`build_initial_transit_bucket_state`] unrolls each declared arc's pre-study
-//! defluence history through the IC-anchor overlap arithmetic (water memo
-//! §4.1/§2.2) into the stage-0 incoming bucket state, aggregated per
-//! downstream plant exactly as [`TransitBucketTopology`] aggregates depth. The
+//! defluence history through the IC-anchor overlap arithmetic into the
+//! stage-0 incoming bucket state, aggregated per downstream plant exactly as
+//! [`TransitBucketTopology`] aggregates depth. The
 //! caller splices the result into the same `initial_state` vector
 //! `build_initial_state` populates, so the single `fill_col_state_patches`
 //! pin path picks it up with no separate wiring.
@@ -28,11 +28,10 @@ use super::bucket_topology::{
 /// landing `d-1` study stages after stage 0.
 ///
 /// Runs single-threaded in [`TransitBucketTopology::column_order`]'s canonical
-/// (sorted) order — never a rank-count-dependent parallel reduction (water
-/// memo §6 item 6).
+/// (sorted) order — never a rank-count-dependent parallel reduction.
 ///
 /// Falls back to `past_inflows` when a declared arc's `past_defluences`
-/// history is shorter than its required depth (D5) — the same choice
+/// history is shorter than its required depth — the same choice
 /// `cobre-io`'s `validate_travel_time` row-5 gate already enforced (and
 /// already hard-errors / logs the caveat there); this only consumes whichever
 /// history that validation accepted.
@@ -92,7 +91,7 @@ pub(crate) fn build_initial_transit_bucket_state(
 }
 
 /// Select the arc's pre-study release history: `past_defluences` when it
-/// meets `required`, else the whole `past_inflows` proxy (D5) — the fallback
+/// meets `required`, else the whole `past_inflows` proxy — the fallback
 /// `cobre-io`'s row-5 validation already decided; neither being long enough
 /// would already have hard-errored before setup runs this.
 fn select_history(ic: &InitialConditions, hydro_id: EntityId, required: usize) -> &[f64] {
@@ -265,7 +264,8 @@ mod tests {
 
     /// Single arc, `k = [1/2, 1/2]`, one pre-study release `D^{-1}` ⇒
     /// `b_1 = k_1 · D^{-1} = 1/2 · D^{-1}` (`D^{-1}` the period-duration-scaled
-    /// volume, mirroring the memo's already-volume-scaled `D_i^t`).
+    /// volume, mirroring how an in-study release is already volume-scaled by
+    /// `τ`).
     #[test]
     fn test_single_arc_unroll_matches_ac1() {
         let downstream = hydro(1, None, None);

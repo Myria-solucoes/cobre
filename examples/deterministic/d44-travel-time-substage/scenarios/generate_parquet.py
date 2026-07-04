@@ -1,7 +1,6 @@
 """
 Generate Parquet scenario files for the d44-travel-time-substage case (the
-sub-stage-delay bucket-value case: water memo
-`docs/design/temporal-lag-unification.md` S7.1).
+sub-stage-delay bucket-value case).
 
 Run with: uv tool run --with pyarrow -- python3 generate_parquet.py
 

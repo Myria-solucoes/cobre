@@ -16,8 +16,8 @@ fn assert_close(actual: &[f64], expected: &[f64]) {
     }
 }
 
-// S1a stage-clock weights per temporal-lag-unification.md §3 (DECOMP Fig. 5.5b):
-// k_0 = k_1 = 0, k_2 = 6/7, k_3 = 1/7, depth 3.
+// Weekly anchor (168h stages), t_v=360h: stage_weights[0]=stage_weights[1]=0,
+// stage_weights[2]=6/7, stage_weights[3]=1/7, depth 3.
 #[test]
 fn test_s1a_matches_decomp_fig_5_5b() {
     let stage_lengths_hours = [168.0; 6];
@@ -88,9 +88,8 @@ fn test_example_iii_block_factors() {
     }
 }
 
-// S1b stage-clock weights per temporal-lag-unification.md §3 (DECOMP Fig.
-// 5.5c's (Δt-15)/Δt same-stage shape): monthly anchor, t_v=360h is exactly
-// half the anchor length, so k_0 = k_1 = 1/2 and depth is 1.
+// Monthly anchor, t_v=360h is exactly half the anchor length, so
+// stage_weights[0]=stage_weights[1]=1/2 and depth is 1.
 #[test]
 fn test_s1b_monthly_half_split() {
     let stage_lengths_hours = [720.0, 720.0, 720.0];
@@ -101,12 +100,11 @@ fn test_s1b_monthly_half_split() {
     assert!((resolution.stage_weights.iter().sum::<f64>() - 1.0).abs() < TOL);
 }
 
-// S1c weekly-to-monthly transition per temporal-lag-unification.md §3: the
-// same t_v=360h anchored at each of 4 weekly stages then the first monthly
-// stage gives depths (3, 3, 2, 1, 1) — week 3's window skips week 4 entirely
-// and lands in the month (k_2 = 1, slot 1 transit-only) — and the global max
-// over all anchors is depth 3, the reachability mask the per-stage state
-// sizing needs.
+// Weekly-to-monthly transition: the same t_v=360h anchored at each of 4
+// weekly stages then the first monthly stage gives depths (3, 3, 2, 1, 1) —
+// week 3's window skips week 4 entirely and lands in the month
+// (stage_weights[2] = 1, slot 1 transit-only) — and the global max over all
+// anchors is depth 3, the reachability mask the per-stage state sizing needs.
 #[test]
 fn test_s1c_weekly_to_monthly_transition_depths() {
     let stage_lengths_hours = [168.0, 168.0, 168.0, 168.0, 720.0, 720.0, 720.0];
@@ -143,9 +141,9 @@ fn test_s1c_weekly_to_monthly_transition_depths() {
     }
 }
 
-// S2 negligible same-stage-crossing mass per temporal-lag-unification.md §3:
-// monthly anchor, t_v=6h — the setup-advisory case rather than a silent
-// fold, since the bucket still carries the exact mass k_1 = 6/720.
+// Negligible same-stage-crossing mass: monthly anchor, t_v=6h — the
+// setup-advisory case rather than a silent fold, since the bucket still
+// carries the exact mass stage_weights[1] = 6/720.
 #[test]
 fn test_s2_monthly_negligible_mass() {
     let stage_lengths_hours = [720.0, 720.0];
@@ -156,11 +154,11 @@ fn test_s2_monthly_negligible_mass() {
     assert!((resolution.stage_weights.iter().sum::<f64>() - 1.0).abs() < TOL);
 }
 
-// S3 daily chronological block partition per temporal-lag-unification.md §3:
-// t_v=6h against 24 hourly blocks gives stage-clock k_1 = 25%, and the
-// chronological-adds boundary — blocks 0-17 route in-stage to block b+6
-// (block_deposits[b][0] = 1), blocks 18-23 cross the day boundary and
-// deposit fully into lag 1 (block_deposits[b][1] = 1).
+// Daily chronological block partition: t_v=6h against 24 hourly blocks gives
+// stage-clock stage_weights[1] = 25%, and the chronological-adds boundary —
+// blocks 0-17 route in-stage to block b+6 (block_deposits[b][0] = 1), blocks
+// 18-23 cross the day boundary and deposit fully into lag 1
+// (block_deposits[b][1] = 1).
 #[test]
 fn test_s3_daily_chronological_block_partition() {
     let stage_lengths_hours = [24.0, 24.0, 24.0];
@@ -193,9 +191,9 @@ fn test_s3_daily_chronological_block_partition() {
     }
 }
 
-// S4 exact-multiple boundary per temporal-lag-unification.md §3: monthly
-// anchor, t_v=720h is exactly one stage length, so the whole release crosses
-// the boundary: k_0 = 0, k_1 = 1.
+// Exact-multiple boundary: monthly anchor, t_v=720h is exactly one stage
+// length, so the whole release crosses the boundary: stage_weights[0] = 0,
+// stage_weights[1] = 1.
 #[test]
 fn test_s4_monthly_exact_multiple_boundary() {
     let stage_lengths_hours = [720.0, 720.0];
@@ -206,10 +204,10 @@ fn test_s4_monthly_exact_multiple_boundary() {
     assert!((resolution.stage_weights.iter().sum::<f64>() - 1.0).abs() < TOL);
 }
 
-// S5 transit-only slot per temporal-lag-unification.md §3: monthly anchor,
-// t_v=1800h (75 d) — slot 1 carries zero deposit yet the ring shift still
-// passes mass through it to slots 2 and 3, which split the release evenly;
-// depth counts a reachable slot, not a nonzero-factor count.
+// Transit-only slot: monthly anchor, t_v=1800h (75 d) — slot 1 carries zero
+// deposit yet the ring shift still passes mass through it to slots 2 and 3,
+// which split the release evenly; depth counts a reachable slot, not a
+// nonzero-factor count.
 #[test]
 fn test_s5_monthly_transit_only_slot() {
     let stage_lengths_hours = [720.0; 5];
@@ -221,9 +219,10 @@ fn test_s5_monthly_transit_only_slot() {
     assert!((resolution.stage_weights.iter().sum::<f64>() - 1.0).abs() < TOL);
 }
 
-// Exercises the `Σ_d k_d == 1` conservation debug_assert directly
-// (water-travel-time-sddp-analysis.md §6.1), across a non-uniform calendar and
-// a non-zero `anchor_stage` slice offset, distinct from S1a/S1d's fixtures.
+// Exercises the `Σ_d k_d == 1` conservation debug_assert directly, across a
+// non-uniform calendar and a non-zero `anchor_stage` slice offset — distinct
+// from the weekly (`test_s1a_matches_decomp_fig_5_5b`) and monthly-transition
+// (`test_s1d_monthly_to_weekly_counterexample`) fixtures above.
 #[test]
 fn test_stage_level_conservation_debug_assert() {
     let stage_lengths_hours = [300.0, 200.0, 400.0, 150.0, 600.0, 250.0];
@@ -244,8 +243,9 @@ fn test_stage_level_conservation_debug_assert() {
 }
 
 // Exercises the `Σ_b w_b·χ_{b,d} == k_d` shared-density-consistency
-// debug_assert directly (sub-contract 2), across a non-uniform block
-// partition and non-uniform future stages, distinct from example (iii).
+// debug_assert directly (the shared-density aggregation identity), across a
+// non-uniform block partition and non-uniform future stages, distinct from
+// `test_example_iii_block_factors`.
 #[test]
 fn test_shared_density_consistency_debug_assert() {
     let stage_lengths_hours = [720.0, 500.0, 300.0, 300.0];
@@ -275,12 +275,12 @@ fn test_shared_density_consistency_debug_assert() {
 }
 
 // PMO calendar (4x168h weekly then 720h monthly), 30-day (720h) lead. The
-// end-anchored decider (§4.3) inverts the memo §4.1 collision illustration
-// directly against the calendar rather than reading its decision-anchored
-// column: weeks 0-3 cannot reach month 1 (end_4 - 720h = day -2, pre-study),
-// so month 1 is IC; week 4 (the stage immediately preceding month 1) is the
-// unique decider, and each month thereafter decides the next at lag 1
-// (Δ == h_month exactly).
+// end-anchored decider computes directly against the calendar rather than
+// reading a decision-anchored column, avoiding the many-to-one collision a
+// decision-anchored scheme produces on this same calendar: weeks 0-3 cannot
+// reach month 1 (end_4 - 720h = day -2, pre-study), so month 1 is IC; week 4
+// (the stage immediately preceding month 1) is the unique decider, and each
+// month thereafter decides the next at lag 1 (Δ == h_month exactly).
 #[test]
 fn test_pmo_end_anchored_delivery_resolution() {
     let stage_lengths_hours = [168.0, 168.0, 168.0, 168.0, 720.0, 720.0, 720.0];
@@ -297,10 +297,9 @@ fn test_pmo_end_anchored_delivery_resolution() {
     assert_eq!(resolution.depth, vec![0, 0, 0, 1, 1, 1, 0]);
 }
 
-// Sub-stage lead (§4.3): a 700h stage then a 744h (31-day) month, 720h
-// (30-day) lead. Δ < h_1, so end_1 - Δ falls inside stage 1's own window and
-// c(1) == 1 — the K=0 degeneracy, represented (not underflowed) with
-// depth[1] == 0.
+// Sub-stage lead: a 700h stage then a 744h (31-day) month, 720h (30-day)
+// lead. Δ < h_1, so end_1 - Δ falls inside stage 1's own window and c(1) ==
+// 1 — the K=0 degeneracy, represented (not underflowed) with depth[1] == 0.
 #[test]
 fn test_sub_stage_lead_k0_degeneracy() {
     let stage_lengths_hours = [700.0, 744.0];
@@ -311,12 +310,12 @@ fn test_sub_stage_lead_k0_degeneracy() {
     assert_eq!(resolution.depth, vec![0, 0]);
 }
 
-// Stage-count mode (§4.4) on a monthly calendar with unequal stage hours
-// (672-744h): the hour clock is never consulted, so `LeadTime::Stages(2)`
-// reproduces the shipped index shift identically regardless of the calendar
-// values. Depth and fan-out are checked away from the array boundary, where
-// K(t) == ℓ and |C(t)| == 1 hold without the natural edge truncation that
-// bounds K(t) = |{m>t : c(m)<=t}| to the delivery stages that actually exist.
+// Stage-count mode on a monthly calendar with unequal stage hours (672-744h):
+// the hour clock is never consulted, so `LeadTime::Stages(2)` reproduces the
+// shipped index shift identically regardless of the calendar values. Depth
+// and fan-out are checked away from the array boundary, where K(t) == ℓ and
+// |C(t)| == 1 hold without the natural edge truncation that bounds K(t) =
+// |{m>t : c(m)<=t}| to the delivery stages that actually exist.
 #[test]
 fn test_stage_count_mode_unequal_monthly_hours() {
     let stage_lengths_hours = [672.0, 700.0, 744.0, 720.0, 672.0, 744.0, 700.0, 744.0];
@@ -350,12 +349,11 @@ fn test_ic_boundary_decider_is_none() {
     assert_eq!(resolution.depth, vec![0]);
 }
 
-// Fan-out per temporal-lag-unification.md §4.3: a coarse decision stage
-// before a fine zone commits several delivery stages, |C(t)| > 1. A 720h
-// month (stage 0) anchors four 168h weeks (stages 1-4); at a 750h lead each
-// week's end_m - Δ lands inside the month's own window, so all four weeks
-// share decider 0. The month's own delivery (Δ exceeds its own 720h length)
-// precedes the horizon and is IC.
+// Fan-out: a coarse decision stage before a fine zone commits several
+// delivery stages, |C(t)| > 1. A 720h month (stage 0) anchors four 168h
+// weeks (stages 1-4); at a 750h lead each week's end_m - Δ lands inside the
+// month's own window, so all four weeks share decider 0. The month's own
+// delivery (Δ exceeds its own 720h length) precedes the horizon and is IC.
 #[test]
 fn test_coarse_decision_fans_out_over_fine_delivery_stages() {
     let stage_lengths_hours = [720.0, 168.0, 168.0, 168.0, 168.0];
