@@ -41,6 +41,7 @@ pub(super) fn fill_stage_rows(
     fill_operational_violation_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
     fill_anticipated_fishing_rows(ctx, layout, &mut row_lower, &mut row_upper);
     fill_anticipated_state_out_def_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
+    fill_anticipated_slot_definition_rows(layout, &mut row_lower, &mut row_upper);
     fill_z_inflow_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
 
     (row_lower, row_upper)
@@ -530,4 +531,23 @@ pub(super) fn fill_anticipated_state_out_def_rows(
         active_pos, layout.anticipated.n_anticipated_state_out_def_rows,
         "fill_anticipated_state_out_def_rows: active_pos mismatch at stage {stage_idx}"
     );
+}
+
+/// Fill the anticipated ring's interior plain-shift definition row bounds
+/// (`0 == 0`), one row per (plant, slot) reachable at this stage
+/// (`layout.anticipated.anticipated_slot_row_pos`, sparse like
+/// [`fill_anticipated_state_out_def_rows`]'s `active_pos` offset) — a slot
+/// beyond a plant's own depth or this stage's horizon-reachable cap gets no
+/// row. Empty when `n_anticipated * k_max == 0`.
+fn fill_anticipated_slot_definition_rows(
+    layout: &StageLayout,
+    row_lower: &mut [f64],
+    row_upper: &mut [f64],
+) {
+    let row_start = layout.anticipated.row_anticipated_slot_definition_start;
+    for pos in layout.anticipated.anticipated_slot_row_pos.iter().flatten() {
+        let row = row_start + pos;
+        row_lower[row] = 0.0;
+        row_upper[row] = 0.0;
+    }
 }

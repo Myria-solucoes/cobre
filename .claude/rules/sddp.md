@@ -299,3 +299,60 @@ Read: `crates/cobre-io/src/validation/semantic/thermal.rs`
 (`required_anticipated_commitment_count`, `check_anticipated_thermals`).
 Pinned by `test_anticipated_lead_time_coverage_pmo_calendar` and
 `test_anticipated_lead_time_coverage_pmo_calendar_under_coverage_rejected`.
+
+### In-LP anticipated ring: definition-row sign & two-sided masking
+
+The anticipated ring mirrors the travel-time bucket ring construct-for-
+construct: an outgoing block (`StateLayout::anticipated_slots_out`, identity-
+resolved by `state_to_lp_column`, contributing to `n_state`) and a separate
+incoming block (`StateLayout::anticipated_state`, pinned via
+`state_to_lp_incoming_column`) — never one dual-purpose range shifted
+out-of-LP. There is no Rust-side shift step: the ring transition is resolved
+entirely by the definition rows below, and `current_state`/`state_at_capture`
+read the outgoing block by the same plain copy already used for storage and
+travel-time buckets.
+
+An interior slot's outgoing column is pinned to the next slot's incoming value
+by a ring-shift row, `slot_k^out − slot_{k+1}^in = 0`
+(`fill_anticipated_slot_definition_entries` emits the structural `+1`/`−1`
+terms); the plant's own newest slot (`k = k_i − 1`) is pinned instead to the
+fresh decision column, `slot_{k_i-1}^out = decision_col`
+(`fill_anticipated_state_out_def_entries`, pre-existing and unchanged in logic
+— only its column addressing moved into the relocated ring). Both row
+families render `[0, 0]` (`fill_anticipated_slot_definition_rows` /
+`fill_anticipated_state_out_def_rows`): the `+1`/`−1` structural coefficients
+on each side of the row do the shift, never the bounds.
+
+A slot beyond the horizon-reachable window (`build_anticipated_slot_row_pos`'s
+per-slot `Option<usize>`, `None` when unreachable) gets BOTH sides of the
+masking contract together: no definition row (the row-cap side) AND a frozen
+`[0, 0]` outgoing column (`fill_anticipated_slot_columns`, the column-freeze
+side — the same commissioning-dormant-column convention as
+NCS/thermal/line/station/contract). Wiring only one side leaves either a
+dangling row referencing a frozen column or a free column with no defining
+constraint — both wrong-but-compiling, never staged as two separate changes.
+
+A slot beyond a plant's OWN `StateLayout::anticipated_lead_stages[plant]`
+bound is structural padding even when `t + slot_idx` itself still lands
+inside the horizon — the multi-plant heterogeneous-lead case, where two
+plants sharing one `k_max`-wide ring have different per-plant reachable
+widths. `policy::policy_export::build_stage_entity_manifest` applies this
+same bound before populating `EntitySlot::delivery_anchor`, never a depth- or
+decider-only check: `AnticipatedResolution::decision_sets`/`depth` count only
+within-study-decided commitments and silently exclude a still-draining
+pre-study seed, undercounting a ring position that legitimately holds one.
+
+Read: `lp/indexer/state_layout.rs` (`StateLayout::state_to_lp_column`,
+`state_to_lp_incoming_column`), `lp/builder/layout.rs`
+(`build_anticipated_slot_row_pos`), `lp/builder/entries.rs`
+(`fill_anticipated_slot_definition_entries`,
+`fill_anticipated_state_out_def_entries`), `lp/builder/rows.rs`
+(`fill_anticipated_slot_definition_rows`), `lp/builder/columns.rs`
+(`fill_anticipated_slot_columns`), `policy/policy_export.rs`
+(`build_stage_entity_manifest`). Pinned by the `state_to_lp_column`
+`anticipated_slots_out`-identity regressions, the combined row-cap-and-
+column-freeze regression asserting both sides in one test, the backward-cut
+coefficient propagation regressions (K=1, K=2, K=3) confirming the
+definition rows preserve the same subgradient values the prior out-of-LP
+shift produced, and the manifest's padding-vs-reachable delivery-anchor
+regression.

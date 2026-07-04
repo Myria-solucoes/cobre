@@ -80,9 +80,9 @@ pub(crate) fn postprocess_templates(
     //
     // Use the per-stage `StageGeometry::theta_col` (= authoritative
     // `StageLayout::col_theta()`), NOT a re-derivation from `n_state`/`n_hydros`:
-    // that hand arithmetic omits the `anticipated_state_out` block and, with
-    // anticipated thermals, lands on a zero-cost `storage_in` column, silently
-    // disabling discounting (`0 * d = 0`).
+    // that hand arithmetic omits the anticipated ring's `anticipated_slots_out`/
+    // `anticipated_state` blocks and, with anticipated thermals, lands on a
+    // zero-cost `storage_in` column, silently disabling discounting (`0 * d = 0`).
     {
         let theta_cols: Vec<usize> = stage_templates
             .geometry_per_stage

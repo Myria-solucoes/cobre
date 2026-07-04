@@ -7,6 +7,11 @@
 //! algorithm-specific types is the calling crate's responsibility. Field names
 //! correspond to the tables in `schemas/policy.fbs`.
 
+/// Sentinel [`EntitySlot::delivery_anchor`] value for a slot with no
+/// delivery/arrival calendar semantics; also the value a reader yields when the
+/// field is absent from a pre-`id:4` buffer (forward-compatible default).
+pub const ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL: i32 = i32::MIN;
+
 /// One per-slot entity-identity record for a state-vector dimension.
 ///
 /// `entity_type` is the raw `EntityType` enum byte from `schemas/policy.fbs`
@@ -22,6 +27,11 @@ pub struct EntitySlot {
     pub subindex: u32,
     /// Whether the owning entity was operationally active at this slot's stage.
     pub was_active: bool,
+    /// Canonical absolute delivery/arrival calendar anchor for this slot;
+    /// [`ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL`] when the slot has no delivery
+    /// semantics. The calendar encoding is the calling crate's responsibility,
+    /// as with `subindex`.
+    pub delivery_anchor: i32,
 }
 
 /// One cut record for policy checkpoint serialization.

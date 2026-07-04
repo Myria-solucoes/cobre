@@ -733,8 +733,8 @@ mod tests {
         let state_layout = state_layout_full(0, 0, 1, 2, vec![2]);
 
         let mut state = vec![0.0_f64; state_layout.n_state];
-        state[state_layout.anticipated_state.start] = 7.0;
-        state[state_layout.anticipated_state.start + 1] = 11.0;
+        state[state_layout.anticipated_slots_out.start] = 7.0;
+        state[state_layout.anticipated_slots_out.start + 1] = 11.0;
 
         // N=0, A=1, K=2 → row capacity = 0 + 0 + 0 = 0
         let mut buf = PatchBuffer::new(0, 0, 0, 0, 0, 1, 2);
@@ -852,17 +852,20 @@ mod tests {
         // N=0, A=1, K=2 anticipated-only state layout.
         let state_layout = state_layout_full(0, 0, 1, 2, vec![2]);
 
-        // n_state = 0 + 1*2 = 2; anticipated_state.start = 0
-        let ant_start = state_layout.anticipated_state.start;
+        // n_state = 0 + 1*2 = 2; the state-VECTOR anticipated block is
+        // `anticipated_slots_out` (== 0 here), NOT the relocated incoming
+        // `anticipated_state` (== 2 here).
+        let ant_state_vec_start = state_layout.anticipated_slots_out.start;
+        let ant_incoming_col_start = state_layout.anticipated_state.start;
         let mut state = vec![0.0_f64; state_layout.n_state];
-        state[ant_start] = 7.0;
-        state[ant_start + 1] = 11.0;
+        state[ant_state_vec_start] = 7.0;
+        state[ant_state_vec_start + 1] = 11.0;
 
         let mut buf = PatchBuffer::new(0, 0, 0, 0, 0, 1, 2);
         buf.fill_col_state_patches(&state_layout, &state, &[]);
 
-        assert_eq!(buf.col_indices[0], ant_start);
-        assert_eq!(buf.col_indices[1], ant_start + 1);
+        assert_eq!(buf.col_indices[0], ant_incoming_col_start);
+        assert_eq!(buf.col_indices[1], ant_incoming_col_start + 1);
         assert_eq!(buf.col_lower[0], 7.0);
         assert_eq!(buf.col_upper[0], 7.0);
         assert_eq!(buf.col_lower[1], 11.0);
@@ -1006,17 +1009,21 @@ mod tests {
         let state_layout =
             state_layout_with_transit_buckets(n, l, n_buckets, vec![(0, 0), (0, 1)], 1, 2, vec![2]);
         let unshifted_anticipated_start = n * (1 + l);
+        // The state-VECTOR anticipated position is `anticipated_slots_out`
+        // (the `state_to_lp_column` identity domain), shifted by `n_buckets`
+        // past the unshifted `N*(1+L)` a hardcoded `anticipated_start =
+        // N*(1+L)` would (incorrectly) target.
         let shifted_anticipated_start = unshifted_anticipated_start + n_buckets;
         assert_eq!(
-            state_layout.anticipated_state.start,
+            state_layout.anticipated_slots_out.start,
             shifted_anticipated_start
         );
 
         let mut state = vec![0.0_f64; state_layout.n_state];
         state[state_layout.transit_buckets_out.start] = 100.0;
         state[state_layout.transit_buckets_out.start + 1] = 200.0;
-        state[state_layout.anticipated_state.start] = 7.0;
-        state[state_layout.anticipated_state.start + 1] = 11.0;
+        state[state_layout.anticipated_slots_out.start] = 7.0;
+        state[state_layout.anticipated_slots_out.start + 1] = 11.0;
 
         let mut buf = PatchBuffer::new(n, l, 0, 0, n_buckets, 1, 2);
         buf.fill_col_state_patches(&state_layout, &state, &[]);
@@ -1026,6 +1033,8 @@ mod tests {
         assert_eq!(buf.col_lower[unshifted_anticipated_start + 1], 200.0);
         assert_eq!(buf.col_lower[shifted_anticipated_start], 7.0);
         assert_eq!(buf.col_lower[shifted_anticipated_start + 1], 11.0);
+        // The pinned LP column is the RELOCATED incoming `anticipated_state`
+        // range, not the state-vector index used to populate `state` above.
         assert_eq!(
             buf.col_indices[shifted_anticipated_start],
             state_layout.anticipated_state.start
@@ -1093,7 +1102,7 @@ mod tests {
                 let off = slot * a + plant;
                 let buf_slot = anticipated_start + off;
                 let col = ant_state_col_start + off;
-                let scaled = state[col] / col_scale[col];
+                let scaled = state[buf_slot] / col_scale[col];
                 legacy_indices[buf_slot] = col;
                 legacy_lower[buf_slot] = scaled;
                 legacy_upper[buf_slot] = scaled;

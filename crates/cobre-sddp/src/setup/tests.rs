@@ -3162,7 +3162,7 @@ fn system_with_anticipated_thermals(
 }
 
 /// AC-1: A system with `n_anticipated == 0` produces an unchanged state
-/// vector (length `n_state`, `anticipated_state` block is empty).
+/// vector (length `n_state`, `anticipated_slots_out` block is empty).
 ///
 /// Regression guard: confirms zero-anticipated path is unaffected.
 #[test]
@@ -3172,9 +3172,9 @@ fn build_initial_state_no_anticipated_state_unchanged() {
     let system = minimal_system(2);
     let layout = layout_for_lag_test(1, 0);
 
-    // n_anticipated == 0; anticipated_state range is 0..0.
+    // n_anticipated == 0; anticipated_slots_out range is 0..0.
     assert_eq!(layout.n_anticipated, 0);
-    assert!(layout.anticipated_state.is_empty());
+    assert!(layout.anticipated_slots_out.is_empty());
 
     let state = build_initial_state(&system, &crate::test_support::study_dims(), &layout);
 
@@ -3223,7 +3223,7 @@ fn build_initial_state_single_anticipated_thermal_k2() {
         layout.n_state,
         "state length must equal n_state"
     );
-    let ant_start = layout.anticipated_state.start;
+    let ant_start = layout.anticipated_slots_out.start;
     assert!(
         (state[ant_start] - 50.0).abs() < 1e-10,
         "slot 0 expected 50.0, got {}",
@@ -3285,7 +3285,7 @@ fn build_initial_state_two_anticipated_thermals_mixed_k() {
     // n_ant = 2, k_max = 3.  Slot-major offsets from ant_start:
     //   (slot, plant) → offset = slot * n_ant + plant
     //   (0,0)→0, (0,1)→1, (1,0)→2, (1,1)→3, (2,0)→4, (2,1)→5
-    let s = layout.anticipated_state.start;
+    let s = layout.anticipated_slots_out.start;
 
     assert!(
         (state[s] - 10.0).abs() < 1e-10,
@@ -3340,8 +3340,8 @@ fn build_initial_state_empty_past_commitments_leaves_zeros() {
         layout.n_state,
         "state length must equal n_state"
     );
-    let ant_start = layout.anticipated_state.start;
-    let ant_end = layout.anticipated_state.end;
+    let ant_start = layout.anticipated_slots_out.start;
+    let ant_end = layout.anticipated_slots_out.end;
     for (i, &v) in state[ant_start..ant_end].iter().enumerate() {
         assert!(
             v.abs() < 1e-10,
@@ -3379,8 +3379,8 @@ fn build_initial_state_unknown_thermal_id_silently_skipped() {
         layout.n_state,
         "state length must equal n_state"
     );
-    let ant_start = layout.anticipated_state.start;
-    let ant_end = layout.anticipated_state.end;
+    let ant_start = layout.anticipated_slots_out.start;
+    let ant_end = layout.anticipated_slots_out.end;
     for (i, &v) in state[ant_start..ant_end].iter().enumerate() {
         assert!(
             v.abs() < 1e-10,
@@ -3435,7 +3435,7 @@ fn build_initial_state_anticipated_seed_padding_slot_stays_zero() {
         layout.n_state,
         "state length must equal n_state"
     );
-    let s = layout.anticipated_state.start;
+    let s = layout.anticipated_slots_out.start;
     let n_ant = layout.n_anticipated;
     assert_eq!(n_ant, 2);
     assert_eq!(layout.k_max, 2);
@@ -5392,7 +5392,7 @@ fn setup_leadstages_resolution_preserves_k_max_and_state_dimension() {
 
 /// AC#2 (hand-derived): a `LeadTime(720.0)` plant on the weekly-then-monthly PMO
 /// calendar `[168,168,168,168,720,720]` resolves via the end-anchored
-/// resolve_point decider contract to `decider ==
+/// `resolve_point` decider contract to `decider ==
 /// [None,None,None,None,Some(3),Some(4)]`, `C(3) == {4}`, `C(4) == {5}`, and
 /// `depth == [0,0,0,1,1,0]` (ring depth 1).
 #[test]
@@ -5481,8 +5481,8 @@ fn assert_state_layout_finalized(state: &StateLayout) {
         "anticipated_state range must match"
     );
     assert_eq!(
-        state.anticipated_state_out, reference.anticipated_state_out,
-        "anticipated_state_out range must match"
+        state.anticipated_slots_out, reference.anticipated_slots_out,
+        "anticipated_slots_out range must match"
     );
     assert_eq!(
         state.z_inflow, reference.z_inflow,
@@ -5896,7 +5896,7 @@ fn stage_data_geometry_role_b_matches_reference_build() {
 
 /// AC#1 (anticipated): `StageData.state` is byte-identical to the indexer's
 /// role-(a) when anticipated thermals are present (`K_i = 2`), exercising
-/// the `anticipated_state` / `anticipated_state_out` ranges and the
+/// the `anticipated_slots_out` / `anticipated_state` ranges and the
 /// anticipated entries of the nonzero mask.
 #[test]
 fn stage_data_state_matches_indexer_role_a_anticipated() {

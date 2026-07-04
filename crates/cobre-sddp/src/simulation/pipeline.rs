@@ -572,15 +572,6 @@ fn solve_simulation_stage<S: SolverInterface>(
         .lag_matrix_buf
         .extend_from_slice(&ws.current_state[lag_start..lag_start + lag_len]);
 
-    // Snapshot incoming anticipated state before state is overwritten below
-    // (mirrors `run_forward_stage`).
-    let ant_start = state.anticipated_state.start;
-    let ant_len = state.n_anticipated * state.k_max;
-    ws.scratch.anticipated_state_buf.clear();
-    ws.scratch
-        .anticipated_state_buf
-        .extend_from_slice(&ws.current_state[ant_start..ant_start + ant_len]);
-
     ws.current_state.clear();
     ws.current_state
         .extend_from_slice(&ws.scratch.unscaled_primal[..state.n_state]);
@@ -623,13 +614,6 @@ fn solve_simulation_stage<S: SolverInterface>(
             n_completed: &mut ws.scratch.downstream_n_completed,
             par_order: downstream_par_order,
         },
-    );
-    crate::noise::shift_anticipated_state(
-        &mut ws.current_state,
-        &ws.scratch.anticipated_state_buf,
-        unscaled_primal_ref,
-        state,
-        &geometry.anticipated_decision,
     );
     crate::stage_solve::debug_assert_bucket_copy_gap_intact(
         &ws.current_state,

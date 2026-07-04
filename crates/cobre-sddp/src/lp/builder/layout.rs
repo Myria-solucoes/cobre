@@ -163,14 +163,18 @@ pub(crate) struct AnticipatedLayout {
     /// `col_anticipated_decision_start + local_anticipated_idx`. Equals
     /// `col_thermal_end`.
     pub(crate) col_anticipated_decision_start: usize,
-    /// Start of the `anticipated_state_out` column block (one per plant,
-    /// stage-level). Sourced from `StateLayout::anticipated_state_out.start`, so
-    /// the offset is stage-invariant — keeping the global stage-0 cut map on the
-    /// correct column at every stage regardless of this stage's block count.
-    pub(crate) col_anticipated_state_out_start: usize,
-    /// Start of the `anticipated_state_out_def` equality row block. One row per
-    /// ACTIVE plant (strict gate `stage_idx + K_p < n_stages`); inactive plants
-    /// emit no row. Immediately after `row_anticipated_fishing_start`.
+    /// Start of the `anticipated_slots_out` column block (`A * k_max` columns,
+    /// slot-major, plant-minor). Sourced from
+    /// `StateLayout::anticipated_slots_out.start`, so the offset is
+    /// stage-invariant — keeping the global stage-0 cut map on the correct
+    /// column at every stage regardless of this stage's block count.
+    pub(crate) col_anticipated_slots_out_start: usize,
+    /// Start of the `anticipated_state_out_def` equality row block: one row per
+    /// ACTIVE plant (strict gate `stage_idx + K_p < n_stages`, AND the delivery
+    /// stage's commissioning window), pinning that plant's own newest ring slot
+    /// (`col_anticipated_slots_out_start + (K_p-1)*A + local_idx`) to its
+    /// decision column. Inactive plants emit no row. Immediately after
+    /// `row_anticipated_fishing_start`.
     pub(crate) row_anticipated_state_out_def_start: usize,
     /// Count of plants with `stage_idx + K_p < n_stages` (strict gate); drives the
     /// active-row iteration.
@@ -183,6 +187,26 @@ pub(crate) struct AnticipatedLayout {
     pub(crate) row_anticipated_fishing_start: usize,
     /// Anticipated-fishing row count; equals `n_anticipated` (always-active).
     pub(crate) n_anticipated_fishing_rows: usize,
+    /// Start of the anticipated-ring interior-slot definition equality rows
+    /// (`slot_k^out − slot_{k+1}^in = 0`, the plain-shift rows for every slot
+    /// strictly before a plant's own newest slot). Immediately after
+    /// `row_anticipated_state_out_def_start`. Mirrors
+    /// [`Self::col_anticipated_slots_out_start`]'s pairing with
+    /// `transit_bucket_definition` in spirit — the anticipated ring's own
+    /// per-slot definition-row family.
+    pub(crate) row_anticipated_slot_definition_start: usize,
+    /// Count of reachable interior-slot definition rows this stage
+    /// (`anticipated_slot_row_pos`'s `Some` count).
+    pub(crate) n_anticipated_slot_definition_rows: usize,
+    /// For each GLOBAL anticipated-ring slot (`slot * n_anticipated + plant`,
+    /// slot-major, matching [`crate::indexer::StateLayout::anticipated_slots_out`]'s
+    /// own layout), this stage's compact row position within the interior-slot
+    /// definition-row family, or `None` when the slot is this plant's own
+    /// newest slot (`slot == k_i − 1`, handled by
+    /// `row_anticipated_state_out_def_start` instead), stage-invariant padding
+    /// (`slot >= k_i`), or beyond this stage's horizon-reachable cap
+    /// (`slot >= n_stages − 1 − stage_idx`). Length `n_anticipated * k_max`.
+    pub(crate) anticipated_slot_row_pos: Vec<Option<usize>>,
 }
 
 /// Pre-computed column and row layout offsets for a single stage LP.
@@ -522,6 +546,42 @@ fn build_transit_bucket_row_pos(
         }
     }
     (transit_bucket_row_pos, n_reachable)
+}
+
+/// For each GLOBAL anticipated-ring slot (`slot * n_anticipated + plant`,
+/// slot-major, mirroring [`build_transit_bucket_row_pos`]'s role for buckets),
+/// this stage's compact row position within the interior-slot definition-row
+/// family, or `None` when the slot is this plant's own newest slot
+/// (`slot + 1 == k_i`, the deposit row `row_anticipated_state_out_def_start`
+/// owns it instead), stage-invariant padding (`slot >= k_i`), or beyond this
+/// stage's horizon-reachable cap (`slot >= n_stages − 1 − stage_idx` — the
+/// plant's newest slot has no deeper slot to shift from and no in-horizon
+/// delivery target beyond that cap either, the same `horizon_cap_active`
+/// reasoning [`build_transit_bucket_row_pos`] applies to buckets). Returns the
+/// mapping and the reachable count.
+fn build_anticipated_slot_row_pos(
+    n_anticipated: usize,
+    k_max: usize,
+    anticipated_lead_stages: &[usize],
+    n_stages: usize,
+    stage_idx: usize,
+) -> (Vec<Option<usize>>, usize) {
+    if n_anticipated == 0 || k_max == 0 {
+        return (Vec::new(), 0);
+    }
+    let horizon_cap = n_stages.saturating_sub(stage_idx + 1);
+    let mut row_pos = vec![None; n_anticipated * k_max];
+    let mut n_reachable = 0_usize;
+    for slot in 0..k_max {
+        for (plant, &k_i) in anticipated_lead_stages.iter().enumerate() {
+            let is_interior_slot = slot + 1 < k_i;
+            if is_interior_slot && slot < horizon_cap {
+                row_pos[slot * n_anticipated + plant] = Some(n_reachable);
+                n_reachable += 1;
+            }
+        }
+    }
+    (row_pos, n_reachable)
 }
 
 /// Evaporation column/row indices per `(evaporation hydro, block)`, block-major
@@ -1060,8 +1120,24 @@ impl<'a> StageLayout<'a> {
             .count();
         let row_anticipated_state_out_def_start =
             row_anticipated_fishing_start + n_anticipated_fishing_rows;
-        let row_generic_start =
+
+        // Anticipated-ring interior-slot definition rows: one per (plant, slot)
+        // strictly before that plant's own newest slot, reachable within this
+        // stage's horizon cap (`build_anticipated_slot_row_pos`, mirroring
+        // `build_transit_bucket_row_pos`). Immediately after
+        // `row_anticipated_state_out_def_start`.
+        let (anticipated_slot_row_pos, n_anticipated_slot_definition_rows) =
+            build_anticipated_slot_row_pos(
+                ctx.n_anticipated,
+                ctx.k_max,
+                &ctx.anticipated_lead_stages,
+                n_stages,
+                stage_idx,
+            );
+        let row_anticipated_slot_definition_start =
             row_anticipated_state_out_def_start + n_anticipated_state_out_def_rows;
+        let row_generic_start =
+            row_anticipated_slot_definition_start + n_anticipated_slot_definition_rows;
 
         // Pumping columns follow NCS, before the generic-slack columns.
         let n_pumping = ctx.n_pumping;
@@ -1092,22 +1168,25 @@ impl<'a> StageLayout<'a> {
         let num_rows = row_generic_start + generic.n_generic_rows;
         let zeta = stage.blocks.iter().map(|b| b.duration_hours).sum::<f64>() * M3S_TO_HM3;
 
-        // The state-out cut-target column is sourced from its stage-invariant
-        // state-region position (`state.anticipated_state_out.start`), NOT
+        // The ring's outgoing columns are sourced from their stage-invariant
+        // state-region position (`state.anticipated_slots_out.start`), NOT
         // `thermal_end + n_anticipated`, so the global stage-0 cut map lands on the
         // correct column even when this stage's block count differs from stage 0's.
-        let col_anticipated_state_out_start = if ctx.n_anticipated > 0 {
-            state.anticipated_state_out.start
+        let col_anticipated_slots_out_start = if ctx.n_anticipated > 0 {
+            state.anticipated_slots_out.start
         } else {
             thermal_end
         };
         let anticipated = AnticipatedLayout {
             col_anticipated_decision_start: thermal_end,
-            col_anticipated_state_out_start,
+            col_anticipated_slots_out_start,
             row_anticipated_state_out_def_start,
             n_anticipated_state_out_def_rows,
             row_anticipated_fishing_start,
             n_anticipated_fishing_rows,
+            row_anticipated_slot_definition_start,
+            n_anticipated_slot_definition_rows,
+            anticipated_slot_row_pos,
         };
 
         // Reverse map for O(1) `AnticipatedDecision` generic-constraint resolution.

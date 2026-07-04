@@ -296,14 +296,6 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         .lag_matrix_buf
         .extend_from_slice(&ws.current_state[lag_start..lag_start + lag_len]);
 
-    // Save incoming anticipated-state slice before overwriting state with primal.
-    let ant_start = state.anticipated_state.start;
-    let ant_len = state.n_anticipated * state.k_max;
-    ws.scratch.anticipated_state_buf.clear();
-    ws.scratch
-        .anticipated_state_buf
-        .extend_from_slice(&ws.current_state[ant_start..ant_start + ant_len]);
-
     ws.current_state.clear();
     ws.current_state
         .extend_from_slice(&unscaled_primal[..state.n_state]);
@@ -342,20 +334,6 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             n_completed: &mut ws.scratch.downstream_n_completed,
             par_order: downstream_par_order,
         },
-    );
-    // The anticipated-decision column base is n_blks-dependent: read this stage's
-    // decision range, NOT the global stage-0 `indexer`. Empty `geometry_per_stage`
-    // falls back to `0..0` (harmless: the shift early-returns at `n_anticipated == 0`).
-    let anticipated_decision = ctx
-        .geometry_per_stage
-        .get(t)
-        .map_or(0..0, |g| g.anticipated_decision.clone());
-    crate::noise::shift_anticipated_state(
-        &mut ws.current_state,
-        &ws.scratch.anticipated_state_buf,
-        &unscaled_primal,
-        state,
-        &anticipated_decision,
     );
     crate::stage_solve::debug_assert_bucket_copy_gap_intact(
         &ws.current_state,

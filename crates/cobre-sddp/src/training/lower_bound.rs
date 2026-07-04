@@ -336,8 +336,6 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             scratch.z_inflow_rhs_buf.push(z_rhs);
         }
 
-        // No shift_anticipated_state here: the lower bound solves at a fixed trial
-        // point, never advancing the ring buffer.
         patch_buf.fill_col_state_patches(state_layout, initial_state, &spec.template.col_scale);
         patch_buf.fill_forward_patches(
             state_layout,

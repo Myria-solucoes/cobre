@@ -622,7 +622,6 @@ fn single_workspace(
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            anticipated_state_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -2747,7 +2746,6 @@ fn forward_pass_load_noise_positive_realization() {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            anticipated_state_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -2908,7 +2906,6 @@ fn forward_pass_load_noise_clamped_to_zero() {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            anticipated_state_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -3945,17 +3942,20 @@ mod transit_bucket_copy_gap {
     use crate::workspace::{BasisStore, SolverWorkspace, WorkspaceSizing};
 
     /// Column layout for `N=1, L=1, B=1, A=1, K_max=1`:
-    /// `[storage(0), lag0(1), bucket_out(2), ant_state0(3), ant_state_out(4),
-    /// z_inflow(5), storage_in(6), bucket_in(7), theta(8), decision(9)]`.
-    /// `n_state = 4` (storage, lag0, `bucket_out`, `ant_state0`) — the state
-    /// region is the LP's first `n_state` columns by construction.
-    const NUM_COLS: usize = 10;
+    /// `[storage(0), lag0(1), bucket_out(2), ant_slot0(3), z_inflow(4),
+    /// storage_in(5), bucket_in(6), ant_state_in(7), theta(8)]`.
+    /// `n_state = 4` (storage, lag0, `bucket_out`, `ant_slot0`) — the state
+    /// region is the LP's first `n_state` columns by construction. With
+    /// `k_max = 1`, `ant_slot0` is both the ring's only slot and its newest
+    /// (`k_i - 1 = 0`), so it resolves by identity like `bucket_out` — no
+    /// separate decision-aliased column exists anymore.
+    const NUM_COLS: usize = 9;
     const TRANSIT_BUCKET_COL: usize = 2;
     const TRANSIT_BUCKET_VALUE: f64 = 777.0;
-    const Z_INFLOW_COL: usize = 5;
+    const ANTICIPATED_SLOT_COL: usize = 3;
+    const ANTICIPATED_SLOT_VALUE: f64 = 400.0;
+    const Z_INFLOW_COL: usize = 4;
     const Z_INFLOW_VALUE: f64 = 55.0;
-    const DECISION_COL: usize = 9;
-    const DECISION_VALUE: f64 = 999.0;
 
     fn transit_bucket_template() -> StageTemplate {
         StageTemplate {
@@ -3981,17 +3981,16 @@ mod transit_bucket_copy_gap {
     }
 
     /// Canned primal: `storage=100`, `lag0=200` (pre-overwrite), `bucket_out=777`,
-    /// `ant_state0=400` (pre-overwrite), `ant_state_out=0`, `z_inflow=55`,
-    /// `storage_in=0`, `bucket_in=0`, `theta=0`, `decision=999`. The `MockSolver`
-    /// returns this verbatim regardless of the bounds `run_forward_stage` patches.
+    /// `ant_slot0=400`, `z_inflow=55`, `storage_in=0`, `bucket_in=0`,
+    /// `ant_state_in=0`, `theta=0`. The `MockSolver` returns this verbatim
+    /// regardless of the bounds `run_forward_stage` patches.
     fn transit_bucket_solution() -> LpSolution {
         let mut primal = vec![0.0_f64; NUM_COLS];
         primal[0] = 100.0;
         primal[1] = 200.0;
         primal[TRANSIT_BUCKET_COL] = TRANSIT_BUCKET_VALUE;
-        primal[3] = 400.0;
+        primal[ANTICIPATED_SLOT_COL] = ANTICIPATED_SLOT_VALUE;
         primal[Z_INFLOW_COL] = Z_INFLOW_VALUE;
-        primal[DECISION_COL] = DECISION_VALUE;
         LpSolution {
             objective: 0.0,
             primal,
@@ -4053,11 +4052,7 @@ mod transit_bucket_copy_gap {
         ws.current_state
             .extend_from_slice(&[10.0, 20.0, 30.0, 40.0]);
 
-        let geometry = StageGeometry {
-            anticipated_decision: DECISION_COL..DECISION_COL + 1,
-            ..StageGeometry::default()
-        };
-        let geometry_per_stage = vec![geometry];
+        let geometry_per_stage = vec![StageGeometry::default()];
 
         let ctx = StageContext {
             geometry_per_stage: &geometry_per_stage,
@@ -4140,9 +4135,10 @@ mod transit_bucket_copy_gap {
         records[0].state.clone()
     }
 
-    /// The bucket state (`state[transit_buckets_out]`) rides the state-assembly plain
-    /// copy: it equals the LP primal's `bucket_out` column, untouched by the
-    /// lag-shift (which overwrites index 1) or the anticipated-shift (index 3).
+    /// The bucket and anticipated-ring state (`state[transit_buckets_out]`,
+    /// `state[anticipated_slots_out]`) ride the state-assembly plain copy: each
+    /// equals its own LP primal column, untouched by the lag-shift (the only
+    /// remaining state-assembly overwrite, at index 1).
     #[test]
     fn transit_bucket_state_survives_lag_and_anticipated_overwrites() {
         let advanced = run_transit_bucket_forward_stage();
@@ -4150,16 +4146,16 @@ mod transit_bucket_copy_gap {
             advanced[TRANSIT_BUCKET_COL], TRANSIT_BUCKET_VALUE,
             "bucket state must equal the LP primal's bucket_out column"
         );
-        // Neighboring overwrites genuinely ran (not vacuous no-ops): the lag
-        // slot picks up the accumulated z_inflow value, and the anticipated
-        // slot picks up the decision-column value.
+        assert_eq!(
+            advanced[ANTICIPATED_SLOT_COL], ANTICIPATED_SLOT_VALUE,
+            "anticipated-ring slot must equal the LP primal's ant_slot0 column, \
+             identity-resolved like the bucket"
+        );
+        // The lag overwrite genuinely ran (not a vacuous no-op): the lag slot
+        // picks up the accumulated z_inflow value.
         assert_eq!(
             advanced[1], Z_INFLOW_VALUE,
             "lag0 must be overwritten by the lag shift"
-        );
-        assert_eq!(
-            advanced[3], DECISION_VALUE,
-            "ant_state0 must be overwritten by the anticipated shift"
         );
     }
 }

@@ -580,6 +580,7 @@ mod tests {
             entity_id: id,
             subindex: 0,
             was_active: true,
+            delivery_anchor: cobre_io::ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
         }
     }
 
@@ -591,6 +592,7 @@ mod tests {
             entity_id: id,
             subindex: lag,
             was_active: true,
+            delivery_anchor: cobre_io::ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
         }
     }
 

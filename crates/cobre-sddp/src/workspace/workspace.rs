@@ -323,9 +323,8 @@ pub struct WorkspaceSizing {
     /// Noise dimension for forward-pass sampling; pre-sizes
     /// `ScratchBuffers::raw_noise_buf`.
     pub noise_dim: usize,
-    /// Number of anticipated thermals (A); pre-sizes
-    /// `ScratchBuffers::anticipated_state_buf` and the `PatchBuffer` anticipated
-    /// region. `0` when there are no anticipated thermals.
+    /// Number of anticipated thermals (A); pre-sizes the `PatchBuffer`
+    /// anticipated region. `0` when there are no anticipated thermals.
     pub n_anticipated: usize,
     /// Maximum lead-time horizon across anticipated thermals (K); with
     /// `n_anticipated`, sizes the anticipated-state ring buffer.
@@ -494,12 +493,6 @@ pub(crate) struct ScratchBuffers {
     /// Per-worker permutation scratch for the forward-pass sampler and simulation
     /// worker loop. Pre-sized to `total_forward_passes.max(1)`.
     pub(crate) perm_scratch: Vec<usize>,
-
-    /// Snapshot of the incoming anticipated-state slice saved before
-    /// `ws.current_state.clear()`, read by `shift_anticipated_state` to produce
-    /// the new ring-buffer state. Empty (path skipped) when `n_anticipated` or
-    /// `k_max` is zero.
-    pub(crate) anticipated_state_buf: Vec<f64>,
 }
 
 /// All per-thread mutable resources required for one LP solve sequence.
@@ -596,10 +589,9 @@ impl ScratchBuffers {
             max_local_fwd,
             total_forward_passes,
             noise_dim,
-            n_anticipated,
-            k_max,
-            // `n_state` and `max_openings` size CapturedBasis /
-            // BackwardAccumulators, not ScratchBuffers — deliberately skipped.
+            // `n_anticipated`/`k_max` size the `PatchBuffer` anticipated region
+            // (constructed separately); `n_state` and `max_openings` size
+            // CapturedBasis / BackwardAccumulators — none size `ScratchBuffers`.
             ..
         } = s;
         Self {
@@ -640,7 +632,6 @@ impl ScratchBuffers {
             trajectory_costs_buf: Vec::with_capacity(max_local_fwd),
             raw_noise_buf: Vec::with_capacity(noise_dim),
             perm_scratch: Vec::with_capacity(total_forward_passes.max(1)),
-            anticipated_state_buf: Vec::with_capacity(n_anticipated * k_max),
         }
     }
 }
@@ -2004,21 +1995,21 @@ mod tests {
     // Layout-invariance tests
     // ---------------------------------------------------------------------------
 
-    /// Locks `state_at_capture.len() == n_state` across the layout change:
-    /// the new `anticipated_state_out` column does not contribute to
-    /// `state_at_capture`.
+    /// Locks `state_at_capture.len() == n_state`: the anticipated ring's
+    /// outgoing/incoming blocks live inside `n_state`, so widening the ring
+    /// does not change `state_at_capture`'s length contract.
     #[test]
     fn test_state_at_capture_length_equals_n_state_after_layout_change() {
         // Layout: N=2 hydros, L=1 PAR lag, n_anticipated=1, k_max=2.
         // n_state = 2*(1+1) + 1*2 = 6.
         //
-        // col_status length includes the new anticipated_state_out column slot;
-        // that slot lives outside the n_state prefix and must not affect
+        // col_status length includes the anticipated-ring column slots;
+        // those slots live outside the n_state prefix and must not affect
         // state_at_capture recovery.
         let state_at_capture = vec![1.0_f64, 2.0, 100.0, 200.0, 1000.0, 2000.0];
         let original = CapturedBasis {
             basis: Basis {
-                // col_status length includes the anticipated_state_out column.
+                // col_status length includes the anticipated-ring columns.
                 // 12 is a representative LP num_cols.
                 col_status: vec![1_i32; 12],
                 row_status: vec![5_i32; 8],
@@ -2056,7 +2047,7 @@ mod tests {
         assert_eq!(
             recovered.basis.col_status.len(),
             12,
-            "col_status length round-trips bit-identically (including the new column slot)"
+            "col_status length round-trips bit-identically (including the anticipated-ring column slots)"
         );
         assert_eq!(
             recovered.cut_row_slots, original.cut_row_slots,
@@ -2064,18 +2055,17 @@ mod tests {
         );
     }
 
-    /// Locks `BASIS_BROADCAST_WIRE_VERSION` at 1 across the layout change:
-    /// adding the new `anticipated_state_out` column does not bump the wire
-    /// version.
+    /// Locks `BASIS_BROADCAST_WIRE_VERSION` at 1: widening the anticipated
+    /// ring does not bump the wire version.
     #[test]
     fn test_basis_broadcast_wire_version_stays_one_with_state_out_column() {
         use super::BASIS_BROADCAST_WIRE_VERSION;
 
         // Representative basis with enough col_status entries to include the
-        // new anticipated_state_out columns.
+        // anticipated-ring columns.
         let original = CapturedBasis {
             basis: Basis {
-                col_status: vec![1_i32; 16], // includes new anticipated_state_out block
+                col_status: vec![1_i32; 16], // includes the anticipated-ring block
                 row_status: vec![1_i32; 10],
             },
             base_row_count: 8,
@@ -2126,14 +2116,13 @@ mod tests {
         assert_eq!(recovered.state_at_capture, original.state_at_capture);
     }
 
-    /// Full-`Basis` round-trip on a relocated-layout anticipated solve: the
-    /// `col_status` count carries the relocated `anticipated_state_out` block in
-    /// the state region (column count is wider by `n_anticipated` than the
-    /// no-anticipated baseline), and `cut_row_slots` carries a slot that the
-    /// reconstruction path will match by identity. The wire format serialises
+    /// Full-`Basis` round-trip on a wide-anticipated-ring solve: the
+    /// `col_status` count carries the anticipated ring's outgoing+incoming
+    /// blocks in the state region (column count is wider by `2*n_anticipated*k_max`
+    /// than the no-anticipated baseline), and `cut_row_slots` carries a slot that
+    /// the reconstruction path will match by identity. The wire format serialises
     /// `col_status.len()`/`row_status.len()` as live counts, so the wider column
-    /// block round-trips byte-for-byte with no format change: relocating the
-    /// cut-target column must not corrupt the broadcast round-trip.
+    /// block round-trips byte-for-byte with no format change.
     #[test]
     fn test_captured_basis_round_trip_relocated_anticipated_column_layout() {
         // Anticipated layout sketch: N=2, L=1, A=2, k_max=2.
@@ -2174,8 +2163,8 @@ mod tests {
         .expect("round-trip must not fail")
         .expect("sentinel is 1; must return Some");
 
-        // The wider column block (incl. the relocated anticipated_state_out
-        // columns) round-trips byte-for-byte.
+        // The wider column block (incl. the anticipated-ring columns) round-trips
+        // byte-for-byte.
         assert_eq!(
             recovered.basis.col_status, col_status,
             "relocated-layout col_status must round-trip bit-identically"

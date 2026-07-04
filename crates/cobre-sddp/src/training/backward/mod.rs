@@ -24,18 +24,16 @@
 //! multiplied) lives in `duals_extraction` and sddp.md "Benders cut sign &
 //! subgradient extraction".
 //!
-//! ### Anticipated-state cut gradient flow
+//! ### Anticipated-ring cut gradient flow
 //!
-//! For anticipated-state slots `state_to_lp_column` applies a shift-aware mapping:
-//! slot `K_p-1` (the maturation slot for plant `p`) maps to the decision column,
-//! while slot `i < K_p-1` maps to slot `i+1`, so cuts apply against the correct LP
-//! variables at the predecessor stage. The fishing constraint is emitted at every
-//! stage unconditionally, so every slot participates in the dual chain. See the
-//! `StateLayout::state_to_lp_column` rustdoc.
-//!
-//! The backward pass does not call `shift_anticipated_state`: `x_hat` is the
-//! forward-shifted state and cut extraction uses it as-is. Re-shifting would offset
-//! `x_hat` relative to the anticipated-state-fixing rows, breaking cut consistency.
+//! Anticipated-ring slots resolve by identity (`state_to_lp_column`, the
+//! `transit_buckets_out` convention): the in-LP ring's definition rows — a
+//! plain shift for slot `i < K_p-1`, the delivery-decision deposit for plant
+//! `p`'s own newest slot `K_p-1` — resolve the ring transition, so cuts apply
+//! directly against the outgoing `anticipated_slots_out` column. The fishing
+//! constraint is emitted at every stage unconditionally, so every slot
+//! participates in the dual chain. See the `StateLayout::state_to_lp_column`
+//! rustdoc.
 //!
 //! ## Cut activity tracking
 //!

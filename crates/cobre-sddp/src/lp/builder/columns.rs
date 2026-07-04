@@ -36,6 +36,7 @@ pub(super) fn fill_stage_columns(
 
     fill_storage_columns(ctx, stage, stage_idx, layout, b);
     fill_transit_bucket_columns(layout, b);
+    fill_anticipated_slot_columns(layout, b);
     fill_ar_lag_columns(layout, b);
     fill_anticipated_state_columns(layout, b);
     fill_theta_column(layout, b);
@@ -136,6 +137,34 @@ fn fill_transit_bucket_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) 
     }
 }
 
+/// Anticipated-ring outgoing (interior + padding) columns: open `(-inf, inf)`
+/// bounds — a committed MW value carries either sign, unlike the water-volume
+/// buckets' implicit `[0, inf)` default — for every slot reachable this stage
+/// (`layout.anticipated.anticipated_slot_row_pos`), frozen `[0, 0]` otherwise
+/// (the commissioning-dormant-column convention, mirroring
+/// [`fill_transit_bucket_columns`]). A plant's own newest slot is `None` in
+/// `anticipated_slot_row_pos` by construction and is bounded by
+/// [`fill_anticipated_columns`] instead, which runs later and overwrites
+/// whatever this fill wrote there.
+fn fill_anticipated_slot_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
+    let base = layout.anticipated.col_anticipated_slots_out_start;
+    for (offset, pos) in layout
+        .anticipated
+        .anticipated_slot_row_pos
+        .iter()
+        .enumerate()
+    {
+        let col = base + offset;
+        if pos.is_some() {
+            bufs.col_lower[col] = f64::NEG_INFINITY;
+            bufs.col_upper[col] = f64::INFINITY;
+        } else {
+            bufs.col_lower[col] = 0.0;
+            bufs.col_upper[col] = 0.0;
+        }
+    }
+}
+
 /// AR lag columns: unconstrained (signed).
 fn fill_ar_lag_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
     let n_lag_cols = layout.lag_order * layout.n_h;
@@ -145,9 +174,9 @@ fn fill_ar_lag_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
     }
 }
 
-/// Anticipated-state columns: open bounds `(-INF, +INF)` in slot-major,
-/// plant-minor order. Left open because the binding comes from the state-fixing
-/// equality rows, RHS-patched at solve time by `fill_state_patches`.
+/// Incoming anticipated-ring columns: open bounds `(-INF, +INF)` in slot-major,
+/// plant-minor order. Left open because pinning is via `set_col_bounds` at
+/// solve time (`fill_col_state_patches`), not an equality row.
 fn fill_anticipated_state_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
     for slot in 0..layout.k_max {
         for plant in 0..layout.n_anticipated {
@@ -381,7 +410,11 @@ pub(super) fn fill_anticipated_columns(
     let n_stages = ctx.resolved.bounds.n_stages();
     let mut active_count = 0_usize;
     for local_idx in 0..ctx.n_anticipated {
-        let state_out_col = layout.anticipated.col_anticipated_state_out_start + local_idx;
+        // The plant's own newest ring slot (`k_i - 1`) is the cut target.
+        let k_i = ctx.anticipated_lead_stages[local_idx];
+        let state_out_col = layout.anticipated.col_anticipated_slots_out_start
+            + (k_i - 1) * ctx.n_anticipated
+            + local_idx;
         let decision_col = layout.anticipated.col_anticipated_decision_start + local_idx;
         if layout.is_anticipated_decision_active(
             local_idx,
@@ -3053,9 +3086,10 @@ mod anticipated_objective_tests {
             objective[decision_col], expected_npv,
             "anticipated decision objective must equal the NPV commitment cost",
         );
-        // The active plant's state-out column is open (active), confirming the
-        // merged fill ran the active branch.
-        let state_out_col = layout.anticipated.col_anticipated_state_out_start;
+        // The active plant's newest ring slot is open (active), confirming the
+        // merged fill ran the active branch. K_MAX == 1 here, so the newest
+        // slot is the ring's own start (no per-plant offset needed).
+        let state_out_col = layout.anticipated.col_anticipated_slots_out_start;
         assert_eq!(col_upper[state_out_col], f64::INFINITY);
     }
 }

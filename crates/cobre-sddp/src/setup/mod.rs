@@ -1244,10 +1244,13 @@ fn build_initial_state(
         }
     }
 
-    // Anticipated-state ring buffer, slot-major:
-    // `state[anticipated_state.start + slot * n_anticipated + local_idx]`. Padding
-    // slots `[K_i, k_max)` must stay zero — the ring-buffer logic in `noise.rs` and
-    // `indexer.rs` assumes it.
+    // Anticipated ring, slot-major: `state[anticipated_slots_out.start + slot *
+    // n_anticipated + local_idx]`. This IS the state-vector numbering
+    // (`StateLayout::state_to_lp_column`'s identity domain), the same
+    // `anticipated_slots_out` position every other outgoing-state read uses —
+    // never `anticipated_state` (the relocated, incoming-only pinned block).
+    // Padding slots `[K_i, k_max)` must stay zero — the in-LP ring's row/column
+    // fill in `lp/builder` assumes it.
     if layout.n_anticipated > 0 && layout.k_max > 0 {
         debug_assert_eq!(
             study_dims.anticipated_thermal_indices.len(),
@@ -1256,7 +1259,7 @@ fn build_initial_state(
         );
         let thermals = system.thermals();
         let n_ant = layout.n_anticipated;
-        let ant_start = layout.anticipated_state.start;
+        let ant_start = layout.anticipated_slots_out.start;
         for history in &ic.past_anticipated_commitments {
             // thermals() and past_anticipated_commitments are both sorted by
             // thermal_id (binary_search requires it).

@@ -73,9 +73,6 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
             &mut ws.scratch.ncs_col_upper_buf,
         );
     }
-    // No shift_anticipated_state here: the ring-buffer advance happens once in the
-    // forward pass; backward and simulation reuse those slot values without
-    // re-shifting (re-shifting would offset x_hat from the fixing rows).
     ws.patch_buf
         .fill_col_state_patches(training_ctx.state, x_hat, &ctx.templates[s].col_scale);
     ws.patch_buf.fill_forward_patches(

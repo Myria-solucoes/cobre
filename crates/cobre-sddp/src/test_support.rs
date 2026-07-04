@@ -164,7 +164,11 @@ pub fn geometry(
     } = *dims;
     let n_ant_state = n_anticipated * k_max;
 
-    let theta = hydro_count * (3 + max_par_order) + n_ant_state + n_anticipated;
+    // No `n_buckets` field on `GeometryDims` (B == 0 always here), so the
+    // `2*B` term of the production formula drops out; the in-LP anticipated
+    // ring's two `n_ant_state`-wide blocks (`anticipated_slots_out` outgoing +
+    // `anticipated_state` incoming) contribute `2*n_ant_state`.
+    let theta = hydro_count * (3 + max_par_order) + 2 * n_ant_state;
     let decision_start = theta + 1;
 
     let z_inflow_row_start = 0_usize;

@@ -182,18 +182,19 @@ pub(crate) fn fill_unscaled_dual(out: &mut Vec<f64>, scaled: &[f64], row_scale: 
     }
 }
 
-/// Assert the bucket state rode the state-assembly plain copy untouched.
+/// Assert the bucket and anticipated-ring state rode the state-assembly plain
+/// copy untouched.
 ///
 /// The forward/simulation assembly plain-copies `unscaled_primal[..n_state]`
-/// into the advanced state, then overwrites only `inflow_lags` and
-/// `anticipated_state` in place; `transit_buckets_out` sits in the shift-gap those
-/// overwrites never reach because the outgoing bucket column equals its
-/// state-vector index (the `storage` identity convention). Call after both
-/// overwrites, before the caller moves `unscaled_primal` back into scratch.
+/// into the advanced state, then overwrites only `inflow_lags` in place;
+/// `transit_buckets_out` and `anticipated_slots_out` sit in the shift-gap that
+/// overwrite never reaches, because both outgoing columns equal their
+/// state-vector index (the `storage` identity convention). Call after the lag
+/// overwrite, before the caller moves `unscaled_primal` back into scratch.
 // Rationale: this checks a verbatim copy invariant (`extend_from_slice`), not
 // a numerical result, so exact equality is the correct comparison — a
 // tolerance would mask the one bug this guards against (an overwrite landing
-// on the bucket range).
+// on the bucket/anticipated-ring range).
 #[allow(clippy::float_cmp)]
 pub(crate) fn debug_assert_bucket_copy_gap_intact(
     assembled_state: &[f64],
@@ -204,9 +205,11 @@ pub(crate) fn debug_assert_bucket_copy_gap_intact(
         layout
             .transit_buckets_out
             .clone()
+            .chain(layout.anticipated_slots_out.clone())
             .all(|j| assembled_state[j] == unscaled_primal[j]),
-        "bucket state must equal the LP primal's transit_buckets_out column: the \
-         lag/anticipated overwrites must never touch the bucket shift-gap"
+        "bucket/anticipated-ring state must equal the LP primal's identity \
+         columns: the lag overwrite must never touch the bucket/anticipated-ring \
+         shift-gap"
     );
 }
 
@@ -555,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "bucket state must equal the LP primal's transit_buckets_out column")]
+    #[should_panic(expected = "bucket/anticipated-ring state must equal the LP primal's identity")]
     fn debug_assert_bucket_copy_gap_intact_panics_when_bucket_diverges() {
         let layout = crate::test_support::state_layout_with_transit_buckets(
             0,
@@ -569,6 +572,40 @@ mod tests {
         let primal = vec![7.0, 11.0];
         let mut assembled = primal.clone();
         assembled[1] = 999.0; // simulate an accidental overwrite of the bucket block
+        super::debug_assert_bucket_copy_gap_intact(&assembled, &primal, &layout);
+    }
+
+    #[test]
+    fn debug_assert_bucket_copy_gap_intact_passes_when_anticipated_ring_matches_primal() {
+        let layout = crate::test_support::state_layout_with_transit_buckets(
+            0,
+            0,
+            0,
+            vec![],
+            2,
+            1,
+            vec![1, 1],
+        );
+        let primal = vec![3.0, 5.0];
+        let assembled = primal.clone();
+        super::debug_assert_bucket_copy_gap_intact(&assembled, &primal, &layout);
+    }
+
+    #[test]
+    #[should_panic(expected = "bucket/anticipated-ring state must equal the LP primal's identity")]
+    fn debug_assert_bucket_copy_gap_intact_panics_when_anticipated_ring_diverges() {
+        let layout = crate::test_support::state_layout_with_transit_buckets(
+            0,
+            0,
+            0,
+            vec![],
+            2,
+            1,
+            vec![1, 1],
+        );
+        let primal = vec![3.0, 5.0];
+        let mut assembled = primal.clone();
+        assembled[0] = 999.0; // simulate an accidental overwrite of the anticipated-ring slot
         super::debug_assert_bucket_copy_gap_intact(&assembled, &primal, &layout);
     }
 }

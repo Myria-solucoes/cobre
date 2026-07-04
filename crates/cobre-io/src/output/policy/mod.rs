@@ -20,9 +20,9 @@ pub use checkpoint::{read_policy_checkpoint, write_policy_checkpoint};
 pub use codec::{deserialize_stage_basis, deserialize_stage_cuts, deserialize_stage_states};
 pub use codec::{serialize_stage_basis, serialize_stage_cuts, serialize_stage_states};
 pub use records::{
-    EntitySlot, OwnedPolicyBasisRecord, OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCheckpoint,
-    PolicyCheckpointMetadata, PolicyCutRecord, StageCutsPayload, StageCutsReadResult,
-    StageStatesPayload, StageStatesReadResult,
+    ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, EntitySlot, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
+    PolicyBasisRecord, PolicyCheckpoint, PolicyCheckpointMetadata, PolicyCutRecord,
+    StageCutsPayload, StageCutsReadResult, StageStatesPayload, StageStatesReadResult,
 };
 
 #[cfg(test)]
@@ -845,18 +845,21 @@ mod tests {
                 entity_id: 12,
                 subindex: 0,
                 was_active: true,
+                delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
             },
             EntitySlot {
                 entity_type: 1,
                 entity_id: -1,
                 subindex: 3,
                 was_active: false,
+                delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
             },
             EntitySlot {
                 entity_type: 2,
                 entity_id: 7,
                 subindex: 1,
                 was_active: true,
+                delivery_anchor: 2024 * 12 + 5,
             },
         ]
     }
@@ -868,6 +871,10 @@ mod tests {
             assert_eq!(a.entity_id, e.entity_id, "slot {i} entity_id");
             assert_eq!(a.subindex, e.subindex, "slot {i} subindex");
             assert_eq!(a.was_active, e.was_active, "slot {i} was_active");
+            assert_eq!(
+                a.delivery_anchor, e.delivery_anchor,
+                "slot {i} delivery_anchor"
+            );
         }
     }
 

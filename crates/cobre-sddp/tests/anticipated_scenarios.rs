@@ -409,7 +409,7 @@ mod anticipated_5stage_k2_smoke {
 
         let result = &outcome.result;
         let state = setup.stage_state();
-        let anticipated_state_start = state.anticipated_state.start;
+        let anticipated_slots_out_start = state.anticipated_slots_out.start;
         let n_anticipated = state.n_anticipated;
 
         assert_training_converged_structurally(result, &[], 8);
@@ -418,7 +418,7 @@ mod anticipated_5stage_k2_smoke {
         // at t+K in {2,3,4}.
         assert_anticipated_delivery_slots_populated(
             result,
-            anticipated_state_start,
+            anticipated_slots_out_start,
             n_anticipated,
             &[2, 3, 4],
         );
@@ -427,17 +427,18 @@ mod anticipated_5stage_k2_smoke {
     /// Warm-start regression: an anticipated-thermal study trained with warm-start
     /// must reconstruct every stored basis with zero rejections.
     ///
-    /// `anticipated_state_out` lives in the stage-invariant state region, so the
-    /// cut row that targets it shifts `z_inflow`/`storage_in`/`theta` and the whole
-    /// control region downstream by `n_anticipated`. The risk this test pins: that
-    /// the shift breaks `reconstruct_basis`'s slot-identity matching and starts
-    /// producing bases `HiGHS` rejects. It cannot, because `reconstruct_basis`
-    /// matches stored cut rows to current LP rows by `CutPool` slot identity — never
-    /// by absolute column index — and copies the column block verbatim before
-    /// resizing to the (now-wider) column count. `basis_consistency_failures` is the
-    /// `SolverStatistics` counter incremented whenever the solver rejects an offered
-    /// warm-start basis (`isBasisConsistent` returns false): every reconstructed
-    /// basis must be accepted by the solver.
+    /// The anticipated ring's `anticipated_slots_out` block lives in the
+    /// stage-invariant state region, so it shifts `z_inflow`/`storage_in`/`theta`
+    /// and the whole control region downstream by `n_anticipated * k_max`. The
+    /// risk this test pins: that the shift breaks `reconstruct_basis`'s
+    /// slot-identity matching and starts producing bases `HiGHS` rejects. It
+    /// cannot, because `reconstruct_basis` matches stored cut rows to current LP
+    /// rows by `CutPool` slot identity — never by absolute column index — and
+    /// copies the column block verbatim before resizing to the (now-wider) column
+    /// count. `basis_consistency_failures` is the `SolverStatistics` counter
+    /// incremented whenever the solver rejects an offered warm-start basis
+    /// (`isBasisConsistent` returns false): every reconstructed basis must be
+    /// accepted by the solver.
     #[test]
     fn test_anticipated_5stage_k2_warm_start_zero_basis_rejections() {
         let system = build_system();
@@ -472,8 +473,8 @@ mod anticipated_5stage_k2_smoke {
 
         assert_eq!(
             total_rejections, 0,
-            "anticipated warm-start: expected 0 basis rejections after relocating \
-         anticipated_state_out into the state region, got {total_rejections} \
+            "anticipated warm-start: expected 0 basis rejections with the \
+         anticipated ring in the state region, got {total_rejections} \
          (reconstruct_basis must match cut rows by CutPool slot identity, not by \
          absolute column index, so the column shift is transparent)"
         );
@@ -928,7 +929,7 @@ mod anticipated_two_plants_smoke {
 
         let n_anticipated = state.n_anticipated;
         let k_max = state.k_max;
-        let ant_start = state.anticipated_state.start;
+        let ant_start = state.anticipated_slots_out.start;
         let ant_block_len = n_anticipated * k_max;
 
         let basis_cache = &result.basis_cache;
@@ -968,20 +969,18 @@ mod anticipated_two_plants_smoke {
 }
 
 mod anticipated_simulation_ring_buffer {
-    //! Regression: the simulation pipeline (`solve_simulation_stage`) must call
-    //! `shift_anticipated_state` once per stage, like the inflow-lag ring buffer.
-    //!
-    //! Without the shift, the next stage's `ws.current_state` carries the post-solve
-    //! primal of the unbounded `anticipated_state` columns — `incoming - decision`,
-    //! the residual the anticipated fixing rows leave — instead of the shifted
-    //! ring-buffer state, so the fishing constraint at delivery stage `K` reads a
-    //! never-advanced slot 0. The contract this pins: with the anticipated thermal
-    //! cheaper than the backup, the matured commitment equals the in-study decision
-    //! made `K` stages earlier,
+    //! Regression: the simulation pipeline (`solve_simulation_stage`) advances
+    //! the anticipated ring exactly like the forward pass — a plain identity
+    //! copy of the LP's own `anticipated_slots_out` columns, each resolved
+    //! in-LP by the ring's definition rows (a shift for interior slots, the
+    //! delivery-decision deposit for the newest slot; see
+    //! `StateLayout::state_to_lp_column`). The contract this pins: with the
+    //! anticipated thermal cheaper than the backup, the matured commitment
+    //! equals the in-study decision made `K` stages earlier,
     //!
     //! `anticipated_committed_mw(t = K) == anticipated_decision_mw(t = 0)`,
     //!
-    //! not the seeded `past_anticipated_commitments` a missing shift would surface.
+    //! not the seeded `past_anticipated_commitments` a broken ring would surface.
 
     use std::sync::mpsc;
 

@@ -341,7 +341,6 @@ fn single_workspace(solver: MockSolver, n_state: usize) -> Vec<SolverWorkspace<M
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            anticipated_state_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -393,7 +392,6 @@ fn transit_bucket_only_workspace(
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            anticipated_state_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -2361,7 +2359,6 @@ fn test_backward_pass_parallel_cut_determinism() {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            anticipated_state_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -2476,7 +2473,6 @@ fn test_backward_pass_parallel_cut_determinism() {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
-                anticipated_state_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -2840,7 +2836,6 @@ fn backward_pass_load_patches_applied() {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            anticipated_state_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -3024,7 +3019,6 @@ fn backward_pass_no_load_buses_unchanged() {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            anticipated_state_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -3203,7 +3197,6 @@ fn backward_pass_cut_coefficients_unaffected() {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            anticipated_state_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -3667,7 +3660,6 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
-                anticipated_state_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -4038,7 +4030,6 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
-                anticipated_state_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -4271,7 +4262,6 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
-                anticipated_state_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -4838,7 +4828,6 @@ fn handshake_passes_with_local_backend() {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
-                anticipated_state_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -5105,18 +5094,19 @@ fn handshake_rejects_nonuniform_workers() {
     }
 }
 
-/// Verify cut sign convention: the matured anticipated slot's coefficient 7.5 is
-/// negated to -7.5 at the cut-target column. Drives the cut-row builder against a
-/// finalized anticipated [`StateLayout`] (the role-(a) owner of the resolver).
+/// Verify cut sign convention: an anticipated ring slot's stored coefficient
+/// 7.5 is negated to -7.5 at the cut-target column. Drives the cut-row
+/// builder against a finalized anticipated [`StateLayout`] (the role-(a)
+/// owner of the resolver).
 #[test]
 fn cut_coefficient_sign_convention_slot_zero_k2() {
     let state = crate::test_support::state_layout_full(0, 0, 1, 2, vec![2]);
-    assert_eq!(state.anticipated_state.start, 0);
+    assert_eq!(state.anticipated_slots_out.start, 0);
     assert_eq!(state.n_state, 2);
 
     let mut fcf = FutureCostFunction::new(3, state.n_state, 1, 10, &[0; 3]);
     let mut coefficients = vec![0.0_f64; state.n_state];
-    coefficients[state.anticipated_state.start] = 7.5;
+    coefficients[state.anticipated_slots_out.start] = 7.5;
     fcf.add_cut(1, 0, 0, 0.0, &coefficients);
 
     let mut batch = RowBatch {
@@ -5136,10 +5126,11 @@ fn cut_coefficient_sign_convention_slot_zero_k2() {
         &[],
     );
 
-    // Slot 0 (j = anticipated_state.start) is the matured slot (K=2, slot+1==K via
-    // the Equal branch), so it maps to anticipated_state_out.start == 1.
-    let lp_col = state.state_to_lp_column(state.anticipated_state.start);
-    assert_eq!(lp_col, 1);
+    // Slot 0 (j = anticipated_slots_out.start) resolves by identity — the
+    // in-LP ring's definition row (not `state_to_lp_column`) resolves the
+    // ring transition, so the cut renders directly onto the outgoing column.
+    let lp_col = state.state_to_lp_column(state.anticipated_slots_out.start);
+    assert_eq!(lp_col, state.anticipated_slots_out.start);
 
     let pos = batch
         .col_indices

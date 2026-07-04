@@ -1096,11 +1096,10 @@ fn extract_thermals_marks_anticipated_thermals_when_indices_nonempty() {
     let indexer = crate::test_support::geometry(&eq_counts, vec![], &[], vec![]);
     let study_dims = crate::test_support::study_dims_for(&eq_counts);
     let state = crate::test_support::state_layout_full(0, 0, 1, 1, vec![1]);
-    // With N=0, L=0, A=1, K_max=1 (anticipated_state_out relocated to the
-    // state region after the ring buffer):
-    //   anticipated_state     = [0, 1)  (A*K_max = 1 slot)
-    //   anticipated_state_out = [1, 2)  (A = 1 column)
-    //   theta = N*(3+L) + A*K_max + A = 0 + 1 + 1 = 2
+    // With N=0, L=0, A=1, K_max=1:
+    //   anticipated_slots_out = [0, 1)  (outgoing ring, A*K_max = 1 slot)
+    //   anticipated_state     = [1, 2)  (incoming, A*K_max = 1 slot)
+    //   theta = N*(3+L) + 2*A*K_max = 0 + 2 = 2
     //   thermal = [theta+1, theta+1+T*K) = [3, 5)  — t0→3, t1→4
     assert_eq!(state.theta, 2);
     assert_eq!(indexer.thermal, 3..5);
@@ -1749,12 +1748,12 @@ fn extract_thermals_anticipated_decision_is_per_block_invariant() {
 /// N=0 hydros, T=1 thermal (ID 10, global index 0), `n_blks=3`, `n_anticipated=1`
 /// (global index 0, local index 0), `k_max=2`, `K_i=2`.
 ///
-/// Layout (`anticipated_state_out` relocated to the state region):
-///   `n_ant_state = 1*2 = 2`, plus the A=1 `state_out` column → `theta = 3`
-///   `anticipated_state`     = `[0, 2)`
-///   `anticipated_state_out` = `[2, 3)`
-///   `thermal` = `[4, 7)`          (1 thermal * 3 blocks)
-///   `anticipated_decision.start = 7`
+/// Layout: `n_ant_state = 1*2 = 2`, doubled for the outgoing+incoming ring
+/// blocks → `theta = 4`.
+///   `anticipated_slots_out` (outgoing) = `[0, 2)`
+///   `anticipated_state` (incoming)     = `[2, 4)`
+///   `thermal` = `[5, 8)`          (1 thermal * 3 blocks)
+///   `anticipated_decision.start = 8`
 /// The `GeometryDims` both
 /// [`make_anticipated_committed_indexer_k2_3blks`] and the matching
 /// `study_dims` derive from, keeping the role-(b) geometry and the non-state
@@ -1798,18 +1797,21 @@ fn make_anticipated_committed_indexer_k2_3blks() -> StageGeometry {
 fn extract_thermals_per_block_committed_at_delivery_stage() {
     let indexer = make_anticipated_committed_indexer_k2_3blks();
     let state = crate::test_support::state_layout_full(0, 0, 1, 2, vec![2]);
-    // thermal = [4, 7): col 4 = block 0, col 5 = block 1, col 6 = block 2
-    assert_eq!(indexer.thermal.start, 4);
-    // anticipated_state = [0, 2): col 0 = slot 0, col 1 = slot 1
-    assert_eq!(state.anticipated_state.start, 0);
+    // thermal = [5, 8): col 5 = block 0, col 6 = block 1, col 7 = block 2
+    // (theta = N*(3+L) + 2*n_ant_state = 0 + 2*2 = 4, control region starts at 5).
+    assert_eq!(indexer.thermal.start, 5);
+    // anticipated_state (the incoming, pinned block) = [2, 4): col 2 = slot 0,
+    // col 3 = slot 1 (the outgoing `anticipated_slots_out` ring occupies [0, 2)
+    // instead; `compute_anticipated_committed_mw` reads the INCOMING slot).
+    assert_eq!(state.anticipated_state.start, 2);
     let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
     let mut primal = vec![0.0_f64; n_cols];
-    primal[0] = 42.0; // ant_state slot 0 (the committed scalar)
-    primal[1] = 99.0; // ant_state slot 1 (unrelated; must not be read)
-    primal[3] = 0.0; // theta
-    primal[4] = 50.0; // thermal 10, block 0
-    primal[5] = 60.0; // thermal 10, block 1
-    primal[6] = 70.0; // thermal 10, block 2
+    primal[2] = 42.0; // ant_state slot 0 (the committed scalar)
+    primal[3] = 99.0; // ant_state slot 1 (unrelated; must not be read)
+    primal[4] = 0.0; // theta
+    primal[5] = 50.0; // thermal 10, block 0
+    primal[6] = 60.0; // thermal 10, block 1
+    primal[7] = 70.0; // thermal 10, block 2
     let obj = vec![0.0_f64; n_cols];
 
     // Also verify the helper directly for AC-1 coverage.

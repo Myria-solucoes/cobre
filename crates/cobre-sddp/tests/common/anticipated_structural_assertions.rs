@@ -139,8 +139,10 @@ pub fn assert_basis_cache_fully_populated(result: &TrainingResult, expected_stag
 ///
 /// # Arguments
 ///
-/// - `anticipated_state_start` — `indexer.anticipated_state.start`, the
-///   state-index offset of the anticipated-state ring buffer.
+/// - `anticipated_slots_out_start` — `indexer.anticipated_slots_out.start`, the
+///   state-vector offset of the anticipated ring's outgoing slots (the domain
+///   `state_at_capture` is addressed in — never the relocated incoming
+///   `anticipated_state` range).
 /// - `n_anticipated` — `indexer.n_anticipated`.
 /// - `delivery_stages` — pass the indices of stages where `K_i ≤ stage_idx` for
 ///   some plant; slot 0 (slot-major layout) must be populated and non-negative.
@@ -150,7 +152,7 @@ pub fn assert_basis_cache_fully_populated(result: &TrainingResult, expected_stag
 /// If any delivery-stage slot 0 value is non-finite or strictly negative.
 pub fn assert_anticipated_delivery_slots_populated(
     result: &TrainingResult,
-    anticipated_state_start: usize,
+    anticipated_slots_out_start: usize,
     n_anticipated: usize,
     delivery_stages: &[usize],
 ) {
@@ -161,7 +163,7 @@ pub fn assert_anticipated_delivery_slots_populated(
         // Slot 0 holds the matured commitment about to be dispatched at
         // `stage_idx`. Layout is slot-major, plant-minor.
         for plant in 0..n_anticipated {
-            let idx = anticipated_state_start + plant;
+            let idx = anticipated_slots_out_start + plant;
             let value = captured.state_at_capture[idx];
             assert!(
                 value.is_finite(),

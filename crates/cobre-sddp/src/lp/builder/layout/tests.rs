@@ -235,9 +235,8 @@ fn membership_hydro(
 /// `col_turbine_start == idx.theta + 1` where `idx` is the legacy
 /// the N=0, L=0 state layout (zero hydros, zero lag order).
 ///
-/// This verifies that the decision-region offset before the
-/// `anticipated_state_out` insertion is preserved when no anticipated
-/// thermals are present.
+/// This verifies that the decision-region offset before the anticipated-ring
+/// insertion is preserved when no anticipated thermals are present.
 #[test]
 fn stage_layout_zero_anticipated_matches_pre_anticipated_offsets() {
     let fixtures = ZeroEntityFixtures::new();
@@ -1348,13 +1347,13 @@ fn stage_layout_operational_violation_rows_are_contiguous_blocks() {
 /// `col_anticipated_decision_start` falls between thermal end and
 /// `col_line_fwd_start` when `n_anticipated=2, n_thermals=3, n_blks=4`.
 ///
-/// After the `anticipated_state_out` relocation the control region is
-/// `thermal` then `anticipated_decision` (2 cols) then `line_fwd` —
-/// `state_out` moved to the state region. So `col_line_fwd_start` equals
+/// The control region is `thermal` then `anticipated_decision` (2 cols) then
+/// `line_fwd` — the anticipated ring's outgoing slots live entirely in the
+/// state region. So `col_line_fwd_start` equals
 /// `col_anticipated_decision_start + n_anticipated`, and
-/// `col_anticipated_state_out_start` is sourced from the state-region
-/// position (immediately after the `anticipated_state` ring buffer), not
-/// from the control region.
+/// `col_anticipated_slots_out_start` is sourced from the state-region
+/// position (immediately after `transit_buckets_out`), not from the control
+/// region.
 #[test]
 fn anticipated_decision_columns_placed_between_thermal_and_line_fwd() {
     use chrono::NaiveDate;
@@ -1430,14 +1429,13 @@ fn anticipated_decision_columns_placed_between_thermal_and_line_fwd() {
         "col_line_fwd_start == col_anticipated_decision_start + n_anticipated \
              (state_out relocated out of the control region)"
     );
-    // The relocated state_out start equals the indexer's state-region
-    // position: after the ring buffer (N*(1+L) + n_ant*k_max). Here N=0,
-    // L=0, k_max=1, n_ant=2 → ring buffer is [0, 2), state_out starts at 2.
+    // The outgoing ring start equals the indexer's state-region position:
+    // immediately after `transit_buckets_out` (N*(1+L) + B). Here N=0, L=0,
+    // B=0 → the ring starts at 0.
     assert_eq!(
-        layout.anticipated.col_anticipated_state_out_start,
-        n_anticipated * k_max,
-        "col_anticipated_state_out_start must equal the state-region offset \
-             N*(1+L) + n_ant*k_max"
+        layout.anticipated.col_anticipated_slots_out_start, 0,
+        "col_anticipated_slots_out_start must equal the state-region offset \
+             N*(1+L) + B"
     );
     // Verify the separation between thermal_start and line_fwd_start is
     // exactly n_anticipated (only the decision block remains between them).
@@ -1452,15 +1450,15 @@ fn anticipated_decision_columns_placed_between_thermal_and_line_fwd() {
 // ── AC-4 ─────────────────────────────────────────────────────────────────
 
 /// AC-4: `StageLayout` with `n_anticipated=2, k_max=3, n_hydros=0,
-/// max_par_order=0` has `col_turbine_start == 0*(3+0) + 6 + 2 + 1 == 9`.
+/// max_par_order=0` has `col_turbine_start == 0*(3+0) + 2*6 + 1 == 13`.
 ///
-/// `n_ant_state = n_anticipated * k_max = 2 * 3 = 6` and the relocated
-/// `anticipated_state_out` block (width `n_anticipated = 2`) together shift
-/// `theta` from the legacy `N*(3+L) = 0` to `0 + 6 + 2 = 8`, so decisions
-/// begin at 9.
+/// `n_ant_state = n_anticipated * k_max = 2 * 3 = 6` and the in-LP ring's TWO
+/// `n_ant_state`-wide blocks (`anticipated_slots_out` outgoing +
+/// `anticipated_state` incoming) together shift `theta` from the legacy
+/// `N*(3+L) = 0` to `0 + 2*6 = 12`, so decisions begin at 13.
 ///
-/// The general formula (any N, L) is
-/// `N*(3+L) + n_ant_state + n_anticipated + 1`.
+/// The general formula (any N, L, B) is
+/// `N*(3+L) + 2*B + 2*n_ant_state + 1`.
 #[test]
 fn stage_layout_with_anticipated_shifts_decision_region() {
     let n_hydros = 0_usize;
@@ -1483,14 +1481,13 @@ fn stage_layout_with_anticipated_shifts_decision_region() {
     let expected_n_ant_state = n_anticipated * k_max;
     assert_eq!(layout.n_ant_state, expected_n_ant_state, "n_ant_state");
 
-    // theta = N*(3+L) + n_ant_state + n_anticipated = 0*(3+0) + 6 + 2 = 8
-    // col_turbine_start = theta + 1 = 9
-    let expected_col_turbine_start =
-        n_hydros * (3 + max_par_order) + expected_n_ant_state + n_anticipated + 1;
+    // theta = N*(3+L) + 2*n_ant_state = 0*(3+0) + 2*6 = 12 (B=0 here)
+    // col_turbine_start = theta + 1 = 13
+    let expected_col_turbine_start = n_hydros * (3 + max_par_order) + 2 * expected_n_ant_state + 1;
     assert_eq!(
         layout.col_turbine_start(),
         expected_col_turbine_start,
-        "col_turbine_start == N*(3+L) + n_ant_state + n_anticipated + 1"
+        "col_turbine_start == N*(3+L) + 2*B + 2*n_ant_state + 1"
     );
 }
 
@@ -1773,14 +1770,14 @@ impl AntFixturesWithNStages {
     }
 }
 
-/// `col_anticipated_state_out_start` is sourced from the relocated
-/// state-region position (after the `anticipated_state` ring buffer, before
-/// `z_inflow`), `col_line_fwd_start` follows `anticipated_decision` directly,
-/// and `n_anticipated_state_out_def_rows` counts both active plants at stage 0.
+/// `col_anticipated_slots_out_start` is sourced from the state-region
+/// position immediately after `transit_buckets_out` (before `z_inflow`),
+/// `col_line_fwd_start` follows `anticipated_decision` directly, and
+/// `n_anticipated_state_out_def_rows` counts both active plants at stage 0.
 ///
 /// Fixture: `n_anticipated=2`, `K=[2,3]`, `k_max=3`, `n_stages=6`,
-/// `stage_idx=0`, `N=0`, `L=0`. Both plants are active: `0+2=2 < 6` and
-/// `0+3=3 < 6`. State-region offset = `N*(1+L) + n_ant*k_max = 0 + 6 = 6`.
+/// `stage_idx=0`, `N=0`, `L=0`, `B=0`. Both plants are active: `0+2=2 < 6` and
+/// `0+3=3 < 6`. State-region offset = `N*(1+L) + B = 0`.
 #[test]
 fn test_layout_state_out_block_adjacent_to_decision() {
     let fixtures = AntFixturesWithNStages::new(6);
@@ -1794,11 +1791,11 @@ fn test_layout_state_out_block_adjacent_to_decision() {
     let state = state_layout_for(&ctx);
     let layout = StageLayout::new(&ctx, &state, &stage, 0);
 
-    // state_out is relocated to the state region: N*(1+L) + n_ant*k_max.
+    // The outgoing ring sits in the state region: N*(1+L) + B.
     assert_eq!(
-        layout.anticipated.col_anticipated_state_out_start, 6,
-        "state_out columns must be sourced from the state-region offset \
-             N*(1+L) + n_ant*k_max"
+        layout.anticipated.col_anticipated_slots_out_start, 0,
+        "outgoing-ring columns must be sourced from the state-region offset \
+             N*(1+L) + B"
     );
     // line_fwd follows anticipated_decision directly (state_out moved out).
     assert_eq!(
@@ -1834,13 +1831,13 @@ fn test_layout_state_out_def_rows_zero_when_all_inactive() {
 
     assert_eq!(layout.anticipated.n_anticipated_state_out_def_rows, 0);
     // Column block stays allocated at the state-region offset regardless of
-    // activity: N*(1+L) + n_ant*k_max = 0 + 6 = 6.
-    assert_eq!(layout.anticipated.col_anticipated_state_out_start, 6);
+    // activity: N*(1+L) + B = 0.
+    assert_eq!(layout.anticipated.col_anticipated_slots_out_start, 0);
 }
 
 /// Zero-anticipated layouts must not grow `num_cols` or emit def rows.
 ///
-/// `col_anticipated_state_out_start` must equal `col_anticipated_decision_start`
+/// `col_anticipated_slots_out_start` must equal `col_anticipated_decision_start`
 /// when `n_anticipated == 0` (empty block; both starts coincide).
 #[test]
 fn test_layout_no_anticipated_unchanged_num_cols() {
@@ -1851,9 +1848,9 @@ fn test_layout_no_anticipated_unchanged_num_cols() {
     let layout = StageLayout::new(&ctx, &state, &stage, 0);
 
     assert_eq!(
-        layout.anticipated.col_anticipated_state_out_start,
+        layout.anticipated.col_anticipated_slots_out_start,
         layout.anticipated.col_anticipated_decision_start,
-        "col_anticipated_state_out_start must equal col_anticipated_decision_start when n_anticipated=0"
+        "col_anticipated_slots_out_start must equal col_anticipated_decision_start when n_anticipated=0"
     );
     assert_eq!(layout.anticipated.n_anticipated_state_out_def_rows, 0);
 }

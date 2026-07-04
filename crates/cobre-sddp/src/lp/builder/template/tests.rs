@@ -1282,8 +1282,8 @@ fn assert_lp_equivalence_after_anticipated_swap(
     dec_start_b: usize,
     state_start_a: usize,
     state_start_b: usize,
-    state_out_start_a: usize,
-    state_out_start_b: usize,
+    slots_out_start_a: usize,
+    slots_out_start_b: usize,
     n_ant: usize,
     k_max: usize,
     fish_start_a: usize,
@@ -1292,6 +1292,10 @@ fn assert_lp_equivalence_after_anticipated_swap(
     def_row_start_a: usize,
     def_row_start_b: usize,
     n_def_rows: usize,
+    slot_def_row_start_a: usize,
+    slot_def_row_start_b: usize,
+    slot_row_pos_a: &[Option<usize>],
+    slot_row_pos_b: &[Option<usize>],
     stage_idx: usize,
 ) {
     assert_eq!(
@@ -1311,14 +1315,17 @@ fn assert_lp_equivalence_after_anticipated_swap(
     // Swap the two anticipated_decision columns.
     col_perm[dec_start_b] = dec_start_a + 1;
     col_perm[dec_start_b + 1] = dec_start_a;
-    // Swap the two anticipated_state_out columns (one per plant, plant-indexed).
-    col_perm[state_out_start_b] = state_out_start_a + 1;
-    col_perm[state_out_start_b + 1] = state_out_start_a;
-    // Swap anticipated_state columns at each ring-buffer slot. Slot-major
-    // layout: column for slot `s`, plant `p` = state_start + s * n_ant + p.
+    // Swap anticipated_state (incoming) columns at each ring-buffer slot.
+    // Slot-major layout: column for slot `s`, plant `p` = state_start + s *
+    // n_ant + p.
     for s in 0..k_max {
         col_perm[state_start_b + s * n_ant] = state_start_a + s * n_ant + 1;
         col_perm[state_start_b + s * n_ant + 1] = state_start_a + s * n_ant;
+    }
+    // Swap anticipated_slots_out (outgoing) columns at each ring-buffer slot.
+    for s in 0..k_max {
+        col_perm[slots_out_start_b + s * n_ant] = slots_out_start_a + s * n_ant + 1;
+        col_perm[slots_out_start_b + s * n_ant + 1] = slots_out_start_a + s * n_ant;
     }
 
     // Build row permutation: identity outside anticipated_fishing and
@@ -1352,6 +1359,26 @@ fn assert_lp_equivalence_after_anticipated_swap(
     }
     if n_def_rows == 1 {
         row_perm[def_row_start_b] = def_row_start_a;
+    }
+    // Anticipated-ring interior-slot definition rows: the general per-(slot,
+    // plant) analogue of the def-row swap above. `slot_row_pos_b`'s global
+    // index `slot * n_ant + plant` corresponds to `slot_row_pos_a`'s
+    // `slot * n_ant + (1 - plant)` (the same plant-swap the column loops
+    // apply); both must agree on reachability (Some/None) since swapping
+    // local labels never changes which physical (slot, plant) pair is
+    // in-horizon.
+    for (g_b, pos_b) in slot_row_pos_b.iter().enumerate() {
+        let Some(pos_b) = *pos_b else { continue };
+        let slot = g_b / n_ant;
+        let plant = g_b % n_ant;
+        let g_a = slot * n_ant + (1 - plant);
+        let pos_a = slot_row_pos_a[g_a].unwrap_or_else(|| {
+            panic!(
+                "stage {stage_idx}: slot_row_pos_a[{g_a}] must be reachable to \
+                 match slot_row_pos_b[{g_b}]"
+            )
+        });
+        row_perm[slot_def_row_start_b + pos_b] = slot_def_row_start_a + pos_a;
     }
 
     // Dense bound/objective comparison: tpl_a[col_perm[j]] == tpl_b[j].
@@ -1619,8 +1646,8 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
             layout_b.anticipated.col_anticipated_decision_start,
             layout_a.col_anticipated_state_start(),
             layout_b.col_anticipated_state_start(),
-            layout_a.anticipated.col_anticipated_state_out_start,
-            layout_b.anticipated.col_anticipated_state_out_start,
+            layout_a.anticipated.col_anticipated_slots_out_start,
+            layout_b.anticipated.col_anticipated_slots_out_start,
             ctx_a.n_anticipated,
             ctx_a.k_max,
             layout_a.anticipated.row_anticipated_fishing_start,
@@ -1629,6 +1656,10 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
             layout_a.anticipated.row_anticipated_state_out_def_start,
             layout_b.anticipated.row_anticipated_state_out_def_start,
             layout_a.anticipated.n_anticipated_state_out_def_rows,
+            layout_a.anticipated.row_anticipated_slot_definition_start,
+            layout_b.anticipated.row_anticipated_slot_definition_start,
+            &layout_a.anticipated.anticipated_slot_row_pos,
+            &layout_b.anticipated.anticipated_slot_row_pos,
             stage_idx,
         );
     }

@@ -1877,20 +1877,20 @@ fn line_exchange_unknown_id_returns_empty() {
 /// B=1 bus, K=2 blocks, n_anticipated=1, k_max=2.
 ///
 /// Column layout (no hydros, no FPHA, no evap):
-///   storage:            [0, 0)    empty
-///   lags:               [0, 0)    empty
-///   anticipated_state:     [0, 0 + 2*1) = [0, 2)  (k_max=2, n_anticipated=1)
-///   anticipated_state_out: [2, 3)        (relocated state region, A=1)
-///   z_inflow:              [3, 3)    empty
-///   storage_in:            [3, 3)    empty
-///   theta:                 3
-///   decision_start:        4
-///   thermal:               [4, 4 + 2*2) = [4, 8)  (T=2, K=2)
-///   anticipated_decision:  [8, 8+1) = [8, 9)   (n_anticipated=1)
-///   line_fwd: [9, 9) empty
-///   line_rev: [9, 9) empty
-///   deficit: [9, 9+1*1*2) = [9, 11)  (B=1, S=1, K=2)
-///   excess:  [11, 11+1*2) = [11, 13)
+///   storage:               [0, 0)    empty
+///   lags:                  [0, 0)    empty
+///   anticipated_slots_out: [0, 0 + 2*1) = [0, 2)  (k_max=2, n_anticipated=1, outgoing)
+///   z_inflow:              [2, 2)    empty
+///   storage_in:            [2, 2)    empty
+///   anticipated_state:     [2, 4)    (incoming, relocated)
+///   theta:                 4
+///   decision_start:        5
+///   thermal:               [5, 5 + 2*2) = [5, 9)  (T=2, K=2)
+///   anticipated_decision:  [9, 9+1) = [9, 10)   (n_anticipated=1)
+///   line_fwd: [10, 10) empty
+///   line_rev: [10, 10) empty
+///   deficit: [10, 10+1*1*2) = [10, 12)  (B=1, S=1, K=2)
+///   excess:  [12, 12+1*2) = [12, 14)
 fn make_indexer_with_anticipated() -> StageGeometry {
     crate::test_support::geometry(
         &crate::test_support::GeometryDims {
@@ -1913,8 +1913,8 @@ fn make_indexer_with_anticipated() -> StageGeometry {
 ///
 /// Using `make_indexer_with_anticipated`:
 /// - Thermal EntityId(6) at sys_pos=1, which is anticipated_thermal_indices[0].
-/// - anticipated_decision.start = 8, local_idx = 0.
-/// - Expected column = 8 + 0 = 8.
+/// - anticipated_decision.start = 9, local_idx = 0.
+/// - Expected column = 9 + 0 = 9.
 #[test]
 fn anticipated_decision_maps_to_correct_column() {
     let indexer = make_indexer_with_anticipated();
@@ -1932,8 +1932,8 @@ fn anticipated_decision_maps_to_correct_column() {
 
     // Verify anticipated_decision.start is as expected.
     assert_eq!(
-        indexer.anticipated_decision.start, 8,
-        "anticipated_decision.start should be 8, got {}",
+        indexer.anticipated_decision.start, 9,
+        "anticipated_decision.start should be 9, got {}",
         indexer.anticipated_decision.start
     );
 
@@ -1952,8 +1952,8 @@ fn anticipated_decision_maps_to_correct_column() {
 
     assert_eq!(
         result,
-        vec![(8, 1.0)],
-        "AnticipatedDecision(6) should resolve to column 8 (anticipated_decision.start + 0)"
+        vec![(9, 1.0)],
+        "AnticipatedDecision(6) should resolve to column 9 (anticipated_decision.start + 0)"
     );
 }
 
@@ -1988,7 +1988,7 @@ fn anticipated_decision_ignores_block_idx() {
         );
         assert_eq!(
             result,
-            vec![(8, 1.0)],
+            vec![(9, 1.0)],
             "AnticipatedDecision must be stage-level (block_idx={block_idx} should not change column)"
         );
     }

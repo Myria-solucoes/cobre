@@ -15,8 +15,9 @@ use flatbuffers::{FlatBufferBuilder, WIPOffset};
 
 use super::super::error::OutputError;
 use super::records::{
-    EntitySlot, OwnedPolicyBasisRecord, OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCutRecord,
-    StageCutsReadResult, StageStatesPayload, StageStatesReadResult,
+    ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, EntitySlot, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
+    PolicyBasisRecord, PolicyCutRecord, StageCutsReadResult, StageStatesPayload,
+    StageStatesReadResult,
 };
 
 // ── FlatBuffers vtable slot offsets ──────────────────────────────────────────
@@ -38,6 +39,7 @@ const ENTITY_SLOT_FIELD_ENTITY_TYPE: u16 = 4;
 const ENTITY_SLOT_FIELD_ENTITY_ID: u16 = 6;
 const ENTITY_SLOT_FIELD_SUBINDEX: u16 = 8;
 const ENTITY_SLOT_FIELD_WAS_ACTIVE: u16 = 10;
+const ENTITY_SLOT_FIELD_DELIVERY_ANCHOR: u16 = 12;
 
 const STAGE_CUTS_FIELD_STAGE_ID: u16 = 4;
 const STAGE_CUTS_FIELD_STATE_DIMENSION: u16 = 6;
@@ -98,6 +100,7 @@ fn build_entity_slot_table(
     builder.push_slot_always::<i32>(ENTITY_SLOT_FIELD_ENTITY_ID, slot.entity_id);
     builder.push_slot_always::<u32>(ENTITY_SLOT_FIELD_SUBINDEX, slot.subindex);
     builder.push_slot_always::<bool>(ENTITY_SLOT_FIELD_WAS_ACTIVE, slot.was_active);
+    builder.push_slot_always::<i32>(ENTITY_SLOT_FIELD_DELIVERY_ANCHOR, slot.delivery_anchor);
 
     builder.end_table(tab)
 }
@@ -490,11 +493,23 @@ fn deserialize_entity_slot_table(buf: &[u8], slot_table_pos: usize) -> Option<En
     .and_then(|p| read_bool_byte(buf, p))
     .unwrap_or(false);
 
+    // Absent in a pre-`id:4` buffer (FlatBuffers graceful absence): default to
+    // the sentinel, not zero — zero is a valid calendar anchor.
+    let delivery_anchor = field_pos(
+        buf,
+        slot_table_pos,
+        vtable_pos,
+        ENTITY_SLOT_FIELD_DELIVERY_ANCHOR,
+    )
+    .and_then(|p| read_i32_le(buf, p))
+    .unwrap_or(ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL);
+
     Some(EntitySlot {
         entity_type,
         entity_id,
         subindex,
         was_active,
+        delivery_anchor,
     })
 }
 

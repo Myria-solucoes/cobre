@@ -858,8 +858,11 @@ fn test_zero_out_and_fishing_active_predicate_align() {
 }
 
 /// With two anticipated thermals (K_0=1, K_1=2) and n_stages=4, fishing rows are
-/// always 2 per stage (always-active = `n_anticipated`); the `state_out_def` count
-/// varies only with the strict `stage + K_i < 4` gate.
+/// always 2 per stage (always-active = `n_anticipated`); the `state_out_def`
+/// (newest-slot deposit) count varies with the strict `stage + K_i < 4` gate,
+/// and the interior ring-shift definition row (K_1's only interior slot, slot
+/// 0; K_0=1 has none) varies with the horizon-reachable cap
+/// `slot < n_stages - stage - 1`.
 ///
 /// State_out_def rows per stage:
 ///   stage 0: K_0=1: 0+1=1 < 4 ✓, K_1=2: 0+2=2 < 4 ✓ → 2 rows
@@ -867,10 +870,15 @@ fn test_zero_out_and_fishing_active_predicate_align() {
 ///   stage 2: K_0=1: 2+1=3 < 4 ✓, K_1=2: 2+2=4 < 4 ✗ → 1 row
 ///   stage 3: K_0=1: 3+1=4 < 4 ✗, K_1=2: 3+2=5 < 4 ✗ → 0 rows
 ///
-/// Combined fishing + state_out_def counts (base = stage 0: 2 fishing + 2 def):
-///   stage 1: 2 fishing + 2 state_out_def = base     (same as stage 0)
-///   stage 2: 2 fishing + 1 state_out_def = base - 1
-///   stage 3: 2 fishing + 0 state_out_def = base - 2
+/// K_1 interior-slot (slot 0) reachability, cap = `4 - stage - 1`:
+///   stage 0: cap=3, 0<3 ✓ → 1 row; stage 1: cap=2, 0<2 ✓ → 1 row
+///   stage 2: cap=1, 0<1 ✓ → 1 row; stage 3: cap=0, 0<0 ✗ → 0 rows
+///
+/// Combined fishing + state_out_def + interior-slot counts
+/// (base = stage 0: 2 fishing + 2 def + 1 interior):
+///   stage 1: 2 fishing + 2 state_out_def + 1 interior = base (same as stage 0)
+///   stage 2: 2 fishing + 1 state_out_def + 1 interior = base - 1
+///   stage 3: 2 fishing + 0 state_out_def + 0 interior = base - 3
 #[test]
 fn test_anticipated_fishing_rows_count_by_stage() {
     let system = two_anticipated_thermal_system(4);
@@ -885,21 +893,23 @@ fn test_anticipated_fishing_rows_count_by_stage() {
     )
     .expect("build ok");
 
-    // base = stage 0: 2 fishing rows (always-active) + 2 state_out_def rows.
+    // base = stage 0: 2 fishing rows (always-active) + 2 state_out_def rows
+    // + 1 interior ring-shift row (K_1's slot 0).
     let base = result.templates[0].num_rows;
     assert_eq!(
         result.templates[1].num_rows, base,
-        "stage 1: 2 fishing + 2 state_out_def = base (equal to stage 0)"
+        "stage 1: 2 fishing + 2 state_out_def + 1 interior = base (equal to stage 0)"
     );
     assert_eq!(
         result.templates[2].num_rows,
         base - 1,
-        "stage 2: 2 fishing + 1 state_out_def = base - 1 (K_1=2 def inactive: 2+2=4)"
+        "stage 2: 2 fishing + 1 state_out_def + 1 interior = base - 1 (K_1=2 def inactive: 2+2=4)"
     );
     assert_eq!(
         result.templates[3].num_rows,
-        base - 2,
-        "stage 3: 2 fishing + 0 state_out_def = base - 2 (both def inactive)"
+        base - 3,
+        "stage 3: 2 fishing + 0 state_out_def + 0 interior = base - 3 \
+         (both def inactive, K_1's interior slot beyond horizon cap)"
     );
 }
 
@@ -936,10 +946,17 @@ fn test_anticipated_fishing_same_count_both_stages() {
     );
 }
 
-/// With two anticipated thermals (K_0=1, K_1=2) → n_ant_state=4, all 4
-/// anticipated-state columns are unbounded (-INF, +INF).
-/// Slot-major layout: col = col_anticipated_state_start + slot * n_anticipated + plant
-/// → cols 0..3 for N=0 hydros.
+/// With two anticipated thermals (K_0=1, K_1=2) sharing one `k_max=2` ring at
+/// stage 0 (`n_stages=4`), `anticipated_slots_out` columns are unbounded
+/// (-INF, +INF) at every slot BOTH plants can reach, and frozen `[0, 0]` at a
+/// slot beyond a plant's own lead — the multi-plant heterogeneous-lead
+/// padding case. Slot-major layout: `col = col_anticipated_slots_out_start +
+/// slot * n_anticipated + plant`.
+///
+/// - col 0 (slot 0, plant 0 = K_0=1's own deposit slot): free (active: 0+1<4).
+/// - col 1 (slot 0, plant 1 = K_1=2's interior slot): free (reachable: 0<horizon_cap=3).
+/// - col 2 (slot 1, plant 0 = K_0=1's padding, beyond its own lead): frozen `[0, 0]`.
+/// - col 3 (slot 1, plant 1 = K_1=2's own deposit slot): free (active: 0+2<4).
 #[test]
 fn test_anticipated_state_columns_unconstrained() {
     let system = two_anticipated_thermal_system(4);
@@ -955,13 +972,8 @@ fn test_anticipated_state_columns_unconstrained() {
     .expect("build ok");
 
     let t = &result.templates[0];
-    // col_anticipated_state_start = 0 for N=0 hydros (N*(1+L) = 0).
-    // n_anticipated=2, k_max=2 → n_ant_state=4 columns: indices 0..3.
-    let col_state_start = 0_usize; // N*(1+L) = 0 when N=0
-    let n_ant_state = 2 * 2; // n_anticipated * k_max
 
-    for i in 0..n_ant_state {
-        let col = col_state_start + i;
+    for &col in &[0_usize, 1, 3] {
         assert!(
             t.col_lower[col].is_infinite() && t.col_lower[col] < 0.0,
             "col {col}: col_lower must be -INF, got {}",
@@ -973,6 +985,15 @@ fn test_anticipated_state_columns_unconstrained() {
             t.col_upper[col]
         );
     }
+
+    assert_eq!(
+        t.col_lower[2], 0.0,
+        "col 2 (K_0=1's padding slot in the shared k_max=2 ring) must be frozen"
+    );
+    assert_eq!(
+        t.col_upper[2], 0.0,
+        "col 2 (K_0=1's padding slot in the shared k_max=2 ring) must be frozen"
+    );
 }
 
 /// One anticipated thermal with K=2, n_stages=4: the Cat 6 state-fixing slot at
@@ -1136,7 +1157,7 @@ fn test_anticipated_thermals_lp_roundtrip_k1() {
     )
     .expect("K=1 build ok");
 
-    let col_ant_state = rt_col_ant_state_start(); // 1
+    let col_ant_state = rt_col_ant_state_incoming_start(k); // fishing couples the INCOMING slot
     let col_ant_dec = rt_col_ant_dec_start(k); // 13
     let col_thermal = rt_col_thermal_start(k); // 11
     let row_fish_start = rt_row_ant_fishing_start(k); // 12
@@ -1301,7 +1322,7 @@ fn test_anticipated_thermals_lp_roundtrip_k2() {
     )
     .expect("K=2 build ok");
 
-    let col_ant_state = rt_col_ant_state_start(); // 1
+    let col_ant_state = rt_col_ant_state_incoming_start(k); // fishing couples the INCOMING slot
     let col_ant_dec = rt_col_ant_dec_start(k); // 14
     let col_thermal = rt_col_thermal_start(k); // 12
     let row_fish_start = rt_row_ant_fishing_start(k); // 12
@@ -1407,17 +1428,21 @@ fn test_anticipated_thermals_lp_roundtrip_k2() {
     }
 
     // K=2, n_stages=4: fishing is 1 row at every stage; state_out_def (s+K<4) is
-    // active at 0,1 but absent at 2,3 → stages 0,1 have one more row than 2,3.
+    // active at 0,1 but absent at 2,3. The single interior ring slot (slot 0)
+    // is reachable at 0,1,2 (horizon_cap = 3,2,1) but not at 3 (cap = 0), so
+    // stage 2 keeps one more row than stage 3 despite both lacking state_out_def.
     {
         assert_eq!(
             result.templates[1].num_rows, result.templates[0].num_rows,
             "K=2: stage 1 must have same row count as stage 0 \
-             (both have fishing + state_out_def active)"
+             (both have fishing + state_out_def + the interior ring-shift row active)"
         );
         assert_eq!(
-            result.templates[2].num_rows, result.templates[3].num_rows,
-            "K=2: stage 2 must have same row count as stage 3 \
-             (both have fishing active, state_out_def absent)"
+            result.templates[2].num_rows,
+            result.templates[3].num_rows + 1,
+            "K=2: stage 2 must have exactly 1 more row than stage 3 \
+             (both lack state_out_def, but stage 2's interior ring-shift slot is \
+             still horizon-reachable while stage 3's is not)"
         );
         assert_eq!(
             result.templates[0].num_rows,
@@ -1457,7 +1482,7 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
     )
     .expect("K=3 build ok");
 
-    let col_ant_state = rt_col_ant_state_start(); // 1
+    let col_ant_state = rt_col_ant_state_incoming_start(k); // fishing couples the INCOMING slot
     let col_ant_dec = rt_col_ant_dec_start(k); // 15
     let col_thermal = rt_col_thermal_start(k); // 13
     let row_fish_start = rt_row_ant_fishing_start(k); // 12 (K-independent)
@@ -1524,13 +1549,18 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
         result.templates[0].objective[col_ant_dec]
     );
 
-    // K=3, n_stages=4: fishing (K<=stage) is absent at 0,1,2 and active at 3;
-    // state_out_def (s+K<4) is active at 0 only → stages 0 and 3 each have one
-    // more row than stages 1,2.
+    // K=3, n_stages=4: fishing is always-active (1 row/stage); state_out_def
+    // (s+K<4) is active at stage 0 only. The two interior ring slots (0, 1)
+    // are both reachable at stages 0-1 (horizon_cap = 3, 2), only slot 0 is
+    // reachable at stage 2 (cap = 1), and neither is reachable at stage 3
+    // (cap = 0).
     {
         assert_eq!(
-            result.templates[1].num_rows, result.templates[2].num_rows,
-            "K=3: stages 1 and 2 must have equal row count (no fishing, no def)"
+            result.templates[1].num_rows,
+            result.templates[2].num_rows + 1,
+            "K=3: stage 1 must have 1 more row than stage 2 \
+             (both lack state_out_def, but stage 2 has already lost one \
+             horizon-reachable interior ring-shift row)"
         );
         assert_eq!(
             result.templates[0].num_rows,
@@ -1581,12 +1611,17 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
     // For K=3, n_stages=4:
     //   Fishing: 1 row per stage at every stage (always-active predicate).
     //   State_out_def (s+K<4): active at 0; absent at 1,2,3.
-    // So stage 0 has one extra row vs stages 1, 2, 3, which are equal.
+    //   Interior ring slots (0, 1): both reachable at 0,1; only slot 0 at 2;
+    //   neither at 3 (horizon_cap = 3,2,1,0) — so stage 2 has one more row
+    //   than stage 3, not an equal count.
     {
         assert_eq!(
-            result.templates[3].num_rows, result.templates[2].num_rows,
-            "K=3: stage 3 must have same row count as stage 2 \
-             (fishing always-active; state_out_def absent at both)"
+            result.templates[3].num_rows + 1,
+            result.templates[2].num_rows,
+            "K=3: stage 2 must have 1 more row than stage 3 \
+             (fishing always-active and state_out_def absent at both, but \
+             stage 2's slot-0 interior ring-shift row is still \
+             horizon-reachable while stage 3's is not)"
         );
     }
 }

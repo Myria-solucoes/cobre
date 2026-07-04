@@ -9,20 +9,11 @@
 //!
 //! ## Column layout (Solver Abstraction SS2.1)
 //!
-//! ```text
-//! [0, N)                                    storage           — outgoing storage volumes  (N = hydro_count)
-//! [N, N*(1+L))                              inflow_lags       — AR lag variables (L lags per hydro)
-//! [N*(1+L), N*(1+L) + A*K_max)              anticipated_state     — anticipated thermal commitment state slots (ring buffer)
-//! [N*(1+L) + A*K_max, N*(1+L) + A*K_max + A) anticipated_state_out — relocated cut-target column; state region, stage-invariant (owned by `StateLayout`)
-//! [N*(1+L) + A*K_max + A, N*(2+L) + A*K_max + A) z_inflow          — realized inflow (auxiliary, not state)
-//! [N*(2+L) + A*K_max + A, N*(3+L) + A*K_max + A) storage_in        — incoming storage volumes
-//! N*(3+L) + A*K_max + A                      theta                 — future cost variable (scalar)
-//! ```
-//!
-//! where `A = n_anticipated` is the number of thermals with
-//! `anticipated_config.is_some()` and `K_max` is the maximum `lead_stages`
-//! across those plants. When `A == 0` the layout collapses to the
-//! pre-anticipated form: `z_inflow` at `N*(1+L)`, `theta` at `N*(3+L)`.
+//! The stage-invariant state-vector column ranges (storage, AR lags,
+//! travel-time buckets, the anticipated ring's outgoing and incoming blocks,
+//! `z_inflow`, `theta`) are owned entirely by [`StateLayout`] — see its own
+//! module doc for the authoritative diagram; this file does not re-derive it,
+//! to avoid the two copies drifting apart.
 //!
 //! The following equipment columns follow immediately after `theta` (laid out
 //! per stage by [`StageLayout`](crate::lp_builder)):
@@ -42,11 +33,11 @@
 //! plant, NOT per-block) and has length `A = n_anticipated`. The block collapses
 //! to length 0 when `n_anticipated == 0`, leaving the rest of the layout
 //! byte-identical to the pre-anticipated form. The control region runs
-//! `anticipated_decision` then `line_fwd` directly — the cut-target
-//! `anticipated_state_out` column does NOT live here: it was relocated into the
-//! stage-invariant state region above (`[N*(1+L)+A*K_max, …+A)`, owned by
-//! [`StateLayout`]), so its address never depends on `n_blks`. The
-//! `anticipated_state_out_def` equality row still pins it to its
+//! `anticipated_decision` then `line_fwd` directly — the anticipated ring's
+//! outgoing slots (`StateLayout::anticipated_slots_out`) do NOT live here:
+//! they sit in the stage-invariant state region owned by [`StateLayout`], so
+//! their address never depends on `n_blks`. An `anticipated_state_out_def`
+//! equality row pins the plant's own newest ring slot to its
 //! `anticipated_decision` column.
 //!
 //! When the inflow non-negativity penalty method is active (`has_inflow_penalty == true`),
@@ -105,18 +96,6 @@
 //! ```text
 //! [min_generation_rows.end, +0)   anticipated_fishing — zero rows at stage 0
 //! ```
-//!
-//! ## Worked example (SS5.5.3): N = 3, L = 2
-//!
-//! Without anticipated thermals:
-//! ```text
-//! storage = 0..3, inflow_lags = 3..9, z_inflow = 9..12, storage_in = 12..15,
-//! theta = 15, n_state = 9
-//! ```
-//!
-//! With 2 anticipated thermals (`K_max = 3`): `anticipated_state = 9..15` and the
-//! relocated `anticipated_state_out = 15..17` insert before `z_inflow`, shifting
-//! `z_inflow` to `17..20`, `storage_in` to `20..23`, and `theta` to `23`.
 //!
 //! The per-solve patch sequence layered on top of this geometry is documented in
 //! [`crate::lp_builder`].
