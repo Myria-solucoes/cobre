@@ -1398,7 +1398,6 @@ mod tests {
 
     #[test]
     fn backward_pass_state_new_sizes_buffers_correctly() {
-        // n_workers_local=2, n_ranks=3, bwd_max_openings=5
         let n_workers_local = 2_usize;
         let n_ranks = 3_usize;
         let bwd_max_openings = 5_usize;
@@ -1522,7 +1521,6 @@ mod tests {
             dcs: None,
         };
 
-        // Allocate BackwardPassState sized for this minimal study.
         let bwd_max_openings = n_openings;
         let mut state = BackwardPassState::new(1, 1, bwd_max_openings, n_state);
         // Capture local_count before mutably borrowing exchange inside the struct literal.

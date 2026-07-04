@@ -125,10 +125,6 @@ where
     /// # Errors
     ///
     /// Returns `SddpError::Solver(e)` if the workspace pool cannot be constructed.
-    // Rationale: the `i32::try_from(my_rank).expect(...)` cannot fire — the MPI
-    // spec bounds rank counts by `i32::MAX`; `?` would surface an unrecoverable
-    // invariant as a `Result`.
-    #[allow(clippy::expect_used)]
     pub(crate) fn new(
         solver: &'a mut S,
         mut config: TrainingConfig,

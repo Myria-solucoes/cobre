@@ -1143,7 +1143,6 @@ mod tests {
 
     #[test]
     fn resolve_warm_start_counts_old_format_broadcasts_scalar() {
-        // Empty warm_start_counts: fall back to warm_start_cuts broadcast.
         let meta = meta_with_counts(5, vec![]);
         let counts = resolve_warm_start_counts(&meta, 3).unwrap();
         assert_eq!(counts, vec![5u32, 5, 5]);
@@ -1158,7 +1157,6 @@ mod tests {
 
     #[test]
     fn resolve_warm_start_counts_wrong_length_returns_validation_error() {
-        // warm_start_counts has 2 entries but num_stages is 3 — corrupted checkpoint.
         let meta = meta_with_counts(5, vec![5, 5]);
         let result = resolve_warm_start_counts(&meta, 3);
         assert!(result.is_err());

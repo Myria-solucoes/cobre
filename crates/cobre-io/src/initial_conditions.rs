@@ -893,7 +893,6 @@ mod tests {
         let ic = parse_initial_conditions(f.path()).unwrap();
 
         assert_eq!(ic.past_inflows.len(), 2);
-        // Sorted by hydro_id ascending
         assert_eq!(ic.past_inflows[0].hydro_id, EntityId(0));
         assert_eq!(ic.past_inflows[0].values_m3s, vec![600.0, 500.0]);
         assert_eq!(ic.past_inflows[1].hydro_id, EntityId(1));
@@ -1183,7 +1182,6 @@ mod tests {
             ic1, ic2,
             "results must be identical regardless of input ordering"
         );
-        // Sorted by hydro_id ascending
         assert_eq!(ic1.storage[0].hydro_id, EntityId(0));
         assert_eq!(ic1.storage[1].hydro_id, EntityId(1));
         assert_eq!(ic1.past_inflows[0].hydro_id, EntityId(0));
@@ -1509,7 +1507,6 @@ mod tests {
         let f = write_json(json);
         let ic = parse_initial_conditions(f.path()).unwrap();
         assert_eq!(ic.recent_observations.len(), 3);
-        // Sorted by (hydro_id, start_date): hydro 0 first with earlier start first
         assert_eq!(ic.recent_observations[0].hydro_id, EntityId(0));
         assert_eq!(
             ic.recent_observations[0].start_date,
@@ -1701,7 +1698,6 @@ mod tests {
             ic1.past_anticipated_commitments, ic2.past_anticipated_commitments,
             "results must be identical regardless of input ordering"
         );
-        // Sorted by thermal_id ascending
         assert_eq!(ic1.past_anticipated_commitments[0].thermal_id, EntityId(1));
         assert_eq!(ic1.past_anticipated_commitments[1].thermal_id, EntityId(2));
     }
@@ -1825,7 +1821,6 @@ mod tests {
         let f = write_json(json);
         let ic = parse_initial_conditions(f.path()).unwrap();
         assert_eq!(ic.past_defluences.len(), 3);
-        // Sorted by (hydro_id, start_date): hydro 0 first, earlier start first.
         assert_eq!(ic.past_defluences[0].hydro_id, EntityId(0));
         assert_eq!(
             ic.past_defluences[0].start_date,

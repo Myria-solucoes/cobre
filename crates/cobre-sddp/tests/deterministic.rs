@@ -2155,7 +2155,6 @@ fn d20_operational_violations() {
     assert_eq!(summary.n_scenarios, 1);
     assert_cost(summary.mean_cost, D20_EXPECTED_COST, 1e-2, "D20-sim");
 
-    // Verify operational violation slacks are non-zero in at least one stage.
     assert_eq!(scenario_results.len(), 1);
     let scenario = &scenario_results[0];
     assert_eq!(scenario.stages.len(), 2);
@@ -2251,7 +2250,6 @@ fn d21_min_outflow_regression() {
     writer.write(&inflow_batch).expect("write inflow batch");
     writer.close().expect("close inflow writer");
 
-    // Train + simulate.
     let (result, scenario_results, summary) = run_with_simulation(case_dir);
 
     assert!(
@@ -2630,7 +2628,6 @@ fn d23_bidirectional_withdrawal() {
     writer.write(&bounds_batch).expect("write bounds batch");
     writer.close().expect("close bounds writer");
 
-    // Train + simulate.
     let (result, scenario_results, _summary) = run_with_simulation(case_dir);
 
     assert!(

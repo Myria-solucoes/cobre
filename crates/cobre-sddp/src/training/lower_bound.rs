@@ -919,7 +919,6 @@ mod tests {
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
 
-        // Solver returns 60, 80, 100 for the three openings.
         let mut solver = MockSolver::with_objectives(vec![60.0, 80.0, 100.0]);
 
         let spec = LbEvalSpec {
@@ -985,7 +984,6 @@ mod tests {
         };
         let comm = LocalComm;
 
-        // Solver returns 50, 150.
         let mut solver = MockSolver::with_objectives(vec![50.0, 150.0]);
 
         let spec = LbEvalSpec {
