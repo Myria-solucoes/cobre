@@ -51,7 +51,7 @@ pub use stochastic_pipeline::{
 use std::path::Path;
 
 use cobre_core::{
-    EntityId, Stage, System,
+    AnticipatedConfig, EntityId, Stage, System,
     scenario::{SamplingScheme, ScenarioSource},
 };
 use cobre_io::build_hydro_reference_volumes_resolved;
@@ -67,6 +67,7 @@ use crate::{
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
     indexer::{CutStateProjection, StateLayout, StudyDimensions},
+    lead_time::{AnticipatedResolution, LeadTime, PointResolution},
     lp_builder::build_stage_templates,
     risk_measure::RiskMeasure,
     simulation::EntityCounts,
@@ -670,15 +671,28 @@ fn build_wired_indexer(
         .unwrap_or(0);
 
     let mut anticipated_thermal_indices: Vec<usize> = Vec::new();
-    let mut anticipated_lead_stages: Vec<usize> = Vec::new();
     for (t_idx, thermal) in system.thermals().iter().enumerate() {
-        if let Some(cfg) = thermal.anticipated_config.as_ref() {
+        if thermal.anticipated_config.is_some() {
             anticipated_thermal_indices.push(t_idx);
-            anticipated_lead_stages.push(usize::try_from(cfg.lead_stages).unwrap_or(usize::MAX));
         }
     }
     let n_anticipated = anticipated_thermal_indices.len();
-    let k_max: usize = anticipated_lead_stages.iter().copied().max().unwrap_or(0);
+
+    // Single resolve_point consumer: map each anticipated plant's config to a
+    // delivery-anchored PointResolution and derive the constant-lead K_i the
+    // still-live ring machinery reads (the resolve_point decider contract). A
+    // second resolve_point call site is forbidden — this resolution threads onto
+    // the state layout instead.
+    let (anticipated_resolution, anticipated_lead_stages) = resolve_anticipated_commitments(system);
+    debug_assert_eq!(anticipated_lead_stages.len(), n_anticipated);
+
+    // Ring depth: the delivery-anchored max_t K_i(t), clamped up to the
+    // constant-lead machinery's per-plant K_i so its slot indexing stays in range.
+    // A LeadStages plant's depth is bounded by ℓ, so this equals the pre-anchor
+    // max(lead_stages) and the ring sizing is byte-for-byte unchanged.
+    let k_max: usize = anticipated_resolution
+        .k_max
+        .max(anticipated_lead_stages.iter().copied().max().unwrap_or(0));
     let hydro_count = stage_templates_ref[0].n_hydro;
     let max_par_order = stage_templates_ref[0].max_par_order;
 
@@ -715,7 +729,7 @@ fn build_wired_indexer(
     // `StateLayout` is the sole role-(a) owner; its constructor finalizes the
     // nonzero mask unconditionally, so every study (storage-only or pure-thermal)
     // has a finalized mask for the single-path mask-driven cut-row loop.
-    let state = StateLayout::new(
+    let mut state = StateLayout::new(
         hydro_count,
         max_par_order,
         transit_bucket_topology.n_buckets,
@@ -725,8 +739,79 @@ fn build_wired_indexer(
         anticipated_lead_stages,
         &effective_lag_counts,
     );
+    state.set_anticipated_resolution(anticipated_resolution);
 
     (state, study_dims)
+}
+
+/// Resolve every anticipated thermal's delivery-anchored point commitment and
+/// derive the constant-lead per-plant `K_i` the still-live ring machinery reads.
+///
+/// The sole `resolve_point` consumer (via [`AnticipatedResolution::resolve`]);
+/// the resolution threads onto the [`StateLayout`] rather than being recomputed
+/// downstream. Returns the per-plant resolution and the anticipated-local
+/// constant leads: a `LeadStages(ℓ)` plant keeps `ℓ` byte-for-byte; a `LeadTime`
+/// plant (gated off the load path until the in-LP ring lands) takes its per-plant
+/// max depth as a `k_max`-consistent placeholder, so its LP path is not yet
+/// correct.
+pub(crate) fn resolve_anticipated_commitments(
+    system: &System,
+) -> (AnticipatedResolution, Vec<usize>) {
+    let leads: Vec<LeadTime> = system
+        .thermals()
+        .iter()
+        .filter_map(|t| t.anticipated_config.as_ref())
+        .map(|cfg| match cfg {
+            AnticipatedConfig::LeadStages(l) => LeadTime::Stages(*l),
+            AnticipatedConfig::LeadTime(h) => LeadTime::Time(*h),
+        })
+        .collect();
+    if leads.is_empty() {
+        return (AnticipatedResolution::default(), Vec::new());
+    }
+
+    let durations = bucket_topology::study_stage_durations(system);
+    let n_stages = durations.len();
+    let resolution = AnticipatedResolution::resolve(&leads, &durations, n_stages);
+
+    let lead_stages: Vec<usize> = leads
+        .iter()
+        .zip(&resolution.per_plant)
+        .map(|(lead, point)| match lead {
+            LeadTime::Stages(l) => {
+                let l = usize::try_from(*l).unwrap_or(usize::MAX);
+                // LeadStages byte-identity anchor: c(m)=m−ℓ ⇒ depth ≤ ℓ and each
+                // in-horizon C(t) is the singleton {t+ℓ}.
+                debug_assert!(
+                    point.depth.iter().all(|&d| d <= l),
+                    "LeadStages depth must be bounded by ℓ"
+                );
+                debug_assert!(
+                    leadstages_decision_sets_are_singletons(point, l, n_stages),
+                    "LeadStages c(m)=m−ℓ ⇒ each in-horizon C(t)={{t+ℓ}}"
+                );
+                l
+            }
+            LeadTime::Time(_) => point.depth.iter().copied().max().unwrap_or(0),
+        })
+        .collect();
+
+    (resolution, lead_stages)
+}
+
+/// Whether every in-horizon delivery stage's decision set is the singleton
+/// `{t+ℓ}` — the `LeadStages` byte-identity anchor. Edge stages (`t+ℓ ≥
+/// n_stages`) carry empty sets and are skipped.
+fn leadstages_decision_sets_are_singletons(
+    point: &PointResolution,
+    lead: usize,
+    n_stages: usize,
+) -> bool {
+    point.decision_sets.iter().enumerate().all(|(t, set)| {
+        t.checked_add(lead)
+            .filter(|&m| m < n_stages)
+            .is_none_or(|m| set.as_slice() == [m])
+    })
 }
 
 /// Build the per-pool [`CutStateProjection`], one per stage (pool) `t`, projecting

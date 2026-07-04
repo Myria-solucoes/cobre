@@ -193,9 +193,7 @@ mod anticipated_backward_cut {
                 min_generation_mw: 0.0,
                 max_generation_mw: fixture.max_gen_ant,
                 cost_per_mwh: C_ANT,
-                anticipated_config: Some(AnticipatedConfig {
-                    lead_stages: fixture.k_max as u32,
-                }),
+                anticipated_config: Some(AnticipatedConfig::LeadStages(fixture.k_max as u32)),
                 entry_stage_id: None,
                 exit_stage_id: None,
                 ..Default::default()
@@ -899,9 +897,7 @@ mod anticipated_pre_horizon_seed_delivery {
                 min_generation_mw: 0.0,
                 max_generation_mw: 200.0,
                 cost_per_mwh: 10.0,
-                anticipated_config: Some(AnticipatedConfig {
-                    lead_stages: k as u32,
-                }),
+                anticipated_config: Some(AnticipatedConfig::LeadStages(k as u32)),
                 entry_stage_id: None,
                 exit_stage_id: None,
                 ..Default::default()
@@ -1896,9 +1892,7 @@ mod anticipated_d_t_saturation {
                 min_generation_mw: 0.0,
                 max_generation_mw: 200.0,
                 cost_per_mwh: 10.0,
-                anticipated_config: Some(AnticipatedConfig {
-                    lead_stages: k as u32,
-                }),
+                anticipated_config: Some(AnticipatedConfig::LeadStages(k as u32)),
                 entry_stage_id: None,
                 exit_stage_id: None,
                 ..Default::default()
@@ -2485,7 +2479,7 @@ mod anticipated_forward_pass {
                 min_generation_mw: 0.0,
                 max_generation_mw: 100.0,
                 cost_per_mwh: 50.0,
-                anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
+                anticipated_config: Some(AnticipatedConfig::LeadStages(2)),
                 entry_stage_id: None,
                 exit_stage_id: None,
                 ..Default::default()
@@ -3141,7 +3135,7 @@ mod anticipated_closed_form_lb_k1_single_thermal {
                 min_generation_mw: 0.0,
                 max_generation_mw: M_ANT,
                 cost_per_mwh: C_A,
-                anticipated_config: Some(AnticipatedConfig { lead_stages: 1 }),
+                anticipated_config: Some(AnticipatedConfig::LeadStages(1)),
                 entry_stage_id: None,
                 exit_stage_id: None,
                 ..Default::default()
@@ -3548,9 +3542,7 @@ mod anticipated_numerical_reconciliation_k2 {
                 min_generation_mw: 0.0,
                 max_generation_mw: 200.0,
                 cost_per_mwh: 10.0,
-                anticipated_config: Some(AnticipatedConfig {
-                    lead_stages: k as u32,
-                }),
+                anticipated_config: Some(AnticipatedConfig::LeadStages(k as u32)),
                 entry_stage_id: None,
                 exit_stage_id: None,
                 ..Default::default()
@@ -4096,7 +4088,7 @@ mod anticipated_bridge_st_cruz_nova_k1 {
                 min_generation_mw: 0.0,
                 max_generation_mw: 350.0,
                 cost_per_mwh: 10.0,
-                anticipated_config: Some(AnticipatedConfig { lead_stages: 1 }),
+                anticipated_config: Some(AnticipatedConfig::LeadStages(1)),
                 entry_stage_id: None,
                 exit_stage_id: None,
                 ..Default::default()
@@ -4641,7 +4633,7 @@ mod anticipated_convergence_slow {
                 min_generation_mw: 0.0,
                 max_generation_mw: 100.0,
                 cost_per_mwh: 50.0,
-                anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
+                anticipated_config: Some(AnticipatedConfig::LeadStages(2)),
                 entry_stage_id: None,
                 exit_stage_id: None,
                 ..Default::default()

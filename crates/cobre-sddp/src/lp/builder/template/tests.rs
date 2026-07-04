@@ -121,7 +121,7 @@ fn system_with_thermals(thermals: Vec<Thermal>) -> cobre_core::System {
     let k_max = thermals
         .iter()
         .filter_map(|t| t.anticipated_config.as_ref())
-        .map(|c| c.lead_stages as usize)
+        .map(|c| c.lead_stages().unwrap() as usize)
         .max()
         .unwrap_or(0);
 
@@ -947,7 +947,7 @@ fn build_template_build_ctx_populates_anticipated_metadata() {
             cost_per_mwh: 10.0,
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
-            anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
+            anticipated_config: Some(AnticipatedConfig::LeadStages(2)),
         },
         Thermal {
             id: EntityId(2),
@@ -971,7 +971,7 @@ fn build_template_build_ctx_populates_anticipated_metadata() {
             cost_per_mwh: 30.0,
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
-            anticipated_config: Some(AnticipatedConfig { lead_stages: 3 }),
+            anticipated_config: Some(AnticipatedConfig::LeadStages(3)),
         },
     ];
     let system = system_with_thermals(thermals);
@@ -1089,7 +1089,7 @@ fn anticipated_invariance_system() -> cobre_core::System {
             cost_per_mwh: 50.0,
             min_generation_mw: 0.0,
             max_generation_mw: 120.0,
-            anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
+            anticipated_config: Some(AnticipatedConfig::LeadStages(2)),
         },
         Thermal {
             id: EntityId(2),
@@ -1101,7 +1101,7 @@ fn anticipated_invariance_system() -> cobre_core::System {
             cost_per_mwh: 40.0,
             min_generation_mw: 0.0,
             max_generation_mw: 80.0,
-            anticipated_config: Some(AnticipatedConfig { lead_stages: 3 }),
+            anticipated_config: Some(AnticipatedConfig::LeadStages(3)),
         },
         Thermal {
             id: EntityId(3),

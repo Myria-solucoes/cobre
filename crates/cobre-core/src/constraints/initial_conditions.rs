@@ -109,11 +109,15 @@ pub struct HydroPastDefluence {
 
 /// Past externally-decided anticipated commitments for a single thermal plant.
 ///
-/// `values_mw[k]` is the MW output the LP dispatches at study stage `k`
-/// (`0 <= k < lead_stages`). The decisions are sunk cost: their per-MWh cost
-/// does not enter the study objective. The LP imposes a fishing equality at
-/// every pre-horizon stage `k`:
-/// `sum_b gen[i][b] * block_hours_b == values_mw[k] * stage_total_hours`.
+/// `values_mw[j]` is the MW output the LP dispatches at the `j`-th
+/// pre-study-committed delivery stage — the `j`-th study stage whose
+/// delivery-anchored decider is pre-study, `0 <= j < required` — never a
+/// date-windowed record like [`HydroPastDefluence`]: `required` is a
+/// calendar-derived count, not `lead_stages` (the "Pre-study anticipated
+/// commitments: calendar-derived coverage" contract). The decisions are sunk
+/// cost: their per-MWh cost does not enter the study objective. The LP
+/// imposes a fishing equality at every pre-horizon stage:
+/// `sum_b gen[i][b] * block_hours_b == values_mw[j] * stage_total_hours`.
 ///
 /// # Sorting invariant
 ///
@@ -125,9 +129,9 @@ pub struct HydroPastDefluence {
 ///
 /// `cobre-core` has no view of the entity registry, so the `cobre-io` semantic
 /// validator (not `cobre-core`) enforces:
-/// - `values_mw.len() == lead_stages`.
-/// - Every `values_mw[k]` in `[min_generation_mw, max_generation_mw]` (an
-///   out-of-bounds entry makes the stage-`k` fishing equality infeasible).
+/// - `values_mw.len() == required` (calendar-derived; a hard error, no fallback).
+/// - Every `values_mw[j]` in `[min_generation_mw, max_generation_mw]` (an
+///   out-of-bounds entry makes the stage-`j` fishing equality infeasible).
 /// - `thermal_id` references a thermal whose `anticipated_config` is `Some`.
 /// - Exactly one entry per anticipated thermal in the system.
 #[derive(Debug, Clone, PartialEq)]
@@ -135,8 +139,8 @@ pub struct HydroPastDefluence {
 pub struct AnticipatedCommitmentHistory {
     /// Thermal plant identifier. Must reference an anticipated thermal entity.
     pub thermal_id: EntityId,
-    /// Externally-decided MW delivered at each study stage (`values_mw[k]` at
-    /// stage `k`).
+    /// Externally-decided MW delivered at each pre-study-committed delivery
+    /// stage (`values_mw[j]` at the `j`-th such stage).
     pub values_mw: Vec<f64>,
 }
 

@@ -392,7 +392,7 @@ mod tests {
             cost_per_mwh: 50.0,
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
-            anticipated_config: Some(AnticipatedConfig { lead_stages }),
+            anticipated_config: Some(AnticipatedConfig::LeadStages(lead_stages)),
         }
     }
 

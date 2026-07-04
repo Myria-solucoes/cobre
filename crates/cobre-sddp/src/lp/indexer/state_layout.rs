@@ -22,6 +22,8 @@
 
 use std::ops::Range;
 
+use crate::lead_time::AnticipatedResolution;
+
 /// Stage-invariant state-vector layout for one SDDP stage subproblem.
 ///
 /// Computed once from the state dimensions (`N`, `L`, `B`, `A`, `k_max`) plus
@@ -173,6 +175,14 @@ pub struct StateLayout {
     /// Length [`Self::n_anticipated`].
     pub anticipated_lead_stages: Vec<usize>,
 
+    /// Delivery-anchored point-commitment resolution per anticipated plant
+    /// (anticipated-local order), threaded from setup as additive data for the
+    /// in-LP delivery-anchored ring. Default-empty until
+    /// [`Self::set_anticipated_resolution`] attaches it; the still-live
+    /// constant-lead resolvers ([`Self::state_to_lp_column`]) read
+    /// [`Self::anticipated_lead_stages`], not this, until that ring lands.
+    pub(crate) anticipated_resolution: AnticipatedResolution,
+
     /// Canonical `(plant_canonical_idx, lag)` pair per bucket state-vector
     /// dimension, in [`Self::transit_buckets_out`] order.
     pub transit_bucket_column_order: Vec<(usize, usize)>,
@@ -303,6 +313,7 @@ impl StateLayout {
             n_anticipated,
             k_max,
             anticipated_lead_stages,
+            anticipated_resolution: AnticipatedResolution::default(),
             transit_bucket_column_order,
             nonzero_state_indices: Vec::new(),
             state_to_lp_column_map: Vec::new(),
@@ -312,6 +323,31 @@ impl StateLayout {
         layout.set_nonzero_mask(effective_lag_count, &anticipated_k);
         layout.finalize_state_column_map();
         layout
+    }
+
+    /// Attach the setup-computed [`AnticipatedResolution`].
+    ///
+    /// The single call site is setup's `build_wired_indexer`; every other
+    /// `StateLayout` construction leaves the default-empty resolution, since a
+    /// second `resolve_point` call site is forbidden — this one threads through.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if the delivery-anchored ring depth exceeds the sized `k_max`, or
+    /// the resolution does not carry exactly one `PointResolution` per plant.
+    pub(crate) fn set_anticipated_resolution(&mut self, resolution: AnticipatedResolution) {
+        debug_assert!(
+            resolution.k_max <= self.k_max,
+            "delivery-anchored ring depth {} exceeds the sized k_max {}",
+            resolution.k_max,
+            self.k_max
+        );
+        debug_assert_eq!(
+            resolution.per_plant.len(),
+            self.n_anticipated,
+            "resolution must carry one PointResolution per anticipated plant"
+        );
+        self.anticipated_resolution = resolution;
     }
 
     /// First column of the control region (`theta + 1`): the state region

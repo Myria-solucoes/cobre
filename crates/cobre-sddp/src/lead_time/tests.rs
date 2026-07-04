@@ -370,3 +370,28 @@ fn test_coarse_decision_fans_out_over_fine_delivery_stages() {
     assert_eq!(resolution.depth, vec![4, 3, 2, 1, 0]);
     assert!(resolution.decision_sets[0].len() > 1);
 }
+
+// AnticipatedResolution::resolve batches per-plant resolutions in anticipated-
+// local order and derives k_max as the global max per-stage depth. Two plants on
+// a uniform monthly calendar: LeadStages(2) has depth max 2, LeadStages(4) has
+// depth max 4, so the derived ring depth is 4 (the deeper plant), not the sum.
+#[test]
+fn test_anticipated_resolution_k_max_is_global_depth_max() {
+    let stage_lengths_hours = [720.0; 8];
+    let leads = [LeadTime::Stages(2), LeadTime::Stages(4)];
+    let resolution = AnticipatedResolution::resolve(&leads, &stage_lengths_hours, 8);
+
+    assert_eq!(resolution.per_plant.len(), 2);
+    assert_eq!(resolution.per_plant[0].depth.iter().copied().max(), Some(2));
+    assert_eq!(resolution.per_plant[1].depth.iter().copied().max(), Some(4));
+    assert_eq!(resolution.k_max, 4);
+}
+
+// An empty lead set (no anticipated plants) resolves to an empty batch with ring
+// depth 0 — the zero-anticipated collapse.
+#[test]
+fn test_anticipated_resolution_empty_is_zero_depth() {
+    let resolution = AnticipatedResolution::resolve(&[], &[720.0; 4], 4);
+    assert!(resolution.per_plant.is_empty());
+    assert_eq!(resolution.k_max, 0);
+}

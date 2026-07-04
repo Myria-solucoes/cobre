@@ -2850,7 +2850,7 @@ mod anticipated_objective_tests {
                     cost_per_mwh: DELIVERY_COST_PER_MWH,
                     // lead_stages == K_MAX; the entity field is u32 while K_MAX
                     // is the usize layout dimension, so write the value directly.
-                    anticipated_config: Some(AnticipatedConfig { lead_stages: 1 }),
+                    anticipated_config: Some(AnticipatedConfig::LeadStages(1)),
                     entry_stage_id: None,
                     exit_stage_id: None,
                 },

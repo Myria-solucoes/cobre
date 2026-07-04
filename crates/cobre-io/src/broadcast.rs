@@ -462,7 +462,7 @@ mod tests {
         // change silently breaking broadcast deserialization of `anticipated_config`.
         let buses = vec![minimal_bus(1), minimal_bus(2)];
         let mut anticipated = minimal_thermal(10, 1);
-        anticipated.anticipated_config = Some(AnticipatedConfig { lead_stages: 2 });
+        anticipated.anticipated_config = Some(AnticipatedConfig::LeadStages(2));
         let regular = minimal_thermal(20, 2);
         let thermals = vec![anticipated, regular];
 
@@ -481,7 +481,7 @@ mod tests {
         };
         assert_eq!(
             restored_anticipated.anticipated_config,
-            Some(AnticipatedConfig { lead_stages: 2 }),
+            Some(AnticipatedConfig::LeadStages(2)),
             "anticipated_config must survive broadcast round-trip"
         );
         let Some(restored_regular) = restored.thermal(EntityId(20)) else {

@@ -113,7 +113,7 @@ mod anticipated_5stage_k2_smoke {
                 min_generation_mw: 0.0,
                 max_generation_mw: 100.0,
                 cost_per_mwh: 50.0,
-                anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
+                anticipated_config: Some(AnticipatedConfig::LeadStages(2)),
                 entry_stage_id: None,
                 exit_stage_id: None,
                 ..Default::default()
@@ -581,7 +581,7 @@ mod anticipated_two_plants_smoke {
                 min_generation_mw: 0.0,
                 max_generation_mw: 100.0,
                 cost_per_mwh: 50.0,
-                anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
+                anticipated_config: Some(AnticipatedConfig::LeadStages(2)),
                 entry_stage_id: None,
                 exit_stage_id: None,
                 ..Default::default()
@@ -614,7 +614,7 @@ mod anticipated_two_plants_smoke {
                 min_generation_mw: 0.0,
                 max_generation_mw: 80.0,
                 cost_per_mwh: 40.0,
-                anticipated_config: Some(AnticipatedConfig { lead_stages: 4 }),
+                anticipated_config: Some(AnticipatedConfig::LeadStages(4)),
                 entry_stage_id: None,
                 exit_stage_id: None,
                 ..Default::default()
@@ -1067,9 +1067,7 @@ mod anticipated_simulation_ring_buffer {
                 min_generation_mw: 0.0,
                 max_generation_mw: 200.0,
                 cost_per_mwh: 10.0,
-                anticipated_config: Some(AnticipatedConfig {
-                    lead_stages: k as u32,
-                }),
+                anticipated_config: Some(AnticipatedConfig::LeadStages(k as u32)),
                 entry_stage_id: None,
                 exit_stage_id: None,
                 ..Default::default()
@@ -1703,7 +1701,7 @@ mod anticipated_generic_constraint_e2e {
                 min_generation_mw: 0.0,
                 max_generation_mw: ANT_MAX_MW,
                 cost_per_mwh: ANT_COST,
-                anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
+                anticipated_config: Some(AnticipatedConfig::LeadStages(2)),
                 entry_stage_id: None,
                 exit_stage_id: None,
                 ..Default::default()
@@ -2326,7 +2324,10 @@ mod d34_anticipated_varying_blocks_shape {
         let anticipated: Vec<_> = system
             .thermals()
             .iter()
-            .filter_map(|t| t.anticipated_config.map(|cfg| (t.id, cfg.lead_stages)))
+            .filter_map(|t| {
+                t.anticipated_config
+                    .and_then(|cfg| cfg.lead_stages().map(|k| (t.id, k)))
+            })
             .collect();
         assert!(
             !anticipated.is_empty(),

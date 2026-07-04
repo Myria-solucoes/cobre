@@ -3114,7 +3114,7 @@ fn one_anticipated_thermal_system(
             min_generation_mw,
             max_generation_mw,
             cost_per_mwh: 50.0,
-            anticipated_config: Some(AnticipatedConfig { lead_stages }),
+            anticipated_config: Some(AnticipatedConfig::LeadStages(lead_stages)),
             entry_stage_id: None,
             exit_stage_id: None,
             ..Default::default()
@@ -3286,7 +3286,7 @@ fn two_thermal_one_anticipated_system(n_stages: usize, lead_stages: u32) -> cobr
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             cost_per_mwh: 50.0,
-            anticipated_config: Some(AnticipatedConfig { lead_stages }),
+            anticipated_config: Some(AnticipatedConfig::LeadStages(lead_stages)),
             entry_stage_id: None,
             exit_stage_id: None,
             ..Default::default()
@@ -3470,7 +3470,7 @@ fn two_anticipated_thermal_system(n_stages: usize) -> cobre_core::System {
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             cost_per_mwh: 50.0,
-            anticipated_config: Some(AnticipatedConfig { lead_stages: 1 }),
+            anticipated_config: Some(AnticipatedConfig::LeadStages(1)),
             entry_stage_id: None,
             exit_stage_id: None,
             ..Default::default()
@@ -3485,7 +3485,7 @@ fn two_anticipated_thermal_system(n_stages: usize) -> cobre_core::System {
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             cost_per_mwh: 50.0,
-            anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
+            anticipated_config: Some(AnticipatedConfig::LeadStages(2)),
             entry_stage_id: None,
             exit_stage_id: None,
             ..Default::default()
@@ -3683,7 +3683,7 @@ fn one_hydro_one_ant_system(n_stages: usize) -> cobre_core::System {
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             cost_per_mwh: 50.0,
-            anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
+            anticipated_config: Some(AnticipatedConfig::LeadStages(2)),
             entry_stage_id: None,
             exit_stage_id: None,
             ..Default::default()
@@ -3971,7 +3971,7 @@ fn build_hydro_one_ant_system(
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             cost_per_mwh: 50.0,
-            anticipated_config: Some(AnticipatedConfig { lead_stages }),
+            anticipated_config: Some(AnticipatedConfig::LeadStages(lead_stages)),
             entry_stage_id: None,
             exit_stage_id: None,
             ..Default::default()

@@ -5,17 +5,27 @@ use chrono::NaiveDate;
 
 /// Anticipated dispatch configuration for thermal plants requiring advance commitment.
 ///
-/// `lead_stages` is `u32` so negative JSON literals are rejected at deserialise
-/// time (zero is rejected by the semantic validator). `deny_unknown_fields`
-/// mirrors the IO-layer `RawAnticipatedConfig` so deserialisation paths that
-/// bypass the IO raw parser still reject unknown keys; postcard is positional and
-/// ignores the attribute on the wire.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Carries exactly one lead mode — a stage-count lead (`LeadStages`) or a
+/// physical lead time in hours (`LeadTime`, delivery-anchored, same clock as a
+/// water arc's `travel_time_hours`) — mutually exclusive by construction.
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
-pub struct AnticipatedConfig {
-    /// Number of stages of dispatch anticipation. Must be ≥ 1.
-    pub lead_stages: u32,
+pub enum AnticipatedConfig {
+    /// Stage-count lead; the calendar is never consulted. Must be >= 1.
+    LeadStages(u32),
+    /// Physical lead time in hours, delivery-anchored. Must be finite and > 0.0.
+    LeadTime(f64),
+}
+
+impl AnticipatedConfig {
+    /// The stage count in `LeadStages` mode; `None` for `LeadTime`.
+    #[must_use]
+    pub fn lead_stages(&self) -> Option<u32> {
+        match self {
+            Self::LeadStages(lead_stages) => Some(*lead_stages),
+            Self::LeadTime(_) => None,
+        }
+    }
 }
 
 /// Thermal power plant with a scalar marginal cost.
@@ -88,21 +98,54 @@ mod tests {
             cost_per_mwh: 120.0,
             min_generation_mw: 100.0,
             max_generation_mw: 360.0,
-            anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
+            anticipated_config: Some(AnticipatedConfig::LeadStages(2)),
         };
 
         assert_eq!(
             thermal.anticipated_config,
-            Some(AnticipatedConfig { lead_stages: 2 })
+            Some(AnticipatedConfig::LeadStages(2))
         );
         assert_eq!(thermal.entry_stage_id, Some(1));
         assert_eq!(thermal.exit_stage_id, Some(120));
     }
 
     #[test]
-    fn test_anticipated_config_lead_stages_as_usize_5() {
-        let config = AnticipatedConfig { lead_stages: 5 };
-        assert_eq!(config.lead_stages as usize, 5_usize);
+    fn test_anticipated_config_lead_stages_accessor_returns_stage_count() {
+        let config = AnticipatedConfig::LeadStages(5);
+        assert_eq!(config.lead_stages(), Some(5));
+    }
+
+    #[test]
+    fn test_anticipated_config_lead_stages_accessor_none_for_lead_time() {
+        let config = AnticipatedConfig::LeadTime(720.0);
+        assert_eq!(config.lead_stages(), None);
+    }
+
+    #[test]
+    fn test_anticipated_config_is_copy() {
+        let config = AnticipatedConfig::LeadStages(3);
+        let copied = config;
+        assert_eq!(config, copied);
+    }
+
+    #[test]
+    fn test_anticipated_config_partial_eq() {
+        assert_eq!(
+            AnticipatedConfig::LeadStages(2),
+            AnticipatedConfig::LeadStages(2)
+        );
+        assert_ne!(
+            AnticipatedConfig::LeadStages(2),
+            AnticipatedConfig::LeadStages(3)
+        );
+        assert_ne!(
+            AnticipatedConfig::LeadStages(2),
+            AnticipatedConfig::LeadTime(2.0)
+        );
+        assert_eq!(
+            AnticipatedConfig::LeadTime(720.0),
+            AnticipatedConfig::LeadTime(720.0)
+        );
     }
 
     #[cfg(feature = "serde")]
@@ -118,11 +161,34 @@ mod tests {
             cost_per_mwh: 80.0,
             min_generation_mw: 100.0,
             max_generation_mw: 360.0,
-            anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
+            anticipated_config: Some(AnticipatedConfig::LeadStages(2)),
         };
         let json = serde_json::to_string(&thermal).unwrap();
         let deserialized: Thermal = serde_json::from_str(&json).unwrap();
         assert_eq!(thermal, deserialized);
-        assert!(json.contains("\"anticipated_config\":{\"lead_stages\":2}"));
+        // Externally-tagged (not `#[serde(untagged)]`) — postcard's Deserializer
+        // does not implement `deserialize_any`, which `untagged` requires; this
+        // shape keeps `Thermal` postcard-broadcast-safe (`cobre-io::broadcast`).
+        assert!(json.contains("\"anticipated_config\":{\"LeadStages\":2}"));
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_thermal_serde_roundtrip_lead_time() {
+        let thermal = Thermal {
+            id: EntityId::from(3),
+            name: "T_lead_time".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId::from(20),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            cost_per_mwh: 80.0,
+            min_generation_mw: 100.0,
+            max_generation_mw: 360.0,
+            anticipated_config: Some(AnticipatedConfig::LeadTime(720.0)),
+        };
+        let json = serde_json::to_string(&thermal).unwrap();
+        let deserialized: Thermal = serde_json::from_str(&json).unwrap();
+        assert_eq!(thermal, deserialized);
     }
 }

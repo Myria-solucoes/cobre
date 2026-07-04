@@ -2950,7 +2950,7 @@ fn system_with_anticipated_thermals(
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             cost_per_mwh: 50.0,
-            anticipated_config: Some(AnticipatedConfig { lead_stages: k }),
+            anticipated_config: Some(AnticipatedConfig::LeadStages(k)),
             entry_stage_id: None,
             exit_stage_id: None,
         })
@@ -5034,22 +5034,25 @@ fn test_sim_historical_library_built_when_sim_scheme_is_historical() {
     );
 }
 
-/// Build a minimal system identical to [`minimal_system`] except that the
-/// single thermal carries `anticipated_config: Some(AnticipatedConfig { lead_stages })`.
-/// The `BoundsCountsSpec::k_max` is set to `lead_stages as usize` so the
-/// thermal stage-bounds axis is wide enough to accommodate delivery-stage
-/// padding.
+/// Build a minimal system identical to [`minimal_system`] except that the single
+/// thermal carries the given `anticipated_config` and each study stage's single
+/// block runs for the corresponding `stage_hours` entry. `k_max_bounds` sets
+/// `BoundsCountsSpec::k_max` so the thermal stage-bounds axis is wide enough for
+/// delivery-stage padding.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::items_after_statements
 )]
-fn minimal_system_with_anticipated_lead_stages(
-    n_stages: usize,
-    lead_stages: u32,
+fn minimal_system_with_anticipated(
+    stage_hours: &[f64],
+    anticipated_config: AnticipatedConfig,
+    k_max_bounds: usize,
 ) -> cobre_core::System {
     use chrono::NaiveDate;
+
+    let n_stages = stage_hours.len();
 
     let bus = Bus {
         id: EntityId(1),
@@ -5070,7 +5073,7 @@ fn minimal_system_with_anticipated_lead_stages(
         min_generation_mw: 0.0,
         max_generation_mw: 100.0,
         cost_per_mwh: 50.0,
-        anticipated_config: Some(AnticipatedConfig { lead_stages }),
+        anticipated_config: Some(anticipated_config),
         entry_stage_id: None,
         exit_stage_id: None,
     };
@@ -5131,7 +5134,7 @@ fn minimal_system_with_anticipated_lead_stages(
             blocks: vec![Block {
                 index: 0,
                 name: "S".to_string(),
-                duration_hours: 744.0,
+                duration_hours: stage_hours[i],
             }],
             block_mode: BlockMode::Parallel,
             state_config: StageStateConfig {
@@ -5168,7 +5171,6 @@ fn minimal_system_with_anticipated_lead_stages(
         .collect();
 
     let n_st = n_stages.max(1);
-    let k_max_bounds = lead_stages as usize;
 
     fn default_hydro_bounds() -> HydroStageBounds {
         HydroStageBounds {
@@ -5268,7 +5270,20 @@ fn minimal_system_with_anticipated_lead_stages(
         .bounds(bounds)
         .penalties(penalties)
         .build()
-        .expect("minimal_system_with_anticipated_lead_stages: valid")
+        .expect("minimal_system_with_anticipated: valid")
+}
+
+/// [`minimal_system_with_anticipated`] with `n_stages` uniform 744 h stages and a
+/// `LeadStages(lead_stages)` thermal — the pre-delivery-anchor fixture.
+fn minimal_system_with_anticipated_lead_stages(
+    n_stages: usize,
+    lead_stages: u32,
+) -> cobre_core::System {
+    minimal_system_with_anticipated(
+        &vec![744.0; n_stages],
+        AnticipatedConfig::LeadStages(lead_stages),
+        lead_stages as usize,
+    )
 }
 
 /// Given a `StudySetup::new` call on a system with one anticipated thermal
@@ -5311,6 +5326,113 @@ fn setup_wires_anticipated_metadata_into_indexer() {
         vec![2],
         "expected anticipated_lead_stages == [2]"
     );
+}
+
+/// AC#1: a `LeadStages(2)` plant on a 5-stage uniform study resolves to a
+/// per-plant depth whose max is `2` with singleton in-horizon decision sets
+/// `{t+2}`, and the resulting `k_max` and `state_dimension` equal the
+/// pre-delivery-anchor values (`k_max == 2`, `n_state == 3`).
+#[test]
+fn setup_leadstages_resolution_preserves_k_max_and_state_dimension() {
+    let system = minimal_system_with_anticipated_lead_stages(5, 2);
+    let (resolution, lead_stages) = super::resolve_anticipated_commitments(&system);
+
+    assert_eq!(lead_stages, vec![2], "LeadStages keeps the constant ℓ == 2");
+    let point = &resolution.per_plant[0];
+    assert_eq!(
+        point.depth.iter().copied().max(),
+        Some(2),
+        "per-plant depth max == ℓ == 2"
+    );
+    assert_eq!(point.decision_sets[0], vec![2], "C(0) == {{2}}");
+    assert_eq!(point.decision_sets[1], vec![3], "C(1) == {{3}}");
+    assert_eq!(point.decision_sets[2], vec![4], "C(2) == {{4}}");
+    assert_eq!(resolution.k_max, 2, "delivery-anchored ring depth == 2");
+
+    let config = minimal_config(1, 10);
+    let stochastic = build_stochastic_context(
+        &system,
+        42,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("stochastic context");
+    let setup = StudySetup::new(
+        &system,
+        &config,
+        stochastic,
+        PrepareHydroModelsResult::default_from_system(&system),
+    )
+    .expect("setup");
+
+    assert_eq!(setup.stage_data.state.k_max, 2, "k_max unchanged");
+    // n_state = N*(1+L) + A*k_max = 1*(1+0) + 1*2 = 3 (no PAR lags, one hydro).
+    assert_eq!(
+        setup.stage_data.state.n_state, 3,
+        "state_dimension unchanged"
+    );
+    assert_eq!(
+        setup
+            .stage_data
+            .state
+            .anticipated_resolution
+            .per_plant
+            .len(),
+        1,
+        "resolution threaded onto StageData.state"
+    );
+}
+
+/// AC#2 (hand-derived): a `LeadTime(720.0)` plant on the weekly-then-monthly PMO
+/// calendar `[168,168,168,168,720,720]` resolves via the end-anchored
+/// resolve_point decider contract to `decider ==
+/// [None,None,None,None,Some(3),Some(4)]`, `C(3) == {4}`, `C(4) == {5}`, and
+/// `depth == [0,0,0,1,1,0]` (ring depth 1).
+#[test]
+fn test_anticipated_resolve_point_pmo_calendar() {
+    let system = minimal_system_with_anticipated(
+        &[168.0, 168.0, 168.0, 168.0, 720.0, 720.0],
+        AnticipatedConfig::LeadTime(720.0),
+        6,
+    );
+    let (resolution, _) = super::resolve_anticipated_commitments(&system);
+    let point = &resolution.per_plant[0];
+
+    assert_eq!(
+        point.decider,
+        vec![None, None, None, None, Some(3), Some(4)]
+    );
+    assert_eq!(point.decision_sets[3], vec![4]);
+    assert_eq!(point.decision_sets[4], vec![5]);
+    assert_eq!(point.depth, vec![0, 0, 0, 1, 1, 0]);
+    assert_eq!(resolution.k_max, 1);
+}
+
+/// AC#3 (hand-derived): a `LeadTime(720.0)` plant on the monthly-then-weekly
+/// fan-out calendar `[720,168,168,168,168,168]` resolves to a coarse decider 0
+/// committing four fine delivery stages — `C(0) == {1,2,3,4}` (|C(0)| == 4) —
+/// with `depth == [4,4,3,2,1,0]` and ring depth 4.
+#[test]
+fn test_anticipated_resolve_point_fanout_calendar() {
+    let system = minimal_system_with_anticipated(
+        &[720.0, 168.0, 168.0, 168.0, 168.0, 168.0],
+        AnticipatedConfig::LeadTime(720.0),
+        6,
+    );
+    let (resolution, _) = super::resolve_anticipated_commitments(&system);
+    let point = &resolution.per_plant[0];
+
+    assert_eq!(point.decision_sets[0], vec![1, 2, 3, 4]);
+    assert_eq!(point.decision_sets[0].len(), 4);
+    assert_eq!(point.depth, vec![4, 4, 3, 2, 1, 0]);
+    assert_eq!(resolution.k_max, 4);
 }
 
 /// Assert the canonical `StageData.state` role-(a) layout is internally

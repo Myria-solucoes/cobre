@@ -135,7 +135,12 @@ pub(crate) fn run_pipeline_with_artifacts(
         .thermals
         .iter()
         .filter_map(|t| t.anticipated_config.as_ref())
-        .map(|c| usize::try_from(c.lead_stages).unwrap_or(usize::MAX))
+        .map(|c| {
+            // LeadTime is rejected by check_anticipated_thermals's NotImplemented
+            // gate before this pipeline runs.
+            debug_assert!(c.lead_stages().is_some(), "LeadTime must be gated upstream");
+            usize::try_from(c.lead_stages().unwrap_or(0)).unwrap_or(usize::MAX)
+        })
         .max()
         .unwrap_or(0);
     let bounds = resolve_bounds(

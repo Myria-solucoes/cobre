@@ -312,6 +312,45 @@ pub fn resolve_point(
     }
 }
 
+/// Per-anticipated-plant delivery-anchored point-commitment resolution plus the
+/// derived ring depth.
+///
+/// Threaded from setup onto the state layout as additive data for the in-LP
+/// delivery-anchored ring; the still-live constant-lead machinery keeps reading
+/// the layout's per-plant `anticipated_lead_stages` until that ring lands.
+#[derive(Debug, Clone, Default)]
+pub struct AnticipatedResolution {
+    /// One [`PointResolution`] per anticipated plant, in anticipated-local
+    /// (`anticipated_thermal_indices`) order.
+    pub per_plant: Vec<PointResolution>,
+    /// Delivery-anchored ring depth `max_i max_t K_i(t)` over every plant's
+    /// per-stage depth; `0` with no anticipated plants.
+    pub k_max: usize,
+}
+
+impl AnticipatedResolution {
+    /// Resolve every plant's point-commitment lag against the study calendar and
+    /// derive the ring depth.
+    ///
+    /// `leads` is in anticipated-local order; `stage_lengths_hours` has length
+    /// `n_stages` ([`LeadTime::Stages`] never reads it). This is the single
+    /// [`resolve_point`] consumer — a second call site is forbidden; the
+    /// resolution threads through instead.
+    #[must_use]
+    pub fn resolve(leads: &[LeadTime], stage_lengths_hours: &[f64], n_stages: usize) -> Self {
+        let per_plant: Vec<PointResolution> = leads
+            .iter()
+            .map(|&lead| resolve_point(lead, stage_lengths_hours, n_stages))
+            .collect();
+        let k_max = per_plant
+            .iter()
+            .flat_map(|resolution| resolution.depth.iter().copied())
+            .max()
+            .unwrap_or(0);
+        Self { per_plant, k_max }
+    }
+}
+
 /// Cumulative stage-end boundaries `S_0 = 0, S_1, .., S_n`, the hour-clock
 /// primitive shared with [`resolve_spread`].
 fn cumulative_stage_boundaries(stage_lengths_hours: &[f64]) -> Vec<f64> {

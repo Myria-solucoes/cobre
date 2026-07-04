@@ -106,15 +106,28 @@ pub(crate) struct RawThermalGeneration {
 }
 
 /// Intermediate type for anticipated dispatch configuration.
+///
+/// Untagged with per-variant `deny_unknown_fields`: the `{"lead_stages": N}` /
+/// `{"lead_time_hours": H}` object shapes and the structural mutual-exclusion
+/// between them live here; `cobre_core::AnticipatedConfig` keeps a plain
+/// (non-`untagged`) derive so it stays postcard-broadcast-safe.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawAnticipatedConfig {
-    /// Number of stages of dispatch anticipation. Must be ≥ 1.
-    ///
-    /// Using `u32` here causes serde to reject negative JSON literals with a
-    /// `ParseError` before validation runs.
-    lead_stages: u32,
+#[serde(untagged, deny_unknown_fields)]
+pub(crate) enum RawAnticipatedConfig {
+    /// Stage-count lead; the calendar is never consulted. Must be ≥ 1.
+    LeadStages {
+        /// Number of stages of dispatch anticipation. Must be ≥ 1.
+        ///
+        /// Using `u32` here causes serde to reject negative JSON literals with a
+        /// `ParseError` before validation runs.
+        lead_stages: u32,
+    },
+    /// Physical lead time in hours, delivery-anchored. Must be finite and > 0.0.
+    LeadTime {
+        /// Physical lead time in hours. Must be finite and > 0.0.
+        lead_time_hours: f64,
+    },
 }
 
 /// Load and validate `system/thermals.json` from `path`.
@@ -125,8 +138,10 @@ pub(crate) struct RawAnticipatedConfig {
 /// regardless of file row order (declaration-order invariance); the builder applies
 /// the same id as its `(operational_start_date, id)` canonical tiebreak.
 ///
-/// Parse-time validation for `anticipated_config`:
+/// Parse-time validation for `anticipated_config` (`LeadStages` and `LeadTime`
+/// are mutually exclusive by construction — see [`RawAnticipatedConfig`]):
 /// - `lead_stages >= 1`
+/// - `lead_time_hours` finite and `> 0.0`
 ///
 /// Semantic validation (cross-field, requires knowledge of `T` and the
 /// entity registry) is performed by `validation::semantic::thermal`.
@@ -146,6 +161,8 @@ pub(crate) struct RawAnticipatedConfig {
 /// | `max_generation_mw < min_generation_mw`             | [`LoadError::SchemaError`] |
 /// | `lead_stages` is a negative integer in JSON         | [`LoadError::ParseError`]  |
 /// | `lead_stages == 0`                                  | [`LoadError::SchemaError`] |
+/// | Both/neither of `lead_stages`, `lead_time_hours` set | [`LoadError::ParseError`]  |
+/// | `lead_time_hours` non-finite or `<= 0.0`            | [`LoadError::SchemaError`] |
 ///
 /// # Examples
 ///
@@ -209,23 +226,32 @@ fn validate_cost_per_mwh(
     Ok(())
 }
 
-/// Negative values are rejected earlier by serde (the field is `u32`), so
-/// the only remaining failure mode here is `lead_stages == 0`.
+/// `LeadStages` negative values are rejected earlier by serde (the field is
+/// `u32`), so the only remaining failure mode there is `lead_stages == 0`.
+/// `LeadTime` mirrors the water arc's `travel_time_hours` gate: reject
+/// non-finite or non-positive hours.
 fn validate_anticipated_config(
     config: Option<&RawAnticipatedConfig>,
     thermal_index: usize,
     path: &Path,
 ) -> Result<(), LoadError> {
-    if let Some(cfg) = config
-        && cfg.lead_stages == 0
-    {
-        return Err(LoadError::SchemaError {
+    match config {
+        Some(RawAnticipatedConfig::LeadStages { lead_stages: 0 }) => Err(LoadError::SchemaError {
             path: path.to_path_buf(),
             field: format!("thermals[{thermal_index}].anticipated_config.lead_stages"),
             message: "lead_stages must be >= 1, got 0".to_string(),
-        });
+        }),
+        Some(RawAnticipatedConfig::LeadTime { lead_time_hours })
+            if !lead_time_hours.is_finite() || *lead_time_hours <= 0.0 =>
+        {
+            Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("thermals[{thermal_index}].anticipated_config.lead_time_hours"),
+                message: format!("lead_time_hours must be finite and > 0.0, got {lead_time_hours}"),
+            })
+        }
+        Some(_) | None => Ok(()),
     }
-    Ok(())
 }
 
 fn validate_generation_bounds(
@@ -273,8 +299,13 @@ fn convert_thermals(raw: RawThermalFile, path: &Path) -> Result<Vec<Thermal>, Lo
             )?;
 
             let anticipated_config: Option<AnticipatedConfig> =
-                raw_thermal.anticipated_config.map(|g| AnticipatedConfig {
-                    lead_stages: g.lead_stages,
+                raw_thermal.anticipated_config.map(|raw_cfg| match raw_cfg {
+                    RawAnticipatedConfig::LeadStages { lead_stages } => {
+                        AnticipatedConfig::LeadStages(lead_stages)
+                    }
+                    RawAnticipatedConfig::LeadTime { lead_time_hours } => {
+                        AnticipatedConfig::LeadTime(lead_time_hours)
+                    }
                 });
 
             Ok(Thermal {
@@ -344,7 +375,7 @@ mod tests {
     /// Given a valid `thermals.json` with 2 thermals (one with anticipated config,
     /// one without), `parse_thermals` returns `Ok(vec)` with 2 `Thermal` entries
     /// sorted by `id`; the anticipated thermal has
-    /// `anticipated_config: Some(AnticipatedConfig { lead_stages: 2 })`.
+    /// `anticipated_config: Some(AnticipatedConfig::LeadStages(2))`.
     #[test]
     fn test_parse_valid_thermals() {
         let f = write_json(VALID_JSON);
@@ -380,7 +411,7 @@ mod tests {
         assert!((thermals[1].max_generation_mw - 360.0).abs() < f64::EPSILON);
         assert_eq!(
             thermals[1].anticipated_config,
-            Some(AnticipatedConfig { lead_stages: 2 })
+            Some(AnticipatedConfig::LeadStages(2))
         );
     }
 
@@ -644,7 +675,7 @@ mod tests {
         let anticipated_thermal = thermals.iter().find(|t| t.id == EntityId(1)).unwrap();
         assert_eq!(
             anticipated_thermal.anticipated_config,
-            Some(AnticipatedConfig { lead_stages: 2 })
+            Some(AnticipatedConfig::LeadStages(2))
         );
     }
 
@@ -784,13 +815,12 @@ mod tests {
         }
     }
 
-    /// `anticipated_config.lead_stages == -3` → `ParseError` from serde
-    /// (the field is `u32`, so negative JSON literals are rejected at
-    /// deserialise time before validation runs).
-    ///
-    /// Serde's error message includes the rejected integer value and the
-    /// expected type (`u32`); it identifies the field by line/column position
-    /// rather than by name.
+    /// `anticipated_config.lead_stages == -3` → `ParseError` from serde (the
+    /// field is `u32`, so negative JSON literals are rejected at deserialise
+    /// time before validation runs). `RawAnticipatedConfig` is untagged, so the
+    /// combined failure across both variants surfaces as the generic
+    /// "did not match any variant" message rather than the per-variant `u32`
+    /// error.
     #[test]
     fn test_anticipated_lead_stages_negative_rejected_by_serde() {
         let json = r#"{
@@ -808,12 +838,8 @@ mod tests {
         match &err {
             LoadError::ParseError { message, .. } => {
                 assert!(
-                    message.contains("-3"),
-                    "message should mention '-3', got: {message}"
-                );
-                assert!(
-                    message.contains("u32"),
-                    "message should mention 'u32', got: {message}"
+                    message.contains("did not match any variant"),
+                    "message should report the untagged-enum mismatch, got: {message}"
                 );
             }
             other => panic!("expected ParseError, got: {other:?}"),
@@ -839,8 +865,143 @@ mod tests {
         assert_eq!(thermals.len(), 1);
         assert_eq!(
             thermals[0].anticipated_config,
-            Some(AnticipatedConfig { lead_stages: 1 })
+            Some(AnticipatedConfig::LeadStages(1))
         );
+    }
+
+    // ── AC: lead_time_hours mode ──────────────────────────────────────────────
+
+    /// Given a thermal JSON `"anticipated_config": {"lead_stages": 2}`, when
+    /// `parse_thermals` runs, then `Thermal.anticipated_config` equals
+    /// `Some(AnticipatedConfig::LeadStages(2))`.
+    #[test]
+    fn test_parse_anticipated_lead_stages() {
+        let json = r#"{
+          "thermals": [
+            {
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
+              "cost_per_mwh": 50.0,
+              "generation": { "min_mw": 0.0, "max_mw": 100.0 },
+              "anticipated_config": { "lead_stages": 2 }
+            }
+          ]
+        }"#;
+        let f = write_json(json);
+        let thermals = parse_thermals(f.path()).unwrap();
+        assert_eq!(
+            thermals[0].anticipated_config,
+            Some(AnticipatedConfig::LeadStages(2))
+        );
+    }
+
+    /// Given a thermal JSON `"anticipated_config": {"lead_time_hours": 720.0}`,
+    /// when `parse_thermals` runs, then `Thermal.anticipated_config` equals
+    /// `Some(AnticipatedConfig::LeadTime(720.0))`.
+    #[test]
+    fn test_parse_anticipated_lead_time() {
+        let json = r#"{
+          "thermals": [
+            {
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
+              "cost_per_mwh": 50.0,
+              "generation": { "min_mw": 0.0, "max_mw": 100.0 },
+              "anticipated_config": { "lead_time_hours": 720.0 }
+            }
+          ]
+        }"#;
+        let f = write_json(json);
+        let thermals = parse_thermals(f.path()).unwrap();
+        assert_eq!(
+            thermals[0].anticipated_config,
+            Some(AnticipatedConfig::LeadTime(720.0))
+        );
+    }
+
+    /// Given both `lead_stages` and `lead_time_hours` set on the same
+    /// `anticipated_config`, when `parse_thermals` runs, then it returns
+    /// `Err(LoadError::ParseError)` — structural mutual exclusion: each
+    /// variant's `deny_unknown_fields` rejects the other key, so untagged
+    /// resolution matches neither.
+    #[test]
+    fn test_parse_anticipated_both_modes_rejected() {
+        let json = r#"{
+          "thermals": [
+            {
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
+              "cost_per_mwh": 50.0,
+              "generation": { "min_mw": 0.0, "max_mw": 100.0 },
+              "anticipated_config": { "lead_stages": 2, "lead_time_hours": 720.0 }
+            }
+          ]
+        }"#;
+        let f = write_json(json);
+        let err = parse_thermals(f.path()).unwrap_err();
+        assert!(
+            matches!(err, LoadError::ParseError { .. }),
+            "expected ParseError for both-modes-set anticipated_config, got: {err:?}"
+        );
+    }
+
+    /// `lead_time_hours` of `-5.0`, `0.0`, and a non-finite literal all → hard
+    /// error `LoadError::SchemaError` naming `lead_time_hours`. `f64` cannot
+    /// carry a JSON `NaN`/`Infinity` literal, so the non-finite case is driven
+    /// through `serde_json::Number` from a value that round-trips as infinite.
+    #[test]
+    fn test_parse_anticipated_lead_time_nonpositive_rejected() {
+        for lead_time_hours in [-5.0, 0.0] {
+            let json = format!(
+                r#"{{
+              "thermals": [
+                {{
+                  "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0,
+                  "cost_per_mwh": 50.0,
+                  "generation": {{ "min_mw": 0.0, "max_mw": 100.0 }},
+                  "anticipated_config": {{ "lead_time_hours": {lead_time_hours} }}
+                }}
+              ]
+            }}"#
+            );
+            let f = write_json(&json);
+            let err = parse_thermals(f.path()).unwrap_err();
+            match &err {
+                LoadError::SchemaError { field, message, .. } => {
+                    assert_eq!(
+                        field, "thermals[0].anticipated_config.lead_time_hours",
+                        "field mismatch: {field}"
+                    );
+                    assert!(
+                        message.contains("lead_time_hours"),
+                        "message should name lead_time_hours, got: {message}"
+                    );
+                }
+                other => panic!(
+                    "expected SchemaError for lead_time_hours={lead_time_hours}, got: {other:?}"
+                ),
+            }
+        }
+    }
+
+    /// A non-finite `lead_time_hours` (`f64::INFINITY`, unreachable via a JSON
+    /// literal) is rejected the same way as non-positive values — exercised
+    /// directly against the validator since `serde_json` cannot deserialize an
+    /// `Infinity`/`NaN` token from text.
+    #[test]
+    fn test_validate_anticipated_config_lead_time_non_finite_rejected() {
+        let cfg = RawAnticipatedConfig::LeadTime {
+            lead_time_hours: f64::INFINITY,
+        };
+        let err =
+            validate_anticipated_config(Some(&cfg), 0, Path::new("thermals.json")).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(field, "thermals[0].anticipated_config.lead_time_hours");
+                assert!(
+                    message.contains("finite"),
+                    "message should mention 'finite', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
     }
 
     /// `min_mw == max_mw` (degenerate range) is valid.

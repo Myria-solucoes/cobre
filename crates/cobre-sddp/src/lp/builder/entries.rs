@@ -2334,7 +2334,7 @@ mod zero_cost_tests {
                 min_generation_mw: 0.0,
                 max_generation_mw: 100.0,
                 cost_per_mwh: ANT_COST,
-                anticipated_config: Some(AnticipatedConfig { lead_stages: 1 }),
+                anticipated_config: Some(AnticipatedConfig::LeadStages(1)),
                 entry_stage_id: None,
                 exit_stage_id: None,
             },

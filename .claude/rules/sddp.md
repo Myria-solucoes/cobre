@@ -274,3 +274,28 @@ worked kappa/chi numbers, and the `K = 1` chronological-vs-parallel
 byte-identity regression; a state-dimension-equality regression across
 parallel and chronological builds is the direct pin for mode-independent
 sizing.
+
+## Anticipated thermal commitments
+
+### Pre-study anticipated commitments: calendar-derived coverage
+
+`AnticipatedCommitmentHistory::values_mw` (`cobre-core`) is an ordinal,
+delivery-stage-indexed vector — `values_mw[j]` is the MW delivered at the
+`j`-th pre-study-committed delivery stage — never date-windowed like
+`past_defluences`. Its length must equal the calendar-derived count of
+pre-study-committed delivery stages: `LeadStages(l)` clamps to
+`min(l, n_stages)`; `LeadTime(delta)` counts the leading study stages whose
+stage-end cumulative hours are `<= delta` (tie-inclusive). `cobre-io`'s
+`check_anticipated_thermals` computes this count itself, via
+`required_anticipated_commitment_count`, rather than calling into the
+solver crate's point-commitment resolver (cobre-io is upstream and cannot
+depend on it), and hard-rejects any length mismatch as a
+`BusinessRuleViolation`. A `len == lead_stages` gate is a plausible-looking
+alternative that silently mis-covers a `LeadTime`-configured plant on a
+non-uniform calendar, since the required count is calendar-derived, not a
+constant stage count; there is no fallback comparable to the
+(already-rejected) `past_inflows` fallback for `past_defluences`.
+Read: `crates/cobre-io/src/validation/semantic/thermal.rs`
+(`required_anticipated_commitment_count`, `check_anticipated_thermals`).
+Pinned by `test_anticipated_lead_time_coverage_pmo_calendar` and
+`test_anticipated_lead_time_coverage_pmo_calendar_under_coverage_rejected`.
