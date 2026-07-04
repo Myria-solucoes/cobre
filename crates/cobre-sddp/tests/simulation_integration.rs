@@ -371,7 +371,6 @@ impl Fixture {
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
-        let state = state_layout_for(1, 0);
         let risk_measures = vec![RiskMeasure::Expectation; n_stages];
 
         Self {
@@ -413,7 +412,6 @@ fn make_config() -> Config {
         policy: PolicyConfig {
             path: "./policy".to_string(),
             mode: cobre_io::PolicyMode::Fresh,
-            validate_compatibility: true,
             checkpointing: CheckpointingConfig::default(),
             boundary: None,
         },

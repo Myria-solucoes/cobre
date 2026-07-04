@@ -220,17 +220,16 @@ per-method field tables.
 
 **`policy` section:**
 
-| Field                               | Type           | Default      | Description                                                            |
-| ----------------------------------- | -------------- | ------------ | ---------------------------------------------------------------------- |
-| `path`                              | string         | `"./policy"` | Directory for policy data (cuts, states, vertices, basis)              |
-| `mode`                              | string         | `"fresh"`    | Initialization mode: `"fresh"`, `"warm_start"`, or `"resume"`          |
-| `validate_compatibility`            | boolean        | `true`       | Verify entity and dimension compatibility when loading a stored policy |
-| `boundary`                          | object or null | `null`       | Terminal boundary cut config: `path` (string) + `source_stage` (int)   |
-| `checkpointing.enabled`             | boolean        | `null`       | Enable periodic checkpointing                                          |
-| `checkpointing.initial_iteration`   | integer        | `null`       | First iteration to write a checkpoint                                  |
-| `checkpointing.interval_iterations` | integer        | `null`       | Iterations between checkpoints                                         |
-| `checkpointing.store_basis`         | boolean        | `null`       | Include LP basis in checkpoints                                        |
-| `checkpointing.compress`            | boolean        | `null`       | Compress checkpoint files                                              |
+| Field                               | Type           | Default      | Description                                                          |
+| ----------------------------------- | -------------- | ------------ | -------------------------------------------------------------------- |
+| `path`                              | string         | `"./policy"` | Directory for policy data (cuts, states, vertices, basis)            |
+| `mode`                              | string         | `"fresh"`    | Initialization mode: `"fresh"`, `"warm_start"`, or `"resume"`        |
+| `boundary`                          | object or null | `null`       | Terminal boundary cut config: `path` (string) + `source_stage` (int) |
+| `checkpointing.enabled`             | boolean        | `null`       | Enable periodic checkpointing                                        |
+| `checkpointing.initial_iteration`   | integer        | `null`       | First iteration to write a checkpoint                                |
+| `checkpointing.interval_iterations` | integer        | `null`       | Iterations between checkpoints                                       |
+| `checkpointing.store_basis`         | boolean        | `null`       | Include LP basis in checkpoints                                      |
+| `checkpointing.compress`            | boolean        | `null`       | Compress checkpoint files                                            |
 
 **`simulation` section:**
 

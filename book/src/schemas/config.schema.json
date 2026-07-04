@@ -264,11 +264,6 @@
           "default": "./policy",
           "description": "Directory for policy data (rows, states, vertices, basis).",
           "type": "string"
-        },
-        "validate_compatibility": {
-          "default": true,
-          "description": "Verify state dimension and entity compatibility when loading.",
-          "type": "boolean"
         }
       },
       "type": "object"
@@ -923,8 +918,7 @@
           "store_basis": null
         },
         "mode": "fresh",
-        "path": "./policy",
-        "validate_compatibility": true
+        "path": "./policy"
       },
       "description": "Policy directory settings (warm-start / resume)."
     },

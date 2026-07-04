@@ -4,7 +4,6 @@
 //! convergence monitoring, and policy simulation. Parallelized via rayon (intra-rank)
 //! and ferrompi (inter-rank).
 
-// Relax strict production lints for test builds.
 #![cfg_attr(
     test,
     allow(
@@ -133,8 +132,8 @@ pub use stochastic::inflow_method::InflowNonNegativityMethod;
 pub use lp::builder::{StageTemplates, build_stage_templates};
 // ── policy_load ───────────────────────────────────────────────────────────────
 pub use policy::policy_load::{
-    build_basis_cache_from_checkpoint, inject_boundary_cuts, load_boundary_cuts,
-    validate_policy_compatibility, validate_policy_compatibility_effective,
+    CompatibilityReport, PolicyLoadKind, PolicyStageManifest, build_basis_cache_from_checkpoint,
+    compare_manifest_slot_identity, inject_boundary_cuts, load_boundary_cuts, validate_policy_load,
 };
 // ── provenance ────────────────────────────────────────────────────────────────
 pub use policy::provenance::{

@@ -12,14 +12,17 @@ use super::RunContext;
 
 /// Load a policy checkpoint from disk and validate its compatibility.
 ///
-/// Validation is opt-in via `config.policy.validate_compatibility`, except for
-/// a bucket study (`n_buckets > 0`), which forces it on regardless of the flag —
-/// see [`cobre_sddp::validate_policy_compatibility_effective`].
+/// Validation is unconditional: every warm-start, resume, and simulation-only
+/// load routes through [`cobre_sddp::validate_policy_load`] with
+/// [`cobre_sddp::PolicyLoadKind::FullFcf`], checking `state_dimension` and
+/// `num_stages`, then the checkpoint terminal manifest against the current
+/// study's terminal manifest — rejecting a same-dimension-different-entity
+/// policy the dims check alone would pass.
 fn load_and_validate_checkpoint(
+    ctx: &RunContext<impl Communicator>,
     policy_dir: &Path,
     system: &System,
     setup: &StudySetup,
-    root_config: Option<&cobre_io::Config>,
 ) -> Result<cobre_io::PolicyCheckpoint, CliError> {
     let checkpoint = cobre_io::output::policy::read_policy_checkpoint(policy_dir).map_err(|e| {
         CliError::Internal {
@@ -34,15 +37,34 @@ fn load_and_validate_checkpoint(
     let state_dim = u32::try_from(setup.fcf.state_dimension).map_err(|e| CliError::Internal {
         message: format!("state_dimension overflows u32: {e}"),
     })?;
-    let configured_validate = root_config.is_some_and(|c| c.policy.validate_compatibility);
-    cobre_sddp::validate_policy_compatibility_effective(
-        &checkpoint.metadata,
-        state_dim,
-        n_stages,
-        configured_validate,
-        setup.stage_state().n_buckets,
-    )
-    .map_err(CliError::from)?;
+
+    // The terminal pool is always full-config, so its manifest witnesses every
+    // state family's slot identity — a terminal-only comparison covers all stages.
+    let current_manifest = setup.build_terminal_entity_manifest(system);
+    let checkpoint_terminal_manifest: &[cobre_io::EntitySlot] = checkpoint
+        .stage_cuts
+        .last()
+        .map_or(&[], |s| s.entity_manifest.as_slice());
+
+    let source = cobre_sddp::PolicyStageManifest {
+        state_dimension: checkpoint.metadata.state_dimension,
+        num_stages: checkpoint.metadata.num_stages,
+        slots: checkpoint_terminal_manifest,
+    };
+    let current = cobre_sddp::PolicyStageManifest {
+        state_dimension: state_dim,
+        num_stages: n_stages,
+        slots: &current_manifest,
+    };
+    let report =
+        cobre_sddp::validate_policy_load(&source, &current, cobre_sddp::PolicyLoadKind::FullFcf)
+            .map_err(CliError::from)?;
+
+    if ctx.is_root && !ctx.quiet {
+        for msg in &report.warnings {
+            let _ = ctx.stderr.write_line(&format!("warning: {msg}"));
+        }
+    }
 
     Ok(checkpoint)
 }
@@ -99,7 +121,7 @@ pub(super) fn apply_training_policy(
                     .stderr
                     .write_line("Loading prior policy for warm-start training...");
             }
-            let checkpoint = load_and_validate_checkpoint(&policy_dir, system, setup, root_config)?;
+            let checkpoint = load_and_validate_checkpoint(ctx, &policy_dir, system, setup)?;
             load_checkpoint_into_setup(&checkpoint, setup)?;
             if ctx.is_root && !ctx.quiet {
                 let warm_count = setup.fcf.pools[0].warm_start_count;
@@ -124,7 +146,7 @@ pub(super) fn apply_training_policy(
                     .stderr
                     .write_line("Loading prior checkpoint for resume training...");
             }
-            let checkpoint = load_and_validate_checkpoint(&policy_dir, system, setup, root_config)?;
+            let checkpoint = load_and_validate_checkpoint(ctx, &policy_dir, system, setup)?;
             let completed = u64::from(checkpoint.metadata.completed_iterations);
             if completed >= setup.loop_params.max_iterations && ctx.is_root && !ctx.quiet {
                 let _ = ctx.stderr.write_line(&format!(
@@ -191,7 +213,6 @@ pub(super) fn load_policy_for_simulation(
     ctx: &RunContext<impl Communicator>,
     system: &System,
     setup: &mut StudySetup,
-    root_config: Option<&cobre_io::Config>,
 ) -> Result<cobre_sddp::TrainingResult, CliError> {
     if ctx.is_root && !ctx.quiet {
         let _ = ctx
@@ -210,7 +231,7 @@ pub(super) fn load_policy_for_simulation(
         });
     }
 
-    let checkpoint = load_and_validate_checkpoint(&policy_dir, system, setup, root_config)?;
+    let checkpoint = load_and_validate_checkpoint(ctx, &policy_dir, system, setup)?;
 
     let loaded_fcf = cobre_sddp::FutureCostFunction::from_deserialized(&checkpoint.stage_cuts)
         .map_err(CliError::from)?;

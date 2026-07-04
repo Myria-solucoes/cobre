@@ -96,6 +96,25 @@ machinery), whereas spillage is legitimately free in `Filling`.
 Read: `lp/builder/columns.rs` (`fill_spillage_columns`). Cases: D38, D39, D42
 (phantom PreFilling spill removed); D40 (legitimate Filling-phase spill retained).
 
+## Policy-load compatibility validation is mandatory
+
+Every policy load — full-FCF warm-start/resume/simulation-only and terminal
+boundary-cut injection — routes through `validate_policy_load`, the single
+entry point; there is no opt-out or bypass path. Its check matrix keys off
+`PolicyLoadKind`: `state_dimension` equality and per-slot `slot_identity`
+(`entity_type`, `entity_id`, `subindex`) are hard-rejected for both `FullFcf`
+and `BoundaryInjection`; `num_stages` equality is hard-rejected only for
+`FullFcf` — a `BoundaryInjection` load skips it deliberately, since a monthly
+source study may legitimately feed a weekly+monthly current study.
+`col_scale`/LP prescaling is explicitly NOT a compatibility dimension: a state
+variable's identity and physical unit are independent of how the LP happens to
+scale its column, so comparing `col_scale` would falsely reject a policy whose
+entities genuinely match but whose scaling strategy or magnitude differs from
+the current study's — the forbidden alternative this contract rules out.
+Read: `policy/policy_load.rs` (`validate_policy_load`, `slot_identity`). Pinned
+by the `validate_policy_load_full_fcf_*` and
+`validate_policy_load_boundary_injection_*` tests in that module's test suite.
+
 ## Water travel time
 
 A declared upstream→downstream arc introduces in-transit "bucket" state: one

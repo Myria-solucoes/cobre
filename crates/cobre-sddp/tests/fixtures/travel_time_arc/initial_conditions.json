@@ -14,7 +14,9 @@
   "past_defluences": [
     {
       "hydro_id": 0,
-      "values_m3s": [20.0, 18.0]
+      "start_date": "2023-11-01",
+      "end_date": "2024-01-01",
+      "value_m3s": 20.0
     }
   ]
 }

@@ -419,12 +419,11 @@ standard seasonal lag window.
 
 Controls policy persistence (checkpoint saving and warm-start loading).
 
-| Field                    | Type                                     | Default      | Description                                                                                                                                 |
-| ------------------------ | ---------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `path`                   | string                                   | `"./policy"` | Directory where policy data (cuts, states) is stored.                                                                                       |
-| `mode`                   | `"fresh"`, `"warm_start"`, or `"resume"` | `"fresh"`    | Initialization mode. `"fresh"` starts from scratch; `"warm_start"` loads cuts from a previous run; `"resume"` continues an interrupted run. |
-| `validate_compatibility` | boolean                                  | `true`       | When loading a policy, verify that entity counts, stage counts, and cut dimensions match the current system.                                |
-| `boundary`               | object or null                           | `null`       | Terminal boundary cut configuration for coupling with an outer model's FCF. See below.                                                      |
+| Field      | Type                                     | Default      | Description                                                                                                                                 |
+| ---------- | ---------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `path`     | string                                   | `"./policy"` | Directory where policy data (cuts, states) is stored.                                                                                       |
+| `mode`     | `"fresh"`, `"warm_start"`, or `"resume"` | `"fresh"`    | Initialization mode. `"fresh"` starts from scratch; `"warm_start"` loads cuts from a previous run; `"resume"` continues an interrupted run. |
+| `boundary` | object or null                           | `null`       | Terminal boundary cut configuration for coupling with an outer model's FCF. See below.                                                      |
 
 ### `checkpointing`
 
@@ -580,10 +579,10 @@ for the full explanation and a `stages.json` example of the block pattern.
 
 Controls which outputs are written to the results directory.
 
-| Field                   | Type    | Default | Description                                                                                                            |
-| ----------------------- | ------- | ------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `states`                | boolean | `false` | Write visited forward-pass trial points to the policy checkpoint (FlatBuffers).                                        |
-| `stochastic`            | boolean | `false` | Export stochastic preprocessing artifacts to `output/stochastic/`.                                                     |
+| Field                   | Type    | Default | Description                                                                                                                                                                                                |
+| ----------------------- | ------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `states`                | boolean | `false` | Write visited forward-pass trial points to the policy checkpoint (FlatBuffers).                                                                                                                            |
+| `stochastic`            | boolean | `false` | Export stochastic preprocessing artifacts to `output/stochastic/`.                                                                                                                                         |
 | `fpha_deviation_points` | boolean | `false` | Export the per-grid-point computed-FPHA fit-deviation table to `output/hydro_models/fpha_deviation_points.parquet`. Opt-in because it emits one row per (hydro, stage, V, Q) sample point at spillage = 0. |
 
 ---

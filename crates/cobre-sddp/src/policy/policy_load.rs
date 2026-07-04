@@ -1,5 +1,9 @@
 //! Policy loading and compatibility validation.
 //!
+//! [`validate_policy_load`] is the single entry point for compatibility
+//! validation; every load path (full-FCF warm-start/resume/simulation-only and
+//! boundary-cut injection) routes through it.
+//!
 //! [`FutureCostFunction`]: crate::FutureCostFunction
 
 use cobre_io::PolicyCheckpointMetadata;
@@ -42,61 +46,82 @@ pub(crate) fn resolve_warm_start_counts(
     }
 }
 
-/// Validate that a loaded policy checkpoint is compatible with the current
-/// system configuration.
-///
-/// # Errors
-///
-/// Returns [`SddpError::Validation`] if `state_dimension` or `num_stages`
-/// do not match the current system configuration.
-pub fn validate_policy_compatibility(
-    metadata: &PolicyCheckpointMetadata,
-    current_state_dimension: u32,
-    current_num_stages: u32,
-) -> Result<(), SddpError> {
-    if metadata.state_dimension != current_state_dimension {
-        return Err(SddpError::Validation(format!(
-            "policy state_dimension mismatch: policy has {}, current system has {}",
-            metadata.state_dimension, current_state_dimension
-        )));
-    }
-
-    if metadata.num_stages != current_num_stages {
-        return Err(SddpError::Validation(format!(
-            "policy num_stages mismatch: policy has {}, current system has {}",
-            metadata.num_stages, current_num_stages
-        )));
-    }
-
-    Ok(())
+/// Per-side state layout fed to [`validate_policy_load`]: one manifest for the
+/// loaded policy (`source`) and one for the study being trained or simulated
+/// (`current`). The caller builds both — one from checkpoint metadata and its
+/// entity manifest, the other from the live [`StudySetup`].
+#[derive(Debug, Clone, Copy)]
+pub struct PolicyStageManifest<'a> {
+    /// Length of the state vector (one entry per reservoir/lag/bucket dimension).
+    pub state_dimension: u32,
+    /// Number of stages in the study.
+    pub num_stages: u32,
+    /// Per-slot entity identity, in state-vector order.
+    pub slots: &'a [cobre_io::EntitySlot],
 }
 
-/// Run [`validate_policy_compatibility`] when `configured_validate` is set OR
-/// the current study is bucket-aware (`current_n_buckets > 0`), forcing the
-/// check on for a bucket study regardless of the user's flag.
-///
-/// A bucket-free policy's `state_dimension` always differs from a bucket
-/// study's; skipping this check would let a stale policy reach
-/// `CutPool::new_with_warm_start`/`from_deserialized`, whose
-/// coefficient-length `copy_from_slice` panics on the user-facing path
-/// instead of failing cleanly here.
+/// Which policy-load path is being validated; selects the `num_stages` rule in
+/// [`validate_policy_load`]'s check matrix (`state_dimension` and per-slot
+/// identity are checked unconditionally on both variants).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyLoadKind {
+    /// Full future-cost-function load (warm-start, resume, simulation-only):
+    /// `num_stages` must match `current` exactly.
+    FullFcf,
+    /// Single-stage boundary-cut injection into the terminal pool: `num_stages`
+    /// is unchecked (a monthly source may feed a weekly+monthly current study).
+    ///
+    /// Reserved for the boundary-coupling family-fill payload (not yet wired):
+    /// a future field on this variant will carry the entity-family re-indexing
+    /// rules that replace today's positional cut copy.
+    BoundaryInjection,
+}
+
+/// Non-fatal findings from [`validate_policy_load`]; warnings never abort the load.
+#[derive(Debug, Clone, Default)]
+pub struct CompatibilityReport {
+    /// Human-readable warning messages, in emission order.
+    pub warnings: Vec<String>,
+}
+
+/// Validate that `source`'s state layout is compatible with `current`'s, per
+/// `kind`'s check matrix: `state_dimension` equality and per-slot identity
+/// (delegated to [`compare_manifest_slot_identity`]) are hard-rejected on both
+/// variants; `num_stages` equality is hard-rejected only on
+/// [`PolicyLoadKind::FullFcf`]. `col_scale`/scaling is never a compatibility
+/// dimension. This is the single entry point for policy-load validation; every
+/// load path calls it.
 ///
 /// # Errors
 ///
-/// Returns [`SddpError::Validation`] when validation runs (opted-in or
-/// forced) and `metadata.state_dimension` or `metadata.num_stages` mismatches.
-pub fn validate_policy_compatibility_effective(
-    metadata: &PolicyCheckpointMetadata,
-    current_state_dimension: u32,
-    current_num_stages: u32,
-    configured_validate: bool,
-    current_n_buckets: usize,
-) -> Result<(), SddpError> {
-    if configured_validate || current_n_buckets > 0 {
-        validate_policy_compatibility(metadata, current_state_dimension, current_num_stages)
-    } else {
-        Ok(())
+/// Returns [`SddpError::Validation`] on a `state_dimension` mismatch, a
+/// `num_stages` mismatch under [`PolicyLoadKind::FullFcf`], or a per-slot
+/// identity mismatch (see [`compare_manifest_slot_identity`]).
+pub fn validate_policy_load(
+    source: &PolicyStageManifest<'_>,
+    current: &PolicyStageManifest<'_>,
+    kind: PolicyLoadKind,
+) -> Result<CompatibilityReport, SddpError> {
+    if source.state_dimension != current.state_dimension {
+        return Err(SddpError::Validation(format!(
+            "policy state_dimension mismatch: policy has {}, current system has {}",
+            source.state_dimension, current.state_dimension
+        )));
     }
+
+    if kind == PolicyLoadKind::FullFcf && source.num_stages != current.num_stages {
+        return Err(SddpError::Validation(format!(
+            "policy num_stages mismatch: policy has {}, current system has {}",
+            source.num_stages, current.num_stages
+        )));
+    }
+
+    let mut warnings = Vec::new();
+    compare_manifest_slot_identity(source.slots, current.slots, &mut |msg| {
+        warnings.push(msg.to_string());
+    })?;
+
+    Ok(CompatibilityReport { warnings })
 }
 
 /// Build a basis cache from deserialized checkpoint basis records.
@@ -179,6 +204,72 @@ fn slot_identity(slot: &cobre_io::EntitySlot) -> (u8, i32, u32) {
     (slot.entity_type, slot.entity_id, slot.subindex)
 }
 
+/// Compare two entity manifests slot-for-slot by `slot_identity`.
+///
+/// `source` (a loaded policy's manifest) and `current` (the current study's
+/// terminal manifest) describe the same-length state vector of two studies. A
+/// per-slot `(entity_type, entity_id, subindex)` mismatch means a cut coefficient
+/// would attach to the wrong state variable and is REJECTED. `was_active` is
+/// excluded from `slot_identity` (a slot whose entity merely changed activity is
+/// still the same state variable); a `source`-dormant slot now active only warns.
+/// An empty manifest on either side (a pre-manifest checkpoint) cannot be
+/// verified: warn and return `Ok`, leaving the caller's `state_dimension` check
+/// standing.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] if `source` and `current` differ in length
+/// or in any slot's `(entity_type, entity_id, subindex)`.
+pub fn compare_manifest_slot_identity(
+    source: &[cobre_io::EntitySlot],
+    current: &[cobre_io::EntitySlot],
+    on_warning: &mut dyn FnMut(&str),
+) -> Result<(), SddpError> {
+    if source.is_empty() || current.is_empty() {
+        on_warning(&format!(
+            "entity manifest absent (source slots: {}, current slots: {}); slot identity \
+             could not be verified, relying on state_dimension alone",
+            source.len(),
+            current.len(),
+        ));
+        return Ok(());
+    }
+
+    if source.len() != current.len() {
+        return Err(SddpError::Validation(format!(
+            "entity manifest length mismatch: source has {} slots, current study has {}",
+            source.len(),
+            current.len()
+        )));
+    }
+
+    for (i, (src, cur)) in source.iter().zip(current).enumerate() {
+        if slot_identity(src) != slot_identity(cur) {
+            return Err(SddpError::Validation(format!(
+                "entity-identity mismatch at slot {i}: \
+                 source (entity_type={}, entity_id={}, subindex={}) != \
+                 current (entity_type={}, entity_id={}, subindex={}); \
+                 the cut coefficient at this slot would attach to the wrong state variable",
+                src.entity_type,
+                src.entity_id,
+                src.subindex,
+                cur.entity_type,
+                cur.entity_id,
+                cur.subindex
+            )));
+        }
+        if !src.was_active && cur.was_active {
+            on_warning(&format!(
+                "slot {i} (entity_type={}, entity_id={}, subindex={}) was dormant in the source \
+                 policy but is active in the current study; loading its cut",
+                cur.entity_type, cur.entity_id, cur.subindex
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Load boundary cuts from the `source_stage` of a source Cobre policy checkpoint.
 ///
 /// Per-slot `(entity_type, entity_id, subindex)` identity is matched against
@@ -196,6 +287,7 @@ fn slot_identity(slot: &cobre_io::EntitySlot) -> (u8, i32, u32) {
 /// empty manifest (pre-manifest checkpoint) leaves the `state_dimension` check
 /// standing and warns. A `was_active == false` boundary slot whose current
 /// counterpart is active is a non-fatal divergence: warn, load the cut anyway.
+/// Delegates to [`validate_policy_load`] with [`PolicyLoadKind::BoundaryInjection`].
 ///
 /// # Errors
 ///
@@ -237,58 +329,19 @@ pub fn load_boundary_cuts(
             ))
         })?;
 
-    if stage_result.state_dimension != current_state_dimension {
-        return Err(SddpError::Validation(format!(
-            "boundary policy state_dimension mismatch: source stage {} has {}, \
-             current study has {}",
-            source_stage, stage_result.state_dimension, current_state_dimension
-        )));
-    }
-
-    let boundary_manifest = &stage_result.entity_manifest;
-    if boundary_manifest.is_empty() || current_manifest.is_empty() {
-        on_warning(&format!(
-            "boundary policy: entity manifest absent (boundary slots: {}, current slots: {}); \
-             slot identity could not be verified, relying on state_dimension={} alone",
-            boundary_manifest.len(),
-            current_manifest.len(),
-            current_state_dimension
-        ));
-        return Ok(stage_result.cuts.clone());
-    }
-
-    if boundary_manifest.len() != current_manifest.len() {
-        return Err(SddpError::Validation(format!(
-            "boundary policy manifest length mismatch: source stage {} has {} slots, \
-             current study terminal stage has {}",
-            source_stage,
-            boundary_manifest.len(),
-            current_manifest.len()
-        )));
-    }
-
-    for (i, (boundary, current)) in boundary_manifest.iter().zip(current_manifest).enumerate() {
-        if slot_identity(boundary) != slot_identity(current) {
-            return Err(SddpError::Validation(format!(
-                "boundary policy entity-identity mismatch at slot {i} (source stage {source_stage}): \
-                 boundary (entity_type={}, entity_id={}, subindex={}) != \
-                 current (entity_type={}, entity_id={}, subindex={}); \
-                 the boundary cut coefficient at this slot would attach to the wrong state variable",
-                boundary.entity_type,
-                boundary.entity_id,
-                boundary.subindex,
-                current.entity_type,
-                current.entity_id,
-                current.subindex
-            )));
-        }
-        if !boundary.was_active && current.was_active {
-            on_warning(&format!(
-                "boundary policy: slot {i} (entity_type={}, entity_id={}, subindex={}) was dormant \
-                 at the boundary stage but is active in the current study; loading its boundary cut",
-                current.entity_type, current.entity_id, current.subindex
-            ));
-        }
+    let source = PolicyStageManifest {
+        state_dimension: stage_result.state_dimension,
+        num_stages: checkpoint.metadata.num_stages,
+        slots: &stage_result.entity_manifest,
+    };
+    let current = PolicyStageManifest {
+        state_dimension: current_state_dimension,
+        num_stages: checkpoint.metadata.num_stages,
+        slots: current_manifest,
+    };
+    let report = validate_policy_load(&source, &current, PolicyLoadKind::BoundaryInjection)?;
+    for warning in &report.warnings {
+        on_warning(warning);
     }
 
     Ok(stage_result.cuts.clone())
@@ -311,10 +364,9 @@ pub fn inject_boundary_cuts(
     let existing_capacity = fcf.pools[terminal_idx].capacity;
     let existing_warm_start = fcf.pools[terminal_idx].warm_start_count as usize;
     let training_capacity = existing_capacity.saturating_sub(existing_warm_start);
+    #[allow(clippy::cast_possible_truncation)]
     let max_iterations = if forward_passes > 0 {
-        #[allow(clippy::cast_possible_truncation)]
-        let m = (training_capacity / forward_passes as usize) as u64;
-        m
+        (training_capacity / forward_passes as usize) as u64
     } else {
         0
     };
@@ -332,9 +384,10 @@ mod tests {
     use cobre_io::{EntitySlot, PolicyCheckpointMetadata, StageCutsPayload};
 
     use super::{
-        load_boundary_cuts, resolve_warm_start_counts, validate_policy_compatibility,
-        validate_policy_compatibility_effective,
+        PolicyLoadKind, PolicyStageManifest, compare_manifest_slot_identity, load_boundary_cuts,
+        resolve_warm_start_counts, validate_policy_load,
     };
+    use crate::SddpError;
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -746,59 +799,220 @@ mod tests {
         );
     }
 
-    fn sample_metadata() -> PolicyCheckpointMetadata {
-        PolicyCheckpointMetadata {
-            cobre_version: "0.2.2".to_string(),
-            created_at: "2026-03-29T00:00:00Z".to_string(),
-            completed_iterations: 50,
-            final_lower_bound: 1234.56,
-            best_upper_bound: Some(1300.0),
+    // ── compare_manifest_slot_identity tests ──────────────────────────────────
+
+    /// Two same-length manifests differing only at slot 0's `entity_id` (7 vs 9)
+    /// are rejected, naming slot `0` and both ids.
+    #[test]
+    fn compare_manifest_slot_identity_same_dim_different_id_rejects() {
+        let source = storage_manifest(7, 2);
+        let current = storage_manifest(9, 2);
+
+        let result = compare_manifest_slot_identity(&source, &current, &mut ignore_warnings());
+
+        assert!(result.is_err(), "different entity_id at slot 0 must reject");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("slot 0"), "error must name slot 0: {msg}");
+        assert!(msg.contains("entity_id=7"), "error must name id 7: {msg}");
+        assert!(msg.contains("entity_id=9"), "error must name id 9: {msg}");
+    }
+
+    /// An empty `source` manifest cannot be verified: warn once and return `Ok`.
+    #[test]
+    fn compare_manifest_slot_identity_empty_source_warns_and_oks() {
+        let current = storage_manifest(1, 2);
+        let mut warnings: Vec<String> = Vec::new();
+
+        let result = compare_manifest_slot_identity(&[], &current, &mut |m| {
+            warnings.push(m.to_string());
+        });
+
+        assert!(result.is_ok(), "empty manifest must not hard-fail");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "absence must surface exactly one warning"
+        );
+        assert!(
+            warnings[0].contains("manifest absent"),
+            "warning must flag the absent manifest: {}",
+            warnings[0]
+        );
+    }
+
+    /// Identical manifests pass with no warning.
+    #[test]
+    fn compare_manifest_slot_identity_identical_oks_without_warning() {
+        let source = storage_manifest(1, 2);
+        let current = storage_manifest(1, 2);
+        let mut warnings: Vec<String> = Vec::new();
+
+        let result = compare_manifest_slot_identity(&source, &current, &mut |m| {
+            warnings.push(m.to_string());
+        });
+
+        assert!(result.is_ok(), "identical manifests must pass");
+        assert!(
+            warnings.is_empty(),
+            "a slot-for-slot match must emit no warning: {warnings:?}"
+        );
+    }
+
+    /// A `source`-dormant slot whose current counterpart is active warns but
+    /// loads (`Ok`).
+    #[test]
+    fn compare_manifest_slot_identity_was_active_divergence_warns_and_oks() {
+        let mut source = storage_manifest(1, 2);
+        source[1].was_active = false;
+        let current = storage_manifest(1, 2);
+        let mut warnings: Vec<String> = Vec::new();
+
+        let result = compare_manifest_slot_identity(&source, &current, &mut |m| {
+            warnings.push(m.to_string());
+        });
+
+        assert!(result.is_ok(), "was_active divergence must not hard-fail");
+        assert_eq!(warnings.len(), 1, "divergence must surface one warning");
+        assert!(
+            warnings[0].contains("dormant") && warnings[0].contains("slot 1"),
+            "warning must flag slot 1's dormancy divergence: {}",
+            warnings[0]
+        );
+    }
+
+    /// The full-FCF terminal-manifest shape: a checkpoint terminal manifest
+    /// `[storage(7), storage(2)]` vs a current terminal manifest
+    /// `[storage(9), storage(2)]` at equal `state_dimension` is rejected with a
+    /// `Validation` error naming slot `0` — the same guard
+    /// `load_and_validate_checkpoint` applies after the dims/`num_stages` check.
+    #[test]
+    fn compare_manifest_full_fcf_terminal_entity_swap_rejects() {
+        let checkpoint_terminal = storage_manifest(7, 2);
+        let current_terminal = storage_manifest(9, 2);
+
+        let result = compare_manifest_slot_identity(
+            &checkpoint_terminal,
+            &current_terminal,
+            &mut ignore_warnings(),
+        );
+
+        assert!(
+            matches!(result, Err(SddpError::Validation(_))),
+            "same-dimension terminal entity swap must be a Validation error"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("slot 0"), "error must name slot 0: {msg}");
+        assert!(
+            msg.contains("entity_id=7") && msg.contains("entity_id=9"),
+            "error must name both diverging ids: {msg}"
+        );
+    }
+
+    // ── validate_policy_load tests ────────────────────────────────────────────
+
+    /// Identical `state_dimension`, `num_stages`, and slot-for-slot matching
+    /// manifests pass `FullFcf` with no warnings.
+    #[test]
+    fn validate_policy_load_full_fcf_identical_oks_without_warning() {
+        let slots = storage_manifest(1, 2);
+        let source = PolicyStageManifest {
+            state_dimension: 2,
+            num_stages: 12,
+            slots: &slots,
+        };
+        let current = PolicyStageManifest {
+            state_dimension: 2,
+            num_stages: 12,
+            slots: &slots,
+        };
+
+        let report = validate_policy_load(&source, &current, PolicyLoadKind::FullFcf).unwrap();
+
+        assert!(
+            report.warnings.is_empty(),
+            "identical manifests must emit no warning: {:?}",
+            report.warnings
+        );
+    }
+
+    /// A `state_dimension` mismatch is a hard reject on `FullFcf`.
+    #[test]
+    fn validate_policy_load_full_fcf_state_dimension_mismatch_rejects() {
+        let slots = storage_manifest(1, 2);
+        let source = PolicyStageManifest {
             state_dimension: 10,
             num_stages: 12,
-            max_iterations: 200,
-            forward_passes: 4,
-            warm_start_cuts: 0,
-            warm_start_counts: vec![],
-            rng_seed: 42,
-            total_visited_states: 0,
-            training_block_mode: "parallel".to_string(),
-            training_block_mode_per_stage: vec![],
-        }
-    }
+            slots: &slots,
+        };
+        let current = PolicyStageManifest {
+            state_dimension: 8,
+            num_stages: 12,
+            slots: &slots,
+        };
 
-    #[test]
-    fn compatible_metadata_passes() {
-        let meta = sample_metadata();
-        assert!(validate_policy_compatibility(&meta, 10, 12).is_ok());
-    }
+        let result = validate_policy_load(&source, &current, PolicyLoadKind::FullFcf);
 
-    #[test]
-    fn state_dimension_mismatch_fails() {
-        let meta = sample_metadata();
-        let result = validate_policy_compatibility(&meta, 8, 12);
-        assert!(result.is_err());
+        assert!(result.is_err(), "state_dimension mismatch must reject");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("state_dimension"), "{msg}");
-        assert!(msg.contains("10"), "should include policy value: {msg}");
+        assert!(msg.contains("10"), "should include source value: {msg}");
         assert!(msg.contains('8'), "should include current value: {msg}");
     }
 
+    /// A `num_stages` mismatch is a hard reject on `FullFcf` but the identical
+    /// inputs pass `BoundaryInjection` (unchecked there).
     #[test]
-    fn num_stages_mismatch_fails() {
-        let meta = sample_metadata();
-        let result = validate_policy_compatibility(&meta, 10, 24);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
+    fn validate_policy_load_num_stages_mismatch_rejects_full_fcf_oks_boundary() {
+        let slots = storage_manifest(1, 2);
+        let source = PolicyStageManifest {
+            state_dimension: 10,
+            num_stages: 12,
+            slots: &slots,
+        };
+        let current = PolicyStageManifest {
+            state_dimension: 10,
+            num_stages: 24,
+            slots: &slots,
+        };
+
+        let full_fcf_result = validate_policy_load(&source, &current, PolicyLoadKind::FullFcf);
+        assert!(
+            full_fcf_result.is_err(),
+            "num_stages mismatch must reject FullFcf"
+        );
+        let msg = full_fcf_result.unwrap_err().to_string();
         assert!(msg.contains("num_stages"), "{msg}");
-        assert!(msg.contains("12"), "should include policy value: {msg}");
+        assert!(msg.contains("12"), "should include source value: {msg}");
         assert!(msg.contains("24"), "should include current value: {msg}");
+
+        let boundary_result =
+            validate_policy_load(&source, &current, PolicyLoadKind::BoundaryInjection);
+        assert!(
+            boundary_result.is_ok(),
+            "num_stages is unchecked under BoundaryInjection: {boundary_result:?}"
+        );
     }
 
+    /// Both `state_dimension` (10 vs 8) and `num_stages` (12 vs 24) mismatch under
+    /// `FullFcf`; the `state_dimension` guard fires first, so the error names
+    /// `state_dimension`, not `num_stages`.
     #[test]
-    fn both_dimensions_mismatched_returns_err() {
-        let meta = sample_metadata();
-        let result = validate_policy_compatibility(&meta, 8, 24);
-        assert!(result.is_err());
+    fn validate_policy_load_full_fcf_both_dimensions_mismatched_rejects() {
+        let slots = storage_manifest(1, 2);
+        let source = PolicyStageManifest {
+            state_dimension: 10,
+            num_stages: 12,
+            slots: &slots,
+        };
+        let current = PolicyStageManifest {
+            state_dimension: 8,
+            num_stages: 24,
+            slots: &slots,
+        };
+
+        let result = validate_policy_load(&source, &current, PolicyLoadKind::FullFcf);
+
+        assert!(result.is_err(), "both-dimension mismatch must reject");
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("state_dimension"),
@@ -806,49 +1020,86 @@ mod tests {
         );
     }
 
-    // ── validate_policy_compatibility_effective tests ─────────────────────────
-
-    /// Given a bucket study (`current_n_buckets > 0`) with `configured_validate`
-    /// unset (`false`) and a stale bucket-free policy whose `state_dimension`
-    /// does not match, `validate_policy_compatibility_effective` still runs the
-    /// check and returns a clean `Validation` error — not a coefficient-length
-    /// panic downstream in `CutPool::new_with_warm_start`.
+    /// A per-slot identity mismatch is a hard reject under `FullFcf`, naming the
+    /// mismatched slot and both diverging `entity_id`s.
     #[test]
-    fn transit_bucket_study_forces_validation_and_rejects_stale_policy() {
-        let meta = sample_metadata(); // state_dimension: 10, num_stages: 12
-        let result = validate_policy_compatibility_effective(&meta, 8, 12, false, 3);
-        assert!(
-            result.is_err(),
-            "a bucket study must force validation on even when unset"
-        );
+    fn validate_policy_load_full_fcf_slot_mismatch_rejects() {
+        let source_slots = storage_manifest(7, 2);
+        let current_slots = storage_manifest(9, 2);
+        let source = PolicyStageManifest {
+            state_dimension: 2,
+            num_stages: 12,
+            slots: &source_slots,
+        };
+        let current = PolicyStageManifest {
+            state_dimension: 2,
+            num_stages: 12,
+            slots: &current_slots,
+        };
+
+        let result = validate_policy_load(&source, &current, PolicyLoadKind::FullFcf);
+
+        assert!(result.is_err(), "slot identity mismatch must reject");
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("state_dimension"), "{msg}");
-        assert!(msg.contains("10"), "should include policy value: {msg}");
-        assert!(msg.contains('8'), "should include current value: {msg}");
-    }
-
-    /// Given a bucket study with `configured_validate` unset and a policy whose
-    /// dimensions match, `validate_policy_compatibility_effective` accepts it.
-    #[test]
-    fn transit_bucket_study_forced_validation_accepts_matching_policy() {
-        let meta = sample_metadata(); // state_dimension: 10, num_stages: 12
-        let result = validate_policy_compatibility_effective(&meta, 10, 12, false, 3);
+        assert!(msg.contains("slot 0"), "error must name slot 0: {msg}");
         assert!(
-            result.is_ok(),
-            "a matching-dimension policy must be accepted under the forced check"
+            msg.contains("entity_id=7"),
+            "error must name the source id 7: {msg}"
+        );
+        assert!(
+            msg.contains("entity_id=9"),
+            "error must name the current id 9: {msg}"
         );
     }
 
-    /// A bucket-free study (`current_n_buckets == 0`) with `configured_validate`
-    /// unset keeps the pre-existing opt-in behavior: no validation runs even
-    /// though the metadata would otherwise mismatch.
+    /// A per-slot identity mismatch is a hard reject under `BoundaryInjection`
+    /// too — slot identity is checked on both kinds, unlike `num_stages`.
     #[test]
-    fn transit_bucket_free_study_keeps_opt_in_behavior() {
-        let meta = sample_metadata();
-        let result = validate_policy_compatibility_effective(&meta, 8, 24, false, 0);
+    fn validate_policy_load_boundary_injection_slot_mismatch_rejects() {
+        let source_slots = storage_manifest(7, 2);
+        let current_slots = storage_manifest(9, 2);
+        let source = PolicyStageManifest {
+            state_dimension: 2,
+            num_stages: 12,
+            slots: &source_slots,
+        };
+        let current = PolicyStageManifest {
+            state_dimension: 2,
+            num_stages: 6,
+            slots: &current_slots,
+        };
+
+        let result = validate_policy_load(&source, &current, PolicyLoadKind::BoundaryInjection);
+
+        assert!(result.is_err(), "slot identity mismatch must reject");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("slot 0"), "error must name slot 0: {msg}");
+    }
+
+    /// An empty manifest on either side cannot be verified by slot identity:
+    /// `validate_policy_load` falls back to the `state_dimension` check alone,
+    /// returning `Ok` with one warning.
+    #[test]
+    fn validate_policy_load_full_fcf_empty_manifest_oks_with_warning() {
+        let current_slots = storage_manifest(1, 2);
+        let source = PolicyStageManifest {
+            state_dimension: 2,
+            num_stages: 12,
+            slots: &[],
+        };
+        let current = PolicyStageManifest {
+            state_dimension: 2,
+            num_stages: 12,
+            slots: &current_slots,
+        };
+
+        let report = validate_policy_load(&source, &current, PolicyLoadKind::FullFcf).unwrap();
+
+        assert_eq!(report.warnings.len(), 1, "absence must surface one warning");
         assert!(
-            result.is_ok(),
-            "opt-in validation must stay skipped for a bucket-free study"
+            report.warnings[0].contains("manifest absent"),
+            "warning must flag the absent manifest: {}",
+            report.warnings[0]
         );
     }
 

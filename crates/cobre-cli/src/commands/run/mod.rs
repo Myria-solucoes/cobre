@@ -206,16 +206,12 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
             run_simulation_phase(ctx, &system, &mut setup, &training.result, &hostname)?;
         }
     } else if setup.simulation_config.n_scenarios > 0 {
-        let training_result =
-            load_policy_for_simulation(ctx, &system, &mut setup, root_config.as_ref())?;
+        let training_result = load_policy_for_simulation(ctx, &system, &mut setup)?;
         run_simulation_phase(ctx, &system, &mut setup, &training_result, &hostname)?;
-    } else {
-        // Both training and simulation disabled — nothing to do.
-        if ctx.is_root && !ctx.quiet {
-            let _ = ctx
-                .stderr
-                .write_line("Training disabled, simulation disabled — nothing to do.");
-        }
+    } else if ctx.is_root && !ctx.quiet {
+        let _ = ctx
+            .stderr
+            .write_line("Training disabled, simulation disabled — nothing to do.");
     }
 
     Ok(())

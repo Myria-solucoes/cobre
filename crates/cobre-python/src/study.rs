@@ -488,42 +488,29 @@ impl Study {
     /// [`Study::simulate`] re-freezes the stage templates from the FCF at startup,
     /// exactly as the monolithic simulation-only path does.
     ///
-    /// `validate_compatibility` overrides `config.policy.validate_compatibility`
-    /// when supplied; otherwise the config value (default `true`) controls
-    /// whether the checkpoint metadata is validated against this study's state
-    /// dimension and stage count.
+    /// Validation is unconditional: the checkpoint is always checked against
+    /// this study's state dimension, stage count, and terminal entity manifest
+    /// via [`cobre_sddp::validate_policy_load`].
     ///
     /// # Errors
     ///
     /// - `RuntimeError` when the policy directory does not exist (message
     ///   containing `"Policy directory not found"`), when the checkpoint cannot
     ///   be read, or when FCF reconstruction fails.
-    /// - `ValueError` when policy validation fails (incompatible state dimension
-    ///   or stage count), mapped from the descriptive message.
-    #[pyo3(signature = (output_dir=None, validate_compatibility=None))]
+    /// - `ValueError` when policy validation fails (incompatible state dimension,
+    ///   stage count, or entity manifest), mapped from the descriptive message.
+    #[pyo3(signature = (output_dir=None))]
     #[allow(clippy::needless_pass_by_value)]
-    fn load_policy(
-        &self,
-        py: Python<'_>,
-        output_dir: Option<PathBuf>,
-        validate_compatibility: Option<bool>,
-    ) -> PyResult<Policy> {
+    fn load_policy(&self, py: Python<'_>, output_dir: Option<PathBuf>) -> PyResult<Policy> {
         let out_dir = output_dir.unwrap_or_else(|| self.output_dir.clone());
         let policy_dir = out_dir.join(&self.setup.policy_path);
-
-        // The helper keys off `config.policy.validate_compatibility`, so the
-        // override is applied to a config clone rather than passed separately.
-        let mut config = self.config.clone();
-        if let Some(validate) = validate_compatibility {
-            config.policy.validate_compatibility = validate;
-        }
 
         let setup = &self.setup;
         let system = self.system.as_ref();
 
         // The reconstruction reads parquet/JSON from disk; release the GIL.
         let reconstructed: Result<(FutureCostFunction, TrainingResult), String> =
-            py.detach(|| reconstruct_policy_from_checkpoint(setup, system, &config, &policy_dir));
+            py.detach(|| reconstruct_policy_from_checkpoint(setup, system, &policy_dir));
 
         let (fcf, training_result) =
             reconstructed.map_err(|msg| convert_error(ErrorSource::Message(msg)))?;

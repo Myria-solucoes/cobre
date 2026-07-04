@@ -891,6 +891,56 @@ pub(crate) fn build_study_setup(
     })
 }
 
+/// Validate a loaded policy checkpoint against `setup`/`system` via the shared
+/// [`cobre_sddp::validate_policy_load`] entry point, building both
+/// [`cobre_sddp::PolicyStageManifest`]s exactly as the CLI's
+/// `load_and_validate_checkpoint` does (the checkpoint's terminal-stage entity
+/// manifest vs. [`StudySetup::build_terminal_entity_manifest`]) — the single
+/// manifest-construction shape shared by warm-start, resume, and
+/// simulation-only loads. Warnings are drained to stderr (single-process,
+/// non-fatal).
+///
+/// # Errors
+///
+/// Returns `Err(String)` formatted as `"policy validation error: {e}"` on a
+/// `state_dimension`, `num_stages`, or entity-manifest mismatch.
+fn validate_loaded_policy(
+    checkpoint: &cobre_io::PolicyCheckpoint,
+    system: &cobre_core::System,
+    setup: &StudySetup,
+) -> Result<(), String> {
+    #[allow(clippy::cast_possible_truncation)]
+    let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let state_dim = setup.fcf.state_dimension as u32;
+
+    let current_manifest = setup.build_terminal_entity_manifest(system);
+    let checkpoint_terminal_manifest: &[cobre_io::EntitySlot] = checkpoint
+        .stage_cuts
+        .last()
+        .map_or(&[], |s| s.entity_manifest.as_slice());
+
+    let source = cobre_sddp::PolicyStageManifest {
+        state_dimension: checkpoint.metadata.state_dimension,
+        num_stages: checkpoint.metadata.num_stages,
+        slots: checkpoint_terminal_manifest,
+    };
+    let current = cobre_sddp::PolicyStageManifest {
+        state_dimension: state_dim,
+        num_stages: n_stages,
+        slots: &current_manifest,
+    };
+    let report =
+        cobre_sddp::validate_policy_load(&source, &current, cobre_sddp::PolicyLoadKind::FullFcf)
+            .map_err(|e| format!("policy validation error: {e}"))?;
+
+    for msg in &report.warnings {
+        eprintln!("cobre-python: policy validation warning: {msg}");
+    }
+
+    Ok(())
+}
+
 /// Apply the configured policy mode (warm-start / resume / boundary cuts) to
 /// `setup` BEFORE training.
 ///
@@ -925,18 +975,7 @@ pub(crate) fn apply_training_policy_mode(
         let checkpoint = cobre_io::output::policy::read_policy_checkpoint(&policy_dir)
             .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
 
-        #[allow(clippy::cast_possible_truncation)]
-        let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
-        #[allow(clippy::cast_possible_truncation)]
-        let state_dim = setup.fcf.state_dimension as u32;
-        cobre_sddp::validate_policy_compatibility_effective(
-            &checkpoint.metadata,
-            state_dim,
-            n_stages,
-            config.policy.validate_compatibility,
-            setup.stage_state().n_buckets,
-        )
-        .map_err(|e| format!("policy validation error: {e}"))?;
+        validate_loaded_policy(&checkpoint, system, setup)?;
 
         // Reserve one extra slot for cuts added in the final iteration.
         let warm_fcf = cobre_sddp::FutureCostFunction::new_with_warm_start(
@@ -970,18 +1009,7 @@ pub(crate) fn apply_training_policy_mode(
         let checkpoint = cobre_io::output::policy::read_policy_checkpoint(&policy_dir)
             .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
 
-        #[allow(clippy::cast_possible_truncation)]
-        let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
-        #[allow(clippy::cast_possible_truncation)]
-        let state_dim = setup.fcf.state_dimension as u32;
-        cobre_sddp::validate_policy_compatibility_effective(
-            &checkpoint.metadata,
-            state_dim,
-            n_stages,
-            config.policy.validate_compatibility,
-            setup.stage_state().n_buckets,
-        )
-        .map_err(|e| format!("policy validation error: {e}"))?;
+        validate_loaded_policy(&checkpoint, system, setup)?;
 
         let completed = u64::from(checkpoint.metadata.completed_iterations);
 
@@ -1057,7 +1085,6 @@ pub(crate) fn apply_training_policy_mode(
 pub(crate) fn reconstruct_policy_from_checkpoint(
     setup: &StudySetup,
     system: &cobre_core::System,
-    config: &cobre_io::Config,
     policy_dir: &std::path::Path,
 ) -> Result<(cobre_sddp::FutureCostFunction, cobre_sddp::TrainingResult), String> {
     if !policy_dir.exists() {
@@ -1071,18 +1098,7 @@ pub(crate) fn reconstruct_policy_from_checkpoint(
     let checkpoint = cobre_io::output::policy::read_policy_checkpoint(policy_dir)
         .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
 
-    #[allow(clippy::cast_possible_truncation)]
-    let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
-    #[allow(clippy::cast_possible_truncation)]
-    let state_dim = setup.fcf.state_dimension as u32;
-    cobre_sddp::validate_policy_compatibility_effective(
-        &checkpoint.metadata,
-        state_dim,
-        n_stages,
-        config.policy.validate_compatibility,
-        setup.stage_state().n_buckets,
-    )
-    .map_err(|e| format!("policy validation error: {e}"))?;
+    validate_loaded_policy(&checkpoint, system, setup)?;
 
     let loaded_fcf = cobre_sddp::FutureCostFunction::from_deserialized(&checkpoint.stage_cuts)
         .map_err(|e| format!("FCF reconstruction error: {e}"))?;
@@ -1227,7 +1243,7 @@ pub(crate) fn run_via_study(
         if should_simulate {
             let policy_dir = output_dir.join(&setup.policy_path);
             let (loaded_fcf, training_result) =
-                reconstruct_policy_from_checkpoint(&setup, &system, &config, &policy_dir)?;
+                reconstruct_policy_from_checkpoint(&setup, &system, &policy_dir)?;
 
             setup.replace_fcf(loaded_fcf);
 
@@ -2104,13 +2120,9 @@ mod tests {
             .expect("read policy checkpoint");
         let expected_iterations: u64 = checkpoint.metadata.completed_iterations.into();
 
-        let (fcf, training_result) = reconstruct_policy_from_checkpoint(
-            &loaded.setup,
-            &loaded.system,
-            &loaded.config,
-            &policy_dir,
-        )
-        .expect("reconstruct_policy_from_checkpoint must succeed");
+        let (fcf, training_result) =
+            reconstruct_policy_from_checkpoint(&loaded.setup, &loaded.system, &policy_dir)
+                .expect("reconstruct_policy_from_checkpoint must succeed");
 
         assert_eq!(
             training_result.iterations, expected_iterations,
