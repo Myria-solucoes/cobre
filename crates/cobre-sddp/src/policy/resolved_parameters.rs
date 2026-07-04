@@ -2,7 +2,7 @@
 //!
 //! ## Basis-cache invariance
 //!
-//! Resolved values bake into [`StageTemplate`](cobre_solver::StageTemplate)
+//! Resolved values freeze into [`StageTemplate`](cobre_solver::StageTemplate)
 //! entries at construction and are never rebuilt; the hot-path solver patches
 //! only row bounds, so LP matrix coefficients stay identical across iterations
 //! and the warm-start basis cache needs no invalidation. A future change that

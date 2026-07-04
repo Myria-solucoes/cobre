@@ -21,7 +21,7 @@
 //!   periodic cut-selection strategies.
 //! - [`dcs`] — Dynamic Cut Selection: scores all resident cuts per stage.
 //! - [`cut_sync`] — [`CutSyncBuffers`]: MPI cut-synchronization scratch space.
-//! - [`basis_reconstruct`] — warm-start basis reconstruction for the baked
+//! - [`basis_reconstruct`] — warm-start basis reconstruction for the frozen
 //!   hot path and the DCS path.
 
 pub mod basis_reconstruct;

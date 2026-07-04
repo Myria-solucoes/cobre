@@ -359,15 +359,15 @@ pub fn state_layout_full(
 }
 
 /// Build a finalized [`StateLayout`] with a declared travel-time bucket block
-/// (`buckets_out`/`buckets_in`), optionally combined with anticipated
+/// (`transit_buckets_out`/`transit_buckets_in`), optionally combined with anticipated
 /// thermals. `effective_lag_count` is dense (full `max_par_order` for every
 /// hydro), matching [`state_layout_full`].
 #[must_use]
-pub fn state_layout_with_buckets(
+pub fn state_layout_with_transit_buckets(
     hydro_count: usize,
     max_par_order: usize,
-    b_total: usize,
-    bucket_column_order: Vec<(usize, usize)>,
+    n_buckets: usize,
+    transit_bucket_column_order: Vec<(usize, usize)>,
     n_anticipated: usize,
     k_max: usize,
     anticipated_lead_stages: Vec<usize>,
@@ -376,8 +376,8 @@ pub fn state_layout_with_buckets(
     StateLayout::new(
         hydro_count,
         max_par_order,
-        b_total,
-        bucket_column_order,
+        n_buckets,
+        transit_bucket_column_order,
         n_anticipated,
         k_max,
         anticipated_lead_stages,
@@ -392,7 +392,7 @@ pub fn state_layout_with_buckets(
 /// lower-bound and backward consumer-path regressions that pin travel-time
 /// bucket incoming columns without needing a real water-balance row.
 #[must_use]
-pub fn bucket_only_template(num_cols: usize, n_state: usize) -> StageTemplate {
+pub fn transit_bucket_only_template(num_cols: usize, n_state: usize) -> StageTemplate {
     StageTemplate {
         num_cols,
         num_rows: 0,

@@ -3,7 +3,7 @@
 //! Uses a [`MockSolver`] and [`StubComm`] to exercise the simulation pipeline
 //! end-to-end without a real LP solver or MPI communicator. Covers scenario
 //! count, error propagation, cost accumulation, event emission, load patching,
-//! inflow truncation, baked-template acceptance, and warm-start basis handling.
+//! inflow truncation, frozen-template acceptance, and warm-start basis handling.
 
 #![allow(
     clippy::unwrap_used,
@@ -2404,18 +2404,18 @@ fn simulate_progress_scenario_cost_is_finite() {
     }
 }
 
-// ── baked-template acceptance tests ────────────────────────────
+// ── frozen-template acceptance tests ────────────────────────────
 
-/// When `baked_templates` is `Some`,
+/// When `frozen_templates` is `Some`,
 /// `add_rows` is never called (zero `add_rows_count`) and `load_model` is
 /// called exactly `n_scenarios * n_stages` times.
 #[test]
-fn simulate_baked_path_issues_zero_add_rows() {
+fn simulate_frozen_path_issues_zero_add_rows() {
     let n_stages = 2;
     let n_scenarios = 3u32;
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
-    // For MockSolver the baked content is irrelevant; reuse the minimal template.
-    let baked: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
+    // For MockSolver the frozen content is irrelevant; reuse the minimal template.
+    let frozen: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
     let state = state_layout_for(1, 0);
@@ -2510,29 +2510,29 @@ fn simulate_baked_path_issues_zero_add_rows() {
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
         },
-        Some(baked.as_slice()),
+        Some(frozen.as_slice()),
         &[],
         &comm,
     );
 
-    assert!(result.is_ok(), "baked path must succeed: {result:?}");
+    assert!(result.is_ok(), "frozen path must succeed: {result:?}");
     let expected_load_count = n_scenarios as usize * n_stages;
     let solver = workspaces[0].solver.inner();
     assert_eq!(
         solver.add_rows_count, 0,
-        "baked path must call add_rows 0 times; got {}",
+        "frozen path must call add_rows 0 times; got {}",
         solver.add_rows_count
     );
     assert_eq!(
         solver.load_count, expected_load_count,
-        "baked path must call load_model {} times; got {}",
+        "frozen path must call load_model {} times; got {}",
         expected_load_count, solver.load_count
     );
 }
 
-/// Fallback path (`baked_templates: None`): `add_rows` is gated by
+/// Fallback path (`frozen_templates: None`): `add_rows` is gated by
 /// `if cut_batch.num_rows > 0`, so with a 0-cut FCF `add_rows_count == 0` while
-/// `load_count == n_scenarios * n_stages` (same `load_model` count as the baked path).
+/// `load_count == n_scenarios * n_stages` (same `load_model` count as the frozen path).
 #[test]
 fn simulate_fallback_path_issues_expected_add_rows() {
     let n_stages = 2;
@@ -2653,11 +2653,11 @@ fn simulate_fallback_path_issues_expected_add_rows() {
     );
 }
 
-/// When `baked_templates` is `Some`
+/// When `frozen_templates` is `Some`
 /// but the slice length differs from `num_stages`, `simulate` returns
 /// `SimulationError::InvalidConfiguration` whose message contains both lengths.
 #[test]
-fn simulate_baked_length_mismatch_returns_error() {
+fn simulate_frozen_length_mismatch_returns_error() {
     let n_stages = 3;
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
@@ -2682,7 +2682,7 @@ fn simulate_baked_length_mismatch_returns_error() {
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
 
-    let wrong_baked: Vec<StageTemplate> =
+    let wrong_frozen: Vec<StageTemplate> =
         (0..n_stages - 1).map(|_| minimal_template_1_0()).collect();
 
     let mut workspaces = single_workspace(solver);
@@ -2757,7 +2757,7 @@ fn simulate_baked_length_mismatch_returns_error() {
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
         },
-        Some(wrong_baked.as_slice()),
+        Some(wrong_frozen.as_slice()),
         &[],
         &comm,
     );
@@ -2918,7 +2918,7 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
         },
-        // fallback path (no baked templates); reconstruction uses pool.active_cuts()
+        // fallback path (no frozen templates); reconstruction uses pool.active_cuts()
         None,
         &stage_bases,
         &comm,
@@ -2944,7 +2944,7 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         .as_ref()
         .expect("recorded_basis must be Some after a warm-start solve");
 
-    // Under the active-only bake model the LP carries one row per active cut;
+    // Under the active-only freeze model the LP carries one row per active cut;
     // inactive populated slots are absent, so the basis length is base_rows +
     // active_count.
     let active_count = fcf.pools[0].active_count();

@@ -5332,8 +5332,8 @@ fn assert_state_layout_finalized(state: &StateLayout) {
     let reference = StateLayout::new(
         state.hydro_count,
         state.max_par_order,
-        state.b_total,
-        state.bucket_column_order.clone(),
+        state.n_buckets,
+        state.transit_bucket_column_order.clone(),
         state.n_anticipated,
         state.k_max,
         state.anticipated_lead_stages.clone(),
@@ -5351,8 +5351,8 @@ fn assert_state_layout_finalized(state: &StateLayout) {
         "inflow_lags range must match"
     );
     assert_eq!(
-        state.buckets_out, reference.buckets_out,
-        "buckets_out range must match"
+        state.transit_buckets_out, reference.transit_buckets_out,
+        "transit_buckets_out range must match"
     );
     assert_eq!(
         state.anticipated_state, reference.anticipated_state,
@@ -5371,8 +5371,8 @@ fn assert_state_layout_finalized(state: &StateLayout) {
         "storage_in range must match"
     );
     assert_eq!(
-        state.buckets_in, reference.buckets_in,
-        "buckets_in range must match"
+        state.transit_buckets_in, reference.transit_buckets_in,
+        "transit_buckets_in range must match"
     );
 }
 
@@ -5410,7 +5410,7 @@ fn stage_data_state_matches_indexer_role_a_uniform() {
 
 /// Build a 2-hydro cascade with hydro 2 (upstream) declaring a travel-time
 /// arc into hydro 1 (downstream) — mirrors [`minimal_system`]'s single-hydro
-/// template, extended to a cascade so `bucket_topology.b_total > 0`.
+/// template, extended to a cascade so `bucket_topology.n_buckets > 0`.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
@@ -5653,7 +5653,7 @@ fn system_with_travel_time_arc(n_stages: usize) -> cobre_core::System {
         .expect("system_with_travel_time_arc: valid")
 }
 
-/// A declared travel-time arc (`b_total > 0`) must size `StageData.state` (the
+/// A declared travel-time arc (`n_buckets > 0`) must size `StageData.state` (the
 /// role-(a) `StateLayout` `build_wired_indexer` stores) and the actual LP
 /// template (sized by `build_stage_templates`'s own, independently-recomputed
 /// `StateLayout`) to the SAME `n_state` — the cross-construction agreement the
@@ -5664,7 +5664,7 @@ fn setup_state_and_stage_template_agree_on_n_state_with_declared_arc() {
     let setup = setup_from_system(&system);
 
     assert!(
-        setup.stage_data.state.b_total > 0,
+        setup.stage_data.state.n_buckets > 0,
         "fixture must declare a real travel-time arc"
     );
     assert_eq!(

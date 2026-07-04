@@ -51,8 +51,8 @@ pub struct BackwardPassInputs<'a, S: SolverInterface + Send, C: Communicator> {
     pub basis_store: &'a mut BasisStore,
     /// Stage-level LP context (templates, row counts, noise scales).
     pub ctx: &'a StageContext<'a>,
-    /// Baked LP templates including pre-appended prior-iteration cuts.
-    pub baked: &'a [StageTemplate],
+    /// Frozen LP templates including pre-appended prior-iteration cuts.
+    pub frozen: &'a [StageTemplate],
     /// Future-cost function — receives new cuts after each stage.
     pub fcf: &'a mut FutureCostFunction,
     /// Per-stage delta cut row batches (reused scratch, resized per stage).
@@ -110,7 +110,7 @@ impl<'a, S: SolverInterface + Send, C: Communicator> BackwardPassInputs<'a, S, C
         fwd_pool: &'a mut WorkspacePool<S>,
         basis_store: &'a mut BasisStore,
         ctx: &'a StageContext<'a>,
-        baked_templates: &'a [StageTemplate],
+        frozen_templates: &'a [StageTemplate],
         cut_batches: &'a mut [RowBatch],
         records: &'a [TrajectoryRecord],
         fcf: &'a mut FutureCostFunction,
@@ -128,7 +128,7 @@ impl<'a, S: SolverInterface + Send, C: Communicator> BackwardPassInputs<'a, S, C
             workspaces: &mut fwd_pool.workspaces,
             basis_store,
             ctx,
-            baked: baked_templates,
+            frozen: frozen_templates,
             fcf,
             cut_batches,
             training_ctx,
@@ -281,7 +281,7 @@ impl BackwardPassState {
     /// - `inputs.ctx.templates.len() != num_stages`
     /// - `inputs.ctx.base_rows.len() != num_stages`
     /// - `inputs.risk_measures.len() != num_stages`
-    /// - `inputs.baked.len() != num_stages`
+    /// - `inputs.frozen.len() != num_stages`
     pub fn run<S, C: Communicator>(
         &mut self,
         inputs: &mut BackwardPassInputs<'_, S, C>,
@@ -296,9 +296,9 @@ impl BackwardPassState {
         debug_assert_eq!(inputs.ctx.base_rows.len(), num_stages);
         debug_assert_eq!(inputs.risk_measures.len(), num_stages);
         debug_assert_eq!(
-            inputs.baked.len(),
+            inputs.frozen.len(),
             num_stages,
-            "baked.len() must equal num_stages"
+            "frozen.len() must equal num_stages"
         );
 
         let start = Instant::now();
@@ -717,9 +717,9 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
         &ctx.templates[successor].col_scale,
         inputs.iteration,
     );
-    let baked_tmpl = &inputs.baked[successor];
+    let frozen_tmpl = &inputs.frozen[successor];
     let num_cuts_at_successor =
-        (baked_tmpl.num_rows - template_num_rows) + inputs.cut_batches[successor].num_rows;
+        (frozen_tmpl.num_rows - template_num_rows) + inputs.cut_batches[successor].num_rows;
     #[allow(clippy::cast_possible_truncation)]
     let cut_batch_build_ms = batch_start.elapsed().as_millis() as u64;
 
@@ -736,7 +736,7 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
         cut_batch: &inputs.cut_batches[successor],
         num_cuts_at_successor,
         template_num_rows,
-        baked_template: baked_tmpl,
+        frozen_template: frozen_tmpl,
         successor_active_slots: &state.successor_active_slots_buf,
         cut_activity_tolerance: inputs.cut_activity_tolerance,
         successor_populated_count: inputs.fcf.pools[successor].populated_count,
@@ -1452,10 +1452,10 @@ mod tests {
         let stochastic = make_stochastic_context(n_stages, n_openings);
         let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template_1_0(); n_stages];
-        // Production carries a separate baked-template buffer alongside
-        // `ctx.templates`; mirror that here so `baked` does not alias the
+        // Production carries a separate frozen-template buffer alongside
+        // `ctx.templates`; mirror that here so `frozen` does not alias the
         // `&templates` borrow held by `ctx`.
-        let baked_templates = templates.clone();
+        let frozen_templates = templates.clone();
         let base_rows = vec![1_usize; n_stages];
         let n_state = state.n_state;
         let forward_passes = 2_u32;
@@ -1532,7 +1532,7 @@ mod tests {
             workspaces: &mut workspaces,
             basis_store: &mut basis_store,
             ctx: &ctx,
-            baked: &baked_templates,
+            frozen: &frozen_templates,
             fcf: &mut fcf,
             cut_batches: &mut cut_batches,
             training_ctx: &training_ctx,
@@ -1592,7 +1592,7 @@ mod tests {
         let stochastic = make_stochastic_context(n_stages, n_openings);
         let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template_1_0(); n_stages];
-        let baked_templates = templates.clone();
+        let frozen_templates = templates.clone();
         let base_rows = vec![1_usize; n_stages];
         let n_state = state.n_state;
         let forward_passes = 2_u32;
@@ -1667,7 +1667,7 @@ mod tests {
             workspaces: &mut workspaces,
             basis_store: &mut basis_store,
             ctx: &ctx,
-            baked: &baked_templates,
+            frozen: &frozen_templates,
             fcf: &mut fcf,
             cut_batches: &mut cut_batches,
             training_ctx: &training_ctx,
@@ -1705,12 +1705,13 @@ mod tests {
     ///
     /// This drives the real [`BackwardPassState::sync_stage_metadata`] with a
     /// per-worker `metadata_sync_contribution` shaped exactly as the DCS backward
-    /// path produces it (see `backward::tests::backward_dcs_binding_counts_match_baked`,
+    /// path produces it (see `backward::tests::backward_dcs_binding_counts_match_frozen`,
     /// which proves the DCS path bumps exactly the binding slot): slot 1 bound at
     /// iteration `i`, slot 0 did not. Before the sync `last_active_iter == g` for
     /// both slots; after, the binding slot 1 advances to `i` (even though its
     /// `iteration_generated` is the older `g`), while the non-binding slot 0
-    /// stays frozen at `g`. This is the §3.1 clause-1 prerequisite the seed reads.
+    /// stays frozen at `g` (metadata staleness, unrelated to the frozen-template
+    /// LP mode). This is the §3.1 clause-1 prerequisite the seed reads.
     #[test]
     fn dcs_binding_contribution_advances_last_active_iter() {
         use crate::cut_selection::CutMetadata;

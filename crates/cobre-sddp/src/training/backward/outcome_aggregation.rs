@@ -1,6 +1,6 @@
 //! Per-opening outcome, binding-count, and basis-capture accumulators for the
 //! backward pass: write the per-opening stats delta and aggregated outcome, bump
-//! binding-cut slot increments (baked-order or, for the DCS lazy layout,
+//! binding-cut slot increments (frozen-order or, for the DCS lazy layout,
 //! row-map-correct), and capture the first-solved opening's basis.
 
 use cobre_solver::{SolverInterface, SolverStatistics};
@@ -42,10 +42,10 @@ pub(crate) fn accumulate_opening_outcome<S: SolverInterface + Send>(
 /// Accumulate binding-cut slot increments from the DCS lazy solve's final
 /// all-satisfied LP, slot-correct under the resident [`CutRowMap`] layout.
 ///
-/// The baked path bumps by **baked cut-row order**; under DCS the resident rows
+/// The frozen path bumps by **frozen cut-row order**; under DCS the resident rows
 /// are a row-map-ordered subset, so a resident slot's dual is
 /// `dual[row_map.lp_row_for_slot(slot)]`. Bumps `slot_increments[slot]` when that
-/// dual exceeds `cut_activity_tolerance` — the same binding criterion as the baked
+/// dual exceeds `cut_activity_tolerance` — the same binding criterion as the frozen
 /// path (raw dual, not magnitude). A non-resident slot did not bind (by exactness;
 /// else the lazy loop would have added it), so leaving it uncounted is correct.
 ///
@@ -129,7 +129,7 @@ pub(crate) fn save_basis_at_omega_zero<S: SolverInterface + Send>(
     x_hat: &[f64],
 ) {
     let s = succ.successor;
-    let num_cols = succ.baked_template.num_cols;
+    let num_cols = succ.frozen_template.num_cols;
     let base_row_count = succ.template_num_rows;
     let cut_row_count = succ.num_cuts_at_successor;
     let basis_row_capacity = base_row_count + cut_row_count;

@@ -981,7 +981,7 @@ mod basis_reconstruct_churn {
     // ---------------------------------------------------------------------------
 
     /// No-churn happy path: cuts only accumulate. `basis_consistency_failures == 0`
-    /// confirms the always-baked reconstruction stays active across iterations.
+    /// confirms the always-frozen reconstruction stays active across iterations.
     #[test]
     fn test_basis_reconstruct_no_churn_full_preservation() {
         let case_dir = d03_case_dir();
@@ -1139,7 +1139,7 @@ mod basis_reconstruct_churn {
 
         let mut solver2 = ActiveSolver::new().expect("ActiveSolver phase2 must succeed");
 
-        // The config is baked into setup at construction, so phase 2 cannot reuse the
+        // The config is locked into setup at construction, so phase 2 cannot reuse the
         // phase-1 setup with the new stopping rule: rebuild a fresh setup from the same
         // system and transplant the fully-deactivated FCF into it.
         {
@@ -1218,14 +1218,14 @@ mod basis_reconstruct_churn {
     }
 
     // ---------------------------------------------------------------------------
-    // Test 4: Simulation smoke — baked-path simulate completes with zero failures
+    // Test 4: Simulation smoke — frozen-path simulate completes with zero failures
     // ---------------------------------------------------------------------------
 
-    /// Smoke test: after 2-iteration training on D03, baked-path simulation with the
+    /// Smoke test: after 2-iteration training on D03, frozen-path simulation with the
     /// trained `basis_cache` reconstructs a basis per stage/scenario with zero
     /// `basis_consistency_failures` (no reconstructed basis is rejected by `HiGHS`).
     #[test]
-    fn simulate_baked_path_zero_consistency_failures() {
+    fn simulate_frozen_path_zero_consistency_failures() {
         let case_dir = d03_case_dir();
         let config_path = case_dir.join("config.json");
         let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
@@ -1272,8 +1272,8 @@ mod basis_reconstruct_churn {
             outcome.result.iterations
         );
 
-        let baked_templates = outcome.result.baked_templates.as_deref().expect(
-            "simulate_warm_start: training must produce baked_templates after >= 2 iterations",
+        let frozen_templates = outcome.result.frozen_templates.as_deref().expect(
+            "simulate_warm_start: training must produce frozen_templates after >= 2 iterations",
         );
         let basis_cache = &outcome.result.basis_cache;
         assert!(
@@ -1300,7 +1300,7 @@ mod basis_reconstruct_churn {
                 &comm,
                 &result_tx,
                 None,
-                Some(baked_templates),
+                Some(frozen_templates),
                 basis_cache,
             )
             .expect("simulate must return Ok");
@@ -1316,7 +1316,7 @@ mod basis_reconstruct_churn {
 
         assert_eq!(
             total_rejections, 0,
-            "simulate_warm_start: expected 0 basis_consistency_failures in baked-path simulation, \
+            "simulate_warm_start: expected 0 basis_consistency_failures in frozen-path simulation, \
              got {total_rejections} (reconstructed bases must always be accepted by HiGHS)"
         );
     }

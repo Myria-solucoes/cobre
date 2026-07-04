@@ -21,11 +21,11 @@
 //!
 //! ## Patch sequence
 //!
-//! Each forward-pass solve writes the row buffer (Category 3 noise at
-//! `base_rows[stage]`, Category 4 load balance when `n_load_buses > 0`, Category 5
+//! Each forward-pass solve writes the row buffer (noise at
+//! `base_rows[stage]`, load balance when `n_load_buses > 0`,
 //! z-inflow) via `fill_forward_patches` / `fill_load_patches` /
-//! `fill_z_inflow_patches`, and the column buffer (Category 1 incoming storage,
-//! Category 2 AR lags, Category 6 anticipated state) via `fill_col_state_patches`.
+//! `fill_z_inflow_patches`, and the column buffer (incoming storage,
+//! AR lags, anticipated state) via `fill_col_state_patches`.
 //! The backward pass writes only the column buffer; noise comes from the fixed
 //! opening tree through `fill_forward_patches` with the opening-specific vector.
 

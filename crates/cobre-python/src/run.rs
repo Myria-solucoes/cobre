@@ -597,7 +597,7 @@ pub(crate) fn run_simulation_phase_py(
             &LocalBackend,
             &result_tx,
             None,
-            training_result.baked_templates.as_deref(),
+            training_result.frozen_templates.as_deref(),
             &training_result.basis_cache,
         )
         .map_err(|e| {
@@ -934,7 +934,7 @@ pub(crate) fn apply_training_policy_mode(
             state_dim,
             n_stages,
             config.policy.validate_compatibility,
-            setup.stage_state().b_total,
+            setup.stage_state().n_buckets,
         )
         .map_err(|e| format!("policy validation error: {e}"))?;
 
@@ -979,7 +979,7 @@ pub(crate) fn apply_training_policy_mode(
             state_dim,
             n_stages,
             config.policy.validate_compatibility,
-            setup.stage_state().b_total,
+            setup.stage_state().n_buckets,
         )
         .map_err(|e| format!("policy validation error: {e}"))?;
 
@@ -1033,7 +1033,7 @@ pub(crate) fn apply_training_policy_mode(
 /// Reconstruct an on-disk policy checkpoint into a `(FutureCostFunction,
 /// TrainingResult)` pair for simulation-only / `Study.load_policy`, exactly as
 /// the CLI's `load_policy_for_simulation` builds it (a synthetic
-/// [`TrainingResult::new`] with `baked_templates = None`).
+/// [`TrainingResult::new`] with `frozen_templates = None`).
 ///
 /// The single on-disk reconstruction path shared by the simulation-only branch
 /// of [`run_via_study`] and `Study::load_policy`. Python-free (no `PyO3` types in
@@ -1080,7 +1080,7 @@ pub(crate) fn reconstruct_policy_from_checkpoint(
         state_dim,
         n_stages,
         config.policy.validate_compatibility,
-        setup.stage_state().b_total,
+        setup.stage_state().n_buckets,
     )
     .map_err(|e| format!("policy validation error: {e}"))?;
 
@@ -1107,7 +1107,7 @@ pub(crate) fn reconstruct_policy_from_checkpoint(
         basis_cache,
         Vec::new(),
         None,
-        // None: checkpoints store no baked templates; simulate() re-bakes from the
+        // None: checkpoints store no frozen templates; simulate() re-freezes from the
         // FCF cut pool at startup.
         None,
     );
@@ -2121,11 +2121,11 @@ mod tests {
             fcf.state_dimension, fresh_state_dim,
             "reconstructed FCF state dimension must match the freshly built study's FCF"
         );
-        // The synthetic result must carry no baked templates; simulate re-bakes
+        // The synthetic result must carry no frozen templates; simulate re-freezes
         // from the FCF (monolithic behavior).
         assert!(
-            training_result.baked_templates.is_none(),
-            "loaded-from-checkpoint TrainingResult must carry baked_templates = None"
+            training_result.frozen_templates.is_none(),
+            "loaded-from-checkpoint TrainingResult must carry frozen_templates = None"
         );
 
         std::fs::remove_dir_all(&output_dir).ok();

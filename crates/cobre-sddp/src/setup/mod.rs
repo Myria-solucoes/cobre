@@ -197,12 +197,12 @@ pub struct StudySetup {
 
     /// Water travel-time in-transit bucket topology: canonical column order,
     /// global bucket count, and per-stage reachability mask. Empty
-    /// (`b_total == 0`) when the system declares no travel-time arc.
+    /// (`n_buckets == 0`) when the system declares no travel-time arc.
     // Voice 4: no read site consumes this yet — the state layout reads
-    // `b_total`/`column_order` to size and order the bucket block. The
+    // `n_buckets`/`column_order` to size and order the bucket block. The
     // `#[allow(dead_code)]` refires once that reader lands.
     #[allow(dead_code)]
-    pub(crate) bucket_topology: bucket_topology::BucketTopology,
+    pub(crate) transit_bucket_topology: bucket_topology::TransitBucketTopology,
 
     /// Per-stage warm-start basis cache for warm-start / resume training.
     ///
@@ -314,20 +314,25 @@ impl StudySetup {
         )?;
 
         // Computed here (not inside `build_wired_indexer`) so the one
-        // `BucketTopology` this constructor derives from `system` also seeds the
-        // `StudySetup.bucket_topology` field below, with no second call.
-        let bucket_topology = bucket_topology::build_bucket_topology(system);
+        // `TransitBucketTopology` this constructor derives from `system` also seeds the
+        // `StudySetup.transit_bucket_topology` field below, with no second call.
+        let transit_bucket_topology = bucket_topology::build_transit_bucket_topology(system);
 
         let (state_layout, study_dims) = build_wired_indexer(
             system,
             &stage_templates,
             inflow_method,
             &stochastic,
-            &bucket_topology,
+            &transit_bucket_topology,
         );
 
         let mut initial_state = build_initial_state(system, &study_dims, &state_layout);
-        splice_bucket_seed(&mut initial_state, &state_layout, system, &bucket_topology);
+        splice_transit_bucket_seed(
+            &mut initial_state,
+            &state_layout,
+            system,
+            &transit_bucket_topology,
+        );
 
         let n_stages = stage_templates.templates.len();
         let max_iterations = max_iterations_from_rules(&stopping_rule_set);
@@ -464,7 +469,7 @@ impl StudySetup {
             downstream_par_order,
             energy_conversion,
             hydro_min_storage_hm3,
-            bucket_topology,
+            transit_bucket_topology,
             warm_start_basis_cache: None,
         })
     }
@@ -651,7 +656,7 @@ fn build_wired_indexer(
     stage_templates: &crate::lp_builder::StageTemplates,
     inflow_method: crate::InflowNonNegativityMethod,
     stochastic: &StochasticContext,
-    bucket_topology: &bucket_topology::BucketTopology,
+    transit_bucket_topology: &bucket_topology::TransitBucketTopology,
 ) -> (StateLayout, StudyDimensions) {
     let stage_templates_ref = &stage_templates.templates;
     let has_inflow_penalty =
@@ -713,8 +718,8 @@ fn build_wired_indexer(
     let state = StateLayout::new(
         hydro_count,
         max_par_order,
-        bucket_topology.b_total,
-        bucket_topology.column_order.clone(),
+        transit_bucket_topology.n_buckets,
+        transit_bucket_topology.column_order.clone(),
         n_anticipated,
         k_max,
         anticipated_lead_stages,
@@ -1210,20 +1215,20 @@ fn build_initial_state(
     state
 }
 
-/// Write the travel-time bucket seed into `state`'s declared `buckets_out`
+/// Write the travel-time bucket seed into `state`'s declared `transit_buckets_out`
 /// slots — the same index space [`StateLayout::state_to_lp_incoming_column`]
-/// remaps to the pinned `buckets_in` LP column, so no separate pin wiring is
+/// remaps to the pinned `transit_buckets_in` LP column, so no separate pin wiring is
 /// needed beyond this splice.
-fn splice_bucket_seed(
+fn splice_transit_bucket_seed(
     state: &mut [f64],
     layout: &StateLayout,
     system: &System,
-    topology: &bucket_topology::BucketTopology,
+    topology: &bucket_topology::TransitBucketTopology,
 ) {
-    let seed = bucket_seed::build_initial_bucket_state(system, topology);
-    debug_assert_eq!(seed.len(), layout.b_total);
+    let seed = bucket_seed::build_initial_transit_bucket_state(system, topology);
+    debug_assert_eq!(seed.len(), layout.n_buckets);
     for (b, &value) in seed.iter().enumerate() {
-        state[layout.buckets_out.start + b] = value;
+        state[layout.transit_buckets_out.start + b] = value;
     }
 }
 

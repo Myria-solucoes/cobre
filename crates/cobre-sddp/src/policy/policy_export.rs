@@ -87,9 +87,9 @@ pub fn build_stage_entity_manifest(
                     stage_id,
                 ),
             }
-        } else if global_layout.buckets_in.contains(&col) {
-            let b = col - global_layout.buckets_in.start;
-            let (plant_idx, lag) = global_layout.bucket_column_order[b];
+        } else if global_layout.transit_buckets_in.contains(&col) {
+            let b = col - global_layout.transit_buckets_in.start;
+            let (plant_idx, lag) = global_layout.transit_bucket_column_order[b];
             let hydro = &hydros[plant_idx];
             EntitySlot {
                 entity_type: ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
@@ -105,7 +105,7 @@ pub fn build_stage_entity_manifest(
         } else {
             debug_assert!(
                 global_layout.anticipated_state.contains(&col),
-                "incoming column {col} must lie in storage_in, inflow_lags, buckets_in, or \
+                "incoming column {col} must lie in storage_in, inflow_lags, transit_buckets_in, or \
                  anticipated_state"
             );
             let offset = col - global_layout.anticipated_state.start;
@@ -558,13 +558,20 @@ mod tests {
     /// Bucket block classification (`N=2, L=2, B=2, A=1, k_max=2`): the two
     /// travel-time bucket slots sit between the lag block and the anticipated block,
     /// each carrying `entity_type == HydroTransitBucket`, `entity_id ==` the
-    /// downstream hydro id (`bucket_column_order[b].0` into `system.hydros()`), and
-    /// `subindex ==` the maturity lag `d` (`bucket_column_order[b].1`).
+    /// downstream hydro id (`transit_bucket_column_order[b].0` into `system.hydros()`), and
+    /// `subindex ==` the maturity lag `d` (`transit_bucket_column_order[b].1`).
     #[test]
     fn bucket_slots_classify_as_transit_bucket_with_downstream_id_and_lag() {
         let system = system_2h_1ant((None, None), (None, None));
-        let global =
-            test_support::state_layout_with_buckets(2, 2, 2, vec![(0, 1), (1, 2)], 1, 2, vec![2]);
+        let global = test_support::state_layout_with_transit_buckets(
+            2,
+            2,
+            2,
+            vec![(0, 1), (1, 2)],
+            1,
+            2,
+            vec![2],
+        );
         let projection = CutStateProjection::new(&global, ALL_ENABLED);
 
         let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);

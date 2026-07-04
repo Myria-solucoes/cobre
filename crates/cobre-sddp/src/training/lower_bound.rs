@@ -2284,7 +2284,7 @@ mod tests {
         assert_eq!(n_hydros, 2, "fixture has two filling hydros");
 
         // Stage 0 is H_A's terminal Filling stage: the per-stage geometry the
-        // template was baked with must carry the filling_target (σ_fill) row family
+        // template was frozen with must carry the filling_target (σ_fill) row family
         // plus the σ_fill slack column.
         let geom0 = &templates.geometry_per_stage[0];
         assert!(
@@ -2369,7 +2369,8 @@ mod tests {
 
         // PreFilling noise-scale zeroing: H_B is PreFilling at stage 0 (id 0 <
         // start 2), so its stage-0 noise_scale entry is exactly 0.0 — the
-        // frozen-storage-identity freeze the lower bound inherits via
+        // frozen-storage-identity freeze (the PreFilling row-pinning contract,
+        // unrelated to the frozen-template LP mode) the lower bound inherits via
         // `spec.noise_scale`. H_A is Filling at stage 0 (not PreFilling), so its
         // entry is NOT zeroed — the contrast that makes the zeroing non-vacuous.
         let stage0_noise_a = templates.noise_scale[h_a];
@@ -2532,8 +2533,8 @@ mod tests {
     /// single-opening stage-0 evaluation already exercises the per-stage-visit
     /// pinning contract.
     #[test]
-    fn evaluate_lower_bound_pins_bucket_incoming_columns() {
-        let state = crate::test_support::state_layout_with_buckets(
+    fn evaluate_lower_bound_pins_transit_bucket_incoming_columns() {
+        let state = crate::test_support::state_layout_with_transit_buckets(
             0,
             0,
             2,
@@ -2544,10 +2545,11 @@ mod tests {
         );
         assert_eq!(state.n_state, 2);
 
-        let template = crate::test_support::bucket_only_template(state.theta + 1, state.n_state);
+        let template =
+            crate::test_support::transit_bucket_only_template(state.theta + 1, state.n_state);
         let fcf = make_fcf(1, state.n_state);
         let initial_state = vec![7.0_f64, 11.0];
-        let mut patch_buf = PatchBuffer::new(0, 0, 0, 0, state.b_total, 0, 0);
+        let mut patch_buf = PatchBuffer::new(0, 0, 0, 0, state.n_buckets, 0, 0);
         let opening_tree = simple_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -2595,10 +2597,10 @@ mod tests {
         let cp = bundle.patch_buf.state_col_patch_count();
         assert_eq!(
             cp, 2,
-            "state_col_patch_count must equal b_total when N=0, A=0"
+            "state_col_patch_count must equal n_buckets when N=0, A=0"
         );
         for (i, &expected) in initial_state.iter().enumerate() {
-            let col = state.buckets_in.start + i;
+            let col = state.transit_buckets_in.start + i;
             let pos = bundle.patch_buf.col_indices[..cp]
                 .iter()
                 .position(|&c| c == col)

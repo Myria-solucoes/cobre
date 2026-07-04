@@ -77,11 +77,11 @@ pub(crate) fn apply_col_scale(template: &mut StageTemplate, col_scale: &[f64]) {
 /// Override the matrix-derived empty-column default (`1.0`) on travel-time
 /// bucket columns with the corresponding downstream plant's already-computed
 /// storage scale — buckets are volumes (hm³), the same unit as storage, and
-/// `bucket_column_order[b] = (plant_canonical_idx, _lag)` IS that plant's
+/// `transit_bucket_column_order[b] = (plant_canonical_idx, _lag)` IS that plant's
 /// `storage` column offset, so REUSE it rather than re-deriving a bucket scale
 /// from row/column entries the LP fill has not wired yet. Every lag for the
 /// same plant shares that one scale — they measure the same reservoir's
-/// incoming volume, not independent quantities. No-op when `b_total == 0`.
+/// incoming volume, not independent quantities. No-op when `n_buckets == 0`.
 ///
 /// # Panics (debug builds only)
 ///
@@ -99,10 +99,10 @@ pub(crate) fn apply_bucket_col_scale(col_scale: &mut [f64], state_layout: &State
         state_layout.theta,
         col_scale.len()
     );
-    for (b, &(plant_idx, _lag)) in state_layout.bucket_column_order.iter().enumerate() {
+    for (b, &(plant_idx, _lag)) in state_layout.transit_bucket_column_order.iter().enumerate() {
         let d = col_scale[state_layout.storage.start + plant_idx];
-        col_scale[state_layout.buckets_out.start + b] = d;
-        col_scale[state_layout.buckets_in.start + b] = d;
+        col_scale[state_layout.transit_buckets_out.start + b] = d;
+        col_scale[state_layout.transit_buckets_in.start + b] = d;
     }
 }
 
@@ -445,8 +445,8 @@ mod tests {
             StateLayout::new(2, 0, 3, vec![(0, 1), (0, 2), (1, 1)], 0, 0, vec![], &[0, 0]);
 
         assert_eq!(state_layout.storage, 0..2);
-        assert_eq!(state_layout.buckets_out, 2..5);
-        assert_eq!(state_layout.buckets_in, 9..12);
+        assert_eq!(state_layout.transit_buckets_out, 2..5);
+        assert_eq!(state_layout.transit_buckets_in, 9..12);
         assert_eq!(state_layout.theta, 12);
 
         let mut col_scale = vec![1.0_f64; state_layout.theta + 1];
@@ -456,21 +456,21 @@ mod tests {
         super::apply_bucket_col_scale(&mut col_scale, &state_layout);
 
         assert!(col_scale.len() > state_layout.theta);
-        for (b, &(plant_idx, _lag)) in state_layout.bucket_column_order.iter().enumerate() {
+        for (b, &(plant_idx, _lag)) in state_layout.transit_bucket_column_order.iter().enumerate() {
             let expected = col_scale[state_layout.storage.start + plant_idx];
-            let out = col_scale[state_layout.buckets_out.start + b];
-            let in_ = col_scale[state_layout.buckets_in.start + b];
+            let out = col_scale[state_layout.transit_buckets_out.start + b];
+            let in_ = col_scale[state_layout.transit_buckets_in.start + b];
             assert!(out.is_finite() && out == expected, "bucket {b} out scale");
             assert!(in_.is_finite() && in_ == expected, "bucket {b} in scale");
         }
         // Hydro 0's two lags (buckets 0, 1) share hydro 0's scale.
-        assert_eq!(col_scale[state_layout.buckets_out.start], 2.0);
-        assert_eq!(col_scale[state_layout.buckets_out.start + 1], 2.0);
+        assert_eq!(col_scale[state_layout.transit_buckets_out.start], 2.0);
+        assert_eq!(col_scale[state_layout.transit_buckets_out.start + 1], 2.0);
         // Hydro 1's one lag (bucket 2) gets hydro 1's scale.
-        assert_eq!(col_scale[state_layout.buckets_out.start + 2], 5.0);
+        assert_eq!(col_scale[state_layout.transit_buckets_out.start + 2], 5.0);
     }
 
-    /// `B == 0`: `bucket_column_order` is empty, so the override loop touches
+    /// `B == 0`: `transit_bucket_column_order` is empty, so the override loop touches
     /// no column — `col_scale` is left exactly as the generic computation
     /// produced it.
     #[test]
@@ -484,7 +484,7 @@ mod tests {
 
         assert_eq!(
             col_scale, before,
-            "b_total == 0 must leave col_scale untouched"
+            "n_buckets == 0 must leave col_scale untouched"
         );
     }
 

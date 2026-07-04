@@ -265,7 +265,7 @@ mod self_reproducibility_regression {
                 &comm,
                 &result_tx,
                 None,
-                result.baked_templates.as_deref(),
+                result.frozen_templates.as_deref(),
                 &result.basis_cache,
             )
             .expect("simulate must return Ok");
@@ -473,7 +473,7 @@ mod b6a_hydro_inflow_parity {
                 &comm,
                 &result_tx,
                 None,
-                result.baked_templates.as_deref(),
+                result.frozen_templates.as_deref(),
                 &result.basis_cache,
             )
             .expect("simulate must return Ok");
@@ -1685,17 +1685,17 @@ mod determinism {
 
 mod water_travel_time_no_arc_byte_identity {
     //! With the water travel-time feature compiled in but no arc declared on any
-    //! hydro, `b_total == 0` and the `StateLayout`/LP/cuts/outputs must collapse
+    //! hydro, `n_buckets == 0` and the `StateLayout`/LP/cuts/outputs must collapse
     //! to the pre-bucket baseline byte-for-byte (`.claude/rules/sddp.md`, "Water
     //! travel time"). This module makes that guarantee an explicit regression at
     //! two scales:
     //!
-    //! - [`synthetic_no_arc_state_layout_matches_pre_bucket_formula`] and
+    //! - [`synthetic_no_arc_state_layout_matches_pre_transit_bucket_formula`] and
     //!   [`k1_chronological_byte_identical_to_parallel_with_no_arc_declared`]
     //!   build a tiny in-code system (no solver, no baseline) and check the
     //!   `StateLayout` dimensions and the `K = 1` chronological/parallel
     //!   templates directly.
-    //! - [`d06_state_layout_matches_pre_bucket_formula`] and
+    //! - [`d06_state_layout_matches_pre_transit_bucket_formula`] and
     //!   `d06_parity_hash_matches_existing_baseline_{highs,clp}` exercise a real
     //!   golden deterministic case (D06, which declares no arc): its
     //!   `StateLayout` and its full train+simulate parity hash, reusing
@@ -2063,30 +2063,30 @@ mod water_travel_time_no_arc_byte_identity {
         );
     }
 
-    /// Shared pre-bucket-formula assertion: `b_total == 0`, `buckets_out` /
-    /// `buckets_in` / `bucket_column_order` empty, and `n_state` equal to the
+    /// Shared pre-bucket-formula assertion: `n_buckets == 0`, `transit_buckets_out` /
+    /// `transit_buckets_in` / `transit_bucket_column_order` empty, and `n_state` equal to the
     /// pre-bucket `N*(1+L) + A*k_max` — computed from the layout's OWN public
     /// dimensions (`hydro_count`, `max_par_order`, `n_anticipated`, `k_max`), not
     /// a hand-picked literal, so the check holds for any no-arc case.
     fn assert_no_arc_state_layout(state: &StateLayout) {
-        assert_eq!(state.b_total, 0, "no arc declared: b_total must be 0");
+        assert_eq!(state.n_buckets, 0, "no arc declared: n_buckets must be 0");
         assert!(
-            state.buckets_out.is_empty(),
-            "buckets_out must be empty when b_total == 0"
+            state.transit_buckets_out.is_empty(),
+            "transit_buckets_out must be empty when n_buckets == 0"
         );
         assert!(
-            state.buckets_in.is_empty(),
-            "buckets_in must be empty when b_total == 0"
+            state.transit_buckets_in.is_empty(),
+            "transit_buckets_in must be empty when n_buckets == 0"
         );
         assert!(
-            state.bucket_column_order.is_empty(),
-            "bucket_column_order must be empty when b_total == 0"
+            state.transit_bucket_column_order.is_empty(),
+            "transit_bucket_column_order must be empty when n_buckets == 0"
         );
 
-        let pre_bucket_n_state =
+        let pre_transit_bucket_n_state =
             state.hydro_count * (1 + state.max_par_order) + state.n_anticipated * state.k_max;
         assert_eq!(
-            state.n_state, pre_bucket_n_state,
+            state.n_state, pre_transit_bucket_n_state,
             "n_state must equal the pre-bucket formula N*(1+L) + A*k_max when B == 0"
         );
     }
@@ -2094,7 +2094,7 @@ mod water_travel_time_no_arc_byte_identity {
     /// Synthetic no-arc system: `StateLayout` collapses to the pre-bucket
     /// formula with no `.sha256` baseline involved.
     #[test]
-    fn synthetic_no_arc_state_layout_matches_pre_bucket_formula() {
+    fn synthetic_no_arc_state_layout_matches_pre_transit_bucket_formula() {
         let system = build_system(BlockMode::Parallel);
         let config = build_config();
         let setup = build_setup_in_code(system, &config);
@@ -2178,7 +2178,7 @@ mod water_travel_time_no_arc_byte_identity {
         not(feature = "slow-tests"),
         ignore = "slow: run with --features slow-tests"
     )]
-    fn d06_state_layout_matches_pre_bucket_formula() {
+    fn d06_state_layout_matches_pre_transit_bucket_formula() {
         let setup = build_d06_setup();
         assert_no_arc_state_layout(setup.stage_state());
     }

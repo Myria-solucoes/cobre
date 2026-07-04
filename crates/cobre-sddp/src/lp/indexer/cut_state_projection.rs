@@ -100,8 +100,8 @@ impl CutStateProjection {
     pub fn new(global: &StateLayout, state_config: StageStateConfig) -> Self {
         let n = global.hydro_count;
         let lag_end = n * (1 + global.max_par_order);
-        let bucket_end = lag_end + global.b_total;
-        let anticipated_end = bucket_end + global.n_anticipated * global.k_max;
+        let transit_bucket_end = lag_end + global.n_buckets;
+        let anticipated_end = transit_bucket_end + global.n_anticipated * global.k_max;
 
         let mut incoming_columns = Vec::new();
         let mut outgoing_columns = Vec::new();
@@ -155,7 +155,7 @@ impl CutStateProjection {
         // per-stage `StageStateConfig` reduction here would shrink pool
         // `state_dimension` and misalign the intercept dot against the global
         // trial state.
-        for g in lag_end..bucket_end {
+        for g in lag_end..transit_bucket_end {
             push_dim(
                 global,
                 &mut incoming_columns,
@@ -165,7 +165,7 @@ impl CutStateProjection {
                 g,
             );
         }
-        for g in bucket_end..anticipated_end {
+        for g in transit_bucket_end..anticipated_end {
             push_dim(
                 global,
                 &mut incoming_columns,
@@ -296,11 +296,11 @@ mod tests {
 
     /// Same as [`finalized`] but with a declared bucket block, mirroring
     /// `state_layout.rs`'s own bucket-aware test helper.
-    fn finalized_with_buckets(
+    fn finalized_with_transit_buckets(
         hydro_count: usize,
         max_par_order: usize,
-        b_total: usize,
-        bucket_column_order: Vec<(usize, usize)>,
+        n_buckets: usize,
+        transit_bucket_column_order: Vec<(usize, usize)>,
         n_anticipated: usize,
         k_max: usize,
         anticipated_lead_stages: Vec<usize>,
@@ -309,8 +309,8 @@ mod tests {
         StateLayout::new(
             hydro_count,
             max_par_order,
-            b_total,
-            bucket_column_order,
+            n_buckets,
+            transit_bucket_column_order,
             n_anticipated,
             k_max,
             anticipated_lead_stages,
@@ -510,7 +510,7 @@ mod tests {
     /// slots.
     #[test]
     fn bucket_block_always_included_with_storage_only() {
-        let global = finalized_with_buckets(2, 1, 2, vec![(0, 1), (1, 1)], 1, 2, vec![2]);
+        let global = finalized_with_transit_buckets(2, 1, 2, vec![(0, 1), (1, 1)], 1, 2, vec![2]);
         let cut = CutStateProjection::new(&global, STORAGE_ONLY);
 
         assert_eq!(cut.n_state(), 6);
@@ -525,8 +525,8 @@ mod tests {
         for i in 0..2 {
             assert_eq!(
                 cut.state_to_lp_incoming_column(2 + i),
-                global.buckets_in.start + i,
-                "bucket slot {i} must map to buckets_in.start + {i} despite \
+                global.transit_buckets_in.start + i,
+                "bucket slot {i} must map to transit_buckets_in.start + {i} despite \
                  inflow_lags disabled"
             );
         }
@@ -548,10 +548,10 @@ mod tests {
     /// `(index, column)` pair individually still resolves to a valid column).
     #[test]
     fn bucket_render_pairs_sit_between_lag_and_anticipated() {
-        let global = finalized_with_buckets(2, 1, 2, vec![(0, 1), (1, 1)], 1, 2, vec![2]);
+        let global = finalized_with_transit_buckets(2, 1, 2, vec![(0, 1), (1, 1)], 1, 2, vec![2]);
         let cut = CutStateProjection::new(&global, ALL_ENABLED);
 
-        assert_eq!(global.buckets_out, 4..6);
+        assert_eq!(global.transit_buckets_out, 4..6);
         assert_eq!(cut.n_state(), global.n_state);
 
         let rendered: Vec<(usize, usize)> = cut.render_pairs().collect();
@@ -566,14 +566,14 @@ mod tests {
              storage→lag→buckets→anticipated"
         );
 
-        let bucket_positions: Vec<usize> = rendered
+        let transit_bucket_positions: Vec<usize> = rendered
             .iter()
             .enumerate()
-            .filter(|&(_, &(_, col))| global.buckets_out.contains(&col))
+            .filter(|&(_, &(_, col))| global.transit_buckets_out.contains(&col))
             .map(|(pos, _)| pos)
             .collect();
         assert_eq!(
-            bucket_positions,
+            transit_bucket_positions,
             vec![4, 5],
             "bucket render pairs must land after the lag block (positions 0..4) \
              and before the anticipated block (positions 6..8)"
@@ -586,11 +586,11 @@ mod tests {
     /// for the always-included bucket block inserted between lag and
     /// anticipated.
     #[test]
-    fn b_zero_projection_matches_pre_bucket_walk() {
-        let global = finalized_with_buckets(3, 2, 0, vec![], 2, 2, vec![1, 2]);
+    fn b_zero_projection_matches_pre_transit_bucket_walk() {
+        let global = finalized_with_transit_buckets(3, 2, 0, vec![], 2, 2, vec![1, 2]);
         let cut = CutStateProjection::new(&global, ALL_ENABLED);
 
-        assert_eq!(global.b_total, 0);
+        assert_eq!(global.n_buckets, 0);
         assert_eq!(cut.n_state(), global.n_state);
         for j in 0..global.n_state {
             assert_eq!(

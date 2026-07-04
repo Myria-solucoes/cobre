@@ -158,7 +158,7 @@ where
                 max_par_order: state.max_par_order,
                 n_load_buses: stage_ctx.n_load_buses,
                 max_blocks: config.loop_config.max_blocks,
-                b_total: state.b_total,
+                n_buckets: state.n_buckets,
                 downstream_par_order: stage_ctx.downstream_par_order,
                 max_openings: (0..ranks.num_stages)
                     .map(|t| training_ctx.stochastic.opening_tree().n_openings(t))
@@ -262,7 +262,7 @@ where
             stage_ctx.templates[0].num_rows,
             state.hydro_count,
             state.max_par_order,
-            state.b_total,
+            state.n_buckets,
             state.n_anticipated,
             state.k_max,
             stage_ctx,
@@ -461,7 +461,7 @@ where
         #[allow(clippy::cast_possible_truncation)]
         let total_time_ms = (self.results.start_time.elapsed().as_millis() as u64).max(1);
 
-        let baked_templates = self.scratch.baked_templates;
+        let frozen_templates = self.scratch.frozen_templates;
         let visited_archive = self.visited_archive;
         let TrainingResults {
             final_lb,
@@ -502,7 +502,7 @@ where
                 basis_cache,
                 solver_stats_log,
                 visited_archive,
-                Some(baked_templates),
+                Some(frozen_templates),
             ),
             error: None,
         })
@@ -515,7 +515,7 @@ where
     ///
     /// Returns `Err(comm_err)` if `broadcast_basis_cache` itself fails.
     pub(crate) fn finalize_with_error(self, err: SddpError) -> Result<TrainingOutcome, SddpError> {
-        let baked_templates = self.scratch.baked_templates;
+        let frozen_templates = self.scratch.frozen_templates;
         let visited_archive = self.visited_archive;
         let TrainingResults {
             final_lb,
@@ -559,7 +559,7 @@ where
                 basis_cache,
                 solver_stats_log,
                 visited_archive,
-                Some(baked_templates),
+                Some(frozen_templates),
             ),
             error: Some(err),
         })
@@ -713,7 +713,7 @@ where
             &mut self.fwd_pool,
             &mut self.basis_store,
             self.stage_ctx,
-            &self.scratch.baked_templates,
+            &self.scratch.frozen_templates,
             &mut self.scratch.cut_batches,
             &self.scratch.records,
             self.fcf,
@@ -789,7 +789,7 @@ where
         Ok((backward_result, bwd_solve_time_ms))
     }
 
-    /// Apply cut selection, budget enforcement, bitmap shift, and template baking.
+    /// Apply cut selection, budget enforcement, bitmap shift, and template freeze.
     ///
     /// All operations are O(active cuts) and perform no heap allocation when the
     /// cut pools have not grown since the previous iteration.
@@ -961,41 +961,41 @@ where
             );
         }
 
-        let bake_start = Instant::now();
-        let total_rows_baked = self.bake_active_cuts_into_templates();
+        let freeze_start = Instant::now();
+        let total_rows_frozen = self.freeze_active_cuts_into_templates();
         #[allow(clippy::cast_possible_truncation)]
-        let bake_time_ms = bake_start.elapsed().as_millis() as u64;
+        let freeze_time_ms = freeze_start.elapsed().as_millis() as u64;
         emit(
             self.runtime.event_sender(),
             #[allow(clippy::cast_possible_truncation)]
-            TrainingEvent::PolicyTemplateBakeComplete {
+            TrainingEvent::PolicyTemplateFreezeComplete {
                 iteration,
                 stages_processed: self.ranks.num_stages as u32,
-                total_rows_baked,
-                bake_time_ms,
+                total_rows_frozen,
+                freeze_time_ms,
             },
         );
     }
 
-    /// Rebuild every stage's baked template from the current active cut set,
-    /// returning the total number of cut rows baked.
+    /// Rebuild every stage's frozen template from the current active cut set,
+    /// returning the total number of cut rows frozen.
     ///
-    /// Each `baked_templates[t]` becomes the base template plus one structural
+    /// Each `frozen_templates[t]` becomes the base template plus one structural
     /// row per active cut in `fcf.pools[t]` (`active_cuts()` order). With no
-    /// active cuts (a fresh start) every batch is empty and the bake is a
-    /// structural copy of the base template — identical to the pre-bake done in
+    /// active cuts (a fresh start) every batch is empty and the freeze is a
+    /// structural copy of the base template — identical to the pre-freeze done in
     /// `IterationScratch::new`.
     ///
-    /// Deliberately left unoptimized: the rebake is quadratic in the active-cut
+    /// Deliberately left unoptimized: the refreeze is quadratic in the active-cut
     /// count only in the no-cut-selection default, which production never runs at
-    /// scale. An append-only fast path would fire only there, so the full rebake
+    /// scale. An append-only fast path would fire only there, so the full refreeze
     /// is kept.
-    fn bake_active_cuts_into_templates(&mut self) -> u64 {
-        let mut total_rows_baked: u64 = 0;
+    fn freeze_active_cuts_into_templates(&mut self) -> u64 {
+        let mut total_rows_frozen: u64 = 0;
         let state = self.training_ctx.state;
         for t in 0..self.ranks.num_stages {
             build_cut_row_batch_into(
-                &mut self.scratch.bake_row_batches[t],
+                &mut self.scratch.freeze_row_batches[t],
                 self.fcf,
                 t,
                 state,
@@ -1004,16 +1004,16 @@ where
             );
             #[allow(clippy::cast_possible_truncation)]
             {
-                total_rows_baked += self.scratch.bake_row_batches[t].num_rows as u64;
+                total_rows_frozen += self.scratch.freeze_row_batches[t].num_rows as u64;
             }
-            cobre_solver::bake_rows_into_template(
+            cobre_solver::freeze_rows_into_template(
                 &self.stage_ctx.templates[t],
-                &self.scratch.bake_row_batches[t],
-                &mut self.scratch.baked_templates[t],
-                &mut self.scratch.baking_scratch,
+                &self.scratch.freeze_row_batches[t],
+                &mut self.scratch.frozen_templates[t],
+                &mut self.scratch.freeze_scratch,
             );
         }
-        total_rows_baked
+        total_rows_frozen
     }
 
     /// Seed the per-scenario basis store from a checkpoint's stored bases
@@ -1039,16 +1039,16 @@ where
         }
     }
 
-    /// Bake the warm-start / resume pre-loaded cuts into the stage templates
+    /// Freeze the warm-start / resume pre-loaded cuts into the stage templates
     /// before the first training iteration runs.
     ///
-    /// `IterationScratch::new` pre-bakes with an empty cut batch, and iteration
-    /// 1's passes read `scratch.baked_templates` before `run_cut_management`
-    /// rebakes; without this, the first post-resume iteration would solve a
+    /// `IterationScratch::new` pre-freezes with an empty cut batch, and iteration
+    /// 1's passes read `scratch.frozen_templates` before `run_cut_management`
+    /// refreezes; without this, the first post-resume iteration would solve a
     /// cut-less, myopic policy. No-op for a fresh start (no active cuts).
-    pub(crate) fn prime_baked_templates(&mut self) {
+    pub(crate) fn prime_frozen_templates(&mut self) {
         if self.fcf.total_active_cuts() > 0 {
-            let _ = self.bake_active_cuts_into_templates();
+            let _ = self.freeze_active_cuts_into_templates();
         }
     }
 
@@ -1666,9 +1666,9 @@ mod tests {
             "cut_batches must have one RowBatch per stage"
         );
         assert_eq!(
-            session.scratch.baked_templates.len(),
+            session.scratch.frozen_templates.len(),
             n_stages,
-            "baked_templates must have one per stage"
+            "frozen_templates must have one per stage"
         );
         // send_stride = n_workers_local * bwd_max_openings * WORKER_STATS_ENTRY_STRIDE
         // n_fwd_threads=1 → n_workers_local=1; max_openings=1 for this fixture
@@ -1935,7 +1935,7 @@ mod tests {
     /// 9  × per-iteration events (emitted by `run_iteration`):
     ///        `WorkerTiming(Forward)`, `ForwardPassComplete`, `ForwardSyncComplete`,
     ///        `WorkerTiming(Backward)`, `BackwardPassComplete`, `PolicySyncComplete`,
-    ///        `PolicyTemplateBakeComplete`, `ConvergenceUpdate`, `IterationSummary`
+    ///        `PolicyTemplateFreezeComplete`, `ConvergenceUpdate`, `IterationSummary`
     /// 1  × `TrainingFinished`  (emitted by `finalize`)
     ///
     /// Total = 11 events.
@@ -2057,8 +2057,11 @@ mod tests {
             events[6]
         );
         assert!(
-            matches!(events[7], TrainingEvent::PolicyTemplateBakeComplete { .. }),
-            "events[7] must be PolicyTemplateBakeComplete, got: {:?}",
+            matches!(
+                events[7],
+                TrainingEvent::PolicyTemplateFreezeComplete { .. }
+            ),
+            "events[7] must be PolicyTemplateFreezeComplete, got: {:?}",
             events[7]
         );
         assert!(

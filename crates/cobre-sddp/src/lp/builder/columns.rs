@@ -35,7 +35,7 @@ pub(super) fn fill_stage_columns(
     };
 
     fill_storage_columns(ctx, stage, stage_idx, layout, b);
-    fill_bucket_columns(layout, b);
+    fill_transit_bucket_columns(layout, b);
     fill_ar_lag_columns(layout, b);
     fill_anticipated_state_columns(layout, b);
     fill_theta_column(layout, b);
@@ -119,17 +119,17 @@ fn fill_storage_columns(
 ///
 /// Outgoing buckets default to `[0, INF)` (a physical volume); a lag beyond
 /// this stage's horizon-reachable mask gets no definition row
-/// (`entries::fill_bucket_definition_entries`), so its outgoing column is
+/// (`entries::fill_transit_bucket_definition_entries`), so its outgoing column is
 /// frozen `[0, 0]` here rather than left free — the same commissioning-
 /// dormant-column convention as NCS/thermal/line/station/contract, not a
 /// solver-dependent degenerate default. Incoming buckets stay at the open
 /// `[0, INF)` default: pinned every solve by `fill_col_state_patches`, dense
 /// over every bucket regardless of masking.
-fn fill_bucket_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
+fn fill_transit_bucket_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
     let state = layout.state;
-    for (b, pos) in layout.bucket_row_pos.iter().enumerate() {
+    for (b, pos) in layout.transit_bucket_row_pos.iter().enumerate() {
         if pos.is_none() {
-            let col = state.buckets_out.start + b;
+            let col = state.transit_buckets_out.start + b;
             bufs.col_lower[col] = 0.0;
             bufs.col_upper[col] = 0.0;
         }

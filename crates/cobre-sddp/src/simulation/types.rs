@@ -351,7 +351,7 @@ pub struct SimulationInflowLagResult {
 /// mirroring [`SimulationInflowLagResult`]: a downstream plant fed by a declared
 /// travel-time arc owns `L_j` rows, one per maturity bucket. Empty for a plant
 /// with no incoming arc, so the whole table is absent for a non-travel-time
-/// study (`b_total == 0`).
+/// study (`n_buckets == 0`).
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct SimulationTransitBucketResult {
     /// Stage index (0-based).
@@ -422,7 +422,7 @@ pub struct SimulationStageResult {
     /// Empty if no hydros have AR order > 0.
     pub inflow_lags: Vec<SimulationInflowLagResult>,
     /// Travel-time in-transit bucket records for this stage.
-    /// Empty if no travel-time arc is declared (`b_total == 0`).
+    /// Empty if no travel-time arc is declared (`n_buckets == 0`).
     pub transit_buckets: Vec<SimulationTransitBucketResult>,
     /// Generic constraint violation records for this stage.
     /// Empty if no generic constraints exist or no violations occurred.

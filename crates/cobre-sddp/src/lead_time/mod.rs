@@ -9,11 +9,13 @@
 //! [`resolve_spread`] is the sole resolver dependency for the water
 //! travel-time feature (`docs/design/water-travel-time-sddp-analysis.md`
 //! §2.5, `docs/design/temporal-lag-unification.md` §3). Every factor it
-//! returns — stage-clock `k`, block-resolved `chi`/`kappa`, and
-//! per-arrival-stage `delivery` — overlaps `arrival_window`'s ONE shared
-//! uniform arrival density against nested calendar partitions (stage clock
-//! ⊃ block clock), so the aggregation-consistency identity
-//! `Σ_b w_b·χ_{b,d} == k_d` holds by construction rather than by convention.
+//! returns — stage-clock `stage_weights` (the k-factors), block-resolved
+//! `block_deposits`/`within_stage_routing` (the χ/κ factors), and
+//! per-arrival-stage `arrival_density` (the delivery density) — overlaps
+//! `arrival_window`'s ONE shared uniform arrival density against nested
+//! calendar partitions (stage clock ⊃ block clock), so the
+//! aggregation-consistency identity `Σ_b w_b·χ_{b,d} == k_d` holds by
+//! construction rather than by convention.
 
 use cobre_core::window_period_overlaps;
 
@@ -21,30 +23,34 @@ use cobre_core::window_period_overlaps;
 /// single stage `t`.
 #[derive(Debug, Clone)]
 pub struct SpreadResolution {
-    /// Deepest future stage the arrival window reaches — the max index
-    /// reached, never a count (`window_period_overlaps`'s contiguity
+    /// Deepest future stage the arrival window reaches (the depth) — the max
+    /// index reached, never a count (`window_period_overlaps`'s contiguity
     /// contract).
-    pub depth: usize,
-    /// Stage-clock weight `k_d` for `d = 0..=depth`; `k_0` is the same-stage
-    /// share and `Σ_d k_d == 1`.
-    pub k: Vec<f64>,
-    /// Per-source-block deposit, `chi[b][d]`: index `0` is block `b`'s
-    /// same-stage retained share, `1..=depth` are its bucket-`d` deposits.
-    /// Empty when the anchor has no block partition.
-    pub chi: Vec<Vec<f64>>,
-    /// Per-source-block within-stage routing, `kappa[b][j]` to target block
-    /// `b + j` (`j == 0` is block `b` routing to itself). Empty when the
-    /// anchor has no block partition.
-    pub kappa: Vec<Vec<f64>>,
-    /// Per-arrival-stage delivery density for lag `d = 1..=depth` at index
-    /// `d - 1`; an empty row where `k_d == 0` (nothing arrives that lag).
-    pub delivery: Vec<Vec<f64>>,
+    pub stage_reach: usize,
+    /// Stage-clock weight (the k-factor) `k_d` for `d = 0..=stage_reach`;
+    /// `k_0` is the same-stage share and `Σ_d k_d == 1`.
+    pub stage_weights: Vec<f64>,
+    /// Per-source-block deposit (the χ deposits), `block_deposits[b][d]`:
+    /// index `0` is block `b`'s same-stage retained share, `1..=stage_reach`
+    /// are its bucket-`d` deposits. Empty when the anchor has no block
+    /// partition.
+    pub block_deposits: Vec<Vec<f64>>,
+    /// Per-source-block within-stage routing (the κ routing),
+    /// `within_stage_routing[b][j]` to target block `b + j` (`j == 0` is
+    /// block `b` routing to itself). Empty when the anchor has no block
+    /// partition.
+    pub within_stage_routing: Vec<Vec<f64>>,
+    /// Per-arrival-stage arrival density (the delivery density) for lag
+    /// `d = 1..=stage_reach` at index `d - 1`; an empty row where `k_d == 0`
+    /// (nothing arrives that lag).
+    pub arrival_density: Vec<Vec<f64>>,
 }
 
 /// The one shared arrival-density window: a uniform release over the anchor
 /// stage `[0, h_anchor)` delayed by `travel_time_hours` arrives over
-/// `[travel_time_hours, travel_time_hours + h_anchor)`. `k`, `chi`, `kappa`,
-/// and `delivery` all read overlaps against this same window.
+/// `[travel_time_hours, travel_time_hours + h_anchor)`. `stage_weights`,
+/// `block_deposits`, `within_stage_routing`, and `arrival_density` all read
+/// overlaps against this same window.
 fn arrival_window(travel_time_hours: f64, h_anchor: f64) -> (f64, f64) {
     (travel_time_hours, travel_time_hours + h_anchor)
 }
@@ -58,8 +64,9 @@ fn arrival_window(travel_time_hours: f64, h_anchor: f64) -> (f64, f64) {
 /// anchor's own block partition for a chronological anchor (`None` for a
 /// parallel anchor) and must sum to `stage_lengths_hours[anchor_stage]`; v1
 /// reuses it as every reached arrival stage's own partition too (a future
-/// per-arrival-stage partition is a config-only extension, `chi`/`kappa`/`k`
-/// are unaffected either way).
+/// per-arrival-stage partition is a config-only extension,
+/// `block_deposits`/`within_stage_routing`/`stage_weights` are unaffected
+/// either way).
 ///
 /// # Panics
 ///
@@ -86,15 +93,15 @@ pub fn resolve_spread(
     let h_anchor = future_calendar[0];
     let (window_start, window_end) = arrival_window(travel_time_hours, h_anchor);
 
-    let k_overlaps = window_period_overlaps(window_start, h_anchor, future_calendar);
-    let k: Vec<f64> = k_overlaps
+    let stage_weight_overlaps = window_period_overlaps(window_start, h_anchor, future_calendar);
+    let stage_weights: Vec<f64> = stage_weight_overlaps
         .iter()
         .map(|&overlap| overlap / h_anchor)
         .collect();
-    let depth = k.len().saturating_sub(1);
+    let stage_reach = stage_weights.len().saturating_sub(1);
 
     debug_assert!(
-        (k.iter().sum::<f64>() - 1.0).abs() < 1e-9,
+        (stage_weights.iter().sum::<f64>() - 1.0).abs() < 1e-9,
         "stage-clock weights must sum to 1.0 (conservation)"
     );
 
@@ -106,49 +113,76 @@ pub fn resolve_spread(
         );
     }
 
-    let (chi, kappa) = blocks.map_or_else(
-        || (Vec::new(), Vec::new()),
-        |blocks| resolve_block_factors(travel_time_hours, blocks, future_calendar, depth),
+    let BlockFactors {
+        deposits: block_deposits,
+        routing: within_stage_routing,
+    } = blocks.map_or_else(
+        || BlockFactors {
+            deposits: Vec::new(),
+            routing: Vec::new(),
+        },
+        |blocks| resolve_block_factors(travel_time_hours, blocks, future_calendar, stage_reach),
     );
 
     if let Some(blocks) = blocks {
-        for (d, &k_d) in k.iter().enumerate() {
-            let aggregated: f64 = chi
+        for (d, &stage_weight) in stage_weights.iter().enumerate() {
+            let aggregated: f64 = block_deposits
                 .iter()
                 .zip(blocks)
                 .map(|(row, &duration_b)| (duration_b / h_anchor) * row[d])
                 .sum();
             debug_assert!(
-                (aggregated - k_d).abs() < 1e-9,
+                (aggregated - stage_weight).abs() < 1e-9,
                 "block deposits must aggregate to the stage-level k_d (sub-contract 2)"
             );
         }
     }
 
-    let delivery = resolve_delivery(window_start, window_end, future_calendar, blocks, depth);
+    let arrival_density = resolve_delivery(
+        window_start,
+        window_end,
+        future_calendar,
+        blocks,
+        stage_reach,
+    );
 
     SpreadResolution {
-        depth,
-        k,
-        chi,
-        kappa,
-        delivery,
+        stage_reach,
+        stage_weights,
+        block_deposits,
+        within_stage_routing,
+        arrival_density,
     }
 }
 
-/// Per-source-block `chi`/`kappa`: reads the same arrival window as `k`,
-/// restricted to each block's own local origin, so the aggregation
-/// identity in [`resolve_spread`] holds structurally rather than needing a
-/// separate density.
+/// Per-source-block deposit/routing factors resolved by [`resolve_block_factors`].
+///
+/// Two same-typed `Vec<Vec<f64>>` fields — kept as a named struct (rather
+/// than a bare tuple) so a positional swap of `deposits`/`routing` at the
+/// call site is a compile error, not a silent mix-up.
+#[derive(Debug, Clone)]
+struct BlockFactors {
+    /// Per-source-block deposit (`chi` in the design memo); see
+    /// [`SpreadResolution::block_deposits`].
+    deposits: Vec<Vec<f64>>,
+    /// Per-source-block within-stage routing (`kappa` in the design memo);
+    /// see [`SpreadResolution::within_stage_routing`].
+    routing: Vec<Vec<f64>>,
+}
+
+/// Resolve `BlockFactors` (the χ deposits and κ routing): reads the same
+/// arrival window as the stage-clock weights, restricted to each block's own
+/// local origin, so the aggregation identity in [`resolve_spread`] holds
+/// structurally rather than needing a separate density.
 fn resolve_block_factors(
     travel_time_hours: f64,
     blocks: &[f64],
     future_calendar: &[f64],
-    depth: usize,
-) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+    stage_reach: usize,
+) -> BlockFactors {
     let n_blocks = blocks.len();
-    let mut chi = vec![vec![0.0_f64; depth + 1]; n_blocks];
-    let mut kappa = Vec::with_capacity(n_blocks);
+    let mut deposits = vec![vec![0.0_f64; stage_reach + 1]; n_blocks];
+    let mut routing = Vec::with_capacity(n_blocks);
 
     for (b, &duration_b) in blocks.iter().enumerate() {
         let mut target = Vec::with_capacity(n_blocks - b + future_calendar.len() - 1);
@@ -156,43 +190,43 @@ fn resolve_block_factors(
         target.extend_from_slice(&future_calendar[1..]);
 
         let combined = window_period_overlaps(travel_time_hours, duration_b, &target);
-        let kappa_len = (n_blocks - b).min(combined.len());
+        let routing_len = (n_blocks - b).min(combined.len());
 
-        let mut kappa_b: Vec<f64> = combined[..kappa_len]
+        let mut routing_b: Vec<f64> = combined[..routing_len]
             .iter()
             .map(|&overlap| overlap / duration_b)
             .collect();
-        kappa_b.resize(n_blocks - b, 0.0);
+        routing_b.resize(n_blocks - b, 0.0);
 
-        chi[b][0] = kappa_b.iter().sum();
-        for (offset, &overlap) in combined[kappa_len..].iter().enumerate() {
+        deposits[b][0] = routing_b.iter().sum();
+        for (offset, &overlap) in combined[routing_len..].iter().enumerate() {
             let d = offset + 1;
-            if d <= depth {
-                chi[b][d] = overlap / duration_b;
+            if d <= stage_reach {
+                deposits[b][d] = overlap / duration_b;
             }
         }
 
-        kappa.push(kappa_b);
+        routing.push(routing_b);
     }
 
-    (chi, kappa)
+    BlockFactors { deposits, routing }
 }
 
-/// Per-arrival-stage delivery density for lag `d = 1..=depth`: the same
-/// `[window_start, window_end)` window restricted to stage `t+d`'s own
-/// local clock and split across `blocks` (`None` delivers onto a single
-/// parallel row).
+/// Per-arrival-stage arrival density for lag `d = 1..=stage_reach`: the same
+/// `[window_start, window_end)` window restricted to stage `t+d`'s own local
+/// clock and split across `blocks` (`None` delivers onto a single parallel
+/// row).
 fn resolve_delivery(
     window_start: f64,
     window_end: f64,
     future_calendar: &[f64],
     blocks: Option<&[f64]>,
-    depth: usize,
+    stage_reach: usize,
 ) -> Vec<Vec<f64>> {
-    let mut delivery = Vec::with_capacity(depth);
+    let mut arrival_density = Vec::with_capacity(stage_reach);
     let mut stage_start = 0.0_f64;
 
-    for (d, &stage_len) in future_calendar[..=depth].iter().enumerate() {
+    for (d, &stage_len) in future_calendar[..=stage_reach].iter().enumerate() {
         let stage_end = stage_start + stage_len;
         if d >= 1 {
             let overlap_start = window_start.max(stage_start);
@@ -213,19 +247,19 @@ fn resolve_delivery(
             } else {
                 Vec::new()
             };
-            delivery.push(row);
+            arrival_density.push(row);
         }
         stage_start = stage_end;
     }
 
-    delivery
+    arrival_density
 }
 
 /// A calendar-anchored point-commitment lag: a physical lead time on the
 /// hour clock, or a first-class stage-count shift that never reads the
 /// calendar (`docs/design/temporal-lag-unification.md` §4.4).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Lag {
+pub enum LeadTime {
     /// Physical lead time in hours, delivery-anchored (§4.3).
     Time(f64),
     /// Stage-count shift; the calendar is never consulted (§4.4).
@@ -250,22 +284,26 @@ pub struct PointResolution {
 /// per-decision-stage outgoing commitment sets, and the per-decision-stage
 /// depths (§4.3 physical mode, §4.4 stage-count mode).
 ///
-/// `stage_lengths_hours` must have length `n_stages`; [`Lag::Stages`] never
+/// `stage_lengths_hours` must have length `n_stages`; [`LeadTime::Stages`] never
 /// reads it.
 ///
 /// # Panics
 ///
 /// Debug builds panic if `stage_lengths_hours.len() != n_stages` in
-/// [`Lag::Time`] mode, if a stage length or the lead time is not finite and
+/// [`LeadTime::Time`] mode, if a stage length or the lead time is not finite and
 /// positive, or if a non-IC delivery stage fails to appear in its own
 /// decision set.
 #[must_use]
-pub fn resolve_point(lag: Lag, stage_lengths_hours: &[f64], n_stages: usize) -> PointResolution {
+pub fn resolve_point(
+    lag: LeadTime,
+    stage_lengths_hours: &[f64],
+    n_stages: usize,
+) -> PointResolution {
     let decider = match lag {
-        Lag::Time(delta_hours) => {
+        LeadTime::Time(delta_hours) => {
             resolve_decider_physical(delta_hours, stage_lengths_hours, n_stages)
         }
-        Lag::Stages(lead_stages) => resolve_decider_stage_count(lead_stages, n_stages),
+        LeadTime::Stages(lead_stages) => resolve_decider_stage_count(lead_stages, n_stages),
     };
     let (decision_sets, depth) = build_decision_sets_and_depth(&decider, n_stages);
 

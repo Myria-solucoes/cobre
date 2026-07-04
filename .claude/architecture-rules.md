@@ -107,7 +107,7 @@ Hot-path drivers with long preludes and many captures follow a two-part shape:
    No allocation on the hot path.
 2. **Inputs bundle** (`BackwardPassInputs`, `ForwardPassInputs`,
    `SimulationInputs`) — holds all borrowed per-call inputs (contexts, FCF,
-   comm, baked templates, iteration counters). Constructed fresh at each
+   comm, frozen templates, iteration counters). Constructed fresh at each
    `run` call via a `from_session_fields(...)` factory that borrows from
    `&mut TrainingSession` fields disjointly under NLL rules.
 

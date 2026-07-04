@@ -668,7 +668,7 @@ fn ac_train_returns_partial_on_infeasible() {
 /// - 1 `TrainingStarted`
 /// - 2 × (`WorkerTiming` (Forward), `ForwardPassComplete`, `ForwardSyncComplete`,
 ///   `WorkerTiming` (Backward), `BackwardPassComplete`, `PolicySyncComplete`,
-///   `PolicyTemplateBakeComplete`, `ConvergenceUpdate`, `IterationSummary`)
+///   `PolicyTemplateFreezeComplete`, `ConvergenceUpdate`, `IterationSummary`)
 /// - 1 `TrainingFinished`
 ///
 /// = 1 + 18 + 1 = 20 events.
@@ -779,7 +779,7 @@ fn ac_train_emits_correct_event_sequence() {
     // 1 TrainingStarted + 2*(9 per-iteration) + 1 TrainingFinished = 20
     // Per-iteration: WorkerTiming(Forward), ForwardPassComplete,
     //   ForwardSyncComplete, WorkerTiming(Backward), BackwardPassComplete,
-    //   PolicySyncComplete, PolicyTemplateBakeComplete, ConvergenceUpdate, IterationSummary
+    //   PolicySyncComplete, PolicyTemplateFreezeComplete, ConvergenceUpdate, IterationSummary
     assert_eq!(
         events.len(),
         20,
@@ -829,7 +829,7 @@ fn ac_train_emits_correct_event_sequence() {
     ));
     assert!(matches!(
         events[7],
-        TrainingEvent::PolicyTemplateBakeComplete { .. }
+        TrainingEvent::PolicyTemplateFreezeComplete { .. }
     ));
     assert!(matches!(events[8], TrainingEvent::ConvergenceUpdate { .. }));
     assert!(matches!(events[9], TrainingEvent::IterationSummary { .. }));
@@ -867,7 +867,7 @@ fn ac_train_emits_correct_event_sequence() {
     ));
     assert!(matches!(
         events[16],
-        TrainingEvent::PolicyTemplateBakeComplete { .. }
+        TrainingEvent::PolicyTemplateFreezeComplete { .. }
     ));
     assert!(matches!(
         events[17],
@@ -2860,14 +2860,14 @@ fn broadcast_basis_cache_rejects_oversized_i32_payload() {
     }
 }
 
-/// AC: `template_bake_event_emitted`
+/// AC: `template_freeze_event_emitted`
 ///
-/// Verify that `PolicyTemplateBakeComplete` is emitted exactly once per iteration
+/// Verify that `PolicyTemplateFreezeComplete` is emitted exactly once per iteration
 /// with the correct `stages_processed` count. Also verifies that
-/// `total_rows_baked > 0` on iteration 2 (because the backward pass on
+/// `total_rows_frozen > 0` on iteration 2 (because the backward pass on
 /// iteration 1 generates cuts before step 4c runs on that same iteration).
 #[test]
-fn template_bake_event_emitted() {
+fn template_freeze_event_emitted() {
     let n_stages = 2;
     let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template(state.n_state); n_stages];
@@ -2969,23 +2969,23 @@ fn template_bake_event_emitted() {
 
     let events: Vec<TrainingEvent> = rx.try_iter().collect();
 
-    // Collect all PolicyTemplateBakeComplete events.
-    let bake_events: Vec<&TrainingEvent> = events
+    // Collect all PolicyTemplateFreezeComplete events.
+    let freeze_events: Vec<&TrainingEvent> = events
         .iter()
-        .filter(|e| matches!(e, TrainingEvent::PolicyTemplateBakeComplete { .. }))
+        .filter(|e| matches!(e, TrainingEvent::PolicyTemplateFreezeComplete { .. }))
         .collect();
 
     // Exactly one per iteration (2 iterations).
     assert_eq!(
-        bake_events.len(),
+        freeze_events.len(),
         2,
-        "expected exactly 2 PolicyTemplateBakeComplete events, got {}",
-        bake_events.len()
+        "expected exactly 2 PolicyTemplateFreezeComplete events, got {}",
+        freeze_events.len()
     );
 
     // Each event must report stages_processed == n_stages.
-    for event in &bake_events {
-        let TrainingEvent::PolicyTemplateBakeComplete {
+    for event in &freeze_events {
+        let TrainingEvent::PolicyTemplateFreezeComplete {
             stages_processed, ..
         } = event
         else {
@@ -2998,17 +2998,17 @@ fn template_bake_event_emitted() {
     }
 
     // On iteration 2, the backward pass from iteration 1 will have added
-    // cuts, so total_rows_baked must be > 0.
-    let second_bake = bake_events[1];
-    let TrainingEvent::PolicyTemplateBakeComplete {
-        total_rows_baked, ..
-    } = second_bake
+    // cuts, so total_rows_frozen must be > 0.
+    let second_freeze = freeze_events[1];
+    let TrainingEvent::PolicyTemplateFreezeComplete {
+        total_rows_frozen, ..
+    } = second_freeze
     else {
         panic!("wrong variant")
     };
     assert!(
-        *total_rows_baked > 0,
-        "iteration 2 bake must have baked at least one cut row (backward pass \
+        *total_rows_frozen > 0,
+        "iteration 2 freeze must have frozen at least one cut row (backward pass \
              generated cuts on iteration 1)"
     );
 }
@@ -3053,7 +3053,7 @@ fn ac_training_result_new_assigns_all_fields() {
         basis_cache,
         solver_stats_log,
         None, // visited_archive
-        None, // baked_templates
+        None, // frozen_templates
     );
 
     assert_eq!(result.final_lb, 1.5_f64, "final_lb");
@@ -3072,5 +3072,5 @@ fn ac_training_result_new_assigns_all_fields() {
         "solver_stats_log[0].iteration"
     );
     assert!(result.visited_archive.is_none(), "visited_archive");
-    assert!(result.baked_templates.is_none(), "baked_templates");
+    assert!(result.frozen_templates.is_none(), "frozen_templates");
 }

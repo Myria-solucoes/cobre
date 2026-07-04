@@ -13,7 +13,7 @@ use crate::hydro_models::{
     EvaporationModel, EvaporationModelSet, ProductionModelSet, ResolvedProductionModel,
 };
 use crate::indexer::{BlockGrid, EvaporationIndices, StateLayout};
-use crate::temporal_lag::SpreadResolution;
+use crate::lead_time::SpreadResolution;
 
 use super::{
     EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET,
@@ -143,17 +143,18 @@ pub(crate) struct TemplateBuildCtx<'a> {
     /// [`build_arc_spread_k`](crate::setup::bucket_topology::build_arc_spread_k).
     pub(crate) arc_spread_k: HashMap<usize, Vec<Vec<f64>>>,
     /// Per-declared-arc, per-chronological-stage full [`SpreadResolution`]
-    /// (`chi`/`kappa`/`delivery`), keyed like [`Self::arc_spread_k`].
+    /// (`block_deposits`/`within_stage_routing`/`arrival_density`), keyed
+    /// like [`Self::arc_spread_k`].
     /// `by_stage[stage_idx]` is `None` when that study stage's own `block_mode`
     /// is `Parallel` (the parallel fill reads [`Self::arc_spread_k`] instead).
     /// See [`build_arc_spread_chrono`](crate::setup::bucket_topology::build_arc_spread_chrono).
     pub(crate) arc_spread_chrono: HashMap<usize, Vec<Option<SpreadResolution>>>,
-    /// `per_stage_mask[stage_idx]` holds one reachable lag range per declared
+    /// `per_stage_mask[stage_idx]` holds the max reachable lag per declared
     /// downstream plant, discovery order (mirrors
-    /// [`BucketTopology::per_plant_depth`](crate::setup::bucket_topology::BucketTopology::per_plant_depth)).
+    /// [`TransitBucketTopology::per_plant_depth`](crate::setup::bucket_topology::TransitBucketTopology::per_plant_depth)).
     /// Gates which bucket-definition rows [`StageLayout::new`] emits; see
-    /// [`crate::setup::bucket_topology::BucketTopology::per_stage_mask`].
-    pub(crate) per_stage_mask: Vec<Vec<Range<usize>>>,
+    /// [`crate::setup::bucket_topology::TransitBucketTopology::per_stage_mask`].
+    pub(crate) per_stage_mask: Vec<Vec<usize>>,
 }
 
 /// Column/row offsets for one stage's anticipated-thermal layout.
@@ -362,24 +363,24 @@ pub(crate) struct StageLayout<'a> {
     pub(crate) water_balance: Range<usize>,
     /// Row range for travel-time bucket definition rows: `b_d^out − b_{d+1}^in
     /// − deposit_d = 0`, one row per (plant, lag) bucket REACHABLE at this
-    /// stage (`state.bucket_column_order[b]`'s lag within this stage's
-    /// `per_stage_mask` cap for that plant — see [`Self::bucket_row_pos`]);
+    /// stage (`state.transit_bucket_column_order[slot]`'s lag within this stage's
+    /// `per_stage_mask` cap for that plant — see [`Self::transit_bucket_row_pos`]);
     /// unlike `anticipated_state`'s active-plant sparseness, a lag beyond the
     /// cap targets a stage outside `[0, n_stages)` and gets no row at ANY
     /// stage from here to the horizon (the cap only shrinks). Placed
     /// immediately after [`Self::water_balance`], so `load_balance` and every
     /// row cursor after it shift by this stage's reachable count (`<=
-    /// state.b_total`, `== state.b_total` only while every lag is still
-    /// within-horizon). Empty `start..start` when `state.b_total == 0` (the
+    /// state.n_buckets`, `== state.n_buckets` only while every lag is still
+    /// within-horizon). Empty `start..start` when `state.n_buckets == 0` (the
     /// B==0 byte-identity anchor: `load_balance` collapses back onto
     /// `water_balance.end`).
-    pub(crate) bucket_definition: Range<usize>,
-    /// For each GLOBAL bucket index (`state.bucket_column_order`'s index),
-    /// this stage's compact row position within [`Self::bucket_definition`], or
+    pub(crate) transit_bucket_definition: Range<usize>,
+    /// For each GLOBAL bucket index (`state.transit_bucket_column_order`'s index),
+    /// this stage's compact row position within [`Self::transit_bucket_definition`], or
     /// `None` when its lag is beyond this stage's reachable cap (no row; the
     /// matching deposit in [`super::entries`]'s arc-release fill is dropped,
-    /// not misdirected to another row). Length `state.b_total`.
-    pub(crate) bucket_row_pos: Vec<Option<usize>>,
+    /// not misdirected to another row). Length `state.n_buckets`.
+    pub(crate) transit_bucket_row_pos: Vec<Option<usize>>,
     /// Row range for load balance constraints (one per bus per block).
     pub(crate) load_balance: Range<usize>,
     /// Row cursor at which the evaporation row block begins (`fpha_rows_end`),
@@ -482,17 +483,17 @@ fn build_fpha_rows(planes_per_hydro: &[usize], n_blks: usize, start_row: usize) 
     start_row + n_blks * total_planes
 }
 
-/// For each entry of `column_order` (global bucket index `b`, `(plant, lag)`),
-/// this stage's compact position within [`StageLayout::bucket_definition`], or
-/// `None` when `lag` falls outside `per_stage_mask[stage_idx]`'s range for
-/// that plant. `column_order` groups contiguously by plant in the SAME
+/// For each entry of `column_order` (global bucket index `slot`, `(plant, lag)`),
+/// this stage's compact position within [`StageLayout::transit_bucket_definition`], or
+/// `None` when `lag` exceeds `per_stage_mask[stage_idx]`'s max reachable lag
+/// for that plant. `column_order` groups contiguously by plant in the SAME
 /// discovery order `per_stage_mask` indexes
-/// ([`crate::setup::bucket_topology::build_bucket_topology`]), so a plant
+/// ([`crate::setup::bucket_topology::build_transit_bucket_topology`]), so a plant
 /// transition in the scan advances the mask index. Returns the mapping and the
-/// reachable count (`bucket_definition`'s row length).
-fn build_bucket_row_pos(
+/// reachable count (`transit_bucket_definition`'s row length).
+fn build_transit_bucket_row_pos(
     column_order: &[(usize, usize)],
-    per_stage_mask: &[Vec<Range<usize>>],
+    per_stage_mask: &[Vec<usize>],
     stage_idx: usize,
 ) -> (Vec<Option<usize>>, usize) {
     if column_order.is_empty() {
@@ -502,7 +503,7 @@ fn build_bucket_row_pos(
         return (Vec::new(), 0);
     }
     let stage_mask = &per_stage_mask[stage_idx];
-    let mut bucket_row_pos = Vec::with_capacity(column_order.len());
+    let mut transit_bucket_row_pos = Vec::with_capacity(column_order.len());
     let mut plant_group = 0_usize;
     let mut prev_plant: Option<usize> = None;
     let mut n_reachable = 0_usize;
@@ -513,14 +514,14 @@ fn build_bucket_row_pos(
             }
             prev_plant = Some(plant_idx);
         }
-        if stage_mask[plant_group].contains(&lag) {
-            bucket_row_pos.push(Some(n_reachable));
+        if lag <= stage_mask[plant_group] {
+            transit_bucket_row_pos.push(Some(n_reachable));
             n_reachable += 1;
         } else {
-            bucket_row_pos.push(None);
+            transit_bucket_row_pos.push(None);
         }
     }
-    (bucket_row_pos, n_reachable)
+    (transit_bucket_row_pos, n_reachable)
 }
 
 /// Evaporation column/row indices per `(evaporation hydro, block)`, block-major
@@ -939,14 +940,18 @@ impl<'a> StageLayout<'a> {
         let n_water_rows = n_h * n_water_blocks;
         let water_balance = water_balance_start..water_balance_start + n_water_rows;
         // Sized from this stage's reachable count, not the stage-invariant
-        // `state.b_total`: `build_bucket_row_pos` masks a lag beyond
+        // `state.n_buckets`: `build_transit_bucket_row_pos` masks a lag beyond
         // `ctx.per_stage_mask[stage_idx]`'s per-plant cap out of the row range
         // entirely (`horizon_cap_active`'s "dropped by construction").
-        let bucket_definition_start = water_balance.end;
-        let (bucket_row_pos, n_bucket_rows) =
-            build_bucket_row_pos(&state.bucket_column_order, &ctx.per_stage_mask, stage_idx);
-        let bucket_definition = bucket_definition_start..bucket_definition_start + n_bucket_rows;
-        let load_balance_start = bucket_definition.end;
+        let transit_bucket_definition_start = water_balance.end;
+        let (transit_bucket_row_pos, n_transit_bucket_rows) = build_transit_bucket_row_pos(
+            &state.transit_bucket_column_order,
+            &ctx.per_stage_mask,
+            stage_idx,
+        );
+        let transit_bucket_definition = transit_bucket_definition_start
+            ..transit_bucket_definition_start + n_transit_bucket_rows;
+        let load_balance_start = transit_bucket_definition.end;
         let load_balance_end = load_balance_start + ctx.n_buses * n_blks;
         let load_balance = load_balance_start..load_balance_end;
 
@@ -1168,8 +1173,8 @@ impl<'a> StageLayout<'a> {
             post_equipment_col_start,
             z_inflow_row_start,
             water_balance,
-            bucket_definition,
-            bucket_row_pos,
+            transit_bucket_definition,
+            transit_bucket_row_pos,
             load_balance,
             fpha_rows_end,
             min_outflow_rows: oper.min_outflow_rows,
@@ -1487,11 +1492,11 @@ impl<'a> StageLayout<'a> {
         self.water_balance.start
     }
 
-    /// First travel-time bucket-definition row; reads `self.bucket_definition.start`.
+    /// First travel-time bucket-definition row; reads `self.transit_bucket_definition.start`.
     #[inline]
     #[must_use]
-    pub(crate) fn row_bucket_definition_start(&self) -> usize {
-        self.bucket_definition.start
+    pub(crate) fn row_transit_bucket_definition_start(&self) -> usize {
+        self.transit_bucket_definition.start
     }
 
     /// First load-balance row; reads `self.load_balance.start`.

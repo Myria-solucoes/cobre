@@ -142,7 +142,7 @@ mod extraction_nonuniform_block_bases {
                 &comm,
                 &result_tx,
                 None,
-                result.baked_templates.as_deref(),
+                result.frozen_templates.as_deref(),
                 &result.basis_cache,
             )
             .expect("simulate must return Ok");

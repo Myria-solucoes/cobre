@@ -58,7 +58,7 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
     }
 
     let view = if let Some(captured) = inputs.stored_basis {
-        // `base_row_count` is the non-baked template row count so cut rows are
+        // `base_row_count` is the non-frozen template row count so cut rows are
         // matched by slot identity, not positional copy from the stored basis.
         let target = ReconstructionTarget {
             base_row_count: inputs.stage_context.templates[inputs.stage_index].num_rows,
@@ -77,8 +77,8 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
         // demotes them until `col_basic + row_basic == num_row`.
         //
         // `num_row_for_invariant` uses the reconstructed length, not
-        // baked.num_rows, because delta cuts (added during the current backward
-        // pass) extend past the baked template row count.
+        // frozen.num_rows, because delta cuts (added during the current backward
+        // pass) extend past the frozen template row count.
         //
         // `base_row_for_invariant = 0` is safe: the loop demotes only currently-
         // BASIC rows, and equality rows are never BASIC by LP duality.
@@ -186,7 +186,7 @@ pub(crate) fn fill_unscaled_dual(out: &mut Vec<f64>, scaled: &[f64], row_scale: 
 ///
 /// The forward/simulation assembly plain-copies `unscaled_primal[..n_state]`
 /// into the advanced state, then overwrites only `inflow_lags` and
-/// `anticipated_state` in place; `buckets_out` sits in the shift-gap those
+/// `anticipated_state` in place; `transit_buckets_out` sits in the shift-gap those
 /// overwrites never reach because the outgoing bucket column equals its
 /// state-vector index (the `storage` identity convention). Call after both
 /// overwrites, before the caller moves `unscaled_primal` back into scratch.
@@ -202,10 +202,10 @@ pub(crate) fn debug_assert_bucket_copy_gap_intact(
 ) {
     debug_assert!(
         layout
-            .buckets_out
+            .transit_buckets_out
             .clone()
             .all(|j| assembled_state[j] == unscaled_primal[j]),
-        "bucket state must equal the LP primal's buckets_out column: the \
+        "bucket state must equal the LP primal's transit_buckets_out column: the \
          lag/anticipated overwrites must never touch the bucket shift-gap"
     );
 }
@@ -364,11 +364,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 2: warm start on the baked path — successful solve returns outcome
+    // Test 2: warm start on the frozen path — successful solve returns outcome
     // -----------------------------------------------------------------------
 
-    /// Verifies that a warm-start with a valid `CapturedBasis` on the baked
-    /// path completes successfully.  On the baked path all cut rows are
+    /// Verifies that a warm-start with a valid `CapturedBasis` on the frozen
+    /// path completes successfully.  On the frozen path all cut rows are
     /// structural, so `reconstruct_basis` uses an empty iterator and
     /// `enforce_basic_count_invariant` is a no-op (no excess BASIC rows).
     ///
@@ -377,7 +377,7 @@ mod tests {
     /// `target.base_row_count=2` copies the 2 stored row statuses.
     /// With 2 BASIC col statuses + 0 BASIC row statuses, `total_basic=2 == num_row=2`.
     #[test]
-    fn run_stage_solve_warm_start_baked_path_succeeds() {
+    fn run_stage_solve_warm_start_frozen_path_succeeds() {
         let template = make_template();
         let templates = std::slice::from_ref(&template);
         let ctx = make_context(templates);
@@ -417,7 +417,7 @@ mod tests {
         let result = run_stage_solve(&mut ws, &inputs);
         assert!(
             result.is_ok(),
-            "warm start on baked path should succeed: {result:?}"
+            "warm start on frozen path should succeed: {result:?}"
         );
         // No cut rows → no demotions. Row statuses are all LOWER (non-basic).
         let lower_count = ws
@@ -540,7 +540,7 @@ mod tests {
 
     #[test]
     fn debug_assert_bucket_copy_gap_intact_passes_when_bucket_matches_primal() {
-        let layout = crate::test_support::state_layout_with_buckets(
+        let layout = crate::test_support::state_layout_with_transit_buckets(
             0,
             0,
             2,
@@ -555,9 +555,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "bucket state must equal the LP primal's buckets_out column")]
+    #[should_panic(expected = "bucket state must equal the LP primal's transit_buckets_out column")]
     fn debug_assert_bucket_copy_gap_intact_panics_when_bucket_diverges() {
-        let layout = crate::test_support::state_layout_with_buckets(
+        let layout = crate::test_support::state_layout_with_transit_buckets(
             0,
             0,
             2,

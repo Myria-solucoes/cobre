@@ -203,14 +203,14 @@ fn compute_anticipated_committed_mw(
 }
 
 /// Extract the travel-time in-transit bucket records for one stage, in the
-/// canonical [`StateLayout::bucket_column_order`] `(downstream plant, lag)`
+/// canonical [`StateLayout::transit_bucket_column_order`] `(downstream plant, lag)`
 /// order — the same column order the LP fill and cut projection use, so the
 /// output row/column order is declaration-order invariant.
 ///
-/// Empty when `state.b_total == 0` (no arc declared), which keeps the table
+/// Empty when `state.n_buckets == 0` (no arc declared), which keeps the table
 /// absent for a non-travel-time study. The in-transit volume is the outgoing
-/// bucket state `buckets_out`; the delayed-arrival delivery is the incoming
-/// lag-1 bucket `b_1^in` (`buckets_in` at the plant's first bucket), reported
+/// bucket state `transit_buckets_out`; the delayed-arrival delivery is the incoming
+/// lag-1 bucket `b_1^in` (`transit_buckets_in` at the plant's first bucket), reported
 /// only at `lag == 1` where the water matures onto the balance row.
 fn extract_transit_buckets(
     view: &SolutionView<'_>,
@@ -218,27 +218,27 @@ fn extract_transit_buckets(
     stage_id: u32,
 ) -> Vec<SimulationTransitBucketResult> {
     let state = spec.state;
-    if state.b_total == 0 {
+    if state.n_buckets == 0 {
         return Vec::new();
     }
     debug_assert!(
-        state.buckets_out.start + state.b_total <= view.primal.len()
-            && state.buckets_in.start + state.b_total <= view.primal.len(),
-        "bucket primal out of bounds: b_total {}, primal len {}",
-        state.b_total,
+        state.transit_buckets_out.start + state.n_buckets <= view.primal.len()
+            && state.transit_buckets_in.start + state.n_buckets <= view.primal.len(),
+        "bucket primal out of bounds: n_buckets {}, primal len {}",
+        state.n_buckets,
         view.primal.len(),
     );
-    let mut results = Vec::with_capacity(state.b_total);
-    for (b, &(plant_idx, lag)) in state.bucket_column_order.iter().enumerate() {
+    let mut results = Vec::with_capacity(state.n_buckets);
+    for (b, &(plant_idx, lag)) in state.transit_bucket_column_order.iter().enumerate() {
         debug_assert!(
             plant_idx < spec.entity_counts.hydro_ids.len(),
             "bucket plant index {plant_idx} out of bounds for hydro_ids len {}",
             spec.entity_counts.hydro_ids.len(),
         );
         let hydro_id = spec.entity_counts.hydro_ids[plant_idx];
-        let in_transit_volume_hm3 = view.primal[state.buckets_out.start + b];
+        let in_transit_volume_hm3 = view.primal[state.transit_buckets_out.start + b];
         let delayed_arrival_hm3 = if lag == 1 {
-            view.primal[state.buckets_in.start + b]
+            view.primal[state.transit_buckets_in.start + b]
         } else {
             0.0
         };

@@ -5,7 +5,7 @@
 //! `θ ≥ Q(x̂) + π'(x − x̂)`. The subgradient-extraction side lives in
 //! `training::backward::duals_extraction::extract_duals_from_view`.
 //!
-//! The forward training loop uses pre-baked templates and does not call these
+//! The forward training loop uses pre-frozen templates and does not call these
 //! builders; the backward pass, simulation, lower-bound evaluation, and DCS do.
 
 use cobre_solver::{RowBatch, SolverInterface};
@@ -204,7 +204,7 @@ pub fn build_cut_row_batch(
 /// # Design invariant
 ///
 /// The lower-bound LP grows monotonically (cuts appended, never removed);
-/// re-baking its template each iteration would raise cumulative setup cost from
+/// re-freezing its template each iteration would raise cumulative setup cost from
 /// `O(n_iters)` to `O(n_iters^2)`, so the append-only design is intentional.
 ///
 /// # Arguments

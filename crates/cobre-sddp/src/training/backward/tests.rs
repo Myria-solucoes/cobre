@@ -352,13 +352,16 @@ fn single_workspace(solver: MockSolver, n_state: usize) -> Vec<SolverWorkspace<M
 /// Single `MockSolver` workspace with a bucket-aware `PatchBuffer`
 /// (`hydro_count = 0`, `max_par_order = 0`), for the `patch_opening_bounds`
 /// bucket-pinning regression.
-fn bucket_only_workspace(solver: MockSolver, b_total: usize) -> SolverWorkspace<MockSolver> {
+fn transit_bucket_only_workspace(
+    solver: MockSolver,
+    n_buckets: usize,
+) -> SolverWorkspace<MockSolver> {
     use crate::lp_builder::PatchBuffer;
     SolverWorkspace {
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(0, 0, 0, 0, b_total, 0, 0),
+        patch_buf: PatchBuffer::new(0, 0, 0, 0, n_buckets, 0, 0),
         current_state: Vec::new(),
         scratch: crate::workspace::ScratchBuffers {
             noise_buf: Vec::new(),
@@ -743,7 +746,7 @@ fn single_stage_system_produces_no_cuts() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -848,7 +851,7 @@ fn two_stage_system_two_trial_points_generates_two_cuts_at_stage_0() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -953,7 +956,7 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -1054,7 +1057,7 @@ fn no_cuts_generated_at_last_stage() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -1155,7 +1158,7 @@ fn elapsed_ms_is_non_negative() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -1254,7 +1257,7 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -1398,7 +1401,7 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -1520,7 +1523,7 @@ fn cut_gradient_sign_physically_correct() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -1647,7 +1650,7 @@ fn cut_is_tight_at_trial_point() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -1760,7 +1763,7 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -1883,7 +1886,7 @@ fn forward_pass_index_matches_global_scenario_index() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -2000,7 +2003,7 @@ fn warm_start_uses_prepopulated_forward_basis() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -2111,7 +2114,7 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -2229,7 +2232,7 @@ fn backward_solver_error_propagates() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -2394,7 +2397,7 @@ fn test_backward_pass_parallel_cut_determinism() {
         workspaces: &mut workspaces_1,
         basis_store: &mut basis_store_1,
         ctx: &ctx,
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf_1,
         cut_batches: &mut empty_cut_batches(n_stages),
         training_ctx: &TrainingContext {
@@ -2486,7 +2489,7 @@ fn test_backward_pass_parallel_cut_determinism() {
         workspaces: &mut workspaces_4,
         basis_store: &mut basis_store_4,
         ctx: &ctx,
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf_4,
         cut_batches: &mut empty_cut_batches(n_stages),
         training_ctx: &TrainingContext {
@@ -2881,7 +2884,7 @@ fn backward_pass_load_patches_applied() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -3059,7 +3062,7 @@ fn backward_pass_no_load_buses_unchanged() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -3242,7 +3245,7 @@ fn backward_pass_cut_coefficients_unaffected() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -3371,7 +3374,7 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -3509,7 +3512,7 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -3703,7 +3706,7 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -4075,7 +4078,7 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -4308,7 +4311,7 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
@@ -4468,7 +4471,7 @@ fn run_one_trial_point_with_stores(
     let fwd_offset: usize = 0;
     let succ_probabilities = vec![1.0_f64; n_openings];
     let successor_active_slots: Vec<usize> = vec![];
-    let baked_template = minimal_template_1_0();
+    let frozen_template = minimal_template_1_0();
 
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0u32; n_stages]);
     let empty_cut_batch = RowBatch {
@@ -4494,8 +4497,8 @@ fn run_one_trial_point_with_stores(
         probabilities: &succ_probabilities,
         cut_batch: &empty_cut_batch,
         num_cuts_at_successor: 0,
-        template_num_rows: baked_template.num_rows,
-        baked_template: &baked_template,
+        template_num_rows: frozen_template.num_rows,
+        frozen_template: &frozen_template,
         successor_active_slots: &successor_active_slots,
         cut_activity_tolerance: 0.0,
         successor_populated_count: fcf.pools[1].populated_count,
@@ -4532,7 +4535,7 @@ fn run_one_trial_point_with_stores(
         &risk_measures,
         &succ_spec,
         &mut basis_slice,
-        &super::StageOpeningSolver::Baked,
+        &super::StageOpeningSolver::Frozen,
         0,
         0,
     )?;
@@ -4545,13 +4548,21 @@ fn run_one_trial_point_with_stores(
 /// decision-driven trial point), not re-derived per opening (contrast NCS
 /// availability, which genuinely varies per opening).
 #[test]
-fn patch_opening_bounds_pins_bucket_incoming_columns_per_stage_visit() {
-    let state =
-        crate::test_support::state_layout_with_buckets(0, 0, 2, vec![(0, 0), (0, 1)], 0, 0, vec![]);
+fn patch_opening_bounds_pins_transit_bucket_incoming_columns_per_stage_visit() {
+    let state = crate::test_support::state_layout_with_transit_buckets(
+        0,
+        0,
+        2,
+        vec![(0, 0), (0, 1)],
+        0,
+        0,
+        vec![],
+    );
     assert_eq!(state.n_state, 2);
 
     let stochastic = make_stochastic_context(1, 1);
-    let template = crate::test_support::bucket_only_template(state.theta + 1, state.n_state);
+    let template =
+        crate::test_support::transit_bucket_only_template(state.theta + 1, state.n_state);
 
     let templates: &'static _ = Box::leak(Box::new(vec![template]));
     let base_rows: &'static _ = Box::leak(Box::new(vec![0_usize]));
@@ -4605,17 +4616,17 @@ fn patch_opening_bounds_pins_bucket_incoming_columns_per_stage_visit() {
 
     let x_hat = vec![7.0_f64, 11.0];
     let raw_noise: Vec<f64> = Vec::new();
-    let mut ws = bucket_only_workspace(MockSolver::always_ok(solution_1_0(0.0, 0.0)), 2);
+    let mut ws = transit_bucket_only_workspace(MockSolver::always_ok(solution_1_0(0.0, 0.0)), 2);
 
     super::patch_opening_bounds(&mut ws, &ctx, &training_ctx, &raw_noise, &x_hat, 0);
 
     let cp = ws.patch_buf.state_col_patch_count();
     assert_eq!(
         cp, 2,
-        "state_col_patch_count must equal b_total when N=0, A=0"
+        "state_col_patch_count must equal n_buckets when N=0, A=0"
     );
     for (i, &expected) in x_hat.iter().enumerate() {
-        let col = state.buckets_in.start + i;
+        let col = state.transit_buckets_in.start + i;
         let pos = ws.patch_buf.col_indices[..cp]
             .iter()
             .position(|&c| c == col)
@@ -4866,7 +4877,7 @@ fn handshake_passes_with_local_backend() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(n_stages),
         training_ctx: &TrainingContext {
@@ -5031,7 +5042,7 @@ fn handshake_rejects_nonuniform_workers() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(n_stages),
         training_ctx: &TrainingContext {
@@ -5222,7 +5233,7 @@ fn dcs_active_workspace() -> Vec<SolverWorkspace<ActiveSolver>> {
         max_par_order: 0,
         n_load_buses: 0,
         max_blocks: 0,
-        b_total: 0,
+        n_buckets: 0,
         downstream_par_order: 0,
         max_openings: 1,
         initial_pool_capacity: 16,
@@ -5277,7 +5288,7 @@ fn run_dcs_backward_trial_point_at(
     let risk_measures = vec![RiskMeasure::Expectation; 2];
 
     let mut fcf = dcs_two_stage_fcf();
-    // All-cuts batch for the baked path (delta == all cuts here).
+    // All-cuts batch for the frozen path (delta == all cuts here).
     let cut_batch = crate::cut::row::build_cut_row_batch(
         &fcf,
         1,
@@ -5354,7 +5365,7 @@ fn run_dcs_backward_trial_point_at(
         cut_batch: &cut_batch,
         num_cuts_at_successor: num_cuts,
         template_num_rows: core.num_rows,
-        baked_template: &core,
+        frozen_template: &core,
         successor_active_slots: &successor_active_slots,
         cut_activity_tolerance: 0.0,
         successor_populated_count: fcf.pools[1].populated_count,
@@ -5366,7 +5377,7 @@ fn run_dcs_backward_trial_point_at(
     let ws = &mut workspaces[0];
     // Choose the opening-solve strategy exactly as the driver does, then issue
     // the per-trial-point prepare/load (mirrors process_stage_backward's per-`m`
-    // load after the per-opening solver-state reset). The `Baked` variant loads the baked all-cuts
+    // load after the per-opening solver-state reset). The `Frozen` variant loads the frozen all-cuts
     // LP; the `Lazy` variant loads the cut-free core + builds the metadata seed.
     let opening_solver = super::StageOpeningSolver::from_dcs_params(
         dcs.filter(|params| params.is_active(iteration)),
@@ -5450,33 +5461,37 @@ fn dcs_params(start_iteration: u64) -> DcsParams {
 #[test]
 fn backward_dcs_cut_equals_all_cuts_cut() {
     let iteration = 5;
-    let (baked_cut, baked_coefficients, _) = run_dcs_backward_trial_point(None, iteration);
+    let (frozen_cut, frozen_coefficients, _) = run_dcs_backward_trial_point(None, iteration);
     let (dcs_cut, dcs_coefficients, _) =
         run_dcs_backward_trial_point(Some(dcs_params(2)), iteration);
 
     assert!(
-        (baked_cut.intercept - dcs_cut.intercept).abs() < 1e-9,
-        "intercept: baked {} vs DCS {}",
-        baked_cut.intercept,
+        (frozen_cut.intercept - dcs_cut.intercept).abs() < 1e-9,
+        "intercept: frozen {} vs DCS {}",
+        frozen_cut.intercept,
         dcs_cut.intercept
     );
-    assert_eq!(baked_coefficients.len(), dcs_coefficients.len());
-    for (i, (b, d)) in baked_coefficients.iter().zip(&dcs_coefficients).enumerate() {
+    assert_eq!(frozen_coefficients.len(), dcs_coefficients.len());
+    for (i, (b, d)) in frozen_coefficients
+        .iter()
+        .zip(&dcs_coefficients)
+        .enumerate()
+    {
         assert!(
             (b - d).abs() < 1e-9,
-            "coefficient[{i}]: baked {b} vs DCS {d}"
+            "coefficient[{i}]: frozen {b} vs DCS {d}"
         );
     }
     // The binding cut has gradient 2.0 on the incoming storage; both paths
     // must recover it.
     assert!(
-        (baked_coefficients[0] - 2.0).abs() < 1e-9,
-        "baked gradient must be the binding cut's 2.0, got {}",
-        baked_coefficients[0]
+        (frozen_coefficients[0] - 2.0).abs() < 1e-9,
+        "frozen gradient must be the binding cut's 2.0, got {}",
+        frozen_coefficients[0]
     );
 }
 
-/// `dcs = None` ⇒ the baked all-cuts path is taken and the cut is identical
+/// `dcs = None` ⇒ the frozen all-cuts path is taken and the cut is identical
 /// to the pre-DCS baseline (same fixture run with `None`).
 #[test]
 fn backward_dcs_off_is_identical_to_baseline() {
@@ -5488,19 +5503,19 @@ fn backward_dcs_off_is_identical_to_baseline() {
     assert!((coefficients_a[0] - 2.0).abs() < 1e-9);
 }
 
-/// `dcs = Some` but `iteration < start_iteration` ⇒ the baked path is used
-/// (DCS not yet active), so the cut equals the baked cut.
+/// `dcs = Some` but `iteration < start_iteration` ⇒ the frozen path is used
+/// (DCS not yet active), so the cut equals the frozen cut.
 #[test]
 fn backward_dcs_inactive_before_start_iteration() {
     // start_iteration = 4, iteration = 1 → inactive.
-    let (baked_cut, baked_coefficients, baked_meta) = run_dcs_backward_trial_point(None, 1);
+    let (frozen_cut, frozen_coefficients, frozen_meta) = run_dcs_backward_trial_point(None, 1);
     let (early_cut, early_coefficients, early_meta) =
         run_dcs_backward_trial_point(Some(dcs_params(4)), 1);
-    assert_eq!(baked_cut.intercept, early_cut.intercept);
-    assert_eq!(baked_coefficients, early_coefficients);
-    // Baked path updates binding-count metadata; the inactive-DCS run takes
-    // the baked path, so its metadata contribution matches the baked run.
-    assert_eq!(baked_meta, early_meta);
+    assert_eq!(frozen_cut.intercept, early_cut.intercept);
+    assert_eq!(frozen_coefficients, early_coefficients);
+    // Frozen path updates binding-count metadata; the inactive-DCS run takes
+    // the frozen path, so its metadata contribution matches the frozen run.
+    assert_eq!(frozen_meta, early_meta);
 }
 
 /// AC1: the DCS path extracts the cut gradient from the final all-satisfied
@@ -5509,26 +5524,26 @@ fn backward_dcs_inactive_before_start_iteration() {
 /// converged optimum (`x_hat` = 2, theta = 4) is the binding slot 1; slots 0
 /// (floor 1) and 2 (floor 3) are resident from the seed but slack, so their
 /// cut-row duals are zero. The DCS binding-count contribution must therefore
-/// equal the baked path's — slot 1 bumped, all others zero — proving the
+/// equal the frozen path's — slot 1 bumped, all others zero — proving the
 /// slot-correct translation maps the resident binding row back to slot 1 and
 /// to no other.
 #[test]
-fn backward_dcs_binding_counts_match_baked() {
-    let (_, _, baked_meta) = run_dcs_backward_trial_point(None, 5);
+fn backward_dcs_binding_counts_match_frozen() {
+    let (_, _, frozen_meta) = run_dcs_backward_trial_point(None, 5);
     let (_, _, dcs_meta) = run_dcs_backward_trial_point(Some(dcs_params(2)), 5);
 
-    // Baked path bumps exactly the binding slot 1 (the floor-4 cut at x=2).
+    // Frozen path bumps exactly the binding slot 1 (the floor-4 cut at x=2).
     assert_eq!(
-        baked_meta,
+        frozen_meta,
         vec![0, 1, 0],
-        "baked path must bump exactly binding slot 1, got {baked_meta:?}"
+        "frozen path must bump exactly binding slot 1, got {frozen_meta:?}"
     );
     // DCS path records the SAME binding-count contribution: the resident
     // binding row maps back to slot 1, and to no other slot.
     assert_eq!(
-        dcs_meta, baked_meta,
-        "DCS binding-count metadata must match baked (slot-correct via the \
-         resident CutRowMap), got DCS {dcs_meta:?} vs baked {baked_meta:?}"
+        dcs_meta, frozen_meta,
+        "DCS binding-count metadata must match frozen (slot-correct via the \
+         resident CutRowMap), got DCS {dcs_meta:?} vs frozen {frozen_meta:?}"
     );
 }
 
@@ -5577,13 +5592,13 @@ fn dcs_params_k1(start_iteration: u64, k1: Option<u32>) -> DcsParams {
 #[test]
 fn backward_dcs_exactness_and_terminates() {
     let iteration = 5;
-    let (baked, baked_coefficients, _) = run_dcs_backward_trial_point(None, iteration);
+    let (frozen, frozen_coefficients, _) = run_dcs_backward_trial_point(None, iteration);
 
     // Default-cap DCS reaches the no-violation stop and matches all-cuts.
     let (dcs, dcs_coefficients, _) = run_dcs_backward_trial_point(Some(dcs_params(2)), iteration);
-    assert!((baked.intercept - dcs.intercept).abs() < 1e-9);
-    for (b, d) in baked_coefficients.iter().zip(&dcs_coefficients) {
-        assert!((b - d).abs() < 1e-9, "coeff mismatch baked {b} vs DCS {d}");
+    assert!((frozen.intercept - dcs.intercept).abs() < 1e-9);
+    for (b, d) in frozen_coefficients.iter().zip(&dcs_coefficients) {
+        assert!((b - d).abs() < 1e-9, "coeff mismatch frozen {b} vs DCS {d}");
     }
 
     // A 1-iteration cap forces the bounded TC fallback; the call must still
@@ -5593,11 +5608,11 @@ fn backward_dcs_exactness_and_terminates() {
         ..dcs_params(2)
     };
     let (dcs_tc, dcs_tc_coefficients, _) = run_dcs_backward_trial_point(Some(tight), iteration);
-    assert!((baked.intercept - dcs_tc.intercept).abs() < 1e-9);
-    for (b, d) in baked_coefficients.iter().zip(&dcs_tc_coefficients) {
+    assert!((frozen.intercept - dcs_tc.intercept).abs() < 1e-9);
+    for (b, d) in frozen_coefficients.iter().zip(&dcs_tc_coefficients) {
         assert!(
             (b - d).abs() < 1e-9,
-            "TC-fallback coeff mismatch baked {b} vs DCS {d}"
+            "TC-fallback coeff mismatch frozen {b} vs DCS {d}"
         );
     }
 }
@@ -5611,9 +5626,9 @@ fn backward_dcs_exactness_and_terminates() {
 #[test]
 fn backward_dcs_finite_k1_window_takes_effect() {
     let iteration = 5;
-    let (baked, baked_coefficients, _) = run_dcs_backward_trial_point(None, iteration);
+    let (frozen, frozen_coefficients, _) = run_dcs_backward_trial_point(None, iteration);
     // Sanity: the all-cuts (and k1=None DCS) gradient is the binding cut's 2.0.
-    assert!((baked_coefficients[0] - 2.0).abs() < 1e-9);
+    assert!((frozen_coefficients[0] - 2.0).abs() < 1e-9);
 
     let (windowed, windowed_coefficients, _) =
         run_dcs_backward_trial_point(Some(dcs_params_k1(2, Some(1))), iteration);
@@ -5621,14 +5636,14 @@ fn backward_dcs_finite_k1_window_takes_effect() {
     // the surviving cuts (slots 0,2, both gradient 0) give a 0 gradient and
     // a different intercept than the all-cuts cut.
     assert!(
-        (windowed_coefficients[0] - baked_coefficients[0]).abs() > 1e-6
-            || (windowed.intercept - baked.intercept).abs() > 1e-6,
+        (windowed_coefficients[0] - frozen_coefficients[0]).abs() > 1e-6
+            || (windowed.intercept - frozen.intercept).abs() > 1e-6,
         "finite k1 must change the cut vs all-cuts (windowed coeff {} intercept {}; \
          all-cuts coeff {} intercept {})",
         windowed_coefficients[0],
         windowed.intercept,
-        baked_coefficients[0],
-        baked.intercept,
+        frozen_coefficients[0],
+        frozen.intercept,
     );
 }
 
@@ -5673,46 +5688,50 @@ fn backward_dcs_exactness_sweep() {
     let iterations = [3_u64, 5, 7];
     for &iteration in &iterations {
         for &x in &x_hats {
-            let (baked, baked_coefficients, _) =
+            let (frozen, frozen_coefficients, _) =
                 run_dcs_backward_trial_point_at(None, iteration, x);
             let (dcs, dcs_coefficients, _) =
                 run_dcs_backward_trial_point_at(Some(dcs_params(2)), iteration, x);
             assert!(
-                (baked.intercept - dcs.intercept).abs() < 1e-9,
-                "sweep iter {iteration} x_hat {x}: intercept baked {} vs DCS {}",
-                baked.intercept,
+                (frozen.intercept - dcs.intercept).abs() < 1e-9,
+                "sweep iter {iteration} x_hat {x}: intercept frozen {} vs DCS {}",
+                frozen.intercept,
                 dcs.intercept
             );
-            for (i, (b, d)) in baked_coefficients.iter().zip(&dcs_coefficients).enumerate() {
+            for (i, (b, d)) in frozen_coefficients
+                .iter()
+                .zip(&dcs_coefficients)
+                .enumerate()
+            {
                 assert!(
                     (b - d).abs() < 1e-9,
-                    "sweep iter {iteration} x_hat {x}: coeff[{i}] baked {b} vs DCS {d}"
+                    "sweep iter {iteration} x_hat {x}: coeff[{i}] frozen {b} vs DCS {d}"
                 );
             }
         }
     }
 }
 
-/// Baked successor template for the regression fixture: the cut-free base
+/// Frozen successor template for the regression fixture: the cut-free base
 /// (`dcs_core_template`, the coupling row `col0 - col2 = 0`) PLUS the binding
-/// cut (`-2*col0 + theta >= 0`) baked as a second structural row. This
-/// mimics baking being active (`baked_template.num_rows = 2 >
-/// template_num_rows = 1`), so the all-cuts/baked successor LP already
+/// cut (`-2*col0 + theta >= 0`) frozen as a second structural row. This
+/// mimics freeze being active (`frozen_template.num_rows = 2 >
+/// template_num_rows = 1`), so the all-cuts/frozen successor LP already
 /// carries a cut row that the DCS path must NOT re-append.
 ///
 /// CSC by column (4 cols, 2 rows):
 ///   col0 -> (row0, +1), (row1, -5);  col2 -> (row0, -1);  col3 -> (row1, +1)
 ///
-/// The baked cut intentionally DOMINATES the pool's true binding cut: it is
+/// The frozen cut intentionally DOMINATES the pool's true binding cut: it is
 /// `-5*col0 + theta >= 0`, i.e. `theta >= 5*col0`, giving floor `10` at the
 /// pinned `x_hat = 2` versus the pool's true optimum floor `4` (gradient 2).
 /// This is a cut that is NOT in the DCS resident pool (the pool's cuts have
 /// gradients 0 and 2, never 5). If the DCS path erroneously loaded this
-/// baked template as its core, the LP would carry the spurious floor-10
+/// frozen template as its core, the LP would carry the spurious floor-10
 /// constraint and the produced cut would be `theta = 10, gradient = 5` —
 /// observably different from the correct all-cuts cut. Loading the cut-free
-/// base (the fix) ignores this baked row, so the DCS cut matches all-cuts.
-fn dcs_baked_template_with_one_cut() -> StageTemplate {
+/// base (the fix) ignores this frozen row, so the DCS cut matches all-cuts.
+fn dcs_frozen_template_with_one_cut() -> StageTemplate {
     StageTemplate {
         num_cols: 4,
         num_rows: 2,
@@ -5723,7 +5742,7 @@ fn dcs_baked_template_with_one_cut() -> StageTemplate {
         col_lower: vec![0.0, 0.0, 0.0, -1.0e6],
         col_upper: vec![f64::INFINITY, f64::INFINITY, f64::INFINITY, 1.0e6],
         objective: vec![0.0, 0.0, 0.0, 1.0],
-        // row0: coupling equality (=0); row1: spurious baked cut
+        // row0: coupling equality (=0); row1: spurious frozen cut
         // -5*col0 + theta >= 0 (NOT a DCS pool cut).
         row_lower: vec![0.0, 0.0],
         row_upper: vec![0.0, f64::INFINITY],
@@ -5737,38 +5756,38 @@ fn dcs_baked_template_with_one_cut() -> StageTemplate {
     }
 }
 
-/// Regression for the baked-template-as-core bug: when baking is active
-/// (`baked_template.num_rows > template_num_rows`), the DCS path must load
-/// the cut-free base `ctx.templates[s]` — NOT `succ.baked_template`, which
-/// already carries the active cut rows. Loading the baked template would
-/// leave its baked cut rows resident in the LP even though the lazy loop's
+/// Regression for the frozen-template-as-core bug: when freeze is active
+/// (`frozen_template.num_rows > template_num_rows`), the DCS path must load
+/// the cut-free base `ctx.templates[s]` — NOT `succ.frozen_template`, which
+/// already carries the active cut rows. Loading the frozen template would
+/// leave its frozen cut rows resident in the LP even though the lazy loop's
 /// fresh `CutRowMap` does not own them, so DCS would solve against cut rows
 /// it never selected.
 ///
-/// Here `succ.baked_template` carries one baked cut row
-/// (`dcs_baked_template_with_one_cut`, `num_rows = 2`) that is a spurious
+/// Here `succ.frozen_template` carries one frozen cut row
+/// (`dcs_frozen_template_with_one_cut`, `num_rows = 2`) that is a spurious
 /// floor-10 / gradient-5 constraint NOT present in the DCS pool, while
 /// `ctx.templates[s]` is the cut-free base (`num_rows = 1`). With the fix
 /// the DCS cut equals the all-cuts cut (gradient 2) within 1e-9. Against the
-/// old `core = succ.baked_template`, the spurious baked cut dominates the
+/// old `core = succ.frozen_template`, the spurious frozen cut dominates the
 /// solve and DCS returns gradient 5 — observably wrong — failing this
 /// assertion. (Verified: this test fails on the buggy code, passes on the
 /// fix.)
 #[test]
-// Rationale: one end-to-end DCS-vs-baked scenario whose setup (templates, fcf,
+// Rationale: one end-to-end DCS-vs-frozen scenario whose setup (templates, fcf,
 // SuccessorSpec, contexts) and sequential assertions form a single coherent
 // fixture; splitting would fragment the cut-row-identity checks it verifies.
 #[allow(clippy::too_many_lines)]
-fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
+fn backward_dcs_frozen_cuts_present_no_duplicate_rows() {
     let iteration = 5;
     let state = crate::test_support::state_layout(1, 0);
     let n_state = state.n_state;
     let n_stages = 2;
 
-    // Cut-free base (loaded by the DCS path) and the baked successor
+    // Cut-free base (loaded by the DCS path) and the frozen successor
     // template that carries the binding cut as a structural row.
     let base = dcs_core_template();
-    let baked = dcs_baked_template_with_one_cut();
+    let frozen = dcs_frozen_template_with_one_cut();
     // ctx.templates carries the cut-free base for the successor stage.
     let templates = vec![base.clone(), base.clone()];
     let base_rows = vec![0_usize, 0_usize];
@@ -5777,8 +5796,8 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
     let risk_measures = vec![RiskMeasure::Expectation; 2];
 
     let mut fcf = dcs_two_stage_fcf();
-    // All-cuts batch (delta) for the baked path; with baked carrying the
-    // binding cut, the delta is the remaining (non-baked) cuts. For the DCS
+    // All-cuts batch (delta) for the frozen path; with frozen carrying the
+    // binding cut, the delta is the remaining (non-frozen) cuts. For the DCS
     // exactness comparison we only need the all-cuts reference, computed
     // from the full pool against the cut-free base below.
     let cut_batch = crate::cut::row::build_cut_row_batch(
@@ -5842,8 +5861,8 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
     };
 
     let probabilities = vec![1.0_f64];
-    // `baked_template` carries a baked cut row (num_rows = 2); the cut-free
-    // base has template_num_rows = 1. This is the baking-active shape that
+    // `frozen_template` carries a frozen cut row (num_rows = 2); the cut-free
+    // base has template_num_rows = 1. This is the freeze-active shape that
     // exposed the bug.
     let cut_state_projection = crate::indexer::CutStateProjection::new(
         &state,
@@ -5860,7 +5879,7 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
         cut_batch: &cut_batch,
         num_cuts_at_successor: num_cuts,
         template_num_rows: base.num_rows,
-        baked_template: &baked,
+        frozen_template: &frozen,
         successor_active_slots: &successor_active_slots,
         cut_activity_tolerance: 0.0,
         successor_populated_count: fcf.pools[1].populated_count,
@@ -5927,7 +5946,7 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
         0,
         0,
     )
-    .expect("DCS backward solve with baked cuts present must succeed");
+    .expect("DCS backward solve with frozen cuts present must succeed");
     // Resolve the DCS coefficient slice from the worker arena while `ws` is
     // still in scope.
     let dcs_coefficients = staged_cut_coefficients(&dcs_cut, &ws.backward_accum.agg_arena).to_vec();
@@ -5938,7 +5957,7 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
 
     // With the fix (core = cut-free ctx.templates[s]), the binding cut is
     // added exactly once and the DCS cut matches the all-cuts cut. With the
-    // bug (core = baked_template), the baked cut is double-added and the
+    // bug (core = frozen_template), the frozen cut is double-added and the
     // solve/extraction is malformed, so this fails.
     assert!(
         (dcs_cut.intercept - allcuts.intercept).abs() < 1e-9,

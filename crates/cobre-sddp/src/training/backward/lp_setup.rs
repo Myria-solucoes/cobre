@@ -23,7 +23,7 @@ pub(crate) fn load_backward_lp<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
     succ: &SuccessorSpec<'_>,
 ) {
-    ws.solver.load_model(succ.baked_template);
+    ws.solver.load_model(succ.frozen_template);
     if succ.cut_batch.num_rows > 0 {
         ws.solver.add_rows(succ.cut_batch);
     }

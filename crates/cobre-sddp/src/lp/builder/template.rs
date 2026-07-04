@@ -29,7 +29,7 @@ pub struct StageTemplates {
     /// Row index of the first water-balance constraint in each stage's LP.
     ///
     /// Length equals `templates.len()`.  Used by `PatchBuffer::fill_forward_patches`
-    /// to locate the noise-injection rows (Category 3 patches).
+    /// to locate the noise-injection rows.
     pub base_rows: Vec<usize>,
     /// Pre-computed noise scale `ζ_stage * σ_{stage,hydro}` for each (stage, hydro) pair.
     ///
@@ -353,7 +353,7 @@ impl StageGeometry {
     /// Build the per-stage equipment geometry from this stage's `StageLayout`.
     ///
     /// This is the production source: every range is the stage-correct geometry
-    /// the LP template was baked with, so the simulation read-path addresses the
+    /// the LP template was frozen with, so the simulation read-path addresses the
     /// columns the solved primal actually occupies at this stage. The empty-block
     /// `start` accessors (`col_generation_start`, the `col_*_slack` accessors)
     /// resolve the dedicated empty-block cursor rather than a bare `0` when the
@@ -763,11 +763,11 @@ pub fn build_stage_templates(
     // agreement with the one `setup` stores on `StageData.state` without
     // widening this function's signature — the accepted redundant-but-
     // deterministic cost of a second call.
-    let bucket_topology = crate::setup::bucket_topology::build_bucket_topology(system);
+    let bucket_topology = crate::setup::bucket_topology::build_transit_bucket_topology(system);
     let state_layout = crate::indexer::StateLayout::new(
         ctx.n_hydros,
         ctx.max_par_order,
-        bucket_topology.b_total,
+        bucket_topology.n_buckets,
         bucket_topology.column_order,
         ctx.n_anticipated,
         ctx.k_max,
@@ -1054,7 +1054,7 @@ fn build_template_build_ctx<'a>(
     // recomputation for `StateLayout` — the accepted redundant-but-deterministic
     // cost of a second call.
     let per_stage_mask =
-        crate::setup::bucket_topology::build_bucket_topology(system).per_stage_mask;
+        crate::setup::bucket_topology::build_transit_bucket_topology(system).per_stage_mask;
 
     let ctx = TemplateBuildCtx {
         hydros,

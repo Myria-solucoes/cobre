@@ -94,7 +94,7 @@ pub struct Study {
 ///
 /// `Policy` carries enough state to drive `simulate` directly without reloading
 /// a checkpoint from disk: the [`TrainingResult`] (which owns the per-stage
-/// basis cache and the baked stage templates) and a clone of the trained
+/// basis cache and the frozen stage templates) and a clone of the trained
 /// [`FutureCostFunction`] (the cut pool). A `Policy.load`-ed handle and a
 /// trained one therefore expose the same shape.
 ///
@@ -102,7 +102,7 @@ pub struct Study {
 /// (`iterations`, `final_lower_bound`, `final_upper_bound`).
 #[pyclass(name = "Policy")]
 pub struct Policy {
-    /// The training result (basis cache + baked templates) `simulate` warm-starts
+    /// The training result (basis cache + frozen templates) `simulate` warm-starts
     /// from.
     training_result: TrainingResult,
     /// The trained (or loaded) study FCF (the cut pool). `Study::simulate`
@@ -484,8 +484,8 @@ impl Study {
     /// construction-time `output_dir`), reconstructs the
     /// [`FutureCostFunction`] and a synthetic [`TrainingResult`] via the shared
     /// [`reconstruct_policy_from_checkpoint`] helper, and packages them into a
-    /// [`Policy`]. The returned policy carries `baked_templates = None`;
-    /// [`Study::simulate`] re-bakes the stage templates from the FCF at startup,
+    /// [`Policy`]. The returned policy carries `frozen_templates = None`;
+    /// [`Study::simulate`] re-freezes the stage templates from the FCF at startup,
     /// exactly as the monolithic simulation-only path does.
     ///
     /// `validate_compatibility` overrides `config.policy.validate_compatibility`
@@ -541,9 +541,9 @@ impl Study {
     /// [`StudySetup::replace_fcf`] before simulating, so a trained `Policy` (from
     /// [`Study::train`]) and a loaded `Policy` (from [`Study::load_policy`]) feed
     /// the IDENTICAL simulate path: the unchanged [`run_simulation_phase_py`]
-    /// reads the policy's `baked_templates` and `basis_cache`. A trained policy
-    /// carries `baked_templates = Some(...)`; a loaded one carries `None` and the
-    /// study re-bakes the stage templates from the FCF at startup — exactly the
+    /// reads the policy's `frozen_templates` and `basis_cache`. A trained policy
+    /// carries `frozen_templates = Some(...)`; a loaded one carries `None` and the
+    /// study re-freezes the stage templates from the FCF at startup — exactly the
     /// monolithic behavior.
     ///
     /// `output_dir` defaults to this study's construction-time `output_dir`.

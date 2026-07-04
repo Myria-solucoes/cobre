@@ -310,8 +310,8 @@ fn max_par_order_z_inflow_row_has_twelve_lag_entries() {
 /// Regression guard: [`PatchBuffer`] must never grow to include generic-constraint rows.
 ///
 /// The only row categories `PatchBuffer` mutates at solve time are AR dynamics /
-/// noise (Category 3), load-balance (Category 4), and z-inflow definition
-/// (Category 5); incoming state is pinned via column bounds, not patched rows.
+/// noise, load-balance, and z-inflow definition; incoming state is pinned via
+/// column bounds, not patched rows.
 /// Generic-constraint coefficients are immutable after construction. The test pins
 /// this by asserting `forward_patch_count` after filling all three categories
 /// equals `N + M*B_active + N` and never exceeds capacity `N + M*B_max + N`.
@@ -343,7 +343,7 @@ fn parameter_coefficient_persists_across_stage_template_uses() {
     let noise: Vec<f64> = (0..n).map(|h| h as f64 * 0.5).collect();
     let base_row: usize = n; // water_balance_start = N
 
-    // Category 3 — AR dynamics / noise.
+    // Noise — AR dynamics.
     buf.fill_forward_patches(
         &StateLayout::new(n, l, 0, Vec::new(), 0, 0, vec![], &vec![l; n]),
         &state,
@@ -352,7 +352,7 @@ fn parameter_coefficient_persists_across_stage_template_uses() {
         &[],
     );
 
-    // Category 4 — 2 load buses, 2 active blocks (< max 3). The per-stage grid
+    // Load — 2 load buses, 2 active blocks (< max 3). The per-stage grid
     // carries `b_active`, NOT `b_max`, so the load-balance row stride matches the
     // per-stage LP (a global grid striding by `b_max` would address the wrong row).
     let b_active: usize = 2;
@@ -367,7 +367,7 @@ fn parameter_coefficient_persists_across_stage_template_uses() {
         &[],
     );
 
-    // Category 5 — z-inflow rows.
+    // Z-inflow rows.
     let z_inflow_rhs: Vec<f64> = (0..n).map(|h| 80.0 + h as f64).collect();
     let z_inflow_row_start: usize = 50;
     buf.fill_z_inflow_patches(z_inflow_row_start, &z_inflow_rhs, &[]);

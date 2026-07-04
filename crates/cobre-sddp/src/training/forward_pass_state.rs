@@ -42,8 +42,8 @@ pub(crate) struct ForwardPassInputs<'a, S: SolverInterface + Send> {
     pub basis_store: &'a mut BasisStore,
     /// Stage-level LP context (templates, row counts, noise scales).
     pub ctx: &'a StageContext<'a>,
-    /// Baked LP templates including pre-appended prior-iteration cuts.
-    pub baked: &'a [StageTemplate],
+    /// Frozen LP templates including pre-appended prior-iteration cuts.
+    pub frozen: &'a [StageTemplate],
     /// Future-cost function — read-only for the forward pass.
     pub fcf: &'a FutureCostFunction,
     /// Study-level training context (horizon, indexer, stochastic model).
@@ -90,7 +90,7 @@ impl<'a, S: SolverInterface + Send> ForwardPassInputs<'a, S> {
             workspaces: &mut fwd_pool.workspaces,
             basis_store,
             ctx,
-            baked: &scratch.baked_templates,
+            frozen: &scratch.frozen_templates,
             fcf,
             training_ctx,
             records: &mut scratch.records[..fwd_record_len],
@@ -135,8 +135,8 @@ pub(crate) struct ForwardWorkerParams<'a> {
     pub state: &'a StateLayout,
     /// Stage-level LP context (templates, row counts, noise scales).
     pub ctx: &'a StageContext<'a>,
-    /// Baked LP templates including pre-appended prior-iteration cuts.
-    pub baked: &'a [StageTemplate],
+    /// Frozen LP templates including pre-appended prior-iteration cuts.
+    pub frozen: &'a [StageTemplate],
     /// Future-cost function — read-only for the forward pass.
     pub fcf: &'a FutureCostFunction,
     /// Study-level training context (horizon, indexer, stochastic model).
@@ -256,7 +256,7 @@ impl ForwardPassState {
     ///
     /// - `inputs.records.len() != inputs.local_forward_passes * num_stages`
     /// - `inputs.training_ctx.initial_state.len() != state.n_state`
-    /// - `inputs.baked.len() != num_stages`
+    /// - `inputs.frozen.len() != num_stages`
     pub(crate) fn run<S>(
         &mut self,
         inputs: &mut ForwardPassInputs<'_, S>,
@@ -282,10 +282,10 @@ impl ForwardPassState {
         debug_assert_eq!(inputs.records.len(), forward_passes * num_stages);
         debug_assert_eq!(initial_state.len(), state.n_state);
         debug_assert_eq!(
-            inputs.baked.len(),
+            inputs.frozen.len(),
             num_stages,
-            "baked templates length mismatch: expected {num_stages}, got {}",
-            inputs.baked.len()
+            "frozen templates length mismatch: expected {num_stages}, got {}",
+            inputs.frozen.len()
         );
 
         let sampler = build_forward_sampler(ForwardSamplerConfig {
@@ -387,7 +387,7 @@ impl ForwardPassState {
             recent_weight_seed,
             state,
             ctx: inputs.ctx,
-            baked: inputs.baked,
+            frozen: inputs.frozen,
             fcf: inputs.fcf,
             training_ctx,
             sampler: &sampler,
@@ -579,7 +579,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     // Snapshot the cumulative lazy-scoring accumulator; the region-end delta
     // attributes this pass's scoring to the forward phase. The accumulator is
     // never reset, so a snapshot-delta is the only correct attribution; it stays
-    // zero on the baked path.
+    // zero on the frozen path.
     let scoring_seconds_before = ws.backward_accum.dcs_solve.scoring_time_seconds;
     let (start_m, end_m) = partition(params.forward_passes, params.n_workers, w);
     let n_local = end_m - start_m;
@@ -619,17 +619,17 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
             // worker solved before it (determinism across thread/rank counts).
             // No-op for HiGHS; for CLP recreates the model (`Clp_loadProblem`
             // leaves rim/pricing state stale). Must precede the per-scenario load
-            // so the fresh CLP handle is the one repopulated — both the baked
+            // so the fresh CLP handle is the one repopulated — both the frozen
             // `load_model` below and the DCS-path load in `run_forward_stage`.
             ws.solver.reset_solver_state();
 
             // Reload model per scenario to ensure deterministic LP state across
-            // thread assignments. The baked all-cuts template is loaded here for
-            // the baked path; on the DCS path `run_forward_stage` instead loads
-            // the cut-free base template (loading baked would double-append the
-            // embedded cut rows), so the baked load is skipped.
+            // thread assignments. The frozen all-cuts template is loaded here for
+            // the frozen path; on the DCS path `run_forward_stage` instead loads
+            // the cut-free base template (loading frozen would double-append the
+            // embedded cut rows), so the frozen load is skipped.
             if dcs_params.is_none() {
-                ws.solver.load_model(&params.baked[t]);
+                ws.solver.load_model(&params.frozen[t]);
             }
             ws.current_state.clear();
             let src: &[f64] = if t == 0 {
@@ -698,7 +698,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 num_stages: params.num_stages,
                 iteration: params.iteration,
                 raw_noise,
-                basis_row_capacity: params.baked[t].num_rows,
+                basis_row_capacity: params.frozen[t].num_rows,
                 terminal_has_boundary_cuts: params.terminal_has_boundary_cuts,
                 pool: &params.fcf.pools[t],
                 dcs: dcs_params,
@@ -726,7 +726,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     let local_solves = ws.solver.statistics().solve_count - local_solve_count_before;
     ws.worker_timing_buf.forward_wall_ms += worker_wall_start.elapsed().as_secs_f64() * 1_000.0;
     // Fold the forward-region lazy-scoring delta into the timing buffer (ms),
-    // mirroring the `forward_wall_ms` fold above. Zero on the baked path.
+    // mirroring the `forward_wall_ms` fold above. Zero on the frozen path.
     ws.worker_timing_buf.scoring_ms +=
         (ws.backward_accum.dcs_solve.scoring_time_seconds - scoring_seconds_before) * 1_000.0;
     Ok(ForwardWorkerResult {
@@ -1239,7 +1239,7 @@ mod tests {
             workspaces: &mut fx.workspaces,
             basis_store: &mut fx.basis_store,
             ctx: &ctx,
-            baked: &fx.templates,
+            frozen: &fx.templates,
             fcf: &fx.fcf,
             training_ctx: &training_ctx,
             records: &mut fx.records,
@@ -1344,7 +1344,7 @@ mod tests {
             recent_weight_seed: 0.0,
             state: &fx.state,
             ctx: &ctx,
-            baked: &fx.templates,
+            frozen: &fx.templates,
             fcf: &fx.fcf,
             training_ctx: &training_ctx,
             sampler: &sampler,
@@ -1445,7 +1445,7 @@ mod tests {
                 workspaces: &mut fx.workspaces,
                 basis_store: &mut fx.basis_store,
                 ctx: &ctx,
-                baked: &fx.templates,
+                frozen: &fx.templates,
                 fcf: &fx.fcf,
                 training_ctx: &training_ctx,
                 records: &mut fx.records,
@@ -1469,7 +1469,7 @@ mod tests {
                 workspaces: &mut fx.workspaces,
                 basis_store: &mut fx.basis_store,
                 ctx: &ctx,
-                baked: &fx.templates,
+                frozen: &fx.templates,
                 fcf: &fx.fcf,
                 training_ctx: &training_ctx,
                 records: &mut fx.records,
@@ -1572,7 +1572,7 @@ mod tests {
                 workspaces: &mut fx.workspaces,
                 basis_store: &mut fx.basis_store,
                 ctx: &ctx,
-                baked: &fx.templates,
+                frozen: &fx.templates,
                 fcf: &fx.fcf,
                 training_ctx: &training_ctx,
                 records: &mut fx.records,
@@ -1597,7 +1597,7 @@ mod tests {
                 workspaces: &mut fx.workspaces,
                 basis_store: &mut fx.basis_store,
                 ctx: &ctx,
-                baked: &fx.templates,
+                frozen: &fx.templates,
                 fcf: &fx.fcf,
                 training_ctx: &training_ctx,
                 records: &mut fx.records,

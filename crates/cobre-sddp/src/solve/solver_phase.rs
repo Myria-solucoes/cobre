@@ -122,7 +122,7 @@ impl PhaseProfiles for ClpProfile {
         factorization_frequency: 200, // refactor cadence
     };
     // Simulation runs the PRIMAL simplex, not dual: CLP's dual falsely declares
-    // these warm-started, fully-baked cut-laden simulation LPs infeasible, while
+    // these warm-started, fully-frozen cut-laden simulation LPs infeasible, while
     // the primal simplex solves them directly and deterministically (so
     // bit-for-bit reproducibility holds). The dual-row pivot rule
     // (`dual_pricing_mode`) is unused by primal.

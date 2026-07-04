@@ -38,7 +38,7 @@ fn run_simulate<S, C: cobre_comm::Communicator>(
     training_ctx: &TrainingContext<'_>,
     config: &SimulationConfig,
     output: SimulationOutputSpec<'_>,
-    baked_templates: Option<&[cobre_solver::StageTemplate]>,
+    frozen_templates: Option<&[cobre_solver::StageTemplate]>,
     stage_bases: &[Option<CapturedBasis>],
     comm: &C,
 ) -> Result<super::SimulationRunResult, SimulationError>
@@ -54,7 +54,7 @@ where
         training_ctx,
         config,
         output,
-        baked_templates,
+        frozen_templates,
         stage_bases,
         comm,
     };
@@ -118,7 +118,7 @@ impl Communicator for StubComm {
 /// call index (counting across both cold-start and warm-start calls).
 ///
 /// `load_count` and `add_rows_count` track how many times `load_model` and
-/// `add_rows` were called, used by the baked-path acceptance tests.
+/// `add_rows` were called, used by the frozen-path acceptance tests.
 ///
 /// `solve_count` counts calls to the cold-start `solve(None)` path only.
 /// `solve_with_basis_count` counts calls to the warm-start `solve(Some(&basis))`
@@ -900,13 +900,13 @@ fn simulation_load_patches_applied() {
     );
 
     // The load patch must also be reflected in the patch buffer.
-    let cat4_start = 1; // n_hydros = 1
+    let load_start = 1; // n_hydros = 1
     assert_eq!(
-        workspaces[0].patch_buf.lower[cat4_start], workspaces[0].scratch.load_rhs_buf[0],
+        workspaces[0].patch_buf.lower[load_start], workspaces[0].scratch.load_rhs_buf[0],
         "patch_buf lower at load slot must equal load_rhs_buf[0]"
     );
     assert_eq!(
-        workspaces[0].patch_buf.upper[cat4_start], workspaces[0].scratch.load_rhs_buf[0],
+        workspaces[0].patch_buf.upper[load_start], workspaces[0].scratch.load_rhs_buf[0],
         "patch_buf upper at load slot must equal load_rhs_buf[0] (equality constraint)"
     );
 
@@ -1769,7 +1769,7 @@ fn simulation_none_method_produces_raw_negative_noise() {
 // fixtures (a coupling row ties storage_out col0 to the pinned storage_in
 // col2, and cuts constrain theta against col0). The theta-sensitive
 // observable is `SimulationStageResult.future_cost = primal[theta] * SCALE`,
-// which distinguishes the converged theta and so catches a wrong (baked)
+// which distinguishes the converged theta and so catches a wrong (frozen)
 // template load.
 mod dcs_simulation {
     use std::collections::HashMap;
@@ -1822,9 +1822,9 @@ mod dcs_simulation {
         }
     }
 
-    /// All-cuts baked template: cut-free base + the three pool cuts baked as
+    /// All-cuts frozen template: cut-free base + the three pool cuts frozen as
     /// structural rows 1..4 (slot order). `num_rows = 4`.
-    fn sim_all_cuts_baked() -> StageTemplate {
+    fn sim_all_cuts_frozen() -> StageTemplate {
         StageTemplate {
             num_cols: 4,
             num_rows: 4,
@@ -1847,9 +1847,9 @@ mod dcs_simulation {
         }
     }
 
-    /// Baked template carrying a single DOMINATING spurious cut
+    /// Frozen template carrying a single DOMINATING spurious cut
     /// (`-5*col0 + theta >= 0`, floor 10 at `x_hat = 2`, NOT in the pool).
-    fn sim_baked_dominating_cut() -> StageTemplate {
+    fn sim_frozen_dominating_cut() -> StageTemplate {
         StageTemplate {
             num_cols: 4,
             num_rows: 2,
@@ -1897,7 +1897,7 @@ mod dcs_simulation {
             max_par_order: 0,
             n_load_buses: 0,
             max_blocks: 0,
-            b_total: 0,
+            n_buckets: 0,
             downstream_par_order: 0,
             max_openings: 1,
             initial_pool_capacity: 16,
@@ -1930,12 +1930,12 @@ mod dcs_simulation {
         }
     }
 
-    /// Solve one simulation stage with the given `dcs` option and `baked`
+    /// Solve one simulation stage with the given `dcs` option and `frozen`
     /// template, returning `(immediate_cost, SimulationStageResult)`.
     #[allow(clippy::too_many_lines)]
     fn run_one_sim_stage(
         dcs: Option<DcsParams>,
-        baked: &StageTemplate,
+        frozen: &StageTemplate,
     ) -> (f64, SimulationStageResult) {
         let state = crate::test_support::state_layout(1, 0);
         let core = sim_core_template();
@@ -2049,7 +2049,7 @@ mod dcs_simulation {
             scenario_id: 0,
         };
         let load_spec = SimStageLoadSpec {
-            baked_template: baked,
+            frozen_template: frozen,
             warm_basis: None,
         };
         let lookups = SimLookups::build(&crate::test_support::study_dims(), &[], 0, 1);
@@ -2079,37 +2079,37 @@ mod dcs_simulation {
     }
 
     /// AC1: the DCS branch (binding cut omitted from the seed) yields the
-    /// same immediate cost and primal-derived fields as the baked all-cuts
+    /// same immediate cost and primal-derived fields as the frozen all-cuts
     /// path within 1e-9.
     #[test]
     fn sim_dcs_exact_matches_all_cuts() {
-        let all_cuts = sim_all_cuts_baked();
-        let (baked_imm, baked) = run_one_sim_stage(None, &all_cuts);
+        let all_cuts = sim_all_cuts_frozen();
+        let (frozen_imm, frozen) = run_one_sim_stage(None, &all_cuts);
         let (dcs_imm, dcs) = run_one_sim_stage(Some(dcs_params()), &all_cuts);
 
         // Returned immediate cost (the f64) must match within 1e-9.
         assert!(
-            (baked_imm - dcs_imm).abs() < 1e-9,
-            "immediate cost: baked {baked_imm} vs DCS {dcs_imm}"
+            (frozen_imm - dcs_imm).abs() < 1e-9,
+            "immediate cost: frozen {frozen_imm} vs DCS {dcs_imm}"
         );
-        let bc = stage_cost(&baked);
+        let bc = stage_cost(&frozen);
         let dc = stage_cost(&dcs);
         assert!(
             (bc.immediate_cost - dc.immediate_cost).abs() < 1e-9,
-            "record immediate_cost: baked {} vs DCS {}",
+            "record immediate_cost: frozen {} vs DCS {}",
             bc.immediate_cost,
             dc.immediate_cost
         );
         // future_cost = theta * SCALE; the binding cut floor is 4 at x_hat=2.
         assert!(
             (bc.future_cost - dc.future_cost).abs() < 1e-9,
-            "future_cost: baked {} vs DCS {}",
+            "future_cost: frozen {} vs DCS {}",
             bc.future_cost,
             dc.future_cost
         );
         assert!(
             (bc.total_cost - dc.total_cost).abs() < 1e-9,
-            "total_cost: baked {} vs DCS {}",
+            "total_cost: frozen {} vs DCS {}",
             bc.total_cost,
             dc.total_cost
         );
@@ -2120,25 +2120,25 @@ mod dcs_simulation {
         );
     }
 
-    /// AC2: a baked template embedding a DOMINATING cut (floor 10, NOT in the
+    /// AC2: a frozen template embedding a DOMINATING cut (floor 10, NOT in the
     /// pool) must NOT change the DCS result — proving the cut-free
-    /// `ctx.templates[t]` is loaded, not `load_spec.baked_template`. A wrong
+    /// `ctx.templates[t]` is loaded, not `load_spec.frozen_template`. A wrong
     /// load surfaces as `future_cost` reflecting `theta = 10`.
     #[test]
-    fn sim_dcs_baked_cuts_present_uses_cut_free_core() {
-        let all_cuts_template = sim_all_cuts_baked();
-        let dominating = sim_baked_dominating_cut();
-        let (_, baked) = run_one_sim_stage(None, &all_cuts_template);
-        // DCS is handed the dominating baked template but must ignore it and
+    fn sim_dcs_frozen_cuts_present_uses_cut_free_core() {
+        let all_cuts_template = sim_all_cuts_frozen();
+        let dominating = sim_frozen_dominating_cut();
+        let (_, frozen) = run_one_sim_stage(None, &all_cuts_template);
+        // DCS is handed the dominating frozen template but must ignore it and
         // load the cut-free base, recovering the all-cuts (theta=4) result.
         let (_, dcs) = run_one_sim_stage(Some(dcs_params()), &dominating);
 
-        let ac = stage_cost(&baked);
+        let ac = stage_cost(&frozen);
         let dc = stage_cost(&dcs);
         assert!(
             (ac.future_cost - dc.future_cost).abs() < 1e-9,
             "future_cost: all-cuts {} vs DCS {} (DCS must ignore the dominating \
-                 baked cut and load the cut-free base)",
+                 frozen cut and load the cut-free base)",
             ac.future_cost,
             dc.future_cost
         );

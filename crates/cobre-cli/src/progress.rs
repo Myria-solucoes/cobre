@@ -381,7 +381,7 @@ impl BarRenderer {
             | TrainingEvent::PolicySyncComplete { .. }
             | TrainingEvent::PolicySelectionComplete { .. }
             | TrainingEvent::PolicyBudgetEnforcementComplete { .. }
-            | TrainingEvent::PolicyTemplateBakeComplete { .. }
+            | TrainingEvent::PolicyTemplateFreezeComplete { .. }
             | TrainingEvent::ConvergenceUpdate { .. }
             | TrainingEvent::CheckpointComplete { .. }
             | TrainingEvent::WorkerTiming { .. } => {}
@@ -538,7 +538,7 @@ impl LineRenderer {
             | TrainingEvent::PolicySyncComplete { .. }
             | TrainingEvent::PolicySelectionComplete { .. }
             | TrainingEvent::PolicyBudgetEnforcementComplete { .. }
-            | TrainingEvent::PolicyTemplateBakeComplete { .. }
+            | TrainingEvent::PolicyTemplateFreezeComplete { .. }
             | TrainingEvent::ConvergenceUpdate { .. }
             | TrainingEvent::CheckpointComplete { .. }
             | TrainingEvent::WorkerTiming { .. } => {}

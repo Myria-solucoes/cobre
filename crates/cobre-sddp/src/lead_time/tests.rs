@@ -23,9 +23,9 @@ fn test_s1a_matches_decomp_fig_5_5b() {
     let stage_lengths_hours = [168.0; 6];
     let resolution = resolve_spread(360.0, 0, &stage_lengths_hours, None);
 
-    assert_eq!(resolution.depth, 3);
-    assert_close(&resolution.k, &[0.0, 0.0, 6.0 / 7.0, 1.0 / 7.0]);
-    assert!((resolution.k.iter().sum::<f64>() - 1.0).abs() < TOL);
+    assert_eq!(resolution.stage_reach, 3);
+    assert_close(&resolution.stage_weights, &[0.0, 0.0, 6.0 / 7.0, 1.0 / 7.0]);
+    assert!((resolution.stage_weights.iter().sum::<f64>() - 1.0).abs() < TOL);
 }
 
 #[test]
@@ -33,16 +33,16 @@ fn test_s1d_monthly_to_weekly_counterexample() {
     let stage_lengths_hours = [720.0, 168.0, 168.0, 168.0, 168.0];
     let resolution = resolve_spread(360.0, 0, &stage_lengths_hours, None);
 
-    assert_eq!(resolution.depth, 3);
+    assert_eq!(resolution.stage_reach, 3);
     assert_close(
-        &resolution.k,
+        &resolution.stage_weights,
         &[1.0 / 2.0, 7.0 / 30.0, 7.0 / 30.0, 1.0 / 30.0],
     );
-    assert!((resolution.k.iter().sum::<f64>() - 1.0).abs() < TOL);
+    assert!((resolution.stage_weights.iter().sum::<f64>() - 1.0).abs() < TOL);
 
     // The closed-form ceiling `⌈360/720⌉ == 1` would drop the lag-2/lag-3
     // mass; only the general max-reach depth is correct here.
-    assert_ne!(resolution.depth, 1);
+    assert_ne!(resolution.stage_reach, 1);
 }
 
 #[test]
@@ -51,25 +51,35 @@ fn test_example_iii_block_factors() {
     let block_lengths_hours = [240.0, 240.0, 240.0];
     let resolution = resolve_spread(250.0, 0, &stage_lengths_hours, Some(&block_lengths_hours));
 
-    assert_eq!(resolution.depth, 1);
-    assert_close(&resolution.k, &[470.0 / 720.0, 250.0 / 720.0]);
+    assert_eq!(resolution.stage_reach, 1);
+    assert_close(&resolution.stage_weights, &[470.0 / 720.0, 250.0 / 720.0]);
 
-    assert_close(&resolution.chi[0], &[1.0, 0.0]);
-    assert_close(&resolution.chi[1], &[230.0 / 240.0, 10.0 / 240.0]);
-    assert_close(&resolution.chi[2], &[0.0, 1.0]);
+    assert_close(&resolution.block_deposits[0], &[1.0, 0.0]);
+    assert_close(
+        &resolution.block_deposits[1],
+        &[230.0 / 240.0, 10.0 / 240.0],
+    );
+    assert_close(&resolution.block_deposits[2], &[0.0, 1.0]);
 
-    // kappa[b] is self-inclusive: index 0 == block b routing to itself, so the
-    // two nonzero downstream entries are kappa[0][1..].
-    assert_close(&resolution.kappa[0], &[0.0, 230.0 / 240.0, 10.0 / 240.0]);
-    assert_close(&resolution.kappa[1], &[0.0, 230.0 / 240.0]);
-    assert_close(&resolution.kappa[2], &[0.0]);
+    // within_stage_routing[b] is self-inclusive: index 0 == block b routing
+    // to itself, so the two nonzero downstream entries are
+    // within_stage_routing[0][1..].
+    assert_close(
+        &resolution.within_stage_routing[0],
+        &[0.0, 230.0 / 240.0, 10.0 / 240.0],
+    );
+    assert_close(&resolution.within_stage_routing[1], &[0.0, 230.0 / 240.0]);
+    assert_close(&resolution.within_stage_routing[2], &[0.0]);
 
-    assert_eq!(resolution.delivery.len(), 1);
-    assert_close(&resolution.delivery[0], &[240.0 / 250.0, 10.0 / 250.0]);
+    assert_eq!(resolution.arrival_density.len(), 1);
+    assert_close(
+        &resolution.arrival_density[0],
+        &[240.0 / 250.0, 10.0 / 250.0],
+    );
 
-    for (d, &k_d) in resolution.k.iter().enumerate() {
+    for (d, &k_d) in resolution.stage_weights.iter().enumerate() {
         let aggregated: f64 = resolution
-            .chi
+            .block_deposits
             .iter()
             .zip(&block_lengths_hours)
             .map(|(row, &duration_b)| (duration_b / 720.0) * row[d])
@@ -86,9 +96,9 @@ fn test_s1b_monthly_half_split() {
     let stage_lengths_hours = [720.0, 720.0, 720.0];
     let resolution = resolve_spread(360.0, 0, &stage_lengths_hours, None);
 
-    assert_eq!(resolution.depth, 1);
-    assert_close(&resolution.k, &[0.5, 0.5]);
-    assert!((resolution.k.iter().sum::<f64>() - 1.0).abs() < TOL);
+    assert_eq!(resolution.stage_reach, 1);
+    assert_close(&resolution.stage_weights, &[0.5, 0.5]);
+    assert!((resolution.stage_weights.iter().sum::<f64>() - 1.0).abs() < TOL);
 }
 
 // S1c weekly-to-monthly transition per temporal-lag-unification.md §3: the
@@ -102,31 +112,34 @@ fn test_s1c_weekly_to_monthly_transition_depths() {
     let stage_lengths_hours = [168.0, 168.0, 168.0, 168.0, 720.0, 720.0, 720.0];
 
     let week1 = resolve_spread(360.0, 0, &stage_lengths_hours, None);
-    assert_eq!(week1.depth, 3);
-    assert_close(&week1.k, &[0.0, 0.0, 6.0 / 7.0, 1.0 / 7.0]);
+    assert_eq!(week1.stage_reach, 3);
+    assert_close(&week1.stage_weights, &[0.0, 0.0, 6.0 / 7.0, 1.0 / 7.0]);
 
     let week2 = resolve_spread(360.0, 1, &stage_lengths_hours, None);
-    assert_eq!(week2.depth, 3);
-    assert_close(&week2.k, &[0.0, 0.0, 6.0 / 7.0, 1.0 / 7.0]);
+    assert_eq!(week2.stage_reach, 3);
+    assert_close(&week2.stage_weights, &[0.0, 0.0, 6.0 / 7.0, 1.0 / 7.0]);
 
     let week3 = resolve_spread(360.0, 2, &stage_lengths_hours, None);
-    assert_eq!(week3.depth, 2);
-    assert_close(&week3.k, &[0.0, 0.0, 1.0]);
+    assert_eq!(week3.stage_reach, 2);
+    assert_close(&week3.stage_weights, &[0.0, 0.0, 1.0]);
 
     let week4 = resolve_spread(360.0, 3, &stage_lengths_hours, None);
-    assert_eq!(week4.depth, 1);
-    assert_close(&week4.k, &[0.0, 1.0]);
+    assert_eq!(week4.stage_reach, 1);
+    assert_close(&week4.stage_weights, &[0.0, 1.0]);
 
     let month1 = resolve_spread(360.0, 4, &stage_lengths_hours, None);
-    assert_eq!(month1.depth, 1);
-    assert_close(&month1.k, &[0.5, 0.5]);
+    assert_eq!(month1.stage_reach, 1);
+    assert_close(&month1.stage_weights, &[0.5, 0.5]);
 
     let anchors = [&week1, &week2, &week3, &week4, &month1];
-    let global_max_depth = anchors.iter().map(|resolution| resolution.depth).max();
+    let global_max_depth = anchors
+        .iter()
+        .map(|resolution| resolution.stage_reach)
+        .max();
     assert_eq!(global_max_depth, Some(3));
 
     for resolution in anchors {
-        assert!((resolution.k.iter().sum::<f64>() - 1.0).abs() < TOL);
+        assert!((resolution.stage_weights.iter().sum::<f64>() - 1.0).abs() < TOL);
     }
 }
 
@@ -138,37 +151,40 @@ fn test_s2_monthly_negligible_mass() {
     let stage_lengths_hours = [720.0, 720.0];
     let resolution = resolve_spread(6.0, 0, &stage_lengths_hours, None);
 
-    assert_eq!(resolution.depth, 1);
-    assert_close(&resolution.k, &[714.0 / 720.0, 6.0 / 720.0]);
-    assert!((resolution.k.iter().sum::<f64>() - 1.0).abs() < TOL);
+    assert_eq!(resolution.stage_reach, 1);
+    assert_close(&resolution.stage_weights, &[714.0 / 720.0, 6.0 / 720.0]);
+    assert!((resolution.stage_weights.iter().sum::<f64>() - 1.0).abs() < TOL);
 }
 
 // S3 daily chronological block partition per temporal-lag-unification.md §3:
 // t_v=6h against 24 hourly blocks gives stage-clock k_1 = 25%, and the
 // chronological-adds boundary — blocks 0-17 route in-stage to block b+6
-// (chi[b][0] = 1), blocks 18-23 cross the day boundary and deposit fully into
-// lag 1 (chi[b][1] = 1).
+// (block_deposits[b][0] = 1), blocks 18-23 cross the day boundary and
+// deposit fully into lag 1 (block_deposits[b][1] = 1).
 #[test]
 fn test_s3_daily_chronological_block_partition() {
     let stage_lengths_hours = [24.0, 24.0, 24.0];
     let block_lengths_hours = [1.0; 24];
     let resolution = resolve_spread(6.0, 0, &stage_lengths_hours, Some(&block_lengths_hours));
 
-    assert_eq!(resolution.depth, 1);
-    assert_close(&resolution.k, &[18.0 / 24.0, 6.0 / 24.0]);
-    assert!((resolution.k.iter().sum::<f64>() - 1.0).abs() < TOL);
+    assert_eq!(resolution.stage_reach, 1);
+    assert_close(&resolution.stage_weights, &[18.0 / 24.0, 6.0 / 24.0]);
+    assert!((resolution.stage_weights.iter().sum::<f64>() - 1.0).abs() < TOL);
 
     // Last in-stage block: routes fully to block 17+6=23 within the same day.
-    assert_close(&resolution.chi[17], &[1.0, 0.0]);
-    assert_close(&resolution.kappa[17], &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+    assert_close(&resolution.block_deposits[17], &[1.0, 0.0]);
+    assert_close(
+        &resolution.within_stage_routing[17],
+        &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+    );
 
     // First cross-boundary block: the 6-hour delay lands entirely in the
     // next day, deposited fully rather than routed in-stage.
-    assert_close(&resolution.chi[18], &[0.0, 1.0]);
+    assert_close(&resolution.block_deposits[18], &[0.0, 1.0]);
 
-    for (d, &k_d) in resolution.k.iter().enumerate() {
+    for (d, &k_d) in resolution.stage_weights.iter().enumerate() {
         let aggregated: f64 = resolution
-            .chi
+            .block_deposits
             .iter()
             .zip(&block_lengths_hours)
             .map(|(row, &duration_b)| (duration_b / 24.0) * row[d])
@@ -185,9 +201,9 @@ fn test_s4_monthly_exact_multiple_boundary() {
     let stage_lengths_hours = [720.0, 720.0];
     let resolution = resolve_spread(720.0, 0, &stage_lengths_hours, None);
 
-    assert_eq!(resolution.depth, 1);
-    assert_close(&resolution.k, &[0.0, 1.0]);
-    assert!((resolution.k.iter().sum::<f64>() - 1.0).abs() < TOL);
+    assert_eq!(resolution.stage_reach, 1);
+    assert_close(&resolution.stage_weights, &[0.0, 1.0]);
+    assert!((resolution.stage_weights.iter().sum::<f64>() - 1.0).abs() < TOL);
 }
 
 // S5 transit-only slot per temporal-lag-unification.md §3: monthly anchor,
@@ -199,10 +215,10 @@ fn test_s5_monthly_transit_only_slot() {
     let stage_lengths_hours = [720.0; 5];
     let resolution = resolve_spread(1800.0, 0, &stage_lengths_hours, None);
 
-    assert_eq!(resolution.depth, 3);
-    assert_close(&resolution.k, &[0.0, 0.0, 0.5, 0.5]);
-    assert_eq!(resolution.k[1], 0.0);
-    assert!((resolution.k.iter().sum::<f64>() - 1.0).abs() < TOL);
+    assert_eq!(resolution.stage_reach, 3);
+    assert_close(&resolution.stage_weights, &[0.0, 0.0, 0.5, 0.5]);
+    assert_eq!(resolution.stage_weights[1], 0.0);
+    assert!((resolution.stage_weights.iter().sum::<f64>() - 1.0).abs() < TOL);
 }
 
 // Exercises the `Σ_d k_d == 1` conservation debug_assert directly
@@ -217,12 +233,12 @@ fn test_stage_level_conservation_debug_assert() {
             let resolution =
                 resolve_spread(travel_time_hours, anchor_stage, &stage_lengths_hours, None);
             assert!(
-                (resolution.k.iter().sum::<f64>() - 1.0).abs() < TOL,
+                (resolution.stage_weights.iter().sum::<f64>() - 1.0).abs() < TOL,
                 "conservation violated at anchor_stage={anchor_stage}, t_v={travel_time_hours}"
             );
-            assert!(resolution.depth >= 1);
-            assert!(resolution.chi.is_empty());
-            assert!(resolution.kappa.is_empty());
+            assert!(resolution.stage_reach >= 1);
+            assert!(resolution.block_deposits.is_empty());
+            assert!(resolution.within_stage_routing.is_empty());
         }
     }
 }
@@ -243,9 +259,9 @@ fn test_shared_density_consistency_debug_assert() {
             Some(&block_lengths_hours),
         );
 
-        for (d, &k_d) in resolution.k.iter().enumerate() {
+        for (d, &k_d) in resolution.stage_weights.iter().enumerate() {
             let aggregated: f64 = resolution
-                .chi
+                .block_deposits
                 .iter()
                 .zip(&block_lengths_hours)
                 .map(|(row, &duration_b)| (duration_b / 720.0) * row[d])
@@ -268,7 +284,7 @@ fn test_shared_density_consistency_debug_assert() {
 #[test]
 fn test_pmo_end_anchored_delivery_resolution() {
     let stage_lengths_hours = [168.0, 168.0, 168.0, 168.0, 720.0, 720.0, 720.0];
-    let resolution = resolve_point(Lag::Time(720.0), &stage_lengths_hours, 7);
+    let resolution = resolve_point(LeadTime::Time(720.0), &stage_lengths_hours, 7);
 
     assert_eq!(
         resolution.decider,
@@ -288,7 +304,7 @@ fn test_pmo_end_anchored_delivery_resolution() {
 #[test]
 fn test_sub_stage_lead_k0_degeneracy() {
     let stage_lengths_hours = [700.0, 744.0];
-    let resolution = resolve_point(Lag::Time(720.0), &stage_lengths_hours, 2);
+    let resolution = resolve_point(LeadTime::Time(720.0), &stage_lengths_hours, 2);
 
     assert_eq!(resolution.decider, vec![None, Some(1)]);
     assert_eq!(resolution.decision_sets, vec![vec![], vec![1]]);
@@ -296,7 +312,7 @@ fn test_sub_stage_lead_k0_degeneracy() {
 }
 
 // Stage-count mode (§4.4) on a monthly calendar with unequal stage hours
-// (672-744h): the hour clock is never consulted, so `Lag::Stages(2)`
+// (672-744h): the hour clock is never consulted, so `LeadTime::Stages(2)`
 // reproduces the shipped index shift identically regardless of the calendar
 // values. Depth and fan-out are checked away from the array boundary, where
 // K(t) == ℓ and |C(t)| == 1 hold without the natural edge truncation that
@@ -304,7 +320,7 @@ fn test_sub_stage_lead_k0_degeneracy() {
 #[test]
 fn test_stage_count_mode_unequal_monthly_hours() {
     let stage_lengths_hours = [672.0, 700.0, 744.0, 720.0, 672.0, 744.0, 700.0, 744.0];
-    let resolution = resolve_point(Lag::Stages(2), &stage_lengths_hours, 8);
+    let resolution = resolve_point(LeadTime::Stages(2), &stage_lengths_hours, 8);
 
     for m in 2..8 {
         assert_eq!(
@@ -327,7 +343,7 @@ fn test_stage_count_mode_unequal_monthly_hours() {
 #[test]
 fn test_ic_boundary_decider_is_none() {
     let stage_lengths_hours = [100.0];
-    let resolution = resolve_point(Lag::Time(1000.0), &stage_lengths_hours, 1);
+    let resolution = resolve_point(LeadTime::Time(1000.0), &stage_lengths_hours, 1);
 
     assert_eq!(resolution.decider, vec![None]);
     assert_eq!(resolution.decision_sets, vec![Vec::<usize>::new()]);
@@ -343,7 +359,7 @@ fn test_ic_boundary_decider_is_none() {
 #[test]
 fn test_coarse_decision_fans_out_over_fine_delivery_stages() {
     let stage_lengths_hours = [720.0, 168.0, 168.0, 168.0, 168.0];
-    let resolution = resolve_point(Lag::Time(750.0), &stage_lengths_hours, 5);
+    let resolution = resolve_point(LeadTime::Time(750.0), &stage_lengths_hours, 5);
 
     assert_eq!(
         resolution.decider,

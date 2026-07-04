@@ -51,7 +51,7 @@ pub struct CapturedBasis {
 /// reconstruction reader; it is retained for diagnostics and to allow
 /// re-introducing a state-dependent reuse policy without a wire-format change.
 /// The DCS arm captures no basis by design (a captured basis would describe the
-/// baked layout, not the DCS resident subset — see
+/// frozen layout, not the DCS resident subset — see
 /// `StageOpeningSolver::solve_lazy`), so there the field is never part of a
 /// consumed warm-start.
 pub const BASIS_BROADCAST_WIRE_VERSION: i32 = 1;
@@ -301,7 +301,7 @@ pub struct WorkspaceSizing {
     pub max_blocks: usize,
     /// Global travel-time bucket count; pre-sizes the `PatchBuffer`
     /// column-bound region's bucket slots. `0` when no arc is declared.
-    pub b_total: usize,
+    pub n_buckets: usize,
     /// PAR order of the downstream (coarser) resolution; `0` for
     /// uniform-resolution studies (no downstream transition).
     pub downstream_par_order: usize,
@@ -324,7 +324,7 @@ pub struct WorkspaceSizing {
     /// `ScratchBuffers::raw_noise_buf`.
     pub noise_dim: usize,
     /// Number of anticipated thermals (A); pre-sizes
-    /// `ScratchBuffers::anticipated_state_buf` and the `PatchBuffer` Category 6
+    /// `ScratchBuffers::anticipated_state_buf` and the `PatchBuffer` anticipated
     /// region. `0` when there are no anticipated thermals.
     pub n_anticipated: usize,
     /// Maximum lead-time horizon across anticipated thermals (K); with
@@ -688,7 +688,7 @@ impl<S: SolverInterface> WorkspacePool<S> {
                         sizing.max_par_order,
                         sizing.n_load_buses,
                         sizing.max_blocks,
-                        sizing.b_total,
+                        sizing.n_buckets,
                         sizing.n_anticipated,
                         sizing.k_max,
                     ),
@@ -739,7 +739,7 @@ impl<S: SolverInterface> WorkspacePool<S> {
                     sizing.max_par_order,
                     sizing.n_load_buses,
                     sizing.max_blocks,
-                    sizing.b_total,
+                    sizing.n_buckets,
                     sizing.n_anticipated,
                     sizing.k_max,
                 ),

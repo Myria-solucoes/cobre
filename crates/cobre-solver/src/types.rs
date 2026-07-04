@@ -366,10 +366,10 @@ pub struct RowBatch {
 
 impl StageTemplate {
     /// Creates an empty [`StageTemplate`], a reusable output buffer for
-    /// [`crate::baking::bake_rows_into_template`].
+    /// [`crate::freeze::freeze_rows_into_template`].
     ///
     /// An empty template is **not** a valid model for `load_model` (`num_cols == 0`,
-    /// `num_rows == 0`); only pass it there after a `bake_rows_into_template` call
+    /// `num_rows == 0`); only pass it there after a `freeze_rows_into_template` call
     /// has populated it. A `Default` impl is intentionally omitted: an empty
     /// template is a surprising default that invites misuse.
     #[must_use]

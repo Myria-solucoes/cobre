@@ -1,4 +1,4 @@
-//! Delta-cut `RowBatch` construction for baked-template appends.
+//! Delta-cut `RowBatch` construction for frozen-template appends.
 
 use cobre_solver::RowBatch;
 
@@ -7,7 +7,7 @@ use crate::cut::row::push_scaled_coefficient;
 use crate::indexer::{CutStateProjection, StateLayout};
 
 /// Fill a pre-allocated [`RowBatch`] with only the Benders cut rows generated
-/// in `current_iteration`, for appending to a baked template via `add_rows`.
+/// in `current_iteration`, for appending to a frozen template via `add_rows`.
 ///
 /// Warm-start cuts (sentinel `iteration_generated == u64::MAX`) are always
 /// excluded. The CSR layout and coefficient transformation mirror

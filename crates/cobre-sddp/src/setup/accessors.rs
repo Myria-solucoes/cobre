@@ -226,7 +226,7 @@ impl StudySetup {
         TrainingContext {
             horizon: &self.methodology.horizon,
             state: &self.stage_data.state,
-            // Simulation renders stored cuts into baked templates and the DCS LP
+            // Simulation renders stored cuts into frozen templates and the DCS LP
             // (it does not extract), so the per-pool projection threads through here.
             cut_state_layouts: &self.stage_data.cut_state_layouts,
             study_dims: &self.stage_data.study_dims,

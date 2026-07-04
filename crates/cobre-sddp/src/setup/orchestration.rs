@@ -137,21 +137,21 @@ impl StudySetup {
     /// Run simulation using the trained future cost function.
     ///
     /// The caller provides channels, event sender, and thread management.
-    /// `baked_templates` enables the baked-template LP load path (no `add_rows`
+    /// `frozen_templates` enables the frozen-template LP load path (no `add_rows`
     /// per stage); pass `None` for the legacy `load_model + add_rows` fallback.
     /// `stage_bases` enables warm-start; pass `&[]` for cold-start.
     ///
     /// # Errors
     ///
     /// Returns `SimulationError` on LP infeasibility, solver failure, channel closure,
-    /// or if `baked_templates.len() != num_stages`.
+    /// or if `frozen_templates.len() != num_stages`.
     pub fn simulate<S, C: Communicator>(
         &self,
         workspaces: &mut [SolverWorkspace<S>],
         comm: &C,
         result_tx: &SyncSender<SimulationScenarioResult>,
         event_sender: Option<Sender<TrainingEvent>>,
-        baked_templates: Option<&[cobre_solver::StageTemplate]>,
+        frozen_templates: Option<&[cobre_solver::StageTemplate]>,
         stage_bases: &[Option<CapturedBasis>],
     ) -> Result<SimulationRunResult, SimulationError>
     where
@@ -195,7 +195,7 @@ impl StudySetup {
             &training_ctx,
             self.simulation_config(),
             output,
-            baked_templates,
+            frozen_templates,
             stage_bases,
             comm,
         )
@@ -238,7 +238,7 @@ impl StudySetup {
                 max_par_order: self.stage_data.state.max_par_order,
                 n_load_buses: self.stage_data.stage_templates.n_load_buses,
                 max_blocks: self.loop_params.max_blocks,
-                b_total: self.stage_data.state.b_total,
+                n_buckets: self.stage_data.state.n_buckets,
                 downstream_par_order: self.downstream_par_order,
                 max_openings: (0..self.stage_data.stage_templates.templates.len())
                     .map(|t| self.stochastic.opening_tree().n_openings(t))

@@ -67,8 +67,8 @@ pub use types::{
 pub mod profile;
 pub use profile::{DEFAULT_PROFILE_HEURISTIC_SENTINEL, DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL};
 
-pub mod baking;
-pub use baking::{BakingScratch, bake_rows_into_template};
+pub mod freeze;
+pub use freeze::{FreezeScratch, freeze_rows_into_template};
 
 pub mod backends;
 pub use backends::profiled::ProfiledSolver;

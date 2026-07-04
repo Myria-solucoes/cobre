@@ -13,7 +13,7 @@ use super::RunContext;
 /// Load a policy checkpoint from disk and validate its compatibility.
 ///
 /// Validation is opt-in via `config.policy.validate_compatibility`, except for
-/// a bucket study (`b_total > 0`), which forces it on regardless of the flag —
+/// a bucket study (`n_buckets > 0`), which forces it on regardless of the flag —
 /// see [`cobre_sddp::validate_policy_compatibility_effective`].
 fn load_and_validate_checkpoint(
     policy_dir: &Path,
@@ -40,7 +40,7 @@ fn load_and_validate_checkpoint(
         state_dim,
         n_stages,
         configured_validate,
-        setup.stage_state().b_total,
+        setup.stage_state().n_buckets,
     )
     .map_err(CliError::from)?;
 
@@ -236,7 +236,7 @@ pub(super) fn load_policy_for_simulation(
         basis_cache,
         Vec::new(),
         None,
-        // Checkpoints store no baked templates; `simulate()` re-bakes from the FCF
+        // Checkpoints store no frozen templates; `simulate()` re-freezes from the FCF
         // row pool when this is None.
         None,
     ))

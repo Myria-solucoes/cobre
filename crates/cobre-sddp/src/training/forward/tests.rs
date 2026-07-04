@@ -2840,17 +2840,17 @@ fn forward_pass_load_noise_positive_realization() {
         ws.scratch.load_rhs_buf[0]
     );
 
-    let cat4_start = 1;
+    let load_start = 1;
     assert_eq!(
-        ws.patch_buf.lower[cat4_start], ws.scratch.load_rhs_buf[0],
+        ws.patch_buf.lower[load_start], ws.scratch.load_rhs_buf[0],
         "patch_buf lower must equal load_rhs_buf[0]"
     );
     assert_eq!(
-        ws.patch_buf.upper[cat4_start], ws.scratch.load_rhs_buf[0],
+        ws.patch_buf.upper[load_start], ws.scratch.load_rhs_buf[0],
         "patch_buf upper must equal load_rhs_buf[0] (equality constraint)"
     );
     assert_eq!(
-        ws.patch_buf.indices[cat4_start], 10,
+        ws.patch_buf.indices[load_start], 10,
         "patch index must be load_balance_row_starts[0] + 0 * n_blks"
     );
 }
@@ -3001,13 +3001,13 @@ fn forward_pass_load_noise_clamped_to_zero() {
         ws.scratch.load_rhs_buf[0]
     );
 
-    let cat4_start = 1;
+    let load_start = 1;
     assert_eq!(
-        ws.patch_buf.lower[cat4_start], 0.0,
+        ws.patch_buf.lower[load_start], 0.0,
         "patch lower must be 0.0 (clamped)"
     );
     assert_eq!(
-        ws.patch_buf.upper[cat4_start], 0.0,
+        ws.patch_buf.upper[load_start], 0.0,
         "patch upper must be 0.0 (clamped)"
     );
 }
@@ -3540,12 +3540,12 @@ mod dcs_forward {
         }
     }
 
-    /// All-cuts baked template: the cut-free base plus the three pool cuts
-    /// baked as structural rows (rows 1..4), in pool slot order:
+    /// All-cuts frozen template: the cut-free base plus the three pool cuts
+    /// frozen as structural rows (rows 1..4), in pool slot order:
     ///   slot 0: -0*col0 + theta >= 1 ; slot 1: -2*col0 + theta >= 0 ;
     ///   slot 2: -0*col0 + theta >= 3.
     /// `num_rows = 4 = template_num_rows(1) + 3 cuts`.
-    fn fwd_all_cuts_baked() -> StageTemplate {
+    fn fwd_all_cuts_frozen() -> StageTemplate {
         // CSC by column. col0 entries: coupling (row0,+1), slot1 cut (row2,-2).
         // col3 (theta): rows 1,2,3 each +1. col2: coupling (row0,-1).
         StageTemplate {
@@ -3573,11 +3573,11 @@ mod dcs_forward {
         }
     }
 
-    /// Baked template carrying a single DOMINATING spurious cut
+    /// Frozen template carrying a single DOMINATING spurious cut
     /// (`-5*col0 + theta >= 0`, floor 10 at `x_hat = 2`, NOT in the pool),
     /// used to prove the DCS path loads the cut-free base and ignores this
     /// row.
-    fn fwd_baked_dominating_cut() -> StageTemplate {
+    fn fwd_frozen_dominating_cut() -> StageTemplate {
         StageTemplate {
             num_cols: 4,
             num_rows: 2,
@@ -3625,7 +3625,7 @@ mod dcs_forward {
             max_par_order: 0,
             n_load_buses: 0,
             max_blocks: 0,
-            b_total: 0,
+            n_buckets: 0,
             downstream_par_order: 0,
             max_openings: 1,
             initial_pool_capacity: 16,
@@ -3659,22 +3659,22 @@ mod dcs_forward {
     }
 
     /// Run one forward stage (stage 0 of a 2-stage horizon, so theta is not
-    /// terminal-zeroed) with the given `dcs` option and `baked` template,
+    /// terminal-zeroed) with the given `dcs` option and `frozen` template,
     /// returning `(stage_cost, advanced_state, scoring_time_seconds)`. The
-    /// cut-free base is `ctx.templates[0]`; on the baked path the
-    /// caller-equivalent `load_model(baked)` is performed here (mirroring
+    /// cut-free base is `ctx.templates[0]`; on the frozen path the
+    /// caller-equivalent `load_model(frozen)` is performed here (mirroring
     /// `run_forward_worker`).
     ///
     /// The production `run_forward_worker` filter is reproduced verbatim:
     /// `dcs.filter(|p| p.is_active(iteration))`. When `iteration <
-    /// start_iteration` this collapses `dcs` to `None`, so the baked path is
+    /// start_iteration` this collapses `dcs` to `None`, so the frozen path is
     /// taken — exactly as the worker does. The returned
     /// `scoring_time_seconds` (read from the workspace's lazy-solve scratch)
     /// is `0.0` iff the lazy path was never entered, giving callers a faithful
     /// witness for which branch ran.
     fn run_one_forward_stage(
         dcs: Option<DcsParams>,
-        baked: &StageTemplate,
+        frozen: &StageTemplate,
         iteration: u64,
     ) -> (f64, Vec<f64>, f64) {
         // Mirror run_forward_worker's per-pass gate: DCS is `Some` only when
@@ -3699,8 +3699,8 @@ mod dcs_forward {
         // Discount factor 0 at this stage makes stage_cost = objective * SCALE
         // = theta * SCALE (no other objective term), so the observable is
         // directly sensitive to the converged theta — letting the
-        // dominating-baked-cut test distinguish theta=4 (correct) from
-        // theta=10 (a wrong baked load).
+        // dominating-frozen-cut test distinguish theta=4 (correct) from
+        // theta=10 (a wrong frozen load).
         let discount_factors = [0.0_f64, 0.0];
         let ctx = StageContext {
             geometry_per_stage: &[],
@@ -3751,10 +3751,10 @@ mod dcs_forward {
             dcs,
         };
 
-        // Baked path: mirror run_forward_worker's per-scenario baked load.
+        // Frozen path: mirror run_forward_worker's per-scenario frozen load.
         // DCS path: run_forward_stage loads the cut-free base itself.
         if dcs.is_none() {
-            ws.solver.load_model(baked);
+            ws.solver.load_model(frozen);
         }
 
         let mut records = vec![TrajectoryRecord {
@@ -3770,7 +3770,7 @@ mod dcs_forward {
             num_stages: 2,
             iteration,
             raw_noise: &[],
-            basis_row_capacity: baked.num_rows,
+            basis_row_capacity: frozen.num_rows,
             terminal_has_boundary_cuts: false,
             pool: &fcf.pools[0],
             dcs,
@@ -3787,25 +3787,25 @@ mod dcs_forward {
         .expect("forward stage solve must succeed");
         // The lazy-solve scratch accumulates scoring wall time only when
         // `lazy_solve_preloaded` runs (the DCS branch). It stays exactly
-        // `0.0` on the baked path, so it witnesses which branch executed.
+        // `0.0` on the frozen path, so it witnesses which branch executed.
         let scoring_time_seconds = ws.backward_accum.dcs_solve.scoring_time_seconds;
         (stage_cost, records[0].state.clone(), scoring_time_seconds)
     }
 
     /// AC1: DCS branch (binding cut omitted from the seed) yields the same
-    /// stage cost and advanced state as the baked all-cuts path within 1e-9.
+    /// stage cost and advanced state as the frozen all-cuts path within 1e-9.
     #[test]
     fn forward_dcs_exact_matches_all_cuts() {
-        let all_cuts = fwd_all_cuts_baked();
+        let all_cuts = fwd_all_cuts_frozen();
         // iteration 5 >= start_iteration 2 → DCS active; the filter is a pass-through.
-        let (baked_cost, baked_state, baked_scoring) = run_one_forward_stage(None, &all_cuts, 5);
+        let (frozen_cost, frozen_state, frozen_scoring) = run_one_forward_stage(None, &all_cuts, 5);
         let (dcs_cost, dcs_state, dcs_scoring) =
             run_one_forward_stage(Some(dcs_params(2)), &all_cuts, 5);
 
-        // Baked path never scores; the active DCS path does at least one pass.
+        // Frozen path never scores; the active DCS path does at least one pass.
         assert_eq!(
-            baked_scoring, 0.0,
-            "baked path must not enter the lazy solve"
+            frozen_scoring, 0.0,
+            "frozen path must not enter the lazy solve"
         );
         assert!(
             dcs_scoring > 0.0,
@@ -3813,40 +3813,40 @@ mod dcs_forward {
         );
 
         assert!(
-            (baked_cost - dcs_cost).abs() < 1e-9,
-            "stage cost: baked {baked_cost} vs DCS {dcs_cost}"
+            (frozen_cost - dcs_cost).abs() < 1e-9,
+            "stage cost: frozen {frozen_cost} vs DCS {dcs_cost}"
         );
         // The binding cut floor is 4 at x_hat=2; minimise-theta gives theta=4.
         // With discount 0, stage_cost = objective * SCALE = theta * SCALE, so
         // both paths land on 4 * COST_SCALE_FACTOR.
         assert!((dcs_cost - 4.0 * COST_SCALE_FACTOR).abs() < 1e-3);
-        assert_eq!(baked_state.len(), dcs_state.len());
-        for (b, d) in baked_state.iter().zip(&dcs_state) {
-            assert!((b - d).abs() < 1e-9, "state: baked {b} vs DCS {d}");
+        assert_eq!(frozen_state.len(), dcs_state.len());
+        for (b, d) in frozen_state.iter().zip(&dcs_state) {
+            assert!((b - d).abs() < 1e-9, "state: frozen {b} vs DCS {d}");
         }
         // Sanity: advanced storage state equals the pinned x_hat (coupling
         // row forces storage_out = storage_in = x_hat).
         assert!((dcs_state[0] - X_HAT).abs() < 1e-9);
     }
 
-    /// AC2: a baked template with a DOMINATING embedded cut (floor 10,
+    /// AC2: a frozen template with a DOMINATING embedded cut (floor 10,
     /// gradient 5, NOT in the pool) must NOT change the DCS result — proving
-    /// the cut-free `ctx.templates[t]` is loaded, not `params.baked[t]`. If
-    /// the DCS path erroneously loaded the dominating baked template, the
+    /// the cut-free `ctx.templates[t]` is loaded, not `params.frozen[t]`. If
+    /// the DCS path erroneously loaded the dominating frozen template, the
     /// advanced state / cost would reflect theta=10, diverging from all-cuts.
     #[test]
-    fn forward_dcs_baked_cuts_present_uses_cut_free_core() {
-        let all_cuts = fwd_all_cuts_baked();
-        let dominating = fwd_baked_dominating_cut();
+    fn forward_dcs_frozen_cuts_present_uses_cut_free_core() {
+        let all_cuts = fwd_all_cuts_frozen();
+        let dominating = fwd_frozen_dominating_cut();
         let (allcuts_cost, allcuts_state, _) = run_one_forward_stage(None, &all_cuts, 5);
-        // DCS path is handed the dominating baked template, but must ignore it
+        // DCS path is handed the dominating frozen template, but must ignore it
         // and load the cut-free base, recovering the all-cuts result.
         let (dcs_cost, dcs_state, _) = run_one_forward_stage(Some(dcs_params(2)), &dominating, 5);
 
         assert!(
             (allcuts_cost - dcs_cost).abs() < 1e-9,
             "stage cost: all-cuts {allcuts_cost} vs DCS {dcs_cost} (DCS must \
-             ignore the dominating baked cut)"
+             ignore the dominating frozen cut)"
         );
         assert_eq!(allcuts_state.len(), dcs_state.len());
         for (a, d) in allcuts_state.iter().zip(&dcs_state) {
@@ -3866,9 +3866,9 @@ mod dcs_forward {
     /// production filter (`dcs.filter(|p| p.is_active(iteration))`) verbatim.
     ///
     /// - `start_iteration = 4`, `iteration = 1` (inactive): the filter
-    ///   collapses `dcs` to `None`, so the baked path runs — proven by
+    ///   collapses `dcs` to `None`, so the frozen path runs — proven by
     ///   `scoring_time_seconds == 0.0` AND a bit-for-bit match with the
-    ///   `dcs = None` baked run.
+    ///   `dcs = None` frozen run.
     /// - `iteration = 4` (active): the filter lets DCS through — proven by
     ///   `scoring_time_seconds > 0.0`.
     ///
@@ -3887,26 +3887,26 @@ mod dcs_forward {
             "iteration 4 == start_iteration 4 must be active"
         );
 
-        let all_cuts = fwd_all_cuts_baked();
+        let all_cuts = fwd_all_cuts_frozen();
 
-        // Inactive iteration: filter suppresses DCS → baked path. The
+        // Inactive iteration: filter suppresses DCS → frozen path. The
         // scoring counter must be exactly 0.0 (lazy solve never entered),
-        // and the result must match the dcs=None baked run bit-for-bit.
-        let (baked_cost, baked_state, baked_scoring) = run_one_forward_stage(None, &all_cuts, 1);
+        // and the result must match the dcs=None frozen run bit-for-bit.
+        let (frozen_cost, frozen_state, frozen_scoring) = run_one_forward_stage(None, &all_cuts, 1);
         let (early_cost, early_state, early_scoring) =
             run_one_forward_stage(Some(dcs_params(4)), &all_cuts, 1);
         assert_eq!(
-            baked_scoring, 0.0,
-            "dcs=None baked run must not score (sanity)"
+            frozen_scoring, 0.0,
+            "dcs=None frozen run must not score (sanity)"
         );
         assert_eq!(
             early_scoring, 0.0,
             "iteration 1 < start_iteration 4: filter must suppress DCS, so \
-             the baked path runs and no lazy scoring occurs"
+             the frozen path runs and no lazy scoring occurs"
         );
-        assert_eq!(baked_cost.to_bits(), early_cost.to_bits());
-        assert_eq!(baked_state.len(), early_state.len());
-        for (b, e) in baked_state.iter().zip(&early_state) {
+        assert_eq!(frozen_cost.to_bits(), early_cost.to_bits());
+        assert_eq!(frozen_state.len(), early_state.len());
+        for (b, e) in frozen_state.iter().zip(&early_state) {
             assert_eq!(b.to_bits(), e.to_bits());
         }
 
@@ -3931,7 +3931,7 @@ mod dcs_forward {
 // `MockSolver` returning a fixed primal, proving the bucket state rides the
 // state-assembly plain copy: the lag-shift overwrite lands on index 1 and the
 // anticipated-shift overwrite lands on index 3, never on the bucket index 2.
-mod bucket_copy_gap {
+mod transit_bucket_copy_gap {
     use cobre_solver::{LpSolution, SolverInterface, StageTemplate};
 
     use super::super::{StageKey, run_forward_stage};
@@ -3950,14 +3950,14 @@ mod bucket_copy_gap {
     /// `n_state = 4` (storage, lag0, `bucket_out`, `ant_state0`) — the state
     /// region is the LP's first `n_state` columns by construction.
     const NUM_COLS: usize = 10;
-    const BUCKET_COL: usize = 2;
-    const BUCKET_VALUE: f64 = 777.0;
+    const TRANSIT_BUCKET_COL: usize = 2;
+    const TRANSIT_BUCKET_VALUE: f64 = 777.0;
     const Z_INFLOW_COL: usize = 5;
     const Z_INFLOW_VALUE: f64 = 55.0;
     const DECISION_COL: usize = 9;
     const DECISION_VALUE: f64 = 999.0;
 
-    fn bucket_template() -> StageTemplate {
+    fn transit_bucket_template() -> StageTemplate {
         StageTemplate {
             num_cols: NUM_COLS,
             num_rows: 0,
@@ -3984,11 +3984,11 @@ mod bucket_copy_gap {
     /// `ant_state0=400` (pre-overwrite), `ant_state_out=0`, `z_inflow=55`,
     /// `storage_in=0`, `bucket_in=0`, `theta=0`, `decision=999`. The `MockSolver`
     /// returns this verbatim regardless of the bounds `run_forward_stage` patches.
-    fn bucket_solution() -> LpSolution {
+    fn transit_bucket_solution() -> LpSolution {
         let mut primal = vec![0.0_f64; NUM_COLS];
         primal[0] = 100.0;
         primal[1] = 200.0;
-        primal[BUCKET_COL] = BUCKET_VALUE;
+        primal[TRANSIT_BUCKET_COL] = TRANSIT_BUCKET_VALUE;
         primal[3] = 400.0;
         primal[Z_INFLOW_COL] = Z_INFLOW_VALUE;
         primal[DECISION_COL] = DECISION_VALUE;
@@ -4002,13 +4002,13 @@ mod bucket_copy_gap {
         }
     }
 
-    fn bucket_workspace() -> SolverWorkspace<MockSolver> {
+    fn transit_bucket_workspace() -> SolverWorkspace<MockSolver> {
         let sizing = WorkspaceSizing {
             hydro_count: 1,
             max_par_order: 1,
             n_load_buses: 0,
             max_blocks: 0,
-            b_total: 1,
+            n_buckets: 1,
             downstream_par_order: 0,
             max_openings: 1,
             initial_pool_capacity: 16,
@@ -4022,7 +4022,7 @@ mod bucket_copy_gap {
         SolverWorkspace::new(
             0,
             0,
-            MockSolver::always_ok(bucket_solution()),
+            MockSolver::always_ok(transit_bucket_solution()),
             PatchBuffer::new(1, 1, 0, 0, 1, 1, 1),
             4,
             sizing,
@@ -4031,17 +4031,24 @@ mod bucket_copy_gap {
 
     /// Run one forward stage over the bucket-aware layout, returning the
     /// captured advanced state (`records[0].state`).
-    fn run_bucket_forward_stage() -> Vec<f64> {
-        let state =
-            crate::test_support::state_layout_with_buckets(1, 1, 1, vec![(0, 0)], 1, 1, vec![1]);
-        let template = bucket_template();
+    fn run_transit_bucket_forward_stage() -> Vec<f64> {
+        let state = crate::test_support::state_layout_with_transit_buckets(
+            1,
+            1,
+            1,
+            vec![(0, 0)],
+            1,
+            1,
+            vec![1],
+        );
+        let template = transit_bucket_template();
         let templates = vec![template.clone()];
         let base_rows = vec![0_usize];
         let stochastic = super::make_stochastic_context_1_hydro_3_stages();
         let horizon = HorizonMode::Finite { num_stages: 1 };
         let fcf = FutureCostFunction::new(1, state.n_state, 1, 1, &[0]);
 
-        let mut ws = bucket_workspace();
+        let mut ws = transit_bucket_workspace();
         ws.current_state.clear();
         ws.current_state
             .extend_from_slice(&[10.0, 20.0, 30.0, 40.0]);
@@ -4133,14 +4140,14 @@ mod bucket_copy_gap {
         records[0].state.clone()
     }
 
-    /// The bucket state (`state[buckets_out]`) rides the state-assembly plain
+    /// The bucket state (`state[transit_buckets_out]`) rides the state-assembly plain
     /// copy: it equals the LP primal's `bucket_out` column, untouched by the
     /// lag-shift (which overwrites index 1) or the anticipated-shift (index 3).
     #[test]
-    fn bucket_state_survives_lag_and_anticipated_overwrites() {
-        let advanced = run_bucket_forward_stage();
+    fn transit_bucket_state_survives_lag_and_anticipated_overwrites() {
+        let advanced = run_transit_bucket_forward_stage();
         assert_eq!(
-            advanced[BUCKET_COL], BUCKET_VALUE,
+            advanced[TRANSIT_BUCKET_COL], TRANSIT_BUCKET_VALUE,
             "bucket state must equal the LP primal's bucket_out column"
         );
         // Neighboring overwrites genuinely ran (not vacuous no-ops): the lag

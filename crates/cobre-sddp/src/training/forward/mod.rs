@@ -137,7 +137,7 @@ pub(crate) struct StageKey<'a> {
     pub(crate) iteration: u64,
     /// Raw noise sample for this (stage, scenario) pair.
     pub(crate) raw_noise: &'a [f64],
-    /// Total LP row count, equal to `baked[t].num_rows` (the baked template
+    /// Total LP row count, equal to `frozen[t].num_rows` (the frozen template
     /// absorbs all active cut rows as structural rows); sizes basis storage.
     pub(crate) basis_row_capacity: usize,
     /// True when the last study stage (`T-1`) has at least one warm-start
@@ -149,7 +149,7 @@ pub(crate) struct StageKey<'a> {
     /// Dynamic Cut Selection hyperparameters, `Some` only when the dynamic method
     /// is configured AND active at this iteration. When `Some`, the stage is
     /// solved lazily against the cut pool from the cut-free base template; when
-    /// `None`, the baked all-cuts path is used.
+    /// `None`, the frozen all-cuts path is used.
     pub(crate) dcs: Option<DcsParams>,
 }
 
@@ -182,7 +182,7 @@ pub fn run_forward_pass<S>(
     workspaces: &mut [SolverWorkspace<S>],
     basis_store: &mut BasisStore,
     ctx: &StageContext<'_>,
-    baked: &[StageTemplate],
+    frozen: &[StageTemplate],
     fcf: &FutureCostFunction,
     training_ctx: &TrainingContext<'_>,
     batch: &ForwardPassBatch<'_>,
@@ -199,7 +199,7 @@ where
         workspaces,
         basis_store,
         ctx,
-        baked,
+        frozen,
         fcf,
         training_ctx,
         records,

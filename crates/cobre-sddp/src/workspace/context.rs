@@ -193,6 +193,6 @@ pub struct TrainingContext<'a> {
     /// Dynamic Cut Selection hyperparameters, `Some` only when the dynamic
     /// cut-selection method is configured. When `Some` and the iteration is at or
     /// past `start_iteration`, the backward pass solves each stage LP lazily;
-    /// otherwise the baked all-cuts path is used.
+    /// otherwise the frozen all-cuts path is used.
     pub dcs: Option<DcsParams>,
 }

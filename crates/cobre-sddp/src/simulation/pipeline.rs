@@ -212,12 +212,12 @@ struct SimStageIds {
 
 /// Load-path inputs bundled for `solve_simulation_stage`.
 ///
-/// The LP is loaded via `load_model(baked_template)` — the baked template
+/// The LP is loaded via `load_model(frozen_template)` — the frozen template
 /// already embeds all active cut rows as structural rows. No `add_rows` call
 /// is needed.
 struct SimStageLoadSpec<'a> {
-    /// Baked template for this stage; always populated after the startup re-bake.
-    baked_template: &'a StageTemplate,
+    /// Frozen template for this stage; always populated after the startup re-freeze.
+    frozen_template: &'a StageTemplate,
     /// Warm-start basis captured during training at this stage, if any.
     warm_basis: Option<&'a CapturedBasis>,
 }
@@ -225,7 +225,7 @@ struct SimStageLoadSpec<'a> {
 /// Per-stage batched form of [`SimStageLoadSpec`] consumed by
 /// `process_scenario_stages`; indexed by stage via [`Self::stage`].
 pub(crate) struct SimScenarioLoadSpec<'a> {
-    pub(crate) baked_templates: &'a [StageTemplate],
+    pub(crate) frozen_templates: &'a [StageTemplate],
     pub(crate) stage_bases: &'a [Option<CapturedBasis>],
 }
 
@@ -233,7 +233,7 @@ impl<'a> SimScenarioLoadSpec<'a> {
     #[inline]
     fn stage(&self, t: usize) -> SimStageLoadSpec<'a> {
         SimStageLoadSpec {
-            baked_template: &self.baked_templates[t],
+            frozen_template: &self.frozen_templates[t],
             warm_basis: self.stage_bases.get(t).and_then(Option::as_ref),
         }
     }
@@ -320,7 +320,7 @@ fn apply_ncs_col_bounds<S: SolverInterface>(
 }
 
 /// Map a stage-solve [`SddpError`](crate::error::SddpError) to a
-/// [`SimulationError`], carrying the scenario/stage ids. Shared by the baked
+/// [`SimulationError`], carrying the scenario/stage ids. Shared by the frozen
 /// `run_stage_solve` path and the DCS `lazy_solve_preloaded` path so both report
 /// failures identically.
 fn map_sim_solver_error(e: crate::error::SddpError, ids: &SimStageIds) -> SimulationError {
@@ -356,7 +356,7 @@ fn map_sim_solver_error(e: crate::error::SddpError, ids: &SimStageIds) -> Simula
 /// Returns `(immediate_cost, SimulationStageResult)`. The warm-start basis is a
 /// read-only, per-stage training artifact, so determinism is preserved. Under
 /// dynamic cut-selection the stage is solved lazily against the cut pool from the
-/// cut-free base template (the baked cut rows are unused); the realized primal is
+/// cut-free base template (the frozen cut rows are unused); the realized primal is
 /// identical at the optimum by exactness.
 // RATIONALE: the sequential per-stage steps cannot split without fragmenting the
 // per-stage invariant tracking.
@@ -383,11 +383,11 @@ fn solve_simulation_stage<S: SolverInterface>(
     let dcs = *dcs;
     let t = ids.t;
     // DCS loads the cut-free base so its fresh CutRowMap owns the resident cut
-    // subset; loading the baked template would double-append the embedded cut rows.
+    // subset; loading the frozen template would double-append the embedded cut rows.
     if dcs.is_some() {
         ws.solver.load_model(&ctx.templates[t]);
     } else {
-        ws.solver.load_model(load_spec.baked_template);
+        ws.solver.load_model(load_spec.frozen_template);
     }
     // The anticipated-state ring buffer must advance once per stage (mirrors
     // `run_forward_stage`); without the shift, the unbounded `anticipated_state`
@@ -517,7 +517,7 @@ fn solve_simulation_stage<S: SolverInterface>(
         // template (the lazy loop appends resident cut rows), carrying cut-row
         // duals at indices `>= template_num_rows`. Harmless: the reader only reads
         // structural-row indices. Do NOT truncate or add a `dual.len() ==
-        // template_num_rows` check — that holds on the baked path but NOT here, and
+        // template_num_rows` check — that holds on the frozen path but NOT here, and
         // would drop the structural duals the reader needs.
         crate::stage_solve::fill_unscaled_dual(&mut unscaled_dual, view.dual, row_scale);
         let _ = view;
@@ -1048,7 +1048,7 @@ pub(crate) fn dispatch_scenario_result(
 /// Evaluate the trained SDDP policy on a set of scenarios.
 ///
 /// Thin shim that delegates to `SimulationState::run`.
-/// All scheduling, bake logic, and rayon parallelism live in
+/// All scheduling, freeze logic, and rayon parallelism live in
 /// `crate::simulation::state`.
 ///
 /// # Errors
@@ -1064,7 +1064,7 @@ pub fn simulate<S, C: Communicator>(
     training_ctx: &TrainingContext<'_>,
     config: &SimulationConfig,
     output: SimulationOutputSpec<'_>,
-    baked_templates: Option<&[StageTemplate]>,
+    frozen_templates: Option<&[StageTemplate]>,
     stage_bases: &[Option<CapturedBasis>],
     comm: &C,
 ) -> Result<SimulationRunResult, SimulationError>
@@ -1080,7 +1080,7 @@ where
         training_ctx,
         config,
         output,
-        baked_templates,
+        frozen_templates,
         stage_bases,
         comm,
     ))

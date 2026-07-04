@@ -462,7 +462,7 @@ mod anticipated_5stage_k2_smoke {
          reconstruct_basis on iterations 2..8"
         );
 
-        // Aggregate basis-rejection telemetry across every phase. On the baked
+        // Aggregate basis-rejection telemetry across every phase. On the frozen
         // warm-start path `reconstruct_basis` runs once per warm-start solve; a
         // single rejection here would mean the relocated-column LP produced a basis
         // HiGHS could not accept.
@@ -973,7 +973,7 @@ mod anticipated_simulation_ring_buffer {
     //!
     //! Without the shift, the next stage's `ws.current_state` carries the post-solve
     //! primal of the unbounded `anticipated_state` columns — `incoming - decision`,
-    //! the residual the Category 6 fixing rows leave — instead of the shifted
+    //! the residual the anticipated fixing rows leave — instead of the shifted
     //! ring-buffer state, so the fishing constraint at delivery stage `K` reads a
     //! never-advanced slot 0. The contract this pins: with the anticipated thermal
     //! cheaper than the backup, the matured commitment equals the in-study decision

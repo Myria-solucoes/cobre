@@ -125,7 +125,7 @@ impl BlockGrid {
     /// (`S = max_deficit_segments`), segment `seg` by `n_blks`, block `blk`
     /// innermost. Any reordering (e.g. striding `seg` by `S` instead of `n_blks`,
     /// or swapping the bus and segment strides) is a same-length but wrong-cell
-    /// alternative. Both `S` and `n_blks` are baked in at construction, so a
+    /// alternative. Both `S` and `n_blks` are fixed at construction, so a
     /// caller cannot supply them per-call and swap their order.
     #[inline]
     #[must_use]

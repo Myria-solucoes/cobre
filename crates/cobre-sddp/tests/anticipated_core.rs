@@ -512,7 +512,7 @@ mod anticipated_backward_cut {
     /// the FCF cut produced earlier in the same sweep by backward t=1 (solving stage 2). Both
     /// stage-1 state-fixing-row duals equal -c_reg/COST_SCALE_FACTOR * BLOCK_HOURS: slot 0 is
     /// the same-stage fishing-equality dual (fishing is always active for every anticipated
-    /// plant); slot 1 flows through the baked stage-1 FCF cut, whose
+    /// plant); slot 1 flows through the frozen stage-1 FCF cut, whose
     /// +c_reg/COST_SCALE_FACTOR * BLOCK_HOURS coefficient on x_state slot 1 originates from
     /// stage 2's slot-0 fishing dual, routed via the Less-branch ring-buffer shift in
     /// state_to_lp_column. So the stored stage-0 cut carries -0.0001 at both state slots.
@@ -583,7 +583,7 @@ mod anticipated_backward_cut {
         // + forward_pass_index` (per CutPool::slot_index). With dense packing
         // (iteration_base = start_iteration + 1 = 1) and forward_passes = 1, the
         // iteration-1 cut lands at slot 0. The analytical match is this FIRST cut:
-        // once iteration 1's cut is baked into stage 0's template, the iteration-2
+        // once iteration 1's cut is frozen into stage 0's template, the iteration-2
         // forward trial point shifts to a regime where stage 2's subproblem is
         // insensitive to the propagated state (the FCF tangent is exact at the
         // visited point), so iterations 2-5 add zero-subgradient cuts with intercept
@@ -609,7 +609,7 @@ mod anticipated_backward_cut {
 
         // ── AC-3: coefficient at slot 1 ─────────────────────────────────────────
         // Expected: -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS = -0.0001.
-        // Source: dual flowing through the baked stage-1 FCF cut, which carries
+        // Source: dual flowing through the frozen stage-1 FCF cut, which carries
         // coefficient +c_reg/COST_SCALE*BLOCK_HOURS on x_state[slot=1]_1.
         // The coefficient originates from stage 2's slot-0 fishing dual, routed
         // via the Less-branch ring-buffer shift in state_to_lp_column.
@@ -743,7 +743,7 @@ mod anticipated_backward_cut {
         assert!(
             (actual_coeff_slot2 - EXPECTED_COEFF_SLOT2).abs() < TOL,
             "AC-2: slot 2 coefficient {actual_coeff_slot2} != {EXPECTED_COEFF_SLOT2} \
-         (stage-3 fishing dual via two FCF baked cuts and successive Less-branch shifts)",
+         (stage-3 fishing dual via two FCF frozen cuts and successive Less-branch shifts)",
         );
 
         let actual_coeff_slot1 = coefficients[slot1_idx];

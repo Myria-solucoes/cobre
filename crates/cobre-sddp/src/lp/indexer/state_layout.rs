@@ -15,7 +15,7 @@
 //! outgoing state vector to the LP columns a forward-pass cut row references.
 //!
 //! Unlike the satellite control/equipment geometry, every offset here is a pure
-//! function of `N` (`hydro_count`), `L` (`max_par_order`), `B` (`b_total`), `A`
+//! function of `N` (`hydro_count`), `L` (`max_par_order`), `B` (`n_buckets`), `A`
 //! (`n_anticipated`), and `k_max` — independent of `n_blks`/`n_thermals` — so a
 //! single global stage-0 layout resolves onto the correct column at every stage
 //! regardless of per-stage block counts.
@@ -35,18 +35,18 @@ use std::ops::Range;
 /// ```text
 /// [0, N)                                     storage               — outgoing storage volumes (N = hydro_count)
 /// [N, N*(1+L))                               inflow_lags           — AR lag variables (L lags per hydro)
-/// [N*(1+L), N*(1+L) + B)                     buckets_out           — travel-time bucket state (outgoing, identity)
+/// [N*(1+L), N*(1+L) + B)                     transit_buckets_out           — travel-time bucket state (outgoing, identity)
 /// [N*(1+L) + B, N*(1+L) + B + A*k_max)       anticipated_state     — anticipated thermal commitment state slots
 /// [N*(1+L) + B + A*k_max, … + A)             anticipated_state_out — cut-target columns (one per anticipated plant)
 /// [… + A, … + A + N)                         z_inflow              — realized inflow (auxiliary, not state)
 /// [… + A + N, … + A + 2*N)                   storage_in            — incoming storage volumes
-/// [… + 2*N, … + 2*N + B)                     buckets_in            — incoming travel-time bucket volumes (pinned)
+/// [… + 2*N, … + 2*N + B)                     transit_buckets_in            — incoming travel-time bucket volumes (pinned)
 /// … + B                                       theta                 — future cost variable (scalar)
 /// ```
 ///
 /// `anticipated_state_out` lives in the state region (it is a cut TARGET column,
 /// not a state-vector dimension) and does **not** contribute to [`Self::n_state`].
-/// `buckets_out`/`buckets_in` DO contribute to [`Self::n_state`] (one state
+/// `transit_buckets_out`/`transit_buckets_in` DO contribute to [`Self::n_state`] (one state
 /// dimension per bucket) — unlike `anticipated_state_out`, a bucket has no
 /// separate decision-column pin.
 #[derive(Debug, Clone)]
@@ -70,8 +70,8 @@ pub struct StateLayout {
     /// Outgoing bucket state maps to this column by identity — the `storage`
     /// convention, not the `z_inflow` lag remap or the anticipated shift remap.
     ///
-    /// Empty (`0..0`) when [`Self::b_total`] `== 0`.
-    pub buckets_out: Range<usize>,
+    /// Empty (`0..0`) when [`Self::n_buckets`] `== 0`.
+    pub transit_buckets_out: Range<usize>,
 
     /// Column range `[N*(1+L) + B, N*(1+L) + B + n_anticipated*K_max)` for
     /// anticipated thermal commitment state slots.
@@ -101,8 +101,8 @@ pub struct StateLayout {
     /// Pinned like `storage_in` via `set_col_bounds` — not equality rows.
     /// Resolve with [`StateLayout::state_to_lp_incoming_column`].
     ///
-    /// Empty (`0..0`) when [`Self::b_total`] `== 0`.
-    pub buckets_in: Range<usize>,
+    /// Empty (`0..0`) when [`Self::n_buckets`] `== 0`.
+    pub transit_buckets_in: Range<usize>,
 
     /// Column range for realized-inflow variables `z_h`, one per hydro.
     ///
@@ -135,7 +135,7 @@ pub struct StateLayout {
     pub anticipated_state_out: Range<usize>,
 
     /// The future cost variable (theta) — the final column, immediately after
-    /// `buckets_in` (see the module-level column-layout diagram).
+    /// `transit_buckets_in` (see the module-level column-layout diagram).
     ///
     /// Scalar: there is exactly one theta variable per stage LP.
     pub theta: usize,
@@ -159,7 +159,7 @@ pub struct StateLayout {
 
     /// Global travel-time bucket count `B` (`Σ_j per_plant_depth[j]`), `0` when
     /// no arc is declared.
-    pub b_total: usize,
+    pub n_buckets: usize,
 
     /// Number of anticipated thermals (plants with
     /// `anticipated_config.is_some()`).
@@ -174,8 +174,8 @@ pub struct StateLayout {
     pub anticipated_lead_stages: Vec<usize>,
 
     /// Canonical `(plant_canonical_idx, lag)` pair per bucket state-vector
-    /// dimension, in [`Self::buckets_out`] order.
-    pub bucket_column_order: Vec<(usize, usize)>,
+    /// dimension, in [`Self::transit_buckets_out`] order.
+    pub transit_bucket_column_order: Vec<(usize, usize)>,
 
     /// Indices of state dimensions whose cut coefficients can be nonzero.
     ///
@@ -196,9 +196,9 @@ impl StateLayout {
     ///
     /// `effective_lag_count` must have length `hydro_count`; each entry is
     /// `PrecomputedPar::effective_lag_count(h)` — the number of lag-state slots
-    /// that may carry non-zero cut coefficients for that hydro. `b_total` and
-    /// `bucket_column_order` are the travel-time bucket count and its canonical
-    /// `(plant, lag)` order (`bucket_column_order.len() == b_total`); `b_total
+    /// that may carry non-zero cut coefficients for that hydro. `n_buckets` and
+    /// `transit_bucket_column_order` are the travel-time bucket count and its canonical
+    /// `(plant, lag)` order (`transit_bucket_column_order.len() == n_buckets`); `n_buckets
     /// == 0` reproduces the pre-bucket layout byte-for-byte.
     ///
     /// Both layout-derived caches are finalized here, so the returned value is
@@ -208,7 +208,7 @@ impl StateLayout {
     ///
     /// Inherits the [`Self::set_nonzero_mask`] and
     /// [`Self::finalize_state_column_map`] debug assertions:
-    /// `bucket_column_order.len() == b_total`,
+    /// `transit_bucket_column_order.len() == n_buckets`,
     /// `effective_lag_count.len() == hydro_count`,
     /// `anticipated_lead_stages.len() == n_anticipated`, lag/lead bounds, and
     /// `state_to_lp_column_map.len() == n_state`.
@@ -216,17 +216,17 @@ impl StateLayout {
     pub fn new(
         hydro_count: usize,
         max_par_order: usize,
-        b_total: usize,
-        bucket_column_order: Vec<(usize, usize)>,
+        n_buckets: usize,
+        transit_bucket_column_order: Vec<(usize, usize)>,
         n_anticipated: usize,
         k_max: usize,
         anticipated_lead_stages: Vec<usize>,
         effective_lag_count: &[usize],
     ) -> Self {
         debug_assert_eq!(
-            bucket_column_order.len(),
-            b_total,
-            "bucket_column_order must have exactly b_total entries"
+            transit_bucket_column_order.len(),
+            n_buckets,
+            "transit_bucket_column_order must have exactly n_buckets entries"
         );
 
         let n = hydro_count;
@@ -241,15 +241,15 @@ impl StateLayout {
         let storage = 0..n;
         let inflow_lags = n..n * (1 + l);
 
-        let buckets_out_start = n * (1 + l);
-        let buckets_out_end = buckets_out_start + b_total;
-        let buckets_out = if b_total > 0 {
-            buckets_out_start..buckets_out_end
+        let transit_buckets_out_start = n * (1 + l);
+        let transit_buckets_out_end = transit_buckets_out_start + n_buckets;
+        let transit_buckets_out = if n_buckets > 0 {
+            transit_buckets_out_start..transit_buckets_out_end
         } else {
             0..0
         };
 
-        let anticipated_state_start = buckets_out_end;
+        let anticipated_state_start = transit_buckets_out_end;
         let anticipated_state_end = anticipated_state_start + n_ant_state;
         let anticipated_state = if n_ant_state > 0 {
             anticipated_state_start..anticipated_state_end
@@ -270,40 +270,40 @@ impl StateLayout {
         let storage_in_start = z_inflow.end;
         let storage_in = storage_in_start..storage_in_start + n;
 
-        let buckets_in_start = storage_in.end;
-        let buckets_in_end = buckets_in_start + b_total;
-        let buckets_in = if b_total > 0 {
-            buckets_in_start..buckets_in_end
+        let transit_buckets_in_start = storage_in.end;
+        let transit_buckets_in_end = transit_buckets_in_start + n_buckets;
+        let transit_buckets_in = if n_buckets > 0 {
+            transit_buckets_in_start..transit_buckets_in_end
         } else {
             0..0
         };
 
-        let theta = buckets_in_end;
+        let theta = transit_buckets_in_end;
 
         // `anticipated_state_out` is a cut TARGET column, not a state-vector
         // dimension, so it does NOT enter `n_state`. Adding it would corrupt
         // cut-pool storage sizes. Buckets DO enter `n_state` (one state
         // dimension per bucket, the `storage` convention).
-        let n_state = n * (1 + l) + b_total + n_ant_state;
+        let n_state = n * (1 + l) + n_buckets + n_ant_state;
 
         let mut layout = Self {
             storage,
             inflow_lags,
-            buckets_out,
+            transit_buckets_out,
             anticipated_state,
             storage_in,
-            buckets_in,
+            transit_buckets_in,
             z_inflow,
             anticipated_state_out,
             theta,
             n_state,
             hydro_count,
             max_par_order,
-            b_total,
+            n_buckets,
             n_anticipated,
             k_max,
             anticipated_lead_stages,
-            bucket_column_order,
+            transit_bucket_column_order,
             nonzero_state_indices: Vec::new(),
             state_to_lp_column_map: Vec::new(),
         };
@@ -330,7 +330,7 @@ impl StateLayout {
     ///   → LP column `z_inflow.start + h`
     /// - `[N + l·N + h]` for `l ≥ 1`: outgoing lag `l` = incoming lag `l − 1`
     ///   → LP column `N + (l − 1)·N + h`
-    /// - `[N*(1+L), N*(1+L) + B)`: `buckets_out` slots → LP column `j`
+    /// - `[N*(1+L), N*(1+L) + B)`: `transit_buckets_out` slots → LP column `j`
     ///   (identity, the `storage` convention — no lag remap, no anticipated
     ///   shift remap)
     /// - `[N*(1+L) + B, N*(1+L) + B + n_anticipated*K_max)`: `anticipated_state`
@@ -383,7 +383,7 @@ impl StateLayout {
         // Must precede the lag arithmetic below: bucket indices are not lag
         // indices, and the modular lag decode would silently misresolve them
         // once `max_par_order > 0`.
-        if self.buckets_out.contains(&j) {
+        if self.transit_buckets_out.contains(&j) {
             return j;
         }
         if self.max_par_order == 0 {
@@ -450,7 +450,7 @@ impl StateLayout {
     /// - `j ∈ [N, N*(1+L))` (AR lags): returns
     ///   `self.inflow_lags.start + (j − N)`.
     /// - `j ∈ [N*(1+L), N*(1+L) + B)` (travel-time buckets): returns
-    ///   `self.buckets_in.start + (j − N*(1+L))` — an explicit arm, not the
+    ///   `self.transit_buckets_in.start + (j − N*(1+L))` — an explicit arm, not the
     ///   anticipated catch-all below.
     /// - `j ∈ [N*(1+L) + B, n_state)` (anticipated state): returns
     ///   `self.anticipated_state.start + (j − N*(1+L) − B)`.
@@ -472,15 +472,15 @@ impl StateLayout {
     pub fn state_to_lp_incoming_column(&self, j: usize) -> usize {
         let n = self.hydro_count;
         let lag_end = n * (1 + self.max_par_order);
-        let bucket_end = lag_end + self.b_total;
+        let transit_bucket_end = lag_end + self.n_buckets;
         if j < n {
             self.storage_in.start + j
         } else if j < lag_end {
             self.inflow_lags.start + (j - n)
-        } else if j < bucket_end {
-            self.buckets_in.start + (j - lag_end)
+        } else if j < transit_bucket_end {
+            self.transit_buckets_in.start + (j - lag_end)
         } else {
-            self.anticipated_state.start + (j - bucket_end)
+            self.anticipated_state.start + (j - transit_bucket_end)
         }
     }
 
@@ -560,7 +560,7 @@ impl StateLayout {
     /// `inflow_lags.start + l * hydro_count + h` are included for
     /// `l in 0..lag_counts[h]`.
     ///
-    /// Every travel-time bucket slot `buckets_out.start..buckets_out.end` is
+    /// Every travel-time bucket slot `transit_buckets_out.start..transit_buckets_out.end` is
     /// always included — bucket depth is already sized as the per-stage
     /// reachability union, so (unlike anticipated) there is no padding to
     /// exclude.
@@ -604,7 +604,7 @@ impl StateLayout {
         let n_lag_active: usize = lag_counts.iter().copied().sum();
         let n_ant_active: usize = anticipated_lead_stages.iter().copied().sum();
         let mut mask =
-            Vec::with_capacity(self.hydro_count + n_lag_active + self.b_total + n_ant_active);
+            Vec::with_capacity(self.hydro_count + n_lag_active + self.n_buckets + n_ant_active);
 
         for h in 0..self.hydro_count {
             mask.push(h);
@@ -623,7 +623,7 @@ impl StateLayout {
         // Bucket depth is already sized as the per-stage reachability union (no
         // shared-stride padding like anticipated), so every declared slot is
         // reachable and the whole range is included, mirroring `storage` above.
-        mask.extend(self.buckets_out.clone());
+        mask.extend(self.transit_buckets_out.clone());
 
         // Anticipated state: emit slots `0..K_i` for plant `i`, skipping padding.
         for slot in 0..self.k_max {
@@ -673,13 +673,13 @@ mod tests {
     }
 
     /// Same as [`finalized`] but with a declared bucket block
-    /// (`b_total`/`bucket_column_order`), for the bucket-arm resolver and mask
+    /// (`n_buckets`/`transit_bucket_column_order`), for the bucket-arm resolver and mask
     /// tests.
-    fn finalized_with_buckets(
+    fn finalized_with_transit_buckets(
         hydro_count: usize,
         max_par_order: usize,
-        b_total: usize,
-        bucket_column_order: Vec<(usize, usize)>,
+        n_buckets: usize,
+        transit_bucket_column_order: Vec<(usize, usize)>,
         n_anticipated: usize,
         k_max: usize,
         anticipated_lead_stages: Vec<usize>,
@@ -688,8 +688,8 @@ mod tests {
         StateLayout::new(
             hydro_count,
             max_par_order,
-            b_total,
-            bucket_column_order,
+            n_buckets,
+            transit_bucket_column_order,
             n_anticipated,
             k_max,
             anticipated_lead_stages,
@@ -729,7 +729,7 @@ mod tests {
             finalized(3, 0, 0, 0, vec![]),     // storage-only
             finalized(2, 3, 0, 0, vec![]),     // storage + lags
             finalized(3, 2, 2, 2, vec![1, 2]), // storage + lags + anticipated
-            finalized_with_buckets(3, 2, 2, vec![(0, 1), (0, 2)], 2, 2, vec![1, 2]), // storage + lags + buckets + anticipated
+            finalized_with_transit_buckets(3, 2, 2, vec![(0, 1), (0, 2)], 2, 2, vec![1, 2]), // storage + lags + buckets + anticipated
         ] {
             assert_eq!(
                 idx.state_to_lp_column_map.len(),
@@ -1438,12 +1438,13 @@ mod tests {
     /// lag remap — verified with lags present so the bucket check must
     /// correctly intercept before the modular lag decode.
     #[test]
-    fn state_to_lp_column_bucket_arm_is_identity() {
+    fn state_to_lp_column_transit_bucket_arm_is_identity() {
         // N=2, L=2 (lags present), B=3, no anticipated.
-        let idx = finalized_with_buckets(2, 2, 3, vec![(0, 1), (0, 2), (1, 1)], 0, 0, vec![]);
+        let idx =
+            finalized_with_transit_buckets(2, 2, 3, vec![(0, 1), (0, 2), (1, 1)], 0, 0, vec![]);
 
-        assert_eq!(idx.buckets_out, 6..9);
-        for j in idx.buckets_out.clone() {
+        assert_eq!(idx.transit_buckets_out, 6..9);
+        for j in idx.transit_buckets_out.clone() {
             assert_eq!(
                 idx.state_to_lp_column(j),
                 j,
@@ -1457,20 +1458,26 @@ mod tests {
     }
 
     /// Bucket-arm resolution for `state_to_lp_incoming_column`: bucket indices
-    /// resolve to the pinned `buckets_in` column via an explicit arm, not the
+    /// resolve to the pinned `transit_buckets_in` column via an explicit arm, not the
     /// anticipated catch-all — verified with anticipated state present so the
     /// catch-all `else` is live and would otherwise swallow them.
     #[test]
-    fn state_to_lp_incoming_column_bucket_arm_is_pinned_not_anticipated() {
+    fn state_to_lp_incoming_column_transit_bucket_arm_is_pinned_not_anticipated() {
         // N=2, L=1, B=2, A=1 (k_max=2, K=[2]).
-        let idx = finalized_with_buckets(2, 1, 2, vec![(0, 1), (0, 2)], 1, 2, vec![2]);
+        let idx = finalized_with_transit_buckets(2, 1, 2, vec![(0, 1), (0, 2)], 1, 2, vec![2]);
 
-        assert_eq!(idx.buckets_in, 13..15);
+        assert_eq!(idx.transit_buckets_in, 13..15);
         assert_eq!(idx.anticipated_state.start, 6);
 
         // Bucket state indices: j=4, j=5 (lag_end = N*(1+L) = 4).
-        assert_eq!(idx.state_to_lp_incoming_column(4), idx.buckets_in.start);
-        assert_eq!(idx.state_to_lp_incoming_column(5), idx.buckets_in.start + 1);
+        assert_eq!(
+            idx.state_to_lp_incoming_column(4),
+            idx.transit_buckets_in.start
+        );
+        assert_eq!(
+            idx.state_to_lp_incoming_column(5),
+            idx.transit_buckets_in.start + 1
+        );
         assert_ne!(
             idx.state_to_lp_incoming_column(4),
             idx.anticipated_state.start,
@@ -1489,8 +1496,9 @@ mod tests {
     /// lags, no anticipated) — the map-length invariant isolated from the
     /// other blocks.
     #[test]
-    fn state_to_lp_column_map_length_matches_n_state_with_buckets_only() {
-        let idx = finalized_with_buckets(0, 0, 3, vec![(0, 1), (0, 2), (0, 3)], 0, 0, vec![]);
+    fn state_to_lp_column_map_length_matches_n_state_with_transit_buckets_only() {
+        let idx =
+            finalized_with_transit_buckets(0, 0, 3, vec![(0, 1), (0, 2), (0, 3)], 0, 0, vec![]);
 
         assert_eq!(idx.n_state, 3);
         assert_eq!(idx.state_to_lp_column_map.len(), idx.n_state);
@@ -1504,14 +1512,14 @@ mod tests {
     /// excluded lag slot from an unrelated block — the overall mask stays
     /// sorted with the excluded lag index as the only gap.
     #[test]
-    fn nonzero_mask_bucket_block_full_range_with_masked_lag_slot() {
+    fn nonzero_mask_transit_bucket_block_full_range_with_masked_lag_slot() {
         // N=2, L=2, B=2 (single plant, depth 2), no anticipated. Hydro 0 has
         // lag_count=1 (lag slot 1 masked out); hydro 1 has lag_count=2 (full).
-        let mut idx = finalized_with_buckets(2, 2, 2, vec![(0, 1), (0, 2)], 0, 0, vec![]);
+        let mut idx = finalized_with_transit_buckets(2, 2, 2, vec![(0, 1), (0, 2)], 0, 0, vec![]);
 
         idx.set_nonzero_mask(&[1, 2], &[]);
 
-        assert_eq!(idx.buckets_out, 6..8);
+        assert_eq!(idx.transit_buckets_out, 6..8);
         assert_eq!(
             idx.nonzero_state_indices,
             vec![0, 1, 2, 3, 5, 6, 7],
@@ -1530,13 +1538,13 @@ mod tests {
     /// that reorders the sequential-offset chain would move one of these off
     /// its hardcoded value.
     #[test]
-    fn state_layout_b_zero_is_byte_identical_to_pre_bucket_layout() {
+    fn state_layout_b_zero_is_byte_identical_to_pre_transit_bucket_layout() {
         let idx = finalized(3, 2, 2, 2, vec![1, 2]);
 
-        assert_eq!(idx.b_total, 0);
-        assert!(idx.bucket_column_order.is_empty());
-        assert_eq!(idx.buckets_out, 0..0);
-        assert_eq!(idx.buckets_in, 0..0);
+        assert_eq!(idx.n_buckets, 0);
+        assert!(idx.transit_bucket_column_order.is_empty());
+        assert_eq!(idx.transit_buckets_out, 0..0);
+        assert_eq!(idx.transit_buckets_in, 0..0);
 
         assert_eq!(idx.storage, 0..3);
         assert_eq!(idx.inflow_lags, 3..9);

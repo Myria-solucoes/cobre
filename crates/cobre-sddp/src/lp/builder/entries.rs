@@ -153,7 +153,7 @@ pub(super) fn fill_state_and_water_entries(
     // Mode-independent (the bucket ring-shift structure never depends on
     // block_mode, sub-contract 1): runs once regardless of which per-mode fill
     // follows.
-    fill_bucket_definition_entries(layout, col_entries);
+    fill_transit_bucket_definition_entries(layout, col_entries);
 
     match stage.block_mode {
         BlockMode::Parallel => {
@@ -210,9 +210,9 @@ fn fill_parallel_water_entries(
         // deposits targeting this stage (the confluence sum lives in the state
         // variable itself, so this is a SINGLE entry regardless of upstream
         // count). Absent when `h_idx` has no declared incoming arc.
-        if let Some(range) = plant_bucket_range(layout.state, h_idx) {
-            let col_b1_in = layout.state.buckets_in.start + range.start;
-            col_entries[col_b1_in].push((row, -1.0));
+        if let Some(range) = plant_transit_bucket_range(layout.state, h_idx) {
+            let col_first_slot_in = layout.state.transit_buckets_in.start + range.start;
+            col_entries[col_first_slot_in].push((row, -1.0));
         }
 
         for blk in 0..n_blks {
@@ -299,28 +299,31 @@ fn fill_parallel_water_entries(
 /// Fill the travel-time bucket-definition rows' structural ring-shift terms:
 /// `+1.0` on `b_d^out` and, when a deeper bucket exists for the same plant,
 /// `-1.0` on `b_{d+1}^in` (absent at `d == L_j`: `b_{L+1}^in` does not exist).
-/// Only buckets REACHABLE this stage (`layout.bucket_row_pos`) get a row; a
+/// Only buckets REACHABLE this stage (`layout.transit_bucket_row_pos`) get a row; a
 /// masked-out bucket's outgoing column is frozen `[0, 0]` instead (see
-/// `columns::fill_bucket_columns`), so no row needs to define it.
+/// `columns::fill_transit_bucket_columns`), so no row needs to define it.
 /// Mode-independent (buckets are stage-level, never block-resolved), so this
 /// runs once per stage regardless of upstream releases — the deposit terms
 /// riding those releases are emitted separately by
-/// [`fill_arc_release_block_entries`]. A no-op when `state.b_total == 0`.
-fn fill_bucket_definition_entries(layout: &StageLayout, col_entries: &mut [Vec<(usize, f64)>]) {
+/// [`fill_arc_release_block_entries`]. A no-op when `state.n_buckets == 0`.
+fn fill_transit_bucket_definition_entries(
+    layout: &StageLayout,
+    col_entries: &mut [Vec<(usize, f64)>],
+) {
     let state = layout.state;
-    let row_start = layout.row_bucket_definition_start();
-    for (b, pos) in layout.bucket_row_pos.iter().enumerate() {
+    let row_start = layout.row_transit_bucket_definition_start();
+    for (slot, pos) in layout.transit_bucket_row_pos.iter().enumerate() {
         let Some(pos) = *pos else { continue };
         let row = row_start + pos;
-        col_entries[state.buckets_out.start + b].push((row, 1.0));
+        col_entries[state.transit_buckets_out.start + slot].push((row, 1.0));
 
-        let (plant_idx, _lag) = state.bucket_column_order[b];
-        let has_deeper_bucket = state
-            .bucket_column_order
-            .get(b + 1)
+        let (plant_idx, _lag) = state.transit_bucket_column_order[slot];
+        let has_deeper_transit_bucket = state
+            .transit_bucket_column_order
+            .get(slot + 1)
             .is_some_and(|&(p, _)| p == plant_idx);
-        if has_deeper_bucket {
-            col_entries[state.buckets_in.start + b + 1].push((row, -1.0));
+        if has_deeper_transit_bucket {
+            col_entries[state.transit_buckets_in.start + slot + 1].push((row, -1.0));
         }
     }
 }
@@ -349,7 +352,7 @@ fn fill_arc_release_block_entries(
     let col_turbine = layout.turbine_col(u_idx, blk);
     let col_spillage = layout.spillage_col(u_idx, blk);
 
-    let Some(k) = ctx
+    let Some(stage_weights) = ctx
         .arc_spread_k
         .get(&u_idx)
         .map(|k_by_stage| &k_by_stage[stage_idx])
@@ -360,28 +363,29 @@ fn fill_arc_release_block_entries(
     };
 
     debug_assert!(
-        (k.iter().sum::<f64>() - 1.0).abs() < 1e-9,
-        "arc {u_idx} -> {h_idx} stage {stage_idx}: stage-clock weights must sum to 1.0, got {k:?}"
+        (stage_weights.iter().sum::<f64>() - 1.0).abs() < 1e-9,
+        "arc {u_idx} -> {h_idx} stage {stage_idx}: stage-clock weights must sum to 1.0, got \
+         {stage_weights:?}"
     );
 
-    if k[0] != 0.0 {
-        col_entries[col_turbine].push((row_balance, -k[0] * tau_h));
-        col_entries[col_spillage].push((row_balance, -k[0] * tau_h));
+    if stage_weights[0] != 0.0 {
+        col_entries[col_turbine].push((row_balance, -stage_weights[0] * tau_h));
+        col_entries[col_spillage].push((row_balance, -stage_weights[0] * tau_h));
     }
 
-    let depth = k.len() - 1;
+    let depth = stage_weights.len() - 1;
     if depth == 0 {
         return;
     }
-    let range = plant_bucket_range(layout.state, h_idx).unwrap_or_else(|| {
+    let range = plant_transit_bucket_range(layout.state, h_idx).unwrap_or_else(|| {
         unreachable!(
             "hydro {h_idx} receives a depth-{depth} deposit at stage {stage_idx} but has no \
-             bucket range (BucketTopology/arc_spread_k disagreement)"
+             bucket range (TransitBucketTopology/arc_spread_k disagreement)"
         )
     });
-    let row_bucket_def_start = layout.row_bucket_definition_start();
-    for (d, &k_d) in k.iter().enumerate().skip(1) {
-        if k_d == 0.0 {
+    let row_transit_bucket_def_start = layout.row_transit_bucket_definition_start();
+    for (d, &stage_weight) in stage_weights.iter().enumerate().skip(1) {
+        if stage_weight == 0.0 {
             continue;
         }
         debug_assert!(
@@ -389,34 +393,39 @@ fn fill_arc_release_block_entries(
             "lag {d} exceeds plant {h_idx}'s declared bucket depth {}",
             range.len()
         );
-        let b = range.start + (d - 1);
+        let slot = range.start + (d - 1);
         // A lag beyond this stage's reachable cap has no definition row to
         // deposit into — its target stage is outside `[0, n_stages)`, so the
         // share is dropped rather than misdirected onto another lag's row.
-        let Some(pos) = layout.bucket_row_pos[b] else {
+        let Some(pos) = layout.transit_bucket_row_pos[slot] else {
             continue;
         };
-        let row_def = row_bucket_def_start + pos;
-        col_entries[col_turbine].push((row_def, -k_d * tau_h));
-        col_entries[col_spillage].push((row_def, -k_d * tau_h));
+        let row_def = row_transit_bucket_def_start + pos;
+        col_entries[col_turbine].push((row_def, -stage_weight * tau_h));
+        col_entries[col_spillage].push((row_def, -stage_weight * tau_h));
     }
 }
 
 /// The bucket-out/-in sub-range `[start, end)` (relative to
-/// `buckets_out`/`buckets_in`'s own start) for downstream plant `plant_idx`, or
-/// `None` when it declares no incoming arc. `bucket_column_order` groups each
+/// `transit_buckets_out`/`transit_buckets_in`'s own start) for downstream plant `plant_idx`, or
+/// `None` when it declares no incoming arc. `transit_bucket_column_order` groups each
 /// plant's lags contiguously in ascending lag order
-/// ([`crate::setup::bucket_topology::build_bucket_topology`]), so a linear scan
+/// ([`crate::setup::bucket_topology::build_transit_bucket_topology`]), so a linear scan
 /// over the (small) order finds the block's bounds.
-fn plant_bucket_range(state: &StateLayout, plant_idx: usize) -> Option<std::ops::Range<usize>> {
+fn plant_transit_bucket_range(
+    state: &StateLayout,
+    plant_idx: usize,
+) -> Option<std::ops::Range<usize>> {
     let start = state
-        .bucket_column_order
+        .transit_bucket_column_order
         .iter()
         .position(|&(p, _)| p == plant_idx)?;
-    let end = state.bucket_column_order[start..]
+    let end = state.transit_bucket_column_order[start..]
         .iter()
         .position(|&(p, _)| p != plant_idx)
-        .map_or(state.bucket_column_order.len(), |offset| start + offset);
+        .map_or(state.transit_bucket_column_order.len(), |offset| {
+            start + offset
+        });
     Some(start..end)
 }
 
@@ -467,19 +476,20 @@ fn fill_chronological_water_entries(
         // Arrival: the incoming maturing bucket `b_1^in` delivers over THIS
         // stage's blocks by the fixed template density rho (sub-contract 3) —
         // one shared entry per block, mirroring the parallel single-row `-1.0`.
-        if let Some(range) = plant_bucket_range(layout.state, h_idx) {
-            let rho = resolve_chrono_arrival_density(ctx, stage, stage_idx, hydro.id, n_blks);
+        if let Some(range) = plant_transit_bucket_range(layout.state, h_idx) {
+            let arrival_density =
+                resolve_chrono_arrival_density(ctx, stage, stage_idx, hydro.id, n_blks);
             debug_assert!(
-                (rho.iter().sum::<f64>() - 1.0).abs() < 1e-9,
+                (arrival_density.iter().sum::<f64>() - 1.0).abs() < 1e-9,
                 "hydro {h_idx} stage {stage_idx}: delivery density rho must sum to 1.0"
             );
-            let col_b1_in = layout.state.buckets_in.start + range.start;
-            for (b_prime, &rho_val) in rho.iter().enumerate() {
+            let col_first_slot_in = layout.state.transit_buckets_in.start + range.start;
+            for (target_slot, &rho_val) in arrival_density.iter().enumerate() {
                 if rho_val == 0.0 {
                     continue;
                 }
-                let row = row_water + h_idx * n_blks + b_prime;
-                col_entries[col_b1_in].push((row, -rho_val));
+                let row = row_water + h_idx * n_blks + target_slot;
+                col_entries[col_first_slot_in].push((row, -rho_val));
             }
         }
 
@@ -587,55 +597,58 @@ fn fill_arc_release_chrono_block_entries(
         return;
     };
 
-    let kappa_b = &resolution.kappa[blk];
-    let chi_b = &resolution.chi[blk];
+    let block_routing = &resolution.within_stage_routing[blk];
+    let block_deposit = &resolution.block_deposits[blk];
     debug_assert!(
-        (kappa_b.iter().sum::<f64>() + chi_b[1..].iter().sum::<f64>() - 1.0).abs() < 1e-9,
+        (block_routing.iter().sum::<f64>() + block_deposit[1..].iter().sum::<f64>() - 1.0).abs()
+            < 1e-9,
         "arc {u_idx} block {blk} stage {stage_idx}: per-column conservation \
-         sum(kappa) + sum(chi[1..]) must equal 1.0"
+         sum(within_stage_routing) + sum(block_deposits[1..]) must equal 1.0"
     );
     if blk == 0 {
         debug_assert!(
-            (resolution.k.iter().sum::<f64>() - 1.0).abs() < 1e-9,
+            (resolution.stage_weights.iter().sum::<f64>() - 1.0).abs() < 1e-9,
             "arc {u_idx} stage {stage_idx}: stage-clock weights must sum to 1.0, got {:?}",
-            resolution.k
+            resolution.stage_weights
         );
-        for (d, &k_d) in resolution.k.iter().enumerate() {
+        for (d, &stage_weight) in resolution.stage_weights.iter().enumerate() {
             let aggregated: f64 = resolution
-                .chi
+                .block_deposits
                 .iter()
                 .zip(&stage.blocks)
-                .map(|(chi_row, b)| (b.duration_hours * M3S_TO_HM3 / layout.zeta) * chi_row[d])
+                .map(|(deposit_row, b)| {
+                    (b.duration_hours * M3S_TO_HM3 / layout.zeta) * deposit_row[d]
+                })
                 .sum();
             debug_assert!(
-                (aggregated - k_d).abs() < 1e-9,
+                (aggregated - stage_weight).abs() < 1e-9,
                 "arc {u_idx} stage {stage_idx}: block deposits must aggregate to k_d (d={d})"
             );
         }
     }
 
-    for (j, &kappa_val) in kappa_b.iter().enumerate() {
-        if kappa_val == 0.0 {
+    for (j, &routing_val) in block_routing.iter().enumerate() {
+        if routing_val == 0.0 {
             continue;
         }
         let row = row_base + blk + j;
-        col_entries[col_turbine].push((row, -kappa_val * tau_k));
-        col_entries[col_spillage].push((row, -kappa_val * tau_k));
+        col_entries[col_turbine].push((row, -routing_val * tau_k));
+        col_entries[col_spillage].push((row, -routing_val * tau_k));
     }
 
-    let depth = chi_b.len() - 1;
+    let depth = block_deposit.len() - 1;
     if depth == 0 {
         return;
     }
-    let range = plant_bucket_range(layout.state, h_idx).unwrap_or_else(|| {
+    let range = plant_transit_bucket_range(layout.state, h_idx).unwrap_or_else(|| {
         unreachable!(
             "hydro {h_idx} receives a depth-{depth} deposit at stage {stage_idx} but has no \
-             bucket range (BucketTopology/arc_spread_chrono disagreement)"
+             bucket range (TransitBucketTopology/arc_spread_chrono disagreement)"
         )
     });
-    let row_bucket_def_start = layout.row_bucket_definition_start();
-    for (d, &chi_d) in chi_b.iter().enumerate().skip(1) {
-        if chi_d == 0.0 {
+    let row_transit_bucket_def_start = layout.row_transit_bucket_definition_start();
+    for (d, &deposit_d) in block_deposit.iter().enumerate().skip(1) {
+        if deposit_d == 0.0 {
             continue;
         }
         debug_assert!(
@@ -643,15 +656,15 @@ fn fill_arc_release_chrono_block_entries(
             "lag {d} exceeds plant {h_idx}'s declared bucket depth {}",
             range.len()
         );
-        let b = range.start + (d - 1);
+        let slot = range.start + (d - 1);
         // See the parallel-mode fill's identical drop: a lag beyond this
         // stage's reachable cap has no row to deposit into.
-        let Some(pos) = layout.bucket_row_pos[b] else {
+        let Some(pos) = layout.transit_bucket_row_pos[slot] else {
             continue;
         };
-        let row_def = row_bucket_def_start + pos;
-        col_entries[col_turbine].push((row_def, -chi_d * tau_k));
-        col_entries[col_spillage].push((row_def, -chi_d * tau_k));
+        let row_def = row_transit_bucket_def_start + pos;
+        col_entries[col_turbine].push((row_def, -deposit_d * tau_k));
+        col_entries[col_spillage].push((row_def, -deposit_d * tau_k));
     }
 }
 
@@ -696,7 +709,7 @@ fn resolve_chrono_arrival_density(
             .then(|| {
                 by_stage[stage_idx - 1]
                     .as_ref()
-                    .and_then(|r| r.delivery.first())
+                    .and_then(|r| r.arrival_density.first())
                     .filter(|d| d.len() == n_blks)
                     .cloned()
             })
@@ -2813,8 +2826,8 @@ mod pumping_water_tests {
 
     use crate::hydro_models::{EvaporationModel, EvaporationModelSet, ProductionModelSet};
     use crate::indexer::StateLayout;
+    use crate::lead_time::{SpreadResolution, resolve_spread};
     use crate::resolved_parameters::ResolvedParameters;
-    use crate::temporal_lag::{SpreadResolution, resolve_spread};
 
     use super::super::M3S_TO_HM3;
     use super::super::columns::{ColumnBufs, fill_pumping_columns};
@@ -4510,7 +4523,7 @@ mod pumping_water_tests {
         arc_spread_k.insert(up_idx, vec![vec![0.5, 0.5]]);
         let ctx = TemplateBuildCtx {
             arc_spread_k,
-            per_stage_mask: vec![vec![1..2]],
+            per_stage_mask: vec![vec![1]],
             ..fixtures.make_ctx()
         };
 
@@ -4529,9 +4542,9 @@ mod pumping_water_tests {
         let csc = build_sorted_csc(&ctx, &stage, 0, &layout);
 
         let down_row = i32::try_from(layout.row_water_balance_start() + down_idx).unwrap();
-        let def_row = i32::try_from(layout.row_bucket_definition_start()).unwrap();
-        let col_b1_in = state.buckets_in.start;
-        let col_b1_out = state.buckets_out.start;
+        let def_row = i32::try_from(layout.row_transit_bucket_definition_start()).unwrap();
+        let col_first_slot_in = state.transit_buckets_in.start;
+        let col_first_slot_out = state.transit_buckets_out.start;
 
         for blk in 0..layout.n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
@@ -4557,18 +4570,18 @@ mod pumping_water_tests {
             );
         }
         assert_eq!(
-            coeff_at(&csc, col_b1_in, down_row),
+            coeff_at(&csc, col_first_slot_in, down_row),
             -1.0,
             "the maturing-now bucket b_1^in must carry -1.0 on the balance row"
         );
         assert_eq!(
-            coeff_at(&csc, col_b1_out, def_row),
+            coeff_at(&csc, col_first_slot_out, def_row),
             1.0,
             "the definition row must carry +1.0 on b_1^out"
         );
         // b_{L+1}^in does not exist: the plant's only bucket is depth 1, so
-        // buckets_in has exactly one column (no b_2^in to reference).
-        assert_eq!(state.buckets_in.len(), 1);
+        // transit_buckets_in has exactly one column (no b_2^in to reference).
+        assert_eq!(state.transit_buckets_in.len(), 1);
     }
 
     /// Row 13 (Filling arm): a `Filling`-phase upstream (turbine/diversion
@@ -4580,7 +4593,7 @@ mod pumping_water_tests {
     /// carries real flow because the spillage column is actually free at this
     /// stage, not a coefficient on a column pinned to zero.
     #[test]
-    fn filling_upstream_spillage_still_deposits_into_bucket() {
+    fn filling_upstream_spillage_still_deposits_into_transit_bucket() {
         use cobre_core::entities::hydro::FillingConfig;
 
         let up = 1;
@@ -4606,7 +4619,7 @@ mod pumping_water_tests {
         arc_spread_k.insert(up_idx, vec![vec![0.5, 0.5]]);
         let ctx = TemplateBuildCtx {
             arc_spread_k,
-            per_stage_mask: vec![vec![1..2]],
+            per_stage_mask: vec![vec![1]],
             ..fixtures.make_ctx()
         };
 
@@ -4625,7 +4638,7 @@ mod pumping_water_tests {
         let csc = build_sorted_csc(&ctx, &stage, 0, &layout);
 
         let down_row = i32::try_from(layout.row_water_balance_start() + down_idx).unwrap();
-        let def_row = i32::try_from(layout.row_bucket_definition_start()).unwrap();
+        let def_row = i32::try_from(layout.row_transit_bucket_definition_start()).unwrap();
 
         for blk in 0..layout.n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
@@ -4683,7 +4696,7 @@ mod pumping_water_tests {
         arc_spread_k.insert(up_idx, vec![vec![0.5, 0.5]]);
         let ctx = TemplateBuildCtx {
             arc_spread_k,
-            per_stage_mask: vec![vec![1..2]],
+            per_stage_mask: vec![vec![1]],
             ..fixtures.make_ctx()
         };
         let state = StateLayout::new(
@@ -4712,10 +4725,12 @@ mod pumping_water_tests {
 
         let down_row_active =
             i32::try_from(layout_active.row_water_balance_start() + down_idx).unwrap();
-        let def_row_active = i32::try_from(layout_active.row_bucket_definition_start()).unwrap();
+        let def_row_active =
+            i32::try_from(layout_active.row_transit_bucket_definition_start()).unwrap();
         let down_row_exited =
             i32::try_from(layout_exited.row_water_balance_start() + down_idx).unwrap();
-        let def_row_exited = i32::try_from(layout_exited.row_bucket_definition_start()).unwrap();
+        let def_row_exited =
+            i32::try_from(layout_exited.row_transit_bucket_definition_start()).unwrap();
 
         for blk in 0..layout_active.n_blks {
             for (col_active, col_exited) in [
@@ -4796,7 +4811,7 @@ mod pumping_water_tests {
         arc_spread_k.insert(up_b_idx, vec![vec![0.25, 0.75]]);
         let ctx = TemplateBuildCtx {
             arc_spread_k,
-            per_stage_mask: vec![vec![1..2]],
+            per_stage_mask: vec![vec![1]],
             ..fixtures.make_ctx()
         };
 
@@ -4814,7 +4829,7 @@ mod pumping_water_tests {
         let layout = StageLayout::new(&ctx, &state, &stage, 0);
         let csc = build_sorted_csc(&ctx, &stage, 0, &layout);
 
-        let def_row = i32::try_from(layout.row_bucket_definition_start()).unwrap();
+        let def_row = i32::try_from(layout.row_transit_bucket_definition_start()).unwrap();
         for blk in 0..layout.n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
             assert_eq!(
@@ -4837,11 +4852,11 @@ mod pumping_water_tests {
             );
         }
         // A single aggregated bucket for the downstream plant, not one per arc.
-        assert_eq!(state.b_total, 1);
-        assert_eq!(state.buckets_out.len(), 1);
+        assert_eq!(state.n_buckets, 1);
+        assert_eq!(state.transit_buckets_out.len(), 1);
     }
 
-    /// `B == 0` (no declared arc, `state.b_total == 0`): the emitted water
+    /// `B == 0` (no declared arc, `state.n_buckets == 0`): the emitted water
     /// entries are byte-identical to today's shape — no bucket-definition rows
     /// exist at all (`load_balance` collapses back onto `water_balance.end`)
     /// and the upstream release carries exactly `-tau_h` (the W-1 anchor).
@@ -4865,13 +4880,16 @@ mod pumping_water_tests {
         let ctx = fixtures.make_ctx();
         let stage = two_block_stage(0, [300.0, 444.0]);
         let state = state_layout_for(&ctx);
-        assert_eq!(state.b_total, 0, "fixture must declare no travel-time arc");
+        assert_eq!(
+            state.n_buckets, 0,
+            "fixture must declare no travel-time arc"
+        );
         let layout = StageLayout::new(&ctx, &state, &stage, 0);
 
         // No bucket-row gap: load_balance starts exactly where water_balance
         // ends, and the bucket-definition row cursor collapses onto it.
         assert_eq!(
-            layout.row_bucket_definition_start(),
+            layout.row_transit_bucket_definition_start(),
             layout.row_load_balance_start(),
             "B==0 must leave no bucket-definition rows between water_balance and load_balance"
         );
@@ -4922,7 +4940,7 @@ mod pumping_water_tests {
         arc_spread_k.insert(up_idx, vec![vec![0.5, 0.3]]); // sums to 0.8: violates conservation.
         let ctx = TemplateBuildCtx {
             arc_spread_k,
-            per_stage_mask: vec![vec![1..2]],
+            per_stage_mask: vec![vec![1]],
             ..fixtures.make_ctx()
         };
 
@@ -4995,18 +5013,18 @@ mod pumping_water_tests {
         let resolution = resolve_spread(t_v, 0, &[720.0, 720.0], Some(&block_hours));
 
         // Sanity: the resolver reproduces the memo's worked numbers exactly.
-        assert!((resolution.kappa[0][1] - 230.0 / 240.0).abs() < 1e-9);
-        assert!((resolution.kappa[0][2] - 10.0 / 240.0).abs() < 1e-9);
-        assert!((resolution.kappa[1][1] - 230.0 / 240.0).abs() < 1e-9);
-        assert!(resolution.chi[0][1].abs() < 1e-9);
-        assert!((resolution.chi[1][1] - 10.0 / 240.0).abs() < 1e-9);
-        assert!((resolution.chi[2][1] - 1.0).abs() < 1e-9);
+        assert!((resolution.within_stage_routing[0][1] - 230.0 / 240.0).abs() < 1e-9);
+        assert!((resolution.within_stage_routing[0][2] - 10.0 / 240.0).abs() < 1e-9);
+        assert!((resolution.within_stage_routing[1][1] - 230.0 / 240.0).abs() < 1e-9);
+        assert!(resolution.block_deposits[0][1].abs() < 1e-9);
+        assert!((resolution.block_deposits[1][1] - 10.0 / 240.0).abs() < 1e-9);
+        assert!((resolution.block_deposits[2][1] - 1.0).abs() < 1e-9);
 
         let mut arc_spread_chrono = HashMap::new();
         arc_spread_chrono.insert(up_idx, vec![Some(resolution)]);
         let ctx = TemplateBuildCtx {
             arc_spread_chrono,
-            per_stage_mask: vec![vec![1..2]],
+            per_stage_mask: vec![vec![1]],
             ..fixtures.make_ctx()
         };
 
@@ -5024,7 +5042,7 @@ mod pumping_water_tests {
         let layout = StageLayout::new(&ctx, &state, &stage, 0);
         let csc = build_sorted_csc(&ctx, &stage, 0, &layout);
 
-        let def_row = i32::try_from(layout.row_bucket_definition_start()).unwrap();
+        let def_row = i32::try_from(layout.row_transit_bucket_definition_start()).unwrap();
         let row_water = layout.row_water_balance_start();
         let row_b1 = i32::try_from(row_water + down_idx * 3 + 1).unwrap();
         let row_b2 = i32::try_from(row_water + down_idx * 3 + 2).unwrap();
@@ -5092,7 +5110,7 @@ mod pumping_water_tests {
         let down_idx = make_fixtures().hydro_pos[&EntityId(down)];
 
         let resolution = resolve_spread(t_v, 0, &stage_durations, Some(&[720.0]));
-        let k = resolution.k.clone();
+        let stage_weights = resolution.stage_weights.clone();
 
         // Parallel build. `chronological_stage` (not `two_block_stage`, which
         // always carries 2 blocks) gives a single 720h block so `n_blks == 1`
@@ -5100,10 +5118,10 @@ mod pumping_water_tests {
         // `Parallel` for this side.
         let par_fixtures = make_fixtures();
         let mut arc_spread_k = HashMap::new();
-        arc_spread_k.insert(up_idx, vec![k]);
+        arc_spread_k.insert(up_idx, vec![stage_weights]);
         let par_ctx = TemplateBuildCtx {
             arc_spread_k,
-            per_stage_mask: vec![vec![1..2]],
+            per_stage_mask: vec![vec![1]],
             ..par_fixtures.make_ctx()
         };
         let mut par_stage = chronological_stage(0, &[720.0]);
@@ -5127,7 +5145,7 @@ mod pumping_water_tests {
         arc_spread_chrono.insert(up_idx, vec![Some(resolution)]);
         let chr_ctx = TemplateBuildCtx {
             arc_spread_chrono,
-            per_stage_mask: vec![vec![1..2]],
+            per_stage_mask: vec![vec![1]],
             ..chr_fixtures.make_ctx()
         };
         let chr_stage = chronological_stage(0, &[720.0]);
@@ -5181,21 +5199,21 @@ mod pumping_water_tests {
         let up_idx = fixtures.hydro_pos[&EntityId(up)];
         let down_idx = fixtures.hydro_pos[&EntityId(down)];
 
-        // k = [0.3, 0.3] sums to 0.6 — violates row 8's stage-clock
-        // conservation, even though kappa/chi's own per-column identity
-        // (0.5 + 0.5 == 1.0) holds.
+        // stage_weights = [0.3, 0.3] sums to 0.6 — violates row 8's
+        // stage-clock conservation, even though within_stage_routing's/
+        // block_deposits's own per-column identity (0.5 + 0.5 == 1.0) holds.
         let bad_resolution = SpreadResolution {
-            depth: 1,
-            k: vec![0.3, 0.3],
-            chi: vec![vec![0.5, 0.5]],
-            kappa: vec![vec![0.5]],
-            delivery: vec![vec![1.0]],
+            stage_reach: 1,
+            stage_weights: vec![0.3, 0.3],
+            block_deposits: vec![vec![0.5, 0.5]],
+            within_stage_routing: vec![vec![0.5]],
+            arrival_density: vec![vec![1.0]],
         };
         let mut arc_spread_chrono = HashMap::new();
         arc_spread_chrono.insert(up_idx, vec![Some(bad_resolution)]);
         let ctx = TemplateBuildCtx {
             arc_spread_chrono,
-            per_stage_mask: vec![vec![1..2]],
+            per_stage_mask: vec![vec![1]],
             ..fixtures.make_ctx()
         };
 
@@ -5217,7 +5235,7 @@ mod pumping_water_tests {
 
     /// The `Σ_b w_b·χ_{b,d} == k_d` shared-density consistency (row 9) fires
     /// when a hand-built resolution's block deposits disagree with its own
-    /// stage-level `k` — the guard is real, not dead code.
+    /// stage-level `stage_weights` — the guard is real, not dead code.
     #[test]
     #[should_panic(expected = "block deposits must aggregate to k_d")]
     fn row_9_shared_density_consistency_panics_on_disagreement() {
@@ -5236,20 +5254,20 @@ mod pumping_water_tests {
         let up_idx = fixtures.hydro_pos[&EntityId(up)];
         let down_idx = fixtures.hydro_pos[&EntityId(down)];
 
-        // k_1 = 0.5 but the single block's chi deposits 0.0 into lag 1 —
-        // violates sub-contract 2's aggregation identity.
+        // k_1 = 0.5 but the single block's block_deposits value is 0.0 at
+        // lag 1 — violates sub-contract 2's aggregation identity.
         let bad_resolution = SpreadResolution {
-            depth: 1,
-            k: vec![0.5, 0.5],
-            chi: vec![vec![1.0, 0.0]],
-            kappa: vec![vec![1.0]],
-            delivery: vec![vec![1.0]],
+            stage_reach: 1,
+            stage_weights: vec![0.5, 0.5],
+            block_deposits: vec![vec![1.0, 0.0]],
+            within_stage_routing: vec![vec![1.0]],
+            arrival_density: vec![vec![1.0]],
         };
         let mut arc_spread_chrono = HashMap::new();
         arc_spread_chrono.insert(up_idx, vec![Some(bad_resolution)]);
         let ctx = TemplateBuildCtx {
             arc_spread_chrono,
-            per_stage_mask: vec![vec![1..2]],
+            per_stage_mask: vec![vec![1]],
             ..fixtures.make_ctx()
         };
 

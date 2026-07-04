@@ -144,7 +144,7 @@ pub struct StageRowSelectionRecord {
 /// | 4    | [`Self::PolicySyncComplete`]      | Row-sync allgatherv done                                    |
 /// | 4a   | [`Self::PolicySelectionComplete`] | Row-selection done (conditional on `should_run`)       |
 /// | 4b   | [`Self::PolicyBudgetEnforcementComplete`] | Budget cap enforcement done (every iteration when budget is set) |
-/// | 4c   | [`Self::PolicyTemplateBakeComplete`] | Per-stage baked template rebuild done (every iteration) |
+/// | 4c   | [`Self::PolicyTemplateFreezeComplete`] | Per-stage frozen template rebuild done (every iteration) |
 /// | 5    | [`Self::ConvergenceUpdate`]    | Stopping rules evaluated                               |
 /// | 6    | [`Self::CheckpointComplete`]   | Checkpoint written (conditional on checkpoint interval)|
 /// | 7    | [`Self::IterationSummary`]     | End-of-iteration aggregated summary                    |
@@ -269,17 +269,17 @@ pub enum TrainingEvent {
         enforcement_time_ms: u64,
     },
 
-    /// Template baking completed: per-stage baked templates rebuilt from the
+    /// Template freeze completed: per-stage frozen templates rebuilt from the
     /// current active row set, consumed by the *next* iteration's passes.
-    PolicyTemplateBakeComplete {
+    PolicyTemplateFreezeComplete {
         /// Iteration number (1-based).
         iteration: u64,
-        /// Number of stages for which baked templates were rebuilt.
+        /// Number of stages for which frozen templates were rebuilt.
         stages_processed: u32,
-        /// Total number of rows baked, summed across all stages.
-        total_rows_baked: u64,
-        /// Wall-clock time for the baking pass across all stages, in milliseconds.
-        bake_time_ms: u64,
+        /// Total number of rows frozen, summed across all stages.
+        total_rows_frozen: u64,
+        /// Wall-clock time for the freeze pass across all stages, in milliseconds.
+        freeze_time_ms: u64,
     },
 
     /// Convergence check completed: all configured stopping rules evaluated for
@@ -528,11 +528,11 @@ mod tests {
                 stages_processed: 12,
                 enforcement_time_ms: 1,
             },
-            TrainingEvent::PolicyTemplateBakeComplete {
+            TrainingEvent::PolicyTemplateFreezeComplete {
                 iteration: 10,
                 stages_processed: 12,
-                total_rows_baked: 48,
-                bake_time_ms: 2,
+                total_rows_frozen: 48,
+                freeze_time_ms: 2,
             },
             TrainingEvent::ConvergenceUpdate {
                 iteration: 1,
@@ -887,26 +887,26 @@ mod tests {
     }
 
     #[test]
-    fn policy_template_bake_complete_fields_accessible() {
-        let event = TrainingEvent::PolicyTemplateBakeComplete {
+    fn policy_template_freeze_complete_fields_accessible() {
+        let event = TrainingEvent::PolicyTemplateFreezeComplete {
             iteration: 5,
             stages_processed: 12,
-            total_rows_baked: 96,
-            bake_time_ms: 3,
+            total_rows_frozen: 96,
+            freeze_time_ms: 3,
         };
-        let TrainingEvent::PolicyTemplateBakeComplete {
+        let TrainingEvent::PolicyTemplateFreezeComplete {
             iteration,
             stages_processed,
-            total_rows_baked,
-            bake_time_ms,
+            total_rows_frozen,
+            freeze_time_ms,
         } = event
         else {
             panic!("wrong variant")
         };
         assert_eq!(iteration, 5);
         assert_eq!(stages_processed, 12);
-        assert_eq!(total_rows_baked, 96);
-        assert_eq!(bake_time_ms, 3);
+        assert_eq!(total_rows_frozen, 96);
+        assert_eq!(freeze_time_ms, 3);
     }
 
     #[test]

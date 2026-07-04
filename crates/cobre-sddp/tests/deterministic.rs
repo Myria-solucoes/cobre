@@ -147,7 +147,7 @@ fn run_with_simulation(
             &comm,
             &result_tx,
             None,
-            result.baked_templates.as_deref(),
+            result.frozen_templates.as_deref(),
             &result.basis_cache,
         )
         .expect("simulate must return Ok");
@@ -1395,7 +1395,7 @@ fn d12_checkpoint_round_trip() {
             &comm,
             &result_tx,
             None,
-            result.baked_templates.as_deref(),
+            result.frozen_templates.as_deref(),
             &result.basis_cache,
         )
         .expect("simulate must return Ok");
@@ -3213,7 +3213,7 @@ fn d29_weekly_par_noise_sharing() {
             &comm,
             &result_tx,
             None,
-            result.baked_templates.as_deref(),
+            result.frozen_templates.as_deref(),
             &result.basis_cache,
         )
         .expect("simulation must succeed");
@@ -3301,13 +3301,13 @@ fn d30_multi_resolution_loads_and_trains() {
 
 // ── integration test ──────────────────────────────────────────────
 
-/// The baked-template simulation path must produce bit-for-bit identical
+/// The frozen-template simulation path must produce bit-for-bit identical
 /// per-scenario costs to the legacy fallback path (rel error == 0.0, within
-/// 1e-12), confirming `bake_rows_into_template` builds a mathematically
+/// 1e-12), confirming `freeze_rows_into_template` builds a mathematically
 /// equivalent LP to `load_model + add_rows`. Trained on D01, which runs >= 2
-/// iterations so `baked_templates` is `Some`.
+/// iterations so `frozen_templates` is `Some`.
 #[test]
-fn baked_vs_fallback_simulation_costs_are_identical() {
+fn frozen_vs_fallback_simulation_costs_are_identical() {
     let case_dir = Path::new("../../examples/deterministic/d01-thermal-dispatch");
     let config_path = case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path).expect("config must parse");
@@ -3345,8 +3345,8 @@ fn baked_vs_fallback_simulation_costs_are_identical() {
     let training_result = outcome.result;
 
     assert!(
-        training_result.baked_templates.is_some(),
-        "D01 training must produce baked templates (requires >= 2 iterations)"
+        training_result.frozen_templates.is_some(),
+        "D01 training must produce frozen templates (requires >= 2 iterations)"
     );
 
     let mut pool = setup
@@ -3354,21 +3354,21 @@ fn baked_vs_fallback_simulation_costs_are_identical() {
         .expect("simulation workspace pool must build");
 
     let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
-    let (tx_baked, rx_baked) = mpsc::sync_channel(io_capacity);
-    let drain_baked = std::thread::spawn(move || rx_baked.into_iter().collect::<Vec<_>>());
+    let (tx_frozen, rx_frozen) = mpsc::sync_channel(io_capacity);
+    let drain_frozen = std::thread::spawn(move || rx_frozen.into_iter().collect::<Vec<_>>());
 
-    let baked_run = setup
+    let frozen_run = setup
         .simulate(
             &mut pool.workspaces,
             &comm,
-            &tx_baked,
+            &tx_frozen,
             None,
-            training_result.baked_templates.as_deref(),
+            training_result.frozen_templates.as_deref(),
             &training_result.basis_cache,
         )
-        .expect("baked-path simulate must return Ok");
-    drop(tx_baked);
-    drop(drain_baked.join().expect("drain thread must not panic"));
+        .expect("frozen-path simulate must return Ok");
+    drop(tx_frozen);
+    drop(drain_frozen.join().expect("drain thread must not panic"));
 
     let (tx_fallback, rx_fallback) = mpsc::sync_channel(io_capacity);
     let drain_fallback = std::thread::spawn(move || rx_fallback.into_iter().collect::<Vec<_>>());
@@ -3387,13 +3387,13 @@ fn baked_vs_fallback_simulation_costs_are_identical() {
     drop(drain_fallback.join().expect("drain thread must not panic"));
 
     assert_eq!(
-        baked_run.costs.len(),
+        frozen_run.costs.len(),
         fallback_run.costs.len(),
         "both runs must return the same number of scenarios"
     );
 
     for ((b_id, b_cost, _), (f_id, f_cost, _)) in
-        baked_run.costs.iter().zip(fallback_run.costs.iter())
+        frozen_run.costs.iter().zip(fallback_run.costs.iter())
     {
         assert_eq!(b_id, f_id, "scenario IDs must match between runs");
         let rel_err = if b_cost.abs() > 1e-10 {
@@ -3403,7 +3403,7 @@ fn baked_vs_fallback_simulation_costs_are_identical() {
         };
         assert!(
             rel_err < 1e-12,
-            "scenario {b_id}: baked cost {b_cost} != fallback cost {f_cost} (rel_err={rel_err})"
+            "scenario {b_id}: frozen cost {b_cost} != fallback cost {f_cost} (rel_err={rel_err})"
         );
     }
 }
@@ -3549,7 +3549,7 @@ fn d43_storage_only_cut_converges() {
 /// split (50/150 vs. a folded 100/100) are what a fold gets wrong, so they are
 /// asserted explicitly below instead of relying on the fold-blind total.
 #[test]
-fn d44_travel_time_substage_bucket_dual() {
+fn d44_travel_time_substage_transit_bucket_dual() {
     // The LP builder divides every non-theta objective coefficient by this
     // factor; `duals_extraction`'s `rc / col_scale` unscaling leaves it in, so
     // a stored cut coefficient must be multiplied back to read real dollars
@@ -3591,7 +3591,7 @@ fn d44_travel_time_substage_bucket_dual() {
     // (undivided by COST_SCALE_FACTOR) as pool-0's cut coefficient
     // (StateLayout::state_to_lp_incoming_column's explicit bucket arm resolves
     // the pin; the cut coefficient index is the STATE index, identity to the
-    // outgoing column per `buckets_out`).
+    // outgoing column per `transit_buckets_out`).
     //
     // J's own storage entering stage 1 (a non-degenerate corroborating check:
     // both it and the bucket deliver into J's same stage-1 balance row, so
@@ -3601,10 +3601,10 @@ fn d44_travel_time_substage_bucket_dual() {
     // reduced cost is basis-dependent, not a robust, backend-agnostic pin.
     let state = setup.stage_state();
     assert_eq!(
-        state.b_total, 1,
+        state.n_buckets, 1,
         "D44: exactly one bucket dimension (single arc, L=1)"
     );
-    let bucket_idx = state.buckets_out.start;
+    let transit_bucket_idx = state.transit_buckets_out.start;
     let j_canonical_idx = system
         .hydros()
         .iter()
@@ -3618,11 +3618,11 @@ fn d44_travel_time_substage_bucket_dual() {
         "D44: pool 0 must hold at least one trained cut to inspect"
     );
     for (slot, _intercept, coefficients) in pool0.active_cuts() {
-        let bucket_dual = coefficients[bucket_idx] * COST_SCALE_FACTOR;
+        let transit_bucket_dual = coefficients[transit_bucket_idx] * COST_SCALE_FACTOR;
         assert!(
-            (bucket_dual - (-10.0)).abs() < TOL,
+            (transit_bucket_dual - (-10.0)).abs() < TOL,
             "D44: bucket subgradient at pool-0 slot {slot} must be exactly -10 $/hm3 \
-             (a wrong-sign coefficient would give +10); got {bucket_dual}"
+             (a wrong-sign coefficient would give +10); got {transit_bucket_dual}"
         );
         let storage_j_dual = coefficients[storage_j_idx] * COST_SCALE_FACTOR;
         assert!(
@@ -3646,7 +3646,7 @@ fn d44_travel_time_substage_bucket_dual() {
             &comm,
             &result_tx,
             None,
-            result.baked_templates.as_deref(),
+            result.frozen_templates.as_deref(),
             &result.basis_cache,
         )
         .expect("D44: simulate must return Ok");
@@ -3691,15 +3691,15 @@ fn d44_travel_time_substage_bucket_dual() {
         "D44: J must receive 50 hm3 at stage 0 (same-stage k_0), got {j_stage0_volume_hm3}"
     );
 
-    let bucket_stage1 = scenario.stages[1]
+    let transit_bucket_stage1 = scenario.stages[1]
         .transit_buckets
         .iter()
         .find(|b| b.hydro_id == 1)
         .expect("D44: J's bucket record missing from stage 1");
     assert!(
-        (bucket_stage1.delayed_arrival_hm3 - 50.0).abs() < TOL,
+        (transit_bucket_stage1.delayed_arrival_hm3 - 50.0).abs() < TOL,
         "D44: J must receive 50 hm3 at stage 1 via the bucket, got {}",
-        bucket_stage1.delayed_arrival_hm3
+        transit_bucket_stage1.delayed_arrival_hm3
     );
 }
 
@@ -3741,8 +3741,9 @@ fn pad_calendar_for_resolution(stage_hours: &[f64], travel_time_hours: f64) -> V
 ///
 /// ## What each assertion pins
 ///
-/// 1. `resolve_spread` at the monthly anchor reproduces the hand-derived `k`
-///    and `depth == 3` directly (a ceiling-form regression would report 1).
+/// 1. `resolve_spread` at the monthly anchor reproduces the hand-derived
+///    `stage_weights` and `stage_reach == 3` directly (a ceiling-form
+///    regression would report 1).
 /// 2. End-to-end conservation: summed over every stage, `U`'s released
 ///    volume (turbined + spilled) equals `J`'s received volume (turbined +
 ///    spilled — `J` has zero storage, so its own release equals whatever it
@@ -3751,7 +3752,7 @@ fn pad_calendar_for_resolution(stage_hours: &[f64], travel_time_hours: f64) -> V
 ///    terminal stage — a bucket slot there targets a stage past the
 ///    horizon).
 /// 3. Global-max sizing with per-stage masking: the bucket block's global
-///    depth (`state.b_total`) is the deepest per-anchor reach; the
+///    depth (`state.n_buckets`) is the deepest per-anchor reach; the
 ///    documented per-stage cap (`.claude/rules/sddp.md` "Terminal credit
 ///    deferred": `active.min(n_stages - 1 - stage)`) shrinks that reach
 ///    stage by stage down to zero at the terminal stage.
@@ -3766,23 +3767,27 @@ fn d45_travel_time_mixed_calendar_conservation() {
     let stage_hours = [720.0, 168.0, 168.0, 168.0];
 
     // ---- (1) resolve_spread at the monthly anchor: the depth-3 counterexample ----
-    let monthly =
-        cobre_sddp::temporal_lag::resolve_spread(TRAVEL_TIME_HOURS, 0, &stage_hours, None);
+    let monthly = cobre_sddp::lead_time::resolve_spread(TRAVEL_TIME_HOURS, 0, &stage_hours, None);
     assert_eq!(
-        monthly.depth, 3,
+        monthly.stage_reach, 3,
         "D45: the monthly anchor must resolve to depth 3, not the closed-form \
          ceiling ceil(360/720) = 1 (which would drop 8/30 of the release)"
     );
     let expected_k = [0.5, 7.0 / 30.0, 7.0 / 30.0, 1.0 / 30.0];
     assert_eq!(
-        monthly.k.len(),
+        monthly.stage_weights.len(),
         expected_k.len(),
-        "D45: k must have 4 entries"
+        "D45: stage_weights must have 4 entries"
     );
-    for (lag, (&actual, &expected)) in monthly.k.iter().zip(expected_k.iter()).enumerate() {
+    for (lag, (&actual, &expected)) in monthly
+        .stage_weights
+        .iter()
+        .zip(expected_k.iter())
+        .enumerate()
+    {
         assert!(
             (actual - expected).abs() < K_TOL,
-            "D45: k[{lag}] = {actual}, expected {expected}"
+            "D45: stage_weights[{lag}] = {actual}, expected {expected}"
         );
     }
 
@@ -3815,13 +3820,14 @@ fn d45_travel_time_mixed_calendar_conservation() {
     // ---- (3) global-max sizing with per-stage masking ----
     let state = setup.stage_state();
     assert_eq!(
-        state.b_total, 3,
+        state.n_buckets, 3,
         "D45: the global bucket depth must be the deepest per-anchor reach (3)"
     );
     let padded = pad_calendar_for_resolution(&stage_hours, TRAVEL_TIME_HOURS);
     let own_depths: Vec<usize> = (0..N_STAGES)
         .map(|stage| {
-            cobre_sddp::temporal_lag::resolve_spread(TRAVEL_TIME_HOURS, stage, &padded, None).depth
+            cobre_sddp::lead_time::resolve_spread(TRAVEL_TIME_HOURS, stage, &padded, None)
+                .stage_reach
         })
         .collect();
     let capped: Vec<usize> = own_depths
@@ -3836,11 +3842,11 @@ fn d45_travel_time_mixed_calendar_conservation() {
          (active.min(n_stages - 1 - stage)), got {own_depths:?} capped to {capped:?}"
     );
     assert_eq!(
-        capped[0], state.b_total,
+        capped[0], state.n_buckets,
         "D45: stage 0 must reach the full global depth"
     );
     assert!(
-        capped[N_STAGES - 1] < state.b_total,
+        capped[N_STAGES - 1] < state.n_buckets,
         "D45: the terminal stage's active range must be strictly shorter than \
          the global depth (masked), got {}",
         capped[N_STAGES - 1]
@@ -3859,7 +3865,7 @@ fn d45_travel_time_mixed_calendar_conservation() {
             &comm,
             &result_tx,
             None,
-            result.baked_templates.as_deref(),
+            result.frozen_templates.as_deref(),
             &result.basis_cache,
         )
         .expect("D45: simulate must return Ok");
@@ -3893,17 +3899,17 @@ fn d45_travel_time_mixed_calendar_conservation() {
     }
 
     let terminal_stage = scenario.stages.last().expect("D45: at least one stage");
-    let terminal_buckets: Vec<_> = terminal_stage
+    let terminal_transit_buckets: Vec<_> = terminal_stage
         .transit_buckets
         .iter()
         .filter(|b| b.hydro_id == 1)
         .collect();
     assert_eq!(
-        terminal_buckets.len(),
+        terminal_transit_buckets.len(),
         3,
         "D45: J must carry all 3 globally-sized bucket lag slots even at the terminal stage"
     );
-    let horizon_drop_hm3: f64 = terminal_buckets
+    let horizon_drop_hm3: f64 = terminal_transit_buckets
         .iter()
         .map(|b| b.in_transit_volume_hm3)
         .sum();
@@ -3946,7 +3952,7 @@ fn d46_travel_time_chronological_converges() {
 /// `[1080, 1800)` gives `k = [0, 1/2, 1/2]` (depth 2): nothing same-stage, half
 /// maturing one stage later, half two stages later. `L_j = max(1, 2) = 2`, so
 /// `J`'s bucket block must aggregate BOTH arcs into ONE depth-2 block, not one
-/// block per arc (a per-arc block would give `b_total = 1 + 2 = 3`).
+/// block per arc (a per-arc block would give `n_buckets = 1 + 2 = 3`).
 ///
 /// Releasing everything at stage 0 (weakly optimal — deferring any release
 /// risks losing its own deepest share past the horizon, same argument as the
@@ -3965,21 +3971,29 @@ fn d47_travel_time_confluence_aggregation() {
     let stage_hours = [720.0, 720.0, 720.0];
 
     // ---- per-arc k-factors, verified directly before asserting anything downstream ----
-    let u1 = cobre_sddp::temporal_lag::resolve_spread(360.0, 0, &stage_hours, None);
-    assert_eq!(u1.depth, 1, "U1: depth must be 1");
-    for (lag, (&actual, &expected)) in u1.k.iter().zip([0.5, 0.5].iter()).enumerate() {
+    let u1 = cobre_sddp::lead_time::resolve_spread(360.0, 0, &stage_hours, None);
+    assert_eq!(u1.stage_reach, 1, "U1: depth must be 1");
+    for (lag, (&actual, &expected)) in u1.stage_weights.iter().zip([0.5, 0.5].iter()).enumerate() {
         assert!(
             (actual - expected).abs() < 1e-9,
-            "U1: k[{lag}] = {actual}, expected {expected}"
+            "U1: stage_weights[{lag}] = {actual}, expected {expected}"
         );
     }
 
-    let u2 = cobre_sddp::temporal_lag::resolve_spread(1080.0, 0, &stage_hours, None);
-    assert_eq!(u2.depth, 2, "U2: depth must be 2 (arrives at lags 1 and 2)");
-    for (lag, (&actual, &expected)) in u2.k.iter().zip([0.0, 0.5, 0.5].iter()).enumerate() {
+    let u2 = cobre_sddp::lead_time::resolve_spread(1080.0, 0, &stage_hours, None);
+    assert_eq!(
+        u2.stage_reach, 2,
+        "U2: depth must be 2 (arrives at lags 1 and 2)"
+    );
+    for (lag, (&actual, &expected)) in u2
+        .stage_weights
+        .iter()
+        .zip([0.0, 0.5, 0.5].iter())
+        .enumerate()
+    {
         assert!(
             (actual - expected).abs() < 1e-9,
-            "U2: k[{lag}] = {actual}, expected {expected}"
+            "U2: stage_weights[{lag}] = {actual}, expected {expected}"
         );
     }
 
@@ -4012,8 +4026,8 @@ fn d47_travel_time_confluence_aggregation() {
     // ---- merged depth: ONE per-j bucket block of depth 2, not one per arc ----
     let state = setup.stage_state();
     assert_eq!(
-        state.b_total, 2,
-        "D47: b_total must be 2 (one merged block of depth max(1,2)); a \
+        state.n_buckets, 2,
+        "D47: n_buckets must be 2 (one merged block of depth max(1,2)); a \
          one-block-per-arc regression would give 1 + 2 = 3"
     );
     let j_canonical_idx = system
@@ -4022,7 +4036,7 @@ fn d47_travel_time_confluence_aggregation() {
         .position(|h| h.id == cobre_core::EntityId::from(2))
         .expect("D47: J (hydro id 2) must exist in the canonical hydro order");
     assert_eq!(
-        state.bucket_column_order,
+        state.transit_bucket_column_order,
         vec![(j_canonical_idx, 1), (j_canonical_idx, 2)],
         "D47: both bucket slots must belong to J's single block (same plant \
          index, lags 1 and 2), never a separate block per upstream arc"
@@ -4041,7 +4055,7 @@ fn d47_travel_time_confluence_aggregation() {
             &comm,
             &result_tx,
             None,
-            result.baked_templates.as_deref(),
+            result.frozen_templates.as_deref(),
             &result.basis_cache,
         )
         .expect("D47: simulate must return Ok");
@@ -5035,7 +5049,7 @@ mod chronological_attribution {
             past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
-            // Empty is safe: `build_initial_bucket_state`'s history selection
+            // Empty is safe: `build_initial_transit_bucket_state`'s history selection
             // falls back to an empty slice (seed 0.0) rather than panicking —
             // these tests inspect LP structure and state dimension, never a
             // seeded value.
@@ -5130,7 +5144,7 @@ mod chronological_attribution {
 
     /// The monthly (720 h) anchor's block-resolved attribution over 3x240 h
     /// chronological blocks with `travel_time_hours = 250`, reproducing the
-    /// resolver's own pinned reference values (`temporal_lag::tests::
+    /// resolver's own pinned reference values (`lead_time::tests::
     /// test_example_iii_block_factors`) directly — this test's only job is to
     /// confirm the same reference numbers hold for the exact stage lengths
     /// `d46-travel-time-chronological` declares.
@@ -5138,44 +5152,62 @@ mod chronological_attribution {
     fn resolve_spread_matches_reference_block_tables() {
         let stage_lengths_hours = [720.0, 720.0];
         let block_lengths_hours = [240.0, 240.0, 240.0];
-        let resolution = cobre_sddp::temporal_lag::resolve_spread(
+        let resolution = cobre_sddp::lead_time::resolve_spread(
             TRAVEL_TIME_HOURS,
             0,
             &stage_lengths_hours,
             Some(&block_lengths_hours),
         );
 
-        assert_eq!(resolution.depth, 1, "depth must be 1 (k_0, k_1 only)");
-        assert_close(&resolution.k, &[470.0 / 720.0, 250.0 / 720.0], "k");
-
-        assert_close(&resolution.chi[0], &[1.0, 0.0], "chi[0] (B0)");
+        assert_eq!(resolution.stage_reach, 1, "depth must be 1 (k_0, k_1 only)");
         assert_close(
-            &resolution.chi[1],
+            &resolution.stage_weights,
+            &[470.0 / 720.0, 250.0 / 720.0],
+            "stage_weights",
+        );
+
+        assert_close(
+            &resolution.block_deposits[0],
+            &[1.0, 0.0],
+            "block_deposits[0] (B0)",
+        );
+        assert_close(
+            &resolution.block_deposits[1],
             &[230.0 / 240.0, 10.0 / 240.0],
-            "chi[1] (B1)",
+            "block_deposits[1] (B1)",
         );
-        assert_close(&resolution.chi[2], &[0.0, 1.0], "chi[2] (B2)");
-
-        // kappa[b] is self-inclusive (index 0 = block b routing to itself), so
-        // kappa_{B0->B1} = kappa[0][1], kappa_{B0->B2} = kappa[0][2],
-        // kappa_{B1->B2} = kappa[1][1].
         assert_close(
-            &resolution.kappa[0],
+            &resolution.block_deposits[2],
+            &[0.0, 1.0],
+            "block_deposits[2] (B2)",
+        );
+
+        // within_stage_routing[b] is self-inclusive (index 0 = block b
+        // routing to itself), so within_stage_routing_{B0->B1} =
+        // within_stage_routing[0][1], within_stage_routing_{B0->B2} =
+        // within_stage_routing[0][2], within_stage_routing_{B1->B2} =
+        // within_stage_routing[1][1].
+        assert_close(
+            &resolution.within_stage_routing[0],
             &[0.0, 230.0 / 240.0, 10.0 / 240.0],
-            "kappa[0] (B0 self-inclusive)",
+            "within_stage_routing[0] (B0 self-inclusive)",
         );
         assert_close(
-            &resolution.kappa[1],
+            &resolution.within_stage_routing[1],
             &[0.0, 230.0 / 240.0],
-            "kappa[1] (B1 self-inclusive)",
+            "within_stage_routing[1] (B1 self-inclusive)",
         );
-        assert_close(&resolution.kappa[2], &[0.0], "kappa[2] (B2 self-inclusive)");
-
-        assert_eq!(resolution.delivery.len(), 1);
         assert_close(
-            &resolution.delivery[0],
+            &resolution.within_stage_routing[2],
+            &[0.0],
+            "within_stage_routing[2] (B2 self-inclusive)",
+        );
+
+        assert_eq!(resolution.arrival_density.len(), 1);
+        assert_close(
+            &resolution.arrival_density[0],
             &[240.0 / 250.0, 10.0 / 250.0],
-            "delivery (96%/4% split)",
+            "arrival_density (96%/4% split)",
         );
     }
 
@@ -5284,7 +5316,7 @@ mod chronological_attribution {
     /// Sub-contract 1 (mode-independent sizing): the bucket state is a pure
     /// function of stage lengths, never of `n_blks`/`block_mode`. Builds the
     /// SAME cascade in parallel (`K = 1`) and chronological (`K = 3`) mode and
-    /// asserts `state.n_state`/`state.b_total` are equal — a state dimension
+    /// asserts `state.n_state`/`state.n_buckets` are equal — a state dimension
     /// that instead tracked `n_blks` would silently misalign the trial-state
     /// broadcast and the cut coefficients between the two modes.
     #[test]
@@ -5296,12 +5328,12 @@ mod chronological_attribution {
         let chronological_state = chronological.stage_state();
 
         assert!(
-            parallel_state.b_total > 0,
+            parallel_state.n_buckets > 0,
             "the declared arc must actually size a bucket dimension"
         );
         assert_eq!(
-            parallel_state.b_total, chronological_state.b_total,
-            "b_total must not depend on block_mode/n_blks"
+            parallel_state.n_buckets, chronological_state.n_buckets,
+            "n_buckets must not depend on block_mode/n_blks"
         );
         assert_eq!(
             parallel_state.n_state, chronological_state.n_state,

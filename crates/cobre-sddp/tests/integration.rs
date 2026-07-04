@@ -940,7 +940,7 @@ fn train_emits_correct_event_sequence() {
         |e| matches!(e, TrainingEvent::WorkerTiming { .. }),
         |e| matches!(e, TrainingEvent::BackwardPassComplete { .. }),
         |e| matches!(e, TrainingEvent::PolicySyncComplete { .. }),
-        |e| matches!(e, TrainingEvent::PolicyTemplateBakeComplete { .. }),
+        |e| matches!(e, TrainingEvent::PolicyTemplateFreezeComplete { .. }),
         |e| matches!(e, TrainingEvent::ConvergenceUpdate { .. }),
         |e| matches!(e, TrainingEvent::IterationSummary { .. }),
     ];
@@ -1743,14 +1743,14 @@ fn test_forward_basis_reconstruct_bit_identical_d01() {
     );
 }
 
-/// Smoke test: the baked-template backward pass (baking activates on iteration 2)
+/// Smoke test: the frozen-template backward pass (freeze activates on iteration 2)
 /// runs to the iteration limit without diverging or panicking.
 #[test]
-fn baked_backward_pass_smoke_test() {
+fn frozen_backward_pass_smoke_test() {
     let n_iter = 5_u64;
     let fx = Fixture::new(3);
     let mut fcf = make_fcf(fx.n_stages);
-    // The baked path adds cut rows on iteration 2+; ExpandingMockSolver grows its
+    // The frozen path adds cut rows on iteration 2+; ExpandingMockSolver grows its
     // dual slice to match, where MockSolver's fixed 2-element dual would panic.
     let mut solver = ExpandingMockSolver::with_objectives(vec![50.0]);
     let stage_ctx = StageContext {
@@ -1829,7 +1829,7 @@ fn baked_backward_pass_smoke_test() {
         || Ok(ExpandingMockSolver::with_objectives(vec![50.0])),
         None,
     )
-    .expect("baked backward pass smoke: train must not error");
+    .expect("frozen backward pass smoke: train must not error");
 
     assert_eq!(
         outcome.result.iterations, n_iter,

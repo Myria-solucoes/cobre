@@ -25,7 +25,7 @@ pub(super) fn fill_stage_rows(
         &mut row_lower,
         &mut row_upper,
     );
-    fill_bucket_definition_rows(layout, &mut row_lower, &mut row_upper);
+    fill_transit_bucket_definition_rows(layout, &mut row_lower, &mut row_upper);
     fill_filling_target_rows(ctx, stage.id, layout, &mut row_lower, &mut row_upper);
     fill_filled_min_storage_floor_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
     fill_load_balance_rows(
@@ -205,14 +205,18 @@ fn fill_chronological_water_rows(
 
 /// Fill the travel-time bucket-definition equality row bounds (`0 == 0`), one
 /// row per (plant, lag) bucket REACHABLE at this stage
-/// (`layout.bucket_row_pos`, sparse like
+/// (`layout.transit_bucket_row_pos`, sparse like
 /// [`fill_anticipated_state_out_def_rows`]'s `active_pos` offset, not
 /// [`fill_anticipated_fishing_rows`]'s always-active dense one) — a lag beyond
 /// this stage's horizon-reachable cap gets no row. Empty when
-/// `layout.state.b_total == 0`.
-fn fill_bucket_definition_rows(layout: &StageLayout, row_lower: &mut [f64], row_upper: &mut [f64]) {
-    let row_start = layout.row_bucket_definition_start();
-    for pos in layout.bucket_row_pos.iter().flatten() {
+/// `layout.state.n_buckets == 0`.
+fn fill_transit_bucket_definition_rows(
+    layout: &StageLayout,
+    row_lower: &mut [f64],
+    row_upper: &mut [f64],
+) {
+    let row_start = layout.row_transit_bucket_definition_start();
+    for pos in layout.transit_bucket_row_pos.iter().flatten() {
         let row = row_start + pos;
         row_lower[row] = 0.0;
         row_upper[row] = 0.0;

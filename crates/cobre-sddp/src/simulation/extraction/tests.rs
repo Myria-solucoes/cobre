@@ -2270,8 +2270,8 @@ fn extract_thermals_no_block_committed_at_delivery_is_zero() {
         anticipated_windows: &[(None, None)],
         study_stage_ids: &[0, 1, 2, 3, 4, 5],
     };
-    // In the no-block branch the fishing-constraint LHS sum vanishes; Category 6
-    // pins slot 0 to incoming (0.0 here), so the helper returns Some(0.0) — same
+    // In the no-block branch the fishing-constraint LHS sum vanishes; the anticipated
+    // patch pins slot 0 to incoming (0.0 here), so the helper returns Some(0.0) — same
     // observable as before the fix, but via slot-0 of anticipated_state.
     let n_cols_helper = indexer.anticipated_decision.end.max(1);
     let primal_helper = vec![0.0_f64; n_cols_helper];
@@ -5391,24 +5391,24 @@ fn extract_parallel_per_block_evaporation_byte_identical() {
 // -------------------------------------------------------------------------
 
 /// Primal for a (`hydro_count = 2`, `max_par_order = 1`) bucketed layout with
-/// `buckets_out.len()` buckets. Layout: `storage`[0,2) `lags`[2,4)
-/// `buckets_out`[4,4+B) `z_inflow`[4+B,6+B) `storage_in`[6+B,8+B)
-/// `buckets_in`[8+B,8+2B) `theta`=8+2B.
-fn make_bucket_primal(buckets_out: &[f64], buckets_in: &[f64]) -> Vec<f64> {
-    assert_eq!(buckets_out.len(), buckets_in.len());
-    let b = buckets_out.len();
+/// `transit_buckets_out.len()` buckets. Layout: `storage`[0,2) `lags`[2,4)
+/// `transit_buckets_out`[4,4+B) `z_inflow`[4+B,6+B) `storage_in`[6+B,8+B)
+/// `transit_buckets_in`[8+B,8+2B) `theta`=8+2B.
+fn make_transit_bucket_primal(transit_buckets_out: &[f64], transit_buckets_in: &[f64]) -> Vec<f64> {
+    assert_eq!(transit_buckets_out.len(), transit_buckets_in.len());
+    let b = transit_buckets_out.len();
     let theta = 8 + 2 * b;
     let mut p = vec![0.0_f64; theta + 1];
     p[0] = 100.0;
     p[1] = 200.0;
     p[2] = 50.0;
     p[3] = 60.0;
-    for (i, &v) in buckets_out.iter().enumerate() {
+    for (i, &v) in transit_buckets_out.iter().enumerate() {
         p[4 + i] = v;
     }
     p[6 + b] = 90.0;
     p[7 + b] = 180.0;
-    for (i, &v) in buckets_in.iter().enumerate() {
+    for (i, &v) in transit_buckets_in.iter().enumerate() {
         p[8 + b + i] = v;
     }
     p[theta] = 999.5;
@@ -5423,9 +5423,16 @@ fn make_bucket_primal(buckets_out: &[f64], buckets_in: &[f64]) -> Vec<f64> {
 fn extract_transit_buckets_shape_canonical_order_and_delayed_arrival() {
     let geometry = crate::test_support::geom(2, 1);
     let study_dims = crate::test_support::study_dims();
-    let state =
-        crate::test_support::state_layout_with_buckets(2, 1, 2, vec![(0, 1), (0, 2)], 0, 0, vec![]);
-    let primal = make_bucket_primal(&[11.0, 22.0], &[7.0, 8.0]);
+    let state = crate::test_support::state_layout_with_transit_buckets(
+        2,
+        1,
+        2,
+        vec![(0, 1), (0, 2)],
+        0,
+        0,
+        vec![],
+    );
+    let primal = make_transit_bucket_primal(&[11.0, 22.0], &[7.0, 8.0]);
     let dual = vec![0.0; 4];
     let ec = zero_energy_conversion(2, 1);
 
@@ -5486,10 +5493,10 @@ fn extract_transit_buckets_shape_canonical_order_and_delayed_arrival() {
     );
 }
 
-/// Absent when undeclared: `b_total == 0` produces no in-transit rows, keeping
+/// Absent when undeclared: `n_buckets == 0` produces no in-transit rows, keeping
 /// the whole table off for a non-travel-time study.
 #[test]
-fn extract_transit_buckets_absent_when_b_total_zero() {
+fn extract_transit_buckets_absent_when_n_buckets_zero() {
     let geometry = crate::test_support::geom(2, 1);
     let study_dims = crate::test_support::study_dims();
     let state = crate::test_support::state_layout(2, 1);
@@ -5541,7 +5548,7 @@ fn extract_transit_buckets_absent_when_b_total_zero() {
     assert!(result.transit_buckets.is_empty());
 }
 
-/// Row order follows the canonical `bucket_column_order` (grouped by plant,
+/// Row order follows the canonical `transit_bucket_column_order` (grouped by plant,
 /// ascending lag) with each plant's `b_1^in` reported only at its lag-1 row.
 /// Together with `bucket_topology`'s declaration-order-invariant column order,
 /// this pins the output table to a deterministic row/column order regardless of
@@ -5551,7 +5558,7 @@ fn extract_transit_buckets_rows_follow_canonical_column_order() {
     let geometry = crate::test_support::geom(2, 1);
     let study_dims = crate::test_support::study_dims();
     // Plant 0 (hydro_id 10) depth 2, plant 1 (hydro_id 20) depth 1.
-    let state = crate::test_support::state_layout_with_buckets(
+    let state = crate::test_support::state_layout_with_transit_buckets(
         2,
         1,
         3,
@@ -5560,7 +5567,7 @@ fn extract_transit_buckets_rows_follow_canonical_column_order() {
         0,
         vec![],
     );
-    let primal = make_bucket_primal(&[11.0, 22.0, 33.0], &[7.0, 8.0, 9.0]);
+    let primal = make_transit_bucket_primal(&[11.0, 22.0, 33.0], &[7.0, 8.0, 9.0]);
     let dual = vec![0.0; 4];
     let ec = zero_energy_conversion(2, 1);
 

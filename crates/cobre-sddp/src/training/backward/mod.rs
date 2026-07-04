@@ -185,16 +185,16 @@ pub(crate) struct SuccessorSpec<'a> {
     /// Uniform opening probabilities for the successor stage.
     pub(crate) probabilities: &'a [f64],
     /// Pre-built cut rows to append to each successor LP.
-    /// Delta batch when baking is active, full active-cut batch otherwise.
+    /// Delta batch when freeze is active, full active-cut batch otherwise.
     pub(crate) cut_batch: &'a RowBatch,
     /// Total number of active cuts at the successor stage for dual extraction.
-    /// Includes both baked and delta cuts contiguous after `template_num_rows`.
+    /// Includes both frozen and delta cuts contiguous after `template_num_rows`.
     pub(crate) num_cuts_at_successor: usize,
     /// Base row count of the successor template (excludes cuts).
     pub(crate) template_num_rows: usize,
-    /// Baked LP template for the successor stage. Always populated — baking
+    /// Frozen LP template for the successor stage. Always populated — freeze
     /// is complete before the backward pass begins.
-    pub(crate) baked_template: &'a cobre_solver::StageTemplate,
+    pub(crate) frozen_template: &'a cobre_solver::StageTemplate,
     /// Ordered slot indices of the active cuts at the successor stage.
     pub(crate) successor_active_slots: &'a [usize],
     /// Minimum dual multiplier for a cut to count as binding.

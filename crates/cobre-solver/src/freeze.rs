@@ -1,6 +1,6 @@
-//! CSR-to-CSC template baking for reusable LP stage templates.
+//! CSR-to-CSC template freeze for reusable LP stage templates.
 //!
-//! Provides [`bake_rows_into_template`], which merges a CSC base template with a
+//! Provides [`freeze_rows_into_template`], which merges a CSC base template with a
 //! CSR row batch into a larger CSC template loadable directly via
 //! [`crate::SolverInterface::load_model`] without a subsequent `add_rows` call.
 //!
@@ -12,13 +12,13 @@
 
 use crate::types::{RowBatch, StageTemplate};
 
-/// Caller-owned reusable scratch buffers for [`bake_rows_into_template`].
+/// Caller-owned reusable scratch buffers for [`freeze_rows_into_template`].
 ///
 /// Each buffer is `clear()`-ed and re-grown per call without `shrink_to_fit`, so
-/// passing one `BakingScratch` across bakes allocates no temporaries at steady
+/// passing one `FreezeScratch` across freezes allocates no temporaries at steady
 /// state (once the largest seen template/batch has been processed).
 #[derive(Debug, Default)]
-pub struct BakingScratch {
+pub struct FreezeScratch {
     cut_nz_per_col: Vec<u32>,
     col_list_start: Vec<u32>,
     col_list_row: Vec<i32>,
@@ -26,8 +26,8 @@ pub struct BakingScratch {
     write_cursor: Vec<u32>,
 }
 
-impl BakingScratch {
-    /// Construct an empty scratch; buffers grow on first bake.
+impl FreezeScratch {
+    /// Construct an empty scratch; buffers grow on first freeze.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -39,7 +39,7 @@ impl BakingScratch {
 /// After return, `out` is a valid [`StageTemplate`] in CSC form with
 /// `out.num_rows == base.num_rows + rows.num_rows`. Both `out` and `scratch`
 /// are cleared and refilled per call without `shrink_to_fit`; reuse them across
-/// calls for zero allocation at steady state (see [`BakingScratch`]).
+/// calls for zero allocation at steady state (see [`FreezeScratch`]).
 ///
 /// # Preconditions
 ///
@@ -54,11 +54,11 @@ impl BakingScratch {
 ///
 /// Panics if `base.num_nz + rows_nnz` exceeds `i32::MAX` (`HiGHS` API limit).
 #[allow(clippy::too_many_lines)] // complex data-structure merge; extracting sub-functions would obscure the algorithm
-pub fn bake_rows_into_template(
+pub fn freeze_rows_into_template(
     base: &StageTemplate,
     rows: &RowBatch,
     out: &mut StageTemplate,
-    scratch: &mut BakingScratch,
+    scratch: &mut FreezeScratch,
 ) {
     #[allow(clippy::cast_sign_loss)]
     {
@@ -295,12 +295,12 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_bake_empty_rows_copies_base() {
+    fn test_freeze_empty_rows_copies_base() {
         let base = make_fixture_stage_template();
         let rows = make_empty_row_batch();
         let mut out = StageTemplate::empty();
 
-        bake_rows_into_template(&base, &rows, &mut out, &mut BakingScratch::default());
+        freeze_rows_into_template(&base, &rows, &mut out, &mut FreezeScratch::default());
 
         assert_eq!(out.num_cols, base.num_cols);
         assert_eq!(out.num_rows, base.num_rows);
@@ -327,7 +327,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_bake_single_row_appends_correct_column_entries() {
+    fn test_freeze_single_row_appends_correct_column_entries() {
         // Fixture: 3-col, 2-row base as described.
         // RowBatch: one row touching cols 0 and 2.
         let base = make_fixture_stage_template();
@@ -341,7 +341,7 @@ mod tests {
         };
         let mut out = StageTemplate::empty();
 
-        bake_rows_into_template(&base, &rows, &mut out, &mut BakingScratch::default());
+        freeze_rows_into_template(&base, &rows, &mut out, &mut FreezeScratch::default());
 
         assert_eq!(out.num_rows, 3);
         assert_eq!(out.num_nz, 5);
@@ -369,7 +369,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_bake_preserves_row_scale_and_defaults_cut_rows_to_one() {
+    fn test_freeze_preserves_row_scale_and_defaults_cut_rows_to_one() {
         let mut base = make_fixture_stage_template();
         base.row_scale = vec![1.0, 2.0];
 
@@ -383,7 +383,7 @@ mod tests {
         };
         let mut out = StageTemplate::empty();
 
-        bake_rows_into_template(&base, &rows, &mut out, &mut BakingScratch::default());
+        freeze_rows_into_template(&base, &rows, &mut out, &mut FreezeScratch::default());
 
         assert_eq!(out.row_scale.len(), 3);
         assert_eq!(out.row_scale[0], 1.0);
@@ -396,12 +396,12 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_bake_preserves_empty_row_scale_when_no_rows() {
+    fn test_freeze_preserves_empty_row_scale_when_no_rows() {
         let base = make_fixture_stage_template(); // row_scale is empty
         let rows = make_empty_row_batch();
         let mut out = StageTemplate::empty();
 
-        bake_rows_into_template(&base, &rows, &mut out, &mut BakingScratch::default());
+        freeze_rows_into_template(&base, &rows, &mut out, &mut FreezeScratch::default());
 
         assert!(out.row_scale.is_empty());
         assert_eq!(out.num_rows, base.num_rows);
@@ -412,7 +412,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_bake_reuses_out_buffer_capacity() {
+    fn test_freeze_reuses_out_buffer_capacity() {
         // First call: 5 rows, 10 nz (simulated by a larger base).
         let big_base = StageTemplate {
             num_cols: 2,
@@ -437,11 +437,11 @@ mod tests {
         let empty_rows = make_empty_row_batch();
         let mut out = StageTemplate::empty();
 
-        bake_rows_into_template(
+        freeze_rows_into_template(
             &big_base,
             &empty_rows,
             &mut out,
-            &mut BakingScratch::default(),
+            &mut FreezeScratch::default(),
         );
 
         // Capture capacities after the first (larger) call.
@@ -473,11 +473,11 @@ mod tests {
             row_scale: Vec::new(),
         };
 
-        bake_rows_into_template(
+        freeze_rows_into_template(
             &small_base,
             &empty_rows,
             &mut out,
-            &mut BakingScratch::default(),
+            &mut FreezeScratch::default(),
         );
 
         assert_eq!(out.num_rows, 4);
@@ -496,7 +496,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_bake_determinism() {
+    fn test_freeze_determinism() {
         let base = make_fixture_stage_template();
         let rows = RowBatch {
             num_rows: 2,
@@ -510,8 +510,8 @@ mod tests {
         let mut out1 = StageTemplate::empty();
         let mut out2 = StageTemplate::empty();
 
-        bake_rows_into_template(&base, &rows, &mut out1, &mut BakingScratch::default());
-        bake_rows_into_template(&base, &rows, &mut out2, &mut BakingScratch::default());
+        freeze_rows_into_template(&base, &rows, &mut out1, &mut FreezeScratch::default());
+        freeze_rows_into_template(&base, &rows, &mut out2, &mut FreezeScratch::default());
 
         assert_eq!(out1.col_starts, out2.col_starts);
         assert_eq!(out1.row_indices, out2.row_indices);
@@ -525,7 +525,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_bake_multi_column_distribution() {
+    fn test_freeze_multi_column_distribution() {
         // 4-column, 3-row base:
         //   col 0: rows [0,1]         values [1.0, 2.0]
         //   col 1: row  [2]           value  [3.0]
@@ -567,7 +567,7 @@ mod tests {
         };
 
         let mut out = StageTemplate::empty();
-        bake_rows_into_template(&base, &rows, &mut out, &mut BakingScratch::default());
+        freeze_rows_into_template(&base, &rows, &mut out, &mut FreezeScratch::default());
 
         assert_eq!(out.num_rows, 6);
         // col 0: 2 base + 2 cut (rows 3, 5) = 4
@@ -664,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bake_load_model_row_count() {
+    fn test_freeze_load_model_row_count() {
         use crate::SolverInterface;
 
         let base = make_fixture_stage_template();
@@ -678,7 +678,7 @@ mod tests {
         };
 
         let mut out = StageTemplate::empty();
-        bake_rows_into_template(&base, &rows, &mut out, &mut BakingScratch::default());
+        freeze_rows_into_template(&base, &rows, &mut out, &mut FreezeScratch::default());
 
         let expected_rows = base.num_rows + rows.num_rows; // 2 + 3 = 5
 
@@ -696,7 +696,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_bake_empty_base_row_scale_with_cut_rows_appends_ones() {
+    fn test_freeze_empty_base_row_scale_with_cut_rows_appends_ones() {
         let base = make_fixture_stage_template(); // row_scale is empty
         let rows = RowBatch {
             num_rows: 2,
@@ -708,10 +708,10 @@ mod tests {
         };
         let mut out = StageTemplate::empty();
 
-        bake_rows_into_template(&base, &rows, &mut out, &mut BakingScratch::default());
+        freeze_rows_into_template(&base, &rows, &mut out, &mut FreezeScratch::default());
 
         // StageTemplate invariant: when non-empty, row_scale.len() == num_rows.
-        // base.row_scale was empty but rows.num_rows == 2, so the baked template
+        // base.row_scale was empty but rows.num_rows == 2, so the frozen template
         // materialises a full row_scale of 1.0 (base.num_rows + rows.num_rows == 4).
         assert_eq!(out.row_scale.len(), base.num_rows + rows.num_rows);
         assert!(out.row_scale.iter().all(|&s| s == 1.0));
@@ -721,7 +721,7 @@ mod tests {
     // Test: i32::MAX overflow panics
     // -----------------------------------------------------------------------
 
-    /// Verifies that `bake_rows_into_template` panics with the expected message
+    /// Verifies that `freeze_rows_into_template` panics with the expected message
     /// when `base.num_nz + rows_nnz` exceeds `i32::MAX`.
     ///
     /// Skipped in debug builds because `debug_assert!` on `base.row_indices.len()`
@@ -731,7 +731,7 @@ mod tests {
     #[test]
     #[cfg(not(debug_assertions))]
     #[should_panic(expected = "total nnz exceeds i32::MAX")]
-    fn test_bake_panics_on_nnz_overflow() {
+    fn test_freeze_panics_on_nnz_overflow() {
         // base: zero columns, zero actual non-zeros, but num_nz = i32::MAX.
         // In release mode, debug_asserts are disabled so the i32::try_from guard
         // is reached before any length check. rows contributes 1 extra non-zero
@@ -771,16 +771,16 @@ mod tests {
             row_upper: vec![f64::INFINITY],
         };
         let mut out = StageTemplate::empty();
-        bake_rows_into_template(&base, &rows, &mut out, &mut BakingScratch::default());
+        freeze_rows_into_template(&base, &rows, &mut out, &mut FreezeScratch::default());
     }
 
     // -----------------------------------------------------------------------
-    // Test: reusing one scratch across two bakes is bit-identical to a fresh
+    // Test: reusing one scratch across two freezes is bit-identical to a fresh
     // scratch, and the scratch buffers never realloc downward on reuse.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn bake_twice_same_scratch_is_bit_identical() {
+    fn freeze_twice_same_scratch_is_bit_identical() {
         // Test 7 multi-column fixture: 4-col base, 3 CSR rows.
         let base = StageTemplate {
             num_cols: 4,
@@ -811,26 +811,26 @@ mod tests {
             row_upper: vec![f64::INFINITY; 3],
         };
 
-        let mut scratch = BakingScratch::default();
+        let mut scratch = FreezeScratch::default();
 
-        // First reused-scratch bake.
+        // First reused-scratch freeze.
         let mut out1 = StageTemplate::empty();
-        bake_rows_into_template(&base, &rows, &mut out1, &mut scratch);
+        freeze_rows_into_template(&base, &rows, &mut out1, &mut scratch);
 
-        // Capacities after the first bake (must not shrink on reuse).
+        // Capacities after the first freeze (must not shrink on reuse).
         let cap_cut_nz = scratch.cut_nz_per_col.capacity();
         let cap_col_start = scratch.col_list_start.capacity();
         let cap_col_row = scratch.col_list_row.capacity();
         let cap_col_val = scratch.col_list_val.capacity();
         let cap_write_cursor = scratch.write_cursor.capacity();
 
-        // Second bake of the SAME inputs reusing the SAME scratch.
+        // Second freeze of the SAME inputs reusing the SAME scratch.
         let mut out2 = StageTemplate::empty();
-        bake_rows_into_template(&base, &rows, &mut out2, &mut scratch);
+        freeze_rows_into_template(&base, &rows, &mut out2, &mut scratch);
 
-        // Reference bake with a fresh scratch.
+        // Reference freeze with a fresh scratch.
         let mut out_fresh = StageTemplate::empty();
-        bake_rows_into_template(&base, &rows, &mut out_fresh, &mut BakingScratch::default());
+        freeze_rows_into_template(&base, &rows, &mut out_fresh, &mut FreezeScratch::default());
 
         // Bit-identical outputs across reuse and fresh scratch.
         assert_eq!(out1.col_starts, out2.col_starts);
@@ -846,7 +846,7 @@ mod tests {
         assert_eq!(out1.row_scale, out2.row_scale);
         assert_eq!(out1.row_scale, out_fresh.row_scale);
 
-        // No downward realloc on the second (reused) bake.
+        // No downward realloc on the second (reused) freeze.
         assert!(scratch.cut_nz_per_col.capacity() >= cap_cut_nz);
         assert!(scratch.col_list_start.capacity() >= cap_col_start);
         assert!(scratch.col_list_row.capacity() >= cap_col_row);

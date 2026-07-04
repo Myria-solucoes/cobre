@@ -84,7 +84,7 @@ pub(super) fn run_simulation_phase(
             &ctx.comm,
             &result_tx,
             Some(sim_event_tx),
-            training_result.baked_templates.as_deref(),
+            training_result.frozen_templates.as_deref(),
             &training_result.basis_cache,
         )
         .map_err(CliError::from);

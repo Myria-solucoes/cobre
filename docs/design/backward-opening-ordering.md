@@ -175,7 +175,7 @@ configuration flag, with the default to be fixed once measured (§8). The ration
   prefer one.
 - **Two second-order effects pull opposite ways, both small and problem-dependent:**
   1. _Cold-head placement._ The chain's first opening bears the cold solve (DCS) or
-     the cross-iteration warm anchor (baked). The driest opening is the most
+     the cross-iteration warm anchor (frozen). The driest opening is the most
      constrained / penalty-heavy / nearest the feasibility edge — the costliest and
      least numerically robust to cold-solve (the class that motivated the
      cold-retry escalation in `clp-hot-start`-adjacent work); the wettest is the

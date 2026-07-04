@@ -9,27 +9,27 @@
 //! by the same canonical `(operational_start_date, id)` index every other
 //! state block uses.
 
-use std::{collections::HashMap, ops::Range};
+use std::collections::HashMap;
 
 use cobre_core::{BlockMode, EntityId, System, window_period_overlaps};
 
-use crate::temporal_lag::{SpreadResolution, resolve_spread};
+use crate::lead_time::{SpreadResolution, resolve_spread};
 
 /// Canonical bucket ordering, global bucket count, and per-stage reachability
 /// mask, stored on [`super::StudySetup`].
 ///
-/// `b_total == 0` exactly when the system declares no travel-time arc
+/// `n_buckets == 0` exactly when the system declares no travel-time arc
 /// (`travel_time_hours` absent, `0.0`, or missing a `downstream_id`).
 // Voice 4: no production read site consumes these fields yet — the state
-// layout will read `b_total`/`column_order` to size and order the bucket
+// layout will read `n_buckets`/`column_order` to size and order the bucket
 // block, and the per-stage LP fill will read `per_stage_mask` to gate which
 // bucket rows it emits. The `#[allow(dead_code)]` refires once those readers
 // land.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
-pub(crate) struct BucketTopology {
+pub(crate) struct TransitBucketTopology {
     /// Global bucket count, `Σ_j per_plant_depth[j]`.
-    pub(crate) b_total: usize,
+    pub(crate) n_buckets: usize,
     /// Aggregated depth `L_j` per downstream plant, in [`Self::column_order`]'s
     /// plant order.
     pub(crate) per_plant_depth: Vec<usize>,
@@ -37,10 +37,10 @@ pub(crate) struct BucketTopology {
     /// canonical `(operational_start_date, id)` index (the position of the
     /// hydro in [`System::hydros`]).
     pub(crate) column_order: Vec<(usize, usize)>,
-    /// `per_stage_mask[t]` holds one contiguous reachable lag range per
-    /// declared downstream plant, in the same order as
-    /// [`Self::per_plant_depth`], at study stage `t`.
-    pub(crate) per_stage_mask: Vec<Vec<Range<usize>>>,
+    /// `per_stage_mask[t]` holds the max reachable lag per declared
+    /// downstream plant, in the same order as [`Self::per_plant_depth`], at
+    /// study stage `t` (`0` when no lag is reachable at that stage).
+    pub(crate) per_stage_mask: Vec<Vec<usize>>,
 }
 
 /// Study-stage (`id >= 0`) durations in canonical (ascending `id`) stage-index
@@ -95,7 +95,7 @@ fn extend_for_resolution(study_durations: &[f64], t_v: f64) -> Vec<f64> {
 /// its index-0 share (delivered same-stage on the water row, no bucket
 /// needed).
 fn in_study_depth(t_v: f64, stage: usize, extended_calendar: &[f64]) -> usize {
-    resolve_spread(t_v, stage, extended_calendar, None).depth
+    resolve_spread(t_v, stage, extended_calendar, None).stage_reach
 }
 
 /// Pre-study residual depth: the in-transit water arriving over the
@@ -110,12 +110,12 @@ fn ic_only_depth(t_v: f64, study_durations: &[f64]) -> usize {
 /// target stage `stage + lag` still lands inside `[0, n_stages)` — the same
 /// horizon bound `is_anticipated_decision_active` enforces as
 /// `stage_idx + K_i < n_stages`. A lag beyond the cap has no receiving stage;
-/// [`build_bucket_topology`] drops it from the mask here rather than
+/// [`build_transit_bucket_topology`] drops it from the mask here rather than
 /// retaining and zeroing it downstream, the target-stage imprecision the
 /// deferred terminal bucket credit (`V_eff`) would otherwise absorb under the
 /// zero-terminal-value horizon [`crate::horizon_mode::HorizonMode::Finite`]
-/// implements. Never caps [`BucketTopology::per_plant_depth`] or
-/// [`BucketTopology::column_order`], which size from the global max over
+/// implements. Never caps [`TransitBucketTopology::per_plant_depth`] or
+/// [`TransitBucketTopology::column_order`], which size from the global max over
 /// every stage anchor and must retain what the earliest stages need.
 fn horizon_cap_active(active: usize, stage: usize, n_stages: usize) -> usize {
     active.min(n_stages - 1 - stage)
@@ -171,20 +171,20 @@ pub(crate) fn ic_anchor_k(
         .collect()
 }
 
-/// Build the [`BucketTopology`] from the resolved system: group declared arcs
+/// Build the [`TransitBucketTopology`] from the resolved system: group declared arcs
 /// per downstream plant (confluence aggregates every contributing arc into
 /// one block of depth `max_i L_i`, never one block per arc), size each
 /// plant's depth as the max over every in-study stage anchor and the
 /// pre-study IC anchor, and emit the canonical column order and per-stage
 /// reachability mask in `(operational_start_date, id)` order.
-pub(crate) fn build_bucket_topology(system: &System) -> BucketTopology {
+pub(crate) fn build_transit_bucket_topology(system: &System) -> TransitBucketTopology {
     let study_durations = study_stage_durations(system);
     let n_stages = study_durations.len();
     let arcs_by_downstream = declared_arcs(system);
 
     let mut per_plant_depth = Vec::new();
     let mut column_order = Vec::new();
-    let mut per_stage_mask: Vec<Vec<Range<usize>>> = vec![Vec::new(); n_stages];
+    let mut per_stage_mask: Vec<Vec<usize>> = vec![Vec::new(); n_stages];
 
     for (canonical_idx, hydro) in system.hydros().iter().enumerate() {
         let Some(t_vs) = arcs_by_downstream.get(&hydro.id) else {
@@ -221,18 +221,18 @@ pub(crate) fn build_bucket_topology(system: &System) -> BucketTopology {
                 stage + capped < n_stages,
                 "capped active lag {capped} at stage {stage} must not target n_stages={n_stages} or beyond"
             );
-            mask_row.push(1..(capped + 1));
+            mask_row.push(capped);
         }
     }
 
-    let b_total = column_order.len();
+    let n_buckets = column_order.len();
     debug_assert!(
-        arcs_by_downstream.is_empty() == (b_total == 0),
-        "b_total must be zero exactly when no arc is declared"
+        arcs_by_downstream.is_empty() == (n_buckets == 0),
+        "n_buckets must be zero exactly when no arc is declared"
     );
 
-    BucketTopology {
-        b_total,
+    TransitBucketTopology {
+        n_buckets,
         per_plant_depth,
         column_order,
         per_stage_mask,
@@ -242,11 +242,12 @@ pub(crate) fn build_bucket_topology(system: &System) -> BucketTopology {
 /// Per-declared-arc resolved stage-clock weights for the PARALLEL-mode LP fill,
 /// keyed by the arc's upstream hydro system index (a hydro declares at most one
 /// arc — its own `travel_time_hours`/`downstream_id`). `k_by_stage[stage_idx]`
-/// is [`resolve_spread`]'s stage-clock weight vector `k` anchored at that
-/// in-study stage (`k[0]` the same-stage share); a hydro absent from the map
-/// declares no arc — the LP fill's undeclared branch (full same-stage arrival,
-/// no bucket deposit). The chronological-mode block-resolved `chi`/`kappa`
-/// factors are threaded separately.
+/// is [`resolve_spread`]'s stage-clock weight vector `stage_weights` anchored
+/// at that in-study stage (`stage_weights[0]` the same-stage share); a hydro
+/// absent from the map declares no arc — the LP fill's undeclared branch
+/// (full same-stage arrival, no bucket deposit). The chronological-mode
+/// block-resolved `block_deposits`/`within_stage_routing` factors are
+/// threaded separately.
 pub(crate) fn build_arc_spread_k(system: &System) -> HashMap<usize, Vec<Vec<f64>>> {
     let study_durations = study_stage_durations(system);
     let n_stages = study_durations.len();
@@ -261,7 +262,7 @@ pub(crate) fn build_arc_spread_k(system: &System) -> HashMap<usize, Vec<Vec<f64>
         }
         let extended = extend_for_resolution(&study_durations, t_v);
         let k_by_stage: Vec<Vec<f64>> = (0..n_stages)
-            .map(|stage| resolve_spread(t_v, stage, &extended, None).k)
+            .map(|stage| resolve_spread(t_v, stage, &extended, None).stage_weights)
             .collect();
         arc_spread_k.insert(u_idx, k_by_stage);
     }
@@ -269,9 +270,10 @@ pub(crate) fn build_arc_spread_k(system: &System) -> HashMap<usize, Vec<Vec<f64>
     arc_spread_k
 }
 
-/// Per-declared-arc, per-CHRONOLOGICAL-stage full [`SpreadResolution`] (`chi`,
-/// `kappa`, `delivery`, plus the same `k`/`depth` [`build_arc_spread_k`]
-/// stores), resolved with the sending stage's own block partition
+/// Per-declared-arc, per-CHRONOLOGICAL-stage full [`SpreadResolution`]
+/// (`block_deposits`, `within_stage_routing`, `arrival_density`, plus the
+/// same `stage_weights`/`stage_reach` [`build_arc_spread_k`] stores),
+/// resolved with the sending stage's own block partition
 /// (`resolve_spread(.., Some(blocks))`). Keyed like `build_arc_spread_k`;
 /// `by_stage[stage_idx]` is `None` for a study stage whose own `block_mode` is
 /// `Parallel` (no block-resolved routing to compute there — the parallel fill
@@ -446,13 +448,13 @@ mod tests {
     }
 
     #[test]
-    fn test_b_total_zero_when_no_arc_declared() {
+    fn test_n_buckets_zero_when_no_arc_declared() {
         let downstream = hydro(1, None, None);
         let system = build_system(vec![downstream], uniform_stages(3, 24.0));
 
-        let topology = build_bucket_topology(&system);
+        let topology = build_transit_bucket_topology(&system);
 
-        assert_eq!(topology.b_total, 0);
+        assert_eq!(topology.n_buckets, 0);
         assert!(topology.column_order.is_empty());
         assert!(topology.per_plant_depth.is_empty());
     }
@@ -463,9 +465,9 @@ mod tests {
         let upstream = hydro(2, Some(1), Some(0.0));
         let system = build_system(vec![downstream, upstream], uniform_stages(3, 24.0));
 
-        let topology = build_bucket_topology(&system);
+        let topology = build_transit_bucket_topology(&system);
 
-        assert_eq!(topology.b_total, 0);
+        assert_eq!(topology.n_buckets, 0);
     }
 
     #[test]
@@ -478,10 +480,10 @@ mod tests {
             uniform_stages(10, 24.0),
         );
 
-        let topology = build_bucket_topology(&system);
+        let topology = build_transit_bucket_topology(&system);
 
         assert_eq!(topology.per_plant_depth, vec![5]);
-        assert_eq!(topology.b_total, 5);
+        assert_eq!(topology.n_buckets, 5);
         assert_eq!(
             topology.column_order,
             vec![(0, 1), (0, 2), (0, 3), (0, 4), (0, 5)]
@@ -510,18 +512,18 @@ mod tests {
         );
         assert_eq!(ic_depth, 2, "the IC anchor must give L_arc(IC) == 2");
 
-        let topology = build_bucket_topology(&system);
+        let topology = build_transit_bucket_topology(&system);
 
         assert_eq!(topology.per_plant_depth, vec![2]);
-        assert_eq!(topology.b_total, 2);
+        assert_eq!(topology.n_buckets, 2);
 
         // The stage-0 mask reaches the IC-residual slot 2 (decaying reachability,
         // not a zero-deposit filter); it narrows to the own-release depth once the
         // residual has drained.
         assert_eq!(topology.per_stage_mask.len(), durations.len());
-        assert_eq!(topology.per_stage_mask[0], vec![1..3]);
-        assert_eq!(topology.per_stage_mask[1], vec![1..2]);
-        assert_eq!(topology.per_stage_mask[2], vec![1..2]);
+        assert_eq!(topology.per_stage_mask[0], vec![2]);
+        assert_eq!(topology.per_stage_mask[1], vec![1]);
+        assert_eq!(topology.per_stage_mask[2], vec![1]);
     }
 
     #[test]
@@ -542,7 +544,7 @@ mod tests {
         let ic_depth = ic_only_depth(24.0, &durations);
         assert_eq!(ic_depth, in_study_max, "uniform calendar: no IC deepening");
 
-        let topology = build_bucket_topology(&system);
+        let topology = build_transit_bucket_topology(&system);
 
         assert_eq!(topology.per_plant_depth, vec![in_study_max]);
     }
@@ -569,35 +571,26 @@ mod tests {
         );
         assert_eq!(ic_depth, 3, "the IC anchor must also reach 3 stages ahead");
 
-        let topology = build_bucket_topology(&system);
+        let topology = build_transit_bucket_topology(&system);
 
         assert_eq!(
             topology.per_plant_depth,
             vec![3],
             "global depth sizing is unaffected by the per-stage horizon cap"
         );
-        assert_eq!(topology.b_total, 3);
+        assert_eq!(topology.n_buckets, 3);
         assert_eq!(topology.column_order, vec![(0, 1), (0, 2), (0, 3)]);
 
-        assert_eq!(
-            topology.per_stage_mask[0],
-            vec![1..3],
-            "cap = 3 - 1 - 0 = 2"
-        );
-        assert_eq!(
-            topology.per_stage_mask[1],
-            vec![1..2],
-            "cap = 3 - 1 - 1 = 1"
-        );
+        assert_eq!(topology.per_stage_mask[0], vec![2], "cap = 3 - 1 - 0 = 2");
+        assert_eq!(topology.per_stage_mask[1], vec![1], "cap = 3 - 1 - 1 = 1");
         assert_eq!(
             topology.per_stage_mask[2],
-            vec![1..1],
+            vec![0],
             "cap = 3 - 1 - 2 = 0: the last stage targets nothing past T"
         );
 
         for (stage, mask_row) in topology.per_stage_mask.iter().enumerate() {
-            for range in mask_row {
-                let max_lag = range.end.saturating_sub(1);
+            for &max_lag in mask_row {
                 assert!(
                     stage + max_lag < durations.len(),
                     "stage {stage} lag {max_lag} must not target a stage at or past n_stages"
@@ -617,12 +610,12 @@ mod tests {
         );
         let system_b = build_system(vec![upstream, downstream], uniform_stages(5, 24.0));
 
-        let topology_a = build_bucket_topology(&system_a);
-        let topology_b = build_bucket_topology(&system_b);
+        let topology_a = build_transit_bucket_topology(&system_a);
+        let topology_b = build_transit_bucket_topology(&system_b);
 
         assert_eq!(topology_a.column_order, topology_b.column_order);
         assert_eq!(topology_a.per_plant_depth, topology_b.per_plant_depth);
-        assert_eq!(topology_a.b_total, topology_b.b_total);
+        assert_eq!(topology_a.n_buckets, topology_b.n_buckets);
     }
 
     #[test]
@@ -642,7 +635,7 @@ mod tests {
         let upstream = hydro(2, Some(1), Some(24.0));
         let system = build_system(vec![downstream, upstream], uniform_stages(10, 24.0));
 
-        let topology = build_bucket_topology(&system);
+        let topology = build_transit_bucket_topology(&system);
         let arc_spread_k = build_arc_spread_k(&system);
 
         let upstream_idx = 1;
@@ -684,7 +677,7 @@ mod tests {
 
         assert!(
             by_stage[0].is_some(),
-            "chronological stage 0 must resolve chi/kappa/delivery"
+            "chronological stage 0 must resolve block_deposits/within_stage_routing/arrival_density"
         );
         assert!(
             by_stage[1].is_none(),
@@ -692,13 +685,21 @@ mod tests {
         );
 
         let resolution = by_stage[0].as_ref().expect("checked above");
-        assert_eq!(resolution.kappa.len(), 3, "one kappa row per block");
-        assert_eq!(resolution.chi.len(), 3, "one chi row per block");
-        for (b, chi_b) in resolution.chi.iter().enumerate() {
-            let kappa_sum: f64 = resolution.kappa[b].iter().sum();
-            let chi_cross: f64 = chi_b[1..].iter().sum();
+        assert_eq!(
+            resolution.within_stage_routing.len(),
+            3,
+            "one within_stage_routing row per block"
+        );
+        assert_eq!(
+            resolution.block_deposits.len(),
+            3,
+            "one block_deposits row per block"
+        );
+        for (b, deposit_b) in resolution.block_deposits.iter().enumerate() {
+            let routing_sum: f64 = resolution.within_stage_routing[b].iter().sum();
+            let deposit_cross: f64 = deposit_b[1..].iter().sum();
             assert!(
-                (kappa_sum + chi_cross - 1.0).abs() < 1e-9,
+                (routing_sum + deposit_cross - 1.0).abs() < 1e-9,
                 "block {b}: per-column conservation must hold"
             );
         }

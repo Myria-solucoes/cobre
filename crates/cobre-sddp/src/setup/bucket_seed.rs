@@ -1,9 +1,9 @@
 //! Stage-0 incoming travel-time bucket seed from pre-study upstream releases.
 //!
-//! [`build_initial_bucket_state`] unrolls each declared arc's pre-study
+//! [`build_initial_transit_bucket_state`] unrolls each declared arc's pre-study
 //! defluence history through the IC-anchor overlap arithmetic (water memo
 //! §4.1/§2.2) into the stage-0 incoming bucket state, aggregated per
-//! downstream plant exactly as [`BucketTopology`] aggregates depth. The
+//! downstream plant exactly as [`TransitBucketTopology`] aggregates depth. The
 //! caller splices the result into the same `initial_state` vector
 //! `build_initial_state` populates, so the single `fill_col_state_patches`
 //! pin path picks it up with no separate wiring.
@@ -13,12 +13,12 @@ use cobre_core::{EntityId, InitialConditions, System};
 use crate::lp_builder::M3S_TO_HM3;
 
 use super::bucket_topology::{
-    BucketTopology, ic_anchor_k, pre_study_period_durations_desc, required_history_periods,
+    TransitBucketTopology, ic_anchor_k, pre_study_period_durations_desc, required_history_periods,
     study_stage_durations,
 };
 
 /// Unroll every declared arc's pre-study release history into the stage-0
-/// incoming bucket seed, in [`BucketTopology::column_order`] order.
+/// incoming bucket seed, in [`TransitBucketTopology::column_order`] order.
 ///
 /// For downstream plant `j` with depth `L_j`, bucket `d` (`1..=L_j`) is
 /// `Σ_{i∈up(j)} Σ_{m≥1} k_{d-1+m,i}·D_i^{-m}`: `D_i^{-m}` is the volume of
@@ -27,7 +27,7 @@ use super::bucket_topology::{
 /// `k_{d-1+m,i}` is [`ic_anchor_k`]'s fraction of that period's release
 /// landing `d-1` study stages after stage 0.
 ///
-/// Runs single-threaded in [`BucketTopology::column_order`]'s canonical
+/// Runs single-threaded in [`TransitBucketTopology::column_order`]'s canonical
 /// (sorted) order — never a rank-count-dependent parallel reduction (water
 /// memo §6 item 6).
 ///
@@ -37,9 +37,12 @@ use super::bucket_topology::{
 /// already hard-errors / logs the caveat there); this only consumes whichever
 /// history that validation accepted.
 #[must_use]
-pub(crate) fn build_initial_bucket_state(system: &System, topology: &BucketTopology) -> Vec<f64> {
-    let mut seed = vec![0.0_f64; topology.b_total];
-    if topology.b_total == 0 {
+pub(crate) fn build_initial_transit_bucket_state(
+    system: &System,
+    topology: &TransitBucketTopology,
+) -> Vec<f64> {
+    let mut seed = vec![0.0_f64; topology.n_buckets];
+    if topology.n_buckets == 0 {
         return seed;
     }
 
@@ -73,9 +76,9 @@ pub(crate) fn build_initial_bucket_state(system: &System, topology: &BucketTopol
                 let volume = period_duration * M3S_TO_HM3 * raw_value;
 
                 let k = ic_anchor_k(t_v, cumulative_before, period_duration, &study_durations);
-                for (bucket_offset, &k_val) in k.iter().enumerate().take(depth) {
+                for (transit_bucket_offset, &k_val) in k.iter().enumerate().take(depth) {
                     if k_val != 0.0 {
-                        seed[start + bucket_offset] += k_val * volume;
+                        seed[start + transit_bucket_offset] += k_val * volume;
                     }
                 }
             }
@@ -84,7 +87,7 @@ pub(crate) fn build_initial_bucket_state(system: &System, topology: &BucketTopol
         start += depth;
     }
 
-    debug_assert_eq!(seed.len(), topology.b_total);
+    debug_assert_eq!(seed.len(), topology.n_buckets);
     seed
 }
 
@@ -116,7 +119,7 @@ mod tests {
         StageRiskConfig, StageStateConfig, SystemBuilder,
     };
 
-    use crate::setup::bucket_topology::build_bucket_topology;
+    use crate::setup::bucket_topology::build_transit_bucket_topology;
 
     fn date(y: i32, m: u32, d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, d).unwrap()
@@ -273,11 +276,11 @@ mod tests {
             vec![defluence(2, vec![100.0])],
         );
 
-        let topology = build_bucket_topology(&system);
+        let topology = build_transit_bucket_topology(&system);
         assert_eq!(topology.per_plant_depth, vec![2], "sanity: 2-bucket depth");
 
-        let seed = build_initial_bucket_state(&system, &topology);
-        assert_eq!(seed.len(), topology.b_total);
+        let seed = build_initial_transit_bucket_state(&system, &topology);
+        assert_eq!(seed.len(), topology.n_buckets);
 
         let d_minus_1 = 24.0 * M3S_TO_HM3 * 100.0;
         assert!(
@@ -291,11 +294,11 @@ mod tests {
     /// A mid-horizon upstream entrant (`entry_stage_id`
     /// mid-study) supplies zero-valued `past_defluences` -- the physically
     /// correct value, since the plant did not exist pre-study -- and every
-    /// stage-0 bucket the arc feeds comes out zero. [`build_initial_bucket_state`]
+    /// stage-0 bucket the arc feeds comes out zero. [`build_initial_transit_bucket_state`]
     /// never reads `entry_stage_id`; conservation is forced by the input
     /// data, not a code branch.
     #[test]
-    fn test_mid_horizon_entrant_zero_history_zero_seeds_stage_0_buckets() {
+    fn test_mid_horizon_entrant_zero_history_zero_seeds_stage_0_transit_buckets() {
         let downstream = hydro(1, None, None);
         let mut upstream = hydro(2, Some(1), Some(24.0));
         upstream.entry_stage_id = Some(2);
@@ -305,10 +308,10 @@ mod tests {
             vec![defluence(2, vec![0.0])],
         );
 
-        let topology = build_bucket_topology(&system);
+        let topology = build_transit_bucket_topology(&system);
         assert_eq!(topology.per_plant_depth, vec![2], "sanity: 2-bucket depth");
 
-        let seed = build_initial_bucket_state(&system, &topology);
+        let seed = build_initial_transit_bucket_state(&system, &topology);
 
         assert!(
             seed.iter().all(|&v| v.abs() < 1e-9),
@@ -320,7 +323,7 @@ mod tests {
     /// Confluence: two upstreams with different `t_v` feeding one downstream
     /// plant sum their unrolled shares into the SAME per-plant bucket block.
     #[test]
-    fn test_confluence_aggregates_two_upstreams_into_shared_buckets() {
+    fn test_confluence_aggregates_two_upstreams_into_shared_transit_buckets() {
         let downstream = hydro(1, None, None);
         let upstream_a = hydro(2, Some(1), Some(24.0));
         let upstream_b = hydro(3, Some(1), Some(12.0));
@@ -330,10 +333,10 @@ mod tests {
             vec![defluence(2, vec![100.0]), defluence(3, vec![50.0])],
         );
 
-        let topology = build_bucket_topology(&system);
+        let topology = build_transit_bucket_topology(&system);
         assert_eq!(topology.per_plant_depth, vec![2], "sanity: 2-bucket depth");
 
-        let seed = build_initial_bucket_state(&system, &topology);
+        let seed = build_initial_transit_bucket_state(&system, &topology);
 
         let vol_a = 24.0 * M3S_TO_HM3 * 100.0;
         let vol_b = 24.0 * M3S_TO_HM3 * 50.0;
@@ -373,10 +376,10 @@ mod tests {
             defluences,
         );
 
-        let topology_a = build_bucket_topology(&system_a);
-        let topology_b = build_bucket_topology(&system_b);
-        let seed_a = build_initial_bucket_state(&system_a, &topology_a);
-        let seed_b = build_initial_bucket_state(&system_b, &topology_b);
+        let topology_a = build_transit_bucket_topology(&system_a);
+        let topology_b = build_transit_bucket_topology(&system_b);
+        let seed_a = build_initial_transit_bucket_state(&system_a, &topology_a);
+        let seed_b = build_initial_transit_bucket_state(&system_b, &topology_b);
 
         assert_eq!(
             seed_a, seed_b,
@@ -387,7 +390,7 @@ mod tests {
     /// `seed.len() == B` for every declared topology, including when no arc
     /// is declared at all (`B == 0`).
     #[test]
-    fn test_seed_len_matches_b_total() {
+    fn test_seed_len_matches_n_buckets() {
         let downstream = hydro(1, None, None);
         let upstream = hydro(2, Some(1), Some(24.0));
         let system = build_system(
@@ -395,15 +398,15 @@ mod tests {
             study_stages(4, 12.0),
             vec![defluence(2, vec![100.0])],
         );
-        let topology = build_bucket_topology(&system);
-        let seed = build_initial_bucket_state(&system, &topology);
-        assert_eq!(seed.len(), topology.b_total);
+        let topology = build_transit_bucket_topology(&system);
+        let seed = build_initial_transit_bucket_state(&system, &topology);
+        assert_eq!(seed.len(), topology.n_buckets);
 
         let no_arc_downstream = hydro(1, None, None);
         let no_arc_system = build_system(vec![no_arc_downstream], study_stages(3, 24.0), vec![]);
-        let no_arc_topology = build_bucket_topology(&no_arc_system);
-        assert_eq!(no_arc_topology.b_total, 0);
-        let no_arc_seed = build_initial_bucket_state(&no_arc_system, &no_arc_topology);
+        let no_arc_topology = build_transit_bucket_topology(&no_arc_system);
+        assert_eq!(no_arc_topology.n_buckets, 0);
+        let no_arc_seed = build_initial_transit_bucket_state(&no_arc_system, &no_arc_topology);
         assert_eq!(no_arc_seed.len(), 0);
     }
 }

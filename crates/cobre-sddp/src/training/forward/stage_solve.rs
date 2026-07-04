@@ -63,8 +63,8 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     let stochastic = training_ctx.stochastic;
     let horizon = training_ctx.horizon;
 
-    // DCS path: load the cut-free base template here (the caller skips its baked
-    // load). Loading the baked template instead would make the lazy loop's fresh
+    // DCS path: load the cut-free base template here (the caller skips its frozen
+    // load). Loading the frozen template instead would make the lazy loop's fresh
     // CutRowMap double-append the embedded cut rows.
     if dcs.is_some() {
         ws.solver.load_model(&ctx.templates[t]);
@@ -218,7 +218,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     let mut unscaled_primal: Vec<f64> = std::mem::take(&mut ws.scratch.unscaled_primal);
 
     // DCS branch solves the cut pool lazily from the cut-free base loaded above
-    // (extracting the primal, not the dual); baked branch solves the all-cuts LP
+    // (extracting the primal, not the dual); frozen branch solves the all-cuts LP
     // via `run_stage_solve`.
     let view_objective: f64 = if let Some(params) = dcs {
         // Metadata-seeded initial resident subset (deterministic, rank-invariant).
@@ -367,9 +367,9 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     ws.scratch.unscaled_primal = unscaled_primal;
     rec.state.clear();
     rec.state.extend_from_slice(&ws.current_state);
-    // Capture the post-solve basis for next iteration's warm-start — baked arm
+    // Capture the post-solve basis for next iteration's warm-start — frozen arm
     // ONLY. A DCS-solve basis describes the lazy resident-subset row layout, not
-    // the baked layout the warm-start reconstruction expects, so capturing it
+    // the frozen layout the warm-start reconstruction expects, so capturing it
     // would corrupt the warm-start; the DCS path leaves the (m, t) slot untouched.
     if dcs.is_none() {
         let cut_row_count = basis_row_capacity.saturating_sub(ctx.templates[t].num_rows);

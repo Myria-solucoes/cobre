@@ -1,16 +1,16 @@
 //! Simulation state management and entry point.
 //!
-//! [`SimulationState`] owns re-bake scratch buffers allocated once per run.
+//! [`SimulationState`] owns re-freeze scratch buffers allocated once per run.
 //! [`SimulationInputs`] bundles per-call borrowed inputs (no per-scenario allocation).
 //!
-//! The training path passes `baked_templates: Some(..)`; the checkpoint path
-//! passes `None`, because checkpoints do not store baked templates, so
-//! [`rebake_templates_if_needed`] rebuilds them once at startup.
+//! The training path passes `frozen_templates: Some(..)`; the checkpoint path
+//! passes `None`, because checkpoints do not store frozen templates, so
+//! [`refreeze_templates_if_needed`] rebuilds them once at startup.
 //!
 //! ## Hot-path allocation discipline
 //!
 //! No allocations occur per scenario or per stage during the inner loops.
-//! The re-bake allocation in [`rebake_templates_if_needed`] is a one-time
+//! The re-freeze allocation in [`refreeze_templates_if_needed`] is a one-time
 //! setup amortised across the simulation's per-scenario LP solves.
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -49,8 +49,8 @@ use crate::{
 ///
 /// Groups all borrowed inputs that vary between calls: solver workspaces, stage
 /// context, future cost function, training context, simulation configuration,
-/// output spec, optional pre-baked templates, stage bases, and the communicator.
-/// Owned scratch buffers (re-bake intermediates) live on [`SimulationState`].
+/// output spec, optional pre-frozen templates, stage bases, and the communicator.
+/// Owned scratch buffers (re-freeze intermediates) live on [`SimulationState`].
 pub(crate) struct SimulationInputs<'a, S: SolverInterface + Send, C> {
     /// Solver workspaces (one per rayon worker thread).
     pub workspaces: &'a mut [SolverWorkspace<S>],
@@ -64,8 +64,8 @@ pub(crate) struct SimulationInputs<'a, S: SolverInterface + Send, C> {
     pub config: &'a SimulationConfig,
     /// Output-channel and extraction metadata for streaming scenario results.
     pub output: SimulationOutputSpec<'a>,
-    /// Pre-baked LP templates from training. `None` triggers local re-bake.
-    pub baked_templates: Option<&'a [StageTemplate]>,
+    /// Pre-frozen LP templates from training. `None` triggers local re-freeze.
+    pub frozen_templates: Option<&'a [StageTemplate]>,
     /// Per-stage warm-start basis captured from the training checkpoint.
     pub stage_bases: &'a [Option<CapturedBasis>],
     /// MPI communicator.
@@ -81,7 +81,7 @@ impl<'a, S: SolverInterface + Send, C> SimulationInputs<'a, S, C> {
         training_ctx: &'a TrainingContext<'a>,
         config: &'a SimulationConfig,
         output: SimulationOutputSpec<'a>,
-        baked_templates: Option<&'a [StageTemplate]>,
+        frozen_templates: Option<&'a [StageTemplate]>,
         stage_bases: &'a [Option<CapturedBasis>],
         comm: &'a C,
     ) -> Self {
@@ -92,7 +92,7 @@ impl<'a, S: SolverInterface + Send, C> SimulationInputs<'a, S, C> {
             training_ctx,
             config,
             output,
-            baked_templates,
+            frozen_templates,
             stage_bases,
             comm,
         }
@@ -118,8 +118,8 @@ pub(crate) struct SimWorkerParams<'w> {
     config: &'w SimulationConfig,
     /// Per-stage warm-start basis captured from the training checkpoint.
     stage_bases: &'w [Option<CapturedBasis>],
-    /// Resolved baked LP templates (caller-supplied or locally re-baked).
-    baked_templates: &'w [StageTemplate],
+    /// Resolved frozen LP templates (caller-supplied or locally re-frozen).
+    frozen_templates: &'w [StageTemplate],
     /// Shared completion counter scaled to a global progress estimate.
     scenarios_complete: &'w AtomicU32,
     /// Wall-clock start of the simulation, for progress elapsed-time reporting.
@@ -142,28 +142,28 @@ pub(crate) struct SimWorkerParams<'w> {
 ///
 /// `SimulationState` is typically created immediately before calling
 /// [`SimulationState::run`] and discarded afterwards. The owned fields hold the
-/// re-bake intermediates for the lazy re-bake branch: an optional
-/// `Vec<StageTemplate>` built when the caller does not supply pre-baked
+/// re-freeze intermediates for the lazy re-freeze branch: an optional
+/// `Vec<StageTemplate>` built when the caller does not supply pre-frozen
 /// templates, and a [`RowBatch`] scratch used during that build.
 ///
-/// If the caller always provides `baked_templates`, neither buffer is populated.
+/// If the caller always provides `frozen_templates`, neither buffer is populated.
 pub(crate) struct SimulationState {
-    /// Owned baked templates built by the lazy re-bake branch (when
-    /// `baked_templates` is `None`).
-    owned_baked: Option<Vec<StageTemplate>>,
-    /// Row-batch scratch for the lazy re-bake loop.
-    bake_batch: RowBatch,
-    /// Reusable scratch for `bake_rows_into_template`, reused across re-bake stages.
-    baking_scratch: cobre_solver::BakingScratch,
+    /// Owned frozen templates built by the lazy re-freeze branch (when
+    /// `frozen_templates` is `None`).
+    owned_frozen: Option<Vec<StageTemplate>>,
+    /// Row-batch scratch for the lazy re-freeze loop.
+    freeze_batch: RowBatch,
+    /// Reusable scratch for `freeze_rows_into_template`, reused across re-freeze stages.
+    freeze_scratch: cobre_solver::FreezeScratch,
 }
 
 impl SimulationState {
-    /// Construct a new `SimulationState` with empty re-bake buffers.
+    /// Construct a new `SimulationState` with empty re-freeze buffers.
     #[must_use]
     pub(crate) fn new(_num_stages: usize) -> Self {
         Self {
-            owned_baked: None,
-            bake_batch: RowBatch {
+            owned_frozen: None,
+            freeze_batch: RowBatch {
                 num_rows: 0,
                 row_starts: Vec::new(),
                 col_indices: Vec::new(),
@@ -171,7 +171,7 @@ impl SimulationState {
                 row_lower: Vec::new(),
                 row_upper: Vec::new(),
             },
-            baking_scratch: cobre_solver::BakingScratch::new(),
+            freeze_scratch: cobre_solver::FreezeScratch::new(),
         }
     }
 
@@ -182,7 +182,7 @@ impl SimulationState {
     /// # Errors
     ///
     /// Returns `Err(SimulationError::InvalidConfiguration { .. })` when
-    /// `baked_templates` is `Some` but has the wrong length.
+    /// `frozen_templates` is `Some` but has the wrong length.
     /// Returns `Err(SimulationError::LpInfeasible { .. })` when a stage LP has no
     /// feasible solution. Returns `Err(SimulationError::SolverError { .. })` for
     /// other terminal LP solver failures. Returns
@@ -215,32 +215,32 @@ impl SimulationState {
 
         debug_assert_inputs(inputs.ctx, num_stages, initial_state.len(), state.n_state);
 
-        if let Some(baked) = inputs.baked_templates
-            && baked.len() != num_stages
+        if let Some(frozen) = inputs.frozen_templates
+            && frozen.len() != num_stages
         {
             return Err(SimulationError::InvalidConfiguration(format!(
-                "baked_templates length {} != num_stages {}",
-                baked.len(),
+                "frozen_templates length {} != num_stages {}",
+                frozen.len(),
                 num_stages
             )));
         }
 
-        rebake_templates_if_needed(
+        refreeze_templates_if_needed(
             inputs.fcf,
             inputs.ctx,
             state,
             training_ctx.cut_state_layouts,
             num_stages,
-            inputs.baked_templates,
-            &mut self.bake_batch,
-            &mut self.owned_baked,
-            &mut self.baking_scratch,
+            inputs.frozen_templates,
+            &mut self.freeze_batch,
+            &mut self.owned_frozen,
+            &mut self.freeze_scratch,
         );
 
-        let baked_templates: &[StageTemplate] =
-            match (inputs.baked_templates, self.owned_baked.as_deref()) {
+        let frozen_templates: &[StageTemplate] =
+            match (inputs.frozen_templates, self.owned_frozen.as_deref()) {
                 (Some(b), _) | (None, Some(b)) => b,
-                (None, None) => unreachable!("owned_baked is Some when baked_templates is None"),
+                (None, None) => unreachable!("owned_frozen is Some when frozen_templates is None"),
             };
 
         let scenario_range = assign_scenarios(inputs.config.n_scenarios, rank, inputs.comm.size());
@@ -270,7 +270,7 @@ impl SimulationState {
 
         // Apply the simulation solver profile before the parallel region. For CLP
         // this selects the primal simplex, which eliminates the dual simplex's
-        // false-infeasibility on the warm-started, fully-baked cut-laden LPs.
+        // false-infeasibility on the warm-started, fully-frozen cut-laden LPs.
         let simulation_profile = crate::solver_phase::Phase::Simulation.profile();
         for ws in inputs.workspaces.iter_mut() {
             ws.solver.set_profile(&simulation_profile);
@@ -283,7 +283,7 @@ impl SimulationState {
             output: &inputs.output,
             config: inputs.config,
             stage_bases: inputs.stage_bases,
-            baked_templates,
+            frozen_templates,
             scenarios_complete: &scenarios_complete,
             sim_start,
             local_count,
@@ -398,7 +398,7 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
 
         let stats_before = ws.solver.statistics();
         let load_spec = crate::simulation::pipeline::SimScenarioLoadSpec {
-            baked_templates: params.baked_templates,
+            frozen_templates: params.frozen_templates,
             stage_bases: params.stage_bases,
         };
         // mem::take (capacity retained) so the immutable ScenarioIds borrows of
@@ -483,25 +483,25 @@ fn build_sim_sampler<'a>(
     })?)
 }
 
-/// Populate `owned_baked` when the caller did not provide pre-baked templates.
+/// Populate `owned_frozen` when the caller did not provide pre-frozen templates.
 ///
-/// No-op if `caller_baked` is `Some`. Otherwise rebuilds `owned_baked` from the
-/// FCF, context templates, and state layout, using `bake_batch` as scratch (its
+/// No-op if `caller_frozen` is `Some`. Otherwise rebuilds `owned_frozen` from the
+/// FCF, context templates, and state layout, using `freeze_batch` as scratch (its
 /// post-call contents are unspecified). Cost `O(num_stages * num_active_cuts)` —
 /// a one-time setup amortised across the per-scenario LP solves.
-fn rebake_templates_if_needed(
+fn refreeze_templates_if_needed(
     fcf: &FutureCostFunction,
     ctx: &StageContext<'_>,
     state: &crate::indexer::StateLayout,
     cut_state_layouts: &[crate::indexer::CutStateProjection],
     num_stages: usize,
-    caller_baked: Option<&[StageTemplate]>,
-    bake_batch: &mut RowBatch,
-    owned_baked: &mut Option<Vec<StageTemplate>>,
-    baking_scratch: &mut cobre_solver::BakingScratch,
+    caller_frozen: Option<&[StageTemplate]>,
+    freeze_batch: &mut RowBatch,
+    owned_frozen: &mut Option<Vec<StageTemplate>>,
+    freeze_scratch: &mut cobre_solver::FreezeScratch,
 ) {
-    if caller_baked.is_some() {
-        *owned_baked = None;
+    if caller_frozen.is_some() {
+        *owned_frozen = None;
         return;
     }
 
@@ -512,23 +512,23 @@ fn rebake_templates_if_needed(
     #[allow(clippy::needless_range_loop)]
     for t in 0..num_stages {
         build_cut_row_batch_into(
-            bake_batch,
+            freeze_batch,
             fcf,
             t,
             state,
             &cut_state_layouts[t],
             &ctx.templates[t].col_scale,
         );
-        let mut baked = StageTemplate::empty();
-        cobre_solver::bake_rows_into_template(
+        let mut frozen = StageTemplate::empty();
+        cobre_solver::freeze_rows_into_template(
             &ctx.templates[t],
-            bake_batch,
-            &mut baked,
-            baking_scratch,
+            freeze_batch,
+            &mut frozen,
+            freeze_scratch,
         );
-        owned.push(baked);
+        owned.push(frozen);
     }
-    *owned_baked = Some(owned);
+    *owned_frozen = Some(owned);
 }
 
 #[cfg(test)]
@@ -536,12 +536,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn simulation_state_new_allocates_empty_bake_batch() {
+    fn simulation_state_new_allocates_empty_freeze_batch() {
         let state = SimulationState::new(3);
-        assert!(state.owned_baked.is_none(), "owned_baked must be None");
+        assert!(state.owned_frozen.is_none(), "owned_frozen must be None");
         assert_eq!(
-            state.bake_batch.num_rows, 0,
-            "bake_batch.num_rows must be 0"
+            state.freeze_batch.num_rows, 0,
+            "freeze_batch.num_rows must be 0"
         );
     }
 

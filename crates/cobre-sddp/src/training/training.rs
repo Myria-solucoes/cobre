@@ -79,9 +79,9 @@ pub struct TrainingResult {
     /// decides whether to persist it based on `exports.states`.
     pub visited_archive: Option<crate::visited_states::VisitedStatesArchive>,
 
-    /// Final-iteration baked templates, one per stage. Always `Some`: baking
+    /// Final-iteration frozen templates, one per stage. Always `Some`: freeze
     /// runs unconditionally before the first iteration and is never reverted.
-    pub baked_templates: Option<Vec<StageTemplate>>,
+    pub frozen_templates: Option<Vec<StageTemplate>>,
 }
 
 impl TrainingResult {
@@ -105,7 +105,7 @@ impl TrainingResult {
         basis_cache: Vec<Option<CapturedBasis>>,
         solver_stats_log: Vec<SolverStatsLogEntry>,
         visited_archive: Option<crate::visited_states::VisitedStatesArchive>,
-        baked_templates: Option<Vec<StageTemplate>>,
+        frozen_templates: Option<Vec<StageTemplate>>,
     ) -> Self {
         Self {
             final_lb,
@@ -118,7 +118,7 @@ impl TrainingResult {
             basis_cache,
             solver_stats_log,
             visited_archive,
-            baked_templates,
+            frozen_templates,
         }
     }
 }
@@ -337,12 +337,12 @@ where
         comm,
         solver_factory,
     )?;
-    // Must seed the basis store before `prime_baked_templates` bakes the loaded
+    // Must seed the basis store before `prime_frozen_templates` freezes the loaded
     // cuts into the templates. No-op for a fresh start (`None`).
     if let Some(cache) = warm_start_basis_cache {
         session.seed_basis_store(&cache);
     }
-    session.prime_baked_templates();
+    session.prime_frozen_templates();
     for iteration in session.iteration_range() {
         match session.run_iteration(iteration) {
             Ok(IterationOutcome::Continue) => {}
