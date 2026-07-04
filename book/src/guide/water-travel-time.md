@@ -110,31 +110,46 @@ A positive `travel_time_hours` means water released _before_ the study began
 can still be in transit when the study starts — the study's first stage
 needs to know how much, and when it was released, to seed the in-transit
 state correctly. That history is supplied through `past_defluences` in
-`initial_conditions.json`, one entry per upstream hydro that declares an arc:
+`initial_conditions.json`, as one or more dated windows per upstream hydro
+that declares an arc:
 
 ```json
 {
   "past_defluences": [
-    { "hydro_id": 2, "values_m3s": [600.0, 500.0], "season_ids": [3, 2] }
+    {
+      "hydro_id": 2,
+      "start_date": "2023-12-25",
+      "end_date": "2023-12-30",
+      "value_m3s": 600.0
+    },
+    {
+      "hydro_id": 2,
+      "start_date": "2023-12-30",
+      "end_date": "2024-01-01",
+      "value_m3s": 500.0
+    }
   ]
 }
 ```
 
-`values_m3s` is ordered from most recent (index `0`) to oldest, in m³/s — the
-same pre-study-period convention `past_inflows` already uses. `season_ids` is
-optional, one entry per value, for temporal validation against declared
-seasons.
+Each window gives the average release rate `value_m3s` (m³/s) over the
+half-open date range `[start_date, end_date)` — `end_date` exclusive, on the
+same wall-clock calendar as the study stages, exactly like
+`recent_observations`. Because every window carries its own dates, there is no
+implied period ordering to line up against the stage calendar. Windows for one
+hydro must not overlap; adjacent windows (`start_date` equal to the previous
+`end_date`) are accepted.
 
-Cobre works out how many of the most-recent pre-study periods are needed to
-fully cover the arc's travel-time window before the study starts, and
-requires at least that many entries in `values_m3s` for that hydro. If
-`past_defluences` for a hydro is absent or shorter than required, Cobre falls
-back to that hydro's `past_inflows` history instead — treating past inflow as
-a stand-in for past release — provided `past_inflows` is long enough, and
-logs an advisory naming the hydro and asking for `past_defluences` to be
-supplied directly for better first-stage accuracy. If neither history is long
-enough, the case is rejected outright, naming how many periods are missing:
-Cobre never silently seeds an incomplete in-transit state.
+Let `start_0` be the first study stage's `start_date`. Cobre requires the
+windows for each arc to cover the in-transit span `[start_0 − t_v, start_0)` —
+the `t_v` hours of release immediately before the study starts, where `t_v` is
+`travel_time_hours`. In practice the most recent window ends exactly at
+`start_0` and the windows run contiguously back at least `t_v` hours; a window
+may reach further back than needed, as the seed clips it. If the windows leave
+any part of that span uncovered — or none are supplied — the case is rejected
+outright, naming the hydro and the uncovered span: Cobre never silently seeds
+an incomplete in-transit state. A window whose `end_date` falls after `start_0`
+is rejected as future-dated.
 
 ## Parallel vs. chronological attribution
 

@@ -1,40 +1,37 @@
-//! Stage-0 incoming travel-time bucket seed from pre-study upstream releases.
+//! Stage-0 incoming travel-time bucket seed from windowed `past_defluences`
+//! releases.
 //!
-//! [`build_initial_transit_bucket_state`] unrolls each declared arc's pre-study
-//! defluence history through the IC-anchor overlap arithmetic into the
+//! [`build_initial_transit_bucket_state`] unrolls each declared arc's
+//! `past_defluences` windows through the IC-anchor overlap arithmetic into the
 //! stage-0 incoming bucket state, aggregated per downstream plant exactly as
-//! [`TransitBucketTopology`] aggregates depth. The
-//! caller splices the result into the same `initial_state` vector
-//! `build_initial_state` populates, so the single `fill_col_state_patches`
-//! pin path picks it up with no separate wiring.
+//! [`TransitBucketTopology`] aggregates depth. The caller splices the result
+//! into the same `initial_state` vector `build_initial_state` populates, so
+//! the single `fill_col_state_patches` pin path picks it up with no separate
+//! wiring.
 
-use cobre_core::{EntityId, InitialConditions, System};
+use chrono::NaiveDate;
+use cobre_core::System;
 
 use crate::lp_builder::M3S_TO_HM3;
 
-use super::bucket_topology::{
-    TransitBucketTopology, ic_anchor_k, pre_study_period_durations_desc, required_history_periods,
-    study_stage_durations,
-};
+use super::bucket_topology::{TransitBucketTopology, ic_anchor_k, study_stage_durations};
 
-/// Unroll every declared arc's pre-study release history into the stage-0
+/// Unroll every declared arc's `past_defluences` windows into the stage-0
 /// incoming bucket seed, in [`TransitBucketTopology::column_order`] order.
 ///
-/// For downstream plant `j` with depth `L_j`, bucket `d` (`1..=L_j`) is
-/// `Σ_{i∈up(j)} Σ_{m≥1} k_{d-1+m,i}·D_i^{-m}`: `D_i^{-m}` is the volume of
-/// arc `i`'s `m`-th most-recent pre-study defluence (period-duration-scaled,
-/// mirroring how an in-study release is already volume-scaled by `τ`), and
-/// `k_{d-1+m,i}` is [`ic_anchor_k`]'s fraction of that period's release
-/// landing `d-1` study stages after stage 0.
+/// Each window `[start_date, end_date)` for upstream hydro `i` contributes
+/// `k_d · D_i`, `D_i` the window's period-duration-scaled volume (mirroring
+/// how an in-study release is already volume-scaled by `τ`) and `k_d` the
+/// fraction of that window landing `d` study stages after stage 0
+/// ([`ic_anchor_k`], anchored at `e_off = start_0 − end_date` with period
+/// width `end_date − start_date`).
 ///
 /// Runs single-threaded in [`TransitBucketTopology::column_order`]'s canonical
 /// (sorted) order — never a rank-count-dependent parallel reduction.
 ///
-/// Falls back to `past_inflows` when a declared arc's `past_defluences`
-/// history is shorter than its required depth — the same choice
-/// `cobre-io`'s `validate_travel_time` row-5 gate already enforced (and
-/// already hard-errors / logs the caveat there); this only consumes whichever
-/// history that validation accepted.
+/// `cobre-io`'s `validate_travel_time` coverage gate guarantees every declared
+/// arc's `past_defluences` windows cover `[start_0 − t_v, start_0)` before
+/// setup runs this seed; there is no `past_inflows` fallback.
 #[must_use]
 pub(crate) fn build_initial_transit_bucket_state(
     system: &System,
@@ -46,7 +43,14 @@ pub(crate) fn build_initial_transit_bucket_state(
     }
 
     let study_durations = study_stage_durations(system);
-    let pre_study_desc = pre_study_period_durations_desc(system);
+    let Some(start_0) = study_start_date(system) else {
+        debug_assert!(
+            false,
+            "n_buckets > 0 implies build_transit_bucket_topology sized a depth from a non-empty \
+             study calendar, so at least one study stage must exist here"
+        );
+        return seed;
+    };
     let ic = system.initial_conditions();
     let hydros = system.hydros();
 
@@ -62,19 +66,21 @@ pub(crate) fn build_initial_transit_bucket_state(
                 continue;
             }
 
-            let required = required_history_periods(t_v, &pre_study_desc);
-            let history = select_history(ic, upstream.id, required);
+            for window in ic
+                .past_defluences
+                .iter()
+                .filter(|w| w.hydro_id == upstream.id)
+            {
+                debug_assert!(
+                    window.end_date <= start_0,
+                    "past_defluences window must end at or before start_0 ({start_0}); \
+                     cobre-io's validate_travel_time row-5b gate guarantees this"
+                );
+                let e_off = hours_between(start_0, window.end_date);
+                let width = hours_between(window.end_date, window.start_date);
+                let volume = width * M3S_TO_HM3 * window.value_m3s;
 
-            for (offset, &raw_value) in history.iter().enumerate() {
-                let m = offset + 1;
-                if m > pre_study_desc.len() {
-                    break;
-                }
-                let period_duration = pre_study_desc[m - 1];
-                let cumulative_before: f64 = pre_study_desc[..m - 1].iter().sum();
-                let volume = period_duration * M3S_TO_HM3 * raw_value;
-
-                let k = ic_anchor_k(t_v, cumulative_before, period_duration, &study_durations);
+                let k = ic_anchor_k(t_v, e_off, width, &study_durations);
                 for (transit_bucket_offset, &k_val) in k.iter().enumerate().take(depth) {
                     if k_val != 0.0 {
                         seed[start + transit_bucket_offset] += k_val * volume;
@@ -90,31 +96,34 @@ pub(crate) fn build_initial_transit_bucket_state(
     seed
 }
 
-/// Select the arc's pre-study release history: `past_defluences` when it
-/// meets `required`, else the whole `past_inflows` proxy — the fallback
-/// `cobre-io`'s row-5 validation already decided; neither being long enough
-/// would already have hard-errored before setup runs this.
-fn select_history(ic: &InitialConditions, hydro_id: EntityId, required: usize) -> &[f64] {
-    ic.past_defluences
+/// The first study stage's (`id >= 0`, lowest `id`) start date — `start_0`,
+/// the anchor every window's `(e_off, width)` measures against. `None` only
+/// when the system declares no study stages.
+fn study_start_date(system: &System) -> Option<NaiveDate> {
+    system
+        .stages()
         .iter()
-        .find(|e| e.hydro_id == hydro_id)
-        .map(|e| e.values_m3s.as_slice())
-        .filter(|values| values.len() >= required)
-        .unwrap_or_else(|| {
-            ic.past_inflows
-                .iter()
-                .find(|e| e.hydro_id == hydro_id)
-                .map_or(&[], |e| e.values_m3s.as_slice())
-        })
+        .filter(|s| s.id >= 0)
+        .min_by_key(|s| s.id)
+        .map(|s| s.start_date)
+}
+
+/// Hours of wall clock between `earlier` and `later` (`later − earlier`),
+/// positive when `earlier` precedes `later`.
+// Rationale: pre-study spans are on the order of years, far under f64's
+// exact-integer range; a checked conversion buys nothing.
+#[allow(clippy::cast_precision_loss)]
+fn hours_between(later: NaiveDate, earlier: NaiveDate) -> f64 {
+    (later - earlier).num_hours() as f64
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
+    use chrono::Duration;
     use cobre_core::{
         Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro, HydroGenerationModel,
-        HydroPastDefluences, HydroPenalties, NoiseMethod, ScenarioSourceConfig, Stage,
+        HydroPastDefluence, HydroPenalties, NoiseMethod, ScenarioSourceConfig, Stage,
         StageRiskConfig, StageStateConfig, SystemBuilder,
     };
 
@@ -176,29 +185,8 @@ mod tests {
         }
     }
 
-    /// A single 24h pre-study period (`id = -1`) immediately before stage 0.
-    fn pre_study_stage_24h() -> Stage {
-        Stage {
-            index: 0,
-            id: -1,
-            start_date: date(2023, 12, 31),
-            end_date: date(2024, 1, 1),
-            season_id: None,
-            blocks: vec![],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: false,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
-        }
-    }
-
-    /// `n` study stages (`id = 0..n`), each carrying a single `hours`-long block.
+    /// `n` study stages (`id = 0..n`), each carrying a single `hours`-long
+    /// block, all anchored at `start_0 = 2024-01-01`.
     fn study_stages(n: i32, hours: f64) -> Vec<Stage> {
         (0..n)
             .map(|id| Stage {
@@ -228,10 +216,9 @@ mod tests {
 
     fn build_system(
         hydros: Vec<Hydro>,
-        mut stages: Vec<Stage>,
-        past_defluences: Vec<HydroPastDefluences>,
+        stages: Vec<Stage>,
+        past_defluences: Vec<HydroPastDefluence>,
     ) -> cobre_core::System {
-        stages.push(pre_study_stage_24h());
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
@@ -254,18 +241,29 @@ mod tests {
             .expect("valid system")
     }
 
-    fn defluence(hydro_id: i32, values_m3s: Vec<f64>) -> HydroPastDefluences {
-        HydroPastDefluences {
+    /// `start_0 = 2024-01-01`. A single `past_defluences` window ending
+    /// `start_0_minus_hours` before `start_0` and spanning `width_hours`, at
+    /// rate `value` m³/s.
+    fn defluence_window(
+        hydro_id: i32,
+        start_0_minus_hours: f64,
+        width_hours: f64,
+        value: f64,
+    ) -> HydroPastDefluence {
+        let start_0 = date(2024, 1, 1);
+        let end_date = start_0 - Duration::hours(start_0_minus_hours as i64);
+        let start_date = end_date - Duration::hours(width_hours as i64);
+        HydroPastDefluence {
             hydro_id: EntityId(hydro_id),
-            values_m3s,
-            season_ids: None,
+            start_date,
+            end_date,
+            value_m3s: value,
         }
     }
 
-    /// Single arc, `k = [1/2, 1/2]`, one pre-study release `D^{-1}` ⇒
-    /// `b_1 = k_1 · D^{-1} = 1/2 · D^{-1}` (`D^{-1}` the period-duration-scaled
-    /// volume, mirroring how an in-study release is already volume-scaled by
-    /// `τ`).
+    /// Single arc, `k = [1/2, 1/2]`, one window `[start_0 − 24h, start_0)` at
+    /// 100 m³/s ⇒ `b_1 = k_1 · D = 1/2 · D` (`D` the width-scaled volume,
+    /// mirroring how an in-study release is already volume-scaled by `τ`).
     #[test]
     fn test_single_arc_unroll_matches_ac1() {
         let downstream = hydro(1, None, None);
@@ -273,7 +271,7 @@ mod tests {
         let system = build_system(
             vec![downstream, upstream],
             study_stages(4, 12.0),
-            vec![defluence(2, vec![100.0])],
+            vec![defluence_window(2, 0.0, 24.0, 100.0)],
         );
 
         let topology = build_transit_bucket_topology(&system);
@@ -282,21 +280,21 @@ mod tests {
         let seed = build_initial_transit_bucket_state(&system, &topology);
         assert_eq!(seed.len(), topology.n_buckets);
 
-        let d_minus_1 = 24.0 * M3S_TO_HM3 * 100.0;
+        let volume = 24.0 * M3S_TO_HM3 * 100.0;
         assert!(
-            (seed[0] - 0.5 * d_minus_1).abs() < 1e-9,
-            "b_1 must equal 1/2 * D^-1, got {} vs expected {}",
+            (seed[0] - 0.5 * volume).abs() < 1e-9,
+            "b_1 must equal 1/2 * volume, got {} vs expected {}",
             seed[0],
-            0.5 * d_minus_1
+            0.5 * volume
         );
     }
 
     /// A mid-horizon upstream entrant (`entry_stage_id`
-    /// mid-study) supplies zero-valued `past_defluences` -- the physically
-    /// correct value, since the plant did not exist pre-study -- and every
-    /// stage-0 bucket the arc feeds comes out zero. [`build_initial_transit_bucket_state`]
-    /// never reads `entry_stage_id`; conservation is forced by the input
-    /// data, not a code branch.
+    /// mid-study) supplies a zero-valued `past_defluences` window -- the
+    /// physically correct value, since the plant did not exist pre-study --
+    /// and every stage-0 bucket the arc feeds comes out zero.
+    /// [`build_initial_transit_bucket_state`] never reads `entry_stage_id`;
+    /// conservation is forced by the input data, not a code branch.
     #[test]
     fn test_mid_horizon_entrant_zero_history_zero_seeds_stage_0_transit_buckets() {
         let downstream = hydro(1, None, None);
@@ -305,7 +303,7 @@ mod tests {
         let system = build_system(
             vec![downstream, upstream],
             study_stages(4, 12.0),
-            vec![defluence(2, vec![0.0])],
+            vec![defluence_window(2, 0.0, 24.0, 0.0)],
         );
 
         let topology = build_transit_bucket_topology(&system);
@@ -330,7 +328,10 @@ mod tests {
         let system = build_system(
             vec![downstream, upstream_a, upstream_b],
             study_stages(4, 12.0),
-            vec![defluence(2, vec![100.0]), defluence(3, vec![50.0])],
+            vec![
+                defluence_window(2, 0.0, 24.0, 100.0),
+                defluence_window(3, 0.0, 24.0, 50.0),
+            ],
         );
 
         let topology = build_transit_bucket_topology(&system);
@@ -363,7 +364,10 @@ mod tests {
         let downstream = hydro(1, None, None);
         let upstream_a = hydro(2, Some(1), Some(24.0));
         let upstream_b = hydro(3, Some(1), Some(12.0));
-        let defluences = vec![defluence(2, vec![100.0]), defluence(3, vec![50.0])];
+        let defluences = vec![
+            defluence_window(2, 0.0, 24.0, 100.0),
+            defluence_window(3, 0.0, 24.0, 50.0),
+        ];
 
         let system_a = build_system(
             vec![downstream.clone(), upstream_a.clone(), upstream_b.clone()],
@@ -396,7 +400,7 @@ mod tests {
         let system = build_system(
             vec![downstream, upstream],
             study_stages(4, 12.0),
-            vec![defluence(2, vec![100.0])],
+            vec![defluence_window(2, 0.0, 24.0, 100.0)],
         );
         let topology = build_transit_bucket_topology(&system);
         let seed = build_initial_transit_bucket_state(&system, &topology);
@@ -408,5 +412,53 @@ mod tests {
         assert_eq!(no_arc_topology.n_buckets, 0);
         let no_arc_seed = build_initial_transit_bucket_state(&no_arc_system, &no_arc_topology);
         assert_eq!(no_arc_seed.len(), 0);
+    }
+
+    /// Two gapped (non-contiguous) windows for the same 72h arc land in
+    /// DISJOINT bucket pairs: the recent window `[start_0 − 24h, start_0)`
+    /// arrives at buckets 4-5 (`k = [0, 0, 0, 0, 1/2, 1/2]`), the older
+    /// window `[start_0 − 72h, start_0 − 48h)` arrives at buckets 0-1
+    /// (`k = [1/2, 1/2]`) -- a genuine 24h gap (`[start_0 − 48h,
+    /// start_0 − 24h)`) separates the two release windows. Because the
+    /// windows land in disjoint buckets, dropping the older one (the bug a
+    /// `.find()` in place of `.filter()` would introduce) zeroes buckets 0-1
+    /// and fails the assertion below.
+    #[test]
+    fn test_gapped_windows_contribute_additively() {
+        let downstream = hydro(1, None, None);
+        let upstream = hydro(2, Some(1), Some(72.0));
+        let system = build_system(
+            vec![downstream, upstream],
+            study_stages(6, 12.0),
+            vec![
+                defluence_window(2, 0.0, 24.0, 100.0),
+                defluence_window(2, 48.0, 24.0, 40.0),
+            ],
+        );
+
+        let topology = build_transit_bucket_topology(&system);
+        let seed = build_initial_transit_bucket_state(&system, &topology);
+
+        let vol_recent = 24.0 * M3S_TO_HM3 * 100.0;
+        let vol_older = 24.0 * M3S_TO_HM3 * 40.0;
+        let study_durations = study_stage_durations(&system);
+        let k_recent = ic_anchor_k(72.0, 0.0, 24.0, &study_durations);
+        let k_older = ic_anchor_k(72.0, 48.0, 24.0, &study_durations);
+
+        let mut expected = vec![0.0_f64; topology.n_buckets];
+        for (d, &k_val) in k_recent.iter().enumerate() {
+            expected[d] += k_val * vol_recent;
+        }
+        for (d, &k_val) in k_older.iter().enumerate() {
+            expected[d] += k_val * vol_older;
+        }
+
+        assert_eq!(seed.len(), expected.len());
+        for (idx, (&got, &want)) in seed.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "bucket {idx}: gapped windows must contribute additively, got {got} vs expected {want}"
+            );
+        }
     }
 }

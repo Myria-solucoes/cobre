@@ -24,40 +24,34 @@
       ],
       "type": "object"
     },
-    "RawHydroPastDefluences": {
+    "RawHydroPastDefluence": {
       "additionalProperties": false,
-      "description": "Past defluence (release) values per arc for one upstream hydro plant.",
+      "description": "Past defluence (release) for the arc fed by a single upstream hydro over a\nspecific date range.\n\nMirrors [`RawRecentObservation`]: a self-describing `[start_date, end_date)`\nwindow (ISO 8601, `end_date` exclusive and after `start_date`) carrying the\naverage release rate over the window. Multiple windows per hydro are allowed;\ndate ranges for the same hydro must not overlap, though adjacent ranges\n(`start_date == previous end_date`) are accepted.",
       "properties": {
+        "end_date": {
+          "description": "End of the release window (exclusive), as an ISO 8601 date (YYYY-MM-DD).\nMust be after `start_date`.",
+          "type": "string"
+        },
         "hydro_id": {
           "description": "Upstream hydro plant identifier whose release feeds the arc.",
           "format": "int32",
           "type": "integer"
         },
-        "season_ids": {
-          "default": null,
-          "description": "Optional season IDs corresponding to each entry in `values_m3s`, one per\nentry. When present, length must equal `values_m3s.length`. Absent from\nlegacy JSON files (backward compatible).",
-          "items": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
+        "start_date": {
+          "description": "Start of the release window (inclusive), as an ISO 8601 date\n(YYYY-MM-DD).",
+          "type": "string"
         },
-        "values_m3s": {
-          "description": "Past defluence values [m³/s], ordered from most recent (index 0) to\noldest, following the `past_inflows` period convention.",
-          "items": {
-            "format": "double",
-            "type": "number"
-          },
-          "type": "array"
+        "value_m3s": {
+          "description": "Average release rate over the window [m³/s]. Must be finite and\nnon-negative.",
+          "format": "double",
+          "type": "number"
         }
       },
       "required": [
         "hydro_id",
-        "values_m3s"
+        "start_date",
+        "end_date",
+        "value_m3s"
       ],
       "type": "object"
     },
@@ -177,9 +171,9 @@
       "type": "array"
     },
     "past_defluences": {
-      "description": "Past defluence (release) values per arc [m³/s], keyed by the upstream\nhydro whose release feeds the arc, ordered from most recent to oldest\nfollowing the `past_inflows` period convention. Optional; defaults to\nempty.",
+      "description": "Past defluence (release) windows per arc [m³/s per date range], keyed by\nthe upstream hydro whose release feeds the arc. Each entry is a\nself-describing `[start_date, end_date)` window on the pre-study calendar.\nWindows for the same hydro must not overlap; adjacent ranges\n(start == previous end) are accepted. Optional; defaults to empty.",
       "items": {
-        "$ref": "#/$defs/RawHydroPastDefluences"
+        "$ref": "#/$defs/RawHydroPastDefluence"
       },
       "type": "array"
     },

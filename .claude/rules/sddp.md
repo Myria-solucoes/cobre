@@ -166,6 +166,32 @@ declaration-invariance regression: two systems differing only in the
 declaration order of their hydros produce identical `column_order`,
 `per_plant_depth`, and `n_buckets`.
 
+### Stage-0 seed: windowed IC anchor
+
+`build_initial_transit_bucket_state` seeds every declared arc's stage-0
+incoming buckets directly from its `past_defluences` windows — never a
+positional walk over a fixed pre-study calendar. For upstream hydro `i`'s
+window `[start_date, end_date)`, `e_off = start_0 − end_date` and
+`width = end_date − start_date` feed `ic_anchor_k` exactly as it already
+takes `(cumulative_before, period_duration)`: the windowed derivation lives
+entirely in how the caller computes those two offsets from calendar dates,
+never inside `ic_anchor_k` itself. A hydro may carry multiple, non-contiguous
+windows; the seed must `filter` over every window with a matching `hydro_id`
+and deposit each one independently
+(`volume = width · M3S_TO_HM3 · value_m3s`, `seed[start+d] += k[d] · volume`)
+— a `.find()` would silently keep only the first window and drop the rest,
+understating the seed with no error. There is no `past_inflows` fallback:
+`cobre-io`'s `validate_travel_time` row-5 gate guarantees every declared
+arc's windows cover `[start_0 − t_v, start_0)` before setup ever runs this
+seed.
+Read: `setup/bucket_seed.rs` (`build_initial_transit_bucket_state`),
+`setup/bucket_topology.rs` (`ic_anchor_k`). Pinned by the single-window
+unroll regression (the `k`-weighted deposit matches the closed-form
+half-share), the gapped-two-window additive regression (two non-contiguous
+windows for one arc contribute independently), and the seed's own
+declaration-order-invariance regression (distinct from, and in addition to,
+the topology-level ordering pin above).
+
 ### Terminal credit deferred
 
 `horizon_cap_active` caps each stage's active lag at `n_stages − 1 − t`, the

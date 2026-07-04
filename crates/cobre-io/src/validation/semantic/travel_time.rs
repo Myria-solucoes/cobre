@@ -10,12 +10,15 @@
 //! | 2 | `travel_time_hours == 0.0` — treated as undeclared, no arc created      | `ModelQuality` (warning)  |
 //! | 3 | `max_t(t_v / h_t)` below [`NEGLIGIBLE_RATIO_THRESHOLD`]                  | `ModelQuality` (warning)  |
 //! | 4 | `t_v` exceeds the remaining study horizon at some stage                 | `ModelQuality` (warning)  |
-//! | 5 | `past_defluences` history shorter than the arc's required pre-study depth | `BusinessRuleViolation` (or `ModelQuality` warning under the derived-fallback) |
+//! | 5 | `past_defluences` windows do not cover the arc's in-transit span `[start_0 − t_v, start_0)` (gap or no windows) | `BusinessRuleViolation` |
+//! | 5b | A `past_defluences` window ends after `start_0` (future-dated) | `InvalidValue` |
 //! | 6 | Chronological confluence: 2+ declared arcs into one downstream plant with differing `travel_time_hours`, while any study stage is chronological | `NotImplemented` |
 //! | 11 | A declared arc's downstream `exit_stage_id` falls inside the arrival window of a release whose own stage is still Operating | `ModelQuality` (warning) |
 //! | 12 | A declared arc releases at a stage where its downstream has not yet reached Operating status (`PreFilling`/`Filling`, or before `entry_stage_id`) | `BusinessRuleViolation` |
+//! | 13 | `recent_observations` present but the season cycle is not `Monthly` (`Weekly`/`Custom`, a `None` first-stage `season_id`, or no `season_map`) — mid-period PAR lag seeding is silently skipped | `ModelQuality` (warning) |
 
-use cobre_core::{BlockMode, EntityId, Hydro, window_period_overlaps};
+use chrono::NaiveDate;
+use cobre_core::{BlockMode, EntityId, Hydro, SeasonCycleType, window_period_overlaps};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
@@ -26,7 +29,7 @@ const NEGLIGIBLE_RATIO_THRESHOLD: f64 = 0.01;
 
 pub(super) fn validate_travel_time(data: &ParsedData, ctx: &mut ValidationContext) {
     let study_durations = study_stage_durations(data);
-    let pre_study_desc = pre_study_period_durations_desc(data);
+    let start_0 = study_start_date(data);
 
     for hydro in &data.hydros {
         let Some(t) = hydro.travel_time_hours else {
@@ -59,12 +62,60 @@ pub(super) fn validate_travel_time(data: &ParsedData, ctx: &mut ValidationContex
 
         check_negligible_ratio(hydro_id, t, &study_durations, ctx);
         check_horizon_inertness(hydro_id, t, &study_durations, ctx);
-        check_history_depth(hydro_id, t, &pre_study_desc, data, ctx);
+        if let Some(start_0) = start_0 {
+            check_defluence_coverage(hydro, t, start_0, data, ctx);
+        }
     }
 
     check_chronological_confluence_heterogeneous_travel_time(data, ctx);
     check_recourse_downstream_not_operating(data, &study_durations, ctx);
     check_recourse_downstream_exit_within_window(data, &study_durations, ctx);
+}
+
+/// Row 13: warn when `recent_observations` cannot seed the PAR lag accumulator
+/// because the season cycle is not `Monthly` — the solver-side
+/// `compute_recent_observation_seed` implements only `Monthly`, so any other
+/// cycle silently zeroes the mid-period seed. Warning, never an error: a
+/// non-`Monthly` study is valid; only its lag seeding is limited (the deferred
+/// `historical-replay-non-monthly` work closes the gap).
+pub(super) fn check_recent_observations_non_monthly_seed_gap(
+    data: &ParsedData,
+    ctx: &mut ValidationContext,
+) {
+    if data.initial_conditions.recent_observations.is_empty() {
+        return;
+    }
+
+    let first_season_id = data
+        .stages
+        .stages
+        .iter()
+        .filter(|s| s.id >= 0)
+        .min_by_key(|s| s.id)
+        .and_then(|s| s.season_id);
+
+    let cycle: &str = match data.stages.policy_graph.season_map.as_ref() {
+        None => "undefined (no season_map is declared)",
+        Some(season_map) => match season_map.cycle_type {
+            SeasonCycleType::Weekly => "Weekly",
+            SeasonCycleType::Custom => "Custom",
+            SeasonCycleType::Monthly if first_season_id.is_none() => {
+                "Monthly, but the first study stage carries no season_id"
+            }
+            SeasonCycleType::Monthly => return,
+        },
+    };
+
+    ctx.add_warning(
+        ErrorKind::ModelQuality,
+        "initial_conditions.json",
+        None::<String>,
+        format!(
+            "recent_observations is non-empty but the season cycle is {cycle}; \
+             recent_observations mid-period lag seeding is implemented only for the \
+             Monthly cycle, so it is silently skipped and the mid-period lag seed is zero"
+        ),
+    );
 }
 
 /// Whether `hydro` has not reached full commissioning at `stage_id` for a
@@ -271,23 +322,15 @@ fn study_stage_durations(data: &ParsedData) -> Vec<f64> {
         .collect()
 }
 
-/// Pre-study (`id < 0`) period durations, most-recent-first (the `past_inflows`
-/// / `past_defluences` index convention) — the reverse of the canonical
-/// ascending-`id` order. Pre-study stages carry no blocks; duration comes from
-/// the calendar dates.
-// Rationale: pre-study period lengths are on the order of years (<1e6 hours),
-// far under f64's exact-integer range (2^52); a checked conversion buys nothing.
-#[allow(clippy::cast_precision_loss)]
-fn pre_study_period_durations_desc(data: &ParsedData) -> Vec<f64> {
-    let mut pre_study: Vec<_> = data
-        .stages
+/// The first study stage's start date (`id >= 0`, lowest `id`; stages are
+/// canonical-sorted ascending). `None` when the study declares no study stages.
+fn study_start_date(data: &ParsedData) -> Option<NaiveDate> {
+    data.stages
         .stages
         .iter()
-        .filter(|s| s.id < 0)
-        .map(|s| (s.end_date - s.start_date).num_hours() as f64)
-        .collect();
-    pre_study.reverse();
-    pre_study
+        .filter(|s| s.id >= 0)
+        .min_by_key(|s| s.id)
+        .map(|s| s.start_date)
 }
 
 /// Row 3: `max_t(t_v/h_t)` below [`NEGLIGIBLE_RATIO_THRESHOLD`] is an advisory
@@ -351,60 +394,81 @@ fn check_horizon_inertness(
     }
 }
 
-/// The number of most-recent pre-study periods a declared arc's
-/// `past_defluences` (or its derived-fallback proxy) must supply, so that
-/// `[start_0 - t_v, start_0)` is fully covered.
-///
-/// A declared arc (`t > 0.0`, checked by the caller) always needs at least one
-/// period of pre-study history: floored at 1 so an empty pre-study calendar
-/// (no periods to walk) cannot vacuously report a zero requirement and let a
-/// history-free arc pass row 5 unchecked.
-fn required_history_periods(t: f64, pre_study_desc: &[f64]) -> usize {
-    window_period_overlaps(0.0, t, pre_study_desc).len().max(1)
+/// Tolerance for the coverage sweep. Window offsets are whole-day multiples of
+/// 24 hours (day-resolution dates), so contiguity and reach compare exactly;
+/// the slack only absorbs a fractional `travel_time_hours`.
+const COVERAGE_EPS: f64 = 1e-6;
+
+/// Hours of wall clock between `date` and `start_0`, positive when `date`
+/// precedes `start_0`.
+// Rationale: pre-study spans are on the order of years (<1e6 hours), far under
+// f64's exact-integer range (2^52); a checked conversion buys nothing.
+#[allow(clippy::cast_precision_loss)]
+fn hours_before(start_0: NaiveDate, date: NaiveDate) -> f64 {
+    (start_0 - date).num_hours() as f64
 }
 
-/// Row 5 / D5: hard error naming the missing pre-study periods, unless the
-/// derived-from-`past_inflows` fallback is active (that proxy has at least as
-/// much depth as required), in which case it is a logged caveat instead.
-/// Never silently zero-seeds.
-fn check_history_depth(
-    hydro_id: i32,
+/// Row 5: a declared arc's `past_defluences` windows must cover the in-transit
+/// span `(0, t_v]` hours before the first study stage's start (`start_0`).
+///
+/// Each window `[start_date, end_date)` maps to the hours-before-`start_0`
+/// interval `[e_off, s_off)` with `e_off = start_0 − end_date` and
+/// `s_off = start_0 − start_date`. Sweeping the windows most-recent-first, the
+/// newest must end at `start_0` (`e_off == 0`) and the run must stay contiguous
+/// (each next `e_off` at the prior `s_off`, windows being non-overlapping per
+/// the loader) until it reaches `s_off ≥ t`. A gap or missing history leaves
+/// part of `(0, t_v]` uncovered — a hard error naming the uncovered span, never
+/// a silent zero-seed. A window ending after `start_0` is future-dated: it
+/// cannot seed pre-study transit and is rejected outright.
+fn check_defluence_coverage(
+    hydro: &Hydro,
     t: f64,
-    pre_study_desc: &[f64],
+    start_0: NaiveDate,
     data: &ParsedData,
     ctx: &mut ValidationContext,
 ) {
-    let required = required_history_periods(t, pre_study_desc);
+    if hydro.downstream_id.is_none() {
+        return;
+    }
+    let hydro_id = hydro.id.0;
 
-    let defluences_len = data
+    let mut windows: Vec<(f64, f64)> = Vec::new();
+    for w in data
         .initial_conditions
         .past_defluences
         .iter()
-        .find(|e| e.hydro_id.0 == hydro_id)
-        .map_or(0, |e| e.values_m3s.len());
-    if defluences_len >= required {
-        return;
+        .filter(|e| e.hydro_id.0 == hydro_id)
+    {
+        if w.end_date > start_0 {
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "initial_conditions.json",
+                Some(format!("Hydro {hydro_id}")),
+                format!(
+                    "Hydro {hydro_id}: past_defluences window [{}, {}) ends after the study \
+                     start {start_0}; a defluence window must be entirely pre-study",
+                    w.start_date, w.end_date
+                ),
+            );
+            return;
+        }
+        windows.push((
+            hours_before(start_0, w.end_date),
+            hours_before(start_0, w.start_date),
+        ));
     }
 
-    let inflows_len = data
-        .initial_conditions
-        .past_inflows
-        .iter()
-        .find(|e| e.hydro_id.0 == hydro_id)
-        .map_or(0, |e| e.values_m3s.len());
+    windows.sort_by(|a, b| a.0.total_cmp(&b.0));
 
-    if inflows_len >= required {
-        ctx.add_warning(
-            ErrorKind::ModelQuality,
-            "initial_conditions.json",
-            Some(format!("Hydro {hydro_id}")),
-            format!(
-                "Hydro {hydro_id}: past_defluences history ({defluences_len} period(s)) is \
-                 shorter than the arc's required depth ({required} period(s)); deriving a proxy \
-                 from past_inflows (pass-through assumption) — provide past_defluences directly \
-                 for higher first-stage accuracy"
-            ),
-        );
+    let mut covered = 0.0_f64;
+    for (e_off, s_off) in windows {
+        if e_off > covered + COVERAGE_EPS {
+            break;
+        }
+        covered = covered.max(s_off);
+    }
+
+    if covered + COVERAGE_EPS >= t {
         return;
     }
 
@@ -414,10 +478,9 @@ fn check_history_depth(
         Some(format!("Hydro {hydro_id}")),
         format!(
             "Hydro {hydro_id}: declared arc (travel_time_hours={t}) requires past_defluences \
-             history of at least {required} pre-study period(s); only {defluences_len} were \
-             provided ({missing} missing) and past_inflows provides only {inflows_len} \
-             period(s), insufficient for the derived fallback",
-            missing = required - defluences_len
+             windows covering (0, {t}] hours before the study start {start_0}; coverage reaches \
+             only {covered} hour(s), leaving ({covered}, {t}] uncovered — supply contiguous \
+             pre-study release windows ending at {start_0} and reaching {t} hours back"
         ),
     );
 }
@@ -438,7 +501,7 @@ mod tests {
     use crate::stages::StagesData;
     use cobre_core::entities::Hydro;
     use cobre_core::temporal::{Block, PolicyGraph, PolicyGraphType, Stage};
-    use cobre_core::{EntityId, HydroPastDefluences, HydroPastInflows};
+    use cobre_core::{EntityId, HydroPastDefluence};
 
     fn make_hydro_with_travel_time(id: i32, downstream_id: i32, t: Option<f64>) -> Hydro {
         let mut h = make_hydro(id, Some(downstream_id));
@@ -488,20 +551,31 @@ mod tests {
         }
     }
 
-    fn past_defluences(hydro_id: i32, n: usize) -> Vec<HydroPastDefluences> {
-        vec![HydroPastDefluences {
-            hydro_id: EntityId::from(hydro_id),
-            values_m3s: vec![100.0; n],
-            season_ids: None,
-        }]
+    /// The default study start date every `make_study_stage` carries (via
+    /// `make_stage`): the anchor `check_defluence_coverage` measures against.
+    fn study_start() -> NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()
     }
 
-    fn past_inflows(hydro_id: i32, n: usize) -> Vec<HydroPastInflows> {
-        vec![HydroPastInflows {
+    /// A single past-defluence window `[start, end)` at 100 m³/s.
+    fn defluence_window(hydro_id: i32, start: NaiveDate, end: NaiveDate) -> HydroPastDefluence {
+        HydroPastDefluence {
             hydro_id: EntityId::from(hydro_id),
-            values_m3s: vec![100.0; n],
-            season_ids: None,
-        }]
+            start_date: start,
+            end_date: end,
+            value_m3s: 100.0,
+        }
+    }
+
+    /// One window ending at [`study_start`] and reaching `t` hours back — enough
+    /// to cover `(0, t]` so the non-row-5 tests never trip the coverage gate.
+    fn covering_defluences(hydro_id: i32, t: f64) -> Vec<HydroPastDefluence> {
+        let days = (t / 24.0).ceil().max(1.0) as i64;
+        vec![defluence_window(
+            hydro_id,
+            study_start() - chrono::Duration::days(days),
+            study_start(),
+        )]
     }
 
     // ── Row 1: negative / non-finite ──────────────────────────────────────────
@@ -547,7 +621,7 @@ mod tests {
         let hydro = make_hydro_with_travel_time(1, 2, Some(48.0));
         let stages = make_stages_with_pre_study(3, 720.0, 2, 720.0);
         let mut data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
-        data.initial_conditions.past_defluences = past_defluences(1, 2);
+        data.initial_conditions.past_defluences = covering_defluences(1, 48.0);
 
         let mut ctx = ValidationContext::new();
         validate_travel_time(&data, &mut ctx);
@@ -609,7 +683,7 @@ mod tests {
         let hydro = make_hydro_with_travel_time(1, 2, Some(6.0));
         let stages = make_stages_with_pre_study(3, 720.0, 1, 720.0);
         let mut data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
-        data.initial_conditions.past_defluences = past_defluences(1, 1);
+        data.initial_conditions.past_defluences = covering_defluences(1, 6.0);
 
         let mut ctx = ValidationContext::new();
         validate_travel_time(&data, &mut ctx);
@@ -630,7 +704,7 @@ mod tests {
         let hydro = make_hydro_with_travel_time(1, 2, Some(360.0));
         let stages = make_stages_with_pre_study(3, 720.0, 1, 720.0);
         let mut data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
-        data.initial_conditions.past_defluences = past_defluences(1, 1);
+        data.initial_conditions.past_defluences = covering_defluences(1, 360.0);
 
         let mut ctx = ValidationContext::new();
         validate_travel_time(&data, &mut ctx);
@@ -654,7 +728,7 @@ mod tests {
         let hydro = make_hydro_with_travel_time(1, 2, Some(1500.0));
         let stages = make_stages_with_pre_study(3, 720.0, 2, 720.0);
         let mut data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
-        data.initial_conditions.past_defluences = past_defluences(1, 2);
+        data.initial_conditions.past_defluences = covering_defluences(1, 1500.0);
 
         let mut ctx = ValidationContext::new();
         validate_travel_time(&data, &mut ctx);
@@ -674,7 +748,7 @@ mod tests {
         let hydro = make_hydro_with_travel_time(1, 2, Some(48.0));
         let stages = make_stages_with_pre_study(3, 720.0, 1, 720.0);
         let mut data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
-        data.initial_conditions.past_defluences = past_defluences(1, 1);
+        data.initial_conditions.past_defluences = covering_defluences(1, 48.0);
 
         let mut ctx = ValidationContext::new();
         validate_travel_time(&data, &mut ctx);
@@ -688,98 +762,113 @@ mod tests {
         );
     }
 
-    // ── Row 5 / D5: past_defluences depth (both fallback arms) ────────────────
+    // ── Row 5: past_defluences windowed coverage of (0, t_v] ──────────────────
 
     #[test]
-    fn test_insufficient_history_no_fallback_hard_errors() {
-        // t_v = 1000h needs 2 pre-study periods of 720h; only 1 provided, and
-        // past_inflows is empty too — no fallback available.
-        let hydro = make_hydro_with_travel_time(1, 2, Some(1000.0));
+    fn test_sufficient_coverage_no_row5_diagnostics() {
+        // t_v = 48h; one window [2023-12-30, 2024-01-01) ending at start_0 covers
+        // the full 48h span back from start_0.
+        let hydro = make_hydro_with_travel_time(1, 2, Some(48.0));
         let stages = make_stages_with_pre_study(3, 720.0, 2, 720.0);
         let mut data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
-        data.initial_conditions.past_defluences = past_defluences(1, 1);
-
-        let mut ctx = ValidationContext::new();
-        validate_travel_time(&data, &mut ctx);
-
-        assert!(
-            ctx.has_errors(),
-            "insufficient history with no fallback must hard-error"
-        );
-        let errors = ctx.errors();
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.kind == ErrorKind::BusinessRuleViolation
-                    && e.message.contains("Hydro 1")
-                    && e.message.contains("2 pre-study period")),
-            "error must name the required depth and the hydro, got: {errors:?}"
-        );
-    }
-
-    #[test]
-    fn test_insufficient_history_with_fallback_logs_caveat_and_passes() {
-        // Same shortfall as above, but past_inflows now covers the required depth.
-        let hydro = make_hydro_with_travel_time(1, 2, Some(1000.0));
-        let stages = make_stages_with_pre_study(3, 720.0, 2, 720.0);
-        let mut data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
-        data.initial_conditions.past_defluences = past_defluences(1, 1);
-        data.initial_conditions.past_inflows = past_inflows(1, 2);
+        data.initial_conditions.past_defluences = vec![defluence_window(
+            1,
+            chrono::NaiveDate::from_ymd_opt(2023, 12, 30).unwrap(),
+            study_start(),
+        )];
 
         let mut ctx = ValidationContext::new();
         validate_travel_time(&data, &mut ctx);
 
         assert!(
             !ctx.has_errors(),
-            "a usable derived fallback must not hard-error, got: {:?}",
+            "full coverage must not error: {:?}",
             ctx.errors()
         );
         assert!(
-            ctx.warnings()
+            !ctx.warnings()
                 .iter()
-                .any(|w| w.kind == ErrorKind::ModelQuality
-                    && w.message.contains("Hydro 1")
-                    && w.message.contains("past_inflows")),
-            "expected a logged derived-fallback caveat, got: {:?}",
+                .any(|w| w.message.contains("past_defluences")),
+            "full coverage must not advise, got: {:?}",
             ctx.warnings()
         );
     }
 
     #[test]
-    fn test_sufficient_history_no_row5_diagnostics() {
-        let hydro = make_hydro_with_travel_time(1, 2, Some(1000.0));
+    fn test_undercoverage_hard_errors_naming_span() {
+        // t_v = 48h but the only window [2023-12-31, 2024-01-01) covers just 24h,
+        // leaving (24, 48] uncovered.
+        let hydro = make_hydro_with_travel_time(1, 2, Some(48.0));
         let stages = make_stages_with_pre_study(3, 720.0, 2, 720.0);
         let mut data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
-        data.initial_conditions.past_defluences = past_defluences(1, 2);
+        data.initial_conditions.past_defluences = vec![defluence_window(
+            1,
+            chrono::NaiveDate::from_ymd_opt(2023, 12, 31).unwrap(),
+            study_start(),
+        )];
 
         let mut ctx = ValidationContext::new();
         validate_travel_time(&data, &mut ctx);
 
-        assert!(!ctx.has_errors());
+        assert!(ctx.has_errors(), "under-coverage must hard-error");
+        let errors = ctx.errors();
         assert!(
-            !ctx.warnings()
+            errors
                 .iter()
-                .any(|w| w.message.contains("past_defluences") || w.message.contains("proxy")),
-            "sufficient history must not advise, got: {:?}",
-            ctx.warnings()
+                .any(|e| e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message.contains("Hydro 1")
+                    && e.message.contains("48")
+                    && e.message.contains("uncovered")),
+            "error must name the hydro, t_v, and the uncovered span, got: {errors:?}"
         );
     }
 
     #[test]
-    fn test_empty_pre_study_calendar_still_requires_history() {
-        // No pre-study stages declared at all: required_history_periods floors
-        // to 1, so a declared arc with zero past_defluences and zero
-        // past_inflows still hard-errors rather than vacuously passing.
+    fn test_no_windows_hard_errors() {
+        // A declared arc with an empty past_defluences leaves (0, 48] fully
+        // uncovered — a hard error, never a silent zero-seed (no fallback).
         let hydro = make_hydro_with_travel_time(1, 2, Some(48.0));
-        let stages = make_stages_with_pre_study(3, 720.0, 0, 720.0);
+        let stages = make_stages_with_pre_study(3, 720.0, 2, 720.0);
         let data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
 
         let mut ctx = ValidationContext::new();
         validate_travel_time(&data, &mut ctx);
 
+        assert!(ctx.has_errors(), "no windows must hard-error");
+        let errors = ctx.errors();
         assert!(
-            ctx.has_errors(),
-            "a declared arc with no pre-study calendar and no history must still error"
+            errors
+                .iter()
+                .any(|e| e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message.contains("Hydro 1")
+                    && e.message.contains("uncovered")),
+            "error must name the hydro and the uncovered span, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_future_dated_window_invalid_value() {
+        // A window whose end_date (2024-01-05) is after start_0 (2024-01-01)
+        // cannot seed pre-study transit.
+        let hydro = make_hydro_with_travel_time(1, 2, Some(48.0));
+        let stages = make_stages_with_pre_study(3, 720.0, 2, 720.0);
+        let mut data = make_data(vec![hydro], vec![], vec![], stages, vec![], vec![]);
+        data.initial_conditions.past_defluences = vec![defluence_window(
+            1,
+            chrono::NaiveDate::from_ymd_opt(2023, 12, 30).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2024, 1, 5).unwrap(),
+        )];
+
+        let mut ctx = ValidationContext::new();
+        validate_travel_time(&data, &mut ctx);
+
+        assert!(ctx.has_errors(), "a future-dated window must hard-error");
+        let errors = ctx.errors();
+        assert!(
+            errors.iter().any(|e| e.kind == ErrorKind::InvalidValue
+                && e.message.contains("Hydro 1")
+                && e.message.contains("after the study start")),
+            "error must flag the future-dated window naming the hydro, got: {errors:?}"
         );
     }
 
@@ -810,8 +899,8 @@ mod tests {
             vec![],
         );
         data.initial_conditions.past_defluences = vec![
-            past_defluences(1, 1).remove(0),
-            past_defluences(2, 1).remove(0),
+            covering_defluences(1, t1).remove(0),
+            covering_defluences(2, t2).remove(0),
         ];
         data
     }
@@ -880,7 +969,7 @@ mod tests {
         down.entry_stage_id = Some(3);
         let stages = make_stages_with_pre_study(4, 720.0, 1, 720.0);
         let mut data = make_data(vec![up, down], vec![], vec![], stages, vec![], vec![]);
-        data.initial_conditions.past_defluences = past_defluences(1, 1);
+        data.initial_conditions.past_defluences = covering_defluences(1, 48.0);
 
         let mut ctx = ValidationContext::new();
         validate_travel_time(&data, &mut ctx);
@@ -908,7 +997,7 @@ mod tests {
         let down = make_hydro(2, None);
         let stages = make_stages_with_pre_study(4, 720.0, 1, 720.0);
         let mut data = make_data(vec![up, down], vec![], vec![], stages, vec![], vec![]);
-        data.initial_conditions.past_defluences = past_defluences(1, 1);
+        data.initial_conditions.past_defluences = covering_defluences(1, 48.0);
 
         let mut ctx = ValidationContext::new();
         validate_travel_time(&data, &mut ctx);
@@ -931,7 +1020,7 @@ mod tests {
         down.exit_stage_id = Some(2);
         let stages = make_stages_with_pre_study(4, 720.0, 1, 720.0);
         let mut data = make_data(vec![up, down], vec![], vec![], stages, vec![], vec![]);
-        data.initial_conditions.past_defluences = past_defluences(1, 1);
+        data.initial_conditions.past_defluences = covering_defluences(1, 800.0);
 
         let mut ctx = ValidationContext::new();
         validate_travel_time(&data, &mut ctx);
@@ -960,7 +1049,7 @@ mod tests {
         let down = make_hydro(2, None);
         let stages = make_stages_with_pre_study(4, 720.0, 1, 720.0);
         let mut data = make_data(vec![up, down], vec![], vec![], stages, vec![], vec![]);
-        data.initial_conditions.past_defluences = past_defluences(1, 1);
+        data.initial_conditions.past_defluences = covering_defluences(1, 800.0);
 
         let mut ctx = ValidationContext::new();
         validate_travel_time(&data, &mut ctx);
@@ -970,6 +1059,118 @@ mod tests {
                 .iter()
                 .any(|w| w.message.contains("exit_stage_id")),
             "no exit_stage_id must never emit a row-11 advisory, got: {:?}",
+            ctx.warnings()
+        );
+    }
+
+    // ── Row 13: recent_observations non-Monthly seed-gap advisory ────────────
+
+    fn season_map_with_cycle(cycle: SeasonCycleType) -> cobre_core::temporal::SeasonMap {
+        use cobre_core::temporal::{SeasonDefinition, SeasonMap};
+        SeasonMap {
+            cycle_type: cycle,
+            seasons: vec![SeasonDefinition {
+                id: 0,
+                label: "S0".to_string(),
+                month_start: 1,
+                day_start: None,
+                month_end: None,
+                day_end: None,
+            }],
+        }
+    }
+
+    fn recent_obs(hydro_id: i32) -> cobre_core::initial_conditions::RecentObservation {
+        cobre_core::initial_conditions::RecentObservation {
+            hydro_id: EntityId::from(hydro_id),
+            start_date: chrono::NaiveDate::from_ymd_opt(2023, 12, 1).unwrap(),
+            end_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            value_m3s: 500.0,
+        }
+    }
+
+    #[test]
+    fn test_weekly_cycle_with_recent_observations_warns() {
+        let mut data = make_data(
+            vec![make_hydro(1, None)],
+            vec![],
+            vec![],
+            make_stages(vec![0, 1, 2]),
+            vec![],
+            vec![],
+        );
+        data.stages.stages[0].season_id = Some(0);
+        data.stages.policy_graph.season_map = Some(season_map_with_cycle(SeasonCycleType::Weekly));
+        data.initial_conditions.recent_observations = vec![recent_obs(1)];
+
+        let mut ctx = ValidationContext::new();
+        check_recent_observations_non_monthly_seed_gap(&data, &mut ctx);
+
+        assert!(
+            !ctx.has_errors(),
+            "a Weekly-cycle study is valid, not an error"
+        );
+        assert_eq!(
+            ctx.warnings().len(),
+            1,
+            "exactly one advisory, got: {:?}",
+            ctx.warnings()
+        );
+        assert!(
+            ctx.warnings()
+                .iter()
+                .any(|w| w.kind == ErrorKind::ModelQuality
+                    && w.message.contains("Weekly")
+                    && w.message.contains("recent_observations")),
+            "expected a Weekly seed-gap advisory naming the cycle, got: {:?}",
+            ctx.warnings()
+        );
+    }
+
+    #[test]
+    fn test_monthly_cycle_no_seed_gap_warning() {
+        let mut data = make_data(
+            vec![make_hydro(1, None)],
+            vec![],
+            vec![],
+            make_stages(vec![0, 1, 2]),
+            vec![],
+            vec![],
+        );
+        data.stages.stages[0].season_id = Some(0);
+        data.stages.policy_graph.season_map = Some(make_monthly_season_map());
+        data.initial_conditions.recent_observations = vec![recent_obs(1)];
+
+        let mut ctx = ValidationContext::new();
+        check_recent_observations_non_monthly_seed_gap(&data, &mut ctx);
+
+        assert!(
+            ctx.warnings().is_empty(),
+            "Monthly cycle seeds recent_observations; no seed-gap advisory, got: {:?}",
+            ctx.warnings()
+        );
+    }
+
+    #[test]
+    fn test_empty_recent_observations_no_warning() {
+        let mut data = make_data(
+            vec![make_hydro(1, None)],
+            vec![],
+            vec![],
+            make_stages(vec![0, 1, 2]),
+            vec![],
+            vec![],
+        );
+        data.stages.stages[0].season_id = Some(0);
+        data.stages.policy_graph.season_map = Some(season_map_with_cycle(SeasonCycleType::Weekly));
+        // recent_observations left empty — the early return dominates the Weekly cycle.
+
+        let mut ctx = ValidationContext::new();
+        check_recent_observations_non_monthly_seed_gap(&data, &mut ctx);
+
+        assert!(
+            ctx.warnings().is_empty(),
+            "empty recent_observations must be silent even under a Weekly cycle, got: {:?}",
             ctx.warnings()
         );
     }

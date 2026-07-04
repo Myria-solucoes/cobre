@@ -64,6 +64,8 @@ pub(crate) fn compute_recent_observation_seed(
     };
 
     if !matches!(season_map.cycle_type, SeasonCycleType::Monthly) {
+        // TODO(historical-replay-non-monthly): only Monthly seeding is implemented;
+        // cobre-io `check_recent_observations_non_monthly_seed_gap` warns at load time.
         return RecentObservationSeed::zero(hydro_count);
     }
 

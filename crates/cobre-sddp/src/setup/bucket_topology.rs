@@ -121,36 +121,6 @@ fn horizon_cap_active(active: usize, stage: usize, n_stages: usize) -> usize {
     active.min(n_stages - 1 - stage)
 }
 
-/// Pre-study (`id < 0`) period durations in hours, most-recent-first (index 0
-/// = the period immediately preceding stage 0) — the `past_inflows` /
-/// `past_defluences` index convention, the reverse of the canonical
-/// ascending-`id` order. Pre-study stages carry no blocks; duration comes
-/// from the calendar dates.
-// Rationale: pre-study period lengths are on the order of years, far under
-// f64's exact-integer range; a checked conversion buys nothing.
-#[allow(clippy::cast_precision_loss)]
-pub(crate) fn pre_study_period_durations_desc(system: &System) -> Vec<f64> {
-    let mut pre_study: Vec<f64> = system
-        .stages()
-        .iter()
-        .filter(|s| s.id < 0)
-        .map(|s| (s.end_date - s.start_date).num_hours() as f64)
-        .collect();
-    pre_study.reverse();
-    pre_study
-}
-
-/// The number of most-recent pre-study periods a declared arc's history must
-/// supply so `[start_0 - t_v, start_0)` is fully covered — floored at 1 so an
-/// empty pre-study calendar cannot vacuously report zero. Mirrors `cobre-io`'s
-/// `validate_travel_time` row-5 gate; the bucket seed's source-selection
-/// re-derives the same sufficiency check that validation already enforced.
-pub(crate) fn required_history_periods(t_v: f64, pre_study_desc: &[f64]) -> usize {
-    window_period_overlaps(0.0, t_v, pre_study_desc)
-        .len()
-        .max(1)
-}
-
 /// Fraction of pre-study period `m`'s release — spanning
 /// `[t_v - cumulative_before - period_duration, t_v - cumulative_before)` in
 /// real time before stage 0 — landing in study stage `d` (0-indexed, at

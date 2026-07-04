@@ -3,7 +3,7 @@
   "storage": [
     {
       "hydro_id": 0,
-      "value_hm3": 100.0
+      "value_hm3": 0.0
     },
     {
       "hydro_id": 1,
@@ -14,9 +14,9 @@
   "past_defluences": [
     {
       "hydro_id": 0,
-      "start_date": "2023-12-17",
+      "start_date": "2023-12-18",
       "end_date": "2024-01-01",
-      "value_m3s": 0.0
+      "value_m3s": 100.0
     }
   ]
 }

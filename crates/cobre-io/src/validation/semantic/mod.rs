@@ -36,6 +36,7 @@
 //! |24 | Declared arc: `t_v` exceeds the remaining study horizon at some stage  | `system/hydros.json`                  | `ModelQuality` (warning) |
 //! |25 | Declared arc: `past_defluences` history shorter than the required pre-study depth (derived-from-`past_inflows` fallback logs a caveat instead) | `initial_conditions.json` | `BusinessRuleViolation` (or `ModelQuality` warning) |
 //! |26 | 2+ declared arcs into one downstream plant with differing `travel_time_hours`, while any study stage is `Chronological` | `system/hydros.json` | `NotImplemented` |
+//! |27 | `recent_observations` present but the season cycle is not `Monthly` — mid-period PAR lag seeding silently skipped | `initial_conditions.json` | `ModelQuality` (warning) |
 //!
 //! ## Layer 5b rules (stages, penalties, and scenario domain) — `validate_semantic_stages_penalties_scenarios`
 //!
@@ -110,6 +111,7 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     constraints::check_per_block_storage_interior_reference(data, ctx);
     pumping::check_pumping_semantics(data, ctx);
     travel_time::validate_travel_time(data, ctx);
+    travel_time::check_recent_observations_non_monthly_seed_gap(data, ctx);
 }
 
 // ── validate_semantic_stages_penalties_scenarios ──────────────────────────────

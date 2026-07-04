@@ -4110,6 +4110,249 @@ fn d47_travel_time_confluence_aggregation() {
     );
 }
 
+/// D48: a non-zero windowed IC-defluence seed drives the stage-0/1 in-transit
+/// buckets and measurably lowers the training cost — the coverage capstone for
+/// the windowed-seed derivation.
+///
+/// ## System
+///
+/// Cascade `U -> J`, 3 weekly (168 h) stages, one block, parallel mode. `U`
+/// (id 0) declares `travel_time_hours = 336` on its arc to `J` (id 1,
+/// run-of-river). BOTH hydros carry zero reservoir capacity and zero natural
+/// inflow, so `U` releases nothing in-study: the ONLY water in the system is
+/// the pre-study defluence already in transit, seeded into `J`'s stage-0
+/// buckets from `U`'s `past_defluences`. Both carry toy productivity 1 MWh/hm3
+/// (`productivity = 0.0036 = M3S_TO_HM3`, so a turbined hm3 generates 1 MWh
+/// regardless of stage length). One thermal at 10 $/MWh serves 200 MWh/stage.
+///
+/// ## Windowed seed derivation (window -> k -> volume -> cost)
+///
+/// `U`'s single `past_defluences` window `[2023-12-18, 2024-01-01) = [start_0 -
+/// 336h, start_0)` at 100 m3/s covers exactly the arc's in-transit span
+/// `[start_0 - t_v, start_0)` (so it passes the io coverage gate). The seed
+/// (`build_initial_transit_bucket_state`) unrolls it through `ic_anchor_k`:
+///   - `e_off = start_0 - end_date = 0`, `width = end_date - start_date = 336`.
+///   - `ic_anchor_k` sets `window_start = t_v - e_off - width = 0` and overlaps
+///     `[0, 336)` against the weekly stage clock `[168, 168, 168]` -> `[168,
+///     168]` -> `k = [1/2, 1/2]`.
+///   - `volume = width * M3S_TO_HM3 * value = 336 * 0.0036 * 100 = 120.96 hm3`.
+///   - `seed = k * volume = [60.48, 60.48]` hm3. Bucket lag 1 (`b_1^in`)
+///     delivers 60.48 hm3 at stage 0; lag 2 shifts to lag 1 across the stage-0
+///     ring and delivers 60.48 hm3 at stage 1. Both land inside the horizon
+///     (stage 2 is terminal, receives nothing), so no share is dropped.
+///
+/// ## Hand-derived optimum
+///
+/// `J` turbines each maturing arrival (1 hm3 -> 1 MWh), displacing thermal:
+///   - Stage 0: J 60.48 MWh -> thermal 200 - 60.48 = 139.52 MWh -> 1395.20 $.
+///   - Stage 1: J 60.48 MWh -> thermal 139.52 MWh -> 1395.20 $.
+///   - Stage 2: no arrival -> thermal 200 MWh -> 2000.00 $.
+///   - Total = **4790.40 $**.
+///
+/// ## Zero-seed contrast (the non-zero seed is load-bearing)
+///
+/// With the window value set to 0.0 the seed is all-zero, no water reaches J,
+/// and every stage is full thermal: `3 * 200 * 10 = 6000.00 $ != 4790.40`. The
+/// two costs differ by exactly the delivered energy valued at the thermal price
+/// (`120.96 MWh * 10 $/MWh = 1209.60 $`), so the `final_lb == 4790.40`
+/// assertion fails the instant the seed is dropped or mis-derived — this is the
+/// computed-two-ways check that keeps the case from being a zero-seed tautology.
+#[test]
+fn d48_travel_time_ic_seed_windowed_defluence_cost() {
+    const HOURS_PER_STAGE: f64 = 168.0;
+    const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
+    const T_V: f64 = 336.0;
+    const WINDOW_WIDTH: f64 = 336.0;
+    const VALUE_M3S: f64 = 100.0;
+    const DEMAND_MWH: f64 = 200.0;
+    const THERMAL_COST: f64 = 10.0;
+    const N_STAGES: usize = 3;
+    const TOL: f64 = 1e-6;
+
+    // window -> k: recompute the IC-anchor split through the same overlap
+    // primitive the seed uses, so the derivation is machine-checked, not a
+    // hand-copied constant. e_off = 0 (the window ends at start_0), so
+    // window_start = t_v - e_off - width = 0.
+    let e_off = 0.0_f64;
+    let window_start = T_V - e_off - WINDOW_WIDTH;
+    let overlaps =
+        cobre_core::window_period_overlaps(window_start, WINDOW_WIDTH, &[168.0, 168.0, 168.0]);
+    let k: Vec<f64> = overlaps.iter().map(|o| o / WINDOW_WIDTH).collect();
+    assert_eq!(
+        k.len(),
+        2,
+        "D48: the window must split across two study stages"
+    );
+    for (lag, &kd) in k.iter().enumerate() {
+        assert!(
+            (kd - 0.5).abs() < TOL,
+            "D48: k[{lag}] must be 1/2 (even split over two 168 h weeks), got {kd}"
+        );
+    }
+
+    // window -> volume -> seed.
+    let volume_hm3 = WINDOW_WIDTH * M3S_TO_HM3 * VALUE_M3S;
+    assert!(
+        (volume_hm3 - 120.96).abs() < TOL,
+        "D48: volume={volume_hm3}"
+    );
+    let seed_hm3: Vec<f64> = k.iter().map(|kd| kd * volume_hm3).collect(); // [60.48, 60.48]
+
+    // seed -> delivered MWh -> cost (1 hm3 turbined at J -> 1 MWh; the seed
+    // delivers seed[d] hm3 at study stage d, and nothing at the terminal stage).
+    let mut delivered_mwh = vec![0.0_f64; N_STAGES];
+    delivered_mwh[0] = seed_hm3[0];
+    delivered_mwh[1] = seed_hm3[1];
+    let mut expected_lb = 0.0_f64;
+    for &delivered in &delivered_mwh {
+        expected_lb += (DEMAND_MWH - delivered) * THERMAL_COST;
+    }
+    assert!(
+        (expected_lb - 4790.4).abs() < TOL,
+        "D48: hand-derived optimum must be 4790.40, got {expected_lb}"
+    );
+
+    // Zero-seed contrast (computed two ways): the all-thermal baseline minus the
+    // seed savings must equal the seeded optimum, and the two must differ.
+    let expected_zero_seed_lb = (N_STAGES as f64) * DEMAND_MWH * THERMAL_COST; // 6000.0
+    let seed_savings = (seed_hm3[0] + seed_hm3[1]) * THERMAL_COST; // 1209.6
+    assert!(
+        (expected_zero_seed_lb - seed_savings - expected_lb).abs() < TOL,
+        "D48: seeded optimum must be the all-thermal baseline less the delivered \
+         energy's thermal value: {expected_zero_seed_lb} - {seed_savings} != {expected_lb}"
+    );
+    assert!(
+        (expected_zero_seed_lb - expected_lb).abs() > 1.0,
+        "D48: the non-zero seed must MOVE the cost (load-bearing, not a tautology): \
+         zero-seed {expected_zero_seed_lb} vs seeded {expected_lb}"
+    );
+
+    let case_dir = Path::new("../../examples/deterministic/d48-travel-time-ic-seed");
+    let (setup, system, result) = run_deterministic_with_setup(case_dir);
+
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D48: gap={:.2e}",
+        result.final_gap
+    );
+    assert_cost(result.final_lb, expected_lb, TOL, "D48");
+
+    let state = setup.stage_state();
+    assert_eq!(
+        state.n_buckets, 2,
+        "D48: exactly two bucket dimensions (single arc, IC-anchor depth 2)"
+    );
+    let j_canonical_idx = system
+        .hydros()
+        .iter()
+        .position(|h| h.id == cobre_core::EntityId::from(1))
+        .expect("D48: J (hydro id 1) must exist in the canonical hydro order");
+    assert_eq!(
+        state.transit_bucket_column_order,
+        vec![(j_canonical_idx, 1), (j_canonical_idx, 2)],
+        "D48: both bucket slots must belong to J's single block, lags 1 and 2"
+    );
+
+    // End-to-end delivery split: simulate the trained policy and pin the seeded
+    // arrivals, the per-stage thermal split, and seed conservation.
+    let comm = StubComm;
+    let mut pool = setup
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
+        .expect("D48: simulation workspace pool must build");
+    let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
+    let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);
+    let drain_handle = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
+    let _local_costs = setup
+        .simulate(
+            &mut pool.workspaces,
+            &comm,
+            &result_tx,
+            None,
+            result.frozen_templates.as_deref(),
+            &result.basis_cache,
+        )
+        .expect("D48: simulate must return Ok");
+    drop(result_tx);
+    let scenario_results = drain_handle.join().expect("drain thread must not panic");
+
+    assert_eq!(scenario_results.len(), 1, "D48: exactly one scenario");
+    let scenario = &scenario_results[0];
+    assert_eq!(scenario.stages.len(), N_STAGES, "D48: exactly three stages");
+
+    let j_id = 1;
+    let expected_arrivals_hm3 = [seed_hm3[0], seed_hm3[1], 0.0]; // [60.48, 60.48, 0.0]
+    let expected_thermal_mwh = [
+        DEMAND_MWH - delivered_mwh[0],
+        DEMAND_MWH - delivered_mwh[1],
+        DEMAND_MWH - delivered_mwh[2],
+    ]; // [139.52, 139.52, 200.0]
+
+    let mut delivered_hm3 = 0.0_f64;
+    for stage_result in &scenario.stages {
+        let stage_id = stage_result.stage_id as usize;
+
+        // The seed's maturing arrival at J this stage (lag-1 bucket b_1^in).
+        let j_arrival_hm3 = stage_result
+            .transit_buckets
+            .iter()
+            .find(|b| b.hydro_id == j_id && b.lag == 1)
+            .map_or(0.0, |b| b.delayed_arrival_hm3);
+        delivered_hm3 += j_arrival_hm3;
+        assert!(
+            (j_arrival_hm3 - expected_arrivals_hm3[stage_id]).abs() < TOL,
+            "D48: stage {stage_id} seeded arrival at J must be {} hm3, got {j_arrival_hm3}",
+            expected_arrivals_hm3[stage_id]
+        );
+
+        // J turbines every hm3 it receives (zero storage), and 1 hm3 -> 1 MWh,
+        // so its generation MUST equal the arrival — the water actually offsets
+        // thermal, not merely arrives on paper.
+        let j_hydro = stage_result
+            .hydros
+            .iter()
+            .find(|h| h.hydro_id == j_id)
+            .unwrap_or_else(|| panic!("D48: J missing from stage {stage_id}"));
+        let j_turbined_hm3 = j_hydro.turbined_m3s * M3S_TO_HM3 * HOURS_PER_STAGE;
+        assert!(
+            (j_turbined_hm3 - expected_arrivals_hm3[stage_id]).abs() < TOL,
+            "D48: stage {stage_id} J must turbine the {} hm3 it receives, got {j_turbined_hm3}",
+            expected_arrivals_hm3[stage_id]
+        );
+
+        let thermal_mwh = stage_result
+            .thermals
+            .iter()
+            .find(|t| t.thermal_id == 0)
+            .unwrap_or_else(|| panic!("D48: T0 missing from stage {stage_id}"))
+            .generation_mw
+            * HOURS_PER_STAGE;
+        assert!(
+            (thermal_mwh - expected_thermal_mwh[stage_id]).abs() < TOL,
+            "D48: stage {stage_id} thermal must be {} MWh, got {thermal_mwh}",
+            expected_thermal_mwh[stage_id]
+        );
+    }
+
+    // Seed conservation: the entire seeded volume is delivered within the
+    // horizon (U releases nothing in-study), leaving no residual in transit at
+    // the terminal stage.
+    let horizon_drop_hm3: f64 = scenario
+        .stages
+        .last()
+        .expect("D48: at least one stage")
+        .transit_buckets
+        .iter()
+        .filter(|b| b.hydro_id == j_id)
+        .map(|b| b.in_transit_volume_hm3)
+        .sum();
+    let residual = volume_hm3 - (delivered_hm3 + horizon_drop_hm3);
+    assert!(
+        residual.abs() < TOL,
+        "D48: seed conservation violated: seeded={volume_hm3}, delivered={delivered_hm3}, \
+         horizon_drop={horizon_drop_hm3}, residual={residual}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Behavioral convergence coverage for the non-golden (demoted) hashed cases
 //

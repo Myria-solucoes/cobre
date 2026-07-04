@@ -478,13 +478,13 @@ distinct season IDs.
 Initial reservoir storage, past inflow lags, and recent observations at the
 start of the study.
 
-| Field                 | Required | Description                                                                                                       |
-| --------------------- | -------- | ----------------------------------------------------------------------------------------------------------------- |
-| `storage`             | Yes      | Array of `{ "hydro_id": integer, "value_hm3": number }` entries for operating hydros                              |
-| `filling_storage`     | Yes      | Array of `{ "hydro_id": integer, "value_hm3": number }` entries for filling hydros                                |
-| `past_inflows`        | No       | Array of `{ "hydro_id": integer, "values_m3s": [number], "season_ids": [integer] }` for PAR(p) lag initialization |
-| `past_defluences`     | No       | Array of `{ "hydro_id": integer, "values_m3s": [number], "season_ids": [integer] }` — pre-study releases in transit at study start, per declared travel-time arc |
-| `recent_observations` | No       | Array of observed inflow entries for mid-season study starts (see below)                                          |
+| Field                 | Required | Description                                                                                                                                                                                                      |
+| --------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `storage`             | Yes      | Array of `{ "hydro_id": integer, "value_hm3": number }` entries for operating hydros                                                                                                                             |
+| `filling_storage`     | Yes      | Array of `{ "hydro_id": integer, "value_hm3": number }` entries for filling hydros                                                                                                                               |
+| `past_inflows`        | No       | Array of `{ "hydro_id": integer, "values_m3s": [number], "season_ids": [integer] }` for PAR(p) lag initialization                                                                                                |
+| `past_defluences`     | No       | Array of `{ "hydro_id": integer, "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD", "value_m3s": number }` dated release windows — pre-study releases in transit at study start, per declared travel-time arc |
+| `recent_observations` | No       | Array of observed inflow entries for mid-season study starts (see below)                                                                                                                                         |
 
 Each `hydro_id` must be unique within its array and must not appear in both
 `storage` and `filling_storage`. All `value_hm3` values must be non-negative.

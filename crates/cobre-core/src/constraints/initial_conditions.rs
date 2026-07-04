@@ -83,24 +83,28 @@ pub struct HydroPastInflows {
     pub season_ids: Option<Vec<u32>>,
 }
 
-/// Past defluence (release) history for the arc fed by a single upstream hydro.
+/// Past defluence (release) for the arc fed by a single upstream hydro over a
+/// specific date range.
 ///
-/// Mirrors [`HydroPastInflows`]: entries are ordered from most recent (index 0)
-/// to oldest, following the `past_inflows` pre-study period convention. Keyed by
-/// the upstream hydro whose release crosses the arc.
+/// Used to seed the in-transit water travel-time buckets from an arc's
+/// pre-study upstream releases. Each entry represents the average release rate
+/// (in m³/s) over `[start_date, end_date)` — `end_date` exclusive, must be
+/// after `start_date` — for one upstream hydro. Multiple entries per hydro are
+/// allowed; date ranges for the same hydro must not overlap, though adjacent
+/// ranges (`start_date == previous end_date`) are accepted.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct HydroPastDefluences {
+pub struct HydroPastDefluence {
     /// Upstream hydro plant identifier whose release feeds the arc. Must
     /// reference a hydro entity in the system.
     pub hydro_id: EntityId,
-    /// Past defluence values in m³/s, ordered from most recent (index 0) to
-    /// oldest.
-    pub values_m3s: Vec<f64>,
-    /// Optional season ID per entry. When present, `season_ids.len()` must equal
-    /// `values_m3s.len()`; when absent, entries get no temporal validation.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub season_ids: Option<Vec<u32>>,
+    /// Start of the release window (inclusive).
+    pub start_date: NaiveDate,
+    /// End of the release window (exclusive). Must be after `start_date`.
+    pub end_date: NaiveDate,
+    /// Average release rate over the window, in m³/s. Must be finite and
+    /// non-negative.
+    pub value_m3s: f64,
 }
 
 /// Past externally-decided anticipated commitments for a single thermal plant.
@@ -170,7 +174,7 @@ pub struct RecentObservation {
 /// [`storage`](InitialConditions::storage).
 ///
 /// [`filling_storage`]: InitialConditions::filling_storage
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct InitialConditions {
     /// Initial storage for operating hydros, in hm³ per hydro.
@@ -203,9 +207,9 @@ pub struct InitialConditions {
     /// [`RecentObservation`] for the per-entry contract.
     #[cfg_attr(feature = "serde", serde(default))]
     pub recent_observations: Vec<RecentObservation>,
-    /// Past defluence (release) values per arc, keyed by the upstream hydro whose
-    /// release feeds the arc. In m³/s, following the `past_inflows` period
-    /// convention; empty when no arcs need seeding.
+    /// Past defluence (release) windows per arc, keyed by the upstream hydro
+    /// whose release feeds the arc; empty when no arcs need seeding. See
+    /// [`HydroPastDefluence`] for the per-entry contract.
     ///
     /// Always emitted on output even when empty — omitting it would break the
     /// postcard round-trip used by MPI broadcast.
@@ -213,21 +217,7 @@ pub struct InitialConditions {
     /// Field declaration order is part of the postcard wire format used by MPI
     /// broadcast: append new fields at the end, never above this one.
     #[cfg_attr(feature = "serde", serde(default))]
-    pub past_defluences: Vec<HydroPastDefluences>,
-}
-
-impl Default for InitialConditions {
-    /// Returns an empty `InitialConditions` (no hydros, no anticipated thermals).
-    fn default() -> Self {
-        Self {
-            storage: Vec::new(),
-            filling_storage: Vec::new(),
-            past_inflows: Vec::new(),
-            past_anticipated_commitments: Vec::new(),
-            recent_observations: Vec::new(),
-            past_defluences: Vec::new(),
-        }
-    }
+    pub past_defluences: Vec<HydroPastDefluence>,
 }
 
 #[cfg(test)]
@@ -548,18 +538,20 @@ mod tests {
         assert!(ach.values_mw.is_empty());
     }
 
-    // --- HydroPastDefluences / past_defluences tests ---
+    // --- HydroPastDefluence / past_defluences tests ---
 
     #[test]
-    fn test_hydro_past_defluences_construction_and_clone() {
-        let hpd = HydroPastDefluences {
+    fn test_hydro_past_defluence_construction_and_clone() {
+        let hpd = HydroPastDefluence {
             hydro_id: EntityId(4),
-            values_m3s: vec![700.0, 650.0],
-            season_ids: Some(vec![4, 3]),
+            start_date: NaiveDate::from_ymd_opt(2026, 4, 1)
+                .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
+            end_date: NaiveDate::from_ymd_opt(2026, 4, 4)
+                .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
+            value_m3s: 700.0,
         };
         assert_eq!(hpd.hydro_id, EntityId(4));
-        assert_eq!(hpd.values_m3s, vec![700.0, 650.0]);
-        assert_eq!(hpd.season_ids, Some(vec![4, 3]));
+        assert_eq!(hpd.value_m3s, 700.0);
         assert_eq!(hpd.clone(), hpd);
     }
 
@@ -590,15 +582,21 @@ mod tests {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![
-                HydroPastDefluences {
+                HydroPastDefluence {
                     hydro_id: EntityId(0),
-                    values_m3s: vec![700.0, 650.0],
-                    season_ids: Some(vec![4, 3]),
+                    start_date: NaiveDate::from_ymd_opt(2026, 4, 1)
+                        .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
+                    end_date: NaiveDate::from_ymd_opt(2026, 4, 4)
+                        .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
+                    value_m3s: 700.0,
                 },
-                HydroPastDefluences {
-                    hydro_id: EntityId(1),
-                    values_m3s: vec![120.0],
-                    season_ids: None,
+                HydroPastDefluence {
+                    hydro_id: EntityId(0),
+                    start_date: NaiveDate::from_ymd_opt(2026, 4, 4)
+                        .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
+                    end_date: NaiveDate::from_ymd_opt(2026, 4, 11)
+                        .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
+                    value_m3s: 650.0,
                 },
             ],
         };
@@ -636,10 +634,13 @@ mod tests {
             past_defluences: vec![],
         };
         let mut with_defl = base.clone();
-        with_defl.past_defluences = vec![HydroPastDefluences {
+        with_defl.past_defluences = vec![HydroPastDefluence {
             hydro_id: EntityId(0),
-            values_m3s: vec![700.0, 650.0],
-            season_ids: None,
+            start_date: NaiveDate::from_ymd_opt(2026, 4, 1)
+                .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
+            end_date: NaiveDate::from_ymd_opt(2026, 4, 4)
+                .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
+            value_m3s: 700.0,
         }];
 
         let prefix = postcard::to_allocvec(&base).unwrap();
