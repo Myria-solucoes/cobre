@@ -278,6 +278,71 @@ pub struct PointResolution {
     pub depth: Vec<usize>,
 }
 
+impl PointResolution {
+    /// Delivery stages where `c(m) = m` — a sub-stage lead: the physical lead
+    /// is shorter than the delivery stage's own duration, so the commitment
+    /// would be decided inside its own delivery stage and no anticipation
+    /// binds (`K = 0`, locked D4). Excluded from the ring entirely; the stage
+    /// LP dispatches the plant's generation as ordinary, unconstrained
+    /// thermal output.
+    pub fn self_delivered_stages(&self) -> impl Iterator<Item = usize> + '_ {
+        self.decider
+            .iter()
+            .enumerate()
+            .filter_map(|(m, &c)| (c == Some(m)).then_some(m))
+    }
+
+    /// Whether delivery stage `m`'s commitment is genuinely anticipated: its
+    /// decider is `None` (pre-study) or strictly earlier than `m`. `false`
+    /// exactly at a `K = 0` sub-stage lead ([`Self::self_delivered_stages`]).
+    /// `m` beyond the resolved horizon (out of [`Self::decider`]'s range, the
+    /// fixture-only degenerate case of a resolution built for fewer stages
+    /// than queried) safely defaults to `true` — no data to suggest a
+    /// self-delivery, so the fishing gate stays open rather than silently
+    /// suppressing an otherwise-ordinary plant.
+    #[must_use]
+    pub fn is_anticipated_at(&self, m: usize) -> bool {
+        self.decider.get(m).copied().flatten() != Some(m)
+    }
+
+    /// `C(t)` filtered to exclude a `K = 0` self-delivery (`c(m) = m`,
+    /// [`Self::self_delivered_stages`]): the genuine, ring-eligible decisions
+    /// committed at decision stage `t`. Ascending, mirroring `decision_sets[t]`'s
+    /// own order — the fan-out decision-column order. `t` beyond
+    /// [`Self::decision_sets`]'s range safely yields empty (no decision data,
+    /// so no deposit).
+    pub fn genuine_decisions_at(&self, t: usize) -> impl Iterator<Item = usize> + '_ {
+        self.decision_sets
+            .get(t)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(move |&m| m != t)
+    }
+
+    /// Whether delivery stage `m`'s commitment has ALREADY been decided as of
+    /// decision stage `t <= m`: either pre-study (`None`) or at or before `t`
+    /// (`c(m) <= t`). `decider` is nondecreasing in `m` (`resolve_decider_*`'s
+    /// end-anchored/stage-count construction), so readiness is monotonic in
+    /// `m`: if slot `k` (delivery `m = t+k+1`) is ready, every shallower slot
+    /// `k' < k` is ready too — a contiguous prefix from slot 0, never a
+    /// `depth`-derived boundary. `depth[t]` EXCLUDES pre-study (`None`) items
+    /// by construction (`build_decision_sets_and_depth`'s sweep only adds a
+    /// delta for `Some(t)`), so it under-counts whenever pre-study occupancy
+    /// coexists with an in-study decision at the same stage — deriving a slot
+    /// boundary from it (rather than checking readiness directly per slot) is
+    /// the wrong-but-plausible shortcut this method exists to rule out. `m`
+    /// beyond [`Self::decider`]'s range safely yields `false` (no data, so no
+    /// shift row) — callers already gate on `m < n_stages` before reaching
+    /// here in the well-formed case.
+    #[must_use]
+    pub fn is_ready_at(&self, m: usize, t: usize) -> bool {
+        self.decider
+            .get(m)
+            .is_some_and(|c| c.is_none_or(|c| c <= t))
+    }
+}
+
 /// Resolve a point-commitment lag into the delivery-anchored decider, the
 /// per-decision-stage outgoing commitment sets, and the per-decision-stage
 /// depths.
@@ -316,8 +381,8 @@ pub fn resolve_point(
 /// derived ring depth.
 ///
 /// Threaded from setup onto the state layout as additive data for the in-LP
-/// delivery-anchored ring; the still-live constant-lead machinery keeps reading
-/// the layout's per-plant `anticipated_lead_stages` until that ring lands.
+/// delivery-anchored ring; the constant-lead machinery still reads the layout's
+/// per-plant `anticipated_lead_stages`.
 #[derive(Debug, Clone, Default)]
 pub struct AnticipatedResolution {
     /// One [`PointResolution`] per anticipated plant, in anticipated-local
@@ -326,11 +391,18 @@ pub struct AnticipatedResolution {
     /// Delivery-anchored ring depth `max_i max_t K_i(t)` over every plant's
     /// per-stage depth; `0` with no anticipated plants.
     pub k_max: usize,
+    /// Fan-out width `max_i max_t |genuine C_i(t)|` (bounded by [`Self::k_max`]
+    /// — a decision set's genuine members are a subset of the plant's in-flight
+    /// count at `t`): the decision-column geometry's per-plant stride,
+    /// `col_anticipated_decision_start + j * n_anticipated + local_idx` for
+    /// `j in 0..max_fanout`. `1` for a single-decider study (`|C(t)| <= 1`
+    /// everywhere), `0` with no anticipated plants.
+    pub max_fanout: usize,
 }
 
 impl AnticipatedResolution {
     /// Resolve every plant's point-commitment lag against the study calendar and
-    /// derive the ring depth.
+    /// derive the ring depth and fan-out width.
     ///
     /// `leads` is in anticipated-local order; `stage_lengths_hours` has length
     /// `n_stages` ([`LeadTime::Stages`] never reads it). This is the single
@@ -347,7 +419,16 @@ impl AnticipatedResolution {
             .flat_map(|resolution| resolution.depth.iter().copied())
             .max()
             .unwrap_or(0);
-        Self { per_plant, k_max }
+        let max_fanout = per_plant
+            .iter()
+            .flat_map(|point| (0..n_stages).map(|t| point.genuine_decisions_at(t).count()))
+            .max()
+            .unwrap_or(0);
+        Self {
+            per_plant,
+            k_max,
+            max_fanout,
+        }
     }
 }
 

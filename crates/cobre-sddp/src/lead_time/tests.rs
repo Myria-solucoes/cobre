@@ -395,3 +395,84 @@ fn test_anticipated_resolution_empty_is_zero_depth() {
     assert!(resolution.per_plant.is_empty());
     assert_eq!(resolution.k_max, 0);
 }
+
+// Fan-out `[720,168,168,168,168,168]` h `LeadTime(720)` — the exact calendar
+// hand-derived to `decision_sets[0] == [1,2,3,4]`. Confirms
+// `genuine_decisions_at` reproduces the same set (nothing is self-delivered
+// here) and `max_fanout` reaches the fan-out width.
+#[test]
+fn test_genuine_decisions_at_matches_fanout_hand_derivation() {
+    let stage_lengths_hours = [720.0, 168.0, 168.0, 168.0, 168.0, 168.0];
+    let resolution = AnticipatedResolution::resolve(
+        &[LeadTime::Time(720.0)],
+        &stage_lengths_hours,
+        stage_lengths_hours.len(),
+    );
+    let point = &resolution.per_plant[0];
+
+    assert_eq!(point.decision_sets[0], vec![1, 2, 3, 4]);
+    assert_eq!(
+        point.genuine_decisions_at(0).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4],
+        "no self-delivery here, so genuine == decision_sets exactly"
+    );
+    assert_eq!(resolution.max_fanout, 4);
+    assert!(point.self_delivered_stages().next().is_none());
+}
+
+// `K = 0` `[744,744,744,744]` h `LeadTime(720)` — the exact calendar
+// hand-derived to `depth == [0,0,0,0]`. Every delivery stage
+// self-delivers (`c(m) = m`), so `genuine_decisions_at` is empty everywhere,
+// `self_delivered_stages` yields every stage, and `is_anticipated_at` is
+// `false` at every stage.
+#[test]
+fn test_k0_uniform_calendar_self_delivers_every_stage() {
+    let stage_lengths_hours = [744.0, 744.0, 744.0, 744.0];
+    let resolution = AnticipatedResolution::resolve(
+        &[LeadTime::Time(720.0)],
+        &stage_lengths_hours,
+        stage_lengths_hours.len(),
+    );
+    let point = &resolution.per_plant[0];
+
+    assert_eq!(point.depth, vec![0, 0, 0, 0]);
+    assert_eq!(resolution.k_max, 0);
+    assert_eq!(resolution.max_fanout, 0);
+    assert_eq!(
+        point.self_delivered_stages().collect::<Vec<_>>(),
+        vec![0, 1, 2, 3]
+    );
+    for t in 0..4 {
+        assert!(
+            point.genuine_decisions_at(t).next().is_none(),
+            "stage {t}: a self-delivery must never appear as a genuine decision"
+        );
+        assert!(
+            !point.is_anticipated_at(t),
+            "stage {t}: a K=0 self-delivery must never be genuinely anticipated"
+        );
+    }
+}
+
+// `is_ready_at` is monotonic in `m` for a constant-lead plant: at any decision
+// stage, every slot up to K-1 is ready (either IC-seeded or an earlier in-study
+// decision), and slot K is not (structural padding beyond this plant's depth).
+#[test]
+fn test_is_ready_at_monotonic_prefix_for_constant_lead() {
+    let stage_lengths_hours = [744.0; 6];
+    let resolution =
+        AnticipatedResolution::resolve(&[LeadTime::Stages(2)], &stage_lengths_hours, 6);
+    let point = &resolution.per_plant[0];
+
+    // At t=0: m=1 (slot 0, IC-seeded) and m=2 (slot 1, this stage's own fresh
+    // decision) are both ready; m=3 (slot 2, beyond K=2) is not.
+    assert!(point.is_ready_at(1, 0), "slot 0 (IC-seeded) must be ready");
+    assert!(
+        point.is_ready_at(2, 0),
+        "slot 1 (fresh decision) must be ready"
+    );
+    assert!(
+        !point.is_ready_at(3, 0),
+        "slot 2 is beyond this plant's depth and must not be ready"
+    );
+}

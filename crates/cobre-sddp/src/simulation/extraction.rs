@@ -142,12 +142,22 @@ impl ThermalReverseLookup {
     }
 }
 
-/// Primal of a thermal's anticipated-decision column, or `None` when the thermal
-/// is not anticipated or the decision is inactive at this stage.
+/// Primal of a thermal's anticipated-decision column, or `None` when the
+/// thermal is not anticipated, has no in-study decision at this stage, or the
+/// decision is inactive at its delivery stage.
 ///
-/// Gates on [`StateLayout::is_anticipated_decision_active`] rather than reading
-/// then checking: an inactive column is pinned to `[0, 0]` and the predicate is
-/// the canonical single-owner test.
+/// The delivery stage comes from [`StateLayout::anticipated_resolution_for`]'s
+/// delivery-anchored resolution (`PointResolution::genuine_decisions_at`),
+/// never `stage_idx + lead_stages` — the constant-lead shortcut mis-resolves a
+/// calendar-anchored lead on a non-uniform study. Only the single-decider case
+/// is read: at most one genuine decision per plant per stage. A plant fanning
+/// out several deliveries from one decision stage needs a per-delivery-stage
+/// output extraction this helper does not provide; the `debug_assert` below
+/// flags that gap rather than silently reporting only the first delivery.
+///
+/// Gates on [`StateLayout::is_anticipated_decision_active_for_delivery`] rather
+/// than reading then checking: an inactive column is pinned to `[0, 0]` and the
+/// predicate is the canonical single-owner test.
 #[inline]
 fn compute_anticipated_decision_mw(
     view: &SolutionView<'_>,
@@ -156,9 +166,20 @@ fn compute_anticipated_decision_mw(
     thermal_local: usize,
 ) -> Option<f64> {
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
-    if !spec.state.is_anticipated_decision_active(
+    let resolution = spec
+        .state
+        .anticipated_resolution_for(local_idx, spec.n_stages);
+    let mut genuine = resolution.genuine_decisions_at(spec.stage_index);
+    let delivery_stage = genuine.next()?;
+    debug_assert!(
+        genuine.next().is_none(),
+        "compute_anticipated_decision_mw reads a single delivery stage per plant \
+         per stage; a fanned-out decision needs per-delivery-stage output \
+         extraction, not implemented here"
+    );
+    if !spec.state.is_anticipated_decision_active_for_delivery(
         local_idx,
-        spec.stage_index,
+        delivery_stage,
         spec.n_stages,
         spec.anticipated_windows,
         spec.study_stage_ids,

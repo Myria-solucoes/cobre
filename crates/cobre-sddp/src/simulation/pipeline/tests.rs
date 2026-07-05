@@ -2171,3 +2171,417 @@ mod dcs_simulation {
         assert!(DcsParams::from_strategy(&dominated).is_none());
     }
 }
+
+/// Cross-path regression: the simulation pipeline's anticipated ring advances
+/// identically to the training forward pass for the same solved-LP sequence.
+///
+/// `run_forward_stage` and `solve_simulation_stage` each drive their own
+/// workspace through the identical three-stage solution sequence; both share
+/// `debug_assert_bucket_copy_gap_intact` and `accumulate_and_shift_lag_state`,
+/// so a residual shift reintroduced in either path diverges the captured
+/// trajectories or trips that assert.
+mod anticipated_ring_matches_forward_propagation {
+    use std::collections::HashMap;
+    use std::sync::mpsc;
+
+    use cobre_solver::{
+        Basis, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
+    };
+
+    use super::super::{
+        SimLookups, SimStageIds, SimStageLoadSpec, SimulationOutputSpec, solve_simulation_stage,
+    };
+    use crate::context::{StageContext, TrainingContext};
+    use crate::cut::FutureCostFunction;
+    use crate::energy_conversion::EnergyConversionSet;
+    use crate::horizon_mode::HorizonMode;
+    use crate::inflow_method::InflowNonNegativityMethod;
+    use crate::lp_builder::PatchBuffer;
+    use crate::simulation::extraction::EntityCounts;
+    use crate::training::forward::{StageKey, run_forward_stage};
+    use crate::trajectory::TrajectoryRecord;
+    use crate::workspace::{BasisStore, SolverWorkspace, WorkspaceSizing};
+
+    const N_STAGES: usize = 3;
+
+    /// Mock solver returning the `n`-th configured [`LpSolution`] on its `n`-th
+    /// `solve()` call — one per stage, in order (unlike the file's shared
+    /// [`MockSolver`], which always returns the same fixed solution).
+    struct SequencedSolver {
+        solutions: Vec<LpSolution>,
+        call_count: usize,
+        buf_primal: Vec<f64>,
+        buf_dual: Vec<f64>,
+        buf_reduced_costs: Vec<f64>,
+    }
+
+    impl SequencedSolver {
+        fn new(solutions: Vec<LpSolution>) -> Self {
+            Self {
+                solutions,
+                call_count: 0,
+                buf_primal: Vec::new(),
+                buf_dual: Vec::new(),
+                buf_reduced_costs: Vec::new(),
+            }
+        }
+    }
+
+    impl SolverInterface for SequencedSolver {
+        type Profile = cobre_solver::ActiveProfile;
+
+        fn apply_profile(&mut self, _profile: &cobre_solver::ActiveProfile) {}
+        fn solver_name_version(&self) -> String {
+            "SequencedSolver 0.0.0".to_string()
+        }
+        fn load_model(&mut self, _template: &StageTemplate) {}
+        fn add_rows(&mut self, _cuts: &RowBatch) {}
+        fn set_row_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
+        fn set_col_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
+        fn solve(
+            &mut self,
+            _basis: Option<&Basis>,
+        ) -> Result<cobre_solver::SolutionView<'_>, SolverError> {
+            let sol = &self.solutions[self.call_count];
+            self.call_count += 1;
+            self.buf_primal.clone_from(&sol.primal);
+            self.buf_dual.clone_from(&sol.dual);
+            self.buf_reduced_costs.clone_from(&sol.reduced_costs);
+            Ok(cobre_solver::SolutionView {
+                objective: sol.objective,
+                primal: &self.buf_primal,
+                dual: &self.buf_dual,
+                reduced_costs: &self.buf_reduced_costs,
+                iterations: sol.iterations,
+                solve_time_seconds: sol.solve_time_seconds,
+            })
+        }
+        fn get_basis(&mut self, _out: &mut Basis) {}
+        fn record_reconstruction_stats(&mut self) {}
+        fn statistics(&self) -> SolverStatistics {
+            SolverStatistics::default()
+        }
+        fn statistics_into(&self, out: &mut SolverStatistics) {
+            out.copy_from(&SolverStatistics::default());
+        }
+        fn name(&self) -> &'static str {
+            "Sequenced"
+        }
+    }
+
+    fn ring_solution(slot0: f64, slot1: f64, num_cols: usize) -> LpSolution {
+        let mut primal = vec![0.0_f64; num_cols];
+        primal[0] = slot0;
+        primal[1] = slot1;
+        LpSolution {
+            objective: 0.0,
+            primal,
+            dual: Vec::new(),
+            reduced_costs: vec![0.0; num_cols],
+            iterations: 0,
+            solve_time_seconds: 0.0,
+        }
+    }
+
+    /// Three-stage `k_max=2` ring sequence: an IC seed `[10, 20]`, then a
+    /// stage-0 decision `100`, a stage-1 decision `200`, a stage-2 decision
+    /// `300` — each stage's outgoing slots are `[prior slot1, this stage's
+    /// decision]`, the ring-shift narrative the in-LP definition rows encode
+    /// (irrelevant to this fixture: the mock solver returns these values
+    /// unconditionally, so the test isolates state ADVANCE, not the ring's own
+    /// LP-solved shift).
+    fn ring_sequence(num_cols: usize) -> Vec<LpSolution> {
+        vec![
+            ring_solution(20.0, 100.0, num_cols),
+            ring_solution(100.0, 200.0, num_cols),
+            ring_solution(200.0, 300.0, num_cols),
+        ]
+    }
+
+    fn ring_template(num_cols: usize, n_state: usize) -> StageTemplate {
+        StageTemplate {
+            num_cols,
+            num_rows: 0,
+            num_nz: 0,
+            col_starts: vec![0_i32; num_cols + 1],
+            row_indices: Vec::new(),
+            values: Vec::new(),
+            col_lower: vec![f64::NEG_INFINITY; num_cols],
+            col_upper: vec![f64::INFINITY; num_cols],
+            objective: vec![0.0; num_cols],
+            row_lower: Vec::new(),
+            row_upper: Vec::new(),
+            n_state,
+            n_transfer: 0,
+            n_dual_relevant: 0,
+            n_hydro: 0,
+            max_par_order: 0,
+            col_scale: Vec::new(),
+            row_scale: Vec::new(),
+        }
+    }
+
+    fn ring_sizing(n_state: usize) -> WorkspaceSizing {
+        WorkspaceSizing {
+            hydro_count: 0,
+            max_par_order: 0,
+            n_load_buses: 0,
+            max_blocks: 0,
+            n_buckets: 0,
+            downstream_par_order: 0,
+            max_openings: 1,
+            initial_pool_capacity: 16,
+            n_state,
+            max_local_fwd: 1,
+            total_forward_passes: 1,
+            noise_dim: 0,
+            n_anticipated: 1,
+            k_max: 2,
+        }
+    }
+
+    /// Drive `run_forward_stage` over `N_STAGES` stages, returning the captured
+    /// `current_state` after each stage.
+    fn run_forward_trajectory(
+        state: &crate::indexer::StateLayout,
+        templates: &[StageTemplate],
+        training_ctx: &TrainingContext<'_>,
+        ctx: &StageContext<'_>,
+        fcf: &FutureCostFunction,
+        num_cols: usize,
+    ) -> Vec<Vec<f64>> {
+        let mut ws = SolverWorkspace::new(
+            0,
+            0,
+            SequencedSolver::new(ring_sequence(num_cols)),
+            PatchBuffer::new(0, 0, 0, 0, 0, 1, 2),
+            state.n_state,
+            ring_sizing(state.n_state),
+        );
+        ws.current_state.clear();
+        ws.current_state.extend_from_slice(&[10.0, 20.0]);
+
+        let mut basis_store = BasisStore::new(1, N_STAGES);
+        let mut slices = basis_store.split_workers_mut(1);
+        let mut records: Vec<TrajectoryRecord> = (0..N_STAGES)
+            .map(|_| TrajectoryRecord {
+                primal: Vec::new(),
+                dual: Vec::new(),
+                stage_cost: 0.0,
+                state: Vec::new(),
+            })
+            .collect();
+
+        let mut trajectory = Vec::with_capacity(N_STAGES);
+        for (t, template) in templates.iter().enumerate() {
+            ws.solver.load_model(template);
+            let key = StageKey {
+                t,
+                m: 0,
+                local_m: 0,
+                num_stages: N_STAGES,
+                iteration: 1,
+                raw_noise: &[],
+                basis_row_capacity: template.num_rows,
+                terminal_has_boundary_cuts: false,
+                pool: &fcf.pools[t],
+                dcs: None,
+            };
+            run_forward_stage(
+                &mut ws,
+                &mut slices[0],
+                ctx,
+                training_ctx,
+                &key,
+                &mut records,
+            )
+            .expect("forward stage solve must succeed");
+            trajectory.push(ws.current_state.clone());
+        }
+        trajectory
+    }
+
+    /// Drive `solve_simulation_stage` over `N_STAGES` stages, returning the
+    /// captured `current_state` after each stage.
+    fn run_simulation_trajectory(
+        state: &crate::indexer::StateLayout,
+        templates: &[StageTemplate],
+        training_ctx: &TrainingContext<'_>,
+        ctx: &StageContext<'_>,
+        fcf: &FutureCostFunction,
+        num_cols: usize,
+    ) -> Vec<Vec<f64>> {
+        let mut ws = SolverWorkspace::new(
+            0,
+            0,
+            SequencedSolver::new(ring_sequence(num_cols)),
+            PatchBuffer::new(0, 0, 0, 0, 0, 1, 2),
+            state.n_state,
+            ring_sizing(state.n_state),
+        );
+        ws.current_state.clear();
+        ws.current_state.extend_from_slice(&[10.0, 20.0]);
+        ws.scratch.noise_buf.clear();
+        ws.scratch.load_rhs_buf.clear();
+        ws.scratch.z_inflow_rhs_buf.clear();
+        ws.scratch.ncs_col_upper_buf.clear();
+        ws.scratch.inflow_m3s_buf.clear();
+
+        let entity_counts = EntityCounts {
+            hydro_ids: Vec::new(),
+            hydro_productivities: Vec::new(),
+            thermal_ids: Vec::new(),
+            line_ids: Vec::new(),
+            bus_ids: Vec::new(),
+            pumping_station_ids: Vec::new(),
+            contract_ids: Vec::new(),
+            non_controllable_ids: Vec::new(),
+        };
+        let hprod: Vec<Vec<f64>> = vec![Vec::new(); N_STAGES];
+        let ec = EnergyConversionSet::new(Vec::new(), Vec::new(), 0, N_STAGES);
+        let diversion: HashMap<cobre_core::EntityId, Vec<usize>> = HashMap::new();
+        let (tx, _rx) = mpsc::sync_channel(N_STAGES.max(1));
+        let output = SimulationOutputSpec {
+            result_tx: &tx,
+            zeta_per_stage: &[1.0, 1.0, 1.0],
+            block_hours_per_stage: &[vec![1.0], vec![1.0], vec![1.0]],
+            entity_counts: &entity_counts,
+            generic_constraint_row_entries: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            pumping_col_starts: &[],
+            n_pumping: 0,
+            geometry_per_stage: &[],
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices_per_stage: &[],
+            contract_is_import: &[],
+            ncs_entity_ids_per_stage: &[],
+            diversion_upstream: &diversion,
+            hydro_productivities_per_stage: &hprod,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[],
+            event_sender: None,
+        };
+        let lookups = SimLookups::build(training_ctx.study_dims, &[], 0, 0);
+
+        let mut trajectory = Vec::with_capacity(N_STAGES);
+        for (t, template) in templates.iter().enumerate() {
+            #[allow(clippy::cast_possible_truncation)]
+            let ids = SimStageIds {
+                t,
+                stage_id_u32: t as u32,
+                scenario_id: 0,
+            };
+            let load_spec = SimStageLoadSpec {
+                frozen_template: template,
+                warm_basis: None,
+            };
+            let (_immediate, _result) = solve_simulation_stage(
+                &mut ws,
+                ctx,
+                fcf,
+                training_ctx,
+                &load_spec,
+                &output,
+                &ids,
+                &lookups,
+            )
+            .expect("simulation stage solve must succeed");
+            trajectory.push(ws.current_state.clone());
+        }
+        trajectory
+    }
+
+    /// The anticipated ring's per-stage outgoing state in simulation equals the
+    /// training/forward propagation for the identical solved-LP sequence — the
+    /// copy-outgoing convention, not a residual shift.
+    #[test]
+    fn simulation_ring_matches_forward_pass_for_identical_solves() {
+        let state = crate::test_support::state_layout_full(0, 0, 1, 2, vec![2]);
+        let num_cols = state.theta + 1;
+        let template = ring_template(num_cols, state.n_state);
+        let templates = vec![template.clone(), template.clone(), template];
+        let base_rows = vec![0_usize; N_STAGES];
+        let stochastic = super::make_stochastic_context(N_STAGES);
+        let horizon = HorizonMode::Finite {
+            num_stages: N_STAGES,
+        };
+        let study_dims = crate::test_support::study_dims();
+        let fcf = FutureCostFunction::new(N_STAGES, state.n_state, 1, 1, &[0, 0, 0]);
+        let cut_state_layouts =
+            crate::test_support::all_enabled_cut_state_layouts(&state, N_STAGES);
+
+        let ctx = StageContext {
+            geometry_per_stage: &[],
+            templates: &templates,
+            base_rows: &base_rows,
+            noise_scale: &[],
+            n_hydros: 0,
+            n_load_buses: 0,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[1, 1, 1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        };
+        let training_ctx = TrainingContext {
+            horizon: &horizon,
+            state: &state,
+            cut_state_layouts: &cut_state_layouts,
+            study_dims: &study_dims,
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic: &stochastic,
+            initial_state: &[],
+            inflow_scheme: cobre_core::scenario::SamplingScheme::InSample,
+            load_scheme: cobre_core::scenario::SamplingScheme::InSample,
+            ncs_scheme: cobre_core::scenario::SamplingScheme::InSample,
+            stages: &[],
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            recent_accum_seed: &[],
+            recent_weight_seed: 0.0,
+            dcs: None,
+        };
+
+        let forward_trajectory =
+            run_forward_trajectory(&state, &templates, &training_ctx, &ctx, &fcf, num_cols);
+        let sim_trajectory =
+            run_simulation_trajectory(&state, &templates, &training_ctx, &ctx, &fcf, num_cols);
+
+        let expected = [
+            vec![20.0_f64, 100.0],
+            vec![100.0, 200.0],
+            vec![200.0, 300.0],
+        ];
+        for t in 0..N_STAGES {
+            assert_eq!(
+                forward_trajectory[t], sim_trajectory[t],
+                "stage {t}: simulation's anticipated-ring state must match the \
+                 forward pass's for the identical solved-LP sequence"
+            );
+            for (i, (&got, &want)) in forward_trajectory[t]
+                .iter()
+                .zip(expected[t].iter())
+                .enumerate()
+            {
+                assert!(
+                    (got - want).abs() < 1e-9,
+                    "stage {t} slot {i}: expected {want}, got {got}"
+                );
+            }
+        }
+    }
+}

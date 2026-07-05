@@ -389,10 +389,6 @@ fn solve_simulation_stage<S: SolverInterface>(
     } else {
         ws.solver.load_model(load_spec.frozen_template);
     }
-    // The anticipated-state ring buffer must advance once per stage (mirrors
-    // `run_forward_stage`); without the shift, the unbounded `anticipated_state`
-    // LP columns leak into the next stage's incoming state and delivery-stage
-    // fishing constraints read stale slot 0 values.
     ws.patch_buf
         .fill_col_state_patches(state, &ws.current_state, &ctx.templates[t].col_scale);
     ws.patch_buf.fill_forward_patches(

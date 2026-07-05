@@ -51,7 +51,7 @@ pub use stochastic_pipeline::{
 use std::path::Path;
 
 use cobre_core::{
-    AnticipatedConfig, EntityId, Stage, System,
+    AnticipatedConfig, EntityId, Stage, System, Thermal,
     scenario::{SamplingScheme, ScenarioSource},
 };
 use cobre_io::build_hydro_reference_volumes_resolved;
@@ -757,8 +757,12 @@ fn build_wired_indexer(
 pub(crate) fn resolve_anticipated_commitments(
     system: &System,
 ) -> (AnticipatedResolution, Vec<usize>) {
-    let leads: Vec<LeadTime> = system
+    let anticipated_thermals: Vec<&Thermal> = system
         .thermals()
+        .iter()
+        .filter(|t| t.anticipated_config.is_some())
+        .collect();
+    let leads: Vec<LeadTime> = anticipated_thermals
         .iter()
         .filter_map(|t| t.anticipated_config.as_ref())
         .map(|cfg| match cfg {
@@ -773,6 +777,8 @@ pub(crate) fn resolve_anticipated_commitments(
     let durations = bucket_topology::study_stage_durations(system);
     let n_stages = durations.len();
     let resolution = AnticipatedResolution::resolve(&leads, &durations, n_stages);
+
+    warn_on_sub_stage_lead(&anticipated_thermals, &resolution);
 
     let lead_stages: Vec<usize> = leads
         .iter()
@@ -797,6 +803,29 @@ pub(crate) fn resolve_anticipated_commitments(
         .collect();
 
     (resolution, lead_stages)
+}
+
+/// Emit a per-stage setup-time advisory (D4: exclude-with-advisory, never a
+/// hard error) for every `K = 0` sub-stage-lead delivery a `LeadTime` plant's
+/// calendar resolves to (`PointResolution::self_delivered_stages`): names the
+/// plant, the stage, and the effective `lead_stages == 0` alternative.
+/// `LeadStages` plants never trigger it (a positive stage-count lead never
+/// resolves `c(m) = m`). Called once from [`resolve_anticipated_commitments`]
+/// at setup/load time — the established `tracing::warn!` advisory channel
+/// (mirrors `StudyParams::from_config`'s budget-below-forward-passes warning);
+/// never from a per-scenario/per-trajectory function (log-spam rule).
+fn warn_on_sub_stage_lead(thermals: &[&Thermal], resolution: &AnticipatedResolution) {
+    for (thermal, point) in thermals.iter().zip(&resolution.per_plant) {
+        for stage in point.self_delivered_stages() {
+            tracing::warn!(
+                "anticipated thermal {} ({}): stage {stage} resolves to a K=0 sub-stage \
+                 lead (lead_stages == 0 at this stage); no anticipation binds and this \
+                 plant's generation dispatches as ordinary, unconstrained thermal output",
+                thermal.id,
+                thermal.name,
+            );
+        }
+    }
 }
 
 /// Whether every in-horizon delivery stage's decision set is the singleton

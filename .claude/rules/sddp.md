@@ -356,3 +356,106 @@ coefficient propagation regressions (K=1, K=2, K=3) confirming the
 definition rows preserve the same subgradient values the prior out-of-LP
 shift produced, and the manifest's padding-vs-reachable delivery-anchor
 regression.
+
+### In-LP anticipated ring: fan-out deposit cardinality & `K = 0` exclusion
+
+The single-decider ring above generalizes to a plant committing SEVERAL
+delivery stages from the SAME decision stage (`|C(t)| > 1`, a coarse decision
+stage anchoring several fine delivery stages). Each fanned decision `j` gets
+its own decision column (`col_anticipated_decision_start + j * n_anticipated +
+local_idx`, fan-out-index-major, plant-minor, width `AnticipatedResolution::
+max_fanout`) and deposits into its OWN ring slot,
+`slot = delivery_stage − stage_idx − 1` — computed DIRECTLY from the decision's
+own delivery stage, never from a `depth`-derived boundary. A plant committing
+several delivery stages this stage produces several DISTINCT deposit rows,
+each at a different slot; collapsing this to one combined deposit is the
+fold-blindness class — pinned by asserting a CROSS-SLOT SUM (each deposit's
+`(+1.0, −1.0)` pair at its OWN row/slot), never a total-cost-only check.
+
+**`depth[t]` is not the ring's per-stage occupancy boundary.** `depth[t]`
+(`PointResolution::depth`) counts only IN-STUDY decided items still in flight
+— `build_decision_sets_and_depth`'s sweep adds a delta only for `Some(t)`
+deciders, structurally excluding pre-study (`None`, IC-seeded) occupancy. A
+plant can have BOTH an IC-seeded item and a fresh in-study decision occupying
+the ring at the same stage (e.g. a constant-lead plant's stage 0), so
+`depth[t] − genuine_count(t)` under-counts and mis-targets the slot — the
+wrong-but-plausible shortcut `PointResolution::is_ready_at`'s doc comment
+warns against. The correct interior/deposit/padding split is checked PER SLOT
+directly: slot `k`'s target `m = stage_idx + k + 1` is a deposit iff
+`decider[m] == Some(stage_idx)`, an interior shift iff `is_ready_at(m,
+stage_idx)` and not a deposit, else padding. `decider` is nondecreasing in
+`m`, so readiness is monotonic and slots are ready in a contiguous prefix from
+slot 0 — the property that makes the per-slot check well-founded without
+needing an aggregate boundary.
+
+**`K = 0` (sub-stage lead, `c(m) = m`) is excluded from the ring entirely —
+D4, exclude-with-advisory, never a hard error, never an underflow.** A
+delivery whose physical lead is shorter than its own stage's duration is
+decided inside its own delivery stage; `PointResolution::self_delivered_stages`
+identifies these, and `genuine_decisions_at`/`is_anticipated_at` filter them
+out of the fan-out and fishing gates respectively — the plant's ordinary
+thermal generation column is priced and bounded normally (no fishing
+coupling, no anticipated row at all) at that stage. A setup-time
+`tracing::warn!` (`setup::warn_on_sub_stage_lead`, the same channel
+`StudyParams::from_config`'s budget advisory uses) names the plant, the
+stage, and the `lead_stages == 0` alternative — never emitted per-scenario or
+per-trajectory.
+
+Read: `lead_time/mod.rs` (`PointResolution::genuine_decisions_at`,
+`self_delivered_stages`, `is_anticipated_at`, `is_ready_at`,
+`AnticipatedResolution::max_fanout`), `lp/indexer/state_layout.rs`
+(`StateLayout::is_anticipated_decision_active_for_delivery`,
+`anticipated_resolution_for`, `anticipated_max_fanout`), `lp/builder/layout.rs`
+(`build_anticipated_slot_row_pos`, `build_anticipated_decision_row_pos`,
+`build_anticipated_fishing_row_pos`), `lp/builder/columns.rs`
+(`fill_anticipated_columns`), `lp/builder/entries.rs`
+(`fill_anticipated_state_out_def_entries`, `fill_anticipated_fishing_entries`),
+`setup/mod.rs` (`warn_on_sub_stage_lead`). Pinned by the fan-out
+cross-slot-sum regression (four distinct deposits at four distinct slots,
+never a folded total), the delivery-anchored fanned-bounds regression
+(stage-varying `thermal_bounds` per fanned column), the commissioning-
+composition regression (the gate applied per fanned column on its own
+delivery stage), and the `K = 0` zero-emission-plus-advisory regression (no
+anticipated slot/row/fishing coupling at any stage, one advisory per
+self-delivered stage).
+
+### Delivery-anchoring preservation
+
+Every anticipated decision column in `C(t)` — single-decider and every fanned
+member alike — is bounded, costed, and commissioning-gated at ITS OWN delivery
+stage `m`, never the decision stage `t`. `fill_anticipated_columns` reads
+`thermal_bounds(thermal_idx, delivery_stage)` for the column's `[min, max]`
+bounds, `total_hours_per_stage[delivery_stage]` and
+`cumulative_discount_factors[delivery_stage]` for its present-value objective,
+and `is_anticipated_decision_active_for_delivery` (the plant's window at
+`delivery_stage`) for its dormancy — each at `delivery_stage = C(t)[j]`, never
+at `stage_idx`. The delivered commitment is a hard equality with no slack (the
+fishing coupling pins the plant's delivery-stage generation to the committed
+value), so relatively-complete recourse requires the committed value always lie
+within the delivery stage's own generation bounds. A DECISION-anchored read
+(`thermal_bounds(thermal_idx, stage_idx)`) is the forbidden alternative: it
+reintroduces the capacity-drop infeasibility — a commitment placed under the
+decision stage's larger capacity that no scenario can deliver under the delivery
+stage's smaller one, stranded with no feasibility cut to absorb it — and still
+compiles, since constant-across-lead bounds make the two reads indistinguishable.
+
+Residual audit complete: no mechanism other than `thermal_bounds` can strand a
+delivered commitment. The only generic-constraint handle on an anticipated plant,
+`VariableRef::AnticipatedDecision` (`resolve_anticipated_decision`), binds the
+fresh decision column at its own decision stage (the recourse variable, already
+delivery-anchored here), never an in-flight matured commitment (no `VariableRef`
+targets the ring state slots) nor the delivery-stage generation; constraining it
+cannot strand a delivered value. The one path that touches the delivery-stage
+generation, `VariableRef::ThermalGeneration` on an anticipated plant, is already
+surfaced by `warn_thermal_generation_on_anticipated_thermal` and is the general
+"a hard generic constraint may be infeasible" class, not an anticipated-specific
+hole.
+
+Read: `lp/builder/columns.rs` (`fill_anticipated_columns`),
+`lp/indexer/state_layout.rs` (`is_anticipated_decision_active_for_delivery`),
+`lp/generic_constraints.rs` (`resolve_anticipated_decision`),
+`cobre-io` `validation/semantic/thermal.rs`
+(`warn_thermal_generation_on_anticipated_thermal`). Pinned by
+`test_anticipated_decision_delivery_anchored_bounds` (stage-varying delivery
+bounds/cost, single-decider and fan-out, mutation-verified against the
+decision-anchored read).

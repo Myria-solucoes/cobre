@@ -39,8 +39,8 @@ pub(super) fn fill_stage_rows(
     fill_fpha_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
     fill_evaporation_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
     fill_operational_violation_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
-    fill_anticipated_fishing_rows(ctx, layout, &mut row_lower, &mut row_upper);
-    fill_anticipated_state_out_def_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
+    fill_anticipated_fishing_rows(layout, &mut row_lower, &mut row_upper);
+    fill_anticipated_state_out_def_rows(layout, &mut row_lower, &mut row_upper);
     fill_anticipated_slot_definition_rows(layout, &mut row_lower, &mut row_upper);
     fill_z_inflow_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
 
@@ -478,58 +478,60 @@ fn fill_operational_violation_rows(
     }
 }
 
-/// Fill anticipated-fishing equality row bounds: `0 == 0` per anticipated plant.
-/// Always-active: one row per plant at every stage.
+/// Fill anticipated-fishing equality row bounds: `0 == 0` per GENUINELY
+/// anticipated plant this stage (`layout.anticipated.anticipated_fishing_row_pos`
+/// — a `K = 0` self-delivery, D4, excludes a plant's row this stage).
 pub(super) fn fill_anticipated_fishing_rows(
-    ctx: &TemplateBuildCtx<'_>,
     layout: &StageLayout,
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    // Dense offset (`+ local_idx`), not a sparse `active_pos` offset, because the
-    // fishing constraint is always active for every anticipated plant.
-    for local_idx in 0..ctx.n_anticipated {
-        let row = layout.anticipated.row_anticipated_fishing_start + local_idx;
+    let row_start = layout.anticipated.row_anticipated_fishing_start;
+    let mut n_active = 0_usize;
+    for pos in layout
+        .anticipated
+        .anticipated_fishing_row_pos
+        .iter()
+        .flatten()
+    {
+        let row = row_start + pos;
         row_lower[row] = 0.0;
         row_upper[row] = 0.0;
+        n_active += 1;
     }
     debug_assert_eq!(
-        ctx.n_anticipated, layout.anticipated.n_anticipated_fishing_rows,
-        "fill_anticipated_fishing_rows: row count must equal n_anticipated"
+        n_active, layout.anticipated.n_anticipated_fishing_rows,
+        "fill_anticipated_fishing_rows: active count mismatch"
     );
 }
 
-/// Fill the `anticipated_state_out` definition equality row bounds (`0 == 0`) for
-/// each active plant (`stage_idx + K_i < n_stages`). Inactive plants emit no row,
-/// so rows pack at the SPARSE `active_pos` offset — unlike
-/// [`fill_anticipated_fishing_rows`], which is always active and uses a dense offset.
+/// Fill the `anticipated_state_out` (deposit) definition equality row bounds
+/// (`0 == 0`) for each genuine, ACTIVE fanned decision this stage
+/// (`layout.anticipated.anticipated_decision_row_pos`, the single
+/// position-table owner). Inactive or beyond-genuine-count columns emit no
+/// row, so rows pack at the SPARSE position-table offset — unlike
+/// [`fill_anticipated_fishing_rows`], which is dense per anticipated plant.
 pub(super) fn fill_anticipated_state_out_def_rows(
-    ctx: &TemplateBuildCtx<'_>,
-    stage_idx: usize,
     layout: &StageLayout,
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    let n_stages = ctx.resolved.bounds.n_stages();
-    let mut active_pos: usize = 0;
-    for local_idx in 0..ctx.n_anticipated {
-        if !layout.is_anticipated_decision_active(
-            local_idx,
-            stage_idx,
-            n_stages,
-            &ctx.anticipated_windows,
-            &ctx.study_stage_ids,
-        ) {
-            continue;
-        }
-        let row = layout.anticipated.row_anticipated_state_out_def_start + active_pos;
+    let row_start = layout.anticipated.row_anticipated_state_out_def_start;
+    let mut n_active = 0_usize;
+    for pos in layout
+        .anticipated
+        .anticipated_decision_row_pos
+        .iter()
+        .flatten()
+    {
+        let row = row_start + pos;
         row_lower[row] = 0.0;
         row_upper[row] = 0.0;
-        active_pos += 1;
+        n_active += 1;
     }
     debug_assert_eq!(
-        active_pos, layout.anticipated.n_anticipated_state_out_def_rows,
-        "fill_anticipated_state_out_def_rows: active_pos mismatch at stage {stage_idx}"
+        n_active, layout.anticipated.n_anticipated_state_out_def_rows,
+        "fill_anticipated_state_out_def_rows: active count mismatch"
     );
 }
 

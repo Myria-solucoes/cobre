@@ -6423,3 +6423,161 @@ fn cut_state_layouts_stored_one_per_pool_and_reachable() {
         "lag-enabled pool 1 must carry storage + lags (dimension > N)",
     );
 }
+
+// ---------------------------------------------------------------------------
+// K = 0 sub-stage lead (`c(m) = m`) — exclude-with-advisory (D4)
+// ---------------------------------------------------------------------------
+
+/// Minimal WARN-capturing `tracing::Subscriber`, mirroring
+/// `params::tests::WarnRecorder` (the established setup-time advisory-test
+/// pattern for this crate).
+struct WarnRecorder {
+    messages: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl WarnRecorder {
+    fn new() -> (Self, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        (
+            Self {
+                messages: std::sync::Arc::clone(&messages),
+            },
+            messages,
+        )
+    }
+}
+
+impl tracing::Subscriber for WarnRecorder {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() <= tracing::Level::WARN
+    }
+
+    fn new_span(&self, _attrs: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        if *event.metadata().level() == tracing::Level::WARN {
+            struct MessageVisitor(String);
+            impl tracing::field::Visit for MessageVisitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}");
+                    }
+                }
+
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "message" {
+                        self.0 = value.to_string();
+                    }
+                }
+            }
+            let mut visitor = MessageVisitor(String::new());
+            event.record(&mut visitor);
+            self.messages.lock().unwrap().push(visitor.0);
+        }
+    }
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
+/// Hand-derived: a `LeadTime(720.0)` plant on the uniform 31-day-month
+/// calendar `[744, 744, 744, 744]` h resolves `c(m) = m` at every delivery
+/// stage (the 720h lead is shorter than each 744h stage, so `end_m - 720`
+/// always lands inside stage `m`'s own window) — the `K = 0` sub-stage-lead
+/// degeneracy, `depth == [0, 0, 0, 0]` and `resolution.k_max == 0` (never an
+/// underflow).
+#[test]
+fn test_anticipated_resolve_point_k0_uniform_calendar() {
+    let system = minimal_system_with_anticipated(
+        &[744.0, 744.0, 744.0, 744.0],
+        AnticipatedConfig::LeadTime(720.0),
+        0,
+    );
+    let (resolution, lead_stages) = super::resolve_anticipated_commitments(&system);
+    let point = &resolution.per_plant[0];
+
+    assert_eq!(
+        point.decider,
+        vec![Some(0), Some(1), Some(2), Some(3)],
+        "every delivery stage self-delivers (K=0)"
+    );
+    assert_eq!(point.depth, vec![0, 0, 0, 0]);
+    assert_eq!(resolution.k_max, 0, "ring depth collapses to 0");
+    assert_eq!(resolution.max_fanout, 0, "no genuine fan-out either");
+    assert_eq!(
+        point.self_delivered_stages().collect::<Vec<_>>(),
+        vec![0, 1, 2, 3],
+        "every stage is a self-delivery"
+    );
+    // The still-live constant-lead machinery's placeholder is the per-plant
+    // max depth — 0 here, never underflowed downstream.
+    assert_eq!(lead_stages, vec![0]);
+}
+
+/// `resolve_anticipated_commitments` emits one `tracing::WARN` event per
+/// `K = 0` self-delivered stage (D4: exclude-with-advisory, never a hard
+/// error), naming the thermal, the stage, and the `lead_stages == 0`
+/// stage-count alternative. Setup/load-time only (this is a direct,
+/// non-per-trajectory call).
+#[test]
+fn resolve_anticipated_commitments_warns_on_k0_sub_stage_lead() {
+    let system = minimal_system_with_anticipated(
+        &[744.0, 744.0, 744.0, 744.0],
+        AnticipatedConfig::LeadTime(720.0),
+        0,
+    );
+
+    let (subscriber, messages) = WarnRecorder::new();
+    tracing::subscriber::with_default(subscriber, || {
+        let _ = super::resolve_anticipated_commitments(&system);
+    });
+    let recorded = messages.lock().unwrap();
+    let relevant: Vec<&str> = recorded
+        .iter()
+        .filter(|msg| msg.contains("lead_stages == 0"))
+        .map(std::string::String::as_str)
+        .collect();
+    assert_eq!(
+        relevant.len(),
+        4,
+        "expected one advisory per self-delivered stage (4 stages), got: {recorded:?}"
+    );
+    for (stage, msg) in relevant.iter().enumerate() {
+        assert!(
+            msg.contains(&format!("stage {stage}")),
+            "advisory {stage} must name its stage; got: {msg}"
+        );
+        assert!(
+            msg.contains("T1"),
+            "advisory {stage} must name the plant; got: {msg}"
+        );
+    }
+}
+
+/// A `LeadStages` plant never triggers the `K = 0` advisory: a positive
+/// stage-count lead never resolves `c(m) = m`.
+#[test]
+fn resolve_anticipated_commitments_leadstages_never_warns() {
+    let system = minimal_system_with_anticipated_lead_stages(5, 2);
+
+    let (subscriber, messages) = WarnRecorder::new();
+    tracing::subscriber::with_default(subscriber, || {
+        let _ = super::resolve_anticipated_commitments(&system);
+    });
+    let recorded = messages.lock().unwrap();
+    assert!(
+        recorded.iter().all(|msg| !msg.contains("lead_stages == 0")),
+        "LeadStages must never trigger the K=0 advisory; got: {recorded:?}"
+    );
+}

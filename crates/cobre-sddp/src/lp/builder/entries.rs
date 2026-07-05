@@ -8,9 +8,13 @@ use super::M3S_TO_HM3;
 use super::fpha_cursor::for_each_fpha_plane;
 use super::layout::{StageLayout, TemplateBuildCtx};
 
-/// Enforce, per anticipated plant, that summed per-block thermal energy (`MWh`)
-/// equals the committed power level in the anticipated-state slot-0 column scaled
-/// to `MWh` (`MW` × `block_hours_total`). Always-active: one row per plant.
+/// Enforce, per GENUINELY anticipated plant this stage, that summed per-block
+/// thermal energy (`MWh`) equals the committed power level in the
+/// anticipated-state slot-0 column scaled to `MWh` (`MW` × `block_hours_total`).
+/// Gated on `layout.anticipated.anticipated_fishing_row_pos`: a `K = 0`
+/// self-delivery (D4) excludes a plant's row this stage — no anticipation
+/// binds, so the plant's ordinary thermal generation carries no fishing
+/// coupling.
 pub(super) fn fill_anticipated_fishing_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -19,8 +23,12 @@ pub(super) fn fill_anticipated_fishing_entries(
 ) {
     let n_blks = layout.n_blks;
     let grid = layout.block_grid();
+    let mut n_active = 0_usize;
     for local_idx in 0..ctx.n_anticipated {
-        let row = layout.anticipated.row_anticipated_fishing_start + local_idx;
+        let Some(pos) = layout.anticipated.anticipated_fishing_row_pos[local_idx] else {
+            continue;
+        };
+        let row = layout.anticipated.row_anticipated_fishing_start + pos;
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
         let mut block_hours_total: f64 = 0.0;
         for blk in 0..n_blks {
@@ -31,19 +39,26 @@ pub(super) fn fill_anticipated_fishing_entries(
         }
         let col_state = layout.col_anticipated_state_start() + local_idx;
         col_entries[col_state].push((row, -block_hours_total));
+        n_active += 1;
     }
     debug_assert_eq!(
-        ctx.n_anticipated, layout.anticipated.n_anticipated_fishing_rows,
-        "fill_anticipated_fishing_entries: row count must equal n_anticipated"
+        n_active, layout.anticipated.n_anticipated_fishing_rows,
+        "fill_anticipated_fishing_entries: active count mismatch"
     );
 }
 
-/// Encode `slot_{k_i-1}^out − decision_col[i] = 0` — the anticipated ring's
-/// delivery-decision deposit row — for each active plant `i`
-/// (`stage_idx + K_i < n_stages`, AND the delivery stage's commissioning
-/// window); inactive plants emit no entries. `slot_{k_i-1}^out` is plant `i`'s
-/// own newest ring slot, the single matured-slot cut target the general ring
-/// folds in.
+/// Encode `slot_j^out − decision_col[j] = 0` for each genuine, ACTIVE fanned
+/// decision `j` this stage (`layout.anticipated.anticipated_decision_row_pos`,
+/// the single position-table owner) — the anticipated ring's delivery-decision
+/// deposit rows. `slot_j` is `delivery_stage - stage_idx - 1` (the ring's
+/// direct delivery-distance mapping — never a `depth`-derived boundary),
+/// the delivery-anchored ring slot fanned decision `j` matures into;
+/// `decision_col[j]` is its own fan-out decision column. A plant committing
+/// several delivery stages this stage produces several DISTINCT deposit rows,
+/// one per fanned decision — mirroring the water-bucket confluence sum
+/// discipline in reverse (one plant, several deposits, never folded into one,
+/// the fold-blindness class). Inactive (commissioning-gated) or
+/// beyond-genuine-count columns emit no row.
 ///
 /// The per-column `sort_unstable_by_key` pass in `build_single_stage_template`
 /// re-sorts the CSC, so the relative push order of the two entries here does not
@@ -55,30 +70,40 @@ pub(super) fn fill_anticipated_state_out_def_entries(
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
     let n_stages = ctx.resolved.bounds.n_stages();
-    let mut active_pos: usize = 0;
-    for local_idx in 0..ctx.n_anticipated {
-        if !layout.is_anticipated_decision_active(
-            local_idx,
-            stage_idx,
-            n_stages,
-            &ctx.anticipated_windows,
-            &ctx.study_stage_ids,
-        ) {
-            continue;
+    let n_ant = ctx.n_anticipated;
+    let row_start = layout.anticipated.row_anticipated_state_out_def_start;
+    let mut n_active: usize = 0;
+    for local_idx in 0..n_ant {
+        let point = layout.state.anticipated_resolution_for(local_idx, n_stages);
+        for (j, delivery_stage) in point.genuine_decisions_at(stage_idx).enumerate() {
+            let global_j = j * n_ant + local_idx;
+            let Some(pos) = layout.anticipated.anticipated_decision_row_pos[global_j] else {
+                continue;
+            };
+            let row = row_start + pos;
+            debug_assert!(
+                delivery_stage > stage_idx,
+                "a genuine decision's delivery stage must be strictly after the decision \
+                 stage (K=0 self-delivery must already be excluded)"
+            );
+            let slot = delivery_stage - stage_idx - 1;
+            debug_assert!(
+                slot < layout.k_max,
+                "delivery slot {slot} must be within the sized ring depth {}",
+                layout.k_max
+            );
+            let col_state_out =
+                layout.anticipated.col_anticipated_slots_out_start + slot * n_ant + local_idx;
+            let col_decision =
+                layout.anticipated.col_anticipated_decision_start + j * n_ant + local_idx;
+            col_entries[col_state_out].push((row, 1.0));
+            col_entries[col_decision].push((row, -1.0));
+            n_active += 1;
         }
-        let row = layout.anticipated.row_anticipated_state_out_def_start + active_pos;
-        let k_i = ctx.anticipated_lead_stages[local_idx];
-        let col_state_out = layout.anticipated.col_anticipated_slots_out_start
-            + (k_i - 1) * ctx.n_anticipated
-            + local_idx;
-        let col_decision = layout.anticipated.col_anticipated_decision_start + local_idx;
-        col_entries[col_state_out].push((row, 1.0));
-        col_entries[col_decision].push((row, -1.0));
-        active_pos += 1;
     }
     debug_assert_eq!(
-        active_pos, layout.anticipated.n_anticipated_state_out_def_rows,
-        "fill_anticipated_state_out_def_entries: active_pos mismatch at stage {stage_idx}"
+        n_active, layout.anticipated.n_anticipated_state_out_def_rows,
+        "fill_anticipated_state_out_def_entries: active count mismatch at stage {stage_idx}"
     );
 }
 
@@ -2173,9 +2198,7 @@ mod zero_cost_tests {
     use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
     use crate::resolved_parameters::ResolvedParameters;
 
-    use super::super::columns::{
-        ColumnBufs, fill_anticipated_columns, fill_stage_columns, fill_thermal_columns,
-    };
+    use super::super::columns::{ColumnBufs, fill_stage_columns, fill_thermal_columns};
     use super::super::layout::{ResolvedTables, StageLayout, TemplateBuildCtx};
     use super::super::rows::{
         fill_anticipated_fishing_rows, fill_anticipated_state_out_def_rows, fill_stage_rows,
@@ -2489,7 +2512,7 @@ mod zero_cost_tests {
         let mut row_lower = vec![f64::NAN; layout.num_rows];
         let mut row_upper = vec![f64::NAN; layout.num_rows];
 
-        fill_anticipated_fishing_rows(&ctx, &layout, &mut row_lower, &mut row_upper);
+        fill_anticipated_fishing_rows(&layout, &mut row_lower, &mut row_upper);
 
         // Both plants write a row with (0.0, 0.0) bounds.
         for local_idx in 0..layout.anticipated.n_anticipated_fishing_rows {
@@ -2531,7 +2554,7 @@ mod zero_cost_tests {
         let mut row_lower = vec![f64::NAN; layout.num_rows];
         let mut row_upper = vec![f64::NAN; layout.num_rows];
 
-        fill_anticipated_fishing_rows(&ctx, &layout, &mut row_lower, &mut row_upper);
+        fill_anticipated_fishing_rows(&layout, &mut row_lower, &mut row_upper);
 
         // Both plants write equality rows with (0.0, 0.0) bounds.
         for local_idx in 0..layout.anticipated.n_anticipated_fishing_rows {
@@ -2610,6 +2633,13 @@ mod zero_cost_tests {
     /// Fixture: `n_anticipated=2`, `K=[2, 3]`, `n_stages=6`.
     /// Stage 0: both plants active  (0+2=2 < 6, 0+3=3 < 6) → `[-INF, +INF]`.
     /// Stage 5: both plants inactive (5+2=7 >= 6, 5+3=8 >= 6) → `[0, 0]`.
+    ///
+    /// Runs the full `fill_stage_columns` pipeline (not `fill_anticipated_columns`
+    /// alone): a stage with NO genuine decision at all (stage 5's hypothetical
+    /// delivery is out of horizon, so `genuine_decisions_at` is empty) has its
+    /// ring slot frozen by `fill_anticipated_slot_columns`'s masking, not by
+    /// `fill_anticipated_columns` — the two functions collaborate on the
+    /// dormant-column convention exactly as `fill_stage_columns` composes them.
     #[test]
     fn test_fill_anticipated_columns_state_out_active_and_inactive() {
         let (fixtures, _) = build_anticipated_ctx_n_stages_6();
@@ -2625,15 +2655,7 @@ mod zero_cost_tests {
         let stage0 = two_block_stage(0, [372.0, 372.0]);
         let state = state_layout_for(&ctx);
         let layout0 = StageLayout::new(&ctx, &state, &stage0, 0);
-        let mut col_lower = vec![0.0_f64; layout0.num_cols];
-        let mut col_upper = vec![f64::INFINITY; layout0.num_cols];
-        let mut objective = vec![0.0_f64; layout0.num_cols];
-        let mut bufs = ColumnBufs {
-            col_lower: &mut col_lower,
-            col_upper: &mut col_upper,
-            objective: &mut objective,
-        };
-        fill_anticipated_columns(&ctx, 0, &layout0, &mut bufs);
+        let (col_lower, col_upper, _objective) = fill_stage_columns(&ctx, &stage0, 0, &layout0);
         let leads = [2_usize, 3];
         for (i, &lead) in leads.iter().enumerate() {
             let col = layout0.anticipated.col_anticipated_slots_out_start + (lead - 1) * 2 + i;
@@ -2655,20 +2677,12 @@ mod zero_cost_tests {
         let stage5 = two_block_stage(5, [372.0, 372.0]);
         let state = state_layout_for(&ctx);
         let layout5 = StageLayout::new(&ctx, &state, &stage5, 5);
-        let mut col_lower5 = vec![0.0_f64; layout5.num_cols];
-        let mut col_upper5 = vec![f64::INFINITY; layout5.num_cols];
-        let mut objective5 = vec![0.0_f64; layout5.num_cols];
-        let mut bufs5 = ColumnBufs {
-            col_lower: &mut col_lower5,
-            col_upper: &mut col_upper5,
-            objective: &mut objective5,
-        };
-        fill_anticipated_columns(&ctx, 5, &layout5, &mut bufs5);
         assert_eq!(
             layout5.anticipated.n_anticipated_state_out_def_rows, 0,
             "stage 5 inactive: expected no def rows, got {}",
             layout5.anticipated.n_anticipated_state_out_def_rows,
         );
+        let (col_lower5, col_upper5, _objective5) = fill_stage_columns(&ctx, &stage5, 5, &layout5);
         for (i, &lead) in leads.iter().enumerate() {
             let col = layout5.anticipated.col_anticipated_slots_out_start + (lead - 1) * 2 + i;
             assert_eq!(
@@ -2706,7 +2720,7 @@ mod zero_cost_tests {
 
         let mut row_lower = vec![f64::NEG_INFINITY; layout.num_rows];
         let mut row_upper = vec![f64::INFINITY; layout.num_rows];
-        fill_anticipated_state_out_def_rows(&ctx, 0, &layout, &mut row_lower, &mut row_upper);
+        fill_anticipated_state_out_def_rows(&layout, &mut row_lower, &mut row_upper);
 
         for k in 0..2 {
             let row = layout.anticipated.row_anticipated_state_out_def_start + k;
@@ -2849,6 +2863,156 @@ mod zero_cost_tests {
             "masked slot 1 must carry no CSC entries; got {:?}",
             col_entries[col1]
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Fan-out deposit loop (cross-slot sum) + K = 0 exclusion
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Fan-out cross-slot-sum: a single `LeadTime(720.0)` plant on the
+    /// monthly-then-weekly calendar `[720,168,168,168,168,168]` h resolves
+    /// `decision_sets[0] == [1,2,3,4]` (hand-derived from the calendar,
+    /// `depth == [4,4,3,2,1,0]`, `k_max == 4`). At stage 0 the deposit-row fill
+    /// must emit FOUR DISTINCT rows, each depositing into its OWN
+    /// delivery-anchored ring slot (`0,1,2,3`) — never folded into a single
+    /// total (the fold-blindness class). Pinned by asserting the four
+    /// `(+1.0, -1.0)` entry pairs land at FOUR DISTINCT slot columns, never a
+    /// combined/total-cost check.
+    #[test]
+    fn fanout_four_decisions_deposit_into_four_distinct_slots() {
+        let mut fixtures = AntFixtures::new();
+        fixtures.bounds = AntFixtures::bounds_with_n_stages(6, 4, 1);
+        let ctx = fixtures.make_ctx(1, 4, vec![4], vec![0], 1);
+        let stage = two_block_stage(0, [360.0, 360.0]);
+
+        let mut state = state_layout_for(&ctx);
+        state.set_anticipated_resolution(crate::lead_time::AnticipatedResolution::resolve(
+            &[crate::lead_time::LeadTime::Time(720.0)],
+            &[720.0, 168.0, 168.0, 168.0, 168.0, 168.0],
+            6,
+        ));
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        assert_eq!(
+            layout.anticipated.n_anticipated_state_out_def_rows, 4,
+            "four genuine fanned decisions at stage 0 must each emit their own deposit row"
+        );
+
+        let mut row_lower = vec![f64::NAN; layout.num_rows];
+        let mut row_upper = vec![f64::NAN; layout.num_rows];
+        fill_anticipated_state_out_def_rows(&layout, &mut row_lower, &mut row_upper);
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_anticipated_state_out_def_entries(&ctx, 0, &layout, &mut col_entries);
+
+        let row_start = layout.anticipated.row_anticipated_state_out_def_start;
+        let n_ant = ctx.n_anticipated;
+        let slots_out_start = layout.anticipated.col_anticipated_slots_out_start;
+        let decision_start = layout.anticipated.col_anticipated_decision_start;
+
+        // slot = delivery_stage - stage_idx - 1 = (j+1) - 0 - 1 = j: fan-out
+        // index j deposits at slot j exactly for this calendar.
+        for j in 0..4 {
+            let row = row_start + j;
+            assert_eq!(row_lower[row], 0.0, "deposit row {j} must be an equality");
+            assert_eq!(row_upper[row], 0.0, "deposit row {j} must be an equality");
+
+            let col_state_out = slots_out_start + j * n_ant;
+            let col_decision = decision_start + j * n_ant;
+
+            assert!(
+                col_entries[col_state_out]
+                    .iter()
+                    .any(|&(r, v)| r == row && (v - 1.0).abs() < 1e-15),
+                "decision {j}: expected (+1.0) at (col_state_out={col_state_out}, \
+                 row={row}); got {:?}",
+                col_entries[col_state_out]
+            );
+            assert!(
+                col_entries[col_decision]
+                    .iter()
+                    .any(|&(r, v)| r == row && (v + 1.0).abs() < 1e-15),
+                "decision {j}: expected (-1.0) at (col_decision={col_decision}, \
+                 row={row}); got {:?}",
+                col_entries[col_decision]
+            );
+        }
+
+        // Cross-slot-sum pin: the four deposits land at FOUR DISTINCT ring-slot
+        // columns — summing/asserting a single combined value here would hide a
+        // fold-blindness regression that collapses the fan-out to one deposit.
+        let touched_cols: std::collections::BTreeSet<usize> =
+            (0..4).map(|j| slots_out_start + j * n_ant).collect();
+        assert_eq!(
+            touched_cols.len(),
+            4,
+            "the four fanned deposits must target four DISTINCT ring-slot columns, \
+             never one folded column"
+        );
+    }
+
+    /// `K = 0` exclusion: a `LeadTime(720.0)` plant on the uniform 31-day-month
+    /// calendar `[744,744,744,744]` h resolves `depth == [0,0,0,0]` (every
+    /// delivery self-delivers, hand-derived from the calendar). No
+    /// anticipated slot, deposit row, interior-shift row, or fishing row is
+    /// ever emitted for this plant, at any stage — the stage LP dispatches its
+    /// generation as ordinary, unconstrained thermal output (no fishing
+    /// coupling), never an underflow.
+    #[test]
+    fn k0_sub_stage_lead_emits_no_anticipated_rows_or_fishing_coupling() {
+        let mut fixtures = AntFixtures::new();
+        fixtures.bounds = AntFixtures::bounds_with_n_stages(4, 0, 1);
+        let ctx = fixtures.make_ctx(1, 0, vec![0], vec![0], 1);
+
+        let mut state = state_layout_for(&ctx);
+        state.set_anticipated_resolution(crate::lead_time::AnticipatedResolution::resolve(
+            &[crate::lead_time::LeadTime::Time(720.0)],
+            &[744.0, 744.0, 744.0, 744.0],
+            4,
+        ));
+
+        for stage_idx in 0..4 {
+            let stage = two_block_stage(stage_idx, [372.0, 372.0]);
+            let layout = StageLayout::new(&ctx, &state, &stage, stage_idx);
+            assert_eq!(
+                layout.anticipated.n_anticipated_fishing_rows, 0,
+                "stage {stage_idx}: K=0 must exclude the fishing row entirely"
+            );
+            assert_eq!(
+                layout.anticipated.n_anticipated_state_out_def_rows, 0,
+                "stage {stage_idx}: K=0 must exclude the deposit row entirely"
+            );
+            assert_eq!(
+                layout.anticipated.n_anticipated_slot_definition_rows, 0,
+                "stage {stage_idx}: K=0 must exclude every interior-shift row"
+            );
+            assert_eq!(
+                layout.anticipated.max_fanout, 0,
+                "stage {stage_idx}: no genuine fan-out ever exists for a fully K=0 plant"
+            );
+
+            let mut row_lower = vec![f64::NAN; layout.num_rows];
+            let mut row_upper = vec![f64::NAN; layout.num_rows];
+            fill_anticipated_fishing_rows(&layout, &mut row_lower, &mut row_upper);
+            fill_anticipated_state_out_def_rows(&layout, &mut row_lower, &mut row_upper);
+
+            let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+            fill_anticipated_fishing_entries(&ctx, &stage, &layout, &mut col_entries);
+            fill_anticipated_state_out_def_entries(&ctx, stage_idx, &layout, &mut col_entries);
+
+            // The plant's ordinary thermal generation columns carry no entry
+            // at all from either anticipated row family — unconstrained by
+            // any fishing coupling.
+            for blk in 0..layout.n_blks {
+                let col_gen = layout.block_grid().flat(layout.col_thermal_start(), 0, blk);
+                assert!(
+                    col_entries[col_gen].is_empty(),
+                    "stage {stage_idx} blk {blk}: thermal generation column must carry no \
+                     anticipated coupling entry; got {:?}",
+                    col_entries[col_gen]
+                );
+            }
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────

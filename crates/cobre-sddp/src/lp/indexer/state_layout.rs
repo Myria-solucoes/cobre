@@ -512,10 +512,8 @@ impl StateLayout {
     /// delivery-stage lookup `study_stage_ids[stage_idx + K_i]` is only reached
     /// when the index is in range.
     ///
-    /// The active set is defined once here: the LP-builder column/row counts and
-    /// the simulation read (`compute_anticipated_decision_mw`) both resolve
-    /// activity through this one method. The per-plant windows and stage-id map
-    /// flow in by reference, keeping the type a pure layout carrier.
+    /// The per-plant windows and stage-id map flow in by reference, keeping the
+    /// type a pure layout carrier.
     ///
     /// `anticipated_windows` is indexed by anticipated-local position
     /// (`0..n_anticipated`); `study_stage_ids` by study stage index.
@@ -540,6 +538,39 @@ impl StateLayout {
             "anticipated_windows must have one entry per anticipated plant",
         );
         let delivery_stage = stage_idx.saturating_add(self.anticipated_lead_stages[local_idx]);
+        self.is_anticipated_decision_active_for_delivery(
+            local_idx,
+            delivery_stage,
+            n_stages,
+            anticipated_windows,
+            study_stage_ids,
+        )
+    }
+
+    /// Whether anticipated plant `local_idx`'s commitment maturing at an
+    /// EXPLICIT `delivery_stage` is active — the same horizon + commissioning
+    /// gate as [`Self::is_anticipated_decision_active`], generalized so a
+    /// fanned-out decision column (whose delivery stage is read from
+    /// `PointResolution::genuine_decisions_at`, not derived as a constant
+    /// offset from the decision stage) can compose the gate on ITS OWN
+    /// delivery stage. [`Self::is_anticipated_decision_active`] delegates
+    /// here with the constant-lead derived delivery stage — a pure refactor,
+    /// not a behavior change.
+    #[inline]
+    #[must_use]
+    pub fn is_anticipated_decision_active_for_delivery(
+        &self,
+        local_idx: usize,
+        delivery_stage: usize,
+        n_stages: usize,
+        anticipated_windows: &[(Option<i32>, Option<i32>)],
+        study_stage_ids: &[i32],
+    ) -> bool {
+        debug_assert!(
+            local_idx < anticipated_windows.len(),
+            "local_idx {local_idx} out of bounds (anticipated_windows.len() = {})",
+            anticipated_windows.len(),
+        );
         if delivery_stage >= n_stages {
             return false;
         }
@@ -551,6 +582,44 @@ impl StateLayout {
         );
         let (entry, exit) = anticipated_windows[local_idx];
         crate::lp_builder::commissioning_active(entry, exit, study_stage_ids[delivery_stage])
+    }
+
+    /// Plant `local_idx`'s effective delivery-anchored resolution: the
+    /// setup-threaded [`crate::lead_time::PointResolution`] when
+    /// [`Self::anticipated_resolution`] is attached (production always
+    /// attaches it via [`Self::set_anticipated_resolution`]), or an on-the-fly
+    /// `LeadTime::Stages`-equivalent resolution built from the plant's
+    /// constant [`Self::anticipated_lead_stages`] otherwise — the fixture
+    /// fallback that keeps every existing constant-lead unit test
+    /// byte-identical without threading a resolution through it.
+    #[must_use]
+    pub(crate) fn anticipated_resolution_for(
+        &self,
+        local_idx: usize,
+        n_stages: usize,
+    ) -> std::borrow::Cow<'_, crate::lead_time::PointResolution> {
+        if !self.anticipated_resolution.per_plant.is_empty() {
+            return std::borrow::Cow::Borrowed(&self.anticipated_resolution.per_plant[local_idx]);
+        }
+        let lead = u32::try_from(self.anticipated_lead_stages[local_idx]).unwrap_or(u32::MAX);
+        std::borrow::Cow::Owned(crate::lead_time::resolve_point(
+            crate::lead_time::LeadTime::Stages(lead),
+            &[],
+            n_stages,
+        ))
+    }
+
+    /// Effective fan-out width for the decision-column geometry: the
+    /// setup-threaded [`crate::lead_time::AnticipatedResolution::max_fanout`]
+    /// when a resolution is attached, or `1` (single-decider) / `0` (no
+    /// anticipation) derived from the constant [`Self::anticipated_lead_stages`]
+    /// otherwise — mirrors [`Self::anticipated_resolution_for`]'s fallback.
+    #[must_use]
+    pub(crate) fn anticipated_max_fanout(&self) -> usize {
+        if !self.anticipated_resolution.per_plant.is_empty() {
+            return self.anticipated_resolution.max_fanout;
+        }
+        usize::from(self.anticipated_lead_stages.iter().any(|&k| k >= 1))
     }
 
     /// Compute and store the nonzero state index mask from per-hydro

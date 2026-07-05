@@ -1739,6 +1739,112 @@ fn extract_thermals_anticipated_decision_is_per_block_invariant() {
     }
 }
 
+/// The delivery stage comes from the plant's attached `PointResolution`
+/// (`PointResolution::genuine_decisions_at`), never `stage_idx +
+/// anticipated_lead_stages` — the constant-lead fallback
+/// `StateLayout::anticipated_resolution_for` uses only when no resolution is
+/// attached.
+///
+/// `anticipated_lead_stages = [3]` (stale once a resolution is attached) would
+/// place a naive delivery stage at `0 + 3 = 3 >= n_stages = 3` (inactive); the
+/// attached resolution instead genuinely decides delivery stage 1 at stage 0,
+/// well inside the horizon.
+#[test]
+fn extract_thermals_decision_uses_attached_resolution_delivery_stage() {
+    let eq_counts = crate::test_support::GeometryDims {
+        hydro_count: 0,
+        max_par_order: 0,
+        n_thermals: 1,
+        n_lines: 0,
+        n_buses: 0,
+        n_blks: 1,
+        has_inflow_penalty: false,
+        max_deficit_segments: 1,
+        n_anticipated: 1,
+        k_max: 3,
+        anticipated_thermal_indices: vec![0],
+    };
+    let indexer = crate::test_support::geometry(&eq_counts, vec![], &[], vec![]);
+    let study_dims = crate::test_support::study_dims_for(&eq_counts);
+    let mut state = crate::test_support::state_layout_full(0, 0, 1, 3, vec![3]);
+    state.set_anticipated_resolution(crate::lead_time::AnticipatedResolution {
+        per_plant: vec![crate::lead_time::PointResolution {
+            decider: vec![None, Some(0), None],
+            decision_sets: vec![vec![1], vec![], vec![]],
+            depth: vec![1, 0, 0],
+        }],
+        k_max: 3,
+        max_fanout: 1,
+    });
+
+    let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
+    let mut primal = vec![0.0_f64; n_cols];
+    primal[indexer.anticipated_decision.start] = 77.0;
+    let obj = vec![0.0_f64; n_cols];
+
+    let counts = EntityCounts {
+        hydro_ids: vec![],
+        hydro_productivities: vec![],
+        thermal_ids: vec![30],
+        line_ids: vec![],
+        bus_ids: vec![],
+        pumping_station_ids: vec![],
+        contract_ids: vec![],
+        non_controllable_ids: vec![],
+    };
+
+    let ec = zero_energy_conversion(0, 1);
+    let result = extract_stage_result(
+        &SolutionView {
+            primal: &primal,
+            dual: &[],
+            objective: 0.0,
+            objective_coeffs: &obj,
+            row_lower: &[],
+        },
+        &StageExtractionSpec {
+            study_dims: &study_dims,
+            geometry: &indexer,
+            state: &state,
+            n_blks: indexer.n_blks,
+            entity_counts: &counts,
+            inflow_m3s_per_hydro: &[],
+            block_hours: &[1.0],
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices: &[],
+            contract_is_import: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities: &[],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[],
+            stage_index: 0,
+            n_stages: 3,
+            anticipated_windows: &[(None, None)],
+            study_stage_ids: &[0, 1, 2],
+        },
+        0,
+    );
+
+    assert_eq!(result.thermals.len(), 1);
+    assert_eq!(
+        result.thermals[0].anticipated_decision_mw,
+        Some(77.0),
+        "the attached resolution's genuine delivery stage (1) is inside the \
+         horizon; the stale anticipated_lead_stages=[3] constant-lead fallback \
+         would instead place delivery at stage 3 (>= n_stages) and read None"
+    );
+}
+
 // Tests for compute_anticipated_committed_mw (consolidated helper that
 // reads slot 0 of the anticipated_state ring buffer in both branches).
 // -------------------------------------------------------------------------

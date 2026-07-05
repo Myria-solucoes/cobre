@@ -113,7 +113,7 @@ pub(crate) struct TemplateBuildCtx<'a> {
     /// Per-plant commissioning window `(entry_stage_id, exit_stage_id)`, length
     /// `n_anticipated`, anticipated-local order. The decision gate keys on the
     /// DELIVERY stage's operation window
-    /// ([`StateLayout::is_anticipated_decision_active`]).
+    /// ([`StateLayout::is_anticipated_decision_active_for_delivery`]).
     pub(crate) anticipated_windows: Vec<(Option<i32>, Option<i32>)>,
     /// `study_stage_ids[t] = stage.id`, length `n_study_stages`. The decision gate
     /// keys its window clause on the delivery stage's `stage.id`, NOT the stage
@@ -159,37 +159,63 @@ pub(crate) struct TemplateBuildCtx<'a> {
 
 /// Column/row offsets for one stage's anticipated-thermal layout.
 pub(crate) struct AnticipatedLayout {
-    /// Start of anticipated-decision columns (one per plant, stage-level):
-    /// `col_anticipated_decision_start + local_anticipated_idx`. Equals
-    /// `col_thermal_end`.
+    /// Start of the anticipated-decision column block: `max_fanout *
+    /// n_anticipated` columns, fan-out-index-major, plant-minor
+    /// (`col_anticipated_decision_start + j * n_anticipated + local_idx` for
+    /// `j in 0..max_fanout`). Equals `col_thermal_end`. `max_fanout == 1`
+    /// collapses the offset formula to the pre-fan-out
+    /// `col_anticipated_decision_start + local_idx` exactly.
     pub(crate) col_anticipated_decision_start: usize,
+    /// Fan-out width (`AnticipatedResolution::max_fanout`, or its
+    /// single-decider/no-anticipation fallback — see
+    /// `StateLayout::anticipated_max_fanout`): the decision-column block's
+    /// per-plant stride.
+    pub(crate) max_fanout: usize,
     /// Start of the `anticipated_slots_out` column block (`A * k_max` columns,
     /// slot-major, plant-minor). Sourced from
     /// `StateLayout::anticipated_slots_out.start`, so the offset is
     /// stage-invariant — keeping the global stage-0 cut map on the correct
     /// column at every stage regardless of this stage's block count.
     pub(crate) col_anticipated_slots_out_start: usize,
-    /// Start of the `anticipated_state_out_def` equality row block: one row per
-    /// ACTIVE plant (strict gate `stage_idx + K_p < n_stages`, AND the delivery
-    /// stage's commissioning window), pinning that plant's own newest ring slot
-    /// (`col_anticipated_slots_out_start + (K_p-1)*A + local_idx`) to its
-    /// decision column. Inactive plants emit no row. Immediately after
-    /// `row_anticipated_fishing_start`.
+    /// Start of the `anticipated_state_out_def` equality row block: one row
+    /// per genuine, ACTIVE fanned decision (`PointResolution::
+    /// genuine_decisions_at`, AND the delivery stage's commissioning window),
+    /// pinning that decision's ring slot to its decision column. A plant
+    /// committing several delivery stages this stage emits several distinct
+    /// rows, one per fanned decision — never folded into one. Immediately
+    /// after `row_anticipated_fishing_start`.
     pub(crate) row_anticipated_state_out_def_start: usize,
-    /// Count of plants with `stage_idx + K_p < n_stages` (strict gate); drives the
-    /// active-row iteration.
+    /// Count of genuine, active fanned decisions this stage (`Some` count of
+    /// `anticipated_decision_row_pos`); drives the active-row iteration.
     // Rationale: read only by cross-module `debug_assert_eq!` guards in the matrix-fill
     // helpers; dead_code fires because the lint does not see cross-module field access.
     #[allow(dead_code)]
     pub(crate) n_anticipated_state_out_def_rows: usize,
-    /// Start of anticipated-fishing rows (one per plant, always-active):
-    /// `row_anticipated_fishing_start + local_idx`. After operational-violation rows.
+    /// For each fan-out-major, plant-minor decision-column index (`j *
+    /// n_anticipated + local_idx`, matching `col_anticipated_decision_start`'s
+    /// own layout), this stage's compact row position within the deposit-row
+    /// family, or `None` when `j` is beyond this stage's genuine fan-out count
+    /// (`PointResolution::genuine_decisions_at`) or the delivery is
+    /// commissioning-inactive. Length `n_anticipated * max_fanout`.
+    pub(crate) anticipated_decision_row_pos: Vec<Option<usize>>,
+    /// Start of anticipated-fishing rows (one per GENUINELY anticipated plant
+    /// this stage — `PointResolution::is_anticipated_at`, `false` exactly at a
+    /// `K = 0` self-delivery, D4): `row_anticipated_fishing_start + pos`.
+    /// After operational-violation rows.
     pub(crate) row_anticipated_fishing_start: usize,
-    /// Anticipated-fishing row count; equals `n_anticipated` (always-active).
+    /// Anticipated-fishing row count this stage (`Some` count of
+    /// `anticipated_fishing_row_pos`); `n_anticipated` unless a `K = 0`
+    /// self-delivery excludes a plant this stage.
     pub(crate) n_anticipated_fishing_rows: usize,
+    /// For each anticipated plant (local order), this stage's compact row
+    /// position within the fishing-row family, or `None` when the delivery
+    /// maturing this stage is a `K = 0` self-delivery — no anticipation binds,
+    /// so the plant's ordinary thermal generation is unconstrained by any
+    /// fishing coupling. Length `n_anticipated`.
+    pub(crate) anticipated_fishing_row_pos: Vec<Option<usize>>,
     /// Start of the anticipated-ring interior-slot definition equality rows
     /// (`slot_k^out − slot_{k+1}^in = 0`, the plain-shift rows for every slot
-    /// strictly before a plant's own newest slot). Immediately after
+    /// strictly before this stage's fresh-deposit slots). Immediately after
     /// `row_anticipated_state_out_def_start`. Mirrors
     /// [`Self::col_anticipated_slots_out_start`]'s pairing with
     /// `transit_bucket_definition` in spirit — the anticipated ring's own
@@ -201,11 +227,11 @@ pub(crate) struct AnticipatedLayout {
     /// For each GLOBAL anticipated-ring slot (`slot * n_anticipated + plant`,
     /// slot-major, matching [`crate::indexer::StateLayout::anticipated_slots_out`]'s
     /// own layout), this stage's compact row position within the interior-slot
-    /// definition-row family, or `None` when the slot is this plant's own
-    /// newest slot (`slot == k_i − 1`, handled by
-    /// `row_anticipated_state_out_def_start` instead), stage-invariant padding
-    /// (`slot >= k_i`), or beyond this stage's horizon-reachable cap
-    /// (`slot >= n_stages − 1 − stage_idx`). Length `n_anticipated * k_max`.
+    /// definition-row family, or `None` when the slot's delivery target is a
+    /// genuine fresh decision this stage (`PointResolution::genuine_decisions_at`,
+    /// handled by `row_anticipated_state_out_def_start` instead), beyond the
+    /// study horizon, or not yet ready (`PointResolution::is_ready_at`,
+    /// stage-invariant padding). Length `n_anticipated * k_max`.
     pub(crate) anticipated_slot_row_pos: Vec<Option<usize>>,
 }
 
@@ -551,37 +577,123 @@ fn build_transit_bucket_row_pos(
 /// For each GLOBAL anticipated-ring slot (`slot * n_anticipated + plant`,
 /// slot-major, mirroring [`build_transit_bucket_row_pos`]'s role for buckets),
 /// this stage's compact row position within the interior-slot definition-row
-/// family, or `None` when the slot is this plant's own newest slot
-/// (`slot + 1 == k_i`, the deposit row `row_anticipated_state_out_def_start`
-/// owns it instead), stage-invariant padding (`slot >= k_i`), or beyond this
-/// stage's horizon-reachable cap (`slot >= n_stages − 1 − stage_idx` — the
-/// plant's newest slot has no deeper slot to shift from and no in-horizon
-/// delivery target beyond that cap either, the same `horizon_cap_active`
-/// reasoning [`build_transit_bucket_row_pos`] applies to buckets). Returns the
-/// mapping and the reachable count.
+/// family, or `None` when the slot's delivery target `m = stage_idx + slot + 1`
+/// is a genuine fresh decision this stage (`decider[m] == Some(stage_idx)`,
+/// the deposit-row family `row_anticipated_state_out_def_start` owns it
+/// instead), beyond the study horizon (`m >= n_stages`), or not yet ready
+/// (`decider[m] > Some(stage_idx)`, structural padding). Ready
+/// (`PointResolution::is_ready_at`) is checked PER SLOT directly — never via
+/// a `depth`-derived boundary, which under-counts whenever pre-study (`None`)
+/// occupancy coexists with an in-study decision at the same stage (the
+/// fold-blindness class this per-slot check rules out). Returns the mapping
+/// and the reachable count.
 fn build_anticipated_slot_row_pos(
-    n_anticipated: usize,
-    k_max: usize,
-    anticipated_lead_stages: &[usize],
+    state: &StateLayout,
     n_stages: usize,
     stage_idx: usize,
 ) -> (Vec<Option<usize>>, usize) {
+    let n_anticipated = state.n_anticipated;
+    let k_max = state.k_max;
     if n_anticipated == 0 || k_max == 0 {
         return (Vec::new(), 0);
     }
-    let horizon_cap = n_stages.saturating_sub(stage_idx + 1);
+    let points: Vec<_> = (0..n_anticipated)
+        .map(|plant| state.anticipated_resolution_for(plant, n_stages))
+        .collect();
+
     let mut row_pos = vec![None; n_anticipated * k_max];
     let mut n_reachable = 0_usize;
     for slot in 0..k_max {
-        for (plant, &k_i) in anticipated_lead_stages.iter().enumerate() {
-            let is_interior_slot = slot + 1 < k_i;
-            if is_interior_slot && slot < horizon_cap {
+        for (plant, point) in points.iter().enumerate() {
+            let m = stage_idx + slot + 1;
+            let is_deposit = m < n_stages && point.decider[m] == Some(stage_idx);
+            let is_interior = m < n_stages && !is_deposit && point.is_ready_at(m, stage_idx);
+            if is_interior {
                 row_pos[slot * n_anticipated + plant] = Some(n_reachable);
                 n_reachable += 1;
             }
         }
     }
     (row_pos, n_reachable)
+}
+
+/// For each fan-out-major, plant-minor decision-column index (`j *
+/// n_anticipated + local_idx`, mirroring [`AnticipatedLayout::
+/// col_anticipated_decision_start`]'s own layout), this stage's compact row
+/// position within the deposit-row family, or `None` when `j` is beyond this
+/// stage's genuine fan-out count (`PointResolution::genuine_decisions_at`) or
+/// the delivery is commissioning-inactive
+/// (`StateLayout::is_anticipated_decision_active_for_delivery`). Returns the
+/// mapping and the active count.
+///
+/// A plant committing several delivery stages this stage produces several
+/// DISTINCT entries here — one per fanned decision, at its own delivery-
+/// anchored slot — never folded into one (the fold-blindness class).
+fn build_anticipated_decision_row_pos(
+    state: &StateLayout,
+    max_fanout: usize,
+    n_stages: usize,
+    stage_idx: usize,
+    anticipated_windows: &[(Option<i32>, Option<i32>)],
+    study_stage_ids: &[i32],
+) -> (Vec<Option<usize>>, usize) {
+    let n_anticipated = state.n_anticipated;
+    if n_anticipated == 0 || max_fanout == 0 {
+        return (Vec::new(), 0);
+    }
+    let mut row_pos = vec![None; n_anticipated * max_fanout];
+    let mut n_active = 0_usize;
+    for plant in 0..n_anticipated {
+        let point = state.anticipated_resolution_for(plant, n_stages);
+        for (j, m) in point.genuine_decisions_at(stage_idx).enumerate() {
+            debug_assert_ne!(
+                m, stage_idx,
+                "a K=0 self-delivery (decider[m] == m) must never reach the anticipated \
+                 ring's deposit-row fill"
+            );
+            if state.is_anticipated_decision_active_for_delivery(
+                plant,
+                m,
+                n_stages,
+                anticipated_windows,
+                study_stage_ids,
+            ) {
+                row_pos[j * n_anticipated + plant] = Some(n_active);
+                n_active += 1;
+            }
+        }
+    }
+    (row_pos, n_active)
+}
+
+/// For each anticipated plant (local order), this stage's compact row
+/// position within the fishing-row family, or `None` when the delivery
+/// maturing this stage is a `K = 0` self-delivery
+/// (`PointResolution::is_anticipated_at`, D4: exclude-with-advisory) — no
+/// anticipation binds, so the plant's ordinary thermal generation is
+/// unconstrained by any fishing coupling. Returns the mapping and the active
+/// count.
+fn build_anticipated_fishing_row_pos(
+    state: &StateLayout,
+    n_stages: usize,
+    stage_idx: usize,
+) -> (Vec<Option<usize>>, usize) {
+    let n_anticipated = state.n_anticipated;
+    if n_anticipated == 0 {
+        return (Vec::new(), 0);
+    }
+    let mut row_pos = vec![None; n_anticipated];
+    let mut n_active = 0_usize;
+    for (plant, pos) in row_pos.iter_mut().enumerate() {
+        if state
+            .anticipated_resolution_for(plant, n_stages)
+            .is_anticipated_at(stage_idx)
+        {
+            *pos = Some(n_active);
+            n_active += 1;
+        }
+    }
+    (row_pos, n_active)
 }
 
 /// Evaporation column/row indices per `(evaporation hydro, block)`, block-major
@@ -946,9 +1058,11 @@ impl<'a> StageLayout<'a> {
         let diversion_start = spillage_start + n_h * n_blks;
         let thermal_start = diversion_start + n_h * n_blks;
         let thermal_end = thermal_start + ctx.n_thermals * n_blks;
-        // Anticipated-decision columns occupy `[thermal_end, thermal_end + A)`;
-        // `line_fwd` follows them.
-        let anticipated_decision_end = thermal_end + ctx.n_anticipated;
+        // Anticipated-decision columns occupy `[thermal_end, thermal_end + A *
+        // max_fanout)`, fan-out-index-major, plant-minor; `line_fwd` follows
+        // them. `max_fanout == 1` collapses this to the pre-fan-out `+ A`.
+        let max_fanout = state.anticipated_max_fanout();
+        let anticipated_decision_end = thermal_end + ctx.n_anticipated * max_fanout;
         let line_fwd_start = anticipated_decision_end;
         let line_rev_start = line_fwd_start + ctx.n_lines * n_blks;
         let deficit_start = line_rev_start + ctx.n_lines * n_blks;
@@ -1099,41 +1213,42 @@ impl<'a> StageLayout<'a> {
         let n_filled_min_storage_floor_rows = filled_min_storage_floor_hydro_indices.len();
         let row_filled_min_storage_floor_start = row_filling_target_start + n_filling_target_rows;
 
-        // One fishing row per anticipated plant (always-active).
-        let n_anticipated_fishing_rows = ctx.n_anticipated;
+        // Fishing rows: one per GENUINELY anticipated plant this stage
+        // (`build_anticipated_fishing_row_pos`) — a `K = 0` self-delivery
+        // (D4) excludes a plant's fishing row this stage, so the row family
+        // is sparse like the deposit family below, not the dense
+        // `ctx.n_anticipated` count the single-decider ring shipped with.
+        let n_stages = ctx.resolved.bounds.n_stages();
+        let (anticipated_fishing_row_pos, n_anticipated_fishing_rows) =
+            build_anticipated_fishing_row_pos(state, n_stages, stage_idx);
         let row_anticipated_fishing_start =
             row_filled_min_storage_floor_start + n_filled_min_storage_floor_rows;
 
-        // Anticipated-state-out definition rows: one per ACTIVE plant
-        // (`StateLayout::is_anticipated_decision_active`, the single-owner gate).
-        let n_stages = ctx.resolved.bounds.n_stages();
-        let n_anticipated_state_out_def_rows = (0..ctx.n_anticipated)
-            .filter(|&local_idx| {
-                state.is_anticipated_decision_active(
-                    local_idx,
-                    stage_idx,
-                    n_stages,
-                    &ctx.anticipated_windows,
-                    &ctx.study_stage_ids,
-                )
-            })
-            .count();
+        // Anticipated-state-out (deposit) definition rows: one per genuine,
+        // ACTIVE fanned decision this stage (`build_anticipated_decision_row_pos`
+        // — `PointResolution::genuine_decisions_at` AND the delivery stage's
+        // commissioning window). A plant committing several delivery stages
+        // this stage emits several distinct rows. `max_fanout` was already
+        // derived above to size the decision-column block.
+        let (anticipated_decision_row_pos, n_anticipated_state_out_def_rows) =
+            build_anticipated_decision_row_pos(
+                state,
+                max_fanout,
+                n_stages,
+                stage_idx,
+                &ctx.anticipated_windows,
+                &ctx.study_stage_ids,
+            );
         let row_anticipated_state_out_def_start =
             row_anticipated_fishing_start + n_anticipated_fishing_rows;
 
         // Anticipated-ring interior-slot definition rows: one per (plant, slot)
-        // strictly before that plant's own newest slot, reachable within this
-        // stage's horizon cap (`build_anticipated_slot_row_pos`, mirroring
+        // strictly before this stage's fresh-deposit boundary
+        // (`build_anticipated_slot_row_pos`, mirroring
         // `build_transit_bucket_row_pos`). Immediately after
         // `row_anticipated_state_out_def_start`.
         let (anticipated_slot_row_pos, n_anticipated_slot_definition_rows) =
-            build_anticipated_slot_row_pos(
-                ctx.n_anticipated,
-                ctx.k_max,
-                &ctx.anticipated_lead_stages,
-                n_stages,
-                stage_idx,
-            );
+            build_anticipated_slot_row_pos(state, n_stages, stage_idx);
         let row_anticipated_slot_definition_start =
             row_anticipated_state_out_def_start + n_anticipated_state_out_def_rows;
         let row_generic_start =
@@ -1179,11 +1294,14 @@ impl<'a> StageLayout<'a> {
         };
         let anticipated = AnticipatedLayout {
             col_anticipated_decision_start: thermal_end,
+            max_fanout,
             col_anticipated_slots_out_start,
             row_anticipated_state_out_def_start,
             n_anticipated_state_out_def_rows,
+            anticipated_decision_row_pos,
             row_anticipated_fishing_start,
             n_anticipated_fishing_rows,
+            anticipated_fishing_row_pos,
             row_anticipated_slot_definition_start,
             n_anticipated_slot_definition_rows,
             anticipated_slot_row_pos,
@@ -1288,28 +1406,6 @@ impl<'a> StageLayout<'a> {
     #[must_use]
     pub(crate) fn block_grid(&self) -> BlockGrid {
         BlockGrid::new(self.n_blks, self.max_deficit_segments)
-    }
-
-    /// Whether anticipated plant `local_idx` is active at `stage_idx`. Delegates to
-    /// the single-owner gate [`StateLayout::is_anticipated_decision_active`], so the
-    /// active set is defined once across `new` and the column/row fills.
-    #[inline]
-    #[must_use]
-    pub(crate) fn is_anticipated_decision_active(
-        &self,
-        local_idx: usize,
-        stage_idx: usize,
-        n_stages: usize,
-        anticipated_windows: &[(Option<i32>, Option<i32>)],
-        study_stage_ids: &[i32],
-    ) -> bool {
-        self.state.is_anticipated_decision_active(
-            local_idx,
-            stage_idx,
-            n_stages,
-            anticipated_windows,
-            study_stage_ids,
-        )
     }
 
     /// Turbine-flow column for hydro `h_idx`, block `blk`.
