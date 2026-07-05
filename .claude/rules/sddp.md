@@ -418,7 +418,7 @@ slot 0 — the property that makes the per-slot check well-founded without
 needing an aggregate boundary.
 
 **`K = 0` (sub-stage lead, `c(m) = m`) is excluded from the ring entirely —
-D4, exclude-with-advisory, never a hard error, never an underflow.** A
+exclude-with-advisory, never a hard error, never an underflow.** A
 delivery whose physical lead is shorter than its own stage's duration is
 decided inside its own delivery stage; `PointResolution::self_delivered_stages`
 identifies these, and `genuine_decisions_at`/`is_anticipated_at` filter them

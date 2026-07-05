@@ -282,7 +282,7 @@ impl PointResolution {
     /// Delivery stages where `c(m) = m` — a sub-stage lead: the physical lead
     /// is shorter than the delivery stage's own duration, so the commitment
     /// would be decided inside its own delivery stage and no anticipation
-    /// binds (`K = 0`, locked D4). Excluded from the ring entirely; the stage
+    /// binds (`K = 0`). Excluded from the ring entirely; the stage
     /// LP dispatches the plant's generation as ordinary, unconstrained
     /// thermal output.
     pub fn self_delivered_stages(&self) -> impl Iterator<Item = usize> + '_ {

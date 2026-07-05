@@ -869,7 +869,7 @@ pub(crate) fn resolve_anticipated_commitments(
     (resolution, lead_stages)
 }
 
-/// Emit a per-stage setup-time advisory (D4: exclude-with-advisory, never a
+/// Emit a per-stage setup-time advisory (exclude-with-advisory, never a
 /// hard error) for every `K = 0` sub-stage-lead delivery a `LeadTime` plant's
 /// calendar resolves to (`PointResolution::self_delivered_stages`): names the
 /// plant, the stage, and the effective `lead_stages == 0` alternative.

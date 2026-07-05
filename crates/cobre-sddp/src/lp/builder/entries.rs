@@ -12,7 +12,7 @@ use super::layout::{StageLayout, TemplateBuildCtx};
 /// thermal energy (`MWh`) equals the committed power level in the
 /// anticipated-state slot-0 column scaled to `MWh` (`MW` × `block_hours_total`).
 /// Gated on `layout.anticipated.anticipated_fishing_row_pos`: a `K = 0`
-/// self-delivery (D4) excludes a plant's row this stage — no anticipation
+/// self-delivery excludes a plant's row this stage — no anticipation
 /// binds, so the plant's ordinary thermal generation carries no fishing
 /// coupling.
 pub(super) fn fill_anticipated_fishing_entries(

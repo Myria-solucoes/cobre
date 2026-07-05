@@ -346,7 +346,7 @@ fn fill_diversion_columns(
 /// delivery-stage column too would double-count. "Genuinely anticipated"
 /// keys on `layout.anticipated.anticipated_fishing_row_pos` — the same gate
 /// the fishing row itself uses — NOT a static per-plant flag: a `K = 0`
-/// sub-stage-lead delivery (D4) carries no fishing coupling, so its thermal
+/// sub-stage-lead delivery carries no fishing coupling, so its thermal
 /// column must price normally, exactly as an ordinary (non-anticipated)
 /// thermal would (the "dispatches freely" contract).
 ///

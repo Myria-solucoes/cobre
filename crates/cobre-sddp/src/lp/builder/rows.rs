@@ -480,7 +480,7 @@ fn fill_operational_violation_rows(
 
 /// Fill anticipated-fishing equality row bounds: `0 == 0` per GENUINELY
 /// anticipated plant this stage (`layout.anticipated.anticipated_fishing_row_pos`
-/// — a `K = 0` self-delivery, D4, excludes a plant's row this stage).
+/// — a `K = 0` self-delivery excludes a plant's row this stage).
 pub(super) fn fill_anticipated_fishing_rows(
     layout: &StageLayout,
     row_lower: &mut [f64],

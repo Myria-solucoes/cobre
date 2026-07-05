@@ -205,7 +205,7 @@ pub(crate) struct AnticipatedLayout {
     pub(crate) anticipated_decision_row_pos: Vec<Option<usize>>,
     /// Start of anticipated-fishing rows (one per GENUINELY anticipated plant
     /// this stage — `PointResolution::is_anticipated_at`, `false` exactly at a
-    /// `K = 0` self-delivery, D4): `row_anticipated_fishing_start + pos`.
+    /// `K = 0` self-delivery): `row_anticipated_fishing_start + pos`.
     /// After operational-violation rows.
     pub(crate) row_anticipated_fishing_start: usize,
     /// Anticipated-fishing row count this stage (`Some` count of
@@ -674,7 +674,7 @@ fn build_anticipated_decision_row_pos(
 /// For each anticipated plant (local order), this stage's compact row
 /// position within the fishing-row family, or `None` when the delivery
 /// maturing this stage is a `K = 0` self-delivery
-/// (`PointResolution::is_anticipated_at`, D4: exclude-with-advisory) — no
+/// (`PointResolution::is_anticipated_at`, exclude-with-advisory) — no
 /// anticipation binds, so the plant's ordinary thermal generation is
 /// unconstrained by any fishing coupling. Returns the mapping and the active
 /// count.
@@ -1220,7 +1220,7 @@ impl<'a> StageLayout<'a> {
 
         // Fishing rows: one per GENUINELY anticipated plant this stage
         // (`build_anticipated_fishing_row_pos`) — a `K = 0` self-delivery
-        // (D4) excludes a plant's fishing row this stage, so the row family
+        // excludes a plant's fishing row this stage, so the row family
         // is sparse like the deposit family below, not the dense
         // `ctx.n_anticipated` count the single-decider ring shipped with.
         let n_stages = ctx.resolved.bounds.n_stages();

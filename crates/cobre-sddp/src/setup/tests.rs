@@ -6425,7 +6425,7 @@ fn cut_state_layouts_stored_one_per_pool_and_reachable() {
 }
 
 // ---------------------------------------------------------------------------
-// K = 0 sub-stage lead (`c(m) = m`) — exclude-with-advisory (D4)
+// K = 0 sub-stage lead (`c(m) = m`) — exclude-with-advisory
 // ---------------------------------------------------------------------------
 
 /// Minimal WARN-capturing `tracing::Subscriber`, mirroring
@@ -6526,7 +6526,7 @@ fn test_anticipated_resolve_point_k0_uniform_calendar() {
 }
 
 /// `resolve_anticipated_commitments` emits one `tracing::WARN` event per
-/// `K = 0` self-delivered stage (D4: exclude-with-advisory, never a hard
+/// `K = 0` self-delivered stage (exclude-with-advisory, never a hard
 /// error), naming the thermal, the stage, and the `lead_stages == 0`
 /// stage-count alternative. Setup/load-time only (this is a direct,
 /// non-per-trajectory call).
