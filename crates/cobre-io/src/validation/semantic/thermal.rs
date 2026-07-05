@@ -179,6 +179,74 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
     }
 }
 
+/// Advisory (`ModelQuality`): a `lead_stages`-configured thermal whose active
+/// window — decision stage `t` through delivery `t + lead_stages`, `t` ranging
+/// over the plant's commissioning window and the delivery side clamped to the
+/// study horizon — spans a pair of adjacent study stages with differing
+/// durations. A fixed stage-count lead delivers a different physical lead on
+/// each side of such a cadence change; `anticipated_config.lead_time` anchors
+/// the lead to physical hours instead and is immune to this. Never a hard
+/// error — the same `ModelQuality`
+/// channel `check_recent_observations_non_monthly_seed_gap`
+/// (`validation/semantic/travel_time.rs`) uses.
+pub(super) fn check_anticipated_cadence_transition(data: &ParsedData, ctx: &mut ValidationContext) {
+    let study_durations = study_stage_durations(data);
+    let n_stages = study_durations.len();
+    if n_stages < 2 {
+        return;
+    }
+
+    for thermal in &data.thermals {
+        let Some(cfg) = thermal.anticipated_config else {
+            continue;
+        };
+        let Some(k) = cfg.lead_stages() else {
+            continue;
+        };
+        let thermal_id = thermal.id.0;
+        let k_u = usize::try_from(k).unwrap_or(usize::MAX);
+
+        let decision_start = usize::try_from(thermal.entry_stage_id.unwrap_or(0).max(0))
+            .unwrap_or(0)
+            .min(n_stages - 1);
+        let decision_end_id = thermal.exit_stage_id.map_or_else(
+            || i32::try_from(n_stages - 1).unwrap_or(i32::MAX),
+            |exit| exit - 1,
+        );
+        if decision_end_id < 0 {
+            continue;
+        }
+        let decision_end = usize::try_from(decision_end_id)
+            .unwrap_or(0)
+            .min(n_stages - 1);
+        if decision_start > decision_end {
+            continue;
+        }
+        let window_end = decision_end.saturating_add(k_u).min(n_stages - 1);
+
+        let entity_str = format!("thermals[id={thermal_id}].anticipated_config.lead_stages");
+        for i in decision_start..window_end {
+            let (prev, next) = (study_durations[i], study_durations[i + 1]);
+            if (prev - next).abs() > 1e-9 {
+                ctx.add_warning(
+                    ErrorKind::ModelQuality,
+                    "system/thermals.json",
+                    Some(&entity_str),
+                    format!(
+                        "Thermal {thermal_id}: anticipated_config.lead_stages={k} active window \
+                         spans a stage-cadence transition between stage {i} ({prev}h) and stage \
+                         {} ({next}h); a fixed stage-count lead delivers a different physical \
+                         lead on each side of the transition. Consider anticipated_config.lead_time, \
+                         which anchors the lead to physical hours instead of a stage count.",
+                        i + 1
+                    ),
+                );
+                break;
+            }
+        }
+    }
+}
+
 /// Study-stage (`id >= 0`) durations in canonical (ascending `id`) order, each
 /// summed from its blocks. Computed independently of
 /// `travel_time::study_stage_durations` (same shape, own walk) rather than
@@ -804,6 +872,86 @@ mod tests {
             !ctx.has_errors(),
             "lead_stages == n_stages must be accepted, got: {:?}",
             ctx.errors()
+        );
+    }
+
+    // ── Cadence-transition advisory (check_anticipated_cadence_transition) ────
+
+    /// Given a `lead_stages=2` thermal whose active window spans a
+    /// weekly (168h) -> monthly (744h) stage-cadence transition, when
+    /// semantic validation runs, then exactly one advisory is produced naming
+    /// the thermal and citing `lead_time`, and validation still succeeds.
+    #[test]
+    fn lead_stages_cadence_transition_emits_advisory() {
+        let thermal = make_anticipated_thermal(1, 2, None, None);
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(1),
+            values_mw: vec![0.0, 0.0],
+        };
+        let data = make_data_anticipated_with_durations(
+            vec![thermal],
+            &[168.0, 168.0, 168.0, 744.0, 744.0],
+            vec![history],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+
+        assert!(
+            !ctx.has_errors(),
+            "a cadence transition is advisory-only, never an error; got: {:?}",
+            ctx.errors()
+        );
+        let relevant: Vec<_> = ctx
+            .warnings()
+            .into_iter()
+            .filter(|w| w.kind == ErrorKind::ModelQuality && w.message.contains("Thermal 1"))
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly one cadence-transition advisory, got: {:?}",
+            ctx.warnings()
+        );
+        let msg = &relevant[0].message;
+        assert!(
+            msg.contains("lead_time"),
+            "advisory must cite lead_time as the physically-anchored alternative, got: {msg}"
+        );
+        assert!(
+            msg.contains("stage 2") && msg.contains("stage 3"),
+            "advisory must cite the transition stage pair, got: {msg}"
+        );
+    }
+
+    /// Given a `lead_stages=2` thermal whose active window spans only
+    /// equal-duration (uniform) stages, when semantic validation runs, then no
+    /// cadence-transition advisory is produced.
+    #[test]
+    fn lead_stages_uniform_calendar_no_advisory() {
+        let thermal = make_anticipated_thermal(1, 2, None, None);
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(1),
+            values_mw: vec![0.0, 0.0],
+        };
+        let data = make_data_anticipated_with_durations(
+            vec![thermal],
+            &[744.0, 744.0, 744.0, 744.0, 744.0],
+            vec![history],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+
+        assert!(
+            !ctx.has_errors(),
+            "a uniform calendar is valid, got: {:?}",
+            ctx.errors()
+        );
+        assert!(
+            !ctx.warnings()
+                .iter()
+                .any(|w| w.kind == ErrorKind::ModelQuality && w.message.contains("cadence")),
+            "a uniform calendar must not trigger a cadence-transition advisory, got: {:?}",
+            ctx.warnings()
         );
     }
 

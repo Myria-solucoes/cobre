@@ -2,7 +2,7 @@
   "$defs": {
     "RawAnticipatedCommitmentHistory": {
       "additionalProperties": false,
-      "description": "Past committed MW values for one anticipated thermal plant.\n\n`values_mw[0]` is the commitment for the earliest pending delivery stage;\n`values_mw[k-1]` is the most recent. Length must equal the plant's\n`lead_stages` (validated semantically in a later validation layer).",
+      "description": "Past committed MW values for one anticipated thermal plant.\n\n`values_mw[j]` is the MW dispatched at the `j`-th pre-study-committed\ndelivery stage (delivery-anchored; required length is calendar-derived, not\n`lead_stages` on a non-uniform calendar — validated semantically). The\nvalues are sunk cost: they do not enter the study objective. Each value\nmust lie within the plant's `[min_generation_mw, max_generation_mw]` bounds\nand, if the plant has a commissioning window, mature inside it (both\nvalidated semantically).",
       "properties": {
         "thermal_id": {
           "description": "Thermal plant identifier. Must reference an anticipated thermal.",
@@ -10,7 +10,7 @@
           "type": "integer"
         },
         "values_mw": {
-          "description": "Past committed MW values, ordered by delivery stage ascending.\nLength must equal the plant's `lead_stages` (validated semantically).",
+          "description": "Past committed MW values, ordered by delivery stage ascending. Required\nlength is calendar-derived (validated semantically), not `lead_stages`.",
           "items": {
             "format": "double",
             "type": "number"

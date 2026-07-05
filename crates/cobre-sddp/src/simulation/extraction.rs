@@ -152,8 +152,10 @@ impl ThermalReverseLookup {
 /// calendar-anchored lead on a non-uniform study. Only the single-decider case
 /// is read: at most one genuine decision per plant per stage. A plant fanning
 /// out several deliveries from one decision stage needs a per-delivery-stage
-/// output extraction this helper does not provide; the `debug_assert` below
-/// flags that gap rather than silently reporting only the first delivery.
+/// output extraction this helper does not provide, so `build_wired_indexer`
+/// rejects `AnticipatedResolution::max_fanout > 1` at setup — a fanned study
+/// never reaches here, and the `debug_assert` below is defence-in-depth against
+/// that guard regressing, not a reachable panic.
 ///
 /// Gates on [`StateLayout::is_anticipated_decision_active_for_delivery`] rather
 /// than reading then checking: an inactive column is pinned to `[0, 0]` and the

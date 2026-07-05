@@ -65,12 +65,15 @@
 //! 9. No `thermal_id` appears more than once in `past_anticipated_commitments`.
 //! 10. Every `past_anticipated_commitments[i].values_mw` is non-empty.
 //! 11. Every value in `past_anticipated_commitments[i].values_mw` is finite and
-//!     non-negative (`>= 0.0`). (Parse-time check; see also rule 12.)
-//! 12. Every value in `past_anticipated_commitments[i].values_mw` must be `0.0`.
-//!     Non-zero entries are rejected by the semantic validator (Layer 5a) with an
-//!     error naming the thermal id and slot index. Pre-horizon commitments are not
-//!     supported in the current version; see [`AnticipatedCommitmentHistory`] in
-//!     `cobre-core` for the limitation rationale.
+//!     non-negative (`>= 0.0`) (parse-time check).
+//! 12. `past_anticipated_commitments[i].values_mw.len()` equals the
+//!     calendar-derived count of pre-study-committed delivery stages for that
+//!     thermal's lead mode — not `lead_stages` on a non-uniform calendar — and
+//!     every value lies within the plant's `[min_generation_mw, max_generation_mw]`
+//!     bounds and, if the plant has a commissioning window, matures inside it.
+//!     All three are enforced by the semantic validator (Layer 5a); the committed
+//!     values are sunk cost and do not enter the study objective. See
+//!     [`AnticipatedCommitmentHistory`] in `cobre-core` for the full contract.
 //! 13. Every `start_date` and `end_date` in `past_defluences` parses as ISO 8601
 //!     (`YYYY-MM-DD`), and `end_date > start_date`.
 //! 14. Every `value_m3s` in `past_defluences` is finite and non-negative.
@@ -237,17 +240,21 @@ struct RawRecentObservation {
 
 /// Past committed MW values for one anticipated thermal plant.
 ///
-/// `values_mw[0]` is the commitment for the earliest pending delivery stage;
-/// `values_mw[k-1]` is the most recent. Length must equal the plant's
-/// `lead_stages` (validated semantically in a later validation layer).
+/// `values_mw[j]` is the MW dispatched at the `j`-th pre-study-committed
+/// delivery stage (delivery-anchored; required length is calendar-derived, not
+/// `lead_stages` on a non-uniform calendar — validated semantically). The
+/// values are sunk cost: they do not enter the study objective. Each value
+/// must lie within the plant's `[min_generation_mw, max_generation_mw]` bounds
+/// and, if the plant has a commissioning window, mature inside it (both
+/// validated semantically).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawAnticipatedCommitmentHistory {
     /// Thermal plant identifier. Must reference an anticipated thermal.
     thermal_id: i32,
-    /// Past committed MW values, ordered by delivery stage ascending.
-    /// Length must equal the plant's `lead_stages` (validated semantically).
+    /// Past committed MW values, ordered by delivery stage ascending. Required
+    /// length is calendar-derived (validated semantically), not `lead_stages`.
     values_mw: Vec<f64>,
 }
 

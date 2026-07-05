@@ -6582,6 +6582,48 @@ fn resolve_anticipated_commitments_leadstages_never_warns() {
     );
 }
 
+/// A mixed-cadence calendar where exactly ONE of several delivery stages
+/// self-delivers (`c(m) = m`): three weekly (168h) stages decided ahead of
+/// time, then one monthly (744h) stage whose 200h lead is shorter than its
+/// own duration. Discriminates the fixture above (every stage self-delivers,
+/// so it cannot tell "one advisory per self-delivered stage" apart from "one
+/// advisory per stage"): exactly one advisory fires, naming that stage and
+/// the plant.
+#[test]
+fn warn_on_sub_stage_lead_emits_once_per_self_delivered_stage() {
+    let system = minimal_system_with_anticipated(
+        &[168.0, 168.0, 168.0, 744.0],
+        AnticipatedConfig::LeadTime(200.0),
+        0,
+    );
+
+    let (subscriber, messages) = WarnRecorder::new();
+    tracing::subscriber::with_default(subscriber, || {
+        let _ = super::resolve_anticipated_commitments(&system);
+    });
+    let recorded = messages.lock().unwrap();
+    let relevant: Vec<&str> = recorded
+        .iter()
+        .filter(|msg| msg.contains("lead_stages == 0"))
+        .map(std::string::String::as_str)
+        .collect();
+    assert_eq!(
+        relevant.len(),
+        1,
+        "expected exactly one advisory for the single self-delivered stage, got: {recorded:?}"
+    );
+    assert!(
+        relevant[0].contains("stage 3"),
+        "advisory must name stage 3, got: {}",
+        relevant[0]
+    );
+    assert!(
+        relevant[0].contains("T1"),
+        "advisory must name the plant, got: {}",
+        relevant[0]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // LeadTime fan-out — rejected at setup, not silently dropped, no panic
 // ---------------------------------------------------------------------------

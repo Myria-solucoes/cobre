@@ -5388,3 +5388,1006 @@ mod anticipated_convergence_slow {
         );
     }
 }
+mod a1b_value_cut_identity_anchor {
+    //! LeadTime == LeadStages value/cut-identity anchor on a uniform calendar.
+    //!
+    //! On a uniform 3x744h calendar a physical lead of exactly one stage's hours
+    //! (`LeadTime(744.0)`) and a one-stage-count lead (`LeadStages(1)`) resolve to
+    //! the identical delivery-anchored decider `[None, Some(0), Some(1)]`, so both
+    //! build a byte-identical LP and MUST train to bit-identical value, states, and
+    //! anticipated-ring cuts. This module pins that equivalence end-to-end
+    //! (train + simulate) as the A-1(b) value/cut-identity anchor.
+
+    use cobre_core::entities::{bus::DeficitSegment, thermal::AnticipatedConfig};
+    use cobre_core::scenario::LoadModel;
+    use cobre_core::temporal::{
+        Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig, Stage,
+        StageRiskConfig, StageStateConfig,
+    };
+    use cobre_core::{
+        AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
+        ContractStageBounds, EntityId, HydroStageBounds, HydroStagePenalties, InitialConditions,
+        LineStageBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingStageBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
+        ThermalStageBounds,
+    };
+    use cobre_io::config::{
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
+        TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+    };
+    use cobre_sddp::{SimulationScenarioResult, StudySetup};
+    use cobre_solver::ActiveSolver;
+
+    use std::sync::mpsc;
+
+    use super::common::StubComm;
+    use super::common::build_setup_in_code;
+    use super::common::builders::{
+        BusSpec, StageSpec, ThermalSpec, make_bus, make_stage, make_thermal,
+    };
+
+    const N_STAGES: usize = 3;
+    const K_MAX: usize = 1;
+    const STAGE_HOURS: f64 = 744.0;
+    const LOAD_MW: f64 = 200.0;
+
+    const BACKUP_COST: f64 = 100.0;
+    const BACKUP_CAP: f64 = 200.0;
+    const ANT_COST: f64 = 5.0;
+
+    // Stage-varying anticipated delivery caps, indexed by delivery stage over the
+    // `N_STAGES + K_MAX` axis `fill_anticipated_columns` reads. Stage 0 is the
+    // seed-delivery stage AND the decision-anchored decoy for the delivery-1
+    // decision; the delivery-stage-1 (150) and delivery-stage-2 (80) caps differ,
+    // which is what makes the AC3 mutation non-vacuous — constant caps would make a
+    // decision-anchored read indistinguishable from a delivery-anchored one.
+    // Delivery-stage axis width `fill_anticipated_columns` reads (`stage_idx + K`).
+    const THERMAL_AXIS: usize = N_STAGES + K_MAX;
+    const DELIVERY_CAP: [f64; THERMAL_AXIS] = [150.0, 150.0, 80.0, 80.0];
+
+    // EntityId ordering: bus 1, backup T0 = 2, anticipated T1 = 3. System::build
+    // sorts thermals by EntityId, so thermal_idx 0 = backup, 1 = anticipated.
+    const BUS_ID: EntityId = EntityId(1);
+    const BACKUP_ID: EntityId = EntityId(2);
+    const ANT_ID: EntityId = EntityId(3);
+    const THERMAL_IDX_BACKUP: usize = 0;
+    const THERMAL_IDX_ANT: usize = 1;
+
+    const ITERATIONS: usize = 20;
+
+    fn build_system(anticipated_config: AnticipatedConfig) -> cobre_core::System {
+        use chrono::NaiveDate;
+        let date = |m: u32, d: u32| NaiveDate::from_ymd_opt(2024, m, d).expect("valid date");
+
+        let bus = make_bus(
+            BUS_ID,
+            BusSpec {
+                name: "B1".to_string(),
+                operational_start_date: date(1, 1),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 1000.0,
+                }],
+                excess_cost: 0.0,
+                ..Default::default()
+            },
+        );
+
+        let backup = make_thermal(
+            BACKUP_ID,
+            ThermalSpec {
+                name: "T0_backup".to_string(),
+                operational_start_date: date(1, 2),
+                bus_id: BUS_ID,
+                min_generation_mw: 0.0,
+                max_generation_mw: BACKUP_CAP,
+                cost_per_mwh: BACKUP_COST,
+                anticipated_config: None,
+                entry_stage_id: None,
+                exit_stage_id: None,
+                ..Default::default()
+            },
+        );
+
+        let anticipated = make_thermal(
+            ANT_ID,
+            ThermalSpec {
+                name: "T1_anticipated".to_string(),
+                operational_start_date: date(1, 3),
+                bus_id: BUS_ID,
+                min_generation_mw: 0.0,
+                max_generation_mw: BACKUP_CAP,
+                cost_per_mwh: ANT_COST,
+                anticipated_config: Some(anticipated_config),
+                entry_stage_id: None,
+                exit_stage_id: None,
+                ..Default::default()
+            },
+        );
+
+        let stages: Vec<Stage> = (0..N_STAGES)
+            .map(|i| {
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: date(1, 1),
+                        end_date: date(2, 1),
+                        season_id: None,
+                        blocks: vec![Block {
+                            index: 0,
+                            name: "S".to_string(),
+                            duration_hours: STAGE_HOURS,
+                        }],
+                        block_mode: BlockMode::Parallel,
+                        state_config: StageStateConfig {
+                            storage: false,
+                            inflow_lags: false,
+                        },
+                        risk_config: StageRiskConfig::Expectation,
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor: 1,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..N_STAGES)
+            .map(|i| LoadModel {
+                bus_id: BUS_ID,
+                stage_id: i as i32,
+                mean_mw: LOAD_MW,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let mut bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 2,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: K_MAX,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 0.0,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 0.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    max_diversion_m3s: None,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        // fill_anticipated_columns reads the delivery cell at `stage_idx + K`, so
+        // per-thermal bounds must cover the full `[0, N_STAGES + K_MAX)` axis. The
+        // backup is constant; the anticipated plant carries the stage-varying caps.
+        for s in 0..THERMAL_AXIS {
+            *bounds.thermal_bounds_mut(THERMAL_IDX_BACKUP, s) = ThermalStageBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: BACKUP_CAP,
+                cost_per_mwh: BACKUP_COST,
+            };
+            *bounds.thermal_bounds_mut(THERMAL_IDX_ANT, s) = ThermalStageBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: DELIVERY_CAP[s],
+                cost_per_mwh: ANT_COST,
+            };
+        }
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 0,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.0,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 0.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 0.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        // K=1 ring: exactly one pre-study delivery stage (m=0, decider None) in both
+        // modes. Seed it to 0 MW so stage 0 delivers nothing from T1 and the
+        // hand-derived dispatch lives entirely at delivery stages 1 and 2.
+        let initial_conditions = InitialConditions {
+            storage: vec![],
+            filling_storage: vec![],
+            past_inflows: vec![],
+            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
+                thermal_id: ANT_ID,
+                values_mw: vec![0.0],
+            }],
+            recent_observations: vec![],
+            past_defluences: vec![],
+        };
+
+        let policy_graph = PolicyGraph {
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.0,
+            transitions: vec![],
+            season_map: None,
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(vec![backup, anticipated])
+            .stages(stages)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .initial_conditions(initial_conditions)
+            .policy_graph(policy_graph)
+            .build()
+            .expect("build_system: valid")
+    }
+
+    fn build_config(iterations: usize) -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::Penalty,
+                },
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                forward_passes: Some(1),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
+                    limit: iterations as u32,
+                }]),
+                stopping_mode: "any".to_string(),
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                scenario_source: None,
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig {
+                enabled: true,
+                num_scenarios: 1,
+                io_channel_capacity: 8,
+                ..IoSimulationConfig::default()
+            },
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    /// Converged run outputs for the two-mode identity comparison.
+    struct RunOutputs {
+        final_lb: f64,
+        final_ub: f64,
+        scenarios: Vec<SimulationScenarioResult>,
+    }
+
+    /// Train `iterations` then simulate one scenario, capturing the converged
+    /// lower/upper bound before the outcome's basis cache is consumed by simulate.
+    fn train_and_simulate(setup: &mut StudySetup, iterations: usize) -> RunOutputs {
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = setup
+            .train(
+                &mut solver,
+                &comm,
+                iterations,
+                ActiveSolver::new,
+                None,
+                None,
+            )
+            .expect("train must not return Err");
+        assert!(
+            outcome.error.is_none(),
+            "training error must be None; got {:?}",
+            outcome.error
+        );
+        let mut pool = setup
+            .create_workspace_pool(&comm, 1, ActiveSolver::new)
+            .expect("create_workspace_pool");
+        let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
+        let (tx, rx) = mpsc::sync_channel(io_capacity);
+        let drain = std::thread::spawn(move || rx.into_iter().collect::<Vec<_>>());
+        setup
+            .simulate(
+                &mut pool.workspaces,
+                &comm,
+                &tx,
+                None,
+                None,
+                &outcome.result.basis_cache,
+            )
+            .expect("simulate must not return Err");
+        drop(tx);
+        let scenarios = drain.join().expect("drain thread must not panic");
+
+        RunOutputs {
+            final_lb: outcome.result.final_lb,
+            final_ub: outcome.result.final_ub,
+            scenarios,
+        }
+    }
+
+    /// Per-stage active cuts as `(slot, intercept, coefficients)`. With no hydro the
+    /// full coefficient vector IS the anticipated ring (`n_state ==
+    /// anticipated_slots_out.end`), so equality here is anticipated-ring cut identity.
+    fn collect_cuts(setup: &StudySetup) -> Vec<Vec<(usize, f64, Vec<f64>)>> {
+        (0..setup.fcf.pools.len())
+            .map(|stage| {
+                setup
+                    .fcf
+                    .active_cuts(stage)
+                    .map(|(slot, intercept, coeffs)| (slot, intercept, coeffs.to_vec()))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn committed_mw(scenario: &SimulationScenarioResult, t: usize) -> f64 {
+        scenario.stages[t]
+            .thermals
+            .iter()
+            .find(|th| th.thermal_id == ANT_ID.0)
+            .and_then(|th| th.anticipated_committed_mw)
+            .unwrap_or_else(|| panic!("committed_mw missing at stage {t}"))
+    }
+
+    fn decision_mw(scenario: &SimulationScenarioResult, t: usize) -> Option<f64> {
+        scenario.stages[t]
+            .thermals
+            .iter()
+            .find(|th| th.thermal_id == ANT_ID.0)
+            .and_then(|th| th.anticipated_decision_mw)
+    }
+
+    fn backup_mw(scenario: &SimulationScenarioResult, t: usize) -> f64 {
+        scenario.stages[t]
+            .thermals
+            .iter()
+            .find(|th| th.thermal_id == BACKUP_ID.0)
+            .map_or_else(
+                || panic!("backup generation missing at stage {t}"),
+                |th| th.generation_mw,
+            )
+    }
+
+    /// `LeadTime(744h) == LeadStages(1)` on a uniform 3x744h calendar: the two modes
+    /// resolve to the identical decider `[None, Some(0), Some(1)]`, build a
+    /// byte-identical LP, and MUST train to bit-identical value, per-stage
+    /// anticipated committed/decision MW, and anticipated-ring cut coefficients.
+    ///
+    /// This asserts SOLUTIONS (final LB/UB, committed/decision MW, cut coefficients),
+    /// never LP bytes or a basis-dependent dual: the two modes' LPs are identical, so
+    /// the optimum is bit-identical and `==` is the correct comparison. Runs under
+    /// whichever backend the binary is compiled with, so the identity is pinned on
+    /// both HiGHS and CLP via the per-backend CI matrix.
+    ///
+    /// Hand-derived dispatch (T1 cheap at $5/MWh runs to its delivery-stage cap; T0
+    /// backup at $100/MWh fills the 200 MW load): delivery stage 1 -> T1 commits 150
+    /// (its stage-1 cap), T0 supplies 50; delivery stage 2 -> T1 commits 80 (its
+    /// stage-2 cap), T0 supplies 120.
+    ///
+    /// AC3 delivery-anchoring is MUTATION-verified. Changing the production read in
+    /// `fill_anticipated_columns` from `thermal_bounds(thermal_idx, delivery_stage)`
+    /// to `thermal_bounds(thermal_idx, stage_idx)` (the decision stage) relaxes the
+    /// stage-1 decision column to stage-1's 150 MW cap for delivery at stage 2; stage
+    /// 2's own generation cap is 80 MW and fishing pins gen == committed, so the
+    /// delivered 150 MW is undeliverable — the forward solve turns infeasible and the
+    /// run errors (the capacity-drop infeasibility the delivery-anchoring contract
+    /// forbids), failing this test at the `train`/`simulate` expect. The stage-1 vs
+    /// stage-2 cap difference (150 vs 80) is what makes the mutation observable;
+    /// constant caps would make it vacuous.
+    #[test]
+    fn a1b_lead_time_equals_lead_stages_uniform_calendar() {
+        let mut setup_stages = build_setup_in_code(
+            build_system(AnticipatedConfig::LeadStages(1)),
+            &build_config(ITERATIONS),
+        );
+        let mut setup_time = build_setup_in_code(
+            build_system(AnticipatedConfig::LeadTime(STAGE_HOURS)),
+            &build_config(ITERATIONS),
+        );
+
+        // Both modes must derive the same ring geometry on the uniform calendar.
+        let (k_max_stages, n_ant_stages) = {
+            let s = setup_stages.stage_state();
+            (s.k_max, s.n_anticipated)
+        };
+        let (k_max_time, n_ant_time) = {
+            let s = setup_time.stage_state();
+            (s.k_max, s.n_anticipated)
+        };
+        assert_eq!(n_ant_stages, 1, "one anticipated plant (LeadStages)");
+        assert_eq!(n_ant_time, 1, "one anticipated plant (LeadTime)");
+        assert_eq!(
+            k_max_stages, k_max_time,
+            "both modes must derive the same ring depth on the uniform calendar",
+        );
+        assert_eq!(k_max_stages, K_MAX, "ring depth must be 1");
+
+        let run_stages = train_and_simulate(&mut setup_stages, ITERATIONS);
+        let run_time = train_and_simulate(&mut setup_time, ITERATIONS);
+
+        // ── Two-mode bit-identity ────────────────────────────────────────────────
+        assert_eq!(
+            run_stages.final_lb, run_time.final_lb,
+            "final lower bound must be bit-identical across LeadStages/LeadTime",
+        );
+        assert_eq!(
+            run_stages.final_ub, run_time.final_ub,
+            "objective (final upper bound) must be bit-identical across modes",
+        );
+
+        let scen_stages = &run_stages.scenarios[0];
+        let scen_time = &run_time.scenarios[0];
+        assert_eq!(scen_stages.stages.len(), N_STAGES);
+        assert_eq!(scen_time.stages.len(), N_STAGES);
+        for t in 0..N_STAGES {
+            assert_eq!(
+                committed_mw(scen_stages, t),
+                committed_mw(scen_time, t),
+                "committed_mw at stage {t} must be bit-identical across modes",
+            );
+            assert_eq!(
+                decision_mw(scen_stages, t),
+                decision_mw(scen_time, t),
+                "decision_mw at stage {t} must be bit-identical across modes",
+            );
+        }
+
+        assert_eq!(
+            collect_cuts(&setup_stages),
+            collect_cuts(&setup_time),
+            "anticipated-ring cut coefficients must be bit-identical across modes",
+        );
+
+        // ── Hand-derived dispatch (asserted on the LeadStages run; the identity
+        //    above carries every equality to the LeadTime run) ────────────────────
+        const TOL: f64 = 1e-6;
+        assert!(
+            (committed_mw(scen_stages, 1) - 150.0).abs() < TOL,
+            "delivery stage 1: T1 must commit its 150 MW stage-1 cap; got {}",
+            committed_mw(scen_stages, 1),
+        );
+        assert!(
+            (backup_mw(scen_stages, 1) - 50.0).abs() < TOL,
+            "delivery stage 1: T0 must supply 50 MW; got {}",
+            backup_mw(scen_stages, 1),
+        );
+        assert!(
+            (committed_mw(scen_stages, 2) - 80.0).abs() < TOL,
+            "delivery stage 2: T1 must commit its 80 MW stage-2 cap (delivery-anchored, \
+             not the 150 MW decision-stage cap); got {}",
+            committed_mw(scen_stages, 2),
+        );
+        assert!(
+            (backup_mw(scen_stages, 2) - 120.0).abs() < TOL,
+            "delivery stage 2: T0 must supply 120 MW; got {}",
+            backup_mw(scen_stages, 2),
+        );
+    }
+}
+mod a1c_stage_count_mode_anchor {
+    //! Stage-count-mode (`LeadStages`) backwards-compatibility anchor on the d37
+    //! unequal-hours monthly calendar `[730, 730, 730, 720, 744, 720]`.
+    //!
+    //! `LeadStages(ℓ)` is a pure index shift `c(m) = m − ℓ` whose result never
+    //! reads the hour clock — the guarantee that shipped stage-count configs keep
+    //! working unchanged on any calendar. The three resolver-level tests pin that
+    //! the clock is never consulted in stage-count mode and contrast it with the
+    //! physical `LeadTime` mode, which does consult it. The end-to-end test proves
+    //! a single-decider `LeadTime` on this same unequal-hours calendar is a live
+    //! solve path.
+    //!
+    //! Every expected decider below is hand-derived from the calendar; the
+    //! cumulative stage-ends are `[730, 1460, 2190, 2910, 3654, 4374]`.
+
+    use cobre_core::entities::{bus::DeficitSegment, thermal::AnticipatedConfig};
+    use cobre_core::scenario::LoadModel;
+    use cobre_core::temporal::{
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig,
+    };
+    use cobre_core::{
+        AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
+        ContractStageBounds, EntityId, HydroStageBounds, HydroStagePenalties, InitialConditions,
+        LineStageBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingStageBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
+        ThermalStageBounds,
+    };
+    use cobre_io::config::{
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
+        TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+    };
+    use cobre_sddp::lead_time::{AnticipatedResolution, LeadTime};
+    use cobre_solver::ActiveSolver;
+
+    use super::common::StubComm;
+    use super::common::build_setup_in_code;
+    use super::common::builders::{
+        BusSpec, StageSpec, ThermalSpec, make_bus, make_stage, make_thermal,
+    };
+
+    /// The d37 unequal-hours monthly calendar (stage totals, hours).
+    const D37_DURATIONS: [f64; 6] = [730.0, 730.0, 730.0, 720.0, 744.0, 720.0];
+    const N_STAGES: usize = 6;
+
+    /// AC1: `LeadStages(2)` on the d37 calendar is the pure index shift
+    /// `c(m) = m − 2`: `decider = [None, None, Some(0), Some(1), Some(2), Some(3)]`,
+    /// each in-horizon `C(t)` is the singleton `{t + 2}` (t = 4, 5 deliver past the
+    /// horizon and are empty), and every `depth` entry is `≤ 2`.
+    #[test]
+    fn a1c_lead_stages_is_pure_index_shift() {
+        let resolution = AnticipatedResolution::resolve(&[LeadTime::Stages(2)], &D37_DURATIONS, 6);
+        let point = &resolution.per_plant[0];
+
+        assert_eq!(
+            point.decider,
+            vec![None, None, Some(0), Some(1), Some(2), Some(3)],
+            "LeadStages(2) must be the pure index shift c(m)=m-2",
+        );
+
+        for t in 0..N_STAGES {
+            if t + 2 < N_STAGES {
+                assert_eq!(
+                    point.decision_sets[t],
+                    vec![t + 2],
+                    "in-horizon C({t}) must be the singleton {{{}}}",
+                    t + 2,
+                );
+            } else {
+                assert!(
+                    point.decision_sets[t].is_empty(),
+                    "C({t}) must be empty (delivery t+2 is past the horizon); got {:?}",
+                    point.decision_sets[t],
+                );
+            }
+        }
+
+        assert!(
+            point.depth.iter().all(|&d| d <= 2),
+            "every depth entry must be bounded by the lead 2; got {:?}",
+            point.depth,
+        );
+        assert_eq!(
+            resolution.max_fanout, 1,
+            "a constant lead is single-decider (|C(t)| <= 1)",
+        );
+    }
+
+    /// AC2: the same `LeadStages(2)` lead resolves identically against a different
+    /// 6-stage duration vector (`[672.0; 6]`) — the hour clock is never consulted,
+    /// so `decider`, `decision_sets`, and `depth` are byte-for-byte identical.
+    #[test]
+    fn a1c_lead_stages_ignores_calendar() {
+        let on_d37 = AnticipatedResolution::resolve(&[LeadTime::Stages(2)], &D37_DURATIONS, 6);
+        let on_uniform = AnticipatedResolution::resolve(&[LeadTime::Stages(2)], &[672.0; 6], 6);
+
+        let a = &on_d37.per_plant[0];
+        let b = &on_uniform.per_plant[0];
+
+        assert_eq!(
+            a.decider, b.decider,
+            "stage-count decider must not depend on the hour clock",
+        );
+        assert_eq!(
+            a.decision_sets, b.decision_sets,
+            "stage-count decision_sets must not depend on the hour clock",
+        );
+        assert_eq!(
+            a.depth, b.depth,
+            "stage-count depth must not depend on the hour clock",
+        );
+    }
+
+    /// AC3: the physical `LeadTime(1450.0)` mode DOES consult the clock. On the d37
+    /// calendar `end_1 − 1450 = 1460 − 1450 = 10`, which lands in stage 0, so the
+    /// end-anchored decider decides `m = 1` at stage 0 — where the pure stage-count
+    /// shift (`c(1) = 1 − 2`) is still `None`. Full physical decider:
+    /// `[None, Some(0), Some(1), Some(1), Some(3), Some(4)]`.
+    #[test]
+    fn a1c_lead_time_consults_calendar() {
+        let physical = AnticipatedResolution::resolve(&[LeadTime::Time(1450.0)], &D37_DURATIONS, 6);
+        let stage_count = AnticipatedResolution::resolve(&[LeadTime::Stages(2)], &D37_DURATIONS, 6);
+
+        let phys = &physical.per_plant[0];
+        let sc = &stage_count.per_plant[0];
+
+        assert_eq!(
+            phys.decider,
+            vec![None, Some(0), Some(1), Some(1), Some(3), Some(4)],
+            "physical end-anchored decider on the d37 calendar",
+        );
+        assert_eq!(
+            phys.decider[1],
+            Some(0),
+            "LeadTime consults the clock: m=1 decides at stage 0",
+        );
+        assert_eq!(
+            sc.decider[1], None,
+            "LeadStages(2) ignores the clock: c(1)=1-2 is None",
+        );
+        assert_ne!(
+            phys.decider[1], sc.decider[1],
+            "the clock-consulted contrast at m=1 (Some(0) vs None)",
+        );
+    }
+
+    // ── AC5: single-decider LeadTime end-to-end on the d37 unequal-hours calendar ──
+
+    const LEAD_TIME_HOURS: f64 = 1440.0;
+    const K_MAX: usize = 1;
+    const D_LOAD: f64 = 50.0;
+    const M_ANT: f64 = 100.0;
+    const B_BACK: f64 = 200.0;
+    const C_A: f64 = 10.0;
+    const C_B: f64 = 100.0;
+    const C_DEFICIT: f64 = 1000.0;
+    const ITERATIONS: u32 = 12;
+
+    const ANTICIPATED_ID: EntityId = EntityId(2);
+    const BACKUP_ID: EntityId = EntityId(3);
+    const BUS_ID: EntityId = EntityId(1);
+
+    // SystemBuilder::build() sorts thermals by EntityId ascending: 0 -> id=2
+    // (anticipated), 1 -> id=3 (backup).
+    const THERMAL_IDX_ANT: usize = 0;
+    const THERMAL_IDX_BACKUP: usize = 1;
+
+    /// A single-decider `LeadTime(1440.0)` variant of the d37 topology (1
+    /// anticipated thermal, 1 backup thermal, no hydro) on the d37 unequal-hours
+    /// calendar. `Time(1440.0)` resolves to `[None, Some(0), Some(1), Some(2),
+    /// Some(3), Some(4)]` (`max_fanout = 1`), so it clears the fan-out setup guard;
+    /// the single pre-study decider (`decider[0] == None`) fixes the
+    /// `past_anticipated_commitments` history length at 1.
+    fn build_system() -> cobre_core::System {
+        use chrono::NaiveDate;
+
+        let bus = make_bus(
+            BUS_ID,
+            BusSpec {
+                name: "B1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: C_DEFICIT,
+                }],
+                excess_cost: 0.0,
+                ..Default::default()
+            },
+        );
+
+        let thermal_ant = make_thermal(
+            ANTICIPATED_ID,
+            ThermalSpec {
+                name: "T_ant".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                bus_id: BUS_ID,
+                min_generation_mw: 0.0,
+                max_generation_mw: M_ANT,
+                cost_per_mwh: C_A,
+                anticipated_config: Some(AnticipatedConfig::LeadTime(LEAD_TIME_HOURS)),
+                entry_stage_id: None,
+                exit_stage_id: None,
+                ..Default::default()
+            },
+        );
+
+        let thermal_backup = make_thermal(
+            BACKUP_ID,
+            ThermalSpec {
+                name: "T_backup".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                bus_id: BUS_ID,
+                min_generation_mw: 0.0,
+                max_generation_mw: B_BACK,
+                cost_per_mwh: C_B,
+                anticipated_config: None,
+                entry_stage_id: None,
+                exit_stage_id: None,
+                ..Default::default()
+            },
+        );
+
+        // Each stage carries one block whose hours are the d37 stage total, so
+        // study_stage_durations feeds the [730,730,730,720,744,720] calendar to the
+        // point-commitment resolver.
+        let stages: Vec<Stage> = (0..N_STAGES)
+            .map(|i| {
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        season_id: None,
+                        blocks: vec![Block {
+                            index: 0,
+                            name: "S".to_string(),
+                            duration_hours: D37_DURATIONS[i],
+                        }],
+                        block_mode: BlockMode::Parallel,
+                        state_config: StageStateConfig {
+                            storage: false,
+                            inflow_lags: false,
+                        },
+                        risk_config: StageRiskConfig::Expectation,
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor: 1,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..N_STAGES)
+            .map(|i| LoadModel {
+                bus_id: BUS_ID,
+                stage_id: i as i32,
+                mean_mw: D_LOAD,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let mut bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 2,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: K_MAX,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 0.0,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 0.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    max_diversion_m3s: None,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        // fill_anticipated_columns reads the delivery cell at each decision's own
+        // delivery stage; span the full n_stages + k_max axis so every read is
+        // well-defined.
+        let thermal_axis = N_STAGES + K_MAX;
+        for s in 0..thermal_axis {
+            *bounds.thermal_bounds_mut(THERMAL_IDX_ANT, s) = ThermalStageBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: M_ANT,
+                cost_per_mwh: C_A,
+            };
+            *bounds.thermal_bounds_mut(THERMAL_IDX_BACKUP, s) = ThermalStageBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: B_BACK,
+                cost_per_mwh: C_B,
+            };
+        }
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 0,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.0,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 0.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 0.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        // One pre-study delivery stage (decider[0] == None) ⇒ history length 1.
+        let initial_conditions = InitialConditions {
+            storage: vec![],
+            filling_storage: vec![],
+            past_inflows: vec![],
+            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
+                thermal_id: ANTICIPATED_ID,
+                values_mw: vec![0.0],
+            }],
+            recent_observations: vec![],
+            past_defluences: vec![],
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(vec![thermal_ant, thermal_backup])
+            .stages(stages)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .initial_conditions(initial_conditions)
+            .build()
+            .expect("build_system: valid")
+    }
+
+    fn build_config() -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::Penalty,
+                },
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                forward_passes: Some(1),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
+                    limit: ITERATIONS,
+                }]),
+                stopping_mode: "any".to_string(),
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                scenario_source: None,
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    /// AC5: a single-decider `LeadTime(1440.0)` thermal on the d37 unequal-hours
+    /// calendar trains to convergence (`LB == UB`) with no panic — the physical
+    /// mode is a live end-to-end path, not merely a resolver unit.
+    #[test]
+    fn a1c_lead_time_solves_on_unequal_hours() {
+        // Guard the fixture's single-decider premise before building the study: a
+        // fan-out (max_fanout > 1) would trip the setup guard, not converge.
+        let resolution =
+            AnticipatedResolution::resolve(&[LeadTime::Time(LEAD_TIME_HOURS)], &D37_DURATIONS, 6);
+        assert_eq!(
+            resolution.per_plant[0].decider,
+            vec![None, Some(0), Some(1), Some(2), Some(3), Some(4)],
+            "Time(1440.0) must resolve to the single-decider chain on the d37 calendar",
+        );
+        assert_eq!(
+            resolution.max_fanout, 1,
+            "Time(1440.0) must be single-decider (|C(t)| == 1) to clear the fan-out guard",
+        );
+
+        let system = build_system();
+        let config = build_config();
+        let mut setup = build_setup_in_code(system, &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+
+        assert!(
+            outcome.error.is_none(),
+            "training error: {:?}",
+            outcome.error,
+        );
+
+        let result = &outcome.result;
+        assert_eq!(
+            result.iterations,
+            u64::from(ITERATIONS),
+            "iteration count mismatch",
+        );
+
+        let gap = result.final_gap;
+        assert!(
+            gap.is_finite() && gap.abs() < 1e-6,
+            "final_gap must be ~0 (LB == UB) for a fully deterministic fixture; got {gap}",
+        );
+
+        let lb = result.final_lb;
+        assert!(
+            lb.is_finite() && lb > 0.0,
+            "final_lb must be finite and positive; got {lb}",
+        );
+    }
+}

@@ -35,6 +35,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   past the study's last stage is dropped rather than credited to terminal
   storage — a documented target-stage imprecision at the end of the horizon.
 
+- **A thermal plant can now declare an anticipated (pre-committed) dispatch,
+  decided one or more stages before the delivery stage it fixes.**
+  `system/thermals.json`'s `anticipated_config` field declares the lead as
+  either `lead_stages` (a stage count; the calendar is never consulted) or
+  `lead_time_hours` (a physical duration in hours, delivery-anchored against
+  the stage calendar) — the two are mutually exclusive. Every committed
+  decision is bounded, costed, and commissioning-gated at its own delivery
+  stage, never the stage where it is decided, so a plant whose generation cap
+  differs across stages cannot be committed to a value its delivery stage
+  cannot honor. The in-flight commitment between decision and delivery is
+  carried as augmented Benders state — a ring of per-plant slots that
+  advances by a plain copy each stage, with no out-of-LP shift step. A
+  `lead_time_hours` configuration whose coarser decision stage would anchor
+  more than one delivery stage — a single decision committing several
+  deliveries at once — is rejected at setup: per-delivery-stage simulation
+  output for that configuration is not yet supported.
+
 - **Generic constraints can reference per-block hydro storage and evaporation.**
   `hydro_storage_initial(h)` and `hydro_storage_final(h)` reference a stage's
   initial (`S⁰`) and final (`Sᴷ`) storage; supplying a block index —

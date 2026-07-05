@@ -357,6 +357,35 @@ definition rows preserve the same subgradient values the prior out-of-LP
 shift produced, and the manifest's padding-vs-reachable delivery-anchor
 regression.
 
+### End-of-horizon masking is exact, never a dropped commitment
+
+Unlike the water ring's Terminal credit deferred subsection, no anticipated
+commitment is ever discarded at the horizon boundary — none is created there
+in the first place. `is_anticipated_decision_active`/
+`is_anticipated_decision_active_for_delivery` gate a decision column's
+existence on the strict clause `stage_idx + K_i < n_stages`;
+`PointResolution::decider` itself has a fixed domain `m in [0, n_stages)`, so
+no code path ever computes a commitment targeting a delivery past the
+horizon and then truncates it. `build_anticipated_slot_row_pos`'s per-slot
+`None` (no definition row) and `fill_anticipated_slot_columns`'s frozen
+`[0, 0]` outgoing column, at a `(stage_idx, slot)` pair whose target
+`m = stage_idx + slot + 1 >= n_stages`, are therefore always vacuous: the
+masked slot is provably zero for every valid configuration, never a real
+value the model declines to route anywhere. This differs in kind from
+water's masking: a masked bucket discards a genuine non-zero `k_d`-weighted
+release share deposited every stage regardless of the arc's travel time — an
+admitted target-stage imprecision — while the anticipated gate prevents the
+decision from ever existing, so nothing of value is lost. Crediting a masked
+slot as if it held a dropped commitment would introduce value the model
+never computed, for a delivery stage that does not exist.
+Read: `lp/indexer/state_layout.rs` (`is_anticipated_decision_active`,
+`is_anticipated_decision_active_for_delivery`), `lead_time/mod.rs`
+(`PointResolution::decider`), `lp/builder/layout.rs`
+(`build_anticipated_slot_row_pos`), `lp/builder/columns.rs`
+(`fill_anticipated_slot_columns`). Pinned by
+`a1c_lead_stages_is_pure_index_shift`'s empty-`decision_sets`-past-horizon
+assertion.
+
 ### In-LP anticipated ring: fan-out deposit cardinality & `K = 0` exclusion
 
 The single-decider ring above generalizes to a plant committing SEVERAL
@@ -419,6 +448,20 @@ delivery stage), and the `K = 0` zero-emission-plus-advisory regression (no
 anticipated slot/row/fishing coupling at any stage, one advisory per
 self-delivered stage).
 
+### Fan-out output is a current, guarded limitation
+
+The fan-out ring mechanics above (`|C(t)| > 1`) are unit-tested directly
+against the LP-building functions, but no study reaches them end-to-end
+today: `build_wired_indexer` rejects any `AnticipatedResolution::max_fanout >
+1` configuration with `SddpError::Validation` before a study is built,
+naming the fanned plant and stating that per-delivery-stage output is not
+yet supported for simulation. This is a CURRENT, guarded limitation, not a
+permanent restriction on the ring's design — the rejection lives in the
+setup gate alone, not in the column/entry/row-position functions themselves.
+Read: `setup/mod.rs` (`build_wired_indexer`). Pinned by
+`lead_time_fanout_rejected_at_setup` (asserts `SddpError::Validation`, not a
+panic, after confirming the fixture genuinely fans out).
+
 ### Delivery-anchoring preservation
 
 Every anticipated decision column in `C(t)` — single-decider and every fanned
@@ -458,4 +501,10 @@ Read: `lp/builder/columns.rs` (`fill_anticipated_columns`),
 (`warn_thermal_generation_on_anticipated_thermal`). Pinned by
 `test_anticipated_decision_delivery_anchored_bounds` (stage-varying delivery
 bounds/cost, single-decider and fan-out, mutation-verified against the
-decision-anchored read).
+decision-anchored read), the end-to-end
+`a1b_lead_time_equals_lead_stages_uniform_calendar` (the same
+decision-anchored mutation turns the forward solve infeasible; pinned by
+training and simulating both `LeadTime` and `LeadStages` configurations of
+the same calendar to bit-identical solutions), and
+`a1c_lead_stages_is_pure_index_shift` (pins the delivery-anchored decider
+`c(m) = m - lead` those bounds are read against).
