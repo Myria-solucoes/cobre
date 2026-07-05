@@ -329,9 +329,13 @@ impl StateLayout {
 
     /// Attach the setup-computed [`AnticipatedResolution`].
     ///
-    /// The single call site is setup's `build_wired_indexer`; every other
-    /// `StateLayout` construction leaves the default-empty resolution, since a
-    /// second `resolve_point` call site is forbidden — this one threads through.
+    /// Called from setup's `build_wired_indexer` and from
+    /// [`crate::lp_builder::build_stage_templates`]'s own role-(a) `StateLayout`
+    /// build, each against an independently recomputed but identical
+    /// resolution — the same accepted redundant-but-deterministic recompute
+    /// this crate already applies to the bucket topology, not a second
+    /// `resolve_point` entry point. Every other `StateLayout` construction
+    /// leaves the default-empty resolution.
     ///
     /// # Panics (debug builds only)
     ///

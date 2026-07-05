@@ -135,6 +135,7 @@ impl ZeroEntityFixtures {
             // to the bounds' study-stage count so the gate's in-range
             // delivery-stage lookup never indexes out of bounds.
             anticipated_windows: vec![(None, None); n_anticipated],
+            anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
             study_stage_ids: (0..i32::try_from(self.bounds.n_stages()).unwrap_or(0)).collect(),
             anticipated_thermal_indices,
             has_penalty: false,
@@ -362,6 +363,7 @@ impl TwoHydroFixtures {
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
             anticipated_windows: vec![],
+            anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
             study_stage_ids: vec![],
             has_penalty: false,
             cumulative_discount_factors: vec![1.0],
@@ -689,6 +691,7 @@ impl FphaMixFixtures {
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
             anticipated_windows: vec![],
+            anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
             study_stage_ids: vec![],
             has_penalty: false,
             cumulative_discount_factors: vec![1.0],
@@ -864,6 +867,7 @@ impl FillingMembershipFixtures {
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
             anticipated_windows: vec![],
+            anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
             study_stage_ids: vec![],
             has_penalty: false,
             cumulative_discount_factors: vec![1.0],
@@ -1761,6 +1765,7 @@ impl AntFixturesWithNStages {
             // reduces to the strict horizon clause. `study_stage_ids` covers
             // the study-stage count so the in-range delivery lookup is safe.
             anticipated_windows: vec![(None, None); n_anticipated],
+            anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
             study_stage_ids: (0..i32::try_from(n_stages).unwrap_or(0)).collect(),
             has_penalty: false,
             cumulative_discount_factors: vec![1.0; n_stages],
@@ -2026,6 +2031,7 @@ impl PumpingFixtures {
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
             anticipated_windows: vec![],
+            anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
             study_stage_ids: vec![],
             has_penalty: false,
             cumulative_discount_factors: vec![1.0; n_stages],

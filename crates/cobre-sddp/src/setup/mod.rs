@@ -325,7 +325,7 @@ impl StudySetup {
             inflow_method,
             &stochastic,
             &transit_bucket_topology,
-        );
+        )?;
 
         let mut initial_state = build_initial_state(system, &study_dims, &state_layout);
         splice_transit_bucket_seed(
@@ -652,13 +652,19 @@ fn build_energy_and_templates(
 /// Build the canonical [`StateLayout`] and the [`StudyDimensions`] from the
 /// (representative) stage-0 LP layout, the PAR effective lag counts, and the
 /// bucket topology.
+///
+/// # Errors
+///
+/// - [`SddpError::Validation`] — a `LeadTime` anticipated plant's resolution
+///   fans out (`AnticipatedResolution::max_fanout > 1`); per-delivery-stage
+///   fan-out simulation output is not yet supported.
 fn build_wired_indexer(
     system: &System,
     stage_templates: &crate::lp_builder::StageTemplates,
     inflow_method: crate::InflowNonNegativityMethod,
     stochastic: &StochasticContext,
     transit_bucket_topology: &bucket_topology::TransitBucketTopology,
-) -> (StateLayout, StudyDimensions) {
+) -> Result<(StateLayout, StudyDimensions), SddpError> {
     let stage_templates_ref = &stage_templates.templates;
     let has_inflow_penalty =
         inflow_method.has_slack_columns() && stage_templates_ref[0].n_hydro > 0;
@@ -685,6 +691,23 @@ fn build_wired_indexer(
     // the state layout instead.
     let (anticipated_resolution, anticipated_lead_stages) = resolve_anticipated_commitments(system);
     debug_assert_eq!(anticipated_lead_stages.len(), n_anticipated);
+
+    if anticipated_resolution.max_fanout > 1 {
+        let plant_id = first_fanned_plant_id(
+            system,
+            &anticipated_thermal_indices,
+            &anticipated_resolution,
+        );
+        debug_assert!(
+            plant_id.is_some(),
+            "max_fanout > 1 must locate the fanning plant"
+        );
+        return Err(SddpError::Validation(format!(
+            "anticipated thermal {}: LeadTime fan-out (a coarse decision stage delivering \
+             to several stages) is not yet supported for simulation output",
+            plant_id.map_or(EntityId(-1), |id| id)
+        )));
+    }
 
     // Ring depth: the delivery-anchored max_t K_i(t), clamped up to the
     // constant-lead machinery's per-plant K_i so its slot indexing stays in range.
@@ -741,20 +764,46 @@ fn build_wired_indexer(
     );
     state.set_anticipated_resolution(anticipated_resolution);
 
-    (state, study_dims)
+    Ok((state, study_dims))
+}
+
+/// The first (canonical-order) anticipated plant whose `LeadTime` resolution
+/// fans out — `|genuine C(t)| > 1` at some decision stage `t` — or `None` if
+/// none does. Shares the exact per-plant/per-stage predicate
+/// [`AnticipatedResolution::max_fanout`] maxes over, so `Some(_)` iff
+/// `resolution.max_fanout > 1`; `anticipated_thermal_indices` and
+/// `resolution.per_plant` are both in canonical (anticipated-local) order, so
+/// the first match is declaration-order-invariant.
+fn first_fanned_plant_id(
+    system: &System,
+    anticipated_thermal_indices: &[usize],
+    resolution: &AnticipatedResolution,
+) -> Option<EntityId> {
+    resolution
+        .per_plant
+        .iter()
+        .enumerate()
+        .find_map(|(local_idx, point)| {
+            let fans_out =
+                (0..point.decision_sets.len()).any(|t| point.genuine_decisions_at(t).count() > 1);
+            fans_out.then(|| system.thermals()[anticipated_thermal_indices[local_idx]].id)
+        })
 }
 
 /// Resolve every anticipated thermal's delivery-anchored point commitment and
 /// derive the constant-lead per-plant `K_i` the still-live ring machinery reads.
 ///
-/// The sole `resolve_point` consumer (via [`AnticipatedResolution::resolve`]);
-/// the resolution threads onto the [`StateLayout`] rather than being recomputed
-/// downstream. Returns the per-plant resolution and the anticipated-local
-/// constant leads: a `LeadStages(ℓ)` plant keeps `ℓ` byte-for-byte; a `LeadTime`
-/// plant (gated off the load path until the in-LP ring lands) takes its per-plant
-/// max depth as a `k_max`-consistent placeholder, so its LP path is not yet
-/// correct.
-pub(crate) fn resolve_anticipated_commitments(
+/// The sole `resolve_point` consumer (via [`AnticipatedResolution::resolve`]).
+/// Warn-free: [`resolve_anticipated_commitments`] wraps this with the setup-time
+/// `K = 0` advisory; [`crate::lp_builder::build_stage_templates`] calls this core
+/// directly to attach an identical resolution onto its own `StateLayout` — the
+/// same accepted redundant-but-deterministic recompute this crate already
+/// applies to the bucket topology, not a second advisory emission. Returns the
+/// per-plant resolution and the anticipated-local constant leads: a
+/// `LeadStages(ℓ)` plant keeps `ℓ` byte-for-byte; a `LeadTime` plant (gated off
+/// the load path until the in-LP ring lands) takes its per-plant max depth as a
+/// `k_max`-consistent placeholder, so its LP path is not yet correct.
+pub(crate) fn resolve_anticipated_commitments_core(
     system: &System,
 ) -> (AnticipatedResolution, Vec<usize>) {
     let anticipated_thermals: Vec<&Thermal> = system
@@ -778,8 +827,6 @@ pub(crate) fn resolve_anticipated_commitments(
     let n_stages = durations.len();
     let resolution = AnticipatedResolution::resolve(&leads, &durations, n_stages);
 
-    warn_on_sub_stage_lead(&anticipated_thermals, &resolution);
-
     let lead_stages: Vec<usize> = leads
         .iter()
         .zip(&resolution.per_plant)
@@ -802,6 +849,23 @@ pub(crate) fn resolve_anticipated_commitments(
         })
         .collect();
 
+    (resolution, lead_stages)
+}
+
+/// [`resolve_anticipated_commitments_core`] plus the setup-time `K = 0`
+/// advisory ([`warn_on_sub_stage_lead`]) — the single owner of that advisory.
+/// Every other caller (e.g. [`crate::lp_builder::build_stage_templates`]) uses
+/// the core directly so the advisory never double-emits.
+pub(crate) fn resolve_anticipated_commitments(
+    system: &System,
+) -> (AnticipatedResolution, Vec<usize>) {
+    let (resolution, lead_stages) = resolve_anticipated_commitments_core(system);
+    let anticipated_thermals: Vec<&Thermal> = system
+        .thermals()
+        .iter()
+        .filter(|t| t.anticipated_config.is_some())
+        .collect();
+    warn_on_sub_stage_lead(&anticipated_thermals, &resolution);
     (resolution, lead_stages)
 }
 

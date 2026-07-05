@@ -13,7 +13,7 @@ use crate::hydro_models::{
     EvaporationModel, EvaporationModelSet, ProductionModelSet, ResolvedProductionModel,
 };
 use crate::indexer::{BlockGrid, EvaporationIndices, StateLayout};
-use crate::lead_time::SpreadResolution;
+use crate::lead_time::{AnticipatedResolution, SpreadResolution};
 
 use super::{
     EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET,
@@ -115,6 +115,11 @@ pub(crate) struct TemplateBuildCtx<'a> {
     /// DELIVERY stage's operation window
     /// ([`StateLayout::is_anticipated_decision_active_for_delivery`]).
     pub(crate) anticipated_windows: Vec<(Option<i32>, Option<i32>)>,
+    /// Delivery-anchored resolution this build's role-(a) `StateLayout` attaches
+    /// via `StateLayout::set_anticipated_resolution`, from
+    /// `crate::setup::resolve_anticipated_commitments_core` — the same
+    /// resolution setup's own `StateLayout` carries.
+    pub(crate) anticipated_resolution: AnticipatedResolution,
     /// `study_stage_ids[t] = stage.id`, length `n_study_stages`. The decision gate
     /// keys its window clause on the delivery stage's `stage.id`, NOT the stage
     /// index, mapping delivery index `t + K_i` through this slice.

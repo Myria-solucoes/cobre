@@ -632,6 +632,146 @@ fn test_external_ncs_scenarios_wired_into_system() {
     }
 }
 
+// ── test_lead_time_single_decider_on_disk_load ────────────────────────────────
+
+/// Pins the on-disk `LeadTime` load path (`pipeline.rs`'s `k_max` computation
+/// for `resolve_bounds`): a single-decider `LeadTime(744.0)` thermal on a
+/// uniform 3×744h calendar must load via `load_case` with no panic, and the
+/// anticipated plant's resolved bounds must be correct at every study stage
+/// (all of which are legitimate delivery-stage indices for the ring),
+/// demonstrating a correct study, not merely a non-panicking one.
+#[test]
+fn test_lead_time_single_decider_on_disk_load() {
+    // SystemBuilder sorts thermals by (operational_start_date, id); both
+    // declared thermals share the same date, so ascending id puts T_ANT
+    // (id=2) at index 0.
+    const THERMAL_IDX_ANT: usize = 0;
+
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    helpers::write_file(root, "config.json", helpers::VALID_CONFIG_JSON);
+    helpers::write_file(root, "penalties.json", helpers::VALID_PENALTIES_JSON);
+    helpers::write_file(
+        root,
+        "stages.json",
+        r#"{
+    "policy_graph": {
+        "type": "finite_horizon",
+        "annual_discount_rate": 0.0,
+        "transitions": [
+            { "source_id": 0, "target_id": 1, "probability": 1.0 },
+            { "source_id": 1, "target_id": 2, "probability": 1.0 }
+        ]
+    },
+    "stages": [
+        {
+            "id": 0,
+            "start_date": "2024-01-01",
+            "end_date": "2024-02-01",
+            "blocks": [{ "id": 0, "name": "S", "hours": 744.0 }],
+            "num_scenarios": 1
+        },
+        {
+            "id": 1,
+            "start_date": "2024-02-01",
+            "end_date": "2024-03-01",
+            "blocks": [{ "id": 0, "name": "S", "hours": 744.0 }],
+            "num_scenarios": 1
+        },
+        {
+            "id": 2,
+            "start_date": "2024-03-01",
+            "end_date": "2024-04-01",
+            "blocks": [{ "id": 0, "name": "S", "hours": 744.0 }],
+            "num_scenarios": 1
+        }
+    ]
+}"#,
+    );
+    helpers::write_file(
+        root,
+        "initial_conditions.json",
+        r#"{
+    "storage": [],
+    "filling_storage": [],
+    "past_anticipated_commitments": [
+        { "thermal_id": 2, "values_mw": [0.0] }
+    ]
+}"#,
+    );
+    helpers::write_file(
+        root,
+        "system/buses.json",
+        r#"{ "buses": [{ "id": 1, "name": "BUS_1", "operational_start_date": "2024-01-01" }] }"#,
+    );
+    helpers::write_file(root, "system/lines.json", r#"{ "lines": [] }"#);
+    helpers::write_file(root, "system/hydros.json", r#"{ "hydros": [] }"#);
+    helpers::write_file(
+        root,
+        "system/thermals.json",
+        r#"{
+    "thermals": [
+        {
+            "id": 2,
+            "name": "T_ANT",
+            "operational_start_date": "2024-01-01",
+            "bus_id": 1,
+            "cost_per_mwh": 10.0,
+            "generation": { "min_mw": 0.0, "max_mw": 100.0 },
+            "anticipated_config": { "lead_time_hours": 744.0 }
+        },
+        {
+            "id": 3,
+            "name": "T_BACKUP",
+            "operational_start_date": "2024-01-01",
+            "bus_id": 1,
+            "cost_per_mwh": 100.0,
+            "generation": { "min_mw": 0.0, "max_mw": 200.0 }
+        }
+    ]
+}"#,
+    );
+
+    let system = load_case(root).unwrap_or_else(|e| {
+        panic!("load_case must succeed for a valid single-decider LeadTime case, got: {e}")
+    });
+
+    assert_eq!(system.n_stages(), 3, "case declares 3 study stages");
+    assert_eq!(system.n_thermals(), 2, "case declares 2 thermals");
+
+    let ant = &system.thermals()[THERMAL_IDX_ANT];
+    assert_eq!(
+        ant.anticipated_config,
+        Some(cobre_core::AnticipatedConfig::LeadTime(744.0)),
+        "loaded thermal must carry the LeadTime(744.0) config"
+    );
+
+    // Every study stage is a legitimate delivery-stage index for the
+    // delivery-anchored ring: the resolved bounds must be correct there, not
+    // merely absent a panic. The k_max=0 contribution this LeadTime plant
+    // makes to the padded thermal-bounds axis pads no region a real study
+    // ever reads.
+    for stage in 0..system.n_stages() {
+        let b = system.bounds().thermal_bounds(THERMAL_IDX_ANT, stage);
+        assert!(
+            (b.min_generation_mw - 0.0).abs() < f64::EPSILON,
+            "stage {stage}: min_generation_mw mismatch, got {}",
+            b.min_generation_mw
+        );
+        assert!(
+            (b.max_generation_mw - 100.0).abs() < f64::EPSILON,
+            "stage {stage}: max_generation_mw mismatch, got {}",
+            b.max_generation_mw
+        );
+        assert!(
+            (b.cost_per_mwh - 10.0).abs() < f64::EPSILON,
+            "stage {stage}: cost_per_mwh mismatch, got {}",
+            b.cost_per_mwh
+        );
+    }
+}
+
 // ── test_postcard_round_trip ──────────────────────────────────────────────────
 
 #[test]

@@ -139,7 +139,7 @@ pub(crate) enum RawAnticipatedConfig {
 /// the same id as its `(operational_start_date, id)` canonical tiebreak.
 ///
 /// Parse-time validation for `anticipated_config` (`LeadStages` and `LeadTime`
-/// are mutually exclusive by construction — see [`RawAnticipatedConfig`]):
+/// are mutually exclusive by construction, via `RawAnticipatedConfig`):
 /// - `lead_stages >= 1`
 /// - `lead_time_hours` finite and `> 0.0`
 ///

@@ -2367,6 +2367,7 @@ mod zero_cost_tests {
                 // reduces to the strict horizon clause. `study_stage_ids` lists the
                 // study-stage ids so the in-range delivery lookup is safe.
                 anticipated_windows: vec![(None, None); n_anticipated],
+                anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
                 study_stage_ids: (0..i32::try_from(self.bounds.n_stages()).unwrap_or(0)).collect(),
                 has_penalty: false,
                 // Sized to cover every active plant's delivery stage
@@ -3748,6 +3749,7 @@ mod pumping_water_tests {
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
                 anticipated_windows: vec![],
+                anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
                 study_stage_ids: vec![],
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0; N_STAGES],

@@ -1581,6 +1581,16 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         // Swap the windows in lockstep with the index/lead permutation so the
         // per-plant window stays aligned with its anticipated-local position.
         anticipated_windows: vec![ctx_a.anticipated_windows[1], ctx_a.anticipated_windows[0]],
+        // Same lockstep swap on the resolution's per-plant order; this test's
+        // `state_layout_for` never attaches it, so it is unread here.
+        anticipated_resolution: crate::lead_time::AnticipatedResolution {
+            per_plant: vec![
+                ctx_a.anticipated_resolution.per_plant[1].clone(),
+                ctx_a.anticipated_resolution.per_plant[0].clone(),
+            ],
+            k_max: ctx_a.anticipated_resolution.k_max,
+            max_fanout: ctx_a.anticipated_resolution.max_fanout,
+        },
         study_stage_ids: ctx_a.study_stage_ids.clone(),
         has_penalty: ctx_a.has_penalty,
         cumulative_discount_factors: ctx_a.cumulative_discount_factors.clone(),
@@ -3725,4 +3735,377 @@ fn chronological_filling_target_on_final_storage() {
             "Filling block {blk}: per-block spillage FREE (D40), not frozen"
         );
     }
+}
+
+// ── Anticipated-resolution threading (build_stage_templates ↔ setup) ─────
+//
+// `build_stage_templates`'s own role-(a) `StateLayout` must carry the same
+// delivery-anchored `AnticipatedResolution` setup's `build_wired_indexer`
+// attaches, not the constant-lead fallback `anticipated_resolution_for`
+// would otherwise reconstruct from `anticipated_lead_stages` alone.
+
+/// One-bus, no-hydro, `n_stages`-stage system with a single thermal carrying
+/// `anticipated_config`, each stage a single `stage_hours`-hour block.
+/// `k_max_bounds` sizes `BoundsCountsSpec::k_max` for the delivery-stage
+/// padding the thermal's per-stage bounds axis needs.
+fn anticipated_lead_config_system(
+    n_stages: usize,
+    stage_hours: f64,
+    anticipated_config: AnticipatedConfig,
+    k_max_bounds: usize,
+) -> cobre_core::System {
+    let bus = Bus {
+        id: EntityId(1),
+        name: "B1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        deficit_segments: vec![DeficitSegment {
+            depth_mw: None,
+            cost_per_mwh: 500.0,
+        }],
+        excess_cost: 0.0,
+    };
+
+    let thermal = Thermal {
+        id: EntityId(1),
+        name: "T1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        bus_id: EntityId(1),
+        entry_stage_id: None,
+        exit_stage_id: None,
+        cost_per_mwh: 50.0,
+        min_generation_mw: 0.0,
+        max_generation_mw: 100.0,
+        anticipated_config: Some(anticipated_config),
+    };
+
+    let stages: Vec<Stage> = (0..n_stages)
+        .map(|i| Stage {
+            index: i,
+            id: i as i32,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "BLK0".to_string(),
+                duration_hours: stage_hours,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: false,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        })
+        .collect();
+
+    let load_models: Vec<LoadModel> = (0..n_stages)
+        .map(|i| LoadModel {
+            bus_id: EntityId(1),
+            stage_id: i as i32,
+            mean_mw: 100.0,
+            std_mw: 0.0,
+        })
+        .collect();
+
+    let resolved_bounds = ResolvedBounds::new(
+        &BoundsCountsSpec {
+            n_hydros: 0,
+            n_thermals: 1,
+            n_lines: 0,
+            n_pumping: 0,
+            n_contracts: 0,
+            n_stages,
+            k_max: k_max_bounds,
+        },
+        &BoundsDefaults {
+            hydro: default_hydro_bounds(),
+            thermal: ThermalStageBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: 100.0,
+                cost_per_mwh: 0.0,
+            },
+            line: LineStageBounds {
+                direct_mw: 0.0,
+                reverse_mw: 0.0,
+            },
+            pumping: PumpingStageBounds {
+                min_flow_m3s: 0.0,
+                max_flow_m3s: 0.0,
+            },
+            contract: ContractStageBounds {
+                min_mw: 0.0,
+                max_mw: 0.0,
+                price_per_mwh: 0.0,
+            },
+        },
+    );
+    let penalties = ResolvedPenalties::new(
+        &PenaltiesCountsSpec {
+            n_hydros: 0,
+            n_buses: 1,
+            n_lines: 0,
+            n_ncs: 0,
+            n_stages,
+        },
+        &PenaltiesDefaults {
+            hydro: default_hydro_penalties(),
+            bus: BusStagePenalties { excess_cost: 0.0 },
+            line: LineStagePenalties { exchange_cost: 0.0 },
+            ncs: NcsStagePenalties {
+                curtailment_cost: 0.0,
+            },
+        },
+    );
+
+    SystemBuilder::new()
+        .buses(vec![bus])
+        .thermals(vec![thermal])
+        .stages(stages)
+        .load_models(load_models)
+        .bounds(resolved_bounds)
+        .penalties(penalties)
+        .build()
+        .expect("anticipated_lead_config_system: valid system")
+}
+
+/// AC1/AC2: on a uniform 3×744h calendar, a `LeadTime(744.0)` plant resolves
+/// `c(m) = [None, Some(0), Some(1)]` (hand-derived: `resolve_decider_physical`
+/// against boundaries `[0, 744, 1488, 2232]`, target `= boundaries[m+1] - 744`
+/// lands one boundary before `m` at every `m > 0`), giving `depth = [1, 1,
+/// 0]` and `k_max = 1`. `build_template_build_ctx`'s resolution-derived
+/// `k_max`/`anticipated_lead_stages` and the template `StateLayout`'s
+/// threaded resolution must match this and setup's own
+/// `resolve_anticipated_commitments` byte-for-byte — not the constant-lead
+/// fallback a `Stages(1)`-equivalent reconstruction happens to coincide with
+/// here only because the physical lead equals exactly one stage length.
+#[test]
+fn template_anticipated_resolution_matches_setup_lead_time() {
+    let system = anticipated_lead_config_system(3, 744.0, AnticipatedConfig::LeadTime(744.0), 1);
+
+    let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+    let par_lp = PrecomputedPar::default();
+    let resolved_params = empty_resolved_params();
+
+    let (ctx, _, _) = super::build_template_build_ctx(
+        &system,
+        InflowNonNegativityMethod::None,
+        &par_lp,
+        &hydro_result.production,
+        &hydro_result.evaporation,
+        &resolved_params,
+    );
+    assert_eq!(ctx.k_max, 1, "ctx.k_max");
+    assert_eq!(
+        ctx.anticipated_lead_stages,
+        vec![1],
+        "ctx.anticipated_lead_stages"
+    );
+
+    let template_state = super::super::test_support::state_layout_with_resolution(&ctx);
+    assert_eq!(template_state.k_max, 1, "template StateLayout k_max");
+    assert_eq!(
+        template_state.anticipated_lead_stages,
+        vec![1],
+        "template StateLayout anticipated_lead_stages"
+    );
+    let expected_decider = vec![None, Some(0), Some(1)];
+    assert_eq!(
+        template_state.anticipated_resolution_for(0, 3).decider,
+        expected_decider,
+        "template's threaded resolution must resolve the calendar-derived decider"
+    );
+
+    // setup's own entry point must resolve to the byte-identical resolution.
+    let (setup_resolution, setup_lead_stages) =
+        crate::setup::resolve_anticipated_commitments(&system);
+    assert_eq!(
+        setup_lead_stages, ctx.anticipated_lead_stages,
+        "setup vs template anticipated_lead_stages"
+    );
+    assert_eq!(setup_resolution.k_max, ctx.k_max, "setup vs template k_max");
+    assert_eq!(
+        setup_resolution.per_plant[0].decider, expected_decider,
+        "setup vs template decider"
+    );
+}
+
+/// AC2 mutation companion: reproduces the PRE-FIX `StateLayout` template.rs
+/// used to build for a `LeadTime` plant — `anticipated_lead_stages` derived
+/// via `cfg.lead_stages().unwrap_or(0)` (`0` for `LeadTime`, the bug this
+/// ticket fixes) and no [`crate::indexer::StateLayout::set_anticipated_resolution`]
+/// attach — and shows its decider differs from the fixed layout's: the
+/// resulting `Stages(0)` fallback resolves every delivery stage as
+/// self-delivered (`decider[m] == m` for all `m`), never the calendar-derived
+/// `[None, Some(0), Some(1)]` the fixed resolution produces for the same
+/// system (`template_anticipated_resolution_matches_setup_lead_time`).
+#[test]
+fn pre_fix_template_state_layout_yields_differing_all_self_delivered_decider() {
+    let pre_fix_state = crate::indexer::StateLayout::new(0, 0, 0, Vec::new(), 1, 0, vec![0], &[]);
+    let pre_fix_decider = pre_fix_state
+        .anticipated_resolution_for(0, 3)
+        .decider
+        .clone();
+    assert_eq!(
+        pre_fix_decider,
+        vec![Some(0), Some(1), Some(2)],
+        "pre-fix Stages(0) fallback resolves every delivery stage as self-delivered"
+    );
+    assert_ne!(
+        pre_fix_decider,
+        vec![None, Some(0), Some(1)],
+        "pre-fix decider must differ from the calendar-derived fixed resolution"
+    );
+}
+
+/// AC3: a `LeadStages(1)` plant on the same calendar keeps the fallback
+/// byte-identical to the threaded resolution — the LeadStages behaviour this
+/// ticket must leave unchanged (d34/d37 parity).
+#[test]
+fn template_leadstages_byte_identical_to_setup_and_fallback() {
+    let system = anticipated_lead_config_system(3, 744.0, AnticipatedConfig::LeadStages(1), 1);
+
+    let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+    let par_lp = PrecomputedPar::default();
+    let resolved_params = empty_resolved_params();
+
+    let (ctx, _, _) = super::build_template_build_ctx(
+        &system,
+        InflowNonNegativityMethod::None,
+        &par_lp,
+        &hydro_result.production,
+        &hydro_result.evaporation,
+        &resolved_params,
+    );
+    assert_eq!(ctx.anticipated_lead_stages, vec![1]);
+
+    let template_decider = super::super::test_support::state_layout_with_resolution(&ctx)
+        .anticipated_resolution_for(0, 3)
+        .decider
+        .clone();
+
+    let (setup_resolution, setup_lead_stages) =
+        crate::setup::resolve_anticipated_commitments(&system);
+    assert_eq!(setup_lead_stages, ctx.anticipated_lead_stages);
+    assert_eq!(setup_resolution.per_plant[0].decider, template_decider);
+
+    let fallback_decider = super::super::test_support::state_layout_for(&ctx)
+        .anticipated_resolution_for(0, 3)
+        .decider
+        .clone();
+    assert_eq!(
+        fallback_decider, template_decider,
+        "LeadStages fallback must stay byte-identical to the threaded resolution"
+    );
+    assert_eq!(template_decider, vec![None, Some(0), Some(1)]);
+}
+
+/// Minimal WARN-capturing `tracing::Subscriber`, mirroring
+/// `setup::tests::WarnRecorder` (the established setup-time advisory-test
+/// pattern for this crate).
+struct WarnRecorder {
+    messages: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl WarnRecorder {
+    fn new() -> (Self, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        (
+            Self {
+                messages: std::sync::Arc::clone(&messages),
+            },
+            messages,
+        )
+    }
+}
+
+impl tracing::Subscriber for WarnRecorder {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() <= tracing::Level::WARN
+    }
+
+    fn new_span(&self, _attrs: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        if *event.metadata().level() == tracing::Level::WARN {
+            struct MessageVisitor(String);
+            impl tracing::field::Visit for MessageVisitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}");
+                    }
+                }
+
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "message" {
+                        self.0 = value.to_string();
+                    }
+                }
+            }
+            let mut visitor = MessageVisitor(String::new());
+            event.record(&mut visitor);
+            self.messages.lock().unwrap().push(visitor.0);
+        }
+    }
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
+/// AC5: setup's `resolve_anticipated_commitments` and
+/// `build_stage_templates`'s own recompute must never both emit the `K = 0`
+/// advisory — `build_stage_templates` calls the warn-free
+/// `resolve_anticipated_commitments_core`, so running both under the same
+/// capture window still yields exactly one advisory per self-delivered stage.
+#[test]
+fn build_stage_templates_never_double_emits_k0_advisory() {
+    let system = anticipated_lead_config_system(4, 744.0, AnticipatedConfig::LeadTime(720.0), 0);
+
+    let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+    let par_lp = PrecomputedPar::default();
+    let normal_lp = cobre_stochastic::normal::precompute::PrecomputedNormal::default();
+    let resolved_params = empty_resolved_params();
+
+    let (subscriber, messages) = WarnRecorder::new();
+    tracing::subscriber::with_default(subscriber, || {
+        let _ = crate::setup::resolve_anticipated_commitments(&system);
+        let _ = super::build_stage_templates(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &normal_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        )
+        .expect("valid system");
+    });
+
+    let recorded = messages.lock().unwrap();
+    let relevant: Vec<&str> = recorded
+        .iter()
+        .filter(|msg| msg.contains("lead_stages == 0"))
+        .map(std::string::String::as_str)
+        .collect();
+    assert_eq!(
+        relevant.len(),
+        4,
+        "one advisory per self-delivered stage from setup's single call; \
+         build_stage_templates's recompute must not add any, got: {recorded:?}"
+    );
 }

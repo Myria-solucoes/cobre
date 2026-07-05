@@ -42,6 +42,17 @@ pub(super) fn state_layout_for(ctx: &TemplateBuildCtx<'_>) -> StateLayout {
     )
 }
 
+/// [`state_layout_for`] plus the ctx's attached `AnticipatedResolution` — the
+/// resolution-threading step `build_stage_templates` also runs. Tests
+/// asserting `anticipated_resolution_for` byte-identity with production must
+/// build through this, not [`state_layout_for`] (which leaves the
+/// constant-lead fallback active).
+pub(super) fn state_layout_with_resolution(ctx: &TemplateBuildCtx<'_>) -> StateLayout {
+    let mut state = state_layout_for(ctx);
+    state.set_anticipated_resolution(ctx.anticipated_resolution.clone());
+    state
+}
+
 /// All-zero `HydroPenalties` so no fixture-side penalty cost contaminates the
 /// column/objective assertions in the builder tests.
 pub(super) fn zero_hydro_penalties() -> HydroPenalties {

@@ -3409,6 +3409,366 @@ mod anticipated_closed_form_lb_k1_single_thermal {
         );
     }
 }
+mod lead_time_single_decider_end_to_end {
+    //! The first true `LeadTime` parse→validate→setup→train load-path exercise:
+    //! a single-decider `LeadTime` thermal (`|C(t)| <= 1` everywhere) must solve
+    //! end-to-end with no panic, validating both `template.rs`'s `StateLayout`
+    //! threading and the in-LP ring for `LeadTime`.
+    //!
+    //! ## Fixture
+    //!
+    //! Same topology as `anticipated_closed_form_lb_k1_single_thermal`
+    //! (1 anticipated thermal, 1 backup thermal, no hydro, always-active
+    //! fishing), extended to 3 uniform 744h stages with
+    //! `AnticipatedConfig::LeadTime(744.0)` in place of `LeadStages(1)`. On a
+    //! uniform 744h calendar a 744h lead resolves to exactly the same
+    //! decider as a constant 1-stage lead (`c(m) = m - 1`), so the closed-form
+    //! derivation is the direct 3-stage extension of the 2-stage K=1 case:
+    //!
+    //! - Stage 0's delivery is the pre-study seed (`past_anticipated_commitments
+    //!   = [0.0]`), so `g_a_0 = 0` and the backup covers `D` alone.
+    //! - Stage 0 decides `d_ant_0`, delivered at stage 1; stage 1 decides
+    //!   `d_ant_1`, delivered at stage 2 (the last stage decides nothing
+    //!   further — its own `C(2)` is empty).
+    //! - Each decision's sub-problem is independent
+    //!   (`min_x c_a·x + c_b·max(0, D-x)` over `x ∈ [0, M]`) and — since
+    //!   `c_a < c_b` — is minimised at `x = D` for both.
+    //!
+    //! `T* = H·[c_b·D + c_a·D + c_b·max(0,D-D) + c_a·D + c_b·max(0,D-D)]
+    //!     = H·D·(c_b + 2·c_a)`.
+
+    use cobre_core::entities::{bus::DeficitSegment, thermal::AnticipatedConfig};
+    use cobre_core::scenario::LoadModel;
+    use cobre_core::temporal::{
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig,
+    };
+    use cobre_core::{
+        AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
+        ContractStageBounds, EntityId, HydroStageBounds, HydroStagePenalties, InitialConditions,
+        LineStageBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingStageBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
+        ThermalStageBounds,
+    };
+    use cobre_io::config::{
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
+        TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+    };
+    use cobre_solver::ActiveSolver;
+
+    use super::common::StubComm;
+    use super::common::build_setup_in_code;
+    use super::common::builders::{
+        BusSpec, StageSpec, ThermalSpec, make_bus, make_stage, make_thermal,
+    };
+
+    const N_STAGES: usize = 3;
+    const K_MAX: usize = 1;
+    const LEAD_TIME_HOURS: f64 = 744.0;
+    const BLOCK_HOURS: f64 = 744.0;
+
+    const D_LOAD: f64 = 50.0;
+    const M_ANT: f64 = 100.0;
+    const B_BACK: f64 = 200.0;
+    const C_A: f64 = 10.0;
+    const C_B: f64 = 100.0;
+    const C_DEFICIT: f64 = 1000.0;
+
+    /// Closed-form lower bound: `T* = H · D · (C_B + 2 · C_A)` — see module docs.
+    const EXPECTED_LB: f64 = BLOCK_HOURS * D_LOAD * (C_B + 2.0 * C_A); // = 4_464_000.0
+
+    const ANTICIPATED_ID: EntityId = EntityId(2);
+    const BACKUP_ID: EntityId = EntityId(3);
+    const BUS_ID: EntityId = EntityId(1);
+
+    // SystemBuilder::build() sorts thermals by EntityId ascending, so the
+    // global thermal indices end up: 0 → id=2 (anticipated), 1 → id=3 (backup).
+    const THERMAL_IDX_ANT: usize = 0;
+    const THERMAL_IDX_BACKUP: usize = 1;
+
+    fn build_system() -> cobre_core::System {
+        use chrono::NaiveDate;
+
+        let bus = make_bus(
+            BUS_ID,
+            BusSpec {
+                name: "B1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: C_DEFICIT,
+                }],
+                excess_cost: 0.0,
+                ..Default::default()
+            },
+        );
+
+        let thermal_ant = make_thermal(
+            ANTICIPATED_ID,
+            ThermalSpec {
+                name: "T_ant".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                bus_id: BUS_ID,
+                min_generation_mw: 0.0,
+                max_generation_mw: M_ANT,
+                cost_per_mwh: C_A,
+                anticipated_config: Some(AnticipatedConfig::LeadTime(LEAD_TIME_HOURS)),
+                entry_stage_id: None,
+                exit_stage_id: None,
+                ..Default::default()
+            },
+        );
+
+        let thermal_backup = make_thermal(
+            BACKUP_ID,
+            ThermalSpec {
+                name: "T_backup".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                bus_id: BUS_ID,
+                min_generation_mw: 0.0,
+                max_generation_mw: B_BACK,
+                cost_per_mwh: C_B,
+                anticipated_config: None,
+                entry_stage_id: None,
+                exit_stage_id: None,
+                ..Default::default()
+            },
+        );
+
+        let stages: Vec<Stage> = (0..N_STAGES)
+            .map(|i| {
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        season_id: None,
+                        blocks: vec![Block {
+                            index: 0,
+                            name: "S".to_string(),
+                            duration_hours: BLOCK_HOURS,
+                        }],
+                        block_mode: BlockMode::Parallel,
+                        state_config: StageStateConfig {
+                            storage: false,
+                            inflow_lags: false,
+                        },
+                        risk_config: StageRiskConfig::Expectation,
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor: 1,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..N_STAGES)
+            .map(|i| LoadModel {
+                bus_id: BUS_ID,
+                stage_id: i as i32,
+                mean_mw: D_LOAD,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        // Overrides span the full thermal axis (n_stages + k_max) so
+        // `fill_anticipated_columns` reads a well-defined cost at every delivery
+        // stage.
+        let mut bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 2,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: K_MAX,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 0.0,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 0.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    max_diversion_m3s: None,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        let thermal_axis = N_STAGES + K_MAX;
+        for s in 0..thermal_axis {
+            *bounds.thermal_bounds_mut(THERMAL_IDX_ANT, s) = ThermalStageBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: M_ANT,
+                cost_per_mwh: C_A,
+            };
+            *bounds.thermal_bounds_mut(THERMAL_IDX_BACKUP, s) = ThermalStageBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: B_BACK,
+                cost_per_mwh: C_B,
+            };
+        }
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 0,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.0,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 0.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 0.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        // Past commitment is zero (the strict-zero precondition mirroring the
+        // K=1 ring-buffer fixture). Any non-zero delivery observed at stage 1
+        // must come from the stage-0 decision.
+        let initial_conditions = InitialConditions {
+            storage: vec![],
+            filling_storage: vec![],
+            past_inflows: vec![],
+            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
+                thermal_id: ANTICIPATED_ID,
+                values_mw: vec![0.0],
+            }],
+            recent_observations: vec![],
+            past_defluences: vec![],
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(vec![thermal_ant, thermal_backup])
+            .stages(stages)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .initial_conditions(initial_conditions)
+            .build()
+            .expect("build_system: valid")
+    }
+
+    fn build_config() -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::Penalty,
+                },
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                forward_passes: Some(1),
+                // 2 iterations reach the closed-form LB; 2 more settle the
+                // upper-bound gap to ~0 (mirrors the K=1 2-stage fixture's margin).
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 4 }]),
+                stopping_mode: "any".to_string(),
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                scenario_source: None,
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    /// The first true `LeadTime` parse→validate→setup→train load-path exercise:
+    /// a single-decider `LeadTime(744.0)` thermal on a uniform 3×744h calendar
+    /// trains to convergence with no panic, matching the closed-form optimum
+    /// `EXPECTED_LB = H · D · (C_B + 2 · C_A) = 4_464_000.0` USD.
+    #[test]
+    fn lead_time_single_decider_solves_end_to_end() {
+        let system = build_system();
+        let config = build_config();
+        let mut setup = build_setup_in_code(system, &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+
+        assert!(
+            outcome.error.is_none(),
+            "training error: {:?}",
+            outcome.error
+        );
+
+        let result = &outcome.result;
+        assert_eq!(result.iterations, 4, "iterations mismatch");
+
+        let gap = result.final_gap;
+        assert!(
+            gap.is_finite() && gap.abs() < 1e-6,
+            "final_gap should be approximately zero (LB == UB) for a fully \
+             deterministic fixture; got {gap}",
+        );
+
+        let actual = result.final_lb;
+        assert!(actual.is_finite(), "final_lb must be finite; got {actual}");
+        let rel_diff = (actual - EXPECTED_LB).abs() / EXPECTED_LB.abs();
+        assert!(
+            rel_diff < 1e-9,
+            "closed-form LB mismatch: actual = {actual}, expected = {EXPECTED_LB} \
+             (rel_diff = {rel_diff}). See module docs for the derivation.",
+        );
+    }
+}
 mod anticipated_numerical_reconciliation_k2 {
     //! Numerical reconciliation test: LP total cost must match the analytical optimum
     //! for a K=2, 6-stage fixture with zero discount rate.

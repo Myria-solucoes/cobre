@@ -6581,3 +6581,323 @@ fn resolve_anticipated_commitments_leadstages_never_warns() {
         "LeadStages must never trigger the K=0 advisory; got: {recorded:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// LeadTime fan-out — rejected at setup, not silently dropped, no panic
+// ---------------------------------------------------------------------------
+
+/// Given a `LeadTime` thermal whose calendar makes it fan out
+/// (`AnticipatedResolution::max_fanout > 1`: a coarse 744h decision stage
+/// anchoring TWO finer 168h delivery stages), when `StudySetup::new` builds
+/// the study, then setup rejects it with `SddpError::Validation` naming the
+/// fanned plant and stating per-delivery-stage fan-out output is not yet
+/// supported — no panic, no silently dropped fan member.
+#[test]
+fn lead_time_fanout_rejected_at_setup() {
+    use crate::error::SddpError;
+
+    let system = minimal_system_with_anticipated(
+        &[744.0, 168.0, 168.0],
+        AnticipatedConfig::LeadTime(900.0),
+        2,
+    );
+
+    // Sanity: the fixture genuinely fans out (guards the guard's own fixture).
+    let (resolution, _) = super::resolve_anticipated_commitments(&system);
+    assert_eq!(
+        resolution.max_fanout, 2,
+        "fixture must fan out with width 2 at decision stage 0"
+    );
+
+    let config = minimal_config(1, 10);
+    let stochastic = build_stochastic_context(
+        &system,
+        42,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("stochastic context");
+
+    let result = StudySetup::new(
+        &system,
+        &config,
+        stochastic,
+        PrepareHydroModelsResult::default_from_system(&system),
+    );
+
+    let err = result.expect_err("a fan-out LeadTime study must be rejected at setup, not panic");
+    assert!(
+        matches!(err, SddpError::Validation(_)),
+        "expected SddpError::Validation, got: {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("anticipated thermal 2"),
+        "message should name the fanned plant (thermal id 2), got: {msg}"
+    );
+    assert!(
+        msg.contains("LeadTime fan-out"),
+        "message should state LeadTime fan-out, got: {msg}"
+    );
+    assert!(
+        msg.contains("not yet supported"),
+        "message should state fan-out output is not yet supported, got: {msg}"
+    );
+}
+
+/// Build a 1-bus, no-hydro, two-thermal system on a coarse-month-then-fine-weeks
+/// calendar (`[744.0, 168.0, 168.0]` h): thermal id=20 is a non-fanning
+/// `LeadStages(1)` plant, thermal id=21 is a `LeadTime(900.0)` plant whose
+/// stage-0 decision fans out into both stage-1 and stage-2 deliveries
+/// (`AnticipatedResolution::max_fanout == 2`). Declared `[fanning, non_fanning]`
+/// (`SystemBuilder` re-sorts by `EntityId` ascending regardless) so the
+/// declaration-order-invariance test proves the rejection does not depend on
+/// input order.
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
+fn system_with_two_thermals_one_fanning() -> cobre_core::System {
+    use chrono::NaiveDate;
+    use cobre_core::{
+        Bus, EntityId, InitialConditions, SystemBuilder,
+        entities::bus::DeficitSegment,
+        temporal::{Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig},
+    };
+
+    let bus = Bus {
+        id: EntityId(1),
+        name: "B1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        deficit_segments: vec![DeficitSegment {
+            depth_mw: None,
+            cost_per_mwh: 500.0,
+        }],
+        excess_cost: 0.0,
+    };
+
+    let durations = [744.0_f64, 168.0, 168.0];
+    let n_stages = durations.len();
+
+    let non_fanning = Thermal {
+        id: EntityId(20),
+        name: "T_non_fanning".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        bus_id: EntityId(1),
+        min_generation_mw: 0.0,
+        max_generation_mw: 100.0,
+        cost_per_mwh: 50.0,
+        anticipated_config: Some(AnticipatedConfig::LeadStages(1)),
+        entry_stage_id: None,
+        exit_stage_id: None,
+    };
+    let fanning = Thermal {
+        id: EntityId(21),
+        name: "T_fanning".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        bus_id: EntityId(1),
+        min_generation_mw: 0.0,
+        max_generation_mw: 100.0,
+        cost_per_mwh: 50.0,
+        anticipated_config: Some(AnticipatedConfig::LeadTime(900.0)),
+        entry_stage_id: None,
+        exit_stage_id: None,
+    };
+
+    let stages: Vec<Stage> = durations
+        .iter()
+        .enumerate()
+        .map(|(i, &duration)| Stage {
+            index: i,
+            id: i as i32,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: None,
+            blocks: vec![Block {
+                index: 0,
+                name: "S".to_string(),
+                duration_hours: duration,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: false,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        })
+        .collect();
+
+    let load_models: Vec<LoadModel> = (0..n_stages)
+        .map(|i| LoadModel {
+            bus_id: EntityId(1),
+            stage_id: i as i32,
+            mean_mw: 100.0,
+            std_mw: 0.0,
+        })
+        .collect();
+
+    let k_max_bounds = 2usize;
+    let mut bounds = ResolvedBounds::new(
+        &BoundsCountsSpec {
+            n_hydros: 0,
+            n_thermals: 2,
+            n_lines: 0,
+            n_pumping: 0,
+            n_contracts: 0,
+            n_stages,
+            k_max: k_max_bounds,
+        },
+        &BoundsDefaults {
+            hydro: HydroStageBounds {
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 0.0,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 0.0,
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: None,
+                min_generation_mw: 0.0,
+                max_generation_mw: 0.0,
+                max_diversion_m3s: None,
+                filling_min_rate_m3s: 0.0,
+                water_withdrawal_m3s: 0.0,
+            },
+            thermal: ThermalStageBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: 100.0,
+                cost_per_mwh: 50.0,
+            },
+            line: LineStageBounds {
+                direct_mw: 0.0,
+                reverse_mw: 0.0,
+            },
+            pumping: PumpingStageBounds {
+                min_flow_m3s: 0.0,
+                max_flow_m3s: 0.0,
+            },
+            contract: ContractStageBounds {
+                min_mw: 0.0,
+                max_mw: 0.0,
+                price_per_mwh: 0.0,
+            },
+        },
+    );
+    for thermal_idx in 0..2 {
+        for s in 0..(n_stages + k_max_bounds) {
+            *bounds.thermal_bounds_mut(thermal_idx, s) = ThermalStageBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: 100.0,
+                cost_per_mwh: 50.0,
+            };
+        }
+    }
+
+    let penalties = ResolvedPenalties::new(
+        &PenaltiesCountsSpec {
+            n_hydros: 0,
+            n_buses: 1,
+            n_lines: 0,
+            n_ncs: 0,
+            n_stages,
+        },
+        &PenaltiesDefaults {
+            hydro: HydroStagePenalties {
+                spillage_cost: 0.0,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 0.0,
+            },
+            bus: BusStagePenalties { excess_cost: 0.0 },
+            line: LineStagePenalties { exchange_cost: 0.0 },
+            ncs: NcsStagePenalties {
+                curtailment_cost: 0.0,
+            },
+        },
+    );
+
+    SystemBuilder::new()
+        .buses(vec![bus])
+        .thermals(vec![fanning, non_fanning])
+        .stages(stages)
+        .load_models(load_models)
+        .bounds(bounds)
+        .penalties(penalties)
+        .initial_conditions(InitialConditions {
+            storage: vec![],
+            filling_storage: vec![],
+            past_inflows: vec![],
+            past_anticipated_commitments: vec![],
+            recent_observations: vec![],
+            past_defluences: vec![],
+        })
+        .build()
+        .expect("two-thermal fan-out system: valid")
+}
+
+/// Given two anticipated thermals where only the SECOND declared (canonical
+/// id order: `non_fanning`=20 before `fanning`=21) fans out, the rejection
+/// must still fire and name that plant, regardless of where it falls in
+/// declaration order — `system.thermals()` is canonical (ID-sorted), so
+/// scanning in that order is order-invariant by construction.
+#[test]
+fn lead_time_fanout_rejection_is_declaration_order_invariant() {
+    use crate::error::SddpError;
+
+    let system = system_with_two_thermals_one_fanning();
+
+    let config = minimal_config(1, 10);
+    let stochastic = build_stochastic_context(
+        &system,
+        42,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("stochastic context");
+
+    let result = StudySetup::new(
+        &system,
+        &config,
+        stochastic,
+        PrepareHydroModelsResult::default_from_system(&system),
+    );
+
+    let err = result.expect_err(
+        "the fanning plant must still be rejected regardless of its declaration position",
+    );
+    assert!(matches!(err, SddpError::Validation(_)));
+    let msg = err.to_string();
+    assert!(
+        msg.contains("anticipated thermal 21"),
+        "message should name the fanning plant (thermal id 21), not the non-fanning one, got: {msg}"
+    );
+}

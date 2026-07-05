@@ -765,7 +765,7 @@ pub fn build_stage_templates(
     // widening this function's signature — the accepted redundant-but-
     // deterministic cost of a second call.
     let bucket_topology = crate::setup::bucket_topology::build_transit_bucket_topology(system);
-    let state_layout = crate::indexer::StateLayout::new(
+    let mut state_layout = crate::indexer::StateLayout::new(
         ctx.n_hydros,
         ctx.max_par_order,
         bucket_topology.n_buckets,
@@ -775,6 +775,11 @@ pub fn build_stage_templates(
         ctx.anticipated_lead_stages.clone(),
         &effective_lag_counts,
     );
+    // Mirrors setup's own `build_wired_indexer`: attach the same delivery-
+    // anchored resolution onto this role-(a) `StateLayout` so `LeadTime` plants
+    // read the calendar-derived decider here too, not the constant-lead
+    // fallback `anticipated_resolution_for` would otherwise reconstruct.
+    state_layout.set_anticipated_resolution(ctx.anticipated_resolution.clone());
 
     let n_study = study_stages.len();
     let mut stage_outputs = Vec::with_capacity(n_study);
@@ -973,28 +978,30 @@ fn build_template_build_ctx<'a>(
         .unwrap_or(0)
         .max(par_lp.max_order());
 
-    // Per anticipated thermal: global index, lead_stages (K_i), and commissioning
-    // window. The window keys the decision gate's operation-window clause on the
-    // delivery stage; `(None, None)` means active every delivery stage in horizon.
+    // Per anticipated thermal: global index and commissioning window. The window
+    // keys the decision gate's operation-window clause on the delivery stage;
+    // `(None, None)` means active every delivery stage in horizon.
     let mut anticipated_thermal_indices: Vec<usize> = Vec::new();
-    let mut anticipated_lead_stages: Vec<usize> = Vec::new();
     let mut anticipated_windows: Vec<(Option<i32>, Option<i32>)> = Vec::new();
     for (t_idx, thermal) in system.thermals().iter().enumerate() {
-        if let Some(cfg) = thermal.anticipated_config.as_ref() {
+        if thermal.anticipated_config.is_some() {
             anticipated_thermal_indices.push(t_idx);
-            // LeadTime is rejected by check_anticipated_thermals's NotImplemented
-            // gate before setup runs. u32 always fits in usize on supported
-            // 32-bit and 64-bit targets.
-            debug_assert!(
-                cfg.lead_stages().is_some(),
-                "LeadTime must be gated upstream"
-            );
-            anticipated_lead_stages.push(cfg.lead_stages().unwrap_or(0) as usize);
             anticipated_windows.push((thermal.entry_stage_id, thermal.exit_stage_id));
         }
     }
     let n_anticipated = anticipated_thermal_indices.len();
-    let k_max = anticipated_lead_stages.iter().copied().max().unwrap_or(0);
+
+    // Recomputes the delivery-anchored resolution (a pure function of `system`)
+    // instead of threading it in from the caller — the same accepted
+    // redundant-but-deterministic cost of a second call this crate already pays
+    // for the bucket topology below. The warn-free core never re-emits the K=0
+    // advisory setup's own call already owns.
+    let (anticipated_resolution, anticipated_lead_stages) =
+        crate::setup::resolve_anticipated_commitments_core(system);
+    debug_assert_eq!(anticipated_lead_stages.len(), n_anticipated);
+    let k_max: usize = anticipated_resolution
+        .k_max
+        .max(anticipated_lead_stages.iter().copied().max().unwrap_or(0));
 
     // Target hydro ID -> source hydro indices that divert to it. Cloned so the map
     // serves both LP construction (ctx) and the simulation extraction output.
@@ -1107,6 +1114,7 @@ fn build_template_build_ctx<'a>(
         anticipated_lead_stages,
         anticipated_thermal_indices,
         anticipated_windows,
+        anticipated_resolution,
         study_stage_ids,
         has_penalty: n_hydros > 0 && inflow_method.has_slack_columns(),
         cumulative_discount_factors,

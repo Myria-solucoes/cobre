@@ -28,29 +28,22 @@ pub(super) fn check_thermal_generation_bounds(data: &ParsedData, ctx: &mut Valid
 
 /// Checks cross-field invariants for anticipated thermal plants.
 ///
-/// 1. **`LeadTime` gate** — the solver has no `LeadTime` consumer yet, so a
-///    `LeadTime`-configured thermal is hard-rejected with `ErrorKind::NotImplemented`
-///    (mirrors the water-arc chronological-confluence `NotImplemented` precedent in
-///    `validation/semantic/travel_time.rs`); see the
-///    `TODO(anticipated-physical-horizon-gate)` at the reject site. Item 3 below
-///    still runs for a `LeadTime` thermal, independent of this gate: the two
-///    errors compose (different `ErrorKind`s), so lifting this gate later needs
-///    no change to the coverage rule.
-/// 2. **Per-plant lead-stage horizon** (`LeadStages` mode only) — `K == 0` is
+/// 1. **Per-plant lead-stage horizon** (`LeadStages` mode only) — `K == 0` is
 ///    rejected (defence in depth; parse-time also rejects it) and `K > n_stages`
 ///    is rejected (the plant can never deliver within the horizon). A
 ///    commissioning window IS supported and composes with the K-stage lookahead
 ///    via the shifted decision gate; these two checks validate the LEAD itself,
-///    independent of any window.
-/// 3. **Past-commitments registry bijection** with
+///    independent of any window. `LeadTime` mode has no horizon analogue yet —
+///    see the `TODO(anticipated-physical-horizon-gate)` at the fall-through site.
+/// 2. **Past-commitments registry bijection** with
 ///    `ic.past_anticipated_commitments`: each anticipated thermal has exactly one
 ///    history entry, each history entry references an anticipated thermal;
 ///    `history.values_mw.len()` must equal the calendar-derived count of
 ///    pre-study-committed delivery stages (`required_anticipated_commitment_count`)
 ///    for either lead mode — a hard gate, no fallback (the "Pre-study
 ///    anticipated commitments: calendar-derived coverage" contract).
-/// 4. **Committed-value generation bounds** — see `check_committed_value_bounds`.
-/// 5. **Seed-vs-window consistency** — see `check_seed_within_window`.
+/// 3. **Committed-value generation bounds** — see `check_committed_value_bounds`.
+/// 4. **Seed-vs-window consistency** — see `check_seed_within_window`.
 pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut ValidationContext) {
     // Pre-study stages (negative IDs) are never delivery targets for commitments.
     let study_stage_ids: Vec<i32> = data
@@ -69,20 +62,10 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
         };
         let thermal_id = thermal.id.0;
 
+        // TODO(anticipated-physical-horizon-gate): LeadTime has no analogue yet
+        // of the k_u > n_stages rejection below — a LeadTime lead exceeding the
+        // whole study horizon is not rejected here.
         let Some(k) = cfg.lead_stages() else {
-            // TODO(anticipated-physical-horizon-gate): lifting this gate still owes
-            // the deferred physical-horizon check (the LeadTime analogue of the
-            // `k_u > n_stages` rejection below).
-            let entity_str = format!("thermals[id={thermal_id}].anticipated_config");
-            ctx.add_error(
-                ErrorKind::NotImplemented,
-                "system/thermals.json",
-                Some(&entity_str),
-                format!(
-                    "Thermal {thermal_id}: anticipated_config.lead_time_hours is not yet \
-                     consumed by the solver"
-                ),
-            );
             continue;
         };
         let entity_str = format!("thermals[id={thermal_id}].anticipated_config.lead_stages");
@@ -580,48 +563,65 @@ mod tests {
         );
     }
 
-    // ── LeadTime: NotImplemented gate ─────────────────────────────────────────
+    // ── LeadTime: no longer gated `NotImplemented` ────────────────────────────
 
-    /// Given an otherwise-valid `LeadTime`-configured thermal, when semantic
-    /// validation runs, then it returns `ErrorKind::NotImplemented` stating the
-    /// anticipated `lead_time_hours` mode is not yet consumed by the solver.
+    /// Given an otherwise-valid `LeadTime`-configured thermal on the
+    /// weekly-then-monthly PMO calendar (calendar-covered commitments), when
+    /// semantic validation runs, then no `NotImplemented` error is produced and
+    /// the study passes validation entirely: `LeadTime` falls through to the
+    /// shared coverage/bounds/window checks unchanged.
     #[test]
-    fn test_lead_time_thermal_rejected_not_implemented() {
-        let thermal = cobre_core::entities::Thermal {
-            anticipated_config: Some(AnticipatedConfig::LeadTime(720.0)),
-            entry_stage_id: None,
-            exit_stage_id: None,
-            ..make_thermal(1, 0.0, 500.0)
+    fn test_lead_time_thermal_accepted() {
+        let thermal = make_lead_time_anticipated_thermal(1, 720.0, None, None);
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(1),
+            values_mw: vec![0.0, 0.0, 0.0, 0.0],
         };
+        let data = make_data_anticipated_with_durations(
+            vec![thermal],
+            &[168.0, 168.0, 168.0, 168.0, 720.0, 720.0],
+            vec![history],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            !ctx.errors()
+                .iter()
+                .any(|e| e.kind == ErrorKind::NotImplemented),
+            "LeadTime must no longer be rejected as NotImplemented, got: {:?}",
+            ctx.errors()
+        );
+        assert!(
+            !ctx.has_errors(),
+            "a valid LeadTime thermal with calendar-covered commitments must pass \
+             validation entirely, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Given a valid single-decider `LeadTime(744.0)` thermal on a uniform
+    /// 3×744h calendar with a matching one-entry `past_anticipated_commitments`
+    /// history, when semantic validation runs, then the study passes validation
+    /// with no errors — the first `LeadTime` config the gate admits through to
+    /// setup.
+    #[test]
+    fn lead_time_single_decider_passes_validation() {
+        let thermal = make_lead_time_anticipated_thermal(1, 744.0, None, None);
         let history = AnticipatedCommitmentHistory {
             thermal_id: EntityId::from(1),
             values_mw: vec![0.0],
         };
-        let data = make_data_anticipated(vec![thermal], 5, vec![history]);
+        let data = make_data_anticipated_with_durations(
+            vec![thermal],
+            &[744.0, 744.0, 744.0],
+            vec![history],
+        );
         let mut ctx = ValidationContext::new();
         validate_semantic_hydro_thermal(&data, &mut ctx);
-        let errors = ctx.errors();
-        let relevant: Vec<_> = errors
-            .iter()
-            .filter(|e| e.kind == ErrorKind::NotImplemented)
-            .collect();
-        assert_eq!(
-            relevant.len(),
-            1,
-            "expected exactly one NotImplemented error, got: {errors:?}"
-        );
-        let msg = &relevant[0].message;
         assert!(
-            msg.contains("Thermal 1"),
-            "message should contain 'Thermal 1', got: {msg}"
-        );
-        assert!(
-            msg.contains("lead_time_hours"),
-            "message should name lead_time_hours, got: {msg}"
-        );
-        assert!(
-            msg.contains("not yet consumed"),
-            "message should state the mode is not yet consumed, got: {msg}"
+            !ctx.has_errors(),
+            "a valid single-decider LeadTime thermal must pass validation, got: {:?}",
+            ctx.errors()
         );
     }
 
@@ -848,8 +848,7 @@ mod tests {
 
     /// Given a `LeadTime(720.0)` plant on the weekly-then-monthly PMO calendar
     /// `[168,168,168,168,720,720]` h and `values_mw.len() == 4` (the
-    /// calendar-derived required count), no coverage-length error fires. The
-    /// `NotImplemented` gate still fires (a separate, expected `ErrorKind`).
+    /// calendar-derived required count), no coverage-length error fires.
     #[test]
     fn test_anticipated_lead_time_coverage_pmo_calendar() {
         let thermal = make_lead_time_anticipated_thermal(1, 720.0, None, None);
