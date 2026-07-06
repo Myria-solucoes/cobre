@@ -23,6 +23,7 @@ use cobre_core::{
 use crate::StochasticError;
 
 use crate::par::{evaluate::solve_par_noise, precompute::PrecomputedPar};
+use crate::sampling::PeriodBlendWeight;
 
 // ---------------------------------------------------------------------------
 // ExternalScenarioLibrary
@@ -208,6 +209,14 @@ impl ExternalScenarioLibrary {
 /// - `hydro_ids` — canonical-order hydro entity IDs
 /// - `past_inflows` — pre-study history sorted by `hydro_id`; seeds the stage-0 lag chain
 /// - `stage_lag_transitions` — one per stage, same length as `stages`
+/// - `disaggregation_weights` — one per stage, same length as `stages`; empty
+///   or all-interior for a study with no day-weighted disaggregation. A
+///   boundary stage's row is assumed to hold the DAY-WEIGHTED BLENDED raw
+///   value (the same quantity the forward pass's water-balance RHS
+///   consumes); the inverse de-blends it against
+///   [`PeriodBlendWeight::next_period_stage`]'s own row before solving for η, so
+///   the stored η reproduces the ANCHOR period's pure rate — the same
+///   quantity `z_inflow` carries forward, never the blended value itself.
 ///
 /// # Panics
 ///
@@ -224,6 +233,7 @@ pub fn standardize_external_inflow(
     par: &PrecomputedPar,
     past_inflows: &[HydroPastInflows],
     stage_lag_transitions: &[StageLagTransition],
+    disaggregation_weights: &[PeriodBlendWeight],
 ) {
     let n_stages = library.n_stages();
     let n_scenarios = library.n_scenarios();
@@ -250,6 +260,11 @@ pub fn standardize_external_inflow(
         "stage_lag_transitions.len() ({}) must equal n_stages ({})",
         stage_lag_transitions.len(),
         n_stages,
+    );
+    debug_assert!(
+        disaggregation_weights.is_empty() || disaggregation_weights.len() == n_stages,
+        "disaggregation_weights.len() ({}) must be 0 or equal to n_stages ({n_stages})",
+        disaggregation_weights.len(),
     );
 
     if n_hydros == 0 || n_stages == 0 || n_scenarios == 0 {
@@ -308,6 +323,11 @@ pub fn standardize_external_inflow(
     let mut lag_state = vec![0.0_f64; n_hydros * safe_max_order];
     let mut lag_buf = vec![0.0_f64; safe_max_order];
     let mut lag_accum = vec![0.0_f64; n_hydros];
+    // Per-stage de-blended (pure anchor-period) rate, one entry per hydro;
+    // read by both the eta-solve and the accumulate/spillover steps below so
+    // the lag-state advancement mirrors the forward pass's accumulation of
+    // `z_inflow` (the pure anchor rate), never the day-weighted raw value.
+    let mut de_blended_buf = vec![0.0_f64; n_hydros];
 
     for scenario in 0..n_scenarios {
         // Each scenario starts from the same past_inflows-seeded lag state.
@@ -317,9 +337,30 @@ pub fn standardize_external_inflow(
 
         for t in 0..n_stages {
             let stage_lag = &stage_lag_transitions[t];
+            let blend = disaggregation_weights
+                .get(t)
+                .copied()
+                .unwrap_or_else(PeriodBlendWeight::interior);
 
             for h in 0..n_hydros {
-                let target = raw_values[t * n_scenarios * n_hydros + scenario * n_hydros + h];
+                let raw_target = raw_values[t * n_scenarios * n_hydros + scenario * n_hydros + h];
+
+                // De-blend a boundary stage's day-weighted raw value back to
+                // the anchor period's pure rate — the algebraic inverse of
+                // the forward blend (`noise_buf += zeta * next_day_weight *
+                // (next_rate - anchor_rate)`) — using the source-B stage's OWN raw
+                // row as next_rate rather than re-deriving it through the PAR
+                // model (which would require a lag state that does not yet
+                // exist at inversion time).
+                let target = if blend.next_day_weight > 0.0 {
+                    let next_stage = blend.next_period_stage.unwrap_or(t);
+                    let next_rate =
+                        raw_values[next_stage * n_scenarios * n_hydros + scenario * n_hydros + h];
+                    (raw_target - blend.next_day_weight * next_rate) / blend.anchor_day_weight
+                } else {
+                    raw_target
+                };
+                de_blended_buf[h] = target;
 
                 // Full-length lag_buf so PAR(p)-A annual contributions (widened
                 // across the `psi` slice) participate in the η inversion.
@@ -340,8 +381,7 @@ pub fn standardize_external_inflow(
             // is always in the period average.
             let w = stage_lag.accumulate_weight;
             for h in 0..n_hydros {
-                let val = raw_values[t * n_scenarios * n_hydros + scenario * n_hydros + h];
-                lag_accum[h] += val * w;
+                lag_accum[h] += de_blended_buf[h] * w;
             }
             lag_weight_accum += w;
 
@@ -357,13 +397,14 @@ pub fn standardize_external_inflow(
                     lag_state[h * safe_max_order] = avg;
                 }
 
-                // Spillover seeds from the RAW value, not the period average.
+                // Spillover seeds from the de-blended (pure) value, not the
+                // period average — mirroring the RAW-value spillover seed the
+                // pre-disaggregation path uses, now read from the pure anchor
+                // rate instead of the day-weighted raw value.
                 let sw = stage_lag.spillover_weight;
                 if sw > 0.0 {
                     for h in 0..n_hydros {
-                        let raw_val =
-                            raw_values[t * n_scenarios * n_hydros + scenario * n_hydros + h];
-                        lag_accum[h] = raw_val * sw;
+                        lag_accum[h] = de_blended_buf[h] * sw;
                     }
                     lag_weight_accum = sw;
                 } else {
@@ -786,6 +827,7 @@ mod tests {
         standardize_external_ncs,
     };
     use crate::par::{evaluate::evaluate_par, precompute::PrecomputedPar};
+    use crate::sampling::PeriodBlendWeight;
 
     /// Build `n_stages` uniform-monthly transitions: each stage finalizes its own
     /// period with full weight and no spillover (the simple per-stage path).
@@ -901,6 +943,7 @@ mod tests {
             &par,
             &[],
             &transitions,
+            &[],
         );
 
         let eta_0 = lib.eta_slice(0, 0)[0];
@@ -972,6 +1015,7 @@ mod tests {
             &par,
             &past_inflows,
             &transitions,
+            &[],
         );
 
         // Stage 0: lag-1 = 110.0 (from past_inflows).
@@ -1105,6 +1149,7 @@ mod tests {
             &par,
             &past_inflows,
             &transitions,
+            &[],
         );
 
         let det_base = par.deterministic_base(0, 0);
@@ -1229,6 +1274,7 @@ mod tests {
             &par,
             &past_inflows,
             &transitions,
+            &[],
         );
 
         let det_base = par.deterministic_base(0, 0);
@@ -1924,6 +1970,7 @@ mod tests {
             &par,
             &past_inflows,
             &stage_lag_transitions,
+            &[],
         );
 
         // Forward reconstruction: mirror the frozen-lag + accumulation logic from
@@ -1966,6 +2013,121 @@ mod tests {
                 // Non-finalizing stages: lag_buf stays frozen (unchanged).
             }
         }
+    }
+
+    /// Regime A day-weighted disaggregation round trip: monthly (`anchor_rate`,
+    /// `next_rate`) -> weekly (a boundary week's day-weighted BLENDED raw external
+    /// value) -> `standardize_external_inflow`'s inverse -> monthly (`anchor_rate`),
+    /// identity to 1e-9.
+    ///
+    /// 3 weekly stages: two interior April stages (season 3) and one interior
+    /// May stage (season 4); stage 1 is the boundary week spanning April (6
+    /// days) / May (1 day) — the same 6/1 day-count split a sibling
+    /// calendar-enumerator test elsewhere in this workspace pins for the same
+    /// calendar. AR(0) (`base=0`, `sigma=1`) makes `evaluate_par(eta) == eta`,
+    /// so the anchor/next rates and their etas coincide numerically, keeping
+    /// the hand-derivation simple without weakening the round-trip claim (the
+    /// blend/de-blend arithmetic is exercised identically).
+    #[test]
+    fn test_disaggregation_round_trip_monthly_weekly_monthly() {
+        let hydro_id = EntityId(1);
+        let hydro_ids = vec![hydro_id];
+
+        let stages = vec![
+            make_stage(0, 0, 3),
+            make_stage(1, 1, 3),
+            make_stage(2, 2, 4),
+        ];
+        let models = vec![
+            make_inflow_model(1, 0, 0.0, 1.0, vec![]),
+            make_inflow_model(1, 1, 0.0, 1.0, vec![]),
+            make_inflow_model(1, 2, 0.0, 1.0, vec![]),
+        ];
+        let par = PrecomputedPar::build(&models, &stages, &hydro_ids, None).unwrap();
+
+        // Known pure (anchor) monthly rates — the ground truth this round
+        // trip must recover, never read back from the function under test.
+        let anchor_rate = 100.0_f64;
+        let next_rate = 200.0_f64;
+
+        // Day-weights matching a 7-day week straddling a 30-day April with a
+        // 6/1 day split (the same closed-form split the landed
+        // precompute_disaggregation_weights test pins).
+        let anchor_day_weight = 6.0 / 7.0;
+        let next_day_weight = 1.0 / 7.0;
+        let disaggregation_weights = vec![
+            PeriodBlendWeight::interior(), // stage 0: interior April
+            PeriodBlendWeight {
+                anchor_day_weight,
+                next_day_weight,
+                next_period_stage: Some(2),
+            }, // stage 1: boundary
+            PeriodBlendWeight::interior(), // stage 2: interior May
+        ];
+
+        // The day-weighted BLENDED raw value the boundary week's own external
+        // row carries — hand-derived from the closed-form blend formula, not
+        // computed by calling `standardize_external_inflow`.
+        let raw_blended = anchor_day_weight * anchor_rate + next_day_weight * next_rate;
+
+        let mut lib = ExternalScenarioLibrary::new(3, 1, 1, "inflow", vec![1, 1, 1]);
+        let rows = vec![
+            ExternalScenarioRow {
+                stage_id: 0,
+                scenario_id: 0,
+                hydro_id,
+                value_m3s: anchor_rate,
+            },
+            ExternalScenarioRow {
+                stage_id: 1,
+                scenario_id: 0,
+                hydro_id,
+                value_m3s: raw_blended,
+            },
+            ExternalScenarioRow {
+                stage_id: 2,
+                scenario_id: 0,
+                hydro_id,
+                value_m3s: next_rate,
+            },
+        ];
+        let transitions = uniform_monthly_transitions(stages.len());
+        standardize_external_inflow(
+            &mut lib,
+            &rows,
+            &hydro_ids,
+            &stages,
+            &par,
+            &[],
+            &transitions,
+            &disaggregation_weights,
+        );
+
+        // Interior stages: eta reproduces the raw value directly (no blend).
+        assert!((lib.eta_slice(0, 0)[0] - anchor_rate).abs() < 1e-9);
+        assert!((lib.eta_slice(2, 0)[0] - next_rate).abs() < 1e-9);
+
+        // Boundary stage: eta must recover the ANCHOR's pure rate (anchor_rate),
+        // not the day-weighted raw_blended value — monthly -> weekly ->
+        // monthly is identity.
+        let eta_boundary = lib.eta_slice(1, 0)[0];
+        assert!(
+            (eta_boundary - anchor_rate).abs() < 1e-9,
+            "eta_boundary={eta_boundary}, expected anchor_rate={anchor_rate} (round-trip identity)"
+        );
+
+        // Forward cross-check, independent of the inversion above: feed
+        // eta_boundary through evaluate_par (AR0) to recover anchor_rate, then
+        // reapply the closed-form day-weighted blend and confirm it
+        // reproduces the ORIGINAL external row exactly.
+        let recovered_anchor_rate = evaluate_par(0.0, &[], &[], 1.0, eta_boundary);
+        assert!((recovered_anchor_rate - anchor_rate).abs() < 1e-9);
+        let reconstructed_raw =
+            anchor_day_weight * recovered_anchor_rate + next_day_weight * next_rate;
+        assert!(
+            (reconstructed_raw - raw_blended).abs() < 1e-9,
+            "reconstructed={reconstructed_raw}, original raw_blended={raw_blended}"
+        );
     }
 
     /// Given `library.n_scenarios() = 10` and `forward_passes = 50`,

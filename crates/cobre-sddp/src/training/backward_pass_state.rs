@@ -1195,6 +1195,9 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                disagg_next_rate_buf: Vec::new(),
+                disagg_peek_noise_buf: Vec::new(),
+                disagg_peek_perm_scratch: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -1495,6 +1498,8 @@ mod tests {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
+            disaggregation_weights: &[],
+            zeta_s: &[],
         };
         let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
@@ -1631,6 +1636,8 @@ mod tests {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
+            disaggregation_weights: &[],
+            zeta_s: &[],
         };
         let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {

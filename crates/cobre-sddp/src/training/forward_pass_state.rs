@@ -567,6 +567,11 @@ impl ForwardPassState {
 ///
 /// Propagates `Err(SddpError::Stochastic(_))` from `sampler.sample(...)` and
 /// `Err(SddpError::Infeasible/Solver(_))` from [`run_forward_stage`].
+// Rationale: one linear per-(stage, scenario) sampling+solve pipeline, now
+// including the Regime A disaggregation peek block; splitting the peek into a
+// helper would need to pass ws/params/i32/s32/disagg_peek_* across a boundary
+// with no reduction in total complexity.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     w: usize,
     ws: &mut SolverWorkspace<S>,
@@ -593,6 +598,16 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     raw_noise_buf.resize(params.noise_dim, 0.0_f64);
     let mut perm_scratch = std::mem::take(&mut ws.scratch.perm_scratch);
     perm_scratch.resize((params.total_forward_passes).max(1), 0_usize);
+    // Disaggregation peek's own noise/perm scratch: separate from
+    // `raw_noise_buf`/`perm_scratch` because `SampleRequest` ties both to one
+    // lifetime, so the peek's sample for a boundary stage's source-B stage
+    // cannot reuse either buffer while `raw_noise` (borrowed from
+    // `raw_noise_buf` by that SAME lifetime) is still alive for the anchor
+    // stage's `run_forward_stage` call.
+    let mut disagg_peek_noise_buf = std::mem::take(&mut ws.scratch.disagg_peek_noise_buf);
+    disagg_peek_noise_buf.resize(params.noise_dim, 0.0_f64);
+    let mut disagg_peek_perm_scratch = std::mem::take(&mut ws.scratch.disagg_peek_perm_scratch);
+    disagg_peek_perm_scratch.resize((params.total_forward_passes).max(1), 0_usize);
 
     let local_solve_count_before = ws.solver.statistics().solve_count;
     #[allow(clippy::cast_possible_truncation)]
@@ -612,6 +627,11 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
             .get(t)
             .copied()
             .unwrap_or(1.0);
+        // Calendar-derived, scenario-invariant: computed once per stage, not
+        // per (stage, scenario) pair.
+        let disagg_weight = params.ctx.disaggregation_weight_at(t);
+        let disagg_active = disagg_weight.next_day_weight > 0.0
+            && crate::noise::has_par_model(params.training_ctx.stochastic, params.ctx.n_hydros);
 
         for (local_m, m) in (start_m..end_m).enumerate() {
             // Reset the solver's simplex state at the per-scenario boundary so
@@ -691,6 +711,73 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 noise_group_id: params.ctx.noise_group_id_at(t),
             })?;
             let raw_noise = noise.as_slice();
+
+            // Regime A day-weighted disaggregation forward peek: realize the
+            // anchor rate (anchor_rate) for this stage via `compute_water_balance_rhs`
+            // directly (never the `transform_inflow_noise` wrapper, which would
+            // apply the blend using a not-yet-populated `disagg_next_rate_buf`),
+            // then peek the source-B stage's REALIZED draw and evaluate its PAR
+            // model at a lag shifted by anchor_rate. `transform_inflow_noise` re-runs
+            // (idempotent, same inputs) inside `run_forward_stage` below and
+            // applies the blend using `disagg_next_rate_buf` populated here.
+            if disagg_active {
+                crate::noise::compute_water_balance_rhs(
+                    raw_noise,
+                    t,
+                    &ws.current_state,
+                    params.ctx,
+                    params.training_ctx,
+                    &mut ws.scratch,
+                );
+                let n_h = params.training_ctx.state.hydro_count;
+                if let Some(next_stage) = disagg_weight.next_period_stage {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let sb_u32 = next_stage as u32;
+                    let next_noise = params.sampler.sample(SampleRequest {
+                        iteration: i32,
+                        scenario: s32,
+                        stage: sb_u32,
+                        stage_idx: next_stage,
+                        noise_buf: &mut disagg_peek_noise_buf,
+                        perm_scratch: &mut disagg_peek_perm_scratch,
+                        total_scenarios: total_scenarios_u32,
+                        noise_group_id: params.ctx.noise_group_id_at(next_stage),
+                    })?;
+                    let next_eta = &next_noise.as_slice()[..n_h];
+                    crate::noise::compute_disaggregation_next_rate(
+                        params.training_ctx.state,
+                        &ws.current_state,
+                        &ws.scratch.z_inflow_rhs_buf,
+                        params.training_ctx.stochastic,
+                        next_stage,
+                        next_eta,
+                        &mut ws.scratch.lag_matrix_buf,
+                        &mut ws.scratch.disagg_next_rate_buf,
+                    );
+                } else {
+                    // Unreachable given `precompute_disaggregation_weights`'s
+                    // invariant (next_day_weight > 0.0 implies next_period_stage is
+                    // Some); handled defensively rather than indexing a stale
+                    // buffer. Falls back to this stage's own conditional mean.
+                    debug_assert!(
+                        false,
+                        "next_day_weight > 0.0 with next_period_stage == None \
+                         violates the precompute_disaggregation_weights invariant"
+                    );
+                    let eta_zero = &ws.scratch.zero_targets_buf[..n_h];
+                    crate::noise::compute_disaggregation_next_rate(
+                        params.training_ctx.state,
+                        &ws.current_state,
+                        &ws.scratch.z_inflow_rhs_buf,
+                        params.training_ctx.stochastic,
+                        t,
+                        eta_zero,
+                        &mut ws.scratch.lag_matrix_buf,
+                        &mut ws.scratch.disagg_next_rate_buf,
+                    );
+                }
+            }
+
             let key = StageKey {
                 t,
                 m,
@@ -722,6 +809,8 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     // Restore taken scratch buffers so they survive into the next iteration.
     ws.scratch.raw_noise_buf = raw_noise_buf;
     ws.scratch.perm_scratch = perm_scratch;
+    ws.scratch.disagg_peek_noise_buf = disagg_peek_noise_buf;
+    ws.scratch.disagg_peek_perm_scratch = disagg_peek_perm_scratch;
 
     let local_solves = ws.solver.statistics().solve_count - local_solve_count_before;
     ws.worker_timing_buf.forward_wall_ms += worker_wall_start.elapsed().as_secs_f64() * 1_000.0;
@@ -922,6 +1011,9 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                disagg_next_rate_buf: Vec::new(),
+                disagg_peek_noise_buf: Vec::new(),
+                disagg_peek_perm_scratch: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -1210,6 +1302,8 @@ mod tests {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
+            disaggregation_weights: &[],
+            zeta_s: &[],
         };
         let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
@@ -1286,6 +1380,8 @@ mod tests {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
+            disaggregation_weights: &[],
+            zeta_s: &[],
         };
         let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
@@ -1413,6 +1509,8 @@ mod tests {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
+            disaggregation_weights: &[],
+            zeta_s: &[],
         };
         let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
@@ -1541,6 +1639,8 @@ mod tests {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
+            disaggregation_weights: &[],
+            zeta_s: &[],
         };
         let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {

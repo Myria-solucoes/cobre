@@ -1053,6 +1053,8 @@ mod determinism {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
+            disaggregation_weights: &[],
+            zeta_s: &[],
         };
         let result = pool
             .install(|| {
@@ -1195,6 +1197,8 @@ mod determinism {
                         stage_lag_transitions: &[],
                         noise_group_ids: &[],
                         downstream_par_order: 0,
+                        disaggregation_weights: &[],
+                        zeta_s: &[],
                     },
                     fcf,
                     &TrainingContext {

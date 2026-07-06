@@ -52,6 +52,7 @@ use std::hash::Hasher as _;
 use crate::{
     StochasticError,
     par::{evaluate::solve_par_noise, fitting::find_season_for_date, precompute::PrecomputedPar},
+    sampling::PeriodBlendWeight,
 };
 
 // ---------------------------------------------------------------------------
@@ -279,7 +280,7 @@ impl HistoricalScenarioLibrary {
 // Rationale: the lag-state and accumulator buffers, the observation table, and the
 // digest computation thread through the (window × stage × entity) pass in
 // sequence; extracting helpers would pass several mutable buffers across boundaries.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn standardize_historical_windows(
     library: &mut HistoricalScenarioLibrary,
     inflow_history: &[InflowHistoryRow],
@@ -290,6 +291,7 @@ pub fn standardize_historical_windows(
     season_map: Option<&SeasonMap>,
     past_inflows: &[HydroPastInflows],
     stage_lag_transitions: &[StageLagTransition],
+    disaggregation_weights: &[PeriodBlendWeight],
 ) {
     // Fallback for an empty `stage_lag_transitions` or a per-stage noop
     // (accumulate_weight≈0, finalize_period=false) — what an empty SeasonMap
@@ -337,6 +339,12 @@ pub fn standardize_historical_windows(
         stage_lag_transitions.is_empty() || stage_lag_transitions.len() == stages.len(),
         "stage_lag_transitions.len() ({}) must be 0 or equal to stages.len() ({})",
         stage_lag_transitions.len(),
+        stages.len(),
+    );
+    debug_assert!(
+        disaggregation_weights.is_empty() || disaggregation_weights.len() == stages.len(),
+        "disaggregation_weights.len() ({}) must be 0 or equal to stages.len() ({})",
+        disaggregation_weights.len(),
         stages.len(),
     );
 
@@ -462,6 +470,9 @@ pub fn standardize_historical_windows(
     let mut lag_state = vec![0.0_f64; n_hydros * safe_max_order];
     let mut lag_buf = vec![0.0_f64; safe_max_order];
     let mut lag_accum = vec![0.0_f64; n_hydros];
+    // Per-stage de-blended (pure anchor-period) rate, one entry per hydro;
+    // mirrors `standardize_external_inflow`'s `de_blended_buf`.
+    let mut de_blended_buf = vec![0.0_f64; n_hydros];
 
     for (w, &window_year) in window_years.iter().enumerate() {
         // Each window starts from the same past_inflows-seeded lag state.
@@ -481,6 +492,16 @@ pub fn standardize_historical_windows(
                  window discovery should have excluded this window",
             );
 
+            let blend = disaggregation_weights
+                .get(t)
+                .copied()
+                .unwrap_or_else(PeriodBlendWeight::interior);
+            // Source-B's own (year_offset, season_id), resolved once per stage
+            // (constant across hydros and windows-relative offset).
+            let source_b_year_season = blend
+                .next_period_stage
+                .map(|next_stage| full_sequence[max_order + next_stage]);
+
             let eta_slice = library.eta_slice_mut(w, t);
             for h in 0..n_hydros {
                 debug_assert!(
@@ -491,7 +512,20 @@ pub fn standardize_historical_windows(
                      season={season_id}; window discovery should have excluded this window",
                     hydro_ids[h].0,
                 );
-                let target = lookup(h, obs_year, season_id);
+                let raw_target = lookup(h, obs_year, season_id);
+
+                // De-blend a boundary stage's day-weighted raw value back to
+                // the anchor period's pure rate — the algebraic inverse of the
+                // forward blend, mirroring `standardize_external_inflow`.
+                let target = if blend.next_day_weight > 0.0 {
+                    let next_rate = source_b_year_season.map_or(raw_target, |(yo_b, sid_b)| {
+                        lookup(h, window_year + yo_b, sid_b)
+                    });
+                    (raw_target - blend.next_day_weight * next_rate) / blend.anchor_day_weight
+                } else {
+                    raw_target
+                };
+                de_blended_buf[h] = target;
 
                 // lag_state is h-major: lag_state[h * safe_max_order + l]. Fill
                 // every slot so PAR(p)-A annual contributions (widened across the
@@ -523,8 +557,7 @@ pub fn standardize_historical_windows(
 
             let aw = stage_lag.accumulate_weight;
             for (accum, h) in lag_accum.iter_mut().zip(0..n_hydros) {
-                let val = lookup(h, obs_year, season_id);
-                *accum += val * aw;
+                *accum += de_blended_buf[h] * aw;
             }
             lag_weight_accum += aw;
 
@@ -540,12 +573,12 @@ pub fn standardize_historical_windows(
                     lag_state[h * safe_max_order] = avg;
                 }
 
-                // Spillover seeds from the RAW value, not the period average.
+                // Spillover seeds from the de-blended (pure) value, not the
+                // period average.
                 let sw = stage_lag.spillover_weight;
                 if sw > 0.0 {
                     for (accum, h) in lag_accum.iter_mut().zip(0..n_hydros) {
-                        let raw_val = lookup(h, obs_year, season_id);
-                        *accum = raw_val * sw;
+                        *accum = de_blended_buf[h] * sw;
                     }
                     lag_weight_accum = sw;
                 } else {
@@ -902,6 +935,7 @@ mod tests {
             None,
             &[],
             &[],
+            &[],
         );
 
         let expected_0 = (120.0 - 100.0) / 30.0;
@@ -1011,6 +1045,7 @@ mod tests {
             None,
             &past,
             &[],
+            &[],
         );
 
         // Stage 0: lag_state seeded from past_inflows → lag = 110.0.
@@ -1114,6 +1149,7 @@ mod tests {
             None,
             &[],
             &[],
+            &[],
         );
 
         // All 4 (window, stage) slices have length 2 (n_hydros).
@@ -1175,6 +1211,7 @@ mod tests {
             &par,
             &[2000],
             None,
+            &[],
             &[],
             &[],
         );
@@ -1426,6 +1463,7 @@ mod tests {
             None,
             &[],
             &[],
+            &[],
         );
 
         // Run with monthly SeasonMap.
@@ -1438,6 +1476,7 @@ mod tests {
             &par,
             &[2000],
             Some(&sm),
+            &[],
             &[],
             &[],
         );
@@ -1584,6 +1623,7 @@ mod tests {
             Some(&sm),
             &[],
             &[],
+            &[],
         );
 
         // eta = (obs - mean) / std for each season (AR(0)):
@@ -1662,6 +1702,7 @@ mod tests {
             &par,
             &[1995],
             None,
+            &[],
             &[],
             &[],
         );
@@ -1779,6 +1820,7 @@ mod tests {
             &par,
             &window_years,
             Some(&sm),
+            &[],
             &[],
             &[],
         );

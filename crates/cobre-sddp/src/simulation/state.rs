@@ -377,9 +377,14 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
     // Resize once per worker, reuse across scenarios: no per-scenario allocation.
     let noise_dim = params.training_ctx.stochastic.dim();
     ws.scratch.raw_noise_buf.resize(noise_dim, 0.0_f64);
+    ws.scratch.disagg_peek_noise_buf.resize(noise_dim, 0.0_f64);
     #[allow(clippy::cast_possible_truncation)]
     ws.scratch
         .perm_scratch
+        .resize(params.config.n_scenarios.max(1) as usize, 0_usize);
+    #[allow(clippy::cast_possible_truncation)]
+    ws.scratch
+        .disagg_peek_perm_scratch
         .resize(params.config.n_scenarios.max(1) as usize, 0_usize);
 
     // Build once per worker: eliminates the per-(scenario, stage) allocation that
@@ -405,6 +410,8 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
         // these slices do not conflict with the `&mut ws` passed below.
         let mut raw_noise_buf = std::mem::take(&mut ws.scratch.raw_noise_buf);
         let mut perm_scratch = std::mem::take(&mut ws.scratch.perm_scratch);
+        let mut disagg_peek_noise_buf = std::mem::take(&mut ws.scratch.disagg_peek_noise_buf);
+        let mut disagg_peek_perm_scratch = std::mem::take(&mut ws.scratch.disagg_peek_perm_scratch);
         let result = process_scenario_stages(
             ws,
             params.ctx,
@@ -419,12 +426,16 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
                 total_scenarios: params.config.n_scenarios,
                 raw_noise_buf: &mut raw_noise_buf,
                 perm_scratch: &mut perm_scratch,
+                disagg_peek_noise_buf: &mut disagg_peek_noise_buf,
+                disagg_peek_perm_scratch: &mut disagg_peek_perm_scratch,
                 sampler: params.sampler,
             },
             &lookups,
         );
         ws.scratch.raw_noise_buf = raw_noise_buf;
         ws.scratch.perm_scratch = perm_scratch;
+        ws.scratch.disagg_peek_noise_buf = disagg_peek_noise_buf;
+        ws.scratch.disagg_peek_perm_scratch = disagg_peek_perm_scratch;
         let (total_cost, stage_results) = result?;
         let stats_after = ws.solver.statistics();
         let scenario_delta = SolverStatsDelta::from_snapshots(&stats_before, &stats_after);

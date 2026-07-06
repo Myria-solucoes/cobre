@@ -7,12 +7,13 @@
 
 use std::collections::HashMap;
 
-use chrono::{Datelike, NaiveDate};
+use chrono::{Datelike, NaiveDate, TimeDelta, Weekday};
 use cobre_core::{
     entities::hydro::Hydro,
     initial_conditions::RecentObservation,
     temporal::{SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageLagTransition},
 };
+use cobre_stochastic::PeriodBlendWeight;
 
 /// Pre-computed seed values for the lag accumulator, derived from
 /// [`RecentObservation`] data in [`cobre_core::InitialConditions`].
@@ -177,56 +178,244 @@ pub(crate) fn days_in_period(
     }
 }
 
-/// Compute the [`StageLagTransition`] for a single stage in a `Monthly`
-/// season cycle.
-pub(crate) fn compute_monthly_transition(
+/// Concrete `[start, end)` calendar window for one occurrence of a season
+/// period, plus its total duration in hours.
+struct PeriodWindow {
+    start: NaiveDate,
+    end: NaiveDate,
+    hours: f64,
+}
+
+/// Number of real calendar days in `year`-`month` (1–12).
+fn days_in_month(year: i32, month: u32) -> u32 {
+    let first = NaiveDate::from_ymd_opt(year, month, 1)
+        .unwrap_or_else(|| unreachable!("month-start date is always valid"));
+    let next = month_exclusive_end(year, month);
+    u32::try_from((next - first).num_days())
+        .unwrap_or_else(|_| unreachable!("days in a month always fit in u32"))
+}
+
+/// Resolve a `Custom` `season_def`'s `[start, end)` range anchored in `year`.
+///
+/// Mirrors `season_for_date`'s `Custom` arm (`day_start`/`day_end` defaults,
+/// `start <= end` wrap-around); `day_end` is clamped to the real month length
+/// here because a concrete date must be constructed (the tuple comparison in
+/// `season_for_date` needs no such clamp).
+fn custom_period_bounds(year: i32, season_def: &SeasonDefinition) -> (NaiveDate, NaiveDate) {
+    let month_start = season_def.month_start;
+    let day_start = season_def.day_start.unwrap_or(1);
+    let month_end = season_def.month_end.unwrap_or(month_start);
+    let day_end = season_def.day_end.unwrap_or(31);
+
+    let start_day = day_start.min(days_in_month(year, month_start));
+    let start = NaiveDate::from_ymd_opt(year, month_start, start_day)
+        .unwrap_or_else(|| unreachable!("clamped custom start date is always valid"));
+
+    let wraps = (month_start, day_start) > (month_end, day_end);
+    let end_year = if wraps { year + 1 } else { year };
+    let end_day = day_end.min(days_in_month(end_year, month_end));
+    let end_inclusive = NaiveDate::from_ymd_opt(end_year, month_end, end_day)
+        .unwrap_or_else(|| unreachable!("clamped custom end date is always valid"));
+
+    (start, end_inclusive + TimeDelta::days(1))
+}
+
+/// Determine the calendar year whose occurrence of a `Custom` `season_def`
+/// overlaps `[start_date, end_date)`. Generalizes
+/// `find_season_year_monthly`'s candidate/previous-year/fallback search to a
+/// day-level range.
+fn find_season_year_custom(
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    season_def: &SeasonDefinition,
+) -> i32 {
+    let candidate_year = start_date.year();
+    let (period_start, period_end) = custom_period_bounds(candidate_year, season_def);
+    if start_date < period_end && end_date > period_start {
+        return candidate_year;
+    }
+
+    let prev_year = candidate_year - 1;
+    let (period_start_prev, period_end_prev) = custom_period_bounds(prev_year, season_def);
+    if start_date < period_end_prev && end_date > period_start_prev {
+        return prev_year;
+    }
+
+    candidate_year + 1
+}
+
+/// Resolve `season_def`'s concrete calendar window for `stage`'s occurrence.
+///
+/// `Monthly` routes through `find_season_year_monthly`/`month_exclusive_end`/
+/// `month_total_hours` verbatim. `Weekly` derives the 7-day ISO-week window
+/// containing `stage.start_date` directly — `season_for_date`'s week-53→52
+/// fold is a season-id label fold, not a window fold, so the physical week
+/// stays 7 real days regardless. `Custom` resolves `season_def`'s own range
+/// via `find_season_year_custom`/`custom_period_bounds`.
+fn period_window(
+    season_map: &SeasonMap,
+    season_def: &SeasonDefinition,
     stage: &Stage,
+) -> PeriodWindow {
+    match season_map.cycle_type {
+        SeasonCycleType::Monthly => {
+            let season_month = season_def.month_start;
+            let year = find_season_year_monthly(stage.start_date, stage.end_date, season_month);
+            let start = NaiveDate::from_ymd_opt(year, season_month, 1)
+                .unwrap_or_else(|| unreachable!("season month is always valid"));
+            let end = month_exclusive_end(year, season_month);
+            let hours = month_total_hours(year, season_month);
+            PeriodWindow { start, end, hours }
+        }
+        SeasonCycleType::Weekly => {
+            let iso_week = stage.start_date.iso_week();
+            let start = NaiveDate::from_isoywd_opt(iso_week.year(), iso_week.week(), Weekday::Mon)
+                .unwrap_or_else(|| unreachable!("iso week start date is always valid"));
+            let end = start + TimeDelta::days(7);
+            PeriodWindow {
+                start,
+                end,
+                hours: 7.0 * 24.0,
+            }
+        }
+        SeasonCycleType::Custom => {
+            let year = find_season_year_custom(stage.start_date, stage.end_date, season_def);
+            let (start, end) = custom_period_bounds(year, season_def);
+            let days = u32::try_from((end - start).num_days())
+                .unwrap_or_else(|_| unreachable!("custom period day count always fits in u32"));
+            PeriodWindow {
+                start,
+                end,
+                hours: f64::from(days) * 24.0,
+            }
+        }
+    }
+}
+
+/// Resolve the period window immediately following `current`, for forward
+/// spillover accounting.
+///
+/// `Monthly` and `Weekly` derive the next window arithmetically (next
+/// calendar month; next 7-day span). `Custom` advances to the next
+/// `season_def` in id order, wrapping the season list — `season_map.seasons`
+/// is sorted by id, so this is the next entry in the list.
+fn next_period_window(
+    season_map: &SeasonMap,
+    season_def: &SeasonDefinition,
+    current: &PeriodWindow,
+) -> Option<PeriodWindow> {
+    match season_map.cycle_type {
+        SeasonCycleType::Monthly => {
+            let season_month = season_def.month_start;
+            let year = current.start.year();
+            let (next_year, next_month) = if season_month == 12 {
+                (year + 1, 1u32)
+            } else {
+                (year, season_month + 1)
+            };
+            let start = current.end;
+            let end = month_exclusive_end(next_year, next_month);
+            let hours = month_total_hours(next_year, next_month);
+            Some(PeriodWindow { start, end, hours })
+        }
+        SeasonCycleType::Weekly => {
+            let start = current.end;
+            let end = start + TimeDelta::days(7);
+            Some(PeriodWindow {
+                start,
+                end,
+                hours: 7.0 * 24.0,
+            })
+        }
+        SeasonCycleType::Custom => {
+            let pos = season_map
+                .seasons
+                .iter()
+                .position(|s| s.id == season_def.id)?;
+            let next_def = &season_map.seasons[(pos + 1) % season_map.seasons.len()];
+            let probe_end = current.end + TimeDelta::days(1);
+            let year = find_season_year_custom(current.end, probe_end, next_def);
+            let (start, end) = custom_period_bounds(year, next_def);
+            let days = u32::try_from((end - start).num_days())
+                .unwrap_or_else(|_| unreachable!("custom period day count always fits in u32"));
+            Some(PeriodWindow {
+                start,
+                end,
+                hours: f64::from(days) * 24.0,
+            })
+        }
+    }
+}
+
+/// The calendar year identifying which occurrence of `season_def` `stage`
+/// belongs to, disambiguating repeated season ids across years.
+///
+/// `Weekly` uses the ISO week-numbering year (`iso_week().year()`), not the
+/// calendar year of the window start: a week's Monday can fall in the prior
+/// December (`from_isoywd_opt(2004, 1, Mon)` is 2003-12-29), so the window
+/// start's calendar year would misclassify that week as the prior year's.
+fn resolved_year(season_map: &SeasonMap, season_def: &SeasonDefinition, stage: &Stage) -> i32 {
+    match season_map.cycle_type {
+        SeasonCycleType::Monthly => {
+            find_season_year_monthly(stage.start_date, stage.end_date, season_def.month_start)
+        }
+        SeasonCycleType::Weekly => stage.start_date.iso_week().year(),
+        SeasonCycleType::Custom => {
+            find_season_year_custom(stage.start_date, stage.end_date, season_def)
+        }
+    }
+}
+
+/// An all-zero, non-finalizing [`StageLagTransition`] — the shared absent-case
+/// value for a stage with no season or an unresolvable season.
+fn noop_transition() -> StageLagTransition {
+    StageLagTransition {
+        accumulate_weight: 0.0,
+        spillover_weight: 0.0,
+        finalize_period: false,
+        accumulate_downstream: false,
+        downstream_accumulate_weight: 0.0,
+        downstream_spillover_weight: 0.0,
+        downstream_finalize: false,
+        rebuild_from_downstream: false,
+    }
+}
+
+/// Compute the [`StageLagTransition`] for a single stage from its resolved
+/// `season_def`'s period window — the day-weighted accumulate/spillover/
+/// finalize arithmetic generalized across `Monthly`/`Weekly`/`Custom` cycles.
+pub(crate) fn compute_period_transition(
+    stage: &Stage,
+    season_map: &SeasonMap,
     season_def: &SeasonDefinition,
     all_stages: &[Stage],
 ) -> StageLagTransition {
-    let season_month = season_def.month_start;
-    let year = find_season_year_monthly(stage.start_date, stage.end_date, season_month);
+    let current = period_window(season_map, season_def, stage);
 
-    let period_start = NaiveDate::from_ymd_opt(year, season_month, 1)
-        .unwrap_or_else(|| unreachable!("season month is always valid"));
-    let period_end = month_exclusive_end(year, season_month);
-    let period_hours = month_total_hours(year, season_month);
+    let days_current = days_in_period(stage.start_date, stage.end_date, current.start, current.end);
+    let accumulate_weight = f64::from(days_current) * 24.0 / current.hours;
 
-    let days_current = days_in_period(stage.start_date, stage.end_date, period_start, period_end);
-    let accumulate_weight = f64::from(days_current) * 24.0 / period_hours;
+    let spillover_weight =
+        next_period_window(season_map, season_def, &current).map_or(0.0, |next| {
+            let days_next = days_in_period(stage.start_date, stage.end_date, next.start, next.end);
+            if days_next > 0 {
+                f64::from(days_next) * 24.0 / next.hours
+            } else {
+                0.0
+            }
+        });
 
-    let next_period_start = period_end;
-    let (next_year, next_month) = if season_month == 12 {
-        (year + 1, 1u32)
-    } else {
-        (year, season_month + 1)
-    };
-    let next_period_end = month_exclusive_end(next_year, next_month);
-    let next_period_hours = month_total_hours(next_year, next_month);
-
-    let days_next = days_in_period(
-        stage.start_date,
-        stage.end_date,
-        next_period_start,
-        next_period_end,
-    );
-    let spillover_weight = if days_next > 0 {
-        f64::from(days_next) * 24.0 / next_period_hours
-    } else {
-        0.0
-    };
-
-    let season_id = season_def.id;
-    let is_last_in_period = all_stages
+    let year = resolved_year(season_map, season_def, stage);
+    let finalize_period = !all_stages
         .iter()
         .skip(stage.index + 1)
-        .filter(|s| s.season_id == Some(season_id))
-        .all(|s| find_season_year_monthly(s.start_date, s.end_date, season_month) != year);
+        .filter(|s| s.season_id == Some(season_def.id))
+        .any(|s| resolved_year(season_map, season_def, s) == year);
 
     StageLagTransition {
         accumulate_weight,
         spillover_weight,
-        finalize_period: is_last_in_period,
+        finalize_period,
         accumulate_downstream: false,
         downstream_accumulate_weight: 0.0,
         downstream_spillover_weight: 0.0,
@@ -238,8 +427,8 @@ pub(crate) fn compute_monthly_transition(
 /// Precompute one [`StageLagTransition`] per stage from stage date boundaries
 /// and season definitions; consumed read-only on the forward-pass hot path.
 ///
-/// Only `Monthly` is implemented; `Weekly`/`Custom`, a `season_id = None` stage,
-/// or any input outside a season produce a fully zeroed no-op transition.
+/// A `season_id = None` stage, or any input outside a season, produces a
+/// fully zeroed no-op transition.
 ///
 /// # Downstream accumulation
 ///
@@ -254,32 +443,18 @@ pub fn precompute_stage_lag_transitions(
     season_map: &SeasonMap,
     downstream_par_order: usize,
 ) -> Vec<StageLagTransition> {
-    let noop = StageLagTransition {
-        accumulate_weight: 0.0,
-        spillover_weight: 0.0,
-        finalize_period: false,
-        accumulate_downstream: false,
-        downstream_accumulate_weight: 0.0,
-        downstream_spillover_weight: 0.0,
-        downstream_finalize: false,
-        rebuild_from_downstream: false,
-    };
-
     let mut result: Vec<StageLagTransition> = stages
         .iter()
         .map(|stage| {
             let Some(season_id) = stage.season_id else {
-                return noop;
+                return noop_transition();
             };
 
             let Some(season_def) = season_map.seasons.iter().find(|s| s.id == season_id) else {
-                return noop;
+                return noop_transition();
             };
 
-            match season_map.cycle_type {
-                SeasonCycleType::Monthly => compute_monthly_transition(stage, season_def, stages),
-                SeasonCycleType::Weekly | SeasonCycleType::Custom => noop,
-            }
+            compute_period_transition(stage, season_map, season_def, stages)
         })
         .collect();
 
@@ -288,6 +463,123 @@ pub fn precompute_stage_lag_transitions(
     }
 
     result
+}
+
+/// Day-weighted split of one stage's inflow across the (at most two) calendar
+/// periods it overlaps, for monthly→weekly (Regime A) disaggregation.
+///
+/// An interior stage (fully inside one period) carries `next_period == None`
+/// and `anchor_day_weight == 1.0`, so the forward-pass blend collapses to the anchor
+/// period's rate and the monthly instruction stream is byte-for-byte unchanged.
+/// A boundary stage spanning periods `a` (anchor) and `b` (next) carries the
+/// day-share weights and, when an in-study stage carries the next period's draw,
+/// `next_period_stage` — the representative stage the forward peek reads the realized
+/// rate from. A boundary at the study's trailing edge (no in-study next-period
+/// stage) degrades to interior: no realized next-period rate exists to blend.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DisaggregationWeight {
+    /// Anchor period (the stage's `season_id`, the earliest period it overlaps).
+    pub anchor_period: usize,
+    /// Next period the stage overlaps; `None` when the stage is interior.
+    pub next_period: Option<usize>,
+    /// Representative in-study stage index carrying `next_period`'s draw;
+    /// `None` when interior or the next period lies past the study horizon.
+    pub next_period_stage: Option<usize>,
+    /// Day-share of the anchor period; `1.0` when interior.
+    pub anchor_day_weight: f64,
+    /// Day-share of the next period; `0.0` when interior.
+    pub next_day_weight: f64,
+}
+
+impl DisaggregationWeight {
+    /// The interior (no-op) weight for a stage anchored to `anchor_period`.
+    ///
+    /// `pub(crate)`: also the empty-slice fallback shape returned by
+    /// [`crate::context::StageContext::disaggregation_weight_at`] for call sites
+    /// (mostly tests) that pass `disaggregation_weights: &[]`.
+    #[must_use]
+    pub(crate) fn interior(anchor_period: usize) -> Self {
+        Self {
+            anchor_period,
+            next_period: None,
+            next_period_stage: None,
+            anchor_day_weight: 1.0,
+            next_day_weight: 0.0,
+        }
+    }
+}
+
+/// Precompute one [`DisaggregationWeight`] per stage from stage dates and season
+/// definitions; consumed read-only on the forward/backward/simulation hot path.
+///
+/// Reuses the same period-window enumerator as `compute_period_transition`, so
+/// the day-share split is the exact inverse of the lag re-aggregation. No new
+/// input: the weights are calendar-derived and the two period rates are the
+/// trajectory's own drawn values.
+#[must_use]
+pub fn precompute_disaggregation_weights(
+    stages: &[Stage],
+    season_map: &SeasonMap,
+) -> Vec<DisaggregationWeight> {
+    stages
+        .iter()
+        .map(|stage| {
+            let Some(season_id) = stage.season_id else {
+                return DisaggregationWeight::interior(0);
+            };
+            let Some(season_def) = season_map.seasons.iter().find(|s| s.id == season_id) else {
+                return DisaggregationWeight::interior(season_id);
+            };
+
+            let current = period_window(season_map, season_def, stage);
+            let days_a =
+                days_in_period(stage.start_date, stage.end_date, current.start, current.end);
+            let Some(next) = next_period_window(season_map, season_def, &current) else {
+                return DisaggregationWeight::interior(season_id);
+            };
+            let days_b = days_in_period(stage.start_date, stage.end_date, next.start, next.end);
+            if days_b == 0 {
+                return DisaggregationWeight::interior(season_id);
+            }
+
+            // The realized next-period rate lives on the first study stage that
+            // starts inside `next`; without one (trailing-edge boundary) there is
+            // no in-study draw to blend, so degrade to interior.
+            let Some(next_period_stage) = stages
+                .iter()
+                .position(|s| s.start_date >= next.start && s.start_date < next.end)
+            else {
+                return DisaggregationWeight::interior(season_id);
+            };
+
+            let total = f64::from(days_a) + f64::from(days_b);
+            DisaggregationWeight {
+                anchor_period: season_id,
+                next_period: stages[next_period_stage].season_id,
+                next_period_stage: Some(next_period_stage),
+                anchor_day_weight: f64::from(days_a) / total,
+                next_day_weight: f64::from(days_b) / total,
+            }
+        })
+        .collect()
+}
+
+/// Project [`DisaggregationWeight`]s into `cobre-stochastic`'s crate-generic
+/// [`PeriodBlendWeight`] for the η-inversion call sites
+/// (`standardize_external_inflow`, `standardize_historical_windows`) —
+/// `cobre-stochastic` cannot depend on `cobre-sddp`, so the two crates share
+/// only the numeric fields the inverse needs, never the `DisaggregationWeight`
+/// type itself.
+#[must_use]
+pub fn to_period_blend_weights(weights: &[DisaggregationWeight]) -> Vec<PeriodBlendWeight> {
+    weights
+        .iter()
+        .map(|w| PeriodBlendWeight {
+            anchor_day_weight: w.anchor_day_weight,
+            next_day_weight: w.next_day_weight,
+            next_period_stage: w.next_period_stage,
+        })
+        .collect()
 }
 
 /// Populate downstream accumulation fields on the pre-transition window entries
@@ -503,6 +795,66 @@ mod tests {
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    #[test]
+    fn test_disaggregation_interior_week_uses_month_rate() {
+        let season_map = monthly_season_map();
+        let stages = vec![
+            make_stage(0, d(2026, 4, 4), d(2026, 4, 11), Some(3)),
+            make_stage(1, d(2026, 4, 11), d(2026, 4, 18), Some(3)),
+            make_stage(2, d(2026, 4, 18), d(2026, 4, 25), Some(3)),
+        ];
+
+        let weights = precompute_disaggregation_weights(&stages, &season_map);
+        let interior = &weights[1];
+
+        assert_eq!(interior.next_period, None);
+        assert_eq!(interior.next_period_stage, None);
+        assert_eq!(interior.anchor_period, 3);
+        assert!((interior.anchor_day_weight - 1.0).abs() < 1e-12);
+        assert!(interior.next_day_weight.abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_disaggregation_boundary_week_day_weighted_blend() {
+        let season_map = monthly_season_map();
+        let stages = vec![
+            make_stage(0, d(2026, 4, 18), d(2026, 4, 25), Some(3)),
+            make_stage(1, d(2026, 4, 25), d(2026, 5, 2), Some(3)),
+            make_stage(2, d(2026, 5, 2), d(2026, 6, 1), Some(4)),
+        ];
+
+        // Hand-derive the day counts from the public enumerator, never the struct.
+        let april = season_map.seasons.iter().find(|s| s.id == 3).unwrap();
+        let current = period_window(&season_map, april, &stages[1]);
+        let next = next_period_window(&season_map, april, &current).unwrap();
+        let days_a = days_in_period(
+            stages[1].start_date,
+            stages[1].end_date,
+            current.start,
+            current.end,
+        );
+        let days_b = days_in_period(
+            stages[1].start_date,
+            stages[1].end_date,
+            next.start,
+            next.end,
+        );
+        assert_eq!((days_a, days_b), (6, 1));
+        let total = f64::from(days_a + days_b);
+
+        let weights = precompute_disaggregation_weights(&stages, &season_map);
+        let boundary = &weights[1];
+
+        assert_eq!(boundary.anchor_period, 3);
+        assert_eq!(boundary.next_period, Some(4));
+        assert_eq!(boundary.next_period_stage, Some(2));
+        assert!((boundary.anchor_day_weight - f64::from(days_a) / total).abs() < 1e-12);
+        assert!((boundary.next_day_weight - f64::from(days_b) / total).abs() < 1e-12);
+        // Closed-form cross-check.
+        assert!((boundary.anchor_day_weight - 6.0 / 7.0).abs() < 1e-12);
+        assert!((boundary.next_day_weight - 1.0 / 7.0).abs() < 1e-12);
     }
 
     #[test]
@@ -782,6 +1134,222 @@ mod tests {
             "W4 accumulate_weight wrong: {}",
             w4.accumulate_weight
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Weekly / Custom period-window generalization (compute_period_transition)
+    // -----------------------------------------------------------------------
+
+    fn weekly_season_map() -> SeasonMap {
+        let seasons: Vec<SeasonDefinition> = (0..52u32)
+            .map(|i| SeasonDefinition {
+                id: i as usize,
+                label: format!("Week{}", i + 1),
+                month_start: 1,
+                day_start: None,
+                month_end: None,
+                day_end: None,
+            })
+            .collect();
+        SeasonMap {
+            cycle_type: SeasonCycleType::Weekly,
+            seasons,
+        }
+    }
+
+    /// Four consecutive real ISO weeks of January 2024 (2024-01-01 is a Monday,
+    /// ISO week 1), each stage exactly spanning its own week.
+    #[test]
+    fn test_weekly_cycle_per_week_finalizes() {
+        let season_map = weekly_season_map();
+        let stages = vec![
+            make_stage(0, d(2024, 1, 1), d(2024, 1, 8), Some(0)),
+            make_stage(1, d(2024, 1, 8), d(2024, 1, 15), Some(1)),
+            make_stage(2, d(2024, 1, 15), d(2024, 1, 22), Some(2)),
+            make_stage(3, d(2024, 1, 22), d(2024, 1, 29), Some(3)),
+        ];
+
+        let transitions = precompute_stage_lag_transitions(&stages, &season_map, 0);
+        assert_eq!(transitions.len(), 4);
+
+        let tol = 1e-10;
+        for (i, t) in transitions.iter().enumerate() {
+            assert!(
+                (t.accumulate_weight - 1.0).abs() < tol,
+                "stage {i}: accumulate_weight expected 1.0, got {}",
+                t.accumulate_weight
+            );
+            assert!(
+                t.spillover_weight.abs() < tol,
+                "stage {i}: spillover_weight expected 0.0, got {}",
+                t.spillover_weight
+            );
+            assert!(
+                t.finalize_period,
+                "stage {i}: finalize_period expected true (weekly PAR finalizes every stage)"
+            );
+        }
+    }
+
+    /// ISO week 53 of 2026 spans `[2026-12-28, 2027-01-04)`; `season_for_date`
+    /// folds it to season id 51 (the same id as ISO week 52), but the physical
+    /// window stays the real 7-day week-53 span.
+    #[test]
+    fn test_weekly_iso_week_53_folds() {
+        let season_map = weekly_season_map();
+        assert_eq!(season_map.season_for_date(d(2026, 12, 28)), Some(51));
+
+        let stage = make_stage(0, d(2026, 12, 28), d(2027, 1, 4), Some(51));
+        let transitions = precompute_stage_lag_transitions(&[stage], &season_map, 0);
+        assert_eq!(transitions.len(), 1);
+
+        let t = transitions[0];
+        let tol = 1e-10;
+        assert!(
+            (t.accumulate_weight - 1.0).abs() < tol,
+            "accumulate_weight expected 1.0 (the full physical week-53 span), got {}",
+            t.accumulate_weight
+        );
+        assert!(
+            t.spillover_weight.abs() < tol,
+            "spillover_weight expected 0.0, got {}",
+            t.spillover_weight
+        );
+        assert!(t.finalize_period, "single stage must finalize its period");
+    }
+
+    /// d30-style multi-resolution `Custom` map: a monthly definition (June) and
+    /// a quarterly definition (Q3) in the SAME `season_map`. Each stage must
+    /// weight against its OWN level's period hours, never a flattened cycle.
+    fn custom_multi_resolution_season_map() -> SeasonMap {
+        SeasonMap {
+            cycle_type: SeasonCycleType::Custom,
+            seasons: vec![
+                SeasonDefinition {
+                    id: 5,
+                    label: "June".to_string(),
+                    month_start: 6,
+                    day_start: Some(1),
+                    month_end: Some(6),
+                    day_end: Some(30),
+                },
+                SeasonDefinition {
+                    id: 12,
+                    label: "Q3".to_string(),
+                    month_start: 7,
+                    day_start: Some(1),
+                    month_end: Some(9),
+                    day_end: Some(30),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_custom_multi_resolution_each_stage_in_own_level() {
+        let season_map = custom_multi_resolution_season_map();
+
+        // June stage spans its whole month (30 days); the Q3 stage spans only
+        // the first 30 days of the 92-day quarter — a sub-window, so its
+        // weight can only match if it used the QUARTER's hours, not July's.
+        let june_stage = make_stage(0, d(2024, 6, 1), d(2024, 7, 1), Some(5));
+        let q3_partial_stage = make_stage(1, d(2024, 7, 1), d(2024, 7, 31), Some(12));
+        let stages = vec![june_stage, q3_partial_stage];
+
+        let transitions = precompute_stage_lag_transitions(&stages, &season_map, 0);
+        assert_eq!(transitions.len(), 2);
+
+        let tol = 1e-10;
+
+        let june_hours = 30.0 * 24.0;
+        let expected_june_weight = 30.0 * 24.0 / june_hours;
+        assert!(
+            (transitions[0].accumulate_weight - expected_june_weight).abs() < tol,
+            "June stage must weight against its own month's hours ({june_hours}): expected {expected_june_weight}, got {}",
+            transitions[0].accumulate_weight
+        );
+        assert!(transitions[0].finalize_period, "June stage must finalize");
+
+        let q3_hours = 92.0 * 24.0;
+        let expected_q3_weight = 30.0 * 24.0 / q3_hours;
+        assert!(
+            (transitions[1].accumulate_weight - expected_q3_weight).abs() < tol,
+            "Q3 stage must weight against its own quarter's hours ({q3_hours}): expected {expected_q3_weight}, got {}",
+            transitions[1].accumulate_weight
+        );
+        assert!(transitions[1].finalize_period, "Q3 stage must finalize");
+
+        let flattened_to_july_weight = 30.0 * 24.0 / (31.0 * 24.0);
+        assert!(
+            (transitions[1].accumulate_weight - flattened_to_july_weight).abs() > 1e-3,
+            "Q3 stage must not collapse to a monthly-level weight"
+        );
+    }
+
+    /// d30-shaped multi-resolution disaggregation: a fine-level (monthly,
+    /// June) boundary stage — the study's last monthly-resolution stage before
+    /// the decomposition transitions to coarse (quarterly, Q3) resolution —
+    /// must source its next-period rate from the COARSE stage directly above
+    /// it (the level the decomposition switches to), never from a flattened
+    /// global cycle. Reuses `custom_multi_resolution_season_map` (June + Q3)
+    /// verbatim — no new season map shape.
+    #[test]
+    fn test_disaggregation_multi_resolution_sources_from_level_above() {
+        let season_map = custom_multi_resolution_season_map();
+
+        // June (fine) overlaps 5 days into its own month plus 2 days into Q3
+        // (coarse); Q3 (the study's next stage, at coarse resolution) starts
+        // where June's overlap ends.
+        let june_boundary_stage = make_stage(0, d(2024, 6, 26), d(2024, 7, 3), Some(5));
+        let q3_stage = make_stage(1, d(2024, 7, 3), d(2024, 10, 1), Some(12));
+        let stages = vec![june_boundary_stage, q3_stage];
+
+        // Hand-derive the day counts from the public enumerator, never the struct.
+        let june_def = season_map.seasons.iter().find(|s| s.id == 5).unwrap();
+        let current = period_window(&season_map, june_def, &stages[0]);
+        let next = next_period_window(&season_map, june_def, &current).unwrap();
+        let days_a = days_in_period(
+            stages[0].start_date,
+            stages[0].end_date,
+            current.start,
+            current.end,
+        );
+        let days_b = days_in_period(
+            stages[0].start_date,
+            stages[0].end_date,
+            next.start,
+            next.end,
+        );
+        assert_eq!((days_a, days_b), (5, 2));
+        let total = f64::from(days_a + days_b);
+
+        let weights = precompute_disaggregation_weights(&stages, &season_map);
+        let boundary = &weights[0];
+
+        assert_eq!(
+            boundary.anchor_period, 5,
+            "anchor must be June (fine level)"
+        );
+        assert_eq!(
+            boundary.next_period,
+            Some(12),
+            "next period must be Q3 (the coarse level directly above), never a \
+             flattened global cycle"
+        );
+        assert_eq!(
+            boundary.next_period_stage,
+            Some(1),
+            "representative stage must be the coarse Q3 stage"
+        );
+        assert!((boundary.anchor_day_weight - f64::from(days_a) / total).abs() < 1e-12);
+        assert!((boundary.next_day_weight - f64::from(days_b) / total).abs() < 1e-12);
+        // Closed-form cross-check.
+        assert!((boundary.anchor_day_weight - 5.0 / 7.0).abs() < 1e-12);
+        assert!((boundary.next_day_weight - 2.0 / 7.0).abs() < 1e-12);
+
+        // The coarse Q3 stage itself is interior to Q3 — no further boundary.
+        assert_eq!(weights[1].next_period, None);
+        assert!((weights[1].anchor_day_weight - 1.0).abs() < 1e-12);
     }
 
     // -----------------------------------------------------------------------

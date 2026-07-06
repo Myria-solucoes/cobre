@@ -92,6 +92,8 @@ impl StudySetup {
             stage_lag_transitions: &self.stage_data.stage_lag_transitions,
             noise_group_ids: &self.stage_data.noise_group_ids,
             downstream_par_order: self.downstream_par_order,
+            disaggregation_weights: &self.stage_data.disaggregation_weights,
+            zeta_s: &self.stage_data.stage_templates.zeta_per_stage,
         };
 
         let tr = &self.scenario_libraries.training;

@@ -215,6 +215,8 @@ mod tests {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
+            disaggregation_weights: &[],
+            zeta_s: &[],
         }
     }
 

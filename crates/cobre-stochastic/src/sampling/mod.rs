@@ -36,6 +36,43 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
+// PeriodBlendWeight
+// ---------------------------------------------------------------------------
+
+/// Day-weighted split of one stage's η-inversion target across the (at most
+/// two) calendar periods it overlaps — the inverse-path counterpart of a
+/// forward day-weighted disaggregation blend, kept crate-generic (no
+/// dependency on any consuming crate's own weight type).
+///
+/// An interior stage (fully inside one period) carries `next_day_weight == 0.0`
+/// and `next_period_stage == None`, so [`standardize_external_inflow`] and
+/// [`standardize_historical_windows`] fall through to the unblended target
+/// unchanged. A boundary stage carries the day-share split and the
+/// representative stage index whose row holds the next period's raw value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PeriodBlendWeight {
+    /// Day-share of the anchor period; `1.0` when interior.
+    pub anchor_day_weight: f64,
+    /// Day-share of the next period; `0.0` when interior.
+    pub next_day_weight: f64,
+    /// Representative stage index whose row holds the next period's raw
+    /// value; `None` when interior or no in-study representative exists.
+    pub next_period_stage: Option<usize>,
+}
+
+impl PeriodBlendWeight {
+    /// The interior (no-op) weight: the target is used unblended.
+    #[must_use]
+    pub fn interior() -> Self {
+        Self {
+            anchor_day_weight: 1.0,
+            next_day_weight: 0.0,
+            next_period_stage: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ForwardNoise
 // ---------------------------------------------------------------------------
 

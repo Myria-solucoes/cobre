@@ -137,6 +137,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cut and state file (see above). `training/dictionaries/` still contains
   `codes.json`, `entities.csv`, `variables.csv`, and `bounds.parquet`.
 
+### Fixed
+
+- **A study on a non-monthly (weekly or custom) season cycle that fits an
+  inflow PAR model now advances its inflow-lag state at the end of every
+  period, instead of silently freezing it at the initial condition for the
+  whole run.** Only a monthly season cycle previously accumulated, finalized,
+  and spilled the per-period lag average forward; a weekly or custom cycle
+  computed zero-weight contributions every stage, so the lag state driving the
+  PAR forecast never left its initial value. The day-weighted accumulate /
+  spillover / finalize arithmetic that already covered monthly periods now
+  applies uniformly to ISO-week and user-defined custom periods, including a
+  season map that layers more than one period resolution together (for
+  example, monthly and quarterly definitions in the same map) — each stage
+  advances within its own resolution's period, never a different one.
+
 ## [0.9.1] - 2026-06-26
 
 ### Fixed

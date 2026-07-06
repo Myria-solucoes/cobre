@@ -766,6 +766,7 @@ mod lb_conformance {
     use cobre_sddp::{
         indexer::StateLayout,
         inflow_method::InflowNonNegativityMethod,
+        lag_transition::DisaggregationWeight,
         lower_bound::{LbEvalScratch, LbEvalScratchBundle, LbEvalSpec, evaluate_lower_bound},
         lp_builder::PatchBuffer,
         risk_measure::RiskMeasure,
@@ -827,6 +828,14 @@ mod lb_conformance {
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
+            disagg_weight: DisaggregationWeight {
+                anchor_period: 0,
+                next_period: None,
+                next_period_stage: None,
+                anchor_day_weight: 1.0,
+                next_day_weight: 0.0,
+            },
+            zeta: 0.0,
         };
 
         let mut lb_cut_batch = RowBatch {

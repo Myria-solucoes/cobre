@@ -47,6 +47,15 @@ pub(crate) fn compute_effective_eta(
     }
 }
 
+/// Returns `true` when `stochastic`'s PAR model is configured and matches
+/// `n_hydros` — the shared guard for both the water-balance patch and the
+/// Regime A disaggregation blend/peek.
+#[inline]
+pub(crate) fn has_par_model(stochastic: &StochasticContext, n_hydros: usize) -> bool {
+    let par_lp = stochastic.par();
+    par_lp.n_stages() > 0 && par_lp.n_hydros() == n_hydros
+}
+
 /// Transform raw inflow noise `η` into patched water-balance RHS values,
 /// applying [`compute_effective_eta`] clamping under truncation.
 // Rationale: clippy::similar_names flags the role-(a) `state` handle (bound from
@@ -54,6 +63,56 @@ pub(crate) fn compute_effective_eta(
 // renaming either to satisfy the heuristic would obscure intent.
 #[allow(clippy::similar_names)]
 pub(crate) fn transform_inflow_noise(
+    raw_noise: &[f64],
+    stage: usize,
+    current_state: &[f64],
+    ctx: &StageContext<'_>,
+    training_ctx: &TrainingContext<'_>,
+    scratch: &mut ScratchBuffers,
+) {
+    compute_water_balance_rhs(raw_noise, stage, current_state, ctx, training_ctx, scratch);
+
+    // Regime A day-weighted disaggregation: a boundary stage's water-balance
+    // RHS blends in the day-weighted share of the next calendar period's rate
+    // (`disagg_next_rate_buf`, precomputed by the caller's peek before this
+    // call — see `compute_disaggregation_next_rate`). `z_inflow_rhs_buf` is left
+    // untouched — it stays the pure anchor rate, never fed back into itself.
+    // An interior stage (`next_day_weight == 0.0`) skips this block entirely, so
+    // the emitted instruction stream is byte-for-byte identical to the
+    // pre-disaggregation path.
+    let n_hydros = ctx.n_hydros;
+    let has_par = has_par_model(training_ctx.stochastic, n_hydros);
+    let dw = ctx.disaggregation_weight_at(stage);
+    if has_par && dw.next_day_weight > 0.0 {
+        debug_assert!(
+            scratch.disagg_next_rate_buf.len() >= n_hydros,
+            "disagg_next_rate_buf too short: {} < {n_hydros}",
+            scratch.disagg_next_rate_buf.len()
+        );
+        debug_assert!(
+            ctx.zeta_s.len() > stage,
+            "zeta_s too short: {} <= stage {stage}",
+            ctx.zeta_s.len()
+        );
+        let zeta = ctx.zeta_s[stage];
+        for h in 0..n_hydros {
+            scratch.noise_buf[h] += zeta
+                * dw.next_day_weight
+                * (scratch.disagg_next_rate_buf[h] - scratch.z_inflow_rhs_buf[h]);
+        }
+    }
+}
+
+/// Compute the water-balance RHS (`noise_buf`) and the pure z-inflow anchor
+/// rate (`z_inflow_rhs_buf`) for one stage — the shared core
+/// [`transform_inflow_noise`] wraps, and the Regime A disaggregation peek
+/// calls DIRECTLY (never the wrapper) to realize `anchor_rate` before
+/// `disagg_next_rate_buf` exists. Calling the wrapper here instead would apply
+/// the blend using a not-yet-populated `disagg_next_rate_buf`.
+// Rationale: mirrors transform_inflow_noise's own clippy::similar_names allow
+// (the role-(a) `state` handle next to the `stage` index).
+#[allow(clippy::similar_names)]
+pub(crate) fn compute_water_balance_rhs(
     raw_noise: &[f64],
     stage: usize,
     current_state: &[f64],
@@ -74,7 +133,7 @@ pub(crate) fn transform_inflow_noise(
     scratch.z_inflow_rhs_buf.clear();
 
     let par_lp = stochastic.par();
-    let has_par = par_lp.n_stages() > 0 && par_lp.n_hydros() == n_hydros;
+    let has_par = has_par_model(stochastic, n_hydros);
 
     match inflow_method {
         InflowNonNegativityMethod::Truncation
@@ -143,6 +202,46 @@ pub(crate) fn transform_inflow_noise(
             scratch.z_inflow_rhs_buf.push(0.0);
         }
     }
+}
+
+/// Evaluate the Regime A day-weighted disaggregation's source-B (next-period)
+/// rate for a boundary stage: shift `state`'s incoming AR lags by inserting
+/// `anchor_rate` as the newest lag (dropping the oldest), then evaluate `next_stage`'s
+/// PAR model at that shifted lag with `next_eta`, writing the result into
+/// `output` (resized to `hydro_count`).
+///
+/// `shift_buf` is reused scratch (resized to `max_par_order * hydro_count`
+/// here); its prior contents are discarded. Guarantees `output.len() ==
+/// hydro_count` on return so the blend in [`transform_inflow_noise`] can index
+/// it directly.
+pub(crate) fn compute_disaggregation_next_rate(
+    layout: &crate::indexer::StateLayout,
+    state: &[f64],
+    anchor_rate: &[f64],
+    stochastic: &StochasticContext,
+    next_stage: usize,
+    next_eta: &[f64],
+    shift_buf: &mut Vec<f64>,
+    output: &mut Vec<f64>,
+) {
+    let n_h = layout.hydro_count;
+    let l_max = layout.max_par_order;
+
+    shift_buf.clear();
+    if l_max > 0 && n_h > 0 {
+        let lag_start = layout.inflow_lags.start;
+        shift_buf.resize(l_max * n_h, 0.0);
+        for h in 0..n_h {
+            for lag in (1..l_max).rev() {
+                shift_buf[lag * n_h + h] = state[lag_start + (lag - 1) * n_h + h];
+            }
+            shift_buf[h] = anchor_rate[h];
+        }
+    }
+
+    output.clear();
+    output.resize(n_h, 0.0);
+    evaluate_par_batch(stochastic.par(), next_stage, shift_buf, next_eta, output);
 }
 
 /// Shift the lag portion of the outgoing state vector using realized inflow,
@@ -560,8 +659,8 @@ mod tests {
         horizon_mode::HorizonMode,
         inflow_method::InflowNonNegativityMethod,
         noise::{
-            build_dense_ncs_col_indices, compute_effective_eta, gather_dense_ncs_bounds,
-            shift_lag_state, transform_inflow_noise, transform_load_noise,
+            build_dense_ncs_col_indices, compute_disaggregation_next_rate, compute_effective_eta,
+            gather_dense_ncs_bounds, shift_lag_state, transform_inflow_noise, transform_load_noise,
         },
         workspace::ScratchBuffers,
     };
@@ -628,6 +727,9 @@ mod tests {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
+            disagg_next_rate_buf: Vec::new(),
+            disagg_peek_noise_buf: Vec::new(),
+            disagg_peek_perm_scratch: Vec::new(),
         }
     }
 
@@ -973,6 +1075,8 @@ mod tests {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
+            disaggregation_weights: &[],
+            zeta_s: &[],
         };
         let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
@@ -1056,6 +1160,8 @@ mod tests {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
+            disaggregation_weights: &[],
+            zeta_s: &[],
         };
         let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
@@ -1139,6 +1245,8 @@ mod tests {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
+            disaggregation_weights: &[],
+            zeta_s: &[],
         };
         let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
@@ -2447,5 +2555,429 @@ mod tests {
         // Re-entering stage B (same start, same length): no rebuild.
         assert!(!rebuild(200, &mut indices_buf, &mut last_ncs_col_start));
         assert_eq!(indices_buf, vec![200, 201, 202, 203]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Regime A day-weighted disaggregation: compute_disaggregation_next_rate
+    // -----------------------------------------------------------------------
+
+    /// One-hydro, `n_stages`-stage `StochasticContext` with AR(0) (no lag
+    /// term) and configurable `mean_m3s`/`std_m3s` — a variant of
+    /// [`make_one_hydro_stochastic`] permitting `std_m3s == 0.0`
+    /// (`validate_par_parameters` only rejects zero variance when
+    /// `ar_order() > 0`).
+    #[allow(clippy::too_many_lines)]
+    fn make_one_hydro_stochastic_with_sigma(
+        n_stages: usize,
+        mean_m3s: f64,
+        std_m3s: f64,
+    ) -> StochasticContext {
+        let bus = Bus {
+            id: EntityId(0),
+            name: "B0".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 1000.0,
+            }],
+            excess_cost: 0.0,
+        };
+        let hydro = Hydro {
+            id: EntityId(1),
+            name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(0),
+            downstream_id: None,
+            travel_time_hours: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.0,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        };
+
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let make_stage = |idx: usize| Stage {
+            index: idx,
+            id: idx as i32,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "S".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        };
+
+        let stages: Vec<Stage> = (0..n_stages).map(make_stage).collect();
+
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let inflow_models: Vec<InflowModel> = (0..n_stages)
+            .map(|idx| InflowModel {
+                hydro_id: EntityId(1),
+                stage_id: idx as i32,
+                mean_m3s,
+                std_m3s,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            "default".to_string(),
+            CorrelationProfile {
+                groups: vec![CorrelationGroup {
+                    name: "g1".to_string(),
+                    entities: vec![CorrelationEntity {
+                        entity_type: "inflow".to_string(),
+                        id: EntityId(1),
+                    }],
+                    matrix: vec![vec![1.0]],
+                }],
+            },
+        );
+        let correlation = CorrelationModel {
+            method: "spectral".to_string(),
+            profiles,
+            schedule: vec![],
+        };
+
+        let system = SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .correlation(correlation)
+            .build()
+            .unwrap();
+
+        build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .unwrap()
+    }
+
+    /// One-hydro, `n_stages`-stage `StochasticContext` with a configurable
+    /// AR(2) model: constant `mean_m3s`/`std_m3s` across every stage (so the
+    /// `psi = phi * s_m / s_lag` conversion collapses to `psi == ar_coefficients`
+    /// bit-exactly, matching the entries.rs precedent) and a two-lag
+    /// `ar_coefficients`, exercising a real (non-degenerate) shift depth.
+    #[allow(clippy::too_many_lines)]
+    fn make_ar2_stochastic(
+        n_stages: usize,
+        mean_m3s: f64,
+        std_m3s: f64,
+        ar_coefficients: [f64; 2],
+    ) -> StochasticContext {
+        let bus = Bus {
+            id: EntityId(0),
+            name: "B0".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 1000.0,
+            }],
+            excess_cost: 0.0,
+        };
+        let hydro = Hydro {
+            id: EntityId(1),
+            name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(0),
+            downstream_id: None,
+            travel_time_hours: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.0,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        };
+
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let make_stage = |idx: usize| Stage {
+            index: idx,
+            id: idx as i32,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "S".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: true,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        };
+
+        let stages: Vec<Stage> = (0..n_stages).map(make_stage).collect();
+
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let inflow_models: Vec<InflowModel> = (0..n_stages)
+            .map(|idx| InflowModel {
+                hydro_id: EntityId(1),
+                stage_id: idx as i32,
+                mean_m3s,
+                std_m3s,
+                ar_coefficients: ar_coefficients.to_vec(),
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            "default".to_string(),
+            CorrelationProfile {
+                groups: vec![CorrelationGroup {
+                    name: "g1".to_string(),
+                    entities: vec![CorrelationEntity {
+                        entity_type: "inflow".to_string(),
+                        id: EntityId(1),
+                    }],
+                    matrix: vec![vec![1.0]],
+                }],
+            },
+        );
+        let correlation = CorrelationModel {
+            method: "spectral".to_string(),
+            profiles,
+            schedule: vec![],
+        };
+
+        let system = SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .correlation(correlation)
+            .build()
+            .unwrap();
+
+        build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .unwrap()
+    }
+
+    /// Anti-tautology pin: `compute_disaggregation_next_rate`'s shifted-lag
+    /// evaluation must match a HAND-derived expected value computed directly
+    /// from `deterministic_base`/`psi_slice`/`sigma` (read via the same public
+    /// accessors, but combined with plain arithmetic here, never via
+    /// `evaluate_par_batch` or `compute_disaggregation_next_rate` itself) —
+    /// pinning the SHIFT indexing (newest slot = `anchor_rate`, next slot =
+    /// the incoming lag-1 value, oldest incoming lag dropped) rather than
+    /// just re-reading the function's own output.
+    #[test]
+    fn test_disaggregation_boundary_peek_equals_source_stage_rate() {
+        let ar_coefficients = [0.4_f64, 0.1];
+        let stochastic = make_ar2_stochastic(8, 10.0, 2.0, ar_coefficients);
+        let layout = crate::test_support::state_layout(1, 2);
+
+        // state = [storage, lag-1 (incoming_lag0), lag-2 (incoming_lag1)].
+        let incoming_lag0 = 7.0_f64;
+        let incoming_lag1 = 3.0_f64;
+        let state = vec![0.0, incoming_lag0, incoming_lag1];
+
+        let anchor_rate = 12.5_f64;
+        let next_stage = 5_usize;
+        let next_eta = [0.3_f64];
+
+        let par_lp = stochastic.par();
+        let det_base = par_lp.deterministic_base(next_stage, 0);
+        let psi = par_lp.psi_slice(next_stage, 0);
+        let sigma = par_lp.sigma(next_stage, 0);
+
+        // Hand-built shift: newest lag slot <- anchor_rate, next slot <- the
+        // incoming lag-1 value; the incoming lag-2 value is dropped (L=2).
+        let shifted_lag = [anchor_rate, incoming_lag0];
+        let mut expected = det_base;
+        for (l, &p) in psi.iter().enumerate() {
+            expected += p * shifted_lag[l];
+        }
+        expected += sigma * next_eta[0];
+
+        let mut shift_buf = Vec::new();
+        let mut output = Vec::new();
+        compute_disaggregation_next_rate(
+            &layout,
+            &state,
+            &[anchor_rate],
+            &stochastic,
+            next_stage,
+            &next_eta,
+            &mut shift_buf,
+            &mut output,
+        );
+
+        assert_eq!(output.len(), 1);
+        assert!(
+            (output[0] - expected).abs() < 1e-12,
+            "compute_disaggregation_next_rate={}, hand-derived expected={expected}",
+            output[0]
+        );
+    }
+
+    /// Single-opening/deterministic case: when the source-B stage's PAR model
+    /// has ZERO residual variance (`sigma == 0.0`), forward's REALIZED peek
+    /// (whatever η the sampler happened to draw) and backward's
+    /// CONDITIONAL-MEAN peek (η fixed at `0.0`) are bit-identical, because the
+    /// `sigma * eta` term vanishes regardless of `eta`'s value — the concrete
+    /// mechanism by which the two paths coincide when there is only one
+    /// possible realization. This must NOT be asserted in a multi-opening
+    /// stochastic setup (`sigma > 0.0`): forward's realized draw and
+    /// backward's conditional mean legitimately differ there.
+    #[test]
+    fn test_disaggregation_backward_equals_forward_on_deterministic_case() {
+        // AR(0) (no lag term): `validate_par_parameters` rejects `std_m3s == 0.0`
+        // only when `ar_order() > 0`, so this is the degenerate-variance shape
+        // that stays valid at `PrecomputedPar::build` time.
+        let stochastic = make_one_hydro_stochastic_with_sigma(8, 20.0, 0.0);
+        let layout = crate::test_support::state_layout(1, 0);
+
+        let state = vec![0.0];
+        let anchor_rate = 15.0_f64;
+        let next_stage = 6_usize;
+
+        // Forward's "whatever the sampler happened to draw" — nonzero,
+        // arbitrary — versus backward's fixed conditional-mean eta = 0.0.
+        let forward_eta = [0.874_f64];
+        let backward_eta = [0.0_f64];
+
+        let mut shift_buf = Vec::new();
+        let mut forward_output = Vec::new();
+        compute_disaggregation_next_rate(
+            &layout,
+            &state,
+            &[anchor_rate],
+            &stochastic,
+            next_stage,
+            &forward_eta,
+            &mut shift_buf,
+            &mut forward_output,
+        );
+
+        let mut backward_output = Vec::new();
+        compute_disaggregation_next_rate(
+            &layout,
+            &state,
+            &[anchor_rate],
+            &stochastic,
+            next_stage,
+            &backward_eta,
+            &mut shift_buf,
+            &mut backward_output,
+        );
+
+        assert_eq!(
+            forward_output, backward_output,
+            "forward (realized eta={forward_eta:?}) and backward (eta=0.0) must be \
+             bit-identical when sigma == 0.0 (single-opening/deterministic case)"
+        );
+        assert!((forward_output[0] - backward_output[0]).abs() < 1e-6);
     }
 }

@@ -4,6 +4,7 @@ use cobre_core::{Stage, temporal::StageLagTransition};
 
 use crate::{
     indexer::{CutStateProjection, StateLayout, StudyDimensions},
+    lag_transition::DisaggregationWeight,
     lp_builder::StageTemplates,
     scaling_report::ScalingReport,
     simulation::EntityCounts,
@@ -78,6 +79,12 @@ pub struct StageData {
     /// Noise group assignments: stages with the same `(season_id, year)` share a
     /// noise group.
     pub noise_group_ids: Vec<u32>,
+
+    /// Precomputed Regime A day-weighted disaggregation weights, one entry per
+    /// study stage. An interior stage carries a no-op weight
+    /// (`next_day_weight == 0.0`); a boundary stage carries the day-share split
+    /// between the anchor and next calendar period.
+    pub(crate) disaggregation_weights: Vec<DisaggregationWeight>,
 
     /// LP scaling report captured during template build.
     pub scaling_report: ScalingReport,

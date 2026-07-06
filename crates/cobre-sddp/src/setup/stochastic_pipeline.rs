@@ -226,6 +226,12 @@ fn build_opening_tree_library(
         effective_season_map,
         max_order,
     );
+    let disaggregation_weights = crate::lag_transition::precompute_disaggregation_weights(
+        &study_stages,
+        effective_season_map,
+    );
+    let disaggregation_weights =
+        crate::lag_transition::to_period_blend_weights(&disaggregation_weights);
     cobre_stochastic::standardize_historical_windows(
         &mut lib,
         system.inflow_history(),
@@ -236,6 +242,7 @@ fn build_opening_tree_library(
         season_map_ref,
         &system.initial_conditions().past_inflows,
         &stage_lag_transitions,
+        &disaggregation_weights,
     );
     Ok(Some(lib))
 }

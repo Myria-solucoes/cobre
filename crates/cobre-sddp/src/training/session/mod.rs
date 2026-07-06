@@ -1096,6 +1096,10 @@ where
                 .first()
                 .map_or(0, |g| g.z_inflow_row_start),
             inflow_method: self.training_ctx.inflow_method,
+            disagg_weight: self.stage_ctx.disaggregation_weight_at(0),
+            // Inert whenever empty: disaggregation_weight_at's own empty-slice
+            // fallback already zeroes next_day_weight, so zeta is never read downstream.
+            zeta: self.stage_ctx.zeta_s.first().copied().unwrap_or(0.0),
         };
         let mut lb_bundle = LbEvalScratchBundle::from_scratch_fields(
             &mut self.scratch.patch_buf,
@@ -1569,6 +1573,8 @@ mod tests {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
+            disaggregation_weights: &[],
+            zeta_s: &[],
         }
     }
 

@@ -9,6 +9,7 @@ use crate::{
     horizon_mode::HorizonMode,
     indexer::{CutStateProjection, StateLayout, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
+    lag_transition::DisaggregationWeight,
     lp_builder::StageGeometry,
 };
 
@@ -116,6 +117,15 @@ pub struct StageContext<'a> {
     /// monthly-to-quarterly transition. Sizes the downstream scratch buffers and
     /// is passed as `par_order` to `crate::noise::DownstreamAccumState`.
     pub downstream_par_order: usize,
+    /// Precomputed Regime A day-weighted disaggregation weights, one entry per
+    /// study stage. Read via [`Self::disaggregation_weight_at`], never indexed
+    /// directly — empty in call sites (mostly tests) not exercising the
+    /// feature.
+    pub disaggregation_weights: &'a [DisaggregationWeight],
+    /// Per-stage m3s→hm3 flow-to-volume scale (ζ), from
+    /// `crate::lp_builder::StageTemplates::zeta_per_stage`. Read only when a
+    /// boundary stage's [`DisaggregationWeight::next_day_weight`] is positive.
+    pub zeta_s: &'a [f64],
 }
 
 impl StageContext<'_> {
@@ -133,6 +143,27 @@ impl StageContext<'_> {
             self.noise_group_ids.len()
         );
         self.noise_group_ids[t]
+    }
+
+    /// Returns the day-weighted disaggregation weight for stage index `t`.
+    ///
+    /// Falls back to `DisaggregationWeight::interior` (a no-op:
+    /// `next_day_weight == 0.0`, `next_period == None`) when
+    /// `disaggregation_weights` is empty — the same empty-slice fallback shape
+    /// [`Self::noise_group_id_at`] uses, covering call sites that do not
+    /// exercise Regime A disaggregation.
+    #[inline]
+    #[must_use]
+    pub fn disaggregation_weight_at(&self, t: usize) -> DisaggregationWeight {
+        if self.disaggregation_weights.is_empty() {
+            return DisaggregationWeight::interior(0);
+        }
+        debug_assert!(
+            t < self.disaggregation_weights.len(),
+            "stage index {t} out of bounds for disaggregation_weights (len={})",
+            self.disaggregation_weights.len()
+        );
+        self.disaggregation_weights[t]
     }
 }
 

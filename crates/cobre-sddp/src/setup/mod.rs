@@ -395,6 +395,7 @@ impl StudySetup {
             noise_group_ids,
             recent_observation_seed,
             downstream_par_order,
+            disaggregation_weights,
         } = precompute_lag_data(system, &stages, &stochastic);
 
         let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
@@ -405,6 +406,7 @@ impl StudySetup {
             &hydro_ids,
             &stochastic,
             &stage_lag_transitions,
+            &disaggregation_weights,
             training_source,
             simulation_source,
             forward_passes,
@@ -427,6 +429,7 @@ impl StudySetup {
                 block_counts_per_stage,
                 stage_lag_transitions,
                 noise_group_ids,
+                disaggregation_weights,
                 scaling_report,
             },
             stochastic,
@@ -960,10 +963,12 @@ struct LagData {
     noise_group_ids: Vec<u32>,
     recent_observation_seed: crate::lag_transition::RecentObservationSeed,
     downstream_par_order: usize,
+    disaggregation_weights: Vec<crate::lag_transition::DisaggregationWeight>,
 }
 
 /// Precompute per-stage lag accumulation weights, noise-group ids, the
-/// recent-observation seed, and the downstream PAR order.
+/// recent-observation seed, the downstream PAR order, and the Regime A
+/// day-weighted disaggregation weights.
 fn precompute_lag_data(
     system: &System,
     stages: &[Stage],
@@ -1008,11 +1013,15 @@ fn precompute_lag_data(
         )
     };
 
+    let disaggregation_weights =
+        crate::lag_transition::precompute_disaggregation_weights(stages, season_map_ref);
+
     LagData {
         stage_lag_transitions,
         noise_group_ids,
         recent_observation_seed,
         downstream_par_order,
+        disaggregation_weights,
     }
 }
 
@@ -1029,7 +1038,7 @@ fn precompute_lag_data(
 ///
 /// Propagates [`SddpError`] from the individual library builders on validation
 /// or padding failure.
-// Rationale: eight disjoint read-only inputs drive one cohesive setup phase; a
+// Rationale: nine disjoint read-only inputs drive one cohesive setup phase; a
 // bundle struct would only relocate the arity without improving clarity.
 #[allow(clippy::too_many_arguments)]
 fn build_scenario_libraries(
@@ -1038,6 +1047,7 @@ fn build_scenario_libraries(
     hydro_ids: &[EntityId],
     stochastic: &StochasticContext,
     stage_lag_transitions: &[cobre_core::temporal::StageLagTransition],
+    disaggregation_weights: &[crate::lag_transition::DisaggregationWeight],
     training_source: &ScenarioSource,
     simulation_source: &ScenarioSource,
     forward_passes: u32,
@@ -1059,6 +1069,7 @@ fn build_scenario_libraries(
                 system.policy_graph().season_map.as_ref(),
                 &system.initial_conditions().past_inflows,
                 stage_lag_transitions,
+                disaggregation_weights,
                 training_source.historical_years.as_ref(),
                 forward_passes,
             )?)
@@ -1075,6 +1086,7 @@ fn build_scenario_libraries(
                 stochastic.par(),
                 &system.initial_conditions().past_inflows,
                 stage_lag_transitions,
+                disaggregation_weights,
                 forward_passes,
             )?)
         } else {
@@ -1115,6 +1127,7 @@ fn build_scenario_libraries(
                 system.policy_graph().season_map.as_ref(),
                 &system.initial_conditions().past_inflows,
                 stage_lag_transitions,
+                disaggregation_weights,
                 simulation_source.historical_years.as_ref(),
                 forward_passes,
             )?)
@@ -1131,6 +1144,7 @@ fn build_scenario_libraries(
                 stochastic.par(),
                 &system.initial_conditions().past_inflows,
                 stage_lag_transitions,
+                disaggregation_weights,
                 forward_passes,
             )?)
         } else {
