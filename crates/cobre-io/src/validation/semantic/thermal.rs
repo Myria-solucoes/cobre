@@ -28,13 +28,14 @@ pub(super) fn check_thermal_generation_bounds(data: &ParsedData, ctx: &mut Valid
 
 /// Checks cross-field invariants for anticipated thermal plants.
 ///
-/// 1. **Per-plant lead-stage horizon** (`LeadStages` mode only) — `K == 0` is
-///    rejected (defence in depth; parse-time also rejects it) and `K > n_stages`
-///    is rejected (the plant can never deliver within the horizon). A
-///    commissioning window IS supported and composes with the K-stage lookahead
-///    via the shifted decision gate; these two checks validate the LEAD itself,
-///    independent of any window. `LeadTime` mode has no horizon analogue yet —
-///    see the `TODO(anticipated-physical-horizon-gate)` at the fall-through site.
+/// 1. **Per-plant lead horizon** — `LeadStages` rejects `K == 0` (defence in
+///    depth; parse-time also rejects it) and `K > n_stages`; `LeadTime` rejects
+///    `delta_hours` exceeding the summed study-stage durations (strict `>`, so
+///    a delivery landing exactly on the final stage is accepted). Either way,
+///    the plant can never deliver within the study horizon. A commissioning
+///    window IS supported and composes with the lookahead via the shifted
+///    decision gate; these checks validate the LEAD itself, independent of any
+///    window.
 /// 2. **Past-commitments registry bijection** with
 ///    `ic.past_anticipated_commitments`: each anticipated thermal has exactly one
 ///    history entry, each history entry references an anticipated thermal;
@@ -62,9 +63,23 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
         };
         let thermal_id = thermal.id.0;
 
-        // TODO(anticipated-physical-horizon-gate): LeadTime has no analogue yet
-        // of the k_u > n_stages rejection below — a LeadTime lead exceeding the
-        // whole study horizon is not rejected here.
+        if let AnticipatedConfig::LeadTime(delta_hours) = *cfg {
+            let total_horizon_hours: f64 = study_durations.iter().sum();
+            if delta_hours > total_horizon_hours {
+                let entity_str = format!("thermals[id={thermal_id}].anticipated_config.lead_time");
+                ctx.add_error(
+                    ErrorKind::BusinessRuleViolation,
+                    "system/thermals.json",
+                    Some(&entity_str),
+                    format!(
+                        "Thermal {thermal_id}: lead_time exceeds study horizon \
+                         (lead_time={delta_hours}, total_horizon_hours={total_horizon_hours}); \
+                         the plant can never deliver within the study horizon"
+                    ),
+                );
+            }
+        }
+
         let Some(k) = cfg.lead_stages() else {
             continue;
         };
@@ -97,18 +112,18 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
     }
 
     let ic = &data.initial_conditions;
-    let mut history_by_id: HashMap<EntityId, &AnticipatedCommitmentHistory> = HashMap::new();
-    for history in &ic.past_anticipated_commitments {
-        history_by_id.insert(history.thermal_id, history);
-    }
+    let history_by_id: HashMap<EntityId, &AnticipatedCommitmentHistory> = ic
+        .past_anticipated_commitments
+        .iter()
+        .map(|history| (history.thermal_id, history))
+        .collect();
 
-    let mut anticipated_thermal_ids: std::collections::HashSet<EntityId> =
-        std::collections::HashSet::new();
-    for thermal in &data.thermals {
-        if thermal.anticipated_config.is_some() {
-            anticipated_thermal_ids.insert(thermal.id);
-        }
-    }
+    let anticipated_thermal_ids: HashSet<EntityId> = data
+        .thermals
+        .iter()
+        .filter(|t| t.anticipated_config.is_some())
+        .map(|t| t.id)
+        .collect();
 
     for thermal in &data.thermals {
         let Some(ref cfg) = thermal.anticipated_config else {
@@ -871,6 +886,77 @@ mod tests {
         assert!(
             !ctx.has_errors(),
             "lead_stages == n_stages must be accepted, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    // ── lead_time exceeds study horizon ───────────────────────────────────────
+
+    /// Given a `LeadTime(delta_hours)` thermal whose `delta_hours` strictly
+    /// exceeds the summed study-stage durations, when semantic validation runs,
+    /// then exactly one `BusinessRuleViolation` is appended naming the thermal
+    /// id, `delta_hours`, and the total horizon hours.
+    #[test]
+    fn test_lead_time_exceeds_study_horizon_error() {
+        let thermal = make_lead_time_anticipated_thermal(1, 3000.0, None, None);
+        let data = make_data_anticipated_with_durations(
+            vec![thermal],
+            &[168.0, 168.0, 168.0, 168.0, 720.0, 720.0],
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message.contains("lead_time exceeds study horizon")
+            })
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly one BusinessRuleViolation with 'lead_time exceeds study horizon', got: {errors:?}"
+        );
+        let msg = &relevant[0].message;
+        assert!(
+            msg.contains("Thermal 1"),
+            "message should contain 'Thermal 1', got: {msg}"
+        );
+        assert!(
+            msg.contains("3000"),
+            "message should contain delta_hours 3000, got: {msg}"
+        );
+        assert!(
+            msg.contains("2112"),
+            "message should contain the total horizon hours 2112, got: {msg}"
+        );
+    }
+
+    // ── Boundary: lead_time == total horizon is accepted (strict-greater check) ──
+
+    /// Boundary case: `delta_hours == total_horizon_hours` must NOT error. The
+    /// horizon check is `delta_hours > total_horizon_hours` (strict), mirroring
+    /// the `LeadStages` boundary — a delivery landing exactly on the final study
+    /// stage is a valid configuration.
+    #[test]
+    fn test_lead_time_equal_total_horizon_ok() {
+        let thermal = make_lead_time_anticipated_thermal(1, 2112.0, None, None);
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(1),
+            values_mw: vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        };
+        let data = make_data_anticipated_with_durations(
+            vec![thermal],
+            &[168.0, 168.0, 168.0, 168.0, 720.0, 720.0],
+            vec![history],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            !ctx.has_errors(),
+            "delta_hours == total_horizon_hours must be accepted, got: {:?}",
             ctx.errors()
         );
     }

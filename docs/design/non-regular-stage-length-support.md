@@ -46,18 +46,18 @@ primitives.
 
 ## Status at a glance
 
-| ID    | Deferred item                                                        | Feature          | Severity                    |
-| ----- | -------------------------------------------------------------------- | ---------------- | --------------------------- |
-| PAR-1 | Mid-period PAR seed computed only under a Monthly season cycle       | Inflow PAR       | Latent risk (warned)        |
-| PAR-2 | Inflow PAR fixed to a monthly clock; IC `season_ids` inert           | Inflow PAR       | Latent risk (modeling)      |
-| WTT-1 | Multi-resolution arrival-stage delivery density (fixed template)     | Water travel     | **Latent risk**             |
-| WTT-2 | Chronological confluence with heterogeneous travel times             | Water travel     | Guarded gap                 |
-| WTT-3 | Terminal credit for residual in-transit water past the horizon       | Water travel     | Protected contract          |
-| WTT-4 | Advisory-only resolution-mismatch signals                            | Water travel     | Guarded (informational)     |
-| AD-1  | Anticipated fan-out (one decision → several delivery stages)         | Anticipated      | Guarded gap                 |
-| AD-2  | No physical-horizon rejection for a `LeadTime` lead past the horizon | Anticipated      | Latent risk (unvalidated)   |
-| AD-3  | Single-slot anticipated decision resolver (fan-out prerequisite)     | Anticipated      | Guarded gap (sub-note AD-1) |
-| XS-1  | Cross-study boundary FCF coupling across resolutions                 | Water + Anticip. | Guarded gap                 |
+| ID    | Deferred item                                                           | Feature          | Severity                    |
+| ----- | ----------------------------------------------------------------------- | ---------------- | --------------------------- |
+| PAR-1 | Mid-period PAR seed only under a Monthly season cycle                  | Inflow PAR       | Latent risk (warned)        |
+| PAR-2 | Inflow PAR fixed to a monthly clock; IC `season_ids` inert              | Inflow PAR       | Latent risk (modeling)      |
+| WTT-1 | Multi-resolution arrival-stage delivery density (fixed template)        | Water travel     | **Latent risk**             |
+| WTT-2 | Chronological confluence with heterogeneous travel times                | Water travel     | Guarded gap                 |
+| WTT-3 | Terminal credit for residual in-transit water past the horizon          | Water travel     | Protected contract          |
+| WTT-4 | Advisory-only resolution-mismatch signals                               | Water travel     | Guarded (informational)     |
+| AD-1  | Anticipated fan-out (one decision → several delivery stages)            | Anticipated      | Guarded gap                 |
+| AD-2  | `LeadTime` lead past the study horizon — rejected, mirrors `LeadStages` | Anticipated      | Guarded gap                 |
+| AD-3  | Single-slot anticipated decision resolver (fan-out prerequisite)        | Anticipated      | Guarded gap (sub-note AD-1) |
+| XS-1  | Cross-study boundary FCF coupling across resolutions                    | Water + Anticip. | Guarded gap                 |
 
 The anticipated hours-mode migration (calendar-anchored `LeadTime`, the in-LP
 delivery-anchored ring, deletion of the out-of-LP shift) is **done** and is
@@ -73,13 +73,37 @@ The inflow PAR model is the feature least advanced toward calendar-generality.
 Both items below are owned by the stochastic / PAR layer, not the travel-time or
 anticipated work, and both are silent-ish (one warned, one purely modeling).
 
-**Design:** PAR-1 and PAR-2 now have a worked design — see
-`non-regular-stage-length-design.md` §1. The agreed shape: one
-period-provider-agnostic overlap bridge (Monthly / Weekly / Custom), an
-input-free day-weighted disaggregation, `season_id` derived under the
-earliest-study-period anchor, and `RecentObservation`/`season_ids` generalized.
-Monthly stays the only implemented path; Weekly/Custom are hard-rejected at setup
-until shipped (replacing today's silent no-op).
+**Design:** PAR-1 and PAR-2 share the same period-provider-agnostic overlap
+bridge design — see `non-regular-stage-length-design.md` §1. The agreed shape:
+one Monthly / Weekly / Custom overlap bridge, an input-free day-weighted
+disaggregation, `season_id` derived under the earliest-study-period anchor,
+and `RecentObservation`/`season_ids` generalized. Monthly stays the only
+implemented path today; a non-Monthly (Weekly/Custom) season cycle combined
+with inflow PAR modeling is **not** rejected at setup (see the design finding
+below for why a blanket reject was tried and reverted). One related check is
+permanent by design, not scoped to the bridge: a non-Monthly cycle supplying
+an inflow annual component (PAR(p)-A) is always rejected, because the
+annual/long-memory extension is monthly-exclusive by design.
+
+**Design finding — a blanket non-Monthly reject false-positives on
+multi-resolution studies.** A setup-time reject for "non-Monthly season cycle
++ live inflow PAR" and a companion "`Custom` season ranges must tile the
+repeating annual calendar without gap or overlap" check were both
+implemented and then reverted. A `Custom` season cycle is also cobre's
+multi-resolution encoding: a study can declare monthly and quarterly season
+definitions that intentionally coexist and overlap (a fine-grained monthly
+PAR/lag clock layered under a quarterly decomposition envelope), still
+combined with inflow PAR. Both reverted checks assumed a `Custom` cycle
+always denotes a single, non-overlapping partition of the year, and rejected
+the legitimate layered case as if it were the historical mid-period-seed
+gap. The fix is not a blanket cycle-type reject or a no-overlap tiling rule;
+it is the multi-resolution-aware overlap bridge itself
+(`non-regular-stage-length-design.md` §1.3), generalized to recognize a
+resolution-layered `Custom` cycle as distinct from an under-specified one
+before any reject or seed computation runs against it. That bridge remains
+the closing work for PAR-1; until it ships, a non-Monthly cycle combined
+with inflow PAR is accepted with only the load-time mid-period-seed-gap
+advisory (below).
 
 ### PAR-1 — Mid-period PAR seed only under a Monthly season cycle
 
@@ -89,22 +113,30 @@ first-stage season id / season map) receive a zero mid-period seed.
 
 **Where.** `crates/cobre-sddp/src/stochastic/lag_transition.rs` —
 `compute_recent_observation_seed` returns a zero seed for any non-Monthly cycle
-(tagged with a `historical-replay-non-monthly` TODO). Warned, not silent, at load:
-`crates/cobre-io/src/validation/semantic/travel_time.rs` —
+(tagged with a `historical-replay-non-monthly` TODO). Warned, not silent, at
+load: `crates/cobre-io/src/validation/semantic/travel_time.rs` —
 `check_recent_observations_non_monthly_seed_gap` emits a model-quality warning
 naming the cycle.
 
-**Current behavior.** Warned, then zero-seed: setup proceeds, the mid-period lag
-seed is zero, and a load-time advisory names the cycle. Diagnosed, but the produced
-seed is a wrong (zeroed) value for a legitimately non-Monthly study.
+**Current behavior.** Warned, then zero-seed: setup proceeds, the mid-period
+lag seed is zero, and a load-time advisory names the cycle. Diagnosed, but the
+produced seed is a wrong (zeroed) value for a legitimately non-Monthly study.
 
-**What full support requires.** Generalize the season-anchored month-hours math
-(`month_total_hours`, `find_season_year_monthly`) to arbitrary cycle lengths keyed
-off the cycle type. Small, self-contained blast radius in `lag_transition.rs`
-(plus tests, and dropping the warning).
+**Reverted attempt.** A setup-time hard reject for this gap — "non-Monthly
+cycle + live inflow PAR order" — was implemented and then reverted, along with
+a companion `Custom`-cycle tiling check; see the design finding in the §A
+introduction above for why both false-positive on a legitimate
+multi-resolution study.
 
-**Severity: Latent risk (warned).** Produces a wrong (zero) seed on non-Monthly
-input, but a hard-wired load warning removes the silence. The fix is cheap.
+**What full support requires.** The multi-resolution-aware, period-provider-
+agnostic overlap bridge (`non-regular-stage-length-design.md` §1.3) — one that
+distinguishes a resolution-layered `Custom` cycle from an under-specified one
+— before either a setup reject or a corrected non-Monthly seed computation can
+be built on top of it. Not a fix scoped to the seed alone.
+
+**Severity: Latent risk (warned).** Produces a wrong (zero) seed on
+non-Monthly input, but a load-time warning removes the silence. The
+generic-bridge work above is the only path to closing it correctly.
 
 ### PAR-2 — Inflow PAR fixed to a monthly clock; IC `season_ids` inert
 
@@ -261,11 +293,12 @@ completeness because they are where a coarse/fine mismatch surfaces.
 
 ## §C — Anticipated dispatch
 
-The anticipated hours-mode migration is complete (§E). What remains is fan-out
-(the anticipated analogue of confluence), one missing `LeadTime` horizon
-validation, the single-slot decision resolver that fan-out will need, and — at the
-horizon boundary — GNL post-horizon commitment signaling (AD-4), which turns out to
-be a consumer of XS-1 (§D) rather than a standalone item.
+The anticipated hours-mode migration is complete (§E), and so is the `LeadTime`
+horizon-exceed validation (AD-2, below) — it now mirrors the `LeadStages`
+`K > n_stages` reject. What remains is fan-out (the anticipated analogue of
+confluence), the single-slot decision resolver that fan-out will need, and — at
+the horizon boundary — GNL post-horizon commitment signaling (AD-4), which turns
+out to be a consumer of XS-1 (§D) rather than a standalone item.
 
 ### The loss-free horizon property is CONDITIONAL on the terminal mode
 
@@ -296,9 +329,10 @@ into multiple future delivery stages has no per-delivery deposit column, no
 per-delivery fishing coupling, and no per-delivery-stage output.
 
 **Where.** `crates/cobre-sddp/src/setup/mod.rs` — `build_wired_indexer` rejects
-`AnticipatedResolution::max_fanout > 1` with `SddpError::Validation` at setup, so
-the case never reaches the LP builder. `AnticipatedResolution::max_fanout` in
-`crates/cobre-sddp/src/lead_time/mod.rs` computes the maximum decision-set size.
+`AnticipatedResolution::max_fanout > 1` with `SddpError::Validation` at setup,
+naming the fanning plant, so the case never reaches the LP builder.
+`AnticipatedResolution::max_fanout` in `crates/cobre-sddp/src/lead_time/mod.rs`
+computes the maximum decision-set size.
 
 **Current behavior.** Rejected loudly at setup. Single-decider `LeadTime`
 (`|C(t)| = 1`, the common case, and every `LeadStages` config) is fully supported
@@ -315,28 +349,28 @@ trade-off as WTT-2 rather than threading per-arc computation into the I/O crate.
 **Severity: Guarded gap.** Hard reject at setup; pure capability gap, no wrong
 output. Arises only in `LeadTime` mode on a coarsening calendar.
 
-### AD-2 — No physical-horizon rejection for a `LeadTime` lead past the horizon
+### AD-2 — `LeadTime` lead past the horizon (resolved: validated)
 
-**Limitation.** A `LeadStages` lead is rejected when `K > n_stages` (the plant can
-never deliver within the horizon). `LeadTime` has no analogue: a physical lead Δ
-that exceeds the whole study horizon is not rejected at validation.
+**Limitation (historical).** A `LeadStages` lead is rejected when `K > n_stages`
+(the plant can never deliver within the horizon). `LeadTime` had no analogue: a
+physical lead Δ that exceeds the whole study horizon was not rejected at
+validation.
 
 **Where.** `crates/cobre-io/src/validation/semantic/thermal.rs` —
-`check_anticipated_thermals`, at the `cfg.lead_stages()` fall-through carrying the
-`TODO(anticipated-physical-horizon-gate)` tag: the `K > n_stages` rejection runs
-for `LeadStages` only, and `LeadTime` falls through it.
+`check_anticipated_thermals` now sums the study's stage durations into a
+`total_horizon_hours` and rejects any `AnticipatedConfig::LeadTime(delta_hours)`
+whose `delta_hours` exceeds it, mirroring the `LeadStages` `K > n_stages` reject.
+The `TODO(anticipated-physical-horizon-gate)` tag is dropped.
 
-**Current behavior.** Unvalidated, but not obviously wrong: a Δ past the horizon
-resolves (via `resolve_point`) to an all-past decider, so no decision is genuine and
-the plant dispatches as an ordinary thermal — no anticipation, no crash. The gap is
-the missing loud signal, not a known wrong output.
+**Current behavior.** Rejected loudly at setup, naming the thermal, the
+configured lead, and the study's total horizon in hours. A `LeadTime` lead past
+the horizon can no longer resolve silently to an all-past decider and dispatch as
+an ordinary thermal with no anticipation.
 
-**What full support requires.** A calendar-derived horizon-exceed check for
-`LeadTime` mirroring the `LeadStages` `K > n_stages` reject (the resolver already
-exposes the depth needed), then drop the TODO.
-
-**Severity: Latent risk (unvalidated).** No loud signal on a misconfigured
-`LeadTime` lead; behavior is currently benign but unpinned. Cheap, self-contained.
+**Severity: Guarded gap.** Moved out of Latent risk: the case is now caught by a
+hard config-time reject, the same category as the `LeadStages` reject it
+mirrors. The reject is permanent — a physical lead longer than the study horizon
+is never a valid configuration — not a placeholder for a future capability.
 
 ### AD-3 — Single-slot anticipated decision resolver
 
@@ -450,30 +484,34 @@ capability now that its wire prerequisite has landed.
    silently approximate on a real input with no regression. Add a
    decomposition-arrival regression and decide upgrade-vs-accept.
 2. **PAR-1 — non-Monthly mid-period PAR seed.** Produces a wrong (zero) seed;
-   cheap, self-contained; currently masked only by a warning.
-3. **AD-2 — `LeadTime` physical-horizon reject.** Cheap validation gap; removes the
-   one unvalidated anticipated `LeadTime` case (drop the TODO).
+   masked only by a warning. The fix is the multi-resolution-aware overlap
+   bridge (see the design finding in §A), not a narrower reject — a blanket
+   reject was tried and reverted because it false-positives on
+   multi-resolution `Custom` cycles.
+
+AD-2 — the `LeadTime` horizon-exceed reject — is done (§C) and no longer
+appears in this list.
 
 **Fix as designed — capability, guarded today:**
 
-4. **AD-1 (+ AD-3) — anticipated fan-out.** Setup-rejected; build per-delivery
+3. **AD-1 (+ AD-3) — anticipated fan-out.** Setup-rejected; build per-delivery
    deposits/fishing/output with fan-out summation and cross-delivery conservation,
    generalizing the single-slot resolver. Hand-derive every regression's expected
    value (the confluence-summation discipline transfers directly).
-5. **XS-1 — coarse-to-mixed boundary coupling.** Highest capability value; the
+4. **XS-1 — coarse-to-mixed boundary coupling.** Highest capability value; the
    `EntitySlot.delivery_anchor` prerequisite has landed, so this is now a
    consumer-side re-index + coupling policy.
-6. **WTT-2 — precise heterogeneous-confluence support.** Guarded; only worth it if a
+5. **WTT-2 — precise heterogeneous-confluence support.** Guarded; only worth it if a
    real study needs mixed-travel-time confluence under chronological blocks.
-7. **PAR-2 — sub-monthly PAR clock.** Owned by the PAR boundary; largest blast
+6. **PAR-2 — sub-monthly PAR clock.** Owned by the PAR boundary; largest blast
    radius, lowest travel-time relevance.
 
 **Never a "fix" — protect / leave:**
 
-8. **WTT-3 — terminal credit.** A protected contract coupled to non-existent
+7. **WTT-3 — terminal credit.** A protected contract coupled to non-existent
    cyclic-horizon work. Protect the row-omission + zero-terminal-value invariant;
    do not patch it.
-9. **WTT-4 — advisories.** Correct as-is.
+8. **WTT-4 — advisories.** Correct as-is.
 
 ---
 
@@ -489,9 +527,9 @@ To avoid re-filing resolved work as deferred:
   and replaced by the in-LP ring (per-slot outgoing columns + definition rows,
   generalizing the water bucket ring). A single-decider `LeadTime` study solves
   end-to-end through both the in-code path and the on-disk `run_pipeline` path.
-  The residual anticipated gaps are only fan-out (AD-1/AD-3), the `LeadTime`
-  horizon reject (AD-2), and the boundary-coupling consumer (XS-1) — not the mode
-  itself.
+  The residual anticipated gaps are only fan-out (AD-1/AD-3) and the
+  boundary-coupling consumer (XS-1) — not the mode itself; the `LeadTime`
+  horizon-exceed reject (AD-2) is also done.
 - **Anticipated end-of-horizon handling is loss-free.** The strict
   `stage_idx + K_i < n_stages` gate means an out-of-horizon decision is never
   created — there is no anticipated analogue of water's WTT-3 terminal drop (see

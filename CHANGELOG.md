@@ -74,6 +74,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ISO-8601 date produces a schema error naming the file, the field, and the
   offending string.
 
+- **A study now fails validation instead of silently mis-modeling previously
+  unguarded inflow-PAR and anticipated-thermal configurations.** An
+  anticipated thermal's `lead_time_hours` lead exceeding the study's full
+  horizon is rejected — the plant could never deliver within the horizon, and
+  previously it fell through validation and dispatched as an ordinary thermal
+  with no anticipation. A non-Monthly season cycle supplying an inflow annual
+  component is rejected, because that long-memory extension is
+  Monthly-exclusive by design.
+
 ### Changed
 
 - **Operational entities now sort canonically by `(operational_start_date, id)`

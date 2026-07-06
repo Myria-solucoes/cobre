@@ -16,6 +16,7 @@
 //! | 11 | A declared arc's downstream `exit_stage_id` falls inside the arrival window of a release whose own stage is still Operating | `ModelQuality` (warning) |
 //! | 12 | A declared arc releases at a stage where its downstream has not yet reached Operating status (`PreFilling`/`Filling`, or before `entry_stage_id`) | `BusinessRuleViolation` |
 //! | 13 | `recent_observations` present but the season cycle is not `Monthly` (`Weekly`/`Custom`, a `None` first-stage `season_id`, or no `season_map`) — mid-period PAR lag seeding is silently skipped | `ModelQuality` (warning) |
+//! | 14 | Study supplies an inflow annual component (`inflow_annual_components` non-empty) while `season_map.cycle_type` is not `Monthly` — PAR(p)-A is monthly-exclusive by design | `BusinessRuleViolation` |
 
 use chrono::NaiveDate;
 use cobre_core::{BlockMode, EntityId, Hydro, SeasonCycleType, window_period_overlaps};
@@ -114,6 +115,37 @@ pub(super) fn check_recent_observations_non_monthly_seed_gap(
             "recent_observations is non-empty but the season cycle is {cycle}; \
              recent_observations mid-period lag seeding is implemented only for the \
              Monthly cycle, so it is silently skipped and the mid-period lag seed is zero"
+        ),
+    );
+}
+
+/// Row 14: rejects a study supplying an inflow annual component
+/// (`inflow_annual_components` non-empty) under a non-`Monthly` season cycle.
+/// PAR(p)-A is monthly-exclusive by design — a permanent restriction.
+pub(super) fn check_annual_component_monthly_only(data: &ParsedData, ctx: &mut ValidationContext) {
+    if data.inflow_annual_components.is_empty() {
+        return;
+    }
+
+    let Some(season_map) = data.stages.policy_graph.season_map.as_ref() else {
+        return;
+    };
+
+    let cycle = match season_map.cycle_type {
+        SeasonCycleType::Weekly => "Weekly",
+        SeasonCycleType::Custom => "Custom",
+        SeasonCycleType::Monthly => return,
+    };
+
+    ctx.add_error(
+        ErrorKind::BusinessRuleViolation,
+        "scenarios/inflow_annual_component.parquet",
+        None::<String>,
+        format!(
+            "the study supplies {} inflow annual component row(s) under a {cycle} season \
+             cycle; PAR(p)-A (the annual/long-memory extension) is monthly-exclusive by design \
+             — declare a Monthly season cycle or remove the annual component",
+            data.inflow_annual_components.len()
         ),
     );
 }
@@ -1089,6 +1121,23 @@ mod tests {
         }
     }
 
+    /// A `ParsedData` with one hydro, three stages (`season_id = Some(0)` on the
+    /// first), and the given `season_map`. `inflow_ar_coefficients` is left empty
+    /// — callers set it via [`make_ar_row`] to declare PAR usage.
+    fn par_cycle_data(season_map: cobre_core::temporal::SeasonMap) -> ParsedData {
+        let mut data = make_data(
+            vec![make_hydro(1, None)],
+            vec![],
+            vec![],
+            make_stages(vec![0, 1, 2]),
+            vec![],
+            vec![],
+        );
+        data.stages.stages[0].season_id = Some(0);
+        data.stages.policy_graph.season_map = Some(season_map);
+        data
+    }
+
     #[test]
     fn test_weekly_cycle_with_recent_observations_warns() {
         let mut data = make_data(
@@ -1172,6 +1221,67 @@ mod tests {
             ctx.warnings().is_empty(),
             "empty recent_observations must be silent even under a Weekly cycle, got: {:?}",
             ctx.warnings()
+        );
+    }
+
+    // ── Row 14: non-monthly annual component reject ──────────────────────────
+
+    fn annual_component_row(hydro_id: i32) -> crate::scenarios::InflowAnnualComponentRow {
+        crate::scenarios::InflowAnnualComponentRow {
+            hydro_id: EntityId::from(hydro_id),
+            stage_id: 0,
+            annual_coefficient: -0.25,
+            annual_mean_m3s: 1500.0,
+            annual_std_m3s: 300.0,
+        }
+    }
+
+    #[test]
+    fn test_weekly_cycle_with_annual_component_rejects_naming_monthly_exclusive() {
+        let mut data = par_cycle_data(season_map_with_cycle(SeasonCycleType::Weekly));
+        data.inflow_annual_components = vec![annual_component_row(1)];
+
+        let mut ctx = ValidationContext::new();
+        check_annual_component_monthly_only(&data, &mut ctx);
+
+        let errors = ctx.errors();
+        assert_eq!(errors.len(), 1, "exactly one reject, got: {errors:?}");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message.contains("Weekly")
+                    && e.message.contains("monthly-exclusive")),
+            "expected a Weekly PAR(p)-A monthly-exclusive reject, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_monthly_cycle_with_annual_component_no_reject() {
+        let mut data = par_cycle_data(make_monthly_season_map());
+        data.inflow_annual_components = vec![annual_component_row(1)];
+
+        let mut ctx = ValidationContext::new();
+        check_annual_component_monthly_only(&data, &mut ctx);
+
+        assert!(
+            !ctx.has_errors(),
+            "a Monthly-cycle study with an annual component must not reject, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    #[test]
+    fn test_weekly_cycle_without_annual_component_no_reject() {
+        let data = par_cycle_data(season_map_with_cycle(SeasonCycleType::Weekly));
+
+        let mut ctx = ValidationContext::new();
+        check_annual_component_monthly_only(&data, &mut ctx);
+
+        assert!(
+            !ctx.has_errors(),
+            "a Weekly-cycle study with no annual component must not reject, got: {:?}",
+            ctx.errors()
         );
     }
 }

@@ -98,9 +98,16 @@ for the elapsed part of the study's first PAR period; `compute_recent_observatio
 
 ### 1.3 Design decisions
 
-- **Scope.** Implement **Monthly** now; **Weekly** and **Custom** are designed and
-  **hard-rejected at setup** until shipped (replacing today's silent no-op, which
-  produces frozen/wrong lags).
+- **Scope.** Implement **Monthly** now; **Weekly** and **Custom** are designed for
+  the generic bridge below. **Critical finding (revised during implementation):**
+  a blanket `cycle_type != Monthly` setup reject was tried and **reverted** — a
+  `Custom` cycle is ALSO cobre's multi-resolution encoding (one `season_map` layering
+  e.g. 12 monthly + 4 quarterly definitions that overlap by design, with inflow PAR),
+  so a blanket non-Monthly reject false-positives on legitimate multi-resolution
+  studies. The bridge and its guards must be **multi-resolution-aware**: gate on the
+  PAR seasonality's actual resolution, not merely a non-Monthly `cycle_type`. Today's
+  silent no-op for genuine single-resolution non-monthly studies stays a warned gap
+  until the bridge ships.
 - **One generic bridge.** Generalize the monthly-hardcoded transition into a
   **period-provider-agnostic overlap bridge**: given a stage window and the period
   windows (calendar months / ISO weeks / Custom date ranges, all from the
@@ -129,10 +136,14 @@ for the elapsed part of the study's first PAR period; `compute_recent_observatio
 - **`RecentObservation`** seeding is generalized to the non-monthly cycles as part
   of the generic bridge.
 - **Custom tiling validation.** Monthly/Weekly tile the cycle by construction;
-  Custom seasons are user-defined and may leave gaps or overlap
-  (`season_for_date` → `None` for an uncovered date, silently dropping
-  observations/stages). Custom therefore requires a validation that its ranges form
-  a **complete, non-overlapping partition of the repeating cycle**.
+  Custom seasons are user-defined and may leave gaps (`season_for_date` → `None`
+  for an uncovered date, silently dropping observations/stages). A first attempt
+  requiring a **complete, non-overlapping partition** was **reverted**: a
+  multi-resolution study encodes several resolution levels (e.g. monthly + quarterly)
+  in one Custom `season_map` whose definitions overlap **by design**, so a flat
+  no-overlap rule false-positives. Custom validation must instead check tiling **per
+  resolution level** (each level's definitions tile completely among themselves),
+  with each stage resolving its season inside its own resolution.
 
 ### 1.4 Implementation notes
 
@@ -398,12 +409,14 @@ batch, in any order.
   clearly worded; add durable `TODO(anticipated-fanout-output)` at the guard AND at
   `compute_anticipated_decision_mw` (the coupled sites). No LP change; do not
   exercise the unverified fan-out path.
-- **Inflow-PAR non-monthly guard.** Convert the silent `Weekly | Custom` no-op in
-  `lag_transition.rs` (and `compute_recent_observation_seed`'s zero-seed) into a hard
-  setup reject, plus the non-monthly `PAR(p)-A` reject and the Custom
-  complete-tiling check (§1.3). A non-monthly study then fails loudly instead of
-  producing frozen/zero lags. This **subsumes PAR-1** — the zero mid-period seed is
-  unreachable behind the reject — until the generic bridge ships.
+- **Inflow-PAR non-monthly guard.** Ships **only** the non-monthly `PAR(p)-A`
+  annual-component reject (permanent; annual/long-memory is monthly-exclusive). The
+  blanket `Weekly | Custom` + inflow-PAR reject and the Custom complete-tiling check
+  were tried and **reverted** — both false-positive on multi-resolution `Custom`
+  studies (§1.3 Critical finding). The silent `Weekly | Custom` no-op in
+  `lag_transition.rs` (and `compute_recent_observation_seed`'s zero-seed) therefore
+  stays behind the pre-existing seed-gap **warning**; PAR-1 is **not** subsumed and
+  remains a warned gap until the multi-resolution-aware bridge ships (Group 2b).
 
 ### Group 2 — Overlap / arrival generalization (structural, parity-moving)
 

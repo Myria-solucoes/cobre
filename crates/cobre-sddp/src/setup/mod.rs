@@ -692,6 +692,8 @@ fn build_wired_indexer(
     let (anticipated_resolution, anticipated_lead_stages) = resolve_anticipated_commitments(system);
     debug_assert_eq!(anticipated_lead_stages.len(), n_anticipated);
 
+    // TODO(anticipated-fanout-output): the coupled output extractor is
+    // compute_anticipated_decision_mw
     if anticipated_resolution.max_fanout > 1 {
         let plant_id = first_fanned_plant_id(
             system,
@@ -703,8 +705,9 @@ fn build_wired_indexer(
             "max_fanout > 1 must locate the fanning plant"
         );
         return Err(SddpError::Validation(format!(
-            "anticipated thermal {}: LeadTime fan-out (a coarse decision stage delivering \
-             to several stages) is not yet supported for simulation output",
+            "anticipated thermal {}: LeadTime fan-out (a coarse decision stage anchoring \
+             several delivery stages) — per-delivery-stage fan-out simulation output is \
+             not yet supported",
             plant_id.map_or(EntityId(-1), |id| id)
         )));
     }

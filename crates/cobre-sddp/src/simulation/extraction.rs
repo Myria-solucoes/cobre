@@ -173,6 +173,7 @@ fn compute_anticipated_decision_mw(
         .anticipated_resolution_for(local_idx, spec.n_stages);
     let mut genuine = resolution.genuine_decisions_at(spec.stage_index);
     let delivery_stage = genuine.next()?;
+    // TODO(anticipated-fanout-output): gated by build_wired_indexer's max_fanout > 1 reject
     debug_assert!(
         genuine.next().is_none(),
         "compute_anticipated_decision_mw reads a single delivery stage per plant \
