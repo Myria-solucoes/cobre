@@ -73,6 +73,14 @@ The inflow PAR model is the feature least advanced toward calendar-generality.
 Both items below are owned by the stochastic / PAR layer, not the travel-time or
 anticipated work, and both are silent-ish (one warned, one purely modeling).
 
+**Design:** PAR-1 and PAR-2 now have a worked design — see
+`non-regular-stage-length-design.md` §1. The agreed shape: one
+period-provider-agnostic overlap bridge (Monthly / Weekly / Custom), an
+input-free day-weighted disaggregation, `season_id` derived under the
+earliest-study-period anchor, and `RecentObservation`/`season_ids` generalized.
+Monthly stays the only implemented path; Weekly/Custom are hard-rejected at setup
+until shipped (replacing today's silent no-op).
+
 ### PAR-1 — Mid-period PAR seed only under a Monthly season cycle
 
 **Limitation.** The pre-study mid-period lag seed for the PAR accumulator is
@@ -255,21 +263,29 @@ completeness because they are where a coarse/fine mismatch surfaces.
 
 The anticipated hours-mode migration is complete (§E). What remains is fan-out
 (the anticipated analogue of confluence), one missing `LeadTime` horizon
-validation, and the single-slot decision resolver that fan-out will need. The
-one place anticipated is _ahead_ of water is the horizon: its end-of-horizon
-handling is **loss-free by construction**, not a deferred imprecision.
+validation, the single-slot decision resolver that fan-out will need, and — at the
+horizon boundary — GNL post-horizon commitment signaling (AD-4), which turns out to
+be a consumer of XS-1 (§D) rather than a standalone item.
 
-### The loss-free horizon property (not a gap — the contrast with WTT-3)
+### The loss-free horizon property is CONDITIONAL on the terminal mode
 
 `is_anticipated_decision_active_for_delivery`
 (`crates/cobre-sddp/src/lp/indexer/state_layout.rs`) gates a decision on the strict
 clause `stage_idx + K_i < n_stages`. A commitment whose delivery stage would fall
 at or past `n_stages` is **never created** — the decision column, its deposit row,
-and its fishing row are all absent, not zeroed-after-the-fact. So there is no
-dropped mass and no imprecision to defer: masked slots are provably zero. This is
-strictly stronger than water's WTT-3 (which discards a real weighted release under
-a bounded, protected contract). The anticipated ring therefore inherits **no**
-end-of-horizon deferred item.
+and its fishing row are all absent, not zeroed-after-the-fact. Under a **finite,
+zero-terminal horizon** this is provably correct and lossless: with nothing to value
+the ending anticipated ring, a boundary commitment would optimize to zero, so
+dropping it and creating-then-zeroing it are the same answer (strictly stronger than
+water's WTT-3, which discards a real weighted release under a bounded contract).
+
+But the property is **conditional on that zero terminal value.** Under an injected
+boundary future-cost function (XS-1) that prices the ending anticipated ring — the
+DECOMP GNL boundary condition — the drop is no longer correct: the FCF's coefficient
+on the in-flight commitment is exactly what pins a post-horizon decision, and the
+strict gate would silently zero it. So the anticipated ring DOES inherit an
+end-of-horizon item after all: AD-4, the conditional relaxation of this gate under a
+boundary FCF (see §D XS-1 and `non-regular-stage-length-design.md` §3).
 
 ### AD-1 — Anticipated fan-out (one decision feeding several delivery stages)
 
@@ -339,6 +355,35 @@ generalize.
 **Severity: Guarded gap (sub-note of AD-1).** Not independently reachable — the
 fan-out setup reject (AD-1) keeps every shipped study single-slot.
 
+### AD-4 — GNL post-horizon commitment signaling at the boundary
+
+**Limitation.** DECOMP lets GNL (LNG) thermals decide anticipated dispatch for
+delivery weeks BEYOND the horizon end (the `dadgnl` `GS` register declares the
+post-horizon month's week count for exactly this), valued by the NEWAVE boundary
+cost-to-go. cobre's loss-free gate drops any commitment whose delivery is past
+`n_stages`, so it cannot signal a post-horizon GNL commitment.
+
+**Where.** The gate is `is_anticipated_decision_active_for_delivery`
+(`state_layout.rs`, strict `stage_idx + K_i < n_stages`). The valuation path is the
+boundary-FCF injection, XS-1 (§D): the anticipated commitment is already state
+(`anticipated_slots_out` / `anticipated_state`, covered by the cut projection), so an
+injected FCF carrying anticipated-ring coefficients would price it.
+
+**Current behavior.** Correct under a finite / zero-terminal horizon (a post-horizon
+commitment is worth zero, so the drop is exact). Missing only once a boundary FCF
+values the ending ring.
+
+**What full support requires.** NOT a standalone feature — it is the anticipated-ring
+consumer of XS-1 plus one new piece: a **conditional relaxation of the loss-free
+gate** under boundary-FCF mode, so the ending ring holds the in-flight post-horizon
+commitments for the injected FCF to price; the XS-1 anchor-keyed re-index aligns the
+source study's ring to the current one; and the discount `1/(1+β)^K` must survive the
+resolution crossing. Fully worked in `non-regular-stage-length-design.md` §3.
+
+**Severity: Guarded gap (coupled to XS-1 + terminal-mode).** No wrong output today
+(finite horizon → the dropped commitment is genuinely zero-valued); becomes live only
+with an injected boundary FCF.
+
 ---
 
 ## §D — Cross-cutting: cross-study boundary FCF coupling (XS-1)
@@ -381,6 +426,16 @@ positional mismatch). Safe, but the real workflow cannot run.
 
 Large, cross-crate consumer-side blast radius; the dual-owned wire change is
 already paid.
+
+**Named consumer — GNL post-horizon signaling (AD-4).** The DECOMP GNL boundary
+condition is a direct consumer of this seam. Because the anticipated commitment is
+state and the cut projection covers the ring, a boundary FCF injected from a coarse
+(monthly) source study carries a coefficient on the in-flight commitment, which
+prices — and so lets the fine (weekly) stages decide — a GNL dispatch delivered past
+the current horizon. It needs the anchor-keyed anticipated re-index above PLUS a
+conditional relaxation of the loss-free gate (AD-4, §C); the
+`(thermal_id, delivery_anchor)` key aligns a post-horizon delivery by its absolute
+year-month across the two resolutions.
 
 **Severity: Guarded gap.** Hard-rejected today; the highest-value deferred
 capability now that its wire prerequisite has landed.
