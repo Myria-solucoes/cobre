@@ -258,22 +258,31 @@ The bucket state stays a pure function of stage lengths, never of
   density and `stage_weights` from another lets the chronological and
   parallel cuts diverge and silently breaks conservation.
 - **Fixed delivery density.** A maturing bucket delivers into its arrival
-  stage's blocks through a fixed, `block_mode`-independent template density
-  (`resolve_chrono_arrival_density`), never by tracking which origin block a
-  unit came from. Tracking origin-to-arrival-block correlation would grow the
-  bucket into a per-block vector whose length scales with the receiving
-  stage's `n_blks` — re-violating the depth-from-stage-lengths property above.
+  stage's blocks through a fixed, `block_mode`-independent `arrival_density`
+  looked up from the setup-precomputed per-`(arc, arrival stage)` table
+  (`resolve_chrono_arrival_density` reading
+  `TemplateBuildCtx::arc_arrival_density`, built by `build_arc_arrival_density`
+  as a blend over every contributing source stage's lag, resolved in the
+  ARRIVAL stage's own frame), never by tracking which origin block a unit came
+  from. Tracking origin-to-arrival-block correlation would grow the bucket
+  into a per-block vector whose length scales with the receiving stage's
+  `n_blks` — re-violating the depth-from-stage-lengths property above.
 
 Read: `lead_time/mod.rs` (`resolve_spread`'s
 `block_deposits`/`within_stage_routing`/`arrival_density` fields,
-`resolve_block_factors`'s `BlockFactors`), `lp/builder/entries.rs`
+`resolve_block_factors`'s `BlockFactors`, `resolve_arrival_density_at`),
+`setup/bucket_topology.rs` (`build_arc_arrival_density`), `lp/builder/entries.rs`
 (`fill_chronological_water_entries`, `resolve_chrono_arrival_density`). Pinned
 by the shared-density-consistency regression exercising the aggregation
 debug_assert directly, the chronological block-table regression matching the
 worked kappa/chi numbers, and the `K = 1` chronological-vs-parallel
 byte-identity regression; a state-dimension-equality regression across
 parallel and chronological builds is the direct pin for mode-independent
-sizing.
+sizing. The arrival-frame lookup regression (the resolved density equals the
+precomputed `arc_arrival_density` table entry verbatim) is the direct pin for
+the fixed-delivery-density clause itself; the parallel-fill regression (the
+maturing bucket keeps a single `-1.0` regardless of the table's contents)
+pins that `fill_parallel_water_entries` never reads it.
 
 ## Anticipated thermal commitments
 

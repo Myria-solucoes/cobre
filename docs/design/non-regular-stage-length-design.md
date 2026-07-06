@@ -177,7 +177,7 @@ a template — and it resolves with the same shared convention (§0 role 2).
 
 Two spreads, built at setup:
 
-- **Stage-level `k_d`** (`setup/bucket_topology.rs::build_arc_spread_k`): the
+- **Stage-level `k_d`** (`setup/bucket_topology.rs::build_arc_stage_weights`): the
   fraction of a release at a stage arriving at `stage+d`, overlapping the arrival
   window against the full non-uniform calendar. **Block-mode-independent and
   calendar-exact for any stage lengths**; the transit-bucket state is per-depth
@@ -221,7 +221,7 @@ is confined to chronological arrival stages.
 - **Multi-lag blend** (the constraint-respecting representative) for arrival
   stage `A`:
   `ρ_b = (Σ_d κ_d · φ_{d,b}) / (Σ_d κ_d)`, with `κ_d = k_d^(A−d)` the arrival
-  fraction of source `A−d` (from `arc_spread_k`) and `φ_{d,b}` the lag-`d` density
+  fraction of source `A−d` (from `arc_stage_weights`) and `φ_{d,b}` the lag-`d` density
   resolved against `A`'s own blocks. A fixed, release-independent coefficient;
   reduces to `φ_1` when `τ` < one stage length.
 - **Single-`ρ` residual is an inherent bound.** Block-agnostic state ⟹ one

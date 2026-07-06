@@ -405,7 +405,7 @@ fn fill_transit_bucket_definition_entries(
 /// the balance row and `k_1..k_d` into the definition rows (the `k_0 > 0`
 /// co-existence) — never the once-per-stage `ζ`-family.
 ///
-/// `ctx.arc_spread_k` has no entry for an undeclared arc, so this emits
+/// `ctx.arc_stage_weights` has no entry for an undeclared arc, so this emits
 /// exactly today's `-τ_blk` and no deposit (the B==0 byte-identity anchor).
 fn fill_arc_release_block_entries(
     ctx: &TemplateBuildCtx<'_>,
@@ -422,7 +422,7 @@ fn fill_arc_release_block_entries(
     let col_spillage = layout.spillage_col(u_idx, blk);
 
     let Some(stage_weights) = ctx
-        .arc_spread_k
+        .arc_stage_weights
         .get(&u_idx)
         .map(|k_by_stage| &k_by_stage[stage_idx])
     else {
@@ -449,7 +449,7 @@ fn fill_arc_release_block_entries(
     let range = plant_transit_bucket_range(layout.state, h_idx).unwrap_or_else(|| {
         unreachable!(
             "hydro {h_idx} receives a depth-{depth} deposit at stage {stage_idx} but has no \
-             bucket range (TransitBucketTopology/arc_spread_k disagreement)"
+             bucket range (TransitBucketTopology/arc_stage_weights disagreement)"
         )
     });
     let row_transit_bucket_def_start = layout.row_transit_bucket_definition_start();
@@ -543,7 +543,7 @@ fn fill_chronological_water_entries(
         }
 
         // Arrival: the incoming maturing bucket `b_1^in` delivers over THIS
-        // stage's blocks by the fixed template density rho (the
+        // stage's blocks by the fixed arrival_density (the
         // fixed-delivery-density contract) — one shared entry per block,
         // mirroring the parallel single-row `-1.0`.
         if let Some(range) = plant_transit_bucket_range(layout.state, h_idx) {
@@ -551,7 +551,7 @@ fn fill_chronological_water_entries(
                 resolve_chrono_arrival_density(ctx, stage, stage_idx, hydro.id, n_blks);
             debug_assert!(
                 (arrival_density.iter().sum::<f64>() - 1.0).abs() < 1e-9,
-                "hydro {h_idx} stage {stage_idx}: delivery density rho must sum to 1.0"
+                "hydro {h_idx} stage {stage_idx}: arrival_density must sum to 1.0"
             );
             let col_first_slot_in = layout.state.transit_buckets_in.start + range.start;
             for (target_slot, &rho_val) in arrival_density.iter().enumerate() {
@@ -738,20 +738,30 @@ fn fill_arc_release_chrono_block_entries(
     }
 }
 
-/// Resolve the fixed-template delivery density `ρ` (the fixed-delivery-density
-/// contract) that splits THIS stage's incoming maturing bucket across its
-/// `n_blks` rows: the sending stage's (`stage_idx - 1`) own `resolve_spread`
-/// delivery row for `d = 1` — re-anchored fresh every stage (no
-/// per-origin/per-lag memory, the documented bounded approximation). Falls
-/// back to the duration-weighted uniform density (the fixed-delivery-density
-/// fallback: uniform over the early blocks) when no matching chronological
-/// sending-stage table exists (the study's first stage, or a
-/// parallel-to-chronological transition).
+/// Resolve THIS stage's incoming maturing bucket's `arrival_density` (the
+/// fixed-delivery-density contract): a lookup of the setup-precomputed
+/// per-`(arc, arrival stage)` blend
+/// (`TemplateBuildCtx::arc_arrival_density`, built by
+/// [`build_arc_arrival_density`](crate::setup::bucket_topology::build_arc_arrival_density)),
+/// already resolved in THIS (arrival) stage's own frame rather than any
+/// sender's. Falls back to the duration-weighted uniform density only where a
+/// declared arc's table entry holds no blend at this stage (the study's first
+/// stage, which has no source stage to blend from) or the plant has no
+/// travel-time upstream at all (the trailing `unwrap_or_else`).
 ///
-/// A confluence whose contributing arcs disagree on this density has no
-/// resolved policy; `check_chronological_confluence_heterogeneous_travel_time`
-/// (`cobre-io`) rejects that input at config time, so the `debug_assert!`
-/// below is a defensive backstop, not the enforcement point.
+/// A non-travel-time upstream is EXCLUDED from the confluence: `build_arc_arrival_density`
+/// inserts declared travel-time arcs only, so a plain tributary has no table
+/// entry and is skipped (`arc_arrival_density.get(&u_idx)` is `None`), never
+/// folded in via `uniform`. Admitting one would make it disagree with the sole
+/// travel-time arc's non-uniform density — a false heterogeneous-confluence
+/// panic below in debug, a silent uniform split in release. A plain tributary
+/// carries no maturing bucket; its water reaches this plant same-stage through
+/// [`fill_arc_release_chrono_block_entries`], not this arrival split.
+///
+/// A confluence whose contributing travel-time arcs disagree on this density
+/// has no resolved policy; `check_chronological_confluence_heterogeneous_travel_time`
+/// (`cobre-io`) rejects that input at config time, so the `debug_assert!` below
+/// is a defensive backstop, not the enforcement point.
 fn resolve_chrono_arrival_density(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -773,19 +783,17 @@ fn resolve_chrono_arrival_density(
         let Some(&u_idx) = ctx.hydro_pos.get(&up_id) else {
             continue;
         };
-        let Some(by_stage) = ctx.arc_spread_chrono.get(&u_idx) else {
+        let Some(by_stage) = ctx.arc_arrival_density.get(&u_idx) else {
             continue;
         };
-        let candidate = (stage_idx > 0)
-            .then(|| {
-                by_stage[stage_idx - 1]
-                    .as_ref()
-                    .and_then(|r| r.arrival_density.first())
-                    .filter(|d| d.len() == n_blks)
-                    .cloned()
-            })
-            .flatten()
-            .unwrap_or_else(uniform);
+        let candidate = by_stage[stage_idx].clone().map_or_else(uniform, |density| {
+            debug_assert_eq!(
+                density.len(),
+                n_blks,
+                "arc {u_idx} stage {stage_idx}: arrival_density length must equal n_blks"
+            );
+            density
+        });
         match &chosen {
             None => chosen = Some(candidate),
             Some(existing) => {
@@ -2351,8 +2359,9 @@ mod zero_cost_tests {
                 n_contract_import: 0,
                 n_contract_export: 0,
                 diversion_upstream: HashMap::new(),
-                arc_spread_k: HashMap::new(),
+                arc_stage_weights: HashMap::new(),
                 arc_spread_chrono: HashMap::new(),
+                arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
                 n_hydros: 0,
                 n_thermals,
@@ -3138,7 +3147,7 @@ mod pumping_water_tests {
     use super::super::test_support::{state_layout_for, two_block_stage, zero_hydro_penalties};
     use super::{
         LpMatrixBuffers, assemble_csc, build_stage_matrix_entries, fill_generic_constraint_entries,
-        fill_load_balance_entries, fill_pumping_water_entries,
+        fill_load_balance_entries, fill_pumping_water_entries, resolve_chrono_arrival_density,
     };
 
     const N_STAGES: usize = 1;
@@ -3736,8 +3745,9 @@ mod pumping_water_tests {
                 n_contract_import: self.n_contract_import,
                 n_contract_export: self.n_contract_export,
                 diversion_upstream: HashMap::new(),
-                arc_spread_k: HashMap::new(),
+                arc_stage_weights: HashMap::new(),
                 arc_spread_chrono: HashMap::new(),
+                arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
                 n_hydros: self.hydros.len(),
                 n_thermals: self.thermals.len(),
@@ -4818,10 +4828,10 @@ mod pumping_water_tests {
         let up_idx = fixtures.hydro_pos[&EntityId(up)];
         let down_idx = fixtures.hydro_pos[&EntityId(down)];
 
-        let mut arc_spread_k = HashMap::new();
-        arc_spread_k.insert(up_idx, vec![vec![0.5, 0.5]]);
+        let mut arc_stage_weights = HashMap::new();
+        arc_stage_weights.insert(up_idx, vec![vec![0.5, 0.5]]);
         let ctx = TemplateBuildCtx {
-            arc_spread_k,
+            arc_stage_weights,
             per_stage_mask: vec![vec![1]],
             ..fixtures.make_ctx()
         };
@@ -4914,10 +4924,10 @@ mod pumping_water_tests {
         let up_idx = fixtures.hydro_pos[&EntityId(up)];
         let down_idx = fixtures.hydro_pos[&EntityId(down)];
 
-        let mut arc_spread_k = HashMap::new();
-        arc_spread_k.insert(up_idx, vec![vec![0.5, 0.5]]);
+        let mut arc_stage_weights = HashMap::new();
+        arc_stage_weights.insert(up_idx, vec![vec![0.5, 0.5]]);
         let ctx = TemplateBuildCtx {
-            arc_spread_k,
+            arc_stage_weights,
             per_stage_mask: vec![vec![1]],
             ..fixtures.make_ctx()
         };
@@ -4991,10 +5001,10 @@ mod pumping_water_tests {
         let up_idx = fixtures.hydro_pos[&EntityId(up)];
         let down_idx = fixtures.hydro_pos[&EntityId(down)];
 
-        let mut arc_spread_k = HashMap::new();
-        arc_spread_k.insert(up_idx, vec![vec![0.5, 0.5]]);
+        let mut arc_stage_weights = HashMap::new();
+        arc_stage_weights.insert(up_idx, vec![vec![0.5, 0.5]]);
         let ctx = TemplateBuildCtx {
-            arc_spread_k,
+            arc_stage_weights,
             per_stage_mask: vec![vec![1]],
             ..fixtures.make_ctx()
         };
@@ -5105,11 +5115,11 @@ mod pumping_water_tests {
         let up_b_idx = fixtures.hydro_pos[&EntityId(up_b)];
         let down_idx = fixtures.hydro_pos[&EntityId(down)];
 
-        let mut arc_spread_k = HashMap::new();
-        arc_spread_k.insert(up_a_idx, vec![vec![0.5, 0.5]]);
-        arc_spread_k.insert(up_b_idx, vec![vec![0.25, 0.75]]);
+        let mut arc_stage_weights = HashMap::new();
+        arc_stage_weights.insert(up_a_idx, vec![vec![0.5, 0.5]]);
+        arc_stage_weights.insert(up_b_idx, vec![vec![0.25, 0.75]]);
         let ctx = TemplateBuildCtx {
-            arc_spread_k,
+            arc_stage_weights,
             per_stage_mask: vec![vec![1]],
             ..fixtures.make_ctx()
         };
@@ -5236,10 +5246,10 @@ mod pumping_water_tests {
         let up_idx = fixtures.hydro_pos[&EntityId(up)];
         let down_idx = fixtures.hydro_pos[&EntityId(down)];
 
-        let mut arc_spread_k = HashMap::new();
-        arc_spread_k.insert(up_idx, vec![vec![0.5, 0.3]]); // sums to 0.8: violates conservation.
+        let mut arc_stage_weights = HashMap::new();
+        arc_stage_weights.insert(up_idx, vec![vec![0.5, 0.3]]); // sums to 0.8: violates conservation.
         let ctx = TemplateBuildCtx {
-            arc_spread_k,
+            arc_stage_weights,
             per_stage_mask: vec![vec![1]],
             ..fixtures.make_ctx()
         };
@@ -5416,10 +5426,10 @@ mod pumping_water_tests {
         // on both sides of the comparison; the mode is then forced back to
         // `Parallel` for this side.
         let par_fixtures = make_fixtures();
-        let mut arc_spread_k = HashMap::new();
-        arc_spread_k.insert(up_idx, vec![stage_weights]);
+        let mut arc_stage_weights = HashMap::new();
+        arc_stage_weights.insert(up_idx, vec![stage_weights]);
         let par_ctx = TemplateBuildCtx {
-            arc_spread_k,
+            arc_stage_weights,
             per_stage_mask: vec![vec![1]],
             ..par_fixtures.make_ctx()
         };
@@ -5571,6 +5581,223 @@ mod pumping_water_tests {
         };
 
         let stage = chronological_stage(0, &[720.0]);
+        let state = StateLayout::new(
+            ctx.n_hydros,
+            ctx.max_par_order,
+            1,
+            vec![(down_idx, 1)],
+            ctx.n_anticipated,
+            ctx.k_max,
+            ctx.anticipated_lead_stages.clone(),
+            &vec![0; ctx.n_hydros],
+        );
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let _ = build_stage_matrix_entries(&ctx, &stage, 0, &layout);
+    }
+
+    /// `resolve_chrono_arrival_density` returns the precomputed arrival-frame
+    /// `arc_arrival_density` table entry verbatim — a lookup, not a
+    /// re-derivation from the sender's own lag-1 row.
+    #[test]
+    fn resolve_chrono_arrival_density_looks_up_arrival_frame_table() {
+        let up = 1;
+        let down = 2;
+        let fixtures = PumpFixtures::new_full(
+            vec![
+                fixture_hydro_ds(up, Some(down)),
+                fixture_hydro_ds(down, None),
+            ],
+            Vec::new(),
+            vec![fixture_bus(1)],
+            Vec::new(),
+            Vec::new(),
+        );
+        let up_idx = fixtures.hydro_pos[&EntityId(up)];
+
+        let table_density = vec![0.3, 0.7];
+        let mut arc_arrival_density = HashMap::new();
+        arc_arrival_density.insert(up_idx, vec![None, Some(table_density.clone())]);
+        let ctx = TemplateBuildCtx {
+            arc_arrival_density,
+            ..fixtures.make_ctx()
+        };
+
+        let stage = chronological_stage(1, &[300.0, 420.0]);
+        let resolved = resolve_chrono_arrival_density(&ctx, &stage, 1, EntityId(down), 2);
+
+        assert_eq!(
+            resolved, table_density,
+            "must return the precomputed arrival-frame table entry, not a re-derived density"
+        );
+    }
+
+    /// The genuine no-arc/first-stage default: the study's first stage has no
+    /// source stage to blend from, so `arc_arrival_density` carries no entry
+    /// (mirrors the real setup precompute's `None` at stage 0) and the
+    /// fallback is the duration-weighted uniform density.
+    #[test]
+    fn resolve_chrono_arrival_density_falls_back_to_uniform_when_table_entry_absent() {
+        let up = 1;
+        let down = 2;
+        let fixtures = PumpFixtures::new_full(
+            vec![
+                fixture_hydro_ds(up, Some(down)),
+                fixture_hydro_ds(down, None),
+            ],
+            Vec::new(),
+            vec![fixture_bus(1)],
+            Vec::new(),
+            Vec::new(),
+        );
+        let ctx = fixtures.make_ctx();
+
+        let stage = chronological_stage(0, &[300.0, 420.0]);
+        let resolved = resolve_chrono_arrival_density(&ctx, &stage, 0, EntityId(down), 2);
+
+        assert_eq!(
+            resolved,
+            vec![300.0 / 720.0, 420.0 / 720.0],
+            "must fall back to the duration-weighted uniform density"
+        );
+    }
+
+    /// A plain (no-travel-time) tributary into a bucketed confluence is EXCLUDED
+    /// from the arrival-density resolution: `build_arc_arrival_density` inserts
+    /// declared travel-time arcs only, so the plain tributary has no table entry
+    /// and the resolver skips it, returning the sole travel-time arc's density —
+    /// never a false heterogeneous-confluence panic (debug) nor a wrong uniform
+    /// split (release). The plain tributary sorts first in `cascade.upstream`
+    /// (id 0 < id 1), so the pre-fix code would seed `chosen` with the uniform
+    /// fallback before the travel-time arc disagrees. The `cobre-io`
+    /// `check_chronological_confluence_heterogeneous_travel_time` gate cannot
+    /// catch this: it counts travel-time arcs only, so one arc plus one plain
+    /// tributary is `< 2` and passes config validation.
+    #[test]
+    fn resolve_chrono_arrival_density_excludes_plain_tributary_from_confluence() {
+        let plain = 0;
+        let up = 1;
+        let down = 2;
+        let fixtures = PumpFixtures::new_full(
+            vec![
+                fixture_hydro_ds(plain, Some(down)),
+                fixture_hydro_ds(up, Some(down)),
+                fixture_hydro_ds(down, None),
+            ],
+            Vec::new(),
+            vec![fixture_bus(1)],
+            Vec::new(),
+            Vec::new(),
+        );
+        let up_idx = fixtures.hydro_pos[&EntityId(up)];
+
+        // Only the travel-time arc is in the arrival-frame table, and its entry
+        // is deliberately non-uniform so the pre-fix uniform fallback disagrees.
+        let arrival_density = vec![0.25, 0.75];
+        let mut arc_arrival_density = HashMap::new();
+        arc_arrival_density.insert(up_idx, vec![None, Some(arrival_density.clone())]);
+        let ctx = TemplateBuildCtx {
+            arc_arrival_density,
+            ..fixtures.make_ctx()
+        };
+
+        let stage = chronological_stage(1, &[300.0, 420.0]);
+        let resolved = resolve_chrono_arrival_density(&ctx, &stage, 1, EntityId(down), 2);
+
+        assert_eq!(
+            resolved, arrival_density,
+            "the plain tributary must be skipped; the travel-time arc's density wins"
+        );
+    }
+
+    /// `fill_parallel_water_entries` never reads `arc_arrival_density`: the
+    /// maturing bucket's parallel entry stays a single `-1.0` (the confluence
+    /// sum lives in the state variable, not a density split) regardless of
+    /// what the arrival-frame table holds for the arc at this stage.
+    #[test]
+    fn fill_parallel_water_entries_ignores_arc_arrival_density() {
+        let up = 1;
+        let down = 2;
+        let fixtures = PumpFixtures::new_full(
+            vec![
+                fixture_hydro_ds(up, Some(down)),
+                fixture_hydro_ds(down, None),
+            ],
+            Vec::new(),
+            vec![fixture_bus(1)],
+            Vec::new(),
+            Vec::new(),
+        );
+        let up_idx = fixtures.hydro_pos[&EntityId(up)];
+        let down_idx = fixtures.hydro_pos[&EntityId(down)];
+
+        // A deliberately non-uniform entry: if the parallel fill read this
+        // table at all, the bucket's maturing entry would carry something
+        // other than -1.0.
+        let mut arc_arrival_density = HashMap::new();
+        arc_arrival_density.insert(up_idx, vec![Some(vec![0.9, 0.1])]);
+        let ctx = TemplateBuildCtx {
+            arc_arrival_density,
+            per_stage_mask: vec![vec![1]],
+            ..fixtures.make_ctx()
+        };
+
+        let stage = two_block_stage(0, [300.0, 420.0]);
+        let state = StateLayout::new(
+            ctx.n_hydros,
+            ctx.max_par_order,
+            1,
+            vec![(down_idx, 1)],
+            ctx.n_anticipated,
+            ctx.k_max,
+            ctx.anticipated_lead_stages.clone(),
+            &vec![0; ctx.n_hydros],
+        );
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+        let csc = build_sorted_csc(&ctx, &stage, 0, &layout);
+
+        let row_water = i32::try_from(layout.row_water_balance_start() + down_idx).unwrap();
+        let col_first_slot_in = state.transit_buckets_in.start;
+        assert_eq!(
+            coeff_at(&csc, col_first_slot_in, row_water),
+            -1.0,
+            "the parallel maturing-bucket entry must stay a single -1.0, \
+             independent of arc_arrival_density"
+        );
+    }
+
+    /// The `Σ_b arrival_density_b == 1` conservation `debug_assert` in
+    /// [`fill_chronological_water_entries`] still fires when a hand-built
+    /// `arc_arrival_density` table entry violates conservation — the guard is
+    /// real, not dead code, after the arrival-frame lookup swap.
+    #[test]
+    #[should_panic(expected = "arrival_density must sum to 1.0")]
+    fn fill_chronological_water_entries_arrival_density_conservation_panics_on_disagreement() {
+        let up = 1;
+        let down = 2;
+        let fixtures = PumpFixtures::new_full(
+            vec![
+                fixture_hydro_ds(up, Some(down)),
+                fixture_hydro_ds(down, None),
+            ],
+            Vec::new(),
+            vec![fixture_bus(1)],
+            Vec::new(),
+            Vec::new(),
+        );
+        let up_idx = fixtures.hydro_pos[&EntityId(up)];
+        let down_idx = fixtures.hydro_pos[&EntityId(down)];
+
+        // Deliberately non-conserving: sums to 0.6, not 1.0.
+        let mut arc_arrival_density = HashMap::new();
+        arc_arrival_density.insert(up_idx, vec![Some(vec![0.3, 0.3])]);
+        let ctx = TemplateBuildCtx {
+            arc_arrival_density,
+            per_stage_mask: vec![vec![1]],
+            ..fixtures.make_ctx()
+        };
+
+        let stage = chronological_stage(0, &[300.0, 420.0]);
         let state = StateLayout::new(
             ctx.n_hydros,
             ctx.max_par_order,

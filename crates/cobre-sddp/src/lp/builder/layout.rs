@@ -145,15 +145,24 @@ pub(crate) struct TemplateBuildCtx<'a> {
     /// upstream hydro system index (parallel-mode fill; [`Self::arc_spread_chrono`]
     /// carries the chronological block-resolved factors). Absent for an
     /// undeclared arc — the fill's `k_0 = 1`, no-deposit branch. See
-    /// [`build_arc_spread_k`](crate::setup::bucket_topology::build_arc_spread_k).
-    pub(crate) arc_spread_k: HashMap<usize, Vec<Vec<f64>>>,
+    /// [`build_arc_stage_weights`](crate::setup::bucket_topology::build_arc_stage_weights).
+    pub(crate) arc_stage_weights: HashMap<usize, Vec<Vec<f64>>>,
     /// Per-declared-arc, per-chronological-stage full [`SpreadResolution`]
     /// (`block_deposits`/`within_stage_routing`/`arrival_density`), keyed
-    /// like [`Self::arc_spread_k`].
+    /// like [`Self::arc_stage_weights`].
     /// `by_stage[stage_idx]` is `None` when that study stage's own `block_mode`
-    /// is `Parallel` (the parallel fill reads [`Self::arc_spread_k`] instead).
+    /// is `Parallel` (the parallel fill reads [`Self::arc_stage_weights`] instead).
     /// See [`build_arc_spread_chrono`](crate::setup::bucket_topology::build_arc_spread_chrono).
     pub(crate) arc_spread_chrono: HashMap<usize, Vec<Option<SpreadResolution>>>,
+    /// Per-declared-arc, per-chronological-arrival-stage blend of every
+    /// contributing source stage's arrival density (ρ in the methodology),
+    /// resolved in that arrival stage's own frame; keyed like
+    /// [`Self::arc_stage_weights`]. `None` where [`Self::arc_spread_chrono`] is
+    /// also `None` (a `Parallel` arrival stage), or where no in-study source
+    /// stage reaches it. Looked up directly by the chronological water fill's
+    /// `resolve_chrono_arrival_density`. See
+    /// [`build_arc_arrival_density`](crate::setup::bucket_topology::build_arc_arrival_density).
+    pub(crate) arc_arrival_density: HashMap<usize, Vec<Option<Vec<f64>>>>,
     /// `per_stage_mask[stage_idx]` holds the max reachable lag per declared
     /// downstream plant, discovery order (mirrors
     /// [`TransitBucketTopology::per_plant_depth`](crate::setup::bucket_topology::TransitBucketTopology::per_plant_depth)).

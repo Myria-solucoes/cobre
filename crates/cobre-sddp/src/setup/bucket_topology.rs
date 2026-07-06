@@ -11,9 +11,9 @@
 
 use std::collections::HashMap;
 
-use cobre_core::{BlockMode, EntityId, System, window_period_overlaps};
+use cobre_core::{BlockMode, EntityId, Stage, System, window_period_overlaps};
 
-use crate::lead_time::{SpreadResolution, resolve_spread};
+use crate::lead_time::{SpreadResolution, resolve_arrival_density_at, resolve_spread};
 
 /// Canonical bucket ordering, global bucket count, and per-stage reachability
 /// mask, stored on [`super::StudySetup`].
@@ -218,10 +218,10 @@ pub(crate) fn build_transit_bucket_topology(system: &System) -> TransitBucketTop
 /// (full same-stage arrival, no bucket deposit). The chronological-mode
 /// block-resolved `block_deposits`/`within_stage_routing` factors are
 /// threaded separately.
-pub(crate) fn build_arc_spread_k(system: &System) -> HashMap<usize, Vec<Vec<f64>>> {
+pub(crate) fn build_arc_stage_weights(system: &System) -> HashMap<usize, Vec<Vec<f64>>> {
     let study_durations = study_stage_durations(system);
     let n_stages = study_durations.len();
-    let mut arc_spread_k = HashMap::new();
+    let mut arc_stage_weights = HashMap::new();
 
     for (u_idx, hydro) in system.hydros().iter().enumerate() {
         let Some(t_v) = hydro.travel_time_hours.filter(|&t| t > 0.0) else {
@@ -234,20 +234,20 @@ pub(crate) fn build_arc_spread_k(system: &System) -> HashMap<usize, Vec<Vec<f64>
         let k_by_stage: Vec<Vec<f64>> = (0..n_stages)
             .map(|stage| resolve_spread(t_v, stage, &extended, None).stage_weights)
             .collect();
-        arc_spread_k.insert(u_idx, k_by_stage);
+        arc_stage_weights.insert(u_idx, k_by_stage);
     }
 
-    arc_spread_k
+    arc_stage_weights
 }
 
 /// Per-declared-arc, per-CHRONOLOGICAL-stage full [`SpreadResolution`]
 /// (`block_deposits`, `within_stage_routing`, `arrival_density`, plus the
-/// same `stage_weights`/`stage_reach` [`build_arc_spread_k`] stores),
+/// same `stage_weights`/`stage_reach` [`build_arc_stage_weights`] stores),
 /// resolved with the sending stage's own block partition
-/// (`resolve_spread(.., Some(blocks))`). Keyed like `build_arc_spread_k`;
+/// (`resolve_spread(.., Some(blocks))`). Keyed like `build_arc_stage_weights`;
 /// `by_stage[stage_idx]` is `None` for a study stage whose own `block_mode` is
 /// `Parallel` (no block-resolved routing to compute there — the parallel fill
-/// reads `build_arc_spread_k` instead).
+/// reads `build_arc_stage_weights` instead).
 pub(crate) fn build_arc_spread_chrono(
     system: &System,
 ) -> HashMap<usize, Vec<Option<SpreadResolution>>> {
@@ -283,6 +283,129 @@ pub(crate) fn build_arc_spread_chrono(
     }
 
     arc_spread_chrono
+}
+
+/// Per-declared-arc, per-CHRONOLOGICAL-arrival-stage `A` blend of every
+/// contributing source stage's arrival density, resolved in `A`'s own frame
+/// (ρ in the methodology): `density_b = (sum_d weight_d * source_density_{d,b})
+/// / (sum_d weight_d)`, `weight_d` source stage `A-d`'s stage-clock weight
+/// (`arc_stage_weights`) and `source_density_d` that source's lag-`d` delivery
+/// density resolved against `A`'s own blocks ([`resolve_arrival_density_at`])
+/// — covering a parallel source reaching a chronological arrival exactly like
+/// a chronological one, both contributing their weight/density pair to the
+/// same blend. Keyed like [`build_arc_stage_weights`]; `by_stage[stage_idx]` is
+/// `None` for a study stage whose own `block_mode` is `Parallel`, or when no
+/// in-study source stage reaches it (total weight `== 0`, e.g. the study's
+/// first stage).
+pub(crate) fn build_arc_arrival_density(
+    system: &System,
+    arc_stage_weights: &HashMap<usize, Vec<Vec<f64>>>,
+) -> HashMap<usize, Vec<Option<Vec<f64>>>> {
+    let study_durations = study_stage_durations(system);
+    let n_stages = study_durations.len();
+    let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
+    debug_assert_eq!(study_stages.len(), n_stages);
+
+    let mut arc_arrival_density = HashMap::new();
+
+    for (u_idx, hydro) in system.hydros().iter().enumerate() {
+        let Some(t_v) = hydro.travel_time_hours.filter(|&t| t > 0.0) else {
+            continue;
+        };
+        if hydro.downstream_id.is_none() {
+            continue;
+        }
+        let Some(k_by_stage) = arc_stage_weights.get(&u_idx) else {
+            continue;
+        };
+        let extended = extend_for_resolution(&study_durations, t_v);
+
+        let density_by_stage: Vec<Option<Vec<f64>>> = (0..n_stages)
+            .map(|arrival_stage| {
+                arrival_frame_density(
+                    t_v,
+                    arrival_stage,
+                    &extended,
+                    &study_stages,
+                    k_by_stage,
+                    u_idx,
+                )
+            })
+            .collect();
+
+        arc_arrival_density.insert(u_idx, density_by_stage);
+    }
+
+    arc_arrival_density
+}
+
+/// One arc's arrival-frame delivery density at a single arrival stage — the
+/// per-stage body [`build_arc_arrival_density`] maps over every study stage.
+fn arrival_frame_density(
+    t_v: f64,
+    arrival_stage: usize,
+    extended_calendar: &[f64],
+    study_stages: &[&Stage],
+    k_by_stage: &[Vec<f64>],
+    u_idx: usize,
+) -> Option<Vec<f64>> {
+    if study_stages[arrival_stage].block_mode != BlockMode::Chronological {
+        return None;
+    }
+    let arrival_blocks: Vec<f64> = study_stages[arrival_stage]
+        .blocks
+        .iter()
+        .map(|b| b.duration_hours)
+        .collect();
+
+    let mut weighted_density = vec![0.0_f64; arrival_blocks.len()];
+    let mut total_source_weight = 0.0_f64;
+
+    for source_stage in 0..arrival_stage {
+        let lag = arrival_stage - source_stage;
+        let Some(&source_weight) = k_by_stage.get(source_stage).and_then(|k| k.get(lag)) else {
+            continue;
+        };
+        if source_weight <= 0.0 {
+            continue;
+        }
+
+        let mut source_density = resolve_arrival_density_at(
+            t_v,
+            source_stage,
+            lag,
+            extended_calendar,
+            Some(&arrival_blocks),
+        );
+        debug_assert!(
+            source_density.len() <= arrival_blocks.len(),
+            "arc {u_idx} arrival stage {arrival_stage}: source_density row must not exceed A's own block count"
+        );
+        // window_period_overlaps's contiguity contract omits trailing
+        // zero-overlap blocks rather than returning them as explicit 0.0s
+        // (see the lead_time module doc); pad back to A's own block count so
+        // every source_density row aligns with `weighted_density` positionally.
+        source_density.resize(arrival_blocks.len(), 0.0);
+
+        for (acc, &density_b) in weighted_density.iter_mut().zip(&source_density) {
+            *acc += source_weight * density_b;
+        }
+        total_source_weight += source_weight;
+    }
+
+    if total_source_weight <= 0.0 {
+        return None;
+    }
+
+    let arrival_density: Vec<f64> = weighted_density
+        .iter()
+        .map(|&w| w / total_source_weight)
+        .collect();
+    debug_assert!(
+        (arrival_density.iter().sum::<f64>() - 1.0).abs() < 1e-9,
+        "arc {u_idx} arrival stage {arrival_stage}: arrival_density must conserve to 1.0, got {arrival_density:?}"
+    );
+    Some(arrival_density)
 }
 
 #[cfg(test)]
@@ -589,27 +712,27 @@ mod tests {
     }
 
     #[test]
-    fn test_build_arc_spread_k_empty_when_no_arc_declared() {
+    fn test_build_arc_stage_weights_empty_when_no_arc_declared() {
         let downstream = hydro(1, None, None);
         let upstream = hydro(2, Some(1), None);
         let system = build_system(vec![downstream, upstream], uniform_stages(3, 24.0));
 
-        let arc_spread_k = build_arc_spread_k(&system);
+        let arc_stage_weights = build_arc_stage_weights(&system);
 
-        assert!(arc_spread_k.is_empty());
+        assert!(arc_stage_weights.is_empty());
     }
 
     #[test]
-    fn test_build_arc_spread_k_conserves_and_matches_topology_depth() {
+    fn test_build_arc_stage_weights_conserves_and_matches_topology_depth() {
         let downstream = hydro(1, None, None);
         let upstream = hydro(2, Some(1), Some(24.0));
         let system = build_system(vec![downstream, upstream], uniform_stages(10, 24.0));
 
         let topology = build_transit_bucket_topology(&system);
-        let arc_spread_k = build_arc_spread_k(&system);
+        let arc_stage_weights = build_arc_stage_weights(&system);
 
         let upstream_idx = 1;
-        let k_by_stage = arc_spread_k
+        let k_by_stage = arc_stage_weights
             .get(&upstream_idx)
             .expect("declared arc must have an entry");
         assert_eq!(k_by_stage.len(), 10, "one k vector per in-study stage");
@@ -673,5 +796,150 @@ mod tests {
                 "block {b}: per-column conservation must hold"
             );
         }
+    }
+
+    /// Two weekly (168h) parallel sources both reach one 720h chronological
+    /// arrival stage (blocks `[20, 100, 600]`): source stage 1 delivers the
+    /// whole window at lag 1 (weight `1.0`, density `[0, 88/168, 80/168]`),
+    /// source stage 0 delivers a residual tail at lag 2 (weight `32/168`,
+    /// density `[20/32, 12/32, 0]`). The hand-derived blend
+    /// `density_b = sum_d weight_d*source_density_{d,b} / sum_d weight_d` is
+    /// `[0.1, 0.5, 0.4]`.
+    #[test]
+    fn test_build_arc_arrival_density_multi_lag_blend_matches_hand_derived() {
+        let downstream = hydro(1, None, None);
+        let upstream = hydro(2, Some(1), Some(200.0));
+        let system = build_system(
+            vec![downstream, upstream],
+            vec![
+                stage_with_durations(0, &[168.0]),
+                stage_with_durations(1, &[168.0]),
+                chronological_stage_with_durations(2, &[20.0, 100.0, 600.0]),
+            ],
+        );
+
+        let arc_stage_weights = build_arc_stage_weights(&system);
+        let arc_arrival_density = build_arc_arrival_density(&system, &arc_stage_weights);
+
+        let upstream_idx = 1;
+        let density_by_stage = arc_arrival_density
+            .get(&upstream_idx)
+            .expect("declared arc must have an entry");
+        assert_eq!(density_by_stage.len(), 3, "one entry per in-study stage");
+        assert!(
+            density_by_stage[0].is_none(),
+            "no in-study source stage precedes stage 0"
+        );
+        assert!(
+            density_by_stage[1].is_none(),
+            "stage 1 is itself Parallel, no density to resolve"
+        );
+
+        let arrival_density = density_by_stage[2]
+            .as_ref()
+            .expect("both source stages reach the chronological arrival stage");
+        let expected = [0.1, 0.5, 0.4];
+        for (b, (&got, &want)) in arrival_density.iter().zip(&expected).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "block {b}: got {got}, want {want}"
+            );
+        }
+    }
+
+    /// A single Parallel source stage feeds one chronological arrival stage:
+    /// the stored arrival density is the arrival-frame delivery split
+    /// (`[0.8, 0.2]`), not the duration-weighted uniform fallback
+    /// (`[0.4, 0.6]`) a parallel sender used to collapse to.
+    #[test]
+    fn test_build_arc_arrival_density_parallel_sender_is_not_duration_uniform() {
+        let downstream = hydro(1, None, None);
+        let upstream = hydro(2, Some(1), Some(50.0));
+        let system = build_system(
+            vec![downstream, upstream],
+            vec![
+                stage_with_durations(0, &[100.0]),
+                chronological_stage_with_durations(1, &[40.0, 60.0]),
+            ],
+        );
+
+        let arc_stage_weights = build_arc_stage_weights(&system);
+        let arc_arrival_density = build_arc_arrival_density(&system, &arc_stage_weights);
+
+        let upstream_idx = 1;
+        let density_by_stage = arc_arrival_density
+            .get(&upstream_idx)
+            .expect("declared arc must have an entry");
+        let arrival_density = density_by_stage[1]
+            .as_ref()
+            .expect("the parallel source reaches the chronological arrival stage");
+
+        let expected = [0.8, 0.2];
+        for (b, (&got, &want)) in arrival_density.iter().zip(&expected).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "block {b}: got {got}, want {want}"
+            );
+        }
+
+        let duration_uniform: f64 = 40.0 / 100.0;
+        assert!(
+            (arrival_density[0] - duration_uniform).abs() > 1e-6,
+            "arrival density must be the arrival-frame blend, not the duration-weighted uniform fallback"
+        );
+    }
+
+    #[test]
+    fn test_build_arc_arrival_density_conserves_across_every_chronological_stage() {
+        let downstream = hydro(1, None, None);
+        let upstream_a = hydro(2, Some(1), Some(90.0));
+        let upstream_b = hydro(3, Some(1), Some(250.0));
+        let system = build_system(
+            vec![downstream, upstream_a, upstream_b],
+            vec![
+                chronological_stage_with_durations(0, &[60.0, 40.0]),
+                stage_with_durations(1, &[100.0]),
+                chronological_stage_with_durations(2, &[100.0, 100.0, 100.0]),
+                chronological_stage_with_durations(3, &[150.0]),
+            ],
+        );
+
+        let arc_stage_weights = build_arc_stage_weights(&system);
+        let arc_arrival_density = build_arc_arrival_density(&system, &arc_stage_weights);
+
+        let mut n_checked = 0;
+        for density_by_stage in arc_arrival_density.values() {
+            for arrival_density in density_by_stage.iter().flatten() {
+                let sum: f64 = arrival_density.iter().sum();
+                assert!(
+                    (sum - 1.0).abs() < 1e-9,
+                    "arrival_density must conserve to 1.0, got {arrival_density:?}"
+                );
+                n_checked += 1;
+            }
+        }
+        assert!(
+            n_checked > 0,
+            "the system must exercise at least one resolved arrival_density vector"
+        );
+    }
+
+    #[test]
+    fn test_build_arc_arrival_density_is_declaration_order_invariant() {
+        let downstream = hydro(1, None, None);
+        let upstream = hydro(2, Some(1), Some(200.0));
+        let stages = vec![
+            stage_with_durations(0, &[168.0]),
+            stage_with_durations(1, &[168.0]),
+            chronological_stage_with_durations(2, &[20.0, 100.0, 600.0]),
+        ];
+
+        let system_a = build_system(vec![downstream.clone(), upstream.clone()], stages.clone());
+        let system_b = build_system(vec![upstream, downstream], stages);
+
+        let density_a = build_arc_arrival_density(&system_a, &build_arc_stage_weights(&system_a));
+        let density_b = build_arc_arrival_density(&system_b, &build_arc_stage_weights(&system_b));
+
+        assert_eq!(density_a, density_b);
     }
 }

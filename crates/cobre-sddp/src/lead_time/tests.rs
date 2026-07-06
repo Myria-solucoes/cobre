@@ -274,6 +274,79 @@ fn test_shared_density_consistency_debug_assert() {
     }
 }
 
+// Regression: with every arrival stage sharing the anchor's own block
+// partition (uniform stage lengths), arrival_density stays bit-identical to
+// this captured baseline.
+#[test]
+fn test_uniform_resolution_arrival_density_matches_captured_baseline() {
+    let stage_lengths_hours = [720.0, 720.0];
+    let block_lengths_hours = [240.0, 240.0, 240.0];
+    let resolution = resolve_spread(250.0, 0, &stage_lengths_hours, Some(&block_lengths_hours));
+
+    assert_eq!(
+        resolution.arrival_density,
+        vec![vec![240.0 / 250.0, 10.0 / 250.0]]
+    );
+}
+
+// Multi-resolution: arrival stage t+1's own partition (summing to its own
+// 500h length) differs from the anchor's 720h stage. `resolve_delivery`
+// splits row 0 against t+1's own blocks, not the anchor's — block0's 300h
+// covers the whole local window's first 300h, block1's 200h the rest.
+#[test]
+fn test_resolve_delivery_splits_against_arrival_stage_own_blocks() {
+    let future_calendar = [720.0, 500.0, 400.0];
+    let arrival_stage1_blocks = [300.0, 200.0];
+    let arrival_blocks: [Option<&[f64]>; 2] = [Some(&arrival_stage1_blocks), None];
+
+    let arrival_density = resolve_delivery(600.0, 1320.0, &future_calendar, &arrival_blocks, 2);
+
+    assert_eq!(arrival_density.len(), 2);
+    assert_close(&arrival_density[0], &[0.6, 0.4]);
+    assert_close(&arrival_density[1], &[1.0]);
+}
+
+// Exercises the new Σ_b φ_{d,b} == 1 delivery-conservation debug_assert
+// directly: every nonempty arrival_density row sums to 1.0, whether the row
+// split against a matching block partition (uniform calendar) or fell back
+// to a single row (a length mismatch, the mixed calendar).
+#[test]
+fn test_arrival_density_conservation_per_lag() {
+    let assert_conserved = |resolution: &SpreadResolution| {
+        for row in &resolution.arrival_density {
+            if row.is_empty() {
+                continue;
+            }
+            assert!(
+                (row.iter().sum::<f64>() - 1.0).abs() < TOL,
+                "arrival density row must sum to 1.0: {row:?}"
+            );
+        }
+    };
+
+    let uniform_stage_lengths = [720.0, 720.0, 720.0];
+    let uniform_blocks = [240.0, 240.0, 240.0];
+    for &travel_time_hours in &[50.0, 250.0, 400.0, 690.0] {
+        assert_conserved(&resolve_spread(
+            travel_time_hours,
+            0,
+            &uniform_stage_lengths,
+            Some(&uniform_blocks),
+        ));
+    }
+
+    let mixed_stage_lengths = [720.0, 500.0, 300.0, 300.0];
+    let mixed_blocks = [100.0, 200.0, 50.0, 370.0];
+    for &travel_time_hours in &[50.0, 300.0, 690.0, 1000.0] {
+        assert_conserved(&resolve_spread(
+            travel_time_hours,
+            0,
+            &mixed_stage_lengths,
+            Some(&mixed_blocks),
+        ));
+    }
+}
+
 // PMO calendar (4x168h weekly then 720h monthly), 30-day (720h) lead. The
 // end-anchored decider computes directly against the calendar rather than
 // reading a decision-anchored column, avoiding the many-to-one collision a

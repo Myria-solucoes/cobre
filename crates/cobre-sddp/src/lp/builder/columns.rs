@@ -237,13 +237,8 @@ fn fill_turbine_columns(
         };
         for blk in 0..layout.n_blks {
             let col = layout.turbine_col(h_idx, blk);
-            if suspended {
-                bufs.col_lower[col] = 0.0;
-                bufs.col_upper[col] = 0.0;
-            } else {
-                bufs.col_lower[col] = 0.0;
-                bufs.col_upper[col] = turb_upper;
-            }
+            bufs.col_lower[col] = 0.0;
+            bufs.col_upper[col] = if suspended { 0.0 } else { turb_upper };
             let block_hours = stage.blocks[blk].duration_hours;
             bufs.objective[col] = hp.turbined_cost * block_hours;
         }
@@ -760,38 +755,14 @@ fn fill_operational_slack_columns(
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
-    fill_block_family(
-        ctx,
-        stage,
-        stage_idx,
-        layout,
-        bufs,
+    for family in [
         BlockSlackFamily::OutflowBelow,
-    );
-    fill_block_family(
-        ctx,
-        stage,
-        stage_idx,
-        layout,
-        bufs,
         BlockSlackFamily::OutflowAbove,
-    );
-    fill_block_family(
-        ctx,
-        stage,
-        stage_idx,
-        layout,
-        bufs,
         BlockSlackFamily::TurbineBelow,
-    );
-    fill_block_family(
-        ctx,
-        stage,
-        stage_idx,
-        layout,
-        bufs,
         BlockSlackFamily::GenerationBelow,
-    );
+    ] {
+        fill_block_family(ctx, stage, stage_idx, layout, bufs, family);
+    }
 }
 
 /// Fill one operational-violation slack family's `n_h * n_blks` columns. Activation
@@ -1313,8 +1284,9 @@ mod interior_storage_bound_tests {
                 n_contract_import: 0,
                 n_contract_export: 0,
                 diversion_upstream: HashMap::new(),
-                arc_spread_k: HashMap::new(),
+                arc_stage_weights: HashMap::new(),
                 arc_spread_chrono: HashMap::new(),
+                arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
                 n_hydros: 1,
                 n_thermals: 0,
@@ -1800,8 +1772,9 @@ mod diversion_bound_tests {
                 n_contract_import: 0,
                 n_contract_export: 0,
                 diversion_upstream: HashMap::new(),
-                arc_spread_k: HashMap::new(),
+                arc_stage_weights: HashMap::new(),
                 arc_spread_chrono: HashMap::new(),
+                arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
                 n_hydros: 1,
                 n_thermals: 0,
@@ -2174,8 +2147,9 @@ mod filling_phase_gating_tests {
                 n_contract_import: 0,
                 n_contract_export: 0,
                 diversion_upstream: HashMap::new(),
-                arc_spread_k: HashMap::new(),
+                arc_stage_weights: HashMap::new(),
                 arc_spread_chrono: HashMap::new(),
+                arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
                 n_hydros: 1,
                 n_thermals: 0,
@@ -3018,8 +2992,9 @@ mod anticipated_objective_tests {
                 n_contract_import: 0,
                 n_contract_export: 0,
                 diversion_upstream: HashMap::new(),
-                arc_spread_k: HashMap::new(),
+                arc_stage_weights: HashMap::new(),
                 arc_spread_chrono: HashMap::new(),
+                arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
                 n_hydros: 0,
                 n_thermals: 2,
@@ -3277,8 +3252,9 @@ mod anticipated_objective_tests {
             n_contract_import: 0,
             n_contract_export: 0,
             diversion_upstream: HashMap::new(),
-            arc_spread_k: HashMap::new(),
+            arc_stage_weights: HashMap::new(),
             arc_spread_chrono: HashMap::new(),
+            arc_arrival_density: HashMap::new(),
             per_stage_mask: Vec::new(),
             n_hydros: 0,
             n_thermals: 1,
@@ -3463,8 +3439,9 @@ mod anticipated_objective_tests {
             n_contract_import: 0,
             n_contract_export: 0,
             diversion_upstream: HashMap::new(),
-            arc_spread_k: HashMap::new(),
+            arc_stage_weights: HashMap::new(),
             arc_spread_chrono: HashMap::new(),
+            arc_arrival_density: HashMap::new(),
             per_stage_mask: Vec::new(),
             n_hydros: 0,
             n_thermals: 1,
@@ -3682,8 +3659,9 @@ mod anticipated_objective_tests {
                 n_contract_import: 0,
                 n_contract_export: 0,
                 diversion_upstream: HashMap::new(),
-                arc_spread_k: HashMap::new(),
+                arc_stage_weights: HashMap::new(),
                 arc_spread_chrono: HashMap::new(),
+                arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
                 n_hydros: 0,
                 n_thermals: 1,
@@ -4207,8 +4185,9 @@ mod block_family_slack_tests {
                 n_contract_import: 0,
                 n_contract_export: 0,
                 diversion_upstream: HashMap::new(),
-                arc_spread_k: HashMap::new(),
+                arc_stage_weights: HashMap::new(),
                 arc_spread_chrono: HashMap::new(),
+                arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
                 n_hydros: N_HYDROS,
                 n_thermals: 0,
@@ -4610,8 +4589,9 @@ mod evaporation_slack_objective_tests {
                 n_contract_import: 0,
                 n_contract_export: 0,
                 diversion_upstream: HashMap::new(),
-                arc_spread_k: HashMap::new(),
+                arc_stage_weights: HashMap::new(),
                 arc_spread_chrono: HashMap::new(),
+                arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
                 n_hydros: 1,
                 n_thermals: 0,
@@ -4930,8 +4910,9 @@ mod contract_column_tests {
                 n_contract_import,
                 n_contract_export,
                 diversion_upstream: HashMap::new(),
-                arc_spread_k: HashMap::new(),
+                arc_stage_weights: HashMap::new(),
                 arc_spread_chrono: HashMap::new(),
+                arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
                 n_hydros: 0,
                 n_thermals: 0,

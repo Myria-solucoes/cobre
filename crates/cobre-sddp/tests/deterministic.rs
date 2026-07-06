@@ -4350,6 +4350,586 @@ fn d48_travel_time_ic_seed_windowed_defluence_cost() {
     );
 }
 
+/// D49: arrival-frame chronological delivery density. Cascade `U -> J`,
+/// `travel_time_hours = 200` on `U`'s arc. Stages 0 and 1 are single 168 h
+/// weekly PARALLEL senders; stage 2 is a monthly 720 h CHRONOLOGICAL arrival
+/// stage split into blocks `[20, 100, 600]`. This is the first deterministic
+/// case whose maturing bucket delivers into a chronological stage at a non-zero
+/// index — the branch that resolves the delivery density in the arrival stage's
+/// own frame rather than collapsing to the same-stage (first-stage) uniform
+/// fallback, and rather than the parallel single-row arrival every prior water
+/// case used.
+///
+/// ## What is exercised
+///
+/// Two PARALLEL source stages both mature into the ONE chronological arrival
+/// stage: source stage 1 at lag 1 and source stage 0 at lag 2 — a genuine
+/// multi-lag blend (`>= 2` contributing source lags), and the
+/// parallel-sender -> chronological-arrival cell that used to resolve to a
+/// duration-uniform density.
+///
+/// ## Hand-derived delivery density (`arrival_density`)
+///
+/// The delivered per-block split is the fixed, release-independent blend
+/// `arrival_density_b = (sum_d source_weight_d * source_density_{d,b})
+/// / (sum_d source_weight_d)`, with `source_weight_d` the stage-clock weight of
+/// source stage `A - d` (from `resolve_spread`) and `source_density_d` that
+/// source's lag-`d` delivery density resolved against the arrival stage's OWN
+/// blocks `[20, 100, 600]`:
+///
+/// - source stage 1, lag 1: `source_weight = 1`,
+///   `source_density = [0, 88/168, 80/168]`;
+/// - source stage 0, lag 2: `source_weight = 32/168`,
+///   `source_density = [20/32, 12/32, 0]`.
+///
+/// Total source weight `1 + 32/168 = 200/168`; the blend is `[0.1, 0.5, 0.4]`,
+/// which conserves to 1. This test recomputes both parts from the public
+/// resolvers (`resolve_spread` for the weights, `window_period_overlaps` for
+/// each source density) and cross-checks the closed-form `[0.1, 0.5, 0.4]`, so
+/// the expected split pins the setup precompute, never the solver output.
+///
+/// ## What the LP delivers
+///
+/// `U` starts with 100 hm3 of storage and zero natural inflow; draining it
+/// within the horizon pushes water into transit that matures at stage 2. Any
+/// stage-2 release from `U` would arrive same-stage (contaminating the split),
+/// so releasing early is strictly better (it double-generates — once at `U`,
+/// once at `J` inside the horizon) and `U` empties by stage 1, leaving nothing
+/// to release at stage 2. `J` is run-of-river (zero storage), so its per-block
+/// output equals its per-block arrival, which — since the same-stage release is
+/// zero — is exactly `arrival_density_b` times the maturing bucket. The split
+/// is a fixed LP coefficient, so it holds regardless of how much water matures,
+/// making this backend-agnostic across HiGHS and CLP.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d49_travel_time_chronological_arrival_density() {
+    const T_V: f64 = 200.0;
+    const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
+    const N_STAGES: usize = 3;
+    const ARRIVAL_STAGE_IDX: usize = 2;
+    // Exact-rational precompute cross-check vs the closed-form blend.
+    const DERIV_TOL: f64 = 1e-9;
+    // Delivered split vs the precompute (an LP solve stands between them).
+    const SPLIT_TOL: f64 = 1e-6;
+
+    let stage_hours = [168.0, 168.0, 720.0];
+    let arrival_blocks = [20.0, 100.0, 600.0];
+
+    // Stage-clock weights (the source weights) via the public spread resolver.
+    // Two source stages reach the chronological arrival stage: stage 1 at lag 1
+    // and stage 0 at lag 2 — a multi-lag blend.
+    let padded = pad_calendar_for_resolution(&stage_hours, T_V);
+    let stage_weights_0 =
+        cobre_sddp::lead_time::resolve_spread(T_V, 0, &padded, None).stage_weights;
+    let stage_weights_1 =
+        cobre_sddp::lead_time::resolve_spread(T_V, 1, &padded, None).stage_weights;
+    let source_weight_lag1 = stage_weights_1[1];
+    let source_weight_lag2 = stage_weights_0[2];
+    assert!(
+        source_weight_lag1 > 0.0 && source_weight_lag2 > 0.0,
+        "D49: the blend must have >= 2 contributing source lags (lag-1 weight \
+         {source_weight_lag1}, lag-2 weight {source_weight_lag2})"
+    );
+
+    // Lag-`lag` delivery density of `source_stage` resolved against the arrival
+    // stage's OWN blocks — the arrival-frame counterpart of `resolve_spread`,
+    // recomputed here from `window_period_overlaps` exactly as the setup
+    // precompute does, so nothing is read from the solver.
+    let arrival_frame_density = |source_stage: usize, lag: usize| -> Vec<f64> {
+        let h_source = stage_hours[source_stage];
+        let window_start = T_V;
+        let window_end = T_V + h_source;
+        let arrival_start: f64 = stage_hours[source_stage..source_stage + lag].iter().sum();
+        let arrival_end = arrival_start + arrival_blocks.iter().sum::<f64>();
+        let overlap_start = window_start.max(arrival_start);
+        let overlap_end = window_end.min(arrival_end);
+        let width = overlap_end - overlap_start;
+        assert!(
+            width > 0.0,
+            "D49: source stage {source_stage} lag {lag} must reach the arrival stage"
+        );
+        let local_start = overlap_start - arrival_start;
+        let mut row: Vec<f64> =
+            cobre_core::window_period_overlaps(local_start, width, &arrival_blocks)
+                .iter()
+                .map(|overlap| overlap / width)
+                .collect();
+        row.resize(arrival_blocks.len(), 0.0);
+        row
+    };
+    let source_density_lag1 = arrival_frame_density(1, 1);
+    let source_density_lag2 = arrival_frame_density(0, 2);
+
+    let total_source_weight = source_weight_lag1 + source_weight_lag2;
+    let expected_density: Vec<f64> = (0..arrival_blocks.len())
+        .map(|b| {
+            (source_weight_lag1 * source_density_lag1[b]
+                + source_weight_lag2 * source_density_lag2[b])
+                / total_source_weight
+        })
+        .collect();
+
+    // Closed-form cross-check: the hand-derived blend is [0.1, 0.5, 0.4],
+    // conserving to 1.
+    let closed_form = [0.1, 0.5, 0.4];
+    for (b, (&got, &want)) in expected_density.iter().zip(&closed_form).enumerate() {
+        assert!(
+            (got - want).abs() < DERIV_TOL,
+            "D49: hand-derived arrival_density[{b}] = {got}, closed-form {want}"
+        );
+    }
+    let derived_sum: f64 = expected_density.iter().sum();
+    assert!(
+        (derived_sum - 1.0).abs() < DERIV_TOL,
+        "D49: hand-derived arrival_density must conserve to 1.0, got {derived_sum}"
+    );
+
+    let case_dir = Path::new("../../examples/deterministic/d49-travel-time-chronological-arrival");
+    let (setup, system, result) = run_deterministic_with_setup(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D49: gap={:.2e}",
+        result.final_gap
+    );
+
+    // The arrival stage must be chronological at a non-zero index (the branch
+    // under test); its senders must be parallel (the parallel-sender cell).
+    let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
+    assert_eq!(
+        study_stages.len(),
+        N_STAGES,
+        "D49: exactly three study stages"
+    );
+    // ARRIVAL_STAGE_IDX == 2 > 0: a non-first, chronological arrival stage is the
+    // only construction that drives the arrival-frame branch rather than the
+    // uniform first-stage fallback.
+    assert_eq!(
+        study_stages[ARRIVAL_STAGE_IDX].block_mode,
+        cobre_core::BlockMode::Chronological,
+        "D49: the arrival stage must be chronological to drive the arrival-frame branch"
+    );
+    assert_eq!(
+        study_stages[0].block_mode,
+        cobre_core::BlockMode::Parallel,
+        "D49: source stage 0 must be parallel"
+    );
+    assert_eq!(
+        study_stages[1].block_mode,
+        cobre_core::BlockMode::Parallel,
+        "D49: source stage 1 must be parallel"
+    );
+
+    let comm = StubComm;
+    let mut pool = setup
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
+        .expect("D49: simulation workspace pool must build");
+    let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
+    let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);
+    let drain_handle = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
+    let _local_costs = setup
+        .simulate(
+            &mut pool.workspaces,
+            &comm,
+            &result_tx,
+            None,
+            result.frozen_templates.as_deref(),
+            &result.basis_cache,
+        )
+        .expect("D49: simulate must return Ok");
+    drop(result_tx);
+    let scenario_results = drain_handle.join().expect("drain thread must not panic");
+
+    assert_eq!(scenario_results.len(), 1, "D49: exactly one scenario");
+    let scenario = &scenario_results[0];
+    assert_eq!(scenario.stages.len(), N_STAGES, "D49: exactly three stages");
+
+    let arrival_stage = scenario
+        .stages
+        .iter()
+        .find(|s| s.stage_id as usize == ARRIVAL_STAGE_IDX)
+        .expect("D49: the arrival stage must be simulated");
+
+    // U must release nothing same-stage at the arrival stage: only then is J's
+    // per-block arrival purely the maturing bucket, so the split reads the
+    // arrival density and not a fresh same-stage deposit.
+    let u_release_hm3: f64 = arrival_stage
+        .hydros
+        .iter()
+        .filter(|h| h.hydro_id == 0)
+        .map(|h| {
+            let b = h
+                .block_id
+                .expect("D49: chronological records carry a block id") as usize;
+            (h.turbined_m3s + h.spillage_m3s) * M3S_TO_HM3 * arrival_blocks[b]
+        })
+        .sum();
+    assert!(
+        u_release_hm3.abs() < SPLIT_TOL,
+        "D49: U must release nothing at the arrival stage so the per-block split \
+         reads the maturing bucket alone, got {u_release_hm3} hm3"
+    );
+
+    // J is run-of-river, so its per-block output (turbined + spilled) equals its
+    // per-block arrival — here the maturing bucket split by arrival_density.
+    let mut delivered_by_block = [0.0_f64; 3];
+    for h in arrival_stage.hydros.iter().filter(|h| h.hydro_id == 1) {
+        let b = h
+            .block_id
+            .expect("D49: chronological records carry a block id") as usize;
+        delivered_by_block[b] += (h.turbined_m3s + h.spillage_m3s) * M3S_TO_HM3 * arrival_blocks[b];
+    }
+    let delivered_total: f64 = delivered_by_block.iter().sum();
+    assert!(
+        delivered_total > 1.0,
+        "D49: the maturing bucket must deliver a positive volume at the arrival \
+         stage (else the split is unobservable), got {delivered_total} hm3"
+    );
+
+    // Cross-check the total against the reported incoming lag-1 bucket.
+    let reported_arrival_hm3 = arrival_stage
+        .transit_buckets
+        .iter()
+        .find(|b| b.hydro_id == 1 && b.lag == 1)
+        .map_or(0.0, |b| b.delayed_arrival_hm3);
+    assert!(
+        (delivered_total - reported_arrival_hm3).abs() < SPLIT_TOL,
+        "D49: J's summed per-block release ({delivered_total}) must equal the \
+         reported maturing arrival ({reported_arrival_hm3})"
+    );
+
+    // The delivered per-block split must equal the hand-derived arrival density.
+    let mut delivered_split_sum = 0.0_f64;
+    for (b, (&delivered, &want)) in delivered_by_block.iter().zip(&expected_density).enumerate() {
+        let split = delivered / delivered_total;
+        delivered_split_sum += split;
+        assert!(
+            (split - want).abs() < SPLIT_TOL,
+            "D49: delivered arrival split[{b}] = {split}, hand-derived arrival_density {want}"
+        );
+    }
+    assert!(
+        (delivered_split_sum - 1.0).abs() < SPLIT_TOL,
+        "D49: the delivered arrival split must conserve to 1.0, got {delivered_split_sum}"
+    );
+
+    // The parallel-sender -> chronological-arrival cell must deliver the
+    // arrival-frame blend, NOT the duration-weighted uniform density the old
+    // sender-frame lookup collapsed a parallel sender to.
+    let arrival_total: f64 = arrival_blocks.iter().sum();
+    let duration_uniform: Vec<f64> = arrival_blocks.iter().map(|&h| h / arrival_total).collect();
+    let split_vs_uniform: f64 = delivered_by_block
+        .iter()
+        .zip(&duration_uniform)
+        .map(|(&delivered, &uniform)| (delivered / delivered_total - uniform).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        split_vs_uniform > 1e-3,
+        "D49: the delivered split must be the arrival-frame blend, not the \
+         duration-weighted uniform density {duration_uniform:?} (max deviation \
+         {split_vs_uniform})"
+    );
+}
+
+/// D50: a PLAIN tributary into a bucketed chronological confluence must not
+/// perturb the maturing bucket's arrival-density split. Confluence `J` (id 2)
+/// is fed by TWO upstreams: `U` (id 1) carries `travel_time_hours = 200` (a
+/// declared travel-time arc, so `J` holds a maturing transit bucket) and `V`
+/// (id 0) is a plain tributary with no `travel_time_hours` (a same-stage arc,
+/// no maturing bucket). `V` sorts before `U` in the id-ordered cascade upstream
+/// list, so the arrival-density resolver visits the plain tributary first.
+///
+/// `cobre-io`'s `check_chronological_confluence_heterogeneous_travel_time`
+/// counts travel-time arcs only, so one travel-time arc plus one plain tributary
+/// is `< 2` and passes config validation — the resolver is the only guard, and
+/// it must skip `V` (which has no `arc_arrival_density` entry) rather than fold
+/// its duration-uniform density into the confluence. The pre-fix resolver
+/// derived a uniform density for the plain tributary and then compared it to
+/// `U`'s non-uniform arrival density: a false heterogeneous-confluence panic in
+/// debug/test, a silent wrong (uniform) split in release. Because `V` sorts
+/// first, the pre-fix release path would seed the split with the uniform density
+/// and keep it, so the delivered-split assertion below catches the release-mode
+/// regression too.
+///
+/// Same calendar and arc as D49 (`T_V = 200`, senders `[168, 168]` parallel,
+/// arrival stage `[20, 100, 600]` chronological), so the hand-derived
+/// `arrival_density` is the same `[0.1, 0.5, 0.4]` blend, recomputed here from
+/// the public resolvers. `V` carries zero water (zero storage, zero inflow, zero
+/// turbine/generation capacity), so `J`'s stage-2 arrival is the maturing bucket
+/// alone and its per-block split reads `U`'s arrival density. The split is a
+/// fixed LP coefficient, so the assertion is backend-agnostic across HiGHS and
+/// CLP.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d50_travel_time_plain_tributary_confluence_arrival_density() {
+    const T_V: f64 = 200.0;
+    const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
+    const N_STAGES: usize = 3;
+    const ARRIVAL_STAGE_IDX: usize = 2;
+    const DERIV_TOL: f64 = 1e-9;
+    const SPLIT_TOL: f64 = 1e-6;
+    // Entity ids: V is the plain tributary, U the travel-time arc, J the
+    // bucketed confluence downstream.
+    const V_ID: i32 = 0;
+    const U_ID: i32 = 1;
+    const J_ID: i32 = 2;
+
+    let stage_hours = [168.0, 168.0, 720.0];
+    let arrival_blocks = [20.0, 100.0, 600.0];
+
+    // Hand-derived arrival_density = [0.1, 0.5, 0.4] (identical to D49: same arc,
+    // same calendar), recomputed from the public resolvers so nothing is read
+    // from the solver.
+    let padded = pad_calendar_for_resolution(&stage_hours, T_V);
+    let stage_weights_0 =
+        cobre_sddp::lead_time::resolve_spread(T_V, 0, &padded, None).stage_weights;
+    let stage_weights_1 =
+        cobre_sddp::lead_time::resolve_spread(T_V, 1, &padded, None).stage_weights;
+    let source_weight_lag1 = stage_weights_1[1];
+    let source_weight_lag2 = stage_weights_0[2];
+    assert!(
+        source_weight_lag1 > 0.0 && source_weight_lag2 > 0.0,
+        "D50: the blend must have >= 2 contributing source lags (lag-1 weight \
+         {source_weight_lag1}, lag-2 weight {source_weight_lag2})"
+    );
+
+    let arrival_frame_density = |source_stage: usize, lag: usize| -> Vec<f64> {
+        let h_source = stage_hours[source_stage];
+        let window_start = T_V;
+        let window_end = T_V + h_source;
+        let arrival_start: f64 = stage_hours[source_stage..source_stage + lag].iter().sum();
+        let arrival_end = arrival_start + arrival_blocks.iter().sum::<f64>();
+        let overlap_start = window_start.max(arrival_start);
+        let overlap_end = window_end.min(arrival_end);
+        let width = overlap_end - overlap_start;
+        assert!(
+            width > 0.0,
+            "D50: source stage {source_stage} lag {lag} must reach the arrival stage"
+        );
+        let local_start = overlap_start - arrival_start;
+        let mut row: Vec<f64> =
+            cobre_core::window_period_overlaps(local_start, width, &arrival_blocks)
+                .iter()
+                .map(|overlap| overlap / width)
+                .collect();
+        row.resize(arrival_blocks.len(), 0.0);
+        row
+    };
+    let source_density_lag1 = arrival_frame_density(1, 1);
+    let source_density_lag2 = arrival_frame_density(0, 2);
+
+    let total_source_weight = source_weight_lag1 + source_weight_lag2;
+    let expected_density: Vec<f64> = (0..arrival_blocks.len())
+        .map(|b| {
+            (source_weight_lag1 * source_density_lag1[b]
+                + source_weight_lag2 * source_density_lag2[b])
+                / total_source_weight
+        })
+        .collect();
+
+    let closed_form = [0.1, 0.5, 0.4];
+    for (b, (&got, &want)) in expected_density.iter().zip(&closed_form).enumerate() {
+        assert!(
+            (got - want).abs() < DERIV_TOL,
+            "D50: hand-derived arrival_density[{b}] = {got}, closed-form {want}"
+        );
+    }
+    let derived_sum: f64 = expected_density.iter().sum();
+    assert!(
+        (derived_sum - 1.0).abs() < DERIV_TOL,
+        "D50: hand-derived arrival_density must conserve to 1.0, got {derived_sum}"
+    );
+
+    let case_dir =
+        Path::new("../../examples/deterministic/d50-travel-time-plain-tributary-confluence");
+    let (setup, system, result) = run_deterministic_with_setup(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D50: gap={:.2e}",
+        result.final_gap
+    );
+
+    // The triggering topology: J is fed by V (plain, id 0) then U (travel-time,
+    // id 1) in id-order, and only U carries a travel-time arc. This is exactly
+    // the confluence the pre-fix resolver mishandled.
+    let upstream_of_j = system.cascade().upstream(cobre_core::EntityId(J_ID));
+    assert_eq!(
+        upstream_of_j,
+        &[cobre_core::EntityId(V_ID), cobre_core::EntityId(U_ID)],
+        "D50: J must be fed by V (id 0, plain) then U (id 1, travel-time)"
+    );
+    let travel_time_of = |id: i32| {
+        system
+            .hydros()
+            .iter()
+            .find(|h| h.id == cobre_core::EntityId(id))
+            .unwrap_or_else(|| panic!("D50: hydro {id} must be present"))
+            .travel_time_hours
+    };
+    assert!(
+        travel_time_of(V_ID).is_none(),
+        "D50: V (id 0) must be a plain tributary with no travel_time_hours"
+    );
+    assert_eq!(
+        travel_time_of(U_ID),
+        Some(T_V),
+        "D50: U (id 1) must carry the declared travel-time arc"
+    );
+
+    let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
+    assert_eq!(
+        study_stages.len(),
+        N_STAGES,
+        "D50: exactly three study stages"
+    );
+    assert_eq!(
+        study_stages[ARRIVAL_STAGE_IDX].block_mode,
+        cobre_core::BlockMode::Chronological,
+        "D50: the arrival stage must be chronological to drive the arrival-frame branch"
+    );
+    assert_eq!(
+        study_stages[0].block_mode,
+        cobre_core::BlockMode::Parallel,
+        "D50: source stage 0 must be parallel"
+    );
+    assert_eq!(
+        study_stages[1].block_mode,
+        cobre_core::BlockMode::Parallel,
+        "D50: source stage 1 must be parallel"
+    );
+
+    let comm = StubComm;
+    let mut pool = setup
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
+        .expect("D50: simulation workspace pool must build");
+    let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
+    let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);
+    let drain_handle = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
+    let _local_costs = setup
+        .simulate(
+            &mut pool.workspaces,
+            &comm,
+            &result_tx,
+            None,
+            result.frozen_templates.as_deref(),
+            &result.basis_cache,
+        )
+        .expect("D50: simulate must return Ok");
+    drop(result_tx);
+    let scenario_results = drain_handle.join().expect("drain thread must not panic");
+
+    assert_eq!(scenario_results.len(), 1, "D50: exactly one scenario");
+    let scenario = &scenario_results[0];
+    assert_eq!(scenario.stages.len(), N_STAGES, "D50: exactly three stages");
+
+    let arrival_stage = scenario
+        .stages
+        .iter()
+        .find(|s| s.stage_id as usize == ARRIVAL_STAGE_IDX)
+        .expect("D50: the arrival stage must be simulated");
+
+    // The plain tributary V carries zero water, so it releases nothing at the
+    // arrival stage — its presence in the confluence is purely topological and
+    // must not add a same-stage deposit onto J's arrival split.
+    let v_release_hm3: f64 = arrival_stage
+        .hydros
+        .iter()
+        .filter(|h| h.hydro_id == V_ID)
+        .map(|h| {
+            let b = h
+                .block_id
+                .expect("D50: chronological records carry a block id") as usize;
+            (h.turbined_m3s + h.spillage_m3s) * M3S_TO_HM3 * arrival_blocks[b]
+        })
+        .sum();
+    assert!(
+        v_release_hm3.abs() < SPLIT_TOL,
+        "D50: the plain tributary V must release nothing at the arrival stage, got {v_release_hm3} hm3"
+    );
+
+    // U must release nothing same-stage at the arrival stage: only then is J's
+    // per-block arrival purely the maturing bucket, so the split reads the
+    // arrival density and not a fresh same-stage deposit.
+    let u_release_hm3: f64 = arrival_stage
+        .hydros
+        .iter()
+        .filter(|h| h.hydro_id == U_ID)
+        .map(|h| {
+            let b = h
+                .block_id
+                .expect("D50: chronological records carry a block id") as usize;
+            (h.turbined_m3s + h.spillage_m3s) * M3S_TO_HM3 * arrival_blocks[b]
+        })
+        .sum();
+    assert!(
+        u_release_hm3.abs() < SPLIT_TOL,
+        "D50: U must release nothing at the arrival stage so the per-block split \
+         reads the maturing bucket alone, got {u_release_hm3} hm3"
+    );
+
+    // J is run-of-river, so its per-block output (turbined + spilled) equals its
+    // per-block arrival — here the maturing bucket split by arrival_density.
+    let mut delivered_by_block = [0.0_f64; 3];
+    for h in arrival_stage.hydros.iter().filter(|h| h.hydro_id == J_ID) {
+        let b = h
+            .block_id
+            .expect("D50: chronological records carry a block id") as usize;
+        delivered_by_block[b] += (h.turbined_m3s + h.spillage_m3s) * M3S_TO_HM3 * arrival_blocks[b];
+    }
+    let delivered_total: f64 = delivered_by_block.iter().sum();
+    assert!(
+        delivered_total > 1.0,
+        "D50: the maturing bucket must deliver a positive volume at the arrival \
+         stage (else the split is unobservable), got {delivered_total} hm3"
+    );
+
+    let reported_arrival_hm3 = arrival_stage
+        .transit_buckets
+        .iter()
+        .find(|b| b.hydro_id == J_ID && b.lag == 1)
+        .map_or(0.0, |b| b.delayed_arrival_hm3);
+    assert!(
+        (delivered_total - reported_arrival_hm3).abs() < SPLIT_TOL,
+        "D50: J's summed per-block release ({delivered_total}) must equal the \
+         reported maturing arrival ({reported_arrival_hm3})"
+    );
+
+    // The delivered per-block split must equal U's hand-derived arrival density —
+    // NOT the duration-uniform density the plain tributary would have injected.
+    let mut delivered_split_sum = 0.0_f64;
+    for (b, (&delivered, &want)) in delivered_by_block.iter().zip(&expected_density).enumerate() {
+        let split = delivered / delivered_total;
+        delivered_split_sum += split;
+        assert!(
+            (split - want).abs() < SPLIT_TOL,
+            "D50: delivered arrival split[{b}] = {split}, hand-derived arrival_density {want}"
+        );
+    }
+    assert!(
+        (delivered_split_sum - 1.0).abs() < SPLIT_TOL,
+        "D50: the delivered arrival split must conserve to 1.0, got {delivered_split_sum}"
+    );
+
+    let arrival_total: f64 = arrival_blocks.iter().sum();
+    let duration_uniform: Vec<f64> = arrival_blocks.iter().map(|&h| h / arrival_total).collect();
+    let split_vs_uniform: f64 = delivered_by_block
+        .iter()
+        .zip(&duration_uniform)
+        .map(|(&delivered, &uniform)| (delivered / delivered_total - uniform).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        split_vs_uniform > 1e-3,
+        "D50: the delivered split must be U's arrival-frame blend, not the \
+         duration-weighted uniform density {duration_uniform:?} the plain \
+         tributary would have injected (max deviation {split_vs_uniform})"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Behavioral convergence coverage for the non-golden (demoted) hashed cases
 //

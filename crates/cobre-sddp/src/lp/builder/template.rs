@@ -1061,8 +1061,10 @@ fn build_template_build_ctx<'a>(
 
     // Resolved once here (SETUP time, never per stage-solve): `resolve_spread`
     // is O(declared arcs * n_stages), not called again per LP fill.
-    let arc_spread_k = crate::setup::bucket_topology::build_arc_spread_k(system);
+    let arc_stage_weights = crate::setup::bucket_topology::build_arc_stage_weights(system);
     let arc_spread_chrono = crate::setup::bucket_topology::build_arc_spread_chrono(system);
+    let arc_arrival_density =
+        crate::setup::bucket_topology::build_arc_arrival_density(system, &arc_stage_weights);
     // Recomputes the bucket topology (pure function of `system`) rather than
     // threading it in from the caller, mirroring `build_stage_templates`'s own
     // recomputation for `StateLayout` — the accepted redundant-but-deterministic
@@ -1120,8 +1122,9 @@ fn build_template_build_ctx<'a>(
         cumulative_discount_factors,
         total_hours_per_stage,
         filling_v_target,
-        arc_spread_k,
+        arc_stage_weights,
         arc_spread_chrono,
+        arc_arrival_density,
         per_stage_mask,
     };
 

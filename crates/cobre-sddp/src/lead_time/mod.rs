@@ -60,11 +60,13 @@ fn arrival_window(travel_time_hours: f64, h_anchor: f64) -> (f64, f64) {
 /// selects stage `t`, and the arrival window is overlapped against
 /// `stage_lengths_hours[anchor_stage..]`. `block_lengths_hours` is the
 /// anchor's own block partition for a chronological anchor (`None` for a
-/// parallel anchor) and must sum to `stage_lengths_hours[anchor_stage]`; v1
-/// reuses it as every reached arrival stage's own partition too (a future
-/// per-arrival-stage partition is a config-only extension,
-/// `block_deposits`/`within_stage_routing`/`stage_weights` are unaffected
-/// either way).
+/// parallel anchor) and must sum to `stage_lengths_hours[anchor_stage]`.
+/// Delivery reuses this partition at a reached arrival stage only when that
+/// stage's own length matches the anchor's (`resolve_delivery`'s per-
+/// arrival-stage split); a mismatch falls back to a single row rather than
+/// splitting against a partition that would not conserve the target stage's
+/// own mass. `block_deposits`/`within_stage_routing`/`stage_weights` are
+/// unaffected either way.
 ///
 /// # Panics
 ///
@@ -136,13 +138,25 @@ pub fn resolve_spread(
         }
     }
 
+    let arrival_blocks: Vec<Option<&[f64]>> = (1..=stage_reach)
+        .map(|d| blocks.filter(|_| (future_calendar[d] - h_anchor).abs() < 1e-9))
+        .collect();
     let arrival_density = resolve_delivery(
         window_start,
         window_end,
         future_calendar,
-        blocks,
+        &arrival_blocks,
         stage_reach,
     );
+
+    for (d, row) in arrival_density.iter().enumerate() {
+        if stage_weights[d + 1] > 0.0 {
+            debug_assert!(
+                (row.iter().sum::<f64>() - 1.0).abs() < 1e-9,
+                "arrival density row must sum to 1.0 where k_d > 0 (delivery conservation)"
+            );
+        }
+    }
 
     SpreadResolution {
         stage_reach,
@@ -211,22 +225,36 @@ fn resolve_block_factors(
 }
 
 /// Per-arrival-stage arrival density for lag `d = 1..=stage_reach`: the same
-/// `[window_start, window_end)` window restricted to stage `t+d`'s own local
-/// clock and split across `blocks` (`None` delivers onto a single parallel
-/// row).
+/// `[window_start, window_end)` window restricted to arrival stage `t+d`'s
+/// own local clock and split across `arrival_blocks[d - 1]`, that stage's own
+/// partition (`None` delivers onto a single parallel row).
 fn resolve_delivery(
     window_start: f64,
     window_end: f64,
     future_calendar: &[f64],
-    blocks: Option<&[f64]>,
+    arrival_blocks: &[Option<&[f64]>],
     stage_reach: usize,
 ) -> Vec<Vec<f64>> {
+    debug_assert_eq!(
+        arrival_blocks.len(),
+        stage_reach,
+        "arrival_blocks must supply one entry per reached arrival stage"
+    );
+
     let mut arrival_density = Vec::with_capacity(stage_reach);
     let mut stage_start = 0.0_f64;
 
     for (d, &stage_len) in future_calendar[..=stage_reach].iter().enumerate() {
         let stage_end = stage_start + stage_len;
         if d >= 1 {
+            let blocks = arrival_blocks[d - 1];
+            if let Some(partition) = blocks {
+                debug_assert!(
+                    (partition.iter().sum::<f64>() - stage_len).abs() < 1e-9,
+                    "an arrival-stage block partition must sum to that stage's own length"
+                );
+            }
+
             let overlap_start = window_start.max(stage_start);
             let overlap_end = window_end.min(stage_end);
             let width = (overlap_end - overlap_start).max(0.0);
@@ -235,8 +263,8 @@ fn resolve_delivery(
                 let local_start = overlap_start - stage_start;
                 blocks.map_or_else(
                     || vec![1.0],
-                    |blocks| {
-                        window_period_overlaps(local_start, width, blocks)
+                    |partition| {
+                        window_period_overlaps(local_start, width, partition)
                             .iter()
                             .map(|&overlap| overlap / width)
                             .collect()
@@ -251,6 +279,50 @@ fn resolve_delivery(
     }
 
     arrival_density
+}
+
+/// Lag-`d` arrival density for a single (source stage, target arrival stage)
+/// pair, resolved against an EXPLICIT `target_blocks` partition rather than
+/// the anchor's own — the arrival-frame counterpart of [`resolve_spread`],
+/// which instead reuses the anchor's own partition at every reached lag.
+/// Lets a caller blend several source stages' deliveries into one arrival
+/// stage's own frame regardless of each source's own block mode
+/// (`setup::bucket_topology::build_arc_arrival_density`). `target_blocks` is
+/// `None` for a parallel target (the single `1.0` row).
+///
+/// # Panics
+///
+/// Debug builds panic if `lag == 0` or `source_stage + lag` is out of bounds.
+#[must_use]
+pub(crate) fn resolve_arrival_density_at(
+    travel_time_hours: f64,
+    source_stage: usize,
+    lag: usize,
+    stage_lengths_hours: &[f64],
+    target_blocks: Option<&[f64]>,
+) -> Vec<f64> {
+    debug_assert!(lag >= 1, "lag must be >= 1: d=0 is same-stage, no bucket");
+    debug_assert!(
+        source_stage + lag < stage_lengths_hours.len(),
+        "source_stage + lag must index into stage_lengths_hours"
+    );
+
+    let future_calendar = &stage_lengths_hours[source_stage..];
+    let h_anchor = future_calendar[0];
+    let (window_start, window_end) = arrival_window(travel_time_hours, h_anchor);
+
+    let mut arrival_blocks: Vec<Option<&[f64]>> = vec![None; lag];
+    arrival_blocks[lag - 1] = target_blocks;
+
+    resolve_delivery(
+        window_start,
+        window_end,
+        future_calendar,
+        &arrival_blocks,
+        lag,
+    )
+    .pop()
+    .unwrap_or_default()
 }
 
 /// A calendar-anchored point-commitment lag: a physical lead time on the

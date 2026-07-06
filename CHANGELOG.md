@@ -35,6 +35,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   past the study's last stage is dropped rather than credited to terminal
   storage — a documented target-stage imprecision at the end of the horizon.
 
+- **A maturing in-transit water bucket now splits its delivery across a
+  chronological arrival stage's own blocks, blended over every source stage
+  whose released water is still arriving there.** When the arrival stage's
+  block partition differs from the stage(s) the water was released from — a
+  coarsening or refining resolution boundary — the delivered volume is
+  resolved directly against the arrival stage's own blocks rather than a
+  density carried over from a sending stage, weighted by each contributing
+  source stage's own share of the maturing volume. A parallel source stage
+  maturing into a chronological arrival stage is covered by the same blend:
+  it no longer falls back to splitting the delivery in proportion to block
+  duration regardless of the travel time. The delivered split remains a
+  single fixed density per maturing bucket — it does not vary by which block
+  released the water that is arriving — a documented, accepted modeling
+  bound.
+
 - **A thermal plant can now declare an anticipated (pre-committed) dispatch,
   decided one or more stages before the delivery stage it fixes.**
   `system/thermals.json`'s `anticipated_config` field declares the lead as

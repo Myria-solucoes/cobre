@@ -1596,8 +1596,9 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         cumulative_discount_factors: ctx_a.cumulative_discount_factors.clone(),
         total_hours_per_stage: ctx_a.total_hours_per_stage.clone(),
         filling_v_target: ctx_a.filling_v_target.clone(),
-        arc_spread_k: ctx_a.arc_spread_k.clone(),
+        arc_stage_weights: ctx_a.arc_stage_weights.clone(),
         arc_spread_chrono: ctx_a.arc_spread_chrono.clone(),
+        arc_arrival_density: ctx_a.arc_arrival_density.clone(),
         per_stage_mask: ctx_a.per_stage_mask.clone(),
     };
 

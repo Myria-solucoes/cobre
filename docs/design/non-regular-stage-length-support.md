@@ -50,7 +50,7 @@ primitives.
 | ----- | ----------------------------------------------------------------------- | ---------------- | --------------------------- |
 | PAR-1 | Mid-period PAR seed only under a Monthly season cycle                  | Inflow PAR       | Latent risk (warned)        |
 | PAR-2 | Inflow PAR fixed to a monthly clock; IC `season_ids` inert              | Inflow PAR       | Latent risk (modeling)      |
-| WTT-1 | Multi-resolution arrival-stage delivery density (fixed template)        | Water travel     | **Latent risk**             |
+| WTT-1 | Multi-resolution arrival-stage delivery density (resolved: arrival-frame blend) | Water travel     | Protected contract |
 | WTT-2 | Chronological confluence with heterogeneous travel times                | Water travel     | Guarded gap                 |
 | WTT-3 | Terminal credit for residual in-transit water past the horizon          | Water travel     | Protected contract          |
 | WTT-4 | Advisory-only resolution-mismatch signals                               | Water travel     | Guarded (informational)     |
@@ -168,48 +168,67 @@ study is not silently trusted.
 
 ## §B — Water travel time
 
-The water bucket ring is calendar-general within the horizon; the gaps are in
-multi-resolution _delivery density_, heterogeneous confluence, and the accepted
-terminal-drop contract.
+The water bucket ring is calendar-general within the horizon. The
+multi-resolution arrival-stage delivery split is resolved (WTT-1, below); the
+remaining gaps are heterogeneous confluence and the accepted terminal-drop
+contract.
 
-### WTT-1 — Multi-resolution arrival-stage delivery density
+### WTT-1 — Multi-resolution arrival-stage delivery density (resolved: arrival-frame blend)
 
-**Limitation.** When an in-transit water bucket matures into an arrival stage whose
-own block partition differs from the sending stage's, the delivery across that
-arrival stage's blocks is not resolved against the _arrival_ stage's real calendar;
-it reuses a fixed template density derived from the _sending_ stage's single-lag
-delivery row (or a duration-weighted uniform fallback). A genuine multi-resolution
-arrival target (weekly sender → monthly receiver, or the reverse) gets an
-approximate within-arrival-stage block split.
+**Limitation (historical).** When an in-transit water bucket matured into an
+arrival stage whose own block partition differed from the sending stage's, the
+delivery across that arrival stage's blocks was not resolved against the
+_arrival_ stage's real calendar; it reused a fixed template density derived
+from the _sending_ stage's single-lag delivery row (or a duration-weighted
+uniform fallback). A genuine multi-resolution arrival target (weekly sender →
+monthly receiver, or the reverse) got an approximate within-arrival-stage
+block split, and a parallel sender maturing into a chronological arrival stage
+always collapsed to the duration-weighted uniform fallback regardless of the
+travel time.
 
-**Where.** `crates/cobre-sddp/src/lead_time/mod.rs` — `resolve_spread` /
-`resolve_delivery` split every reached arrival stage against the _anchor's_ block
-partition, not the target stage's. `crates/cobre-sddp/src/lp/builder/entries.rs` —
-`resolve_chrono_arrival_density` re-reads the sending stage's own delivery row
-fresh each stage (no per-origin/per-lag memory), with a duration-weighted uniform
-fallback for the study's first stage or a parallel→chronological transition.
+**Where.** `crates/cobre-sddp/src/setup/bucket_topology.rs` —
+`build_arc_arrival_density` now precomputes, per declared arc and per
+chronological arrival stage, the blend of every contributing source stage's
+own delivery density resolved directly against the _arrival_ stage's own
+blocks (`resolve_arrival_density_at` in `lead_time/mod.rs`), weighted by each
+source's stage-clock weight (`build_arc_stage_weights`). This covers a
+parallel source reaching a chronological arrival stage exactly like a
+chronological one — both contribute a weight/density pair to the same blend.
+`crates/cobre-sddp/src/lp/builder/entries.rs` — `resolve_chrono_arrival_density`
+now looks up this precomputed table entry verbatim instead of re-deriving a
+density from the sending stage's own row; the duration-weighted uniform
+density remains only as the fallback for the genuine no-source case (the
+study's first stage).
 
-**Current behavior.** Wrong-but-bounded and compiles: total mass is conserved
-(`Σ ρ = 1`, guarded by a `debug_assert` in `fill_chronological_water_entries`), so
-the LP stays feasible; only the _intra-arrival-stage block distribution_ of the
-delivered slug is approximate. No crash, no stage-level bound error.
+**Current behavior.** Resolved: the delivered split at a multi-resolution
+arrival stage is resolved in the arrival stage's own frame, blended over every
+source lag that reaches it — including the parallel-sender case, which no
+longer collapses to the duration-weighted uniform density. Mass conservation
+is unchanged (`Σ arrival_density = 1`, guarded by a `debug_assert` in
+`fill_chronological_water_entries`), and a hand-derived regression — two
+source stages maturing into one coarser chronological arrival stage at
+different lags — cross-checks the closed-form arrival-frame blend against the
+delivered LP split, backend-agnostically (HiGHS and CLP).
 
-**What full support requires.** Extend `resolve_spread` to accept a
-per-arrival-stage block partition; thread each arrival stage's own `blocks` into
-`resolve_delivery`; replace the fixed-template read in
-`resolve_chrono_arrival_density` with a per-target-stage density. Blast radius:
-`lead_time/mod.rs` (`resolve_spread`/`resolve_delivery` signatures and the spread
-resolution's arrival-density shape), `setup/bucket_topology.rs`
-(`build_arc_spread_chrono`), `lp/builder/entries.rs`
-(`resolve_chrono_arrival_density`, `fill_chronological_water_entries`), plus a new
-decomposition-arrival regression case.
+**The residual: one fixed, block-agnostic density per maturing bucket.** The
+arrival-frame blend is still a single density vector per arc per arrival
+stage: it carries no per-origin/per-lag memory beyond the weighted blend
+itself, and does not vary with which unit of water (by origin block) is
+asked. Tracking finer origin-to-arrival-block correlation would grow the
+bucket into a per-block state vector whose size scales with the receiving
+stage's block count, re-violating the "bucket depth is a pure function of
+stage lengths" property the ring depends on. This is an accepted, documented
+imprecision — the same category as the WTT-3 terminal-credit bound below —
+not scheduled for further work; only the mass-conservation invariant that
+keeps it safe must never regress.
 
-**Severity: Latent risk.** The only item that is silently approximate on a real
-multi-resolution input _and_ has no regression covering it. Bounded (mass-
-conserving), but the coverage gap is the real hazard. It is specific to water: the
-anticipated ring delivers a scalar committed power level per delivery stage, not a
-block-distributed slug, so it has no within-arrival-stage density analogue (the
-anticipated multi-resolution concern is fan-out, AD-1, not density).
+**Severity: Protected contract.** Moved out of Latent risk: the
+multi-resolution arrival split is now resolved and pinned by a regression.
+The remaining single-density residual is a bounded, documented imprecision,
+not a silent approximation. It is specific to water: the anticipated ring
+delivers a scalar committed power level per delivery stage, not a
+block-distributed slug, so it has no within-arrival-stage density analogue
+(the anticipated multi-resolution concern is fan-out, AD-1, not density).
 
 ### WTT-2 — Chronological confluence with heterogeneous travel times
 
@@ -480,34 +499,36 @@ capability now that its wire prerequisite has landed.
 
 **Fix first — latent risk, thin or absent coverage on real inputs:**
 
-1. **WTT-1 — multi-resolution arrival-stage delivery density.** The only item
-   silently approximate on a real input with no regression. Add a
-   decomposition-arrival regression and decide upgrade-vs-accept.
-2. **PAR-1 — non-Monthly mid-period PAR seed.** Produces a wrong (zero) seed;
+1. **PAR-1 — non-Monthly mid-period PAR seed.** Produces a wrong (zero) seed;
    masked only by a warning. The fix is the multi-resolution-aware overlap
    bridge (see the design finding in §A), not a narrower reject — a blanket
    reject was tried and reverted because it false-positives on
    multi-resolution `Custom` cycles.
 
-AD-2 — the `LeadTime` horizon-exceed reject — is done (§C) and no longer
-appears in this list.
+WTT-1 — the multi-resolution arrival-stage delivery density — is done (§B)
+and no longer appears in this list. AD-2 — the `LeadTime` horizon-exceed
+reject — is done (§C) and no longer appears in this list either.
 
 **Fix as designed — capability, guarded today:**
 
-3. **AD-1 (+ AD-3) — anticipated fan-out.** Setup-rejected; build per-delivery
+2. **AD-1 (+ AD-3) — anticipated fan-out.** Setup-rejected; build per-delivery
    deposits/fishing/output with fan-out summation and cross-delivery conservation,
    generalizing the single-slot resolver. Hand-derive every regression's expected
    value (the confluence-summation discipline transfers directly).
-4. **XS-1 — coarse-to-mixed boundary coupling.** Highest capability value; the
+3. **XS-1 — coarse-to-mixed boundary coupling.** Highest capability value; the
    `EntitySlot.delivery_anchor` prerequisite has landed, so this is now a
    consumer-side re-index + coupling policy.
-5. **WTT-2 — precise heterogeneous-confluence support.** Guarded; only worth it if a
+4. **WTT-2 — precise heterogeneous-confluence support.** Guarded; only worth it if a
    real study needs mixed-travel-time confluence under chronological blocks.
-6. **PAR-2 — sub-monthly PAR clock.** Owned by the PAR boundary; largest blast
+5. **PAR-2 — sub-monthly PAR clock.** Owned by the PAR boundary; largest blast
    radius, lowest travel-time relevance.
 
 **Never a "fix" — protect / leave:**
 
+6. **WTT-1 — single-density residual.** A protected contract, the same
+   category as WTT-3: protect the arrival-frame blend's mass-conservation
+   invariant; the residual itself (one fixed, block-agnostic density per
+   maturing bucket) is accepted, not scheduled for further work.
 7. **WTT-3 — terminal credit.** A protected contract coupled to non-existent
    cyclic-horizon work. Protect the row-omission + zero-terminal-value invariant;
    do not patch it.
