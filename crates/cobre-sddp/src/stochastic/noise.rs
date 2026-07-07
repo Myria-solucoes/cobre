@@ -4,6 +4,7 @@
 //! call site (forward, backward, lower-bound).
 
 use cobre_core::temporal::StageLagTransition;
+use cobre_solver::SolverInterface;
 use cobre_stochastic::{StochasticContext, evaluate_par_batch, solve_par_noise_batch};
 
 use crate::{
@@ -547,6 +548,57 @@ pub(crate) fn gather_dense_ncs_bounds(
     }
 }
 
+/// Patch NCS availability bounds onto this stage's dense NCS columns for one
+/// solve — the single owner every solve site reaches the gather-and-set half
+/// of the NCS patch through.
+///
+/// `scratch.ncs_col_lower_buf`/`ncs_col_upper_buf` must already hold this
+/// solve's bounds (full stochastic-slot order) via a preceding
+/// [`transform_ncs_noise`] call. `ncs_col_start` is this stage's own NCS base
+/// column, never a single global stage-0 base — per-stage block counts make
+/// stage bases diverge. [`gather_dense_ncs_bounds`] forces `[0, 0]` for a slot
+/// dormant at this stage — the "patch NCS identically" contract shared by
+/// every solve site (D15: a divergence understates the bound).
+pub(crate) fn apply_ncs_col_bounds<S: SolverInterface>(
+    solver: &mut S,
+    scratch: &mut ScratchBuffers,
+    ncs_col_start: usize,
+    dense_col: &[usize],
+    windows: &[(Option<i32>, Option<i32>)],
+    stage_id: i32,
+    n_blks: usize,
+) {
+    let expected_len = dense_col.len() * n_blks;
+    // Rebuild on `ncs_col_start` change, not length alone: two stages can share a
+    // length yet address different columns, so keying on length would set bounds
+    // on the previous stage's columns.
+    if scratch.last_ncs_col_start != ncs_col_start
+        || scratch.ncs_col_indices_buf.len() != expected_len
+    {
+        build_dense_ncs_col_indices(
+            dense_col,
+            ncs_col_start,
+            n_blks,
+            &mut scratch.ncs_col_indices_buf,
+        );
+        scratch.last_ncs_col_start = ncs_col_start;
+    }
+    gather_dense_ncs_bounds(
+        windows,
+        stage_id,
+        n_blks,
+        &scratch.ncs_col_lower_buf,
+        &scratch.ncs_col_upper_buf,
+        &mut scratch.ncs_col_lower_active_buf,
+        &mut scratch.ncs_col_upper_active_buf,
+    );
+    solver.set_col_bounds(
+        &scratch.ncs_col_indices_buf,
+        &scratch.ncs_col_lower_active_buf,
+        &scratch.ncs_col_upper_active_buf,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -562,16 +614,20 @@ pub(crate) fn gather_dense_ncs_bounds(
 mod tests {
     use chrono::NaiveDate;
     use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
+    use cobre_core::entities::non_controllable::NonControllableSource;
     use cobre_core::scenario::{
         CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, InflowModel,
-        LoadModel, SamplingScheme,
+        LoadModel, NcsModel, SamplingScheme,
     };
     use cobre_core::temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
         StageStateConfig,
     };
     use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
-    use cobre_solver::StageTemplate;
+    use cobre_solver::{
+        Basis, RowBatch, SolutionView, SolverError, SolverInterface, SolverStatistics,
+        StageTemplate,
+    };
     use cobre_stochastic::StochasticContext;
     use cobre_stochastic::context::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
     use std::collections::BTreeMap;
@@ -581,11 +637,58 @@ mod tests {
         horizon_mode::HorizonMode,
         inflow_method::InflowNonNegativityMethod,
         noise::{
-            build_dense_ncs_col_indices, compute_effective_eta, gather_dense_ncs_bounds,
-            shift_lag_state, transform_inflow_noise, transform_load_noise,
+            NcsNoiseOffsets, apply_ncs_col_bounds, build_dense_ncs_col_indices,
+            compute_effective_eta, gather_dense_ncs_bounds, shift_lag_state,
+            transform_inflow_noise, transform_load_noise, transform_ncs_noise,
         },
         workspace::ScratchBuffers,
     };
+
+    /// Records every `set_col_bounds` call verbatim; no other method is
+    /// exercised by the NCS column-bound patch.
+    #[derive(Default)]
+    struct RecordingSolver {
+        col_bounds_calls: Vec<(Vec<usize>, Vec<f64>, Vec<f64>)>,
+    }
+
+    impl SolverInterface for RecordingSolver {
+        type Profile = cobre_solver::ActiveProfile;
+
+        fn apply_profile(&mut self, _profile: &Self::Profile) {}
+
+        fn solver_name_version(&self) -> String {
+            "RecordingSolver 0.0.0".to_string()
+        }
+
+        fn load_model(&mut self, _template: &StageTemplate) {}
+
+        fn add_rows(&mut self, _rows: &RowBatch) {}
+
+        fn set_row_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
+
+        fn set_col_bounds(&mut self, indices: &[usize], lower: &[f64], upper: &[f64]) {
+            self.col_bounds_calls
+                .push((indices.to_vec(), lower.to_vec(), upper.to_vec()));
+        }
+
+        fn solve(&mut self, _basis: Option<&Basis>) -> Result<SolutionView<'_>, SolverError> {
+            unreachable!("solve() is not exercised by the NCS column-bound patch")
+        }
+
+        fn get_basis(&mut self, _out: &mut Basis) {}
+
+        fn statistics(&self) -> SolverStatistics {
+            SolverStatistics::default()
+        }
+
+        fn statistics_into(&self, out: &mut SolverStatistics) {
+            out.copy_from(&SolverStatistics::default());
+        }
+
+        fn name(&self) -> &'static str {
+            "Recording"
+        }
+    }
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -2468,5 +2571,198 @@ mod tests {
         // Re-entering stage B (same start, same length): no rebuild.
         assert!(!rebuild(200, &mut indices_buf, &mut last_ncs_col_start));
         assert_eq!(indices_buf, vec![200, 201, 202, 203]);
+    }
+
+    // ── apply_ncs_col_bounds: collapsed-function equivalence ────────────────
+
+    /// One bus, one NCS entity, availability factor `mean=0.5, std=0.1` — the
+    /// D15 NCS fixture shape (`lb_evaluate_stage_0_patches_ncs_bounds_per_opening`
+    /// in `training/lower_bound.rs`).
+    // Rationale: the inline System/StochasticContext fixture and the reference
+    // vs. owner comparison are one coherent scenario; splitting them into
+    // helpers would scatter the setup the assertions depend on and obscure the
+    // test.
+    #[allow(clippy::too_many_lines)]
+    #[test]
+    fn apply_ncs_col_bounds_matches_pre_collapse_gather_and_set() {
+        let ncs_entity_id = EntityId(10);
+        let bus = Bus {
+            id: EntityId(0),
+            name: "B0".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 1000.0,
+            }],
+            excess_cost: 0.0,
+        };
+        let ncs_source = NonControllableSource {
+            id: ncs_entity_id,
+            name: "W1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(0),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            max_generation_mw: 100.0,
+            allow_curtailment: true,
+            curtailment_cost: 0.0,
+        };
+        let stage = Stage {
+            index: 0,
+            id: 0,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "S".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: false,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        };
+        let ncs_model = NcsModel {
+            ncs_id: ncs_entity_id,
+            stage_id: 0,
+            mean: 0.5,
+            std: 0.1,
+        };
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            "default".to_string(),
+            CorrelationProfile {
+                groups: vec![CorrelationGroup {
+                    name: "ncs_group".to_string(),
+                    entities: vec![CorrelationEntity {
+                        entity_type: "ncs".to_string(),
+                        id: ncs_entity_id,
+                    }],
+                    matrix: vec![vec![1.0]],
+                }],
+            },
+        );
+        let correlation = CorrelationModel {
+            method: "spectral".to_string(),
+            profiles,
+            schedule: vec![],
+        };
+        let system = SystemBuilder::new()
+            .buses(vec![bus])
+            .non_controllable_sources(vec![ncs_source])
+            .stages(vec![stage])
+            .ncs_models(vec![ncs_model])
+            .correlation(correlation)
+            .build()
+            .unwrap();
+        let stoch = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: None,
+                load: None,
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .unwrap();
+        assert_eq!(stoch.n_stochastic_ncs(), 1);
+
+        let raw_noise = vec![0.37_f64];
+        let ncs_max_gen = vec![100.0_f64];
+        let ncs_allow_curtailment = vec![true];
+        let dense_col = vec![0_usize];
+        let windows: Vec<(Option<i32>, Option<i32>)> = vec![(None, None)];
+        let ncs_col_start = 5_usize;
+        let stage_id = 0_i32;
+        let n_blks = 1_usize;
+        let offsets = NcsNoiseOffsets {
+            n_hydros: 0,
+            n_load_buses: 0,
+        };
+
+        // ---- reference: transform, then the pre-collapse gather+set called
+        // directly (independent of `apply_ncs_col_bounds`) ----
+        let mut reference_scratch = make_scratch(0);
+        transform_ncs_noise(
+            &raw_noise,
+            &offsets,
+            &stoch,
+            0,
+            n_blks,
+            &ncs_max_gen,
+            &ncs_allow_curtailment,
+            &mut reference_scratch.ncs_col_lower_buf,
+            &mut reference_scratch.ncs_col_upper_buf,
+        );
+        build_dense_ncs_col_indices(
+            &dense_col,
+            ncs_col_start,
+            n_blks,
+            &mut reference_scratch.ncs_col_indices_buf,
+        );
+        gather_dense_ncs_bounds(
+            &windows,
+            stage_id,
+            n_blks,
+            &reference_scratch.ncs_col_lower_buf,
+            &reference_scratch.ncs_col_upper_buf,
+            &mut reference_scratch.ncs_col_lower_active_buf,
+            &mut reference_scratch.ncs_col_upper_active_buf,
+        );
+        let mut reference_solver = RecordingSolver::default();
+        reference_solver.set_col_bounds(
+            &reference_scratch.ncs_col_indices_buf,
+            &reference_scratch.ncs_col_lower_active_buf,
+            &reference_scratch.ncs_col_upper_active_buf,
+        );
+
+        // ---- owner: transform (unchanged), then the collapsed
+        // `apply_ncs_col_bounds` ----
+        let mut owner_scratch = make_scratch(0);
+        transform_ncs_noise(
+            &raw_noise,
+            &offsets,
+            &stoch,
+            0,
+            n_blks,
+            &ncs_max_gen,
+            &ncs_allow_curtailment,
+            &mut owner_scratch.ncs_col_lower_buf,
+            &mut owner_scratch.ncs_col_upper_buf,
+        );
+        let mut owner_solver = RecordingSolver::default();
+        apply_ncs_col_bounds(
+            &mut owner_solver,
+            &mut owner_scratch,
+            ncs_col_start,
+            &dense_col,
+            &windows,
+            stage_id,
+            n_blks,
+        );
+
+        assert_eq!(
+            owner_solver.col_bounds_calls, reference_solver.col_bounds_calls,
+            "apply_ncs_col_bounds must match the pre-collapse gather+set output"
+        );
+        assert_eq!(owner_solver.col_bounds_calls.len(), 1);
+        let (indices, lower, upper) = &owner_solver.col_bounds_calls[0];
+        assert_eq!(indices, &[ncs_col_start]);
+        // A_r = max_gen * clamp(mean + std * eta, 0, 1); allow_curtailment == true
+        // pins the lower bound to 0 (dispatch is free to curtail down to it).
+        let expected_upper = 100.0_f64 * (0.5 + 0.1 * 0.37_f64).clamp(0.0, 1.0);
+        assert_eq!(lower, &[0.0]);
+        assert!((upper[0] - expected_upper).abs() < 1e-9);
     }
 }

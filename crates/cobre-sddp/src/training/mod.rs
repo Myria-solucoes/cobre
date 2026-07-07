@@ -33,6 +33,7 @@ pub(crate) mod backward;
 pub(crate) mod backward_pass_state;
 pub(crate) mod forward_pass_state;
 pub(crate) mod session;
+pub(crate) mod stage_solve_prep;
 pub(crate) mod state_exchange;
 pub(crate) mod training_output;
 pub(crate) mod trajectory;

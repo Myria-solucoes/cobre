@@ -18,7 +18,10 @@ use crate::{
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     indexer::BlockGrid,
     lp_builder::COST_SCALE_FACTOR,
-    noise::{NcsNoiseOffsets, transform_inflow_noise, transform_load_noise, transform_ncs_noise},
+    noise::{
+        NcsNoiseOffsets, apply_ncs_col_bounds, transform_inflow_noise, transform_load_noise,
+        transform_ncs_noise,
+    },
     simulation::{
         config::SimulationConfig,
         error::SimulationError,
@@ -269,54 +272,6 @@ impl SimLookups {
             hydro_per_stage: HydroReverseLookup::build_per_stage(geometry_per_stage, n_hydros),
         }
     }
-}
-
-/// Patch NCS availability bounds onto this stage's dense NCS columns.
-///
-/// `ncs_col_lower_buf`/`ncs_col_upper_buf` must already be populated by
-/// `transform_ncs_noise` in full stochastic-slot order. `ncs_col_start` is this
-/// stage's NCS base column, never a single global stage-0 base — per-stage block
-/// counts make the stage bases diverge. The gather forces `[0, 0]` for a slot
-/// dormant at this stage, the same zeroing the training patch sites apply (the
-/// "patch NCS identically" contract).
-fn apply_ncs_col_bounds<S: SolverInterface>(
-    solver: &mut S,
-    scratch: &mut crate::workspace::ScratchBuffers,
-    ncs_col_start: usize,
-    dense_col: &[usize],
-    windows: &[(Option<i32>, Option<i32>)],
-    stage_id: i32,
-    n_blks: usize,
-) {
-    let expected_len = dense_col.len() * n_blks;
-    // Rebuild on `ncs_col_start` change, not length alone: two stages can share a
-    // length yet address different columns, so keying on length would set bounds
-    // on the previous stage's columns.
-    if scratch.last_ncs_col_start != ncs_col_start
-        || scratch.ncs_col_indices_buf.len() != expected_len
-    {
-        crate::noise::build_dense_ncs_col_indices(
-            dense_col,
-            ncs_col_start,
-            n_blks,
-            &mut scratch.ncs_col_indices_buf,
-        );
-        scratch.last_ncs_col_start = ncs_col_start;
-    }
-    crate::noise::gather_dense_ncs_bounds(
-        windows,
-        stage_id,
-        n_blks,
-        &scratch.ncs_col_lower_buf,
-        &scratch.ncs_col_upper_buf,
-        &mut scratch.ncs_col_lower_active_buf,
-        &mut scratch.ncs_col_upper_active_buf,
-    );
-    solver.set_col_bounds(
-        &scratch.ncs_col_indices_buf,
-        &scratch.ncs_col_lower_active_buf,
-        &scratch.ncs_col_upper_active_buf,
-    );
 }
 
 /// Map a stage-solve [`SddpError`](crate::error::SddpError) to a
