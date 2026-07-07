@@ -499,12 +499,6 @@ fn rebuild_historical_library_non_root(
             season_map_for_transitions,
             max_order,
         );
-        let disaggregation_weights = cobre_sddp::lag_transition::precompute_disaggregation_weights(
-            &study_stages,
-            season_map_for_transitions,
-        );
-        let disaggregation_weights =
-            cobre_sddp::lag_transition::to_period_blend_weights(&disaggregation_weights);
         cobre_stochastic::standardize_historical_windows(
             &mut lib,
             system.inflow_history(),
@@ -515,7 +509,6 @@ fn rebuild_historical_library_non_root(
             system.policy_graph().season_map.as_ref(),
             &system.initial_conditions().past_inflows,
             &stage_lag_transitions,
-            &disaggregation_weights,
         );
         Ok(Some(lib))
     } else {

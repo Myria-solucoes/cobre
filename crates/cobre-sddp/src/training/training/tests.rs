@@ -501,8 +501,6 @@ fn ac_train_completes_with_iteration_limit() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let result = train(
         &mut solver,
@@ -612,8 +610,6 @@ fn ac_train_returns_partial_on_infeasible() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let result = train(
         &mut solver,
@@ -742,8 +738,6 @@ fn ac_train_emits_correct_event_sequence() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     train(
         &mut solver,
@@ -955,8 +949,6 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     train(
         &mut solver,
@@ -1137,8 +1129,6 @@ fn ac_train_result_fields_populated() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let result = train(
         &mut solver,
@@ -1246,8 +1236,6 @@ fn ac_train_with_no_event_sender() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let result = train(
         &mut solver,
@@ -1352,8 +1340,6 @@ fn ac_total_time_ms_is_non_negative() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let result = train(
         &mut solver,
@@ -1466,8 +1452,6 @@ fn cut_selection_none_skips_step() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     train(
         &mut solver,
@@ -1590,8 +1574,6 @@ fn cut_selection_level1_runs_at_frequency() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     train(
         &mut solver,
@@ -1724,8 +1706,6 @@ fn cut_selection_stage0_exempt_preserves_cuts() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     train(
         &mut solver,
@@ -1869,8 +1849,6 @@ fn existing_train_tests_pass_with_none() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let result = train(
         &mut solver,
@@ -1988,8 +1966,6 @@ fn ac_train_partial_result_on_mid_iteration_failure() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let outcome = train(
         &mut solver,
@@ -2116,8 +2092,6 @@ fn start_iteration_resumes_from_offset() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let outcome = train(
         &mut solver,
@@ -2225,8 +2199,6 @@ fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let outcome = train(
         &mut solver,
@@ -2960,8 +2932,6 @@ fn template_freeze_event_emitted() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
 
     train(

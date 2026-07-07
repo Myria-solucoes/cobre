@@ -20,13 +20,9 @@ use crate::{
     error::SddpError,
     indexer::StateLayout,
     inflow_method::InflowNonNegativityMethod,
-    lag_transition::DisaggregationWeight,
     lp_builder::COST_SCALE_FACTOR,
     lp_builder::PatchBuffer,
-    noise::{
-        NcsNoiseOffsets, compute_disaggregation_next_rate, compute_effective_eta, has_par_model,
-        transform_ncs_noise,
-    },
+    noise::{NcsNoiseOffsets, compute_effective_eta, transform_ncs_noise},
     risk_measure::RiskMeasure,
 };
 use cobre_solver::StageTemplate;
@@ -74,12 +70,6 @@ pub struct LbEvalSpec<'a> {
     pub z_inflow_row_start: usize,
     /// `Truncation`/`TruncationWithPenalty` clamp negative PAR(p) inflows to zero before patching.
     pub inflow_method: &'a InflowNonNegativityMethod,
-    /// Stage-0 day-weighted disaggregation weight; `next_day_weight > 0.0` triggers
-    /// the conditional-mean blend mirroring the backward pass's peek (no sampler
-    /// at the lower bound, so the source-B rate uses `next_eta = 0`).
-    pub disagg_weight: DisaggregationWeight,
-    /// ζ at stage 0, scaling the disaggregation blend (`StageContext::zeta_s[0]`).
-    pub zeta: f64,
     /// Stage-0 anticipated delivery-gen widen inputs; `None` with no anticipated
     /// plants (the widen is then a no-op). Present so the lower bound's stage-0
     /// pin admits a commitment the ring's scaled round-trip drifted a sub-ULP past
@@ -140,13 +130,6 @@ pub struct LbEvalScratch {
     pub uniform_prob_buf: Vec<f64>,
     /// Per-opening objective values from `lb_evaluate_stage_0`.
     pub objectives_buf: Vec<f64>,
-    /// Regime A disaggregation source-B rate (next-period conditional mean).
-    pub disagg_next_rate_buf: Vec<f64>,
-    /// Disaggregation peek's shifted-lag scratch, kept separate from
-    /// `lag_matrix_buf` — that buffer is precomputed once and read across every
-    /// opening in the loop below, so writing the peek's shift into it would
-    /// corrupt the truncation precompute for the next opening.
-    pub disagg_shift_buf: Vec<f64>,
 }
 
 impl LbEvalScratch {
@@ -168,8 +151,6 @@ impl LbEvalScratch {
             zero_targets_buf: Vec::new(),
             uniform_prob_buf: Vec::new(),
             objectives_buf: Vec::new(),
-            disagg_next_rate_buf: Vec::new(),
-            disagg_shift_buf: Vec::new(),
         }
     }
 }
@@ -285,8 +266,8 @@ fn lb_init_rank0<S: SolverInterface>(
 /// Returns [`SddpError::Infeasible`] if any opening LP is infeasible, or
 /// [`SddpError::Solver`] for other LP solve failures.
 // Rationale: the per-opening loop interleaves several correctness-critical
-// sequential steps (truncation, disaggregation blend, NCS patch) that must not
-// be split across functions without threading their shared scratch state.
+// sequential steps (truncation, NCS patch) that must not be split across
+// functions without threading their shared scratch state.
 #[allow(clippy::too_many_lines)]
 fn lb_evaluate_stage_0<S: SolverInterface>(
     solver: &mut S,
@@ -335,20 +316,6 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
         );
     }
 
-    // Uses disagg_shift_buf, never lag_matrix_buf: the latter is precomputed
-    // once above and re-read every opening below, so writing the peek's shift
-    // into it would corrupt the next opening's truncation precompute.
-    let disagg_par = if spec.disagg_weight.next_day_weight > 0.0 {
-        spec.stochastic
-            .filter(|stoch| has_par_model(stoch, n_hydros))
-    } else {
-        None
-    };
-    if disagg_par.is_some() {
-        scratch.zero_targets_buf.clear();
-        scratch.zero_targets_buf.resize(n_hydros, 0.0);
-    }
-
     scratch.objectives_buf.clear();
 
     for opening_idx in 0..n_openings {
@@ -390,35 +357,6 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
                 }
             });
             scratch.z_inflow_rhs_buf.push(z_rhs);
-        }
-
-        if let Some(stoch) = disagg_par {
-            // Unreachable given precompute_disaggregation_weights's invariant
-            // (next_day_weight > 0.0 implies next_period_stage is Some).
-            let next_stage = spec.disagg_weight.next_period_stage.unwrap_or_else(|| {
-                debug_assert!(
-                    false,
-                    "next_day_weight > 0.0 with next_period_stage == None violates \
-                     the precompute_disaggregation_weights invariant"
-                );
-                0
-            });
-            let eta_zero = &scratch.zero_targets_buf[..n_hydros];
-            compute_disaggregation_next_rate(
-                state_layout,
-                initial_state,
-                &scratch.z_inflow_rhs_buf,
-                stoch,
-                next_stage,
-                eta_zero,
-                &mut scratch.disagg_shift_buf,
-                &mut scratch.disagg_next_rate_buf,
-            );
-            for h in 0..n_hydros {
-                scratch.noise_buf[h] += spec.zeta
-                    * spec.disagg_weight.next_day_weight
-                    * (scratch.disagg_next_rate_buf[h] - scratch.z_inflow_rhs_buf[h]);
-            }
         }
 
         patch_buf.fill_col_state_patches(state_layout, initial_state, &spec.template.col_scale);
@@ -623,7 +561,7 @@ mod tests {
     };
     use crate::{
         cut::FutureCostFunction, error::SddpError, inflow_method::InflowNonNegativityMethod,
-        lag_transition::DisaggregationWeight, lp_builder::PatchBuffer, risk_measure::RiskMeasure,
+        lp_builder::PatchBuffer, risk_measure::RiskMeasure,
     };
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
     use cobre_solver::{
@@ -981,8 +919,6 @@ mod tests {
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
-            disagg_weight: DisaggregationWeight::interior(0),
-            zeta: 0.0,
             anticipated_widen: None,
         };
         let (mut row_batch, mut lb_scratch) = make_lb_locals();
@@ -1042,8 +978,6 @@ mod tests {
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
-            disagg_weight: DisaggregationWeight::interior(0),
-            zeta: 0.0,
             anticipated_widen: None,
         };
         let (mut row_batch_lb, mut lb_scratch_lb) = make_lb_locals();
@@ -1110,8 +1044,6 @@ mod tests {
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
-            disagg_weight: DisaggregationWeight::interior(0),
-            zeta: 0.0,
             anticipated_widen: None,
         };
         let (mut row_batch_lb, mut lb_scratch_lb) = make_lb_locals();
@@ -1176,8 +1108,6 @@ mod tests {
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
-            disagg_weight: DisaggregationWeight::interior(0),
-            zeta: 0.0,
             anticipated_widen: None,
         };
         let (mut row_batch_lb, mut lb_scratch_lb) = make_lb_locals();
@@ -1238,8 +1168,6 @@ mod tests {
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
-            disagg_weight: DisaggregationWeight::interior(0),
-            zeta: 0.0,
             anticipated_widen: None,
         };
         let (mut row_batch_result, mut lb_scratch_result) = make_lb_locals();
@@ -1298,8 +1226,6 @@ mod tests {
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
-            disagg_weight: DisaggregationWeight::interior(0),
-            zeta: 0.0,
             anticipated_widen: None,
         };
         let (mut row_batch_result, mut lb_scratch_result) = make_lb_locals();
@@ -1365,8 +1291,6 @@ mod tests {
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
-            disagg_weight: DisaggregationWeight::interior(0),
-            zeta: 0.0,
             anticipated_widen: None,
         };
         let (mut row_batch_lb, mut lb_scratch_lb) = make_lb_locals();
@@ -1429,8 +1353,6 @@ mod tests {
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
-            disagg_weight: DisaggregationWeight::interior(0),
-            zeta: 0.0,
             anticipated_widen: None,
         };
 
@@ -1520,8 +1442,6 @@ mod tests {
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
-            disagg_weight: DisaggregationWeight::interior(0),
-            zeta: 0.0,
             anticipated_widen: None,
         };
         let (mut row_batch_lb, mut lb_scratch_lb) = make_lb_locals();
@@ -1586,8 +1506,6 @@ mod tests {
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::Truncation,
-            disagg_weight: DisaggregationWeight::interior(0),
-            zeta: 0.0,
             anticipated_widen: None,
         };
         let (mut row_batch_result, mut lb_scratch_result) = make_lb_locals();
@@ -1646,8 +1564,6 @@ mod tests {
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::TruncationWithPenalty,
-            disagg_weight: DisaggregationWeight::interior(0),
-            zeta: 0.0,
             anticipated_widen: None,
         };
         let (mut row_batch_result, mut lb_scratch_result) = make_lb_locals();
@@ -1867,8 +1783,6 @@ mod tests {
             ncs_generation: 0..block_count,
             z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
-            disagg_weight: DisaggregationWeight::interior(0),
-            zeta: 0.0,
             anticipated_widen: None,
         };
 
@@ -1953,8 +1867,6 @@ mod tests {
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
-            disagg_weight: DisaggregationWeight::interior(0),
-            zeta: 0.0,
             anticipated_widen: None,
         };
 
@@ -2636,8 +2548,6 @@ mod tests {
             ncs_generation: 0..0,
             z_inflow_row_start: templates.geometry_per_stage[0].z_inflow_row_start,
             inflow_method: &InflowNonNegativityMethod::None,
-            disagg_weight: DisaggregationWeight::interior(0),
-            zeta: 0.0,
             anticipated_widen: None,
         };
         let (mut row_batch, mut lb_scratch) = make_lb_locals();
@@ -2713,8 +2623,6 @@ mod tests {
             ncs_generation: 0..0,
             z_inflow_row_start: 0,
             inflow_method: &InflowNonNegativityMethod::None,
-            disagg_weight: DisaggregationWeight::interior(0),
-            zeta: 0.0,
             anticipated_widen: None,
         };
         let (mut row_batch, mut lb_scratch) = make_lb_locals();
@@ -2751,276 +2659,5 @@ mod tests {
             assert_eq!(bundle.patch_buf.col_lower[pos], expected);
             assert_eq!(bundle.patch_buf.col_upper[pos], expected);
         }
-    }
-
-    // ── Regime A day-weighted disaggregation ─────────────────────────────────
-
-    /// The lower bound's boundary-stage blend uses the CONDITIONAL MEAN
-    /// (`next_eta = 0`) for the source-B rate — the same arm the backward pass
-    /// takes, since neither evaluation point holds a sampler. Hand-derives the
-    /// expected blended noise RHS independently of `lb_evaluate_stage_0`'s own
-    /// arithmetic: `noise_scale == 0.0` zeroes the pre-blend term, isolating
-    /// `zeta * next_day_weight * (next_rate - anchor_rate)`; AR(0) with `std_m3s == 0.0` at
-    /// both stages makes `anchor_rate`/`next_rate` exactly the two stages' means,
-    /// independent of the opening's realized eta.
-    // `clippy::too_many_lines`: the inline `System`/`StochasticContext` fixture is
-    // one coherent scenario; splitting it into helpers would scatter the setup
-    // the hand-derived assertions depend on.
-    #[allow(clippy::too_many_lines)]
-    #[test]
-    fn test_disaggregation_lower_bound_applies_boundary_blend() {
-        use cobre_core::{
-            Bus, DeficitSegment, EntityId, Hydro, HydroGenerationModel, HydroPenalties,
-            InflowModel, SystemBuilder,
-            scenario::{
-                CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
-                SamplingScheme,
-            },
-            temporal::{
-                Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-                StageStateConfig,
-            },
-        };
-        use cobre_stochastic::context::{
-            ClassSchemes, OpeningTreeInputs, build_stochastic_context,
-        };
-        use std::collections::BTreeMap;
-
-        let mean_a = 100.0_f64;
-        let mean_b = 150.0_f64;
-
-        let bus = Bus {
-            id: EntityId(0),
-            name: "B0".to_string(),
-            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: None,
-                cost_per_mwh: 1000.0,
-            }],
-            excess_cost: 0.0,
-        };
-        let hydro = Hydro {
-            id: EntityId(1),
-            name: "H1".to_string(),
-            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(0),
-            downstream_id: None,
-            travel_time_hours: None,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            min_storage_hm3: 0.0,
-            max_storage_hm3: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s: 0.0,
-            max_turbined_m3s: 100.0,
-            specific_productivity_mw_per_m3s_per_m: None,
-            min_generation_mw: 0.0,
-            max_generation_mw: 100.0,
-            tailrace: None,
-            hydraulic_losses: None,
-            efficiency: None,
-            evaporation_coefficients_mm: None,
-            evaporation_reference_volumes_hm3: None,
-            diversion: None,
-            filling: None,
-            penalties: HydroPenalties {
-                spillage_cost: 0.0,
-                diversion_cost: 0.0,
-                turbined_cost: 0.0,
-                storage_violation_below_cost: 0.0,
-                filling_target_violation_cost: 0.0,
-                turbined_violation_below_cost: 0.0,
-                outflow_violation_below_cost: 0.0,
-                outflow_violation_above_cost: 0.0,
-                generation_violation_below_cost: 0.0,
-                evaporation_violation_cost: 0.0,
-                water_withdrawal_violation_cost: 0.0,
-                water_withdrawal_violation_pos_cost: 0.0,
-                water_withdrawal_violation_neg_cost: 0.0,
-                evaporation_violation_pos_cost: 0.0,
-                evaporation_violation_neg_cost: 0.0,
-                inflow_nonnegativity_cost: 1000.0,
-            },
-        };
-
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let make_stage = |idx: usize| Stage {
-            index: idx,
-            id: idx as i32,
-            start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: chrono::NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: Some(0),
-            blocks: vec![Block {
-                index: 0,
-                name: "S".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
-        };
-        let stages: Vec<Stage> = (0..2).map(make_stage).collect();
-
-        let inflow_models = vec![
-            InflowModel {
-                hydro_id: EntityId(1),
-                stage_id: 0,
-                mean_m3s: mean_a,
-                std_m3s: 0.0,
-                ar_coefficients: vec![],
-                residual_std_ratio: 1.0,
-                annual: None,
-            },
-            InflowModel {
-                hydro_id: EntityId(1),
-                stage_id: 1,
-                mean_m3s: mean_b,
-                std_m3s: 0.0,
-                ar_coefficients: vec![],
-                residual_std_ratio: 1.0,
-                annual: None,
-            },
-        ];
-
-        let mut profiles = BTreeMap::new();
-        profiles.insert(
-            "default".to_string(),
-            CorrelationProfile {
-                groups: vec![CorrelationGroup {
-                    name: "g1".to_string(),
-                    entities: vec![CorrelationEntity {
-                        entity_type: "inflow".to_string(),
-                        id: EntityId(1),
-                    }],
-                    matrix: vec![vec![1.0]],
-                }],
-            },
-        );
-        let correlation = CorrelationModel {
-            method: "spectral".to_string(),
-            profiles,
-            schedule: vec![],
-        };
-
-        let system = SystemBuilder::new()
-            .buses(vec![bus])
-            .hydros(vec![hydro])
-            .stages(stages)
-            .inflow_models(inflow_models)
-            .correlation(correlation)
-            .build()
-            .unwrap();
-
-        let stoch = build_stochastic_context(
-            &system,
-            42,
-            None,
-            &[],
-            &[],
-            OpeningTreeInputs::default(),
-            ClassSchemes {
-                inflow: Some(SamplingScheme::InSample),
-                load: Some(SamplingScheme::InSample),
-                ncs: Some(SamplingScheme::InSample),
-            },
-        )
-        .unwrap();
-
-        let state = crate::test_support::state_layout(1, 0);
-        let template = StageTemplate {
-            num_cols: 3,
-            num_rows: 2,
-            num_nz: 1,
-            col_starts: vec![0_i32, 0, 1, 1],
-            row_indices: vec![0_i32],
-            values: vec![1.0],
-            col_lower: vec![0.0, 0.0, 0.0],
-            col_upper: vec![f64::INFINITY, f64::INFINITY, f64::INFINITY],
-            objective: vec![0.0, 0.0, 1.0],
-            row_lower: vec![0.0, 0.0],
-            row_upper: vec![0.0, 0.0],
-            n_state: 1,
-            n_transfer: 0,
-            n_dual_relevant: 1,
-            n_hydro: 1,
-            max_par_order: 0,
-            col_scale: Vec::new(),
-            row_scale: Vec::new(),
-        };
-        let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0);
-        let opening_tree = simple_opening_tree(1);
-
-        let disagg_weight = DisaggregationWeight {
-            anchor_period: 0,
-            next_period: Some(1),
-            next_period_stage: Some(1),
-            anchor_day_weight: 6.0 / 7.0,
-            next_day_weight: 1.0 / 7.0,
-        };
-        let zeta = 1.0_f64;
-
-        let spec = LbEvalSpec {
-            template: &template,
-            base_row: 1,
-            noise_scale: &[0.0],
-            n_hydros: 1,
-            opening_tree: &opening_tree,
-            risk_measure: &RiskMeasure::Expectation,
-            stochastic: Some(&stoch),
-            n_load_buses: 0,
-            ncs_max_gen: &[],
-            ncs_allow_curtailment: &[],
-            ncs_stochastic_dense_col: &[],
-            ncs_stochastic_windows: &[],
-            stage_id: 0,
-            block_count: 1,
-            ncs_generation: 0..0,
-            z_inflow_row_start: 0,
-            inflow_method: &InflowNonNegativityMethod::None,
-            disagg_weight,
-            zeta,
-            anticipated_widen: None,
-        };
-
-        let mut scratch = LbEvalScratch::new();
-        let mut solver = MockSolver::with_objectives(vec![0.0]);
-
-        lb_evaluate_stage_0(
-            &mut solver,
-            &spec,
-            &mut patch_buf,
-            &initial_state,
-            &state,
-            &mut scratch,
-        )
-        .unwrap();
-
-        let expected = zeta * disagg_weight.next_day_weight * (mean_b - mean_a);
-        assert!(
-            (scratch.noise_buf[0] - expected).abs() < 1e-9,
-            "boundary-stage LB noise RHS must equal the conditional-mean blend \
-             {expected}, got {}",
-            scratch.noise_buf[0]
-        );
-        assert!(
-            (scratch.disagg_next_rate_buf[0] - mean_b).abs() < 1e-9,
-            "disagg_next_rate_buf must equal the source-B conditional mean {mean_b}, got {}",
-            scratch.disagg_next_rate_buf[0]
-        );
-        assert!(
-            (scratch.z_inflow_rhs_buf[0] - mean_a).abs() < 1e-9,
-            "z_inflow_rhs_buf must stay the pure anchor rate {mean_a} (never blended), got {}",
-            scratch.z_inflow_rhs_buf[0]
-        );
     }
 }

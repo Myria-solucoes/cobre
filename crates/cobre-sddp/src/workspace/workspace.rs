@@ -493,32 +493,6 @@ pub(crate) struct ScratchBuffers {
     /// Per-worker permutation scratch for the forward-pass sampler and simulation
     /// worker loop. Pre-sized to `total_forward_passes.max(1)`.
     pub(crate) perm_scratch: Vec<usize>,
-
-    /// Regime A day-weighted disaggregation: the source-B (next-period) rate,
-    /// evaluated by [`crate::noise::compute_disaggregation_next_rate`] and
-    /// consumed by [`crate::noise::transform_inflow_noise`]'s blend. Length
-    /// `hydro_count`; populated only for a boundary stage
-    /// (`next_day_weight > 0.0`).
-    pub(crate) disagg_next_rate_buf: Vec<f64>,
-
-    /// Per-worker scratch noise buffer for the disaggregation forward/
-    /// simulation peek's own `sample()` call, kept separate from
-    /// [`Self::raw_noise_buf`] because the peek's sample for the boundary
-    /// stage's source-B representative stage runs while the anchor stage's
-    /// `raw_noise_buf`-derived slice is still borrowed for the LP solve.
-    /// Pre-sized to `noise_dim`, taken via `std::mem::take` the same way as
-    /// [`Self::raw_noise_buf`].
-    pub(crate) disagg_peek_noise_buf: Vec<f64>,
-
-    /// Per-worker permutation scratch for the disaggregation peek's own
-    /// `sample()` call. [`cobre_stochastic::SampleRequest`] ties `noise_buf`
-    /// and `perm_scratch` to the SAME lifetime parameter, so the peek's
-    /// `sample()` call cannot reuse [`Self::perm_scratch`] while the anchor
-    /// stage's noise (borrowed from [`Self::raw_noise_buf`] via that SAME
-    /// call's lifetime) is still alive. Pre-sized to
-    /// `total_forward_passes.max(1)`, taken via `std::mem::take` the same way
-    /// as [`Self::perm_scratch`].
-    pub(crate) disagg_peek_perm_scratch: Vec<usize>,
 }
 
 /// All per-thread mutable resources required for one LP solve sequence.
@@ -658,9 +632,6 @@ impl ScratchBuffers {
             trajectory_costs_buf: Vec::with_capacity(max_local_fwd),
             raw_noise_buf: Vec::with_capacity(noise_dim),
             perm_scratch: Vec::with_capacity(total_forward_passes.max(1)),
-            disagg_next_rate_buf: Vec::with_capacity(hydro_count),
-            disagg_peek_noise_buf: Vec::with_capacity(noise_dim),
-            disagg_peek_perm_scratch: Vec::with_capacity(total_forward_passes.max(1)),
         }
     }
 }

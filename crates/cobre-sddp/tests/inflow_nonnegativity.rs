@@ -524,8 +524,6 @@ fn train_fixture(
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     train(
         &mut solver,
@@ -658,8 +656,6 @@ fn simulate_fixture(
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
-            disaggregation_weights: &[],
-            zeta_s: &[],
         },
         fcf,
         &TrainingContext {

@@ -53,52 +53,6 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
         0
     };
 
-    // Regime A day-weighted disaggregation, backward's conditional-mean arm:
-    // no sampler is available (the backward pass evaluates an opening's fixed
-    // noise, not a fresh draw), so the source-B rate is the PAR model's
-    // conditional mean (eta = 0) at a lag shifted by this stage's realized
-    // anchor rate (anchor_rate), computed via `compute_water_balance_rhs` directly
-    // (never the `transform_inflow_noise` wrapper, which would apply the
-    // blend using a not-yet-populated `disagg_next_rate_buf`). The `real`
-    // `transform_inflow_noise` call below re-runs (idempotent) and applies the
-    // blend using `disagg_next_rate_buf` populated here.
-    let disagg_weight = ctx.disaggregation_weight_at(s);
-    if disagg_weight.next_day_weight > 0.0
-        && crate::noise::has_par_model(training_ctx.stochastic, ctx.n_hydros)
-    {
-        crate::noise::compute_water_balance_rhs(
-            raw_noise,
-            s,
-            x_hat,
-            ctx,
-            training_ctx,
-            &mut ws.scratch,
-        );
-        let n_h = training_ctx.state.hydro_count;
-        // Unreachable given `precompute_disaggregation_weights`'s invariant
-        // (next_day_weight > 0.0 implies next_period_stage is Some); falls back to
-        // this stage's own conditional mean rather than indexing nothing.
-        let next_stage = disagg_weight.next_period_stage.unwrap_or_else(|| {
-            debug_assert!(
-                false,
-                "next_day_weight > 0.0 with next_period_stage == None violates \
-                 the precompute_disaggregation_weights invariant"
-            );
-            s
-        });
-        let eta_zero = &ws.scratch.zero_targets_buf[..n_h];
-        crate::noise::compute_disaggregation_next_rate(
-            training_ctx.state,
-            x_hat,
-            &ws.scratch.z_inflow_rhs_buf,
-            training_ctx.stochastic,
-            next_stage,
-            eta_zero,
-            &mut ws.scratch.lag_matrix_buf,
-            &mut ws.scratch.disagg_next_rate_buf,
-        );
-    }
-
     transform_inflow_noise(raw_noise, s, x_hat, ctx, training_ctx, &mut ws.scratch);
     transform_load_noise(
         raw_noise,

@@ -13,7 +13,6 @@ use cobre_core::{
     initial_conditions::RecentObservation,
     temporal::{SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageLagTransition},
 };
-use cobre_stochastic::PeriodBlendWeight;
 
 /// Pre-computed seed values for the lag accumulator, derived from
 /// [`RecentObservation`] data in [`cobre_core::InitialConditions`].
@@ -476,123 +475,6 @@ pub fn precompute_stage_lag_transitions(
     result
 }
 
-/// Day-weighted split of one stage's inflow across the (at most two) calendar
-/// periods it overlaps, for monthly→weekly (Regime A) disaggregation.
-///
-/// An interior stage (fully inside one period) carries `next_period == None`
-/// and `anchor_day_weight == 1.0`, so the forward-pass blend collapses to the anchor
-/// period's rate and the monthly instruction stream is byte-for-byte unchanged.
-/// A boundary stage spanning periods `a` (anchor) and `b` (next) carries the
-/// day-share weights and, when an in-study stage carries the next period's draw,
-/// `next_period_stage` — the representative stage the forward peek reads the realized
-/// rate from. A boundary at the study's trailing edge (no in-study next-period
-/// stage) degrades to interior: no realized next-period rate exists to blend.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct DisaggregationWeight {
-    /// Anchor period (the stage's `season_id`, the earliest period it overlaps).
-    pub anchor_period: usize,
-    /// Next period the stage overlaps; `None` when the stage is interior.
-    pub next_period: Option<usize>,
-    /// Representative in-study stage index carrying `next_period`'s draw;
-    /// `None` when interior or the next period lies past the study horizon.
-    pub next_period_stage: Option<usize>,
-    /// Day-share of the anchor period; `1.0` when interior.
-    pub anchor_day_weight: f64,
-    /// Day-share of the next period; `0.0` when interior.
-    pub next_day_weight: f64,
-}
-
-impl DisaggregationWeight {
-    /// The interior (no-op) weight for a stage anchored to `anchor_period`.
-    ///
-    /// `pub(crate)`: also the empty-slice fallback shape returned by
-    /// [`crate::context::StageContext::disaggregation_weight_at`] for call sites
-    /// (mostly tests) that pass `disaggregation_weights: &[]`.
-    #[must_use]
-    pub(crate) fn interior(anchor_period: usize) -> Self {
-        Self {
-            anchor_period,
-            next_period: None,
-            next_period_stage: None,
-            anchor_day_weight: 1.0,
-            next_day_weight: 0.0,
-        }
-    }
-}
-
-/// Precompute one [`DisaggregationWeight`] per stage from stage dates and season
-/// definitions; consumed read-only on the forward/backward/simulation hot path.
-///
-/// Reuses the same period-window enumerator as `compute_period_transition`, so
-/// the day-share split is the exact inverse of the lag re-aggregation. No new
-/// input: the weights are calendar-derived and the two period rates are the
-/// trajectory's own drawn values.
-#[must_use]
-pub fn precompute_disaggregation_weights(
-    stages: &[Stage],
-    season_map: &SeasonMap,
-) -> Vec<DisaggregationWeight> {
-    stages
-        .iter()
-        .map(|stage| {
-            let Some(season_id) = stage.season_id else {
-                return DisaggregationWeight::interior(0);
-            };
-            let Some(season_def) = season_map.seasons.iter().find(|s| s.id == season_id) else {
-                return DisaggregationWeight::interior(season_id);
-            };
-
-            let current = period_window(season_map, season_def, stage);
-            let days_a =
-                days_in_period(stage.start_date, stage.end_date, current.start, current.end);
-            let Some(next) = next_period_window(season_map, season_def, &current) else {
-                return DisaggregationWeight::interior(season_id);
-            };
-            let days_b = days_in_period(stage.start_date, stage.end_date, next.start, next.end);
-            if days_b == 0 {
-                return DisaggregationWeight::interior(season_id);
-            }
-
-            // The realized next-period rate lives on the first study stage that
-            // starts inside `next`; without one (trailing-edge boundary) there is
-            // no in-study draw to blend, so degrade to interior.
-            let Some(next_period_stage) = stages
-                .iter()
-                .position(|s| s.start_date >= next.start && s.start_date < next.end)
-            else {
-                return DisaggregationWeight::interior(season_id);
-            };
-
-            let total = f64::from(days_a) + f64::from(days_b);
-            DisaggregationWeight {
-                anchor_period: season_id,
-                next_period: stages[next_period_stage].season_id,
-                next_period_stage: Some(next_period_stage),
-                anchor_day_weight: f64::from(days_a) / total,
-                next_day_weight: f64::from(days_b) / total,
-            }
-        })
-        .collect()
-}
-
-/// Project [`DisaggregationWeight`]s into `cobre-stochastic`'s crate-generic
-/// [`PeriodBlendWeight`] for the η-inversion call sites
-/// (`standardize_external_inflow`, `standardize_historical_windows`) —
-/// `cobre-stochastic` cannot depend on `cobre-sddp`, so the two crates share
-/// only the numeric fields the inverse needs, never the `DisaggregationWeight`
-/// type itself.
-#[must_use]
-pub fn to_period_blend_weights(weights: &[DisaggregationWeight]) -> Vec<PeriodBlendWeight> {
-    weights
-        .iter()
-        .map(|w| PeriodBlendWeight {
-            anchor_day_weight: w.anchor_day_weight,
-            next_day_weight: w.next_day_weight,
-            next_period_stage: w.next_period_stage,
-        })
-        .collect()
-}
-
 /// Populate downstream accumulation fields on the pre-transition window entries
 /// in `transitions`.
 ///
@@ -806,66 +688,6 @@ mod tests {
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
-    }
-
-    #[test]
-    fn test_disaggregation_interior_week_uses_month_rate() {
-        let season_map = monthly_season_map();
-        let stages = vec![
-            make_stage(0, d(2026, 4, 4), d(2026, 4, 11), Some(3)),
-            make_stage(1, d(2026, 4, 11), d(2026, 4, 18), Some(3)),
-            make_stage(2, d(2026, 4, 18), d(2026, 4, 25), Some(3)),
-        ];
-
-        let weights = precompute_disaggregation_weights(&stages, &season_map);
-        let interior = &weights[1];
-
-        assert_eq!(interior.next_period, None);
-        assert_eq!(interior.next_period_stage, None);
-        assert_eq!(interior.anchor_period, 3);
-        assert!((interior.anchor_day_weight - 1.0).abs() < 1e-12);
-        assert!(interior.next_day_weight.abs() < 1e-12);
-    }
-
-    #[test]
-    fn test_disaggregation_boundary_week_day_weighted_blend() {
-        let season_map = monthly_season_map();
-        let stages = vec![
-            make_stage(0, d(2026, 4, 18), d(2026, 4, 25), Some(3)),
-            make_stage(1, d(2026, 4, 25), d(2026, 5, 2), Some(3)),
-            make_stage(2, d(2026, 5, 2), d(2026, 6, 1), Some(4)),
-        ];
-
-        // Hand-derive the day counts from the public enumerator, never the struct.
-        let april = season_map.seasons.iter().find(|s| s.id == 3).unwrap();
-        let current = period_window(&season_map, april, &stages[1]);
-        let next = next_period_window(&season_map, april, &current).unwrap();
-        let days_a = days_in_period(
-            stages[1].start_date,
-            stages[1].end_date,
-            current.start,
-            current.end,
-        );
-        let days_b = days_in_period(
-            stages[1].start_date,
-            stages[1].end_date,
-            next.start,
-            next.end,
-        );
-        assert_eq!((days_a, days_b), (6, 1));
-        let total = f64::from(days_a + days_b);
-
-        let weights = precompute_disaggregation_weights(&stages, &season_map);
-        let boundary = &weights[1];
-
-        assert_eq!(boundary.anchor_period, 3);
-        assert_eq!(boundary.next_period, Some(4));
-        assert_eq!(boundary.next_period_stage, Some(2));
-        assert!((boundary.anchor_day_weight - f64::from(days_a) / total).abs() < 1e-12);
-        assert!((boundary.next_day_weight - f64::from(days_b) / total).abs() < 1e-12);
-        // Closed-form cross-check.
-        assert!((boundary.anchor_day_weight - 6.0 / 7.0).abs() < 1e-12);
-        assert!((boundary.next_day_weight - 1.0 / 7.0).abs() < 1e-12);
     }
 
     #[test]
@@ -1295,72 +1117,6 @@ mod tests {
             (transitions[1].accumulate_weight - flattened_to_july_weight).abs() > 1e-3,
             "Q3 stage must not collapse to a monthly-level weight"
         );
-    }
-
-    /// d30-shaped multi-resolution disaggregation: a fine-level (monthly,
-    /// June) boundary stage — the study's last monthly-resolution stage before
-    /// the decomposition transitions to coarse (quarterly, Q3) resolution —
-    /// must source its next-period rate from the COARSE stage directly above
-    /// it (the level the decomposition switches to), never from a flattened
-    /// global cycle. Reuses `custom_multi_resolution_season_map` (June + Q3)
-    /// verbatim — no new season map shape.
-    #[test]
-    fn test_disaggregation_multi_resolution_sources_from_level_above() {
-        let season_map = custom_multi_resolution_season_map();
-
-        // June (fine) overlaps 5 days into its own month plus 2 days into Q3
-        // (coarse); Q3 (the study's next stage, at coarse resolution) starts
-        // where June's overlap ends.
-        let june_boundary_stage = make_stage(0, d(2024, 6, 26), d(2024, 7, 3), Some(5));
-        let q3_stage = make_stage(1, d(2024, 7, 3), d(2024, 10, 1), Some(12));
-        let stages = vec![june_boundary_stage, q3_stage];
-
-        // Hand-derive the day counts from the public enumerator, never the struct.
-        let june_def = season_map.seasons.iter().find(|s| s.id == 5).unwrap();
-        let current = period_window(&season_map, june_def, &stages[0]);
-        let next = next_period_window(&season_map, june_def, &current).unwrap();
-        let days_a = days_in_period(
-            stages[0].start_date,
-            stages[0].end_date,
-            current.start,
-            current.end,
-        );
-        let days_b = days_in_period(
-            stages[0].start_date,
-            stages[0].end_date,
-            next.start,
-            next.end,
-        );
-        assert_eq!((days_a, days_b), (5, 2));
-        let total = f64::from(days_a + days_b);
-
-        let weights = precompute_disaggregation_weights(&stages, &season_map);
-        let boundary = &weights[0];
-
-        assert_eq!(
-            boundary.anchor_period, 5,
-            "anchor must be June (fine level)"
-        );
-        assert_eq!(
-            boundary.next_period,
-            Some(12),
-            "next period must be Q3 (the coarse level directly above), never a \
-             flattened global cycle"
-        );
-        assert_eq!(
-            boundary.next_period_stage,
-            Some(1),
-            "representative stage must be the coarse Q3 stage"
-        );
-        assert!((boundary.anchor_day_weight - f64::from(days_a) / total).abs() < 1e-12);
-        assert!((boundary.next_day_weight - f64::from(days_b) / total).abs() < 1e-12);
-        // Closed-form cross-check.
-        assert!((boundary.anchor_day_weight - 5.0 / 7.0).abs() < 1e-12);
-        assert!((boundary.next_day_weight - 2.0 / 7.0).abs() < 1e-12);
-
-        // The coarse Q3 stage itself is interior to Q3 — no further boundary.
-        assert_eq!(weights[1].next_period, None);
-        assert!((weights[1].anchor_day_weight - 1.0).abs() < 1e-12);
     }
 
     // -----------------------------------------------------------------------

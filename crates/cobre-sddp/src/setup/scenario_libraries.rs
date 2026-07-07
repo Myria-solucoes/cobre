@@ -18,9 +18,7 @@ use cobre_stochastic::{
     validate_external_library, validate_historical_library,
 };
 
-use crate::{
-    SddpError, lag_transition::DisaggregationWeight, lag_transition::to_period_blend_weights,
-};
+use crate::SddpError;
 
 /// Build and validate a [`HistoricalScenarioLibrary`] for inflow.
 ///
@@ -33,9 +31,6 @@ use crate::{
 /// # Errors
 ///
 /// Returns `SddpError::Stochastic` on window discovery or validation failure.
-// Rationale (too_many_arguments): nine disjoint read-only inputs feed one
-// cohesive library-build phase; a bundle struct would only relocate the arity.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_historical_inflow_library(
     inflow_history: &[InflowHistoryRow],
     hydro_ids: &[EntityId],
@@ -44,7 +39,6 @@ pub(crate) fn build_historical_inflow_library(
     season_map: Option<&SeasonMap>,
     past_inflows: &[HydroPastInflows],
     stage_lag_transitions: &[StageLagTransition],
-    disaggregation_weights: &[DisaggregationWeight],
     user_pool: Option<&HistoricalYears>,
     forward_passes: u32,
 ) -> Result<HistoricalScenarioLibrary, SddpError> {
@@ -76,7 +70,6 @@ pub(crate) fn build_historical_inflow_library(
         season_map,
         past_inflows,
         stage_lag_transitions,
-        &to_period_blend_weights(disaggregation_weights),
     );
     validate_historical_library(
         &library,
@@ -103,7 +96,6 @@ pub(crate) fn build_external_inflow_library(
     par: &PrecomputedPar,
     past_inflows: &[HydroPastInflows],
     stage_lag_transitions: &[StageLagTransition],
-    disaggregation_weights: &[DisaggregationWeight],
     forward_passes: u32,
 ) -> Result<ExternalScenarioLibrary, SddpError> {
     let n_stages = stages.len();
@@ -148,7 +140,6 @@ pub(crate) fn build_external_inflow_library(
         par,
         past_inflows,
         stage_lag_transitions,
-        &to_period_blend_weights(disaggregation_weights),
     );
     pad_library_to_uniform(&mut library);
     Ok(library)

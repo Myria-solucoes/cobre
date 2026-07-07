@@ -171,7 +171,6 @@ fn par_a_historical_replay_roundtrip() {
         None,
         &past_inflows,
         &transitions,
-        &[],
     );
 
     let n_hydros = 1;
@@ -281,7 +280,6 @@ fn t2_past_inflows_differ_from_window_lags_roundtrip() {
         None,
         &past_inflows,
         &transitions,
-        &[],
     );
 
     let safe_max_order = max_order.max(1);
@@ -381,7 +379,6 @@ fn t3_ar0_par_a_roundtrip() {
         None,
         &past_inflows,
         &transitions,
-        &[],
     );
 
     let safe_max_order = max_order.max(1);
@@ -488,7 +485,6 @@ fn t4_past_inflows_shorter_than_max_order_roundtrip() {
         None,
         &past_inflows,
         &transitions,
-        &[],
     );
 
     let max_order = par.max_order();
@@ -590,7 +586,6 @@ fn t5_two_windows_shared_past_inflows_roundtrip() {
         None,
         &past_inflows,
         &transitions,
-        &[],
     );
 
     let safe = max_order.max(1);
@@ -672,6 +667,5 @@ fn t6_non_trivial_transitions_guard_fires() {
         None,
         &[],
         &transitions,
-        &[],
     );
 }

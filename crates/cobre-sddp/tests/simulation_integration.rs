@@ -618,8 +618,6 @@ fn train_simulate_write_cycle() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let result = train(
         &mut solver,
@@ -816,8 +814,6 @@ fn train_simulate_write_cycle() {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
-            disaggregation_weights: &[],
-            zeta_s: &[],
         },
         &fcf,
         &TrainingContext {
@@ -1385,8 +1381,6 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
 
     let training_config = TrainingConfig {

@@ -622,9 +622,6 @@ fn single_workspace(
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            disagg_next_rate_buf: Vec::new(),
-            disagg_peek_noise_buf: Vec::new(),
-            disagg_peek_perm_scratch: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -740,8 +737,6 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let result = run_forward_pass(
         std::slice::from_mut(&mut ws),
@@ -878,8 +873,6 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let result = run_forward_pass(
         std::slice::from_mut(&mut ws),
@@ -1022,8 +1015,6 @@ fn cost_statistics_accumulated_correctly() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let result = run_forward_pass(
         std::slice::from_mut(&mut ws),
@@ -1481,8 +1472,6 @@ fn run_one_iteration(
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     run_forward_pass(
         std::slice::from_mut(ws),
@@ -1663,8 +1652,6 @@ fn test_forward_pass_parallel_cost_agreement() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
 
     // Run with 1 workspace.
@@ -1837,8 +1824,6 @@ fn test_forward_pass_work_distribution() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let _result = run_forward_pass(
         &mut workspaces,
@@ -2147,8 +2132,6 @@ fn run_single_stage_forward(
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let stages = vec![Stage {
         index: 0,
@@ -2376,8 +2359,6 @@ fn none_method_unchanged_with_truncation_code_present() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let result = run_forward_pass(
         std::slice::from_mut(&mut ws),
@@ -2640,8 +2621,6 @@ fn test_forward_pass_parallel_infeasibility() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let result = run_forward_pass(
         &mut workspaces,
@@ -2767,9 +2746,6 @@ fn forward_pass_load_noise_positive_realization() {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            disagg_next_rate_buf: Vec::new(),
-            disagg_peek_noise_buf: Vec::new(),
-            disagg_peek_perm_scratch: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -2810,8 +2786,6 @@ fn forward_pass_load_noise_positive_realization() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let _fwd = run_forward_pass(
         std::slice::from_mut(&mut ws),
@@ -2932,9 +2906,6 @@ fn forward_pass_load_noise_clamped_to_zero() {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            disagg_next_rate_buf: Vec::new(),
-            disagg_peek_noise_buf: Vec::new(),
-            disagg_peek_perm_scratch: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -2975,8 +2946,6 @@ fn forward_pass_load_noise_clamped_to_zero() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let _fwd = run_forward_pass(
         std::slice::from_mut(&mut ws),
@@ -3089,8 +3058,6 @@ fn forward_pass_no_load_buses_unchanged() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let _fwd = run_forward_pass(
         std::slice::from_mut(&mut ws),
@@ -3755,8 +3722,6 @@ mod dcs_forward {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
-            disaggregation_weights: &[],
-            zeta_s: &[],
         };
         let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
@@ -4112,8 +4077,6 @@ mod transit_bucket_copy_gap {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
-            disaggregation_weights: &[],
-            zeta_s: &[],
         };
         let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {

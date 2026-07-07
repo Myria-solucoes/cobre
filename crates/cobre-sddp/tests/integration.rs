@@ -564,8 +564,6 @@ fn run_one_deterministic_pass(
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     train(
         &mut solver,
@@ -675,8 +673,6 @@ fn train_converges_with_mock_solver() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let result = train(
         &mut solver,
@@ -793,8 +789,6 @@ fn train_lb_monotonically_nondecreasing() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     train(
         &mut solver,
@@ -900,8 +894,6 @@ fn train_emits_correct_event_sequence() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     train(
         &mut solver,
@@ -991,8 +983,6 @@ fn train_stops_at_iteration_limit() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let result = train(
         &mut solver,
@@ -1091,8 +1081,6 @@ fn train_stops_on_graceful_shutdown() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let result = train(
         &mut solver,
@@ -1181,8 +1169,6 @@ fn train_propagates_infeasible_error() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let result = train(
         &mut solver,
@@ -1314,8 +1300,6 @@ fn d17_level1_cut_selection_convergence() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let result = train(
         &mut solver,
@@ -1446,8 +1430,6 @@ fn d17_level1_cut_selection_reconstruction() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
 
     let result = train(
@@ -1584,8 +1566,6 @@ fn d18_lml1_cut_selection_convergence() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
     let result = train(
         &mut solver,
@@ -1796,8 +1776,6 @@ fn frozen_backward_pass_smoke_test() {
         stage_lag_transitions: &[],
         noise_group_ids: &[],
         downstream_par_order: 0,
-        disaggregation_weights: &[],
-        zeta_s: &[],
     };
 
     let outcome = train(

@@ -152,16 +152,6 @@ pub(crate) struct ScenarioIds<'a> {
     pub(crate) raw_noise_buf: &'a mut [f64],
     /// Caller-owned permutation scratch for LHS generation (reused across stages).
     pub(crate) perm_scratch: &'a mut [usize],
-    /// Caller-owned noise buffer for the Regime A disaggregation peek's own
-    /// `sample()` call — separate from `raw_noise_buf` because
-    /// `SampleRequest` ties `noise_buf` and `perm_scratch` to one lifetime, so
-    /// the peek's sample for a boundary stage's source-B stage cannot reuse
-    /// `raw_noise_buf`/`perm_scratch` while the anchor stage's `raw_noise` is
-    /// still alive.
-    pub(crate) disagg_peek_noise_buf: &'a mut [f64],
-    /// Caller-owned permutation scratch for the disaggregation peek's own
-    /// `sample()` call; paired with [`Self::disagg_peek_noise_buf`].
-    pub(crate) disagg_peek_perm_scratch: &'a mut [usize],
     /// Noise sampler used to draw per-stage stochastic values.
     pub(crate) sampler: &'a ForwardSampler<'a>,
 }
@@ -936,76 +926,6 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
             noise_group_id: ctx.noise_group_id_at(t),
         })?;
         let raw_noise = noise.as_slice();
-
-        // Regime A day-weighted disaggregation peek: identical to the forward
-        // pass (`training::forward_pass_state::run_forward_worker`) — realize
-        // anchor_rate for this stage via `compute_water_balance_rhs` directly
-        // (never the `transform_inflow_noise` wrapper, which would apply the
-        // blend using a not-yet-populated `disagg_next_rate_buf`), peek the
-        // source-B stage's REALIZED draw, and evaluate its PAR model at a lag
-        // shifted by anchor_rate. The `real` `transform_inflow_noise` call below
-        // re-runs (idempotent) and applies the blend using `disagg_next_rate_buf`
-        // populated here.
-        let disagg_weight = ctx.disaggregation_weight_at(t);
-        if disagg_weight.next_day_weight > 0.0
-            && crate::noise::has_par_model(stochastic, ctx.n_hydros)
-        {
-            crate::noise::compute_water_balance_rhs(
-                raw_noise,
-                t,
-                &ws.current_state,
-                ctx,
-                training_ctx,
-                &mut ws.scratch,
-            );
-            let n_h = state.hydro_count;
-            if let Some(next_stage) = disagg_weight.next_period_stage {
-                #[allow(clippy::cast_possible_truncation)]
-                let sb_u32 = next_stage as u32;
-                let next_noise = ids.sampler.sample(SampleRequest {
-                    iteration: 0,
-                    scenario: ids.global_scenario,
-                    stage: sb_u32,
-                    stage_idx: next_stage,
-                    noise_buf: ids.disagg_peek_noise_buf,
-                    perm_scratch: ids.disagg_peek_perm_scratch,
-                    total_scenarios: ids.total_scenarios,
-                    noise_group_id: ctx.noise_group_id_at(next_stage),
-                })?;
-                let next_eta = &next_noise.as_slice()[..n_h];
-                crate::noise::compute_disaggregation_next_rate(
-                    state,
-                    &ws.current_state,
-                    &ws.scratch.z_inflow_rhs_buf,
-                    stochastic,
-                    next_stage,
-                    next_eta,
-                    &mut ws.scratch.lag_matrix_buf,
-                    &mut ws.scratch.disagg_next_rate_buf,
-                );
-            } else {
-                // Unreachable given `precompute_disaggregation_weights`'s
-                // invariant (next_day_weight > 0.0 implies next_period_stage is
-                // Some); handled defensively rather than indexing a stale
-                // buffer. Falls back to this stage's own conditional mean.
-                debug_assert!(
-                    false,
-                    "next_day_weight > 0.0 with next_period_stage == None \
-                     violates the precompute_disaggregation_weights invariant"
-                );
-                let eta_zero = &ws.scratch.zero_targets_buf[..n_h];
-                crate::noise::compute_disaggregation_next_rate(
-                    state,
-                    &ws.current_state,
-                    &ws.scratch.z_inflow_rhs_buf,
-                    stochastic,
-                    t,
-                    eta_zero,
-                    &mut ws.scratch.lag_matrix_buf,
-                    &mut ws.scratch.disagg_next_rate_buf,
-                );
-            }
-        }
 
         transform_inflow_noise(
             raw_noise,

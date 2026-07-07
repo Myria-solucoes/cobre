@@ -531,9 +531,6 @@ fn single_workspace(solver: MockSolver) -> Vec<SolverWorkspace<MockSolver>> {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            disagg_next_rate_buf: Vec::new(),
-            disagg_peek_noise_buf: Vec::new(),
-            disagg_peek_perm_scratch: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -778,9 +775,6 @@ fn simulation_load_patches_applied() {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            disagg_next_rate_buf: Vec::new(),
-            disagg_peek_noise_buf: Vec::new(),
-            disagg_peek_perm_scratch: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -821,8 +815,6 @@ fn simulation_load_patches_applied() {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
-            disaggregation_weights: &[],
-            zeta_s: &[],
         },
         &fcf,
         &TrainingContext {
@@ -992,8 +984,6 @@ fn simulation_no_load_buses_unchanged() {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
-            disaggregation_weights: &[],
-            zeta_s: &[],
         },
         &fcf,
         &TrainingContext {
@@ -1149,9 +1139,6 @@ fn simulation_inflow_extraction_unaffected() {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            disagg_next_rate_buf: Vec::new(),
-            disagg_peek_noise_buf: Vec::new(),
-            disagg_peek_perm_scratch: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -1190,8 +1177,6 @@ fn simulation_inflow_extraction_unaffected() {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
-            disaggregation_weights: &[],
-            zeta_s: &[],
         },
         &fcf,
         &TrainingContext {
@@ -1489,9 +1474,6 @@ fn single_workspace_with_hydros(
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            disagg_next_rate_buf: Vec::new(),
-            disagg_peek_noise_buf: Vec::new(),
-            disagg_peek_perm_scratch: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -1573,8 +1555,6 @@ fn simulation_truncation_clamps_negative_inflow_noise() {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
-            disaggregation_weights: &[],
-            zeta_s: &[],
         },
         &fcf,
         &TrainingContext {
@@ -1709,8 +1689,6 @@ fn simulation_none_method_produces_raw_negative_noise() {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
-            disaggregation_weights: &[],
-            zeta_s: &[],
         },
         &fcf,
         &TrainingContext {
@@ -2015,8 +1993,6 @@ mod dcs_simulation {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
-            disaggregation_weights: &[],
-            zeta_s: &[],
         };
         let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
@@ -2558,8 +2534,6 @@ mod anticipated_ring_matches_forward_propagation {
             stage_lag_transitions: &[],
             noise_group_ids: &[],
             downstream_par_order: 0,
-            disaggregation_weights: &[],
-            zeta_s: &[],
         };
         let training_ctx = TrainingContext {
             horizon: &horizon,
