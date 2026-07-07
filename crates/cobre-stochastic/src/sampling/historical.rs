@@ -434,7 +434,6 @@ pub fn standardize_historical_windows(
     let full_sequence: Vec<(i32, usize)> =
         super::build_observation_sequence(stages, max_order, n_seasons);
 
-    // past_lag_buf[h_idx * safe_max_order + lag]
     let safe_max_order = max_order.max(1);
     let mut past_lag_buf = vec![0.0_f64; n_hydros * safe_max_order];
     for pi in past_inflows {
@@ -458,7 +457,6 @@ pub fn standardize_historical_windows(
         library.past_inflows_digest = hasher.finish();
     }
 
-    // lag_state[h * safe_max_order + l]
     let mut lag_state = vec![0.0_f64; n_hydros * safe_max_order];
     let mut lag_buf = vec![0.0_f64; safe_max_order];
     let mut lag_accum = vec![0.0_f64; n_hydros];
@@ -476,10 +474,7 @@ pub fn standardize_historical_windows(
             let (year_offset, season_id) = full_sequence[max_order + t];
             let obs_year = window_year + year_offset;
             debug_assert!(
-                table_idx(0, obs_year, season_id).is_some_and(|i| {
-                    _ = i;
-                    true
-                }),
+                table_idx(0, obs_year, season_id).is_some(),
                 "missing study observation for year={obs_year}, season={season_id}; \
                  window discovery should have excluded this window",
             );

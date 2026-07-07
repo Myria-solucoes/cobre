@@ -410,8 +410,7 @@ pub fn build_forward_sampler(
     let noise_methods: Box<[NoiseMethod]> = stages
         .iter()
         .map(|s| s.scenario_config.noise_method)
-        .collect::<Vec<_>>()
-        .into_boxed_slice();
+        .collect();
 
     let entity_order = ctx.entity_order();
     let inflow_order = &entity_order[..dims.n_hydros];

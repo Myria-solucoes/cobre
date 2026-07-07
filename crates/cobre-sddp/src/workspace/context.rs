@@ -102,7 +102,7 @@ pub struct StageContext<'a> {
     /// for transitions preceding stage `t`. `[0] == 1.0` always.
     pub cumulative_discount_factors: &'a [f64],
     /// Precomputed per-stage lag accumulation weights and period-finalization
-    /// flags. Used by the forward pass and simulation pipeline.
+    /// flags.
     pub stage_lag_transitions: &'a [StageLagTransition],
     /// Noise group IDs for noise-group sharing, indexed by stage array index.
     /// Stages sharing a group ID share a noise draw in the opening tree and

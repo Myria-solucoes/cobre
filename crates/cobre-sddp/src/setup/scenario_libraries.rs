@@ -1,6 +1,5 @@
 //! Scenario library builders for historical and external sampling schemes.
 //!
-//! Each builder constructs, validates, standardizes, and pads a library.
 //! Builders are not factored generically because external types have different
 //! standardization semantics.
 

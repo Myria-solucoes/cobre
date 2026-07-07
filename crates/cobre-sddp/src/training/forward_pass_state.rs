@@ -447,7 +447,6 @@ impl ForwardPassState {
             start,
         } = *ppc;
 
-        // Collect per-worker snapshots after the parallel region and decompose overhead.
         self.worker_stats_after.clear();
         self.worker_stats_after
             .extend(inputs.workspaces.iter().map(|ws| ws.solver.statistics()));
@@ -467,7 +466,6 @@ impl ForwardPassState {
             .map(|d| d.load_model_time_ms + d.set_bounds_time_ms + d.basis_set_time_ms)
             .sum();
 
-        // Per-worker elapsed: solve + setup phases.
         self.worker_totals.clear();
         self.worker_totals
             .extend(self.worker_deltas.iter().map(|d| {

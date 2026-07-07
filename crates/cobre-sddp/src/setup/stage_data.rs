@@ -68,7 +68,6 @@ pub struct StageData {
     /// (`true` = import). Stage-invariant.
     pub(crate) contract_is_import: Vec<bool>,
 
-    /// Number of blocks per stage.
     pub(crate) block_counts_per_stage: Vec<usize>,
 
     /// Precomputed lag accumulation weights and period-finalization flags,

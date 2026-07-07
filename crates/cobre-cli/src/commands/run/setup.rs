@@ -216,7 +216,7 @@ pub(super) fn broadcast_and_build_setup(
     let (
         raw_system,
         raw_bcast_config,
-        mut root_config,
+        root_config,
         root_stochastic,
         root_estimation_report,
         root_estimation_path,
@@ -346,7 +346,7 @@ pub(super) fn broadcast_and_build_setup(
     Ok(LoadBroadcastResult {
         system,
         setup,
-        root_config: root_config.take(),
+        root_config,
         root_estimation_report,
         root_estimation_path,
         training_enabled,

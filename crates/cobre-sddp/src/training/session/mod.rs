@@ -145,6 +145,10 @@ where
         fcf.set_iteration_base(config.loop_config.start_iteration + 1);
 
         let n_threads = config.loop_config.n_fwd_threads.max(1);
+        let max_openings = (0..ranks.num_stages)
+            .map(|t| training_ctx.stochastic.opening_tree().n_openings(t))
+            .max()
+            .unwrap_or(0);
         let mut fwd_pool = WorkspacePool::try_new(
             ranks.fwd_rank,
             n_threads,
@@ -156,10 +160,7 @@ where
                 max_blocks: config.loop_config.max_blocks,
                 n_buckets: state.n_buckets,
                 downstream_par_order: stage_ctx.downstream_par_order,
-                max_openings: (0..ranks.num_stages)
-                    .map(|t| training_ctx.stochastic.opening_tree().n_openings(t))
-                    .max()
-                    .unwrap_or(0),
+                max_openings,
                 initial_pool_capacity: fcf.pools[0].capacity,
                 n_state: ranks.n_state,
                 max_local_fwd: ranks.max_local_fwd,
@@ -268,16 +269,11 @@ where
         let fwd_state =
             ForwardPassState::new(n_workers_local, ranks.num_stages, ranks.max_local_fwd);
 
-        let bwd_max_openings = (0..ranks.num_stages)
-            .map(|t| training_ctx.stochastic.opening_tree().n_openings(t))
-            .max()
-            .unwrap_or(0);
-        let n_ranks = comm.size();
         let real_states_capacity = exchange_bufs.real_total_scenarios() * ranks.n_state;
         let bwd_state = BackwardPassState::new(
             n_workers_local,
-            n_ranks,
-            bwd_max_openings,
+            ranks.num_ranks,
+            max_openings,
             real_states_capacity,
         );
 
@@ -1680,7 +1676,7 @@ mod tests {
             n_stages,
             "frozen_templates must have one per stage"
         );
-        // send_stride = n_workers_local * bwd_max_openings * WORKER_STATS_ENTRY_STRIDE
+        // send_stride = n_workers_local * max_openings * WORKER_STATS_ENTRY_STRIDE
         // n_fwd_threads=1 → n_workers_local=1; max_openings=1 for this fixture
         let expected_send_stride = crate::solver_stats::WORKER_STATS_ENTRY_STRIDE;
         assert_eq!(
