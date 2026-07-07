@@ -594,8 +594,8 @@ impl StateLayout {
     /// Whether anticipated plant `local_idx`'s commitment maturing at an
     /// EXPLICIT `delivery_stage` is active — the same horizon + commissioning
     /// gate as [`Self::is_anticipated_decision_active`], generalized so a
-    /// fanned-out decision column (whose delivery stage is read from
-    /// `PointResolution::genuine_decisions_at`, not derived as a constant
+    /// decision column whose delivery stage is read from
+    /// `PointResolution::genuine_decisions_at` (not derived as a constant
     /// offset from the decision stage) can compose the gate on ITS OWN
     /// delivery stage. [`Self::is_anticipated_decision_active`] delegates
     /// here with the constant-lead derived delivery stage — a pure refactor,
@@ -651,19 +651,6 @@ impl StateLayout {
             &[],
             n_stages,
         ))
-    }
-
-    /// Effective fan-out width for the decision-column geometry: the
-    /// setup-threaded [`crate::lead_time::AnticipatedResolution::max_fanout`]
-    /// when a resolution is attached, or `1` (single-decider) / `0` (no
-    /// anticipation) derived from the constant [`Self::anticipated_lead_stages`]
-    /// otherwise — mirrors [`Self::anticipated_resolution_for`]'s fallback.
-    #[must_use]
-    pub(crate) fn anticipated_max_fanout(&self) -> usize {
-        if !self.anticipated_resolution.per_plant.is_empty() {
-            return self.anticipated_resolution.max_fanout;
-        }
-        usize::from(self.anticipated_lead_stages.iter().any(|&k| k >= 1))
     }
 
     /// Compute and store the nonzero state index mask from per-hydro

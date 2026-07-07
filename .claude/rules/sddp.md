@@ -420,20 +420,14 @@ Read: `lp/indexer/state_layout.rs` (`is_anticipated_decision_active`,
 `a1c_lead_stages_is_pure_index_shift`'s empty-`decision_sets`-past-horizon
 assertion.
 
-### In-LP anticipated ring: fan-out deposit cardinality & `K = 0` exclusion
+### In-LP anticipated ring: single-decider deposit & `K = 0` exclusion
 
-The single-decider ring above generalizes to a plant committing SEVERAL
-delivery stages from the SAME decision stage (`|C(t)| > 1`, a coarse decision
-stage anchoring several fine delivery stages). Each fanned decision `j` gets
-its own decision column (`col_anticipated_decision_start + j * n_anticipated +
-local_idx`, fan-out-index-major, plant-minor, width `AnticipatedResolution::
-max_fanout`) and deposits into its OWN ring slot,
-`slot = delivery_stage − stage_idx − 1` — computed DIRECTLY from the decision's
-own delivery stage, never from a `depth`-derived boundary. A plant committing
-several delivery stages this stage produces several DISTINCT deposit rows,
-each at a different slot; collapsing this to one combined deposit is the
-fold-blindness class — pinned by asserting a CROSS-SLOT SUM (each deposit's
-`(+1.0, −1.0)` pair at its OWN row/slot), never a total-cost-only check.
+Each anticipated plant gets AT MOST ONE decision column per stage
+(`col_anticipated_decision_start + local_idx`), driven by
+`PointResolution::genuine_decisions_at(stage_idx).next()` (a `K = 0`
+self-delivery already excluded — see below). That decision deposits into its
+OWN ring slot, `slot = delivery_stage − stage_idx − 1` — computed DIRECTLY from
+the decision's own delivery stage, never from a `depth`-derived boundary.
 
 **`depth[t]` is not the ring's per-stage occupancy boundary.** `depth[t]`
 (`PointResolution::depth`) counts only IN-STUDY decided items still in flight
@@ -456,7 +450,7 @@ exclude-with-advisory, never a hard error, never an underflow.** A
 delivery whose physical lead is shorter than its own stage's duration is
 decided inside its own delivery stage; `PointResolution::self_delivered_stages`
 identifies these, and `genuine_decisions_at`/`is_anticipated_at` filter them
-out of the fan-out and fishing gates respectively — the plant's ordinary
+out of the decision and fishing gates respectively — the plant's ordinary
 thermal generation column is priced and bounded normally (no fishing
 coupling, no anticipated row at all) at that stage. A setup-time
 `tracing::warn!` (`setup::warn_on_sub_stage_lead`, the same channel
@@ -465,52 +459,50 @@ stage, and the `lead_stages == 0` alternative — never emitted per-scenario or
 per-trajectory.
 
 Read: `lead_time/mod.rs` (`PointResolution::genuine_decisions_at`,
-`self_delivered_stages`, `is_anticipated_at`, `is_ready_at`,
-`AnticipatedResolution::max_fanout`), `lp/indexer/state_layout.rs`
+`self_delivered_stages`, `is_anticipated_at`, `is_ready_at`),
+`lp/indexer/state_layout.rs`
 (`StateLayout::is_anticipated_decision_active_for_delivery`,
-`anticipated_resolution_for`, `anticipated_max_fanout`), `lp/builder/layout.rs`
+`anticipated_resolution_for`), `lp/builder/layout.rs`
 (`build_anticipated_slot_row_pos`, `build_anticipated_decision_row_pos`,
 `build_anticipated_fishing_row_pos`), `lp/builder/columns.rs`
 (`fill_anticipated_columns`), `lp/builder/entries.rs`
 (`fill_anticipated_state_out_def_entries`, `fill_anticipated_fishing_entries`),
-`setup/mod.rs` (`warn_on_sub_stage_lead`). Pinned by the fan-out
-cross-slot-sum regression (four distinct deposits at four distinct slots,
-never a folded total), the delivery-anchored fanned-bounds regression
-(stage-varying `thermal_bounds` per fanned column), the commissioning-
-composition regression (the gate applied per fanned column on its own
-delivery stage), and the `K = 0` zero-emission-plus-advisory regression (no
-anticipated slot/row/fishing coupling at any stage, one advisory per
-self-delivered stage).
+`setup/mod.rs` (`warn_on_sub_stage_lead`). Pinned by the `K = 0`
+zero-emission-plus-advisory regression (no anticipated slot/row/fishing
+coupling at any stage, one advisory per self-delivered stage).
 
-### Fan-out output is a current, guarded limitation
+### Fan-out configurations are rejected at setup
 
-The fan-out ring mechanics above (`|C(t)| > 1`) are unit-tested directly
-against the LP-building functions, but no study reaches them end-to-end
-today: `build_wired_indexer` rejects any `AnticipatedResolution::max_fanout >
-1` configuration with `SddpError::Validation` before a study is built,
-naming the fanned plant and stating that per-delivery-stage output is not
-yet supported for simulation. This is a CURRENT, guarded limitation, not a
-permanent restriction on the ring's design — the rejection lives in the
-setup gate alone, not in the column/entry/row-position functions themselves.
-Read: `setup/mod.rs` (`build_wired_indexer`). Pinned by
-`lead_time_fanout_rejected_at_setup` (asserts `SddpError::Validation`, not a
+The LP builder has no fan-out representation: every anticipated plant gets at
+most one decision column per stage (above). A `LeadTime` plant whose
+resolution would fan out (`|genuine C(t)| > 1` at any decision stage) never
+reaches it — `resolve_state_layout` rejects any
+`AnticipatedResolution::max_fanout > 1` configuration with
+`SddpError::Validation`, naming the fanning plant (`first_fanned_plant_id`)
+before a study's stage templates exist. This is the SOLE fan-out guard, not a
+belt-and-braces check backed by column/entry/row-position handling that no
+longer exists.
+Read: `setup/mod.rs` (`resolve_state_layout`, `first_fanned_plant_id`). Pinned
+by `lead_time_fanout_rejected_at_setup` (asserts `SddpError::Validation`, not a
 panic, after confirming the fixture genuinely fans out).
 
 ### Delivery-anchoring preservation
 
-Every anticipated decision column in `C(t)` — single-decider and every fanned
-member alike — is bounded, costed, and commissioning-gated at ITS OWN delivery
-stage `m`, never the decision stage `t`. `fill_anticipated_columns` reads
-`thermal_bounds(thermal_idx, delivery_stage)` for the column's `[min, max]`
-bounds, `total_hours_per_stage[delivery_stage]` and
+Every anticipated plant's decision column is bounded, costed, and
+commissioning-gated at ITS OWN delivery stage `m` (its
+`genuine_decisions_at(t)` target, when one exists), never the decision stage
+`t`. `fill_anticipated_columns` reads `thermal_bounds(thermal_idx,
+delivery_stage)` for the column's `[min, max]` bounds,
+`total_hours_per_stage[delivery_stage]` and
 `cumulative_discount_factors[delivery_stage]` for its present-value objective,
 and `is_anticipated_decision_active_for_delivery` (the plant's window at
-`delivery_stage`) for its dormancy — each at `delivery_stage = C(t)[j]`, never
-at `stage_idx`. The delivered commitment is a hard equality with no slack (the
-fishing coupling pins the plant's delivery-stage generation to the committed
-value), so relatively-complete recourse requires the committed value always lie
-within the delivery stage's own generation bounds. A DECISION-anchored read
-(`thermal_bounds(thermal_idx, stage_idx)`) is the forbidden alternative: it
+`delivery_stage`) for its dormancy — each at the plant's own genuine delivery
+stage, never at `stage_idx`. The delivered commitment is a hard equality with
+no slack (the fishing coupling pins the plant's delivery-stage generation to
+the committed value), so relatively-complete recourse requires the committed
+value always lie within the delivery stage's own generation bounds. A
+DECISION-anchored read (`thermal_bounds(thermal_idx, stage_idx)`) is the
+forbidden alternative: it
 reintroduces the capacity-drop infeasibility — a commitment placed under the
 decision stage's larger capacity that no scenario can deliver under the delivery
 stage's smaller one, stranded with no feasibility cut to absorb it — and still
@@ -534,8 +526,8 @@ Read: `lp/builder/columns.rs` (`fill_anticipated_columns`),
 `cobre-io` `validation/semantic/thermal.rs`
 (`warn_thermal_generation_on_anticipated_thermal`). Pinned by
 `test_anticipated_decision_delivery_anchored_bounds` (stage-varying delivery
-bounds/cost, single-decider and fan-out, mutation-verified against the
-decision-anchored read), the end-to-end
+bounds/cost, mutation-verified against the decision-anchored read), the
+end-to-end
 `a1b_lead_time_equals_lead_stages_uniform_calendar` (the same
 decision-anchored mutation turns the forward solve infeasible; pinned by
 training and simulating both `LeadTime` and `LeadStages` configurations of

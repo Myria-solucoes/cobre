@@ -172,18 +172,10 @@ pub(crate) struct TemplateBuildCtx<'a> {
 
 /// Column/row offsets for one stage's anticipated-thermal layout.
 pub(crate) struct AnticipatedLayout {
-    /// Start of the anticipated-decision column block: `max_fanout *
-    /// n_anticipated` columns, fan-out-index-major, plant-minor
-    /// (`col_anticipated_decision_start + j * n_anticipated + local_idx` for
-    /// `j in 0..max_fanout`). Equals `col_thermal_end`. `max_fanout == 1`
-    /// collapses the offset formula to the pre-fan-out
-    /// `col_anticipated_decision_start + local_idx` exactly.
+    /// Start of the anticipated-decision column block: `n_anticipated`
+    /// columns (`col_anticipated_decision_start + local_idx`). Equals
+    /// `col_thermal_end`.
     pub(crate) col_anticipated_decision_start: usize,
-    /// Fan-out width (`AnticipatedResolution::max_fanout`, or its
-    /// single-decider/no-anticipation fallback — see
-    /// `StateLayout::anticipated_max_fanout`): the decision-column block's
-    /// per-plant stride.
-    pub(crate) max_fanout: usize,
     /// Start of the `anticipated_slots_out` column block (`A * k_max` columns,
     /// slot-major, plant-minor). Sourced from
     /// `StateLayout::anticipated_slots_out.start`, so the offset is
@@ -191,25 +183,22 @@ pub(crate) struct AnticipatedLayout {
     /// column at every stage regardless of this stage's block count.
     pub(crate) col_anticipated_slots_out_start: usize,
     /// Start of the `anticipated_state_out_def` equality row block: one row
-    /// per genuine, ACTIVE fanned decision (`PointResolution::
-    /// genuine_decisions_at`, AND the delivery stage's commissioning window),
-    /// pinning that decision's ring slot to its decision column. A plant
-    /// committing several delivery stages this stage emits several distinct
-    /// rows, one per fanned decision — never folded into one. Immediately
-    /// after `row_anticipated_fishing_start`.
+    /// per plant with a genuine, ACTIVE decision this stage
+    /// (`PointResolution::genuine_decisions_at(stage_idx).next()`, AND the
+    /// delivery stage's commissioning window), pinning that decision's ring
+    /// slot to its decision column. Immediately after
+    /// `row_anticipated_fishing_start`.
     pub(crate) row_anticipated_state_out_def_start: usize,
-    /// Count of genuine, active fanned decisions this stage (`Some` count of
+    /// Count of genuine, active decisions this stage (`Some` count of
     /// `anticipated_decision_row_pos`); drives the active-row iteration.
     // Rationale: read only by cross-module `debug_assert_eq!` guards in the matrix-fill
     // helpers; dead_code fires because the lint does not see cross-module field access.
     #[allow(dead_code)]
     pub(crate) n_anticipated_state_out_def_rows: usize,
-    /// For each fan-out-major, plant-minor decision-column index (`j *
-    /// n_anticipated + local_idx`, matching `col_anticipated_decision_start`'s
-    /// own layout), this stage's compact row position within the deposit-row
-    /// family, or `None` when `j` is beyond this stage's genuine fan-out count
-    /// (`PointResolution::genuine_decisions_at`) or the delivery is
-    /// commissioning-inactive. Length `n_anticipated * max_fanout`.
+    /// For each plant (local order), this stage's compact row position
+    /// within the deposit-row family, or `None` when the plant has no
+    /// genuine decision this stage (`PointResolution::genuine_decisions_at`)
+    /// or the delivery is commissioning-inactive. Length `n_anticipated`.
     pub(crate) anticipated_decision_row_pos: Vec<Option<usize>>,
     /// Start of anticipated-fishing rows (one per GENUINELY anticipated plant
     /// this stage — `PointResolution::is_anticipated_at`, `false` exactly at a
@@ -630,50 +619,44 @@ fn build_anticipated_slot_row_pos(
     (row_pos, n_reachable)
 }
 
-/// For each fan-out-major, plant-minor decision-column index (`j *
-/// n_anticipated + local_idx`, mirroring [`AnticipatedLayout::
-/// col_anticipated_decision_start`]'s own layout), this stage's compact row
-/// position within the deposit-row family, or `None` when `j` is beyond this
-/// stage's genuine fan-out count (`PointResolution::genuine_decisions_at`) or
+/// For each plant (local order), this stage's compact row position within
+/// the deposit-row family, or `None` when the plant has no genuine decision
+/// this stage (`PointResolution::genuine_decisions_at(stage_idx).next()`) or
 /// the delivery is commissioning-inactive
 /// (`StateLayout::is_anticipated_decision_active_for_delivery`). Returns the
 /// mapping and the active count.
-///
-/// A plant committing several delivery stages this stage produces several
-/// DISTINCT entries here — one per fanned decision, at its own delivery-
-/// anchored slot — never folded into one (the fold-blindness class).
 fn build_anticipated_decision_row_pos(
     state: &StateLayout,
-    max_fanout: usize,
     n_stages: usize,
     stage_idx: usize,
     anticipated_windows: &[(Option<i32>, Option<i32>)],
     study_stage_ids: &[i32],
 ) -> (Vec<Option<usize>>, usize) {
     let n_anticipated = state.n_anticipated;
-    if n_anticipated == 0 || max_fanout == 0 {
+    if n_anticipated == 0 {
         return (Vec::new(), 0);
     }
-    let mut row_pos = vec![None; n_anticipated * max_fanout];
+    let mut row_pos = vec![None; n_anticipated];
     let mut n_active = 0_usize;
-    for plant in 0..n_anticipated {
+    for (plant, pos) in row_pos.iter_mut().enumerate() {
         let point = state.anticipated_resolution_for(plant, n_stages);
-        for (j, m) in point.genuine_decisions_at(stage_idx).enumerate() {
-            debug_assert_ne!(
-                m, stage_idx,
-                "a K=0 self-delivery (decider[m] == m) must never reach the anticipated \
-                 ring's deposit-row fill"
-            );
-            if state.is_anticipated_decision_active_for_delivery(
-                plant,
-                m,
-                n_stages,
-                anticipated_windows,
-                study_stage_ids,
-            ) {
-                row_pos[j * n_anticipated + plant] = Some(n_active);
-                n_active += 1;
-            }
+        let Some(m) = point.genuine_decisions_at(stage_idx).next() else {
+            continue;
+        };
+        debug_assert_ne!(
+            m, stage_idx,
+            "a K=0 self-delivery (decider[m] == m) must never reach the anticipated \
+             ring's deposit-row fill"
+        );
+        if state.is_anticipated_decision_active_for_delivery(
+            plant,
+            m,
+            n_stages,
+            anticipated_windows,
+            study_stage_ids,
+        ) {
+            *pos = Some(n_active);
+            n_active += 1;
         }
     }
     (row_pos, n_active)
@@ -1071,11 +1054,9 @@ impl<'a> StageLayout<'a> {
         let diversion_start = spillage_start + n_h * n_blks;
         let thermal_start = diversion_start + n_h * n_blks;
         let thermal_end = thermal_start + ctx.n_thermals * n_blks;
-        // Anticipated-decision columns occupy `[thermal_end, thermal_end + A *
-        // max_fanout)`, fan-out-index-major, plant-minor; `line_fwd` follows
-        // them. `max_fanout == 1` collapses this to the pre-fan-out `+ A`.
-        let max_fanout = state.anticipated_max_fanout();
-        let anticipated_decision_end = thermal_end + ctx.n_anticipated * max_fanout;
+        // Anticipated-decision columns occupy `[thermal_end, thermal_end + A)`,
+        // one per plant; `line_fwd` follows them.
+        let anticipated_decision_end = thermal_end + ctx.n_anticipated;
         let line_fwd_start = anticipated_decision_end;
         let line_rev_start = line_fwd_start + ctx.n_lines * n_blks;
         let deficit_start = line_rev_start + ctx.n_lines * n_blks;
@@ -1237,16 +1218,13 @@ impl<'a> StageLayout<'a> {
         let row_anticipated_fishing_start =
             row_filled_min_storage_floor_start + n_filled_min_storage_floor_rows;
 
-        // Anticipated-state-out (deposit) definition rows: one per genuine,
-        // ACTIVE fanned decision this stage (`build_anticipated_decision_row_pos`
-        // — `PointResolution::genuine_decisions_at` AND the delivery stage's
-        // commissioning window). A plant committing several delivery stages
-        // this stage emits several distinct rows. `max_fanout` was already
-        // derived above to size the decision-column block.
+        // Anticipated-state-out (deposit) definition rows: one per plant with a
+        // genuine, ACTIVE decision this stage (`build_anticipated_decision_row_pos`
+        // — `PointResolution::genuine_decisions_at(stage_idx).next()` AND the
+        // delivery stage's commissioning window).
         let (anticipated_decision_row_pos, n_anticipated_state_out_def_rows) =
             build_anticipated_decision_row_pos(
                 state,
-                max_fanout,
                 n_stages,
                 stage_idx,
                 &ctx.anticipated_windows,
@@ -1307,7 +1285,6 @@ impl<'a> StageLayout<'a> {
         };
         let anticipated = AnticipatedLayout {
             col_anticipated_decision_start: thermal_end,
-            max_fanout,
             col_anticipated_slots_out_start,
             row_anticipated_state_out_def_start,
             n_anticipated_state_out_def_rows,

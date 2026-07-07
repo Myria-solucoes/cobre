@@ -506,9 +506,9 @@ pub(super) fn fill_anticipated_fishing_rows(
 }
 
 /// Fill the `anticipated_state_out` (deposit) definition equality row bounds
-/// (`0 == 0`) for each genuine, ACTIVE fanned decision this stage
+/// (`0 == 0`) for each plant with a genuine, ACTIVE decision this stage
 /// (`layout.anticipated.anticipated_decision_row_pos`, the single
-/// position-table owner). Inactive or beyond-genuine-count columns emit no
+/// position-table owner). Inactive or no-genuine-decision plants emit no
 /// row, so rows pack at the SPARSE position-table offset — unlike
 /// [`fill_anticipated_fishing_rows`], which is dense per anticipated plant.
 pub(super) fn fill_anticipated_state_out_def_rows(

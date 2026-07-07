@@ -392,31 +392,28 @@ pub(super) fn fill_thermal_columns(
     }
 }
 
-/// Anticipated-plant fan-out columns: state-out bound, decision bound, and
-/// decision objective per fanned decision (`j in 0..max_fanout`) per plant.
+/// Anticipated-plant decision columns: state-out bound, decision bound, and
+/// decision objective for the plant's single genuine decision this stage.
 ///
-/// `max_fanout == 1` collapses this to the pre-fan-out single-decider shape
-/// exactly (one decision column per plant). For `max_fanout > 1`, plant
-/// `local_idx`'s `PointResolution::genuine_decisions_at(stage_idx)` (a `K = 0`
-/// self-delivery already excluded) gives up to `max_fanout` delivery stages
-/// DECIDED THIS STAGE, ascending; decision column `j` is bound/costed at ITS
-/// OWN delivery stage `genuine[j]` (`thermal_bounds`, delivery hours/discount)
-/// — never the decision stage `stage_idx`, never `stage_idx + constant` — and
-/// deposits into ring slot `delivery_stage - stage_idx - 1` (the ring's
-/// direct delivery-distance mapping — never a `depth`-derived boundary, which
+/// Plant `local_idx`'s `PointResolution::genuine_decisions_at(stage_idx).next()`
+/// (a `K = 0` self-delivery already excluded) gives the one delivery stage
+/// DECIDED THIS STAGE, if any; the decision column is bound/costed at ITS OWN
+/// delivery stage (`thermal_bounds`, delivery hours/discount) — never the
+/// decision stage `stage_idx`, never `stage_idx + constant` — and deposits
+/// into ring slot `delivery_stage - stage_idx - 1` (the ring's direct
+/// delivery-distance mapping — never a `depth`-derived boundary, which
 /// under-counts whenever pre-study occupancy coexists with an in-study
-/// decision at the same stage). Every column beyond this stage's genuine
-/// count, or every column whose delivery is commissioning-inactive, is frozen
-/// `[0, 0]` (dormant) — first defaulted dense below, then overwritten per
-/// active fanned decision.
+/// decision at the same stage). A plant with no genuine decision this stage,
+/// or whose delivery is commissioning-inactive, keeps its decision/state-out
+/// columns frozen `[0, 0]` (dormant) — first defaulted dense below, then
+/// overwritten only for an active decision.
 ///
-/// Active is `is_anticipated_decision_active_for_delivery`, composed per
-/// fanned column on ITS OWN delivery stage; the boundary
-/// `delivery_stage == n_stages` is INACTIVE (strict gate) — pricing it would
-/// create a cost-only column with no delivery LP. The
-/// `anticipated_state_out_def` row is emitted iff the decision is active
-/// (lockstep invariant: zero-bound iff no def row), discharged here against
-/// `n_anticipated_state_out_def_rows`.
+/// Active is `is_anticipated_decision_active_for_delivery`, evaluated at the
+/// decision's OWN delivery stage; the boundary `delivery_stage == n_stages` is
+/// INACTIVE (strict gate) — pricing it would create a cost-only column with no
+/// delivery LP. The `anticipated_state_out_def` row is emitted iff the
+/// decision is active (lockstep invariant: zero-bound iff no def row),
+/// discharged here against `n_anticipated_state_out_def_rows`.
 ///
 /// The decision objective is the present-value commit cost (`cost_per_mwh *
 /// total_hours * discount` at the delivery stage), UNSCALED — the caller divides
@@ -429,69 +426,67 @@ pub(super) fn fill_anticipated_columns(
 ) {
     let n_stages = ctx.resolved.bounds.n_stages();
     let n_ant = ctx.n_anticipated;
-    let max_fanout = layout.anticipated.max_fanout;
     let decision_start = layout.anticipated.col_anticipated_decision_start;
     let slots_out_start = layout.anticipated.col_anticipated_slots_out_start;
 
     // Dormant default: every decision column freezes to [0, 0] before the
-    // active loop below overwrites the genuinely-active fanned decisions —
-    // mirrors `fill_anticipated_slot_columns`'s dense-freeze-then-overwrite
-    // convention for the ring's own outgoing columns.
-    for j in 0..max_fanout {
-        for local_idx in 0..n_ant {
-            let col = decision_start + j * n_ant + local_idx;
-            bufs.col_lower[col] = 0.0;
-            bufs.col_upper[col] = 0.0;
-        }
+    // active loop below overwrites a genuinely-active decision — mirrors
+    // `fill_anticipated_slot_columns`'s dense-freeze-then-overwrite convention
+    // for the ring's own outgoing columns.
+    for local_idx in 0..n_ant {
+        let col = decision_start + local_idx;
+        bufs.col_lower[col] = 0.0;
+        bufs.col_upper[col] = 0.0;
     }
 
     let mut active_count = 0_usize;
     for local_idx in 0..n_ant {
         let point = layout.state.anticipated_resolution_for(local_idx, n_stages);
-        for (j, delivery_stage) in point.genuine_decisions_at(stage_idx).enumerate() {
-            let decision_col = decision_start + j * n_ant + local_idx;
-            debug_assert!(
-                delivery_stage > stage_idx,
-                "a genuine decision's delivery stage must be strictly after the decision \
-                 stage (K=0 self-delivery must already be excluded)"
-            );
-            let slot = delivery_stage - stage_idx - 1;
-            debug_assert!(
-                slot < layout.k_max,
-                "delivery slot {slot} must be within the sized ring depth {}",
-                layout.k_max
-            );
-            let state_out_col = slots_out_start + slot * n_ant + local_idx;
+        let Some(delivery_stage) = point.genuine_decisions_at(stage_idx).next() else {
+            continue;
+        };
+        let decision_col = decision_start + local_idx;
+        debug_assert!(
+            delivery_stage > stage_idx,
+            "a genuine decision's delivery stage must be strictly after the decision \
+             stage (K=0 self-delivery must already be excluded)"
+        );
+        let slot = delivery_stage - stage_idx - 1;
+        debug_assert!(
+            slot < layout.k_max,
+            "delivery slot {slot} must be within the sized ring depth {}",
+            layout.k_max
+        );
+        let state_out_col = slots_out_start + slot * n_ant + local_idx;
 
-            if layout.state.is_anticipated_decision_active_for_delivery(
-                local_idx,
-                delivery_stage,
-                n_stages,
-                &ctx.anticipated_windows,
-                &ctx.study_stage_ids,
-            ) {
-                active_count += 1;
-                let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
-                let tb = ctx
-                    .resolved
-                    .bounds
-                    .thermal_bounds(thermal_idx, delivery_stage);
+        if layout.state.is_anticipated_decision_active_for_delivery(
+            local_idx,
+            delivery_stage,
+            n_stages,
+            &ctx.anticipated_windows,
+            &ctx.study_stage_ids,
+        ) {
+            active_count += 1;
+            let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
+            let tb = ctx
+                .resolved
+                .bounds
+                .thermal_bounds(thermal_idx, delivery_stage);
 
-                bufs.col_lower[state_out_col] = f64::NEG_INFINITY;
-                bufs.col_upper[state_out_col] = f64::INFINITY;
+            bufs.col_lower[state_out_col] = f64::NEG_INFINITY;
+            bufs.col_upper[state_out_col] = f64::INFINITY;
 
-                bufs.col_lower[decision_col] = tb.min_generation_mw;
-                bufs.col_upper[decision_col] = tb.max_generation_mw;
+            bufs.col_lower[decision_col] = tb.min_generation_mw;
+            bufs.col_upper[decision_col] = tb.max_generation_mw;
 
-                let delivery_hours = ctx.total_hours_per_stage[delivery_stage];
-                let d_factor = ctx.cumulative_discount_factors[delivery_stage];
-                bufs.objective[decision_col] = tb.cost_per_mwh * delivery_hours * d_factor;
-            }
-            // Inactive (commissioning-gated-off): state_out_col / decision_col
-            // stay at the dormant [0, 0] the two defaults above already set —
-            // `fill_anticipated_slot_columns` for the ring side, the dense
-            // freeze loop above for the decision side.
+            let delivery_hours = ctx.total_hours_per_stage[delivery_stage];
+            let d_factor = ctx.cumulative_discount_factors[delivery_stage];
+            bufs.objective[decision_col] = tb.cost_per_mwh * delivery_hours * d_factor;
         }
+        // Inactive (commissioning-gated-off): state_out_col / decision_col
+        // stay at the dormant [0, 0] the two defaults above already set —
+        // `fill_anticipated_slot_columns` for the ring side, the dense
+        // freeze loop above for the decision side.
     }
     debug_assert_eq!(
         active_count, layout.anticipated.n_anticipated_state_out_def_rows,
@@ -3123,382 +3118,6 @@ mod anticipated_objective_tests {
         assert_eq!(col_upper[state_out_col], f64::INFINITY);
     }
 
-    /// Fan-out delivery-anchored bounds: a single `LeadTime(720.0)` plant on
-    /// the monthly-then-weekly calendar `[720,168,168,168,168,168]` h resolves
-    /// `decision_sets[0] == [1,2,3,4]` (hand-derived from the calendar). Each
-    /// of the four decision columns must be bound/costed at ITS OWN delivery
-    /// stage — never the decision stage (0), never `stage_idx + constant` —
-    /// verified with STAGE-VARYING `max_generation_mw` / `cost_per_mwh` so
-    /// the anchoring is not vacuous (a bug binding every column to one fixed
-    /// stage would still pass a same-value check).
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn fanout_decision_columns_bound_and_priced_at_own_delivery_stage() {
-        const N_STAGES: usize = 6;
-        const K_MAX: usize = 4;
-        // Indexed by stage; only delivery stages 1..=4 are read by the fill.
-        const DELIVERY_MAX_GEN: [f64; N_STAGES] = [0.0, 60.0, 70.0, 80.0, 90.0, 999.0];
-        const DELIVERY_COST: [f64; N_STAGES] = [0.0, 10.0, 20.0, 30.0, 40.0, 999.0];
-
-        let thermals = vec![Thermal {
-            id: EntityId(1),
-            name: "T_fanout".to_string(),
-            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(1),
-            min_generation_mw: 0.0,
-            max_generation_mw: 100.0,
-            cost_per_mwh: 0.0,
-            anticipated_config: Some(AnticipatedConfig::LeadTime(720.0)),
-            entry_stage_id: None,
-            exit_stage_id: None,
-        }];
-
-        let mut bounds = ResolvedBounds::new(
-            &BoundsCountsSpec {
-                n_hydros: 0,
-                n_thermals: 1,
-                n_lines: 0,
-                n_pumping: 0,
-                n_contracts: 0,
-                n_stages: N_STAGES,
-                k_max: K_MAX,
-            },
-            &BoundsDefaults {
-                hydro: HydroStageBounds {
-                    min_storage_hm3: 0.0,
-                    max_storage_hm3: 0.0,
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 0.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 0.0,
-                    max_diversion_m3s: None,
-                    filling_min_rate_m3s: 0.0,
-                    water_withdrawal_m3s: 0.0,
-                },
-                thermal: ThermalStageBounds {
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 0.0,
-                    cost_per_mwh: 0.0,
-                },
-                line: LineStageBounds {
-                    direct_mw: 0.0,
-                    reverse_mw: 0.0,
-                },
-                pumping: PumpingStageBounds {
-                    min_flow_m3s: 0.0,
-                    max_flow_m3s: 0.0,
-                },
-                contract: ContractStageBounds {
-                    min_mw: 0.0,
-                    max_mw: 0.0,
-                    price_per_mwh: 0.0,
-                },
-            },
-        );
-        for stage in 0..N_STAGES {
-            let tb = bounds.thermal_bounds_mut(0, stage);
-            tb.max_generation_mw = DELIVERY_MAX_GEN[stage];
-            tb.cost_per_mwh = DELIVERY_COST[stage];
-        }
-
-        let cascade = CascadeTopology::build(&[]);
-        let par_lp = PrecomputedPar::default();
-        let penalties = ResolvedPenalties::empty();
-        let production_models = ProductionModelSet::new(vec![], 0, 1);
-        let evaporation_models = EvaporationModelSet::new(vec![]);
-        let resolved_generic_bounds = ResolvedGenericConstraintBounds::empty();
-        let resolved_load_factors = ResolvedLoadFactors::empty();
-        let resolved_exchange_factors = ResolvedExchangeFactors::empty();
-        let resolved_ncs_bounds = ResolvedNcsBounds::empty();
-        let resolved_ncs_factors = ResolvedNcsFactors::empty();
-        let resolved_parameters = ResolvedParameters {
-            per_param: vec![],
-            id_to_slot: vec![],
-        };
-
-        let ctx = TemplateBuildCtx {
-            hydros: &[],
-            thermals: &thermals,
-            lines: &[],
-            buses: &[],
-            load_models: &[],
-            cascade: &cascade,
-            resolved: ResolvedTables {
-                bounds: &bounds,
-                penalties: &penalties,
-                resolved_generic_bounds: &resolved_generic_bounds,
-                resolved_load_factors: &resolved_load_factors,
-                resolved_exchange_factors: &resolved_exchange_factors,
-                resolved_ncs_bounds: &resolved_ncs_bounds,
-                resolved_ncs_factors: &resolved_ncs_factors,
-                resolved_parameters: &resolved_parameters,
-            },
-            hydro_pos: BTreeMap::new(),
-            thermal_pos: BTreeMap::new(),
-            line_pos: BTreeMap::new(),
-            bus_pos: BTreeMap::new(),
-            par_lp: &par_lp,
-            production_models: &production_models,
-            evaporation_models: &evaporation_models,
-            generic_constraints: &[],
-            non_controllable_sources: &[],
-            pumping_stations: &[],
-            pumping_pos: BTreeMap::new(),
-            n_pumping: 0,
-            contracts: &[],
-            contract_pos: BTreeMap::new(),
-            n_contract_import: 0,
-            n_contract_export: 0,
-            diversion_upstream: HashMap::new(),
-            arc_stage_weights: HashMap::new(),
-            arc_spread_chrono: HashMap::new(),
-            arc_arrival_density: HashMap::new(),
-            per_stage_mask: Vec::new(),
-            n_hydros: 0,
-            n_thermals: 1,
-            n_lines: 0,
-            n_buses: 0,
-            max_par_order: 0,
-            n_anticipated: 1,
-            k_max: K_MAX,
-            anticipated_lead_stages: vec![K_MAX],
-            anticipated_thermal_indices: vec![0],
-            anticipated_windows: vec![(None, None)],
-            anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
-            study_stage_ids: (0..N_STAGES as i32).collect(),
-            has_penalty: false,
-            cumulative_discount_factors: vec![1.0; N_STAGES],
-            total_hours_per_stage: vec![168.0; N_STAGES],
-            filling_v_target: BTreeMap::new(),
-        };
-
-        let stage = two_block_stage(0, [360.0, 360.0]);
-        let mut state = state_layout_for(&ctx);
-        state.set_anticipated_resolution(crate::lead_time::AnticipatedResolution::resolve(
-            &[crate::lead_time::LeadTime::Time(720.0)],
-            &[720.0, 168.0, 168.0, 168.0, 168.0, 168.0],
-            N_STAGES,
-        ));
-        let layout = StageLayout::new(&ctx, &state, &stage, 0);
-
-        let (_col_lower, col_upper, objective) = fill_stage_columns(&ctx, &stage, 0, &layout);
-
-        let decision_start = layout.anticipated.col_anticipated_decision_start;
-        let deliveries = [1_usize, 2, 3, 4];
-        for (j, &delivery_stage) in deliveries.iter().enumerate() {
-            let col = decision_start + j * ctx.n_anticipated;
-            assert_eq!(
-                col_upper[col], DELIVERY_MAX_GEN[delivery_stage],
-                "decision column {j} must bound at its OWN delivery stage {delivery_stage}'s \
-                 max_generation_mw, not the decision stage's",
-            );
-            let expected_obj = DELIVERY_COST[delivery_stage]
-                * ctx.total_hours_per_stage[delivery_stage]
-                * ctx.cumulative_discount_factors[delivery_stage];
-            assert_eq!(
-                objective[col], expected_obj,
-                "decision column {j} must be priced at its OWN delivery stage \
-                 {delivery_stage}'s cost_per_mwh",
-            );
-        }
-
-        // Distinctness pin: the four columns' bounds must be pairwise
-        // distinct — a bug that bound every column at one fixed delivery
-        // stage (or at the decision stage) would still pass a same-value
-        // assertion, so anchoring is only proven non-vacuous by this check.
-        let distinct_bounds: std::collections::BTreeSet<u64> = (0..4)
-            .map(|j| col_upper[decision_start + j * ctx.n_anticipated].to_bits())
-            .collect();
-        assert_eq!(
-            distinct_bounds.len(),
-            4,
-            "the four fanned decision bounds must be pairwise distinct \
-             (stage-varying anchoring, not vacuous)"
-        );
-    }
-
-    /// Commissioning composition: of the fan-out plant's four decisions
-    /// (`decision_sets[0] == [1,2,3,4]`), only those whose delivery stage
-    /// falls within the plant's `[entry, exit)` commissioning window are
-    /// non-dormant — the gate composes per fanned column on ITS OWN delivery
-    /// stage, never on the decision stage `0`.
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn fanout_commissioning_gate_composes_per_fanned_column() {
-        const N_STAGES: usize = 6;
-        const K_MAX: usize = 4;
-
-        // Commissioning window [2, 4): delivery stages 1 and 4 fall outside;
-        // 2 and 3 fall inside. Stage ids equal stage indices here.
-        let thermals = vec![Thermal {
-            id: EntityId(1),
-            name: "T_fanout".to_string(),
-            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(1),
-            min_generation_mw: 0.0,
-            max_generation_mw: 100.0,
-            cost_per_mwh: 0.0,
-            anticipated_config: Some(AnticipatedConfig::LeadTime(720.0)),
-            entry_stage_id: Some(2),
-            exit_stage_id: Some(4),
-        }];
-
-        let bounds = ResolvedBounds::new(
-            &BoundsCountsSpec {
-                n_hydros: 0,
-                n_thermals: 1,
-                n_lines: 0,
-                n_pumping: 0,
-                n_contracts: 0,
-                n_stages: N_STAGES,
-                k_max: K_MAX,
-            },
-            &BoundsDefaults {
-                hydro: HydroStageBounds {
-                    min_storage_hm3: 0.0,
-                    max_storage_hm3: 0.0,
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 0.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 0.0,
-                    max_diversion_m3s: None,
-                    filling_min_rate_m3s: 0.0,
-                    water_withdrawal_m3s: 0.0,
-                },
-                thermal: ThermalStageBounds {
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 50.0,
-                    cost_per_mwh: 10.0,
-                },
-                line: LineStageBounds {
-                    direct_mw: 0.0,
-                    reverse_mw: 0.0,
-                },
-                pumping: PumpingStageBounds {
-                    min_flow_m3s: 0.0,
-                    max_flow_m3s: 0.0,
-                },
-                contract: ContractStageBounds {
-                    min_mw: 0.0,
-                    max_mw: 0.0,
-                    price_per_mwh: 0.0,
-                },
-            },
-        );
-
-        let cascade = CascadeTopology::build(&[]);
-        let par_lp = PrecomputedPar::default();
-        let penalties = ResolvedPenalties::empty();
-        let production_models = ProductionModelSet::new(vec![], 0, 1);
-        let evaporation_models = EvaporationModelSet::new(vec![]);
-        let resolved_generic_bounds = ResolvedGenericConstraintBounds::empty();
-        let resolved_load_factors = ResolvedLoadFactors::empty();
-        let resolved_exchange_factors = ResolvedExchangeFactors::empty();
-        let resolved_ncs_bounds = ResolvedNcsBounds::empty();
-        let resolved_ncs_factors = ResolvedNcsFactors::empty();
-        let resolved_parameters = ResolvedParameters {
-            per_param: vec![],
-            id_to_slot: vec![],
-        };
-
-        let ctx = TemplateBuildCtx {
-            hydros: &[],
-            thermals: &thermals,
-            lines: &[],
-            buses: &[],
-            load_models: &[],
-            cascade: &cascade,
-            resolved: ResolvedTables {
-                bounds: &bounds,
-                penalties: &penalties,
-                resolved_generic_bounds: &resolved_generic_bounds,
-                resolved_load_factors: &resolved_load_factors,
-                resolved_exchange_factors: &resolved_exchange_factors,
-                resolved_ncs_bounds: &resolved_ncs_bounds,
-                resolved_ncs_factors: &resolved_ncs_factors,
-                resolved_parameters: &resolved_parameters,
-            },
-            hydro_pos: BTreeMap::new(),
-            thermal_pos: BTreeMap::new(),
-            line_pos: BTreeMap::new(),
-            bus_pos: BTreeMap::new(),
-            par_lp: &par_lp,
-            production_models: &production_models,
-            evaporation_models: &evaporation_models,
-            generic_constraints: &[],
-            non_controllable_sources: &[],
-            pumping_stations: &[],
-            pumping_pos: BTreeMap::new(),
-            n_pumping: 0,
-            contracts: &[],
-            contract_pos: BTreeMap::new(),
-            n_contract_import: 0,
-            n_contract_export: 0,
-            diversion_upstream: HashMap::new(),
-            arc_stage_weights: HashMap::new(),
-            arc_spread_chrono: HashMap::new(),
-            arc_arrival_density: HashMap::new(),
-            per_stage_mask: Vec::new(),
-            n_hydros: 0,
-            n_thermals: 1,
-            n_lines: 0,
-            n_buses: 0,
-            max_par_order: 0,
-            n_anticipated: 1,
-            k_max: K_MAX,
-            anticipated_lead_stages: vec![K_MAX],
-            anticipated_thermal_indices: vec![0],
-            // The commissioning window itself — the decision gate reads it
-            // keyed on each fanned column's OWN delivery stage.
-            anticipated_windows: vec![(Some(2), Some(4))],
-            anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
-            study_stage_ids: (0..N_STAGES as i32).collect(),
-            has_penalty: false,
-            cumulative_discount_factors: vec![1.0; N_STAGES],
-            total_hours_per_stage: vec![168.0; N_STAGES],
-            filling_v_target: BTreeMap::new(),
-        };
-
-        let stage = two_block_stage(0, [360.0, 360.0]);
-        let mut state = state_layout_for(&ctx);
-        state.set_anticipated_resolution(crate::lead_time::AnticipatedResolution::resolve(
-            &[crate::lead_time::LeadTime::Time(720.0)],
-            &[720.0, 168.0, 168.0, 168.0, 168.0, 168.0],
-            N_STAGES,
-        ));
-        let layout = StageLayout::new(&ctx, &state, &stage, 0);
-
-        // Only 2 of the 4 fanned decisions (delivery stages 2 and 3) fall
-        // inside [entry=2, exit=4).
-        assert_eq!(
-            layout.anticipated.n_anticipated_state_out_def_rows, 2,
-            "only the 2 in-window fanned decisions must be active"
-        );
-
-        let (_col_lower, col_upper, _objective) = fill_stage_columns(&ctx, &stage, 0, &layout);
-        let decision_start = layout.anticipated.col_anticipated_decision_start;
-        let deliveries = [1_usize, 2, 3, 4];
-        for (j, &delivery_stage) in deliveries.iter().enumerate() {
-            let col = decision_start + j * ctx.n_anticipated;
-            let in_window = (2..4).contains(&delivery_stage);
-            if in_window {
-                assert_eq!(
-                    col_upper[col], 50.0,
-                    "decision {j} (delivery {delivery_stage}, in-window) must be non-dormant"
-                );
-            } else {
-                assert_eq!(
-                    col_upper[col], 0.0,
-                    "decision {j} (delivery {delivery_stage}, out-of-window) must be dormant [0,0]"
-                );
-            }
-        }
-    }
-
     /// Borrow-target owner for a one-anticipated-plant delivery-anchoring
     /// preservation `TemplateBuildCtx`. `per_stage[s] == (min_gen, max_gen,
     /// cost)` is the plant's stage-`s` `thermal_bounds`; the discount factor is
@@ -3683,152 +3302,76 @@ mod anticipated_objective_tests {
         }
     }
 
-    /// Delivery-anchoring preservation contract: every anticipated decision
+    /// Delivery-anchoring preservation contract: the anticipated decision
     /// column is bounded/costed at ITS OWN delivery stage `m`, never the
     /// decision stage —
     /// `col_upper == thermal_bounds(m).max_generation_mw`,
     /// `col_lower == thermal_bounds(m).min_generation_mw`,
-    /// `objective == cost(m) * hours(m) * discount(m)`. Covers both a
-    /// single-decider plant (`|C(t)| == 1`) and a fan-out plant
-    /// (`|C(t)| == 4`), each with STAGE-VARYING delivery bounds/cost so a
-    /// decision-anchored read gives a provably different value (constant-across-
-    /// lead bounds would make the test vacuous).
+    /// `objective == cost(m) * hours(m) * discount(m)`. STAGE-VARYING delivery
+    /// bounds/cost so a decision-anchored read gives a provably different
+    /// value (constant-across-lead bounds would make the test vacuous).
     ///
     /// Load-bearing verified by MUTATION: changing the production read at
     /// `fill_anticipated_columns` from `thermal_bounds(thermal_idx,
     /// delivery_stage)` to `thermal_bounds(thermal_idx, stage_idx)` (the
-    /// decision stage) fails the first single-decider assertion —
-    /// `left: 55.0, right: 100.0` on `col_upper[decision]` — reintroducing the
-    /// capacity-drop infeasibility this contract forbids.
+    /// decision stage) fails the first assertion — `left: 55.0, right: 100.0`
+    /// on `col_upper[decision]` — reintroducing the capacity-drop
+    /// infeasibility this contract forbids.
     #[test]
     fn test_anticipated_decision_delivery_anchored_bounds() {
-        // ── Single-decider (|C(t)| == 1): decision stage 0, delivery stage 1.
-        // Stage 0's bounds/cost differ from stage 1's, so a decision-anchored
-        // read (stage 0) is distinguishable from the delivery-anchored read.
-        {
-            const N_STAGES: usize = 6;
-            const K_MAX: usize = 1;
-            // (min_gen, max_gen, cost) per stage; only stage 1 (delivery) is
-            // read by the fill, stage 0 (decision) is the discriminating decoy.
-            let per_stage = [
-                (5.0, 55.0, 15.0),
-                (11.0, 100.0, 30.0),
-                (0.0, 0.0, 0.0),
-                (0.0, 0.0, 0.0),
-                (0.0, 0.0, 0.0),
-                (0.0, 0.0, 0.0),
-            ];
-            let fx = DeliveryAnchoredFixtures::new(
-                N_STAGES,
-                K_MAX,
-                AnticipatedConfig::LeadStages(1),
-                &per_stage,
-            );
-            let ctx = fx.make_ctx();
-            let stage = two_block_stage(0, [372.0, 372.0]);
-            let state = state_layout_for(&ctx);
-            let layout = StageLayout::new(&ctx, &state, &stage, 0);
+        // Decision stage 0, delivery stage 1. Stage 0's bounds/cost differ
+        // from stage 1's, so a decision-anchored read (stage 0) is
+        // distinguishable from the delivery-anchored read.
+        const N_STAGES: usize = 6;
+        const K_MAX: usize = 1;
+        // (min_gen, max_gen, cost) per stage; only stage 1 (delivery) is
+        // read by the fill, stage 0 (decision) is the discriminating decoy.
+        let per_stage = [
+            (5.0, 55.0, 15.0),
+            (11.0, 100.0, 30.0),
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+        ];
+        let fx = DeliveryAnchoredFixtures::new(
+            N_STAGES,
+            K_MAX,
+            AnticipatedConfig::LeadStages(1),
+            &per_stage,
+        );
+        let ctx = fx.make_ctx();
+        let stage = two_block_stage(0, [372.0, 372.0]);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
 
-            let (col_lower, col_upper, objective) = fill_stage_columns(&ctx, &stage, 0, &layout);
-            let decision_col = layout.anticipated.col_anticipated_decision_start;
+        let (col_lower, col_upper, objective) = fill_stage_columns(&ctx, &stage, 0, &layout);
+        let decision_col = layout.anticipated.col_anticipated_decision_start;
 
-            let delivery = 1_usize;
-            let (min_g, max_g, cost) = per_stage[delivery];
-            assert_eq!(
-                col_upper[decision_col], max_g,
-                "single-decider decision column must bound at its OWN delivery \
-                 stage {delivery}'s max_generation_mw, not the decision stage's",
-            );
-            assert_eq!(
-                col_lower[decision_col], min_g,
-                "single-decider decision column must bound at its OWN delivery \
-                 stage {delivery}'s min_generation_mw, not the decision stage's",
-            );
-            let expected_obj = cost
-                * ctx.total_hours_per_stage[delivery]
-                * ctx.cumulative_discount_factors[delivery];
-            assert_eq!(
-                objective[decision_col], expected_obj,
-                "single-decider decision objective must be priced at its OWN \
-                 delivery stage {delivery}'s cost/hours/discount",
-            );
-            // The decision stage's own bounds (stage 0) must be strictly
-            // different, or the anchoring proof is vacuous.
-            let (dec_min, dec_max, _) = per_stage[0];
-            assert_ne!(max_g, dec_max, "delivery and decision max_gen must differ");
-            assert_ne!(min_g, dec_min, "delivery and decision min_gen must differ");
-        }
-
-        // ── Fan-out (|C(t)| == 4): a LeadTime(720) plant on the monthly-then-
-        // weekly calendar [720,168,168,168,168,168] resolves
-        // decision_sets[0] == [1,2,3,4]. Each of the four decision columns must
-        // read ITS OWN delivery stage's bounds/cost — asserted per column.
-        {
-            const N_STAGES: usize = 6;
-            const K_MAX: usize = 4;
-            let per_stage = [
-                (1.0, 5.0, 1.0),
-                (11.0, 61.0, 10.0),
-                (12.0, 72.0, 20.0),
-                (13.0, 83.0, 30.0),
-                (14.0, 94.0, 40.0),
-                (0.0, 0.0, 0.0),
-            ];
-            let fx = DeliveryAnchoredFixtures::new(
-                N_STAGES,
-                K_MAX,
-                AnticipatedConfig::LeadTime(720.0),
-                &per_stage,
-            );
-            let ctx = fx.make_ctx();
-            let stage = two_block_stage(0, [360.0, 360.0]);
-            let mut state = state_layout_for(&ctx);
-            state.set_anticipated_resolution(crate::lead_time::AnticipatedResolution::resolve(
-                &[crate::lead_time::LeadTime::Time(720.0)],
-                &[720.0, 168.0, 168.0, 168.0, 168.0, 168.0],
-                N_STAGES,
-            ));
-            let layout = StageLayout::new(&ctx, &state, &stage, 0);
-
-            let (col_lower, col_upper, objective) = fill_stage_columns(&ctx, &stage, 0, &layout);
-            let decision_start = layout.anticipated.col_anticipated_decision_start;
-
-            let deliveries = [1_usize, 2, 3, 4];
-            for (j, &m) in deliveries.iter().enumerate() {
-                let col = decision_start + j * ctx.n_anticipated;
-                let (min_g, max_g, cost) = per_stage[m];
-                assert_eq!(
-                    col_upper[col], max_g,
-                    "fan-out decision column {j} must bound at its OWN delivery \
-                     stage {m}'s max_generation_mw",
-                );
-                assert_eq!(
-                    col_lower[col], min_g,
-                    "fan-out decision column {j} must bound at its OWN delivery \
-                     stage {m}'s min_generation_mw",
-                );
-                let expected_obj =
-                    cost * ctx.total_hours_per_stage[m] * ctx.cumulative_discount_factors[m];
-                assert_eq!(
-                    objective[col], expected_obj,
-                    "fan-out decision column {j} must be priced at its OWN \
-                     delivery stage {m}'s cost/hours/discount",
-                );
-            }
-
-            // Distinctness pin: a bug binding every column at one fixed stage (or
-            // the decision stage) would still pass a same-value assertion, so the
-            // four upper bounds must be pairwise distinct for the anchoring proof
-            // to be non-vacuous.
-            let distinct: std::collections::BTreeSet<u64> = (0..4)
-                .map(|j| col_upper[decision_start + j * ctx.n_anticipated].to_bits())
-                .collect();
-            assert_eq!(
-                distinct.len(),
-                4,
-                "the four fanned decision bounds must be pairwise distinct",
-            );
-        }
+        let delivery = 1_usize;
+        let (min_g, max_g, cost) = per_stage[delivery];
+        assert_eq!(
+            col_upper[decision_col], max_g,
+            "decision column must bound at its OWN delivery stage {delivery}'s \
+             max_generation_mw, not the decision stage's",
+        );
+        assert_eq!(
+            col_lower[decision_col], min_g,
+            "decision column must bound at its OWN delivery stage {delivery}'s \
+             min_generation_mw, not the decision stage's",
+        );
+        let expected_obj =
+            cost * ctx.total_hours_per_stage[delivery] * ctx.cumulative_discount_factors[delivery];
+        assert_eq!(
+            objective[decision_col], expected_obj,
+            "decision objective must be priced at its OWN delivery stage \
+             {delivery}'s cost/hours/discount",
+        );
+        // The decision stage's own bounds (stage 0) must be strictly
+        // different, or the anchoring proof is vacuous.
+        let (dec_min, dec_max, _) = per_stage[0];
+        assert_ne!(max_g, dec_max, "delivery and decision max_gen must differ");
+        assert_ne!(min_g, dec_min, "delivery and decision min_gen must differ");
     }
 }
 
