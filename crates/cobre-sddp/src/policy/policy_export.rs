@@ -14,7 +14,7 @@ use cobre_io::output::policy::{
 
 use crate::cut::FutureCostFunction;
 use crate::indexer::{CutStateProjection, StateLayout};
-use crate::lp_builder::delivery_ring::{DeliveryRing, TerminalMode};
+use crate::lp_builder::delivery_ring::DeliveryRing;
 use crate::lp_builder::{commissioning_active, hydro_operating_active};
 use crate::training::TrainingResult;
 
@@ -73,7 +73,6 @@ pub fn build_stage_entity_manifest(
         global_layout.anticipated_state.clone(),
         n_anticipated,
         global_layout.k_max,
-        TerminalMode::BoundaryFcfRetain,
     );
 
     // Study stages in canonical index order (the space `AnticipatedResolution`'s

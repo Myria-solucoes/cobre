@@ -148,7 +148,7 @@ the feature compiled in but no arc declared (`n_buckets == 0`), every path below
 collapses to the pre-bucket layout byte-for-byte; the moment any arc is
 declared, each of the following is a contract.
 
-### Shared lagged-delivery ring skeleton (δ/τ)
+### Shared lagged-delivery ring skeleton
 
 The water in-transit bucket ring and the anticipated-thermal ring are one
 lagged-delivery ring construct, owned by `DeliveryRing`: a borrowed outgoing
@@ -157,23 +157,22 @@ incoming block (pinned via `state_to_lp_incoming_column`), advanced one
 Markov-1 slot per stage by the same interior shift row
 (`DeliveryRing::emit_shift_rows`) and the same paired row-cap/column-freeze
 masking (`DeliveryRing::freeze_masked_columns`). The two rings differ only in
-two axis parameters, never a second skeleton implementation:
+how each deposits into its newest slot and in what a masked terminal slot
+means — both differences live entirely at each ring's own call site, never a
+second skeleton implementation:
 
-- **δ (`DeliverySemantics`, matched at `DeliveryRing::emit_deposit`).**
-  `AdditiveSource` (water): the block-mode-coupled per-lag deposit share is
-  emitted at the call site (`fill_arc_release_block_entries`), never through
-  `emit_deposit` itself — its arm only re-validates `Σ density == 1.0` via
-  `DeliveryRing::assert_density_sums_to_one`. `EqualityPin` (anticipated):
-  `emit_deposit` itself pins the ring's newest slot to a single decision
-  column, `+1` on `out_col(slot, lane)` and `−1` on `decision_col`.
-- **τ (`TerminalMode`).** `ZeroTerminalDrop` (water): a masked slot discards a
-  genuine share the ring would otherwise deposit — an admitted target-stage
-  imprecision (see Terminal credit deferred below). `BoundaryFcfRetain`
-  (anticipated): a masked slot never held a value in the first place, because
-  no anticipated commitment is ever created past the horizon (see
-  End-of-horizon masking below). Both render the SAME masking output (frozen
-  `[0, 0]`, scale-independent) regardless of τ — only the per-ring subsection
-  below states what the masked slot MEANS.
+- **Deposit.** Water's block-mode-coupled per-lag deposit share is emitted at
+  its own call site (`fill_arc_release_block_entries`), never through
+  `DeliveryRing::emit_deposit`. Anticipated's deposit IS `emit_deposit`: it
+  pins the ring's newest slot to a single decision column, `+1` on
+  `out_col(slot, lane)` and `−1` on `decision_col`.
+- **Masked terminal slot.** Water's masked slot discards a genuine share the
+  ring would otherwise deposit — an admitted target-stage imprecision (see
+  Terminal credit deferred below). Anticipated's masked slot never held a
+  value in the first place, because no anticipated commitment is ever created
+  past the horizon (see End-of-horizon masking below). Both render the SAME
+  masking output (frozen `[0, 0]`, scale-independent) — only the per-ring
+  subsection below states what the masked slot MEANS.
 
 The masking contract is always two-sided and ships together: a masked
 position (`row_pos[i] == None`) gets NO definition row (the row-cap side) AND
@@ -187,9 +186,8 @@ sub-range); anticipated instantiates ONE dense ring spanning every plant
 addressing schemes resolve through the same `out_col`/`in_col` formula
 (`block.start + slot * n_lanes + lane`).
 Read: `lp/builder/delivery_ring.rs` (`DeliveryRing::emit_shift_rows`,
-`freeze_masked_columns`, `emit_deposit`, `out_col`/`in_col`,
-`DeliverySemantics`, `TerminalMode`), `lp/builder/entries.rs`
-(`transit_bucket_ring`, `anticipated_ring`).
+`freeze_masked_columns`, `emit_deposit`, `out_col`/`in_col`, `slot_target`),
+`lp/builder/entries.rs` (`transit_bucket_ring`, `anticipated_ring`).
 
 ### In-transit bucket dynamics & sign
 
@@ -198,10 +196,11 @@ shift through `DeliveryRing::emit_shift_rows` (the shared skeleton above,
 `b_d^out = b_{d+1}^in + k_d·D_i`); `fill_arc_release_block_entries` deposits
 the arc's `k_d`-weighted release from the SAME release column that also
 carries `k_0` onto the balance row — never a separate once-per-stage family
-(the `AdditiveSource` δ: the share itself is deposited at the call site, never
-through `emit_deposit`'s dispatch). Incoming buckets are pinned via column
-bounds, resolved through `StateLayout::state_to_lp_incoming_column`'s explicit
-bucket arm, never the `anticipated_state` catch-all. Subgradient extraction
+(the deposit share itself is emitted at the call site, never through
+`DeliveryRing::emit_deposit`, which only the anticipated ring calls). Incoming
+buckets are pinned via column bounds, resolved through
+`StateLayout::state_to_lp_incoming_column`'s explicit bucket arm, never the
+`anticipated_state` catch-all. Subgradient extraction
 divides the incoming bucket column's reduced cost by `col_scale`
 (`extract_duals_from_view`, the same rc/col_scale contract as storage); the
 cut row renders the **outgoing** bucket column through
@@ -397,7 +396,7 @@ by the shared ring-shift row, `slot_k^out − slot_{k+1}^in = 0`
 (`fill_anticipated_slot_definition_entries` routes it through
 `DeliveryRing::emit_shift_rows`); the plant's own newest slot (`k = k_i − 1`)
 is pinned instead to the fresh decision column, `slot_{k_i-1}^out =
-decision_col`, via the shared skeleton's `EqualityPin` δ
+decision_col`, via the shared skeleton's deposit primitive
 (`fill_anticipated_state_out_def_entries` calls `DeliveryRing::emit_deposit`
 directly). Both row families render `[0, 0]`
 (`fill_anticipated_slot_definition_rows` / `fill_anticipated_state_out_def_rows`):

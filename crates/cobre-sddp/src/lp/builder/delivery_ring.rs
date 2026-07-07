@@ -2,10 +2,10 @@
 //! water-bucket ring and the anticipated-thermal ring: a borrowed outgoing
 //! block (identity-resolved) and a paired incoming block (pinned) advance one
 //! Markov-1 slot per stage through the same interior shift-row skeleton and
-//! paired row-cap/column-freeze masking. The two rings differ only in how
-//! each deposits into its newest slot ([`DeliverySemantics`]) and what its
-//! terminal slot means ([`TerminalMode`]); both differences are expressed as
-//! enum parameters, never a second skeleton implementation.
+//! paired row-cap/column-freeze masking. The two rings differ in how each
+//! deposits into its newest slot and in what a masked terminal slot means —
+//! both differences live at each ring's own call site, never a second
+//! skeleton implementation.
 //!
 //! [`StateLayout`](crate::indexer::StateLayout) remains the sole owner of the
 //! out/in state-index ranges: a [`DeliveryRing`] borrows them for one
@@ -16,43 +16,6 @@
 use std::ops::Range;
 
 use super::columns::ColumnBufs;
-
-/// Terminal-slot semantics a ring's masked boundary represents. Both variants
-/// drive identical masking output today (frozen `[0, 0]` outgoing column, no
-/// definition row); the tag is the seam for a future terminal mode whose
-/// masked slot retains a value instead of dropping one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TerminalMode {
-    /// A masked slot discards a genuine share the ring would otherwise
-    /// deposit (the water ring's horizon boundary).
-    ZeroTerminalDrop,
-    /// A masked slot never held a value in the first place — no share is
-    /// dropped because none was ever computed (the anticipated ring's
-    /// horizon boundary).
-    BoundaryFcfRetain,
-}
-
-/// Delivery semantics a ring deposit follows, matched only at
-/// [`DeliveryRing::emit_deposit`] — the shift/mask skeleton is
-/// δ-independent.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum DeliverySemantics<'a> {
-    /// Deposits a lag-weighted share from a shared release column into
-    /// several ring slots at once (the water ring); `density` is the
-    /// per-lag arrival weights, `Σ density == 1.0`.
-    // Voice 4: water's conservation check goes straight through
-    // `DeliveryRing::assert_density_sums_to_one`, never through this
-    // dispatch — no production call site constructs this variant.
-    #[allow(dead_code)]
-    AdditiveSource {
-        /// Per-lag arrival weight, validated by
-        /// [`DeliveryRing::assert_density_sums_to_one`].
-        density: &'a [f64],
-    },
-    /// Pins one ring slot to exactly one decision column (the anticipated
-    /// ring); carries no data.
-    EqualityPin,
-}
 
 /// A lagged-delivery ring over one dense, slot-major/lane-minor state-column
 /// grid: `n_lanes` parallel delivery lanes (plants), each `depth` slots deep.
@@ -69,12 +32,6 @@ pub(crate) struct DeliveryRing {
     n_lanes: usize,
     /// Slots per lane.
     depth: usize,
-    /// This ring's terminal-slot semantics; see [`TerminalMode`].
-    // Voice 4: no method reads `self.terminal` yet — both rings' masking is
-    // identical regardless of terminal mode today. Refires once a
-    // differentiated terminal mode reads it.
-    #[allow(dead_code)]
-    terminal: TerminalMode,
 }
 
 impl DeliveryRing {
@@ -90,7 +47,6 @@ impl DeliveryRing {
         in_block: Range<usize>,
         n_lanes: usize,
         depth: usize,
-        terminal: TerminalMode,
     ) -> Self {
         let dense_len = n_lanes * depth;
         debug_assert_eq!(
@@ -110,7 +66,6 @@ impl DeliveryRing {
             in_block,
             n_lanes,
             depth,
-            terminal,
         }
     }
 
@@ -222,8 +177,8 @@ impl DeliveryRing {
     /// discharges the row half for. `reachable_bound` is the ring's open
     /// default (water's implicit `[0, inf)`, anticipated's signed
     /// `(-inf, inf)`); the masked bound is always `[0, 0]` regardless of
-    /// `reachable_bound` or [`TerminalMode`] — scale-independent, so no
-    /// column bound is ever rescaled to share the freeze between rings.
+    /// `reachable_bound` — scale-independent, so no column bound is ever
+    /// rescaled to share the freeze between rings.
     ///
     /// # Panics (debug builds only)
     ///
@@ -253,30 +208,21 @@ impl DeliveryRing {
         }
     }
 
-    /// Emits the δ-matched ring deposit at `(slot, lane)`'s `row`.
-    /// `EqualityPin` pins the ring's outgoing column to `decision_col`
-    /// (`+1` on `out_col(slot, lane)`, `−1` on `decision_col`).
-    /// `AdditiveSource` emits no entry here — the block-mode-coupled per-lag
-    /// fill stays at the call site — and only re-validates its density's
-    /// conservation invariant via [`Self::assert_density_sums_to_one`].
+    /// Pins the ring's outgoing column at `(slot, lane)` to `decision_col`
+    /// (`+1` on `out_col(slot, lane)`, `−1` on `decision_col`) at `row` — the
+    /// anticipated ring's deposit. The water ring's block-mode-coupled
+    /// per-lag deposit share is emitted at its own call site
+    /// (`fill_arc_release_block_entries`), never through this function.
     pub(crate) fn emit_deposit(
         &self,
         slot: usize,
         lane: usize,
         row: usize,
         decision_col: usize,
-        semantics: DeliverySemantics<'_>,
         col_entries: &mut [Vec<(usize, f64)>],
     ) {
-        match semantics {
-            DeliverySemantics::EqualityPin => {
-                col_entries[self.out_col(slot, lane)].push((row, 1.0));
-                col_entries[decision_col].push((row, -1.0));
-            }
-            DeliverySemantics::AdditiveSource { density } => {
-                Self::assert_density_sums_to_one(density);
-            }
-        }
+        col_entries[self.out_col(slot, lane)].push((row, 1.0));
+        col_entries[decision_col].push((row, -1.0));
     }
 
     /// Ring slot targeted by lane `lane`'s `lag`-th deposit (`lag >= 1`;
@@ -307,25 +253,11 @@ impl DeliveryRing {
         );
         slot * self.n_lanes + lane
     }
-
-    /// Debug-asserts `density` sums to `1.0` — the k-factor / arrival-density
-    /// conservation invariant every [`DeliverySemantics::AdditiveSource`]
-    /// deposit must uphold.
-    ///
-    /// # Panics (debug builds only)
-    ///
-    /// Panics if `density` does not sum to `1.0` within `1e-9`.
-    pub(crate) fn assert_density_sums_to_one(density: &[f64]) {
-        debug_assert!(
-            (density.iter().sum::<f64>() - 1.0).abs() < 1e-9,
-            "delivery density must sum to 1.0, got {density:?}"
-        );
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ColumnBufs, DeliveryRing, DeliverySemantics, TerminalMode};
+    use super::{ColumnBufs, DeliveryRing};
 
     /// One ring instance per lane (`n_lanes = 1`), mirroring the water ring's
     /// per-plant contiguous addressing: lane A is 3 slots deep (every
@@ -335,7 +267,7 @@ mod tests {
     /// `fill_transit_bucket_definition_entries`'s output.
     #[test]
     fn emit_shift_rows_drops_the_shift_term_past_a_lanes_own_depth() {
-        let ring_a = DeliveryRing::new(100..103, 200..203, 1, 3, TerminalMode::ZeroTerminalDrop);
+        let ring_a = DeliveryRing::new(100..103, 200..203, 1, 3);
         let row_pos_a = vec![Some(0), Some(1), Some(2)];
         let mut col_entries_a: Vec<Vec<(usize, f64)>> = vec![Vec::new(); 210];
         let n_a = ring_a.emit_shift_rows(&row_pos_a, 900, &mut col_entries_a);
@@ -351,7 +283,7 @@ mod tests {
         assert_eq!(col_entries_a[102], vec![(902, 1.0)]);
         assert!(col_entries_a[203].is_empty());
 
-        let ring_b = DeliveryRing::new(150..151, 250..251, 1, 1, TerminalMode::ZeroTerminalDrop);
+        let ring_b = DeliveryRing::new(150..151, 250..251, 1, 1);
         let row_pos_b = vec![Some(0)];
         let mut col_entries_b: Vec<Vec<(usize, f64)>> = vec![Vec::new(); 260];
         let n_b = ring_b.emit_shift_rows(&row_pos_b, 950, &mut col_entries_b);
@@ -370,7 +302,7 @@ mod tests {
     /// state variable regardless of whether it gets its own definition row.
     #[test]
     fn emit_shift_rows_dense_grid_shares_one_ring_across_heterogeneous_lanes() {
-        let ring = DeliveryRing::new(300..306, 400..406, 2, 3, TerminalMode::BoundaryFcfRetain);
+        let ring = DeliveryRing::new(300..306, 400..406, 2, 3);
         // flat = slot * n_lanes + lane.
         let row_pos = vec![
             Some(0), // slot 0, lane 0
@@ -400,11 +332,11 @@ mod tests {
     }
 
     /// A masked position freezes to `[0, 0]` with no dependence on the
-    /// ring's `reachable_bound` or `TerminalMode` — the shared-masking
-    /// assertion, checked for both a water-like open reachable bound and an
-    /// anticipated-like signed one, and for both terminal modes.
+    /// ring's `reachable_bound` — the shared-masking assertion, checked for
+    /// both a water-like open reachable bound and an anticipated-like signed
+    /// one.
     #[test]
-    fn freeze_masked_columns_masks_identically_across_reachable_bound_and_terminal_mode() {
+    fn freeze_masked_columns_masks_identically_across_reachable_bound() {
         let row_pos = vec![Some(0), None, Some(1)];
         let bounds: [((f64, f64), &str); 2] = [
             ((0.0, f64::INFINITY), "water-like [0, inf)"),
@@ -413,55 +345,43 @@ mod tests {
                 "anticipated-like (-inf, inf)",
             ),
         ];
-        let terminals = [
-            TerminalMode::ZeroTerminalDrop,
-            TerminalMode::BoundaryFcfRetain,
-        ];
 
-        for terminal in terminals {
-            for (reachable_bound, label) in bounds {
-                let ring = DeliveryRing::new(50..53, 150..153, 1, 3, terminal);
-                let mut col_lower = vec![-9.0; 60];
-                let mut col_upper = vec![9.0; 60];
-                let mut objective = vec![0.0; 60];
-                let mut bufs = ColumnBufs {
-                    col_lower: &mut col_lower,
-                    col_upper: &mut col_upper,
-                    objective: &mut objective,
-                };
-                ring.freeze_masked_columns(&row_pos, 50, reachable_bound, &mut bufs);
+        for (reachable_bound, label) in bounds {
+            let ring = DeliveryRing::new(50..53, 150..153, 1, 3);
+            let mut col_lower = vec![-9.0; 60];
+            let mut col_upper = vec![9.0; 60];
+            let mut objective = vec![0.0; 60];
+            let mut bufs = ColumnBufs {
+                col_lower: &mut col_lower,
+                col_upper: &mut col_upper,
+                objective: &mut objective,
+            };
+            ring.freeze_masked_columns(&row_pos, 50, reachable_bound, &mut bufs);
 
-                assert_eq!(
-                    col_lower[50], reachable_bound.0,
-                    "{label}, {terminal:?}: reachable col 50 lower"
-                );
-                assert_eq!(
-                    col_upper[50], reachable_bound.1,
-                    "{label}, {terminal:?}: reachable col 50 upper"
-                );
-                assert_eq!(
-                    col_lower[51], 0.0,
-                    "{label}, {terminal:?}: masked col 51 lower"
-                );
-                assert_eq!(
-                    col_upper[51], 0.0,
-                    "{label}, {terminal:?}: masked col 51 upper"
-                );
-                assert_eq!(
-                    col_lower[52], reachable_bound.0,
-                    "{label}, {terminal:?}: reachable col 52 lower"
-                );
-                assert_eq!(
-                    col_upper[52], reachable_bound.1,
-                    "{label}, {terminal:?}: reachable col 52 upper"
-                );
-            }
+            assert_eq!(
+                col_lower[50], reachable_bound.0,
+                "{label}: reachable col 50 lower"
+            );
+            assert_eq!(
+                col_upper[50], reachable_bound.1,
+                "{label}: reachable col 50 upper"
+            );
+            assert_eq!(col_lower[51], 0.0, "{label}: masked col 51 lower");
+            assert_eq!(col_upper[51], 0.0, "{label}: masked col 51 upper");
+            assert_eq!(
+                col_lower[52], reachable_bound.0,
+                "{label}: reachable col 52 lower"
+            );
+            assert_eq!(
+                col_upper[52], reachable_bound.1,
+                "{label}: reachable col 52 upper"
+            );
         }
     }
 
     #[test]
     fn out_col_in_col_addressing_is_slot_major_lane_minor() {
-        let ring = DeliveryRing::new(1000..1006, 2000..2006, 3, 2, TerminalMode::ZeroTerminalDrop);
+        let ring = DeliveryRing::new(1000..1006, 2000..2006, 3, 2);
         // slot 0: lanes 0, 1, 2 occupy the first n_lanes columns.
         assert_eq!(ring.out_col(0, 0), 1000);
         assert_eq!(ring.out_col(0, 1), 1001);
@@ -479,7 +399,7 @@ mod tests {
     /// ring round-trips through `out_col` back to the same offset.
     #[test]
     fn slot_lane_at_is_the_inverse_of_out_col_in_col() {
-        let ring = DeliveryRing::new(1000..1006, 2000..2006, 3, 2, TerminalMode::ZeroTerminalDrop);
+        let ring = DeliveryRing::new(1000..1006, 2000..2006, 3, 2);
         assert_eq!(ring.slot_lane_at(0), (0, 0));
         assert_eq!(ring.slot_lane_at(1), (0, 1));
         assert_eq!(ring.slot_lane_at(2), (0, 2));
@@ -502,69 +422,30 @@ mod tests {
         }
     }
 
-    /// `EqualityPin`'s deposit is the ring's only real entry emission: the
-    /// `(+1, -1)` slot↔decision pair, under a `col_scale = 1.0` column
-    /// context — the freeze pins `[0, 0]`, never a scaled bound, so no bound
-    /// needs adjusting for the column's scale.
+    /// `emit_deposit` is the ring's only real entry emission: the `(+1, -1)`
+    /// slot↔decision pair, under a `col_scale = 1.0` column context — the
+    /// freeze pins `[0, 0]`, never a scaled bound, so no bound needs
+    /// adjusting for the column's scale.
     #[test]
     fn equality_pin_deposit_emits_the_slot_decision_pair_at_unit_col_scale() {
-        let ring = DeliveryRing::new(10..13, 20..23, 1, 3, TerminalMode::BoundaryFcfRetain);
+        let ring = DeliveryRing::new(10..13, 20..23, 1, 3);
         let decision_col = 99;
         let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); 100];
         let col_scale = 1.0_f64;
 
-        ring.emit_deposit(
-            2,
-            0,
-            777,
-            decision_col,
-            DeliverySemantics::EqualityPin,
-            &mut col_entries,
-        );
+        ring.emit_deposit(2, 0, 777, decision_col, &mut col_entries);
 
         let out_col = ring.out_col(2, 0);
         assert_eq!(col_entries[out_col], vec![(777, col_scale)]);
         assert_eq!(col_entries[decision_col], vec![(777, -col_scale)]);
     }
 
-    /// `AdditiveSource`'s deposit arm emits no entries — it only
-    /// re-validates conservation; the per-block fill stays at the call site.
-    #[test]
-    fn additive_source_deposit_emits_no_entries() {
-        let ring = DeliveryRing::new(10..13, 20..23, 1, 3, TerminalMode::ZeroTerminalDrop);
-        let density = [0.25, 0.5, 0.25];
-        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); 100];
-
-        ring.emit_deposit(
-            0,
-            0,
-            1,
-            99,
-            DeliverySemantics::AdditiveSource { density: &density },
-            &mut col_entries,
-        );
-
-        assert!(col_entries.iter().all(Vec::is_empty));
-    }
-
     #[test]
     fn slot_target_maps_lag_to_the_flat_row_pos_index() {
-        let ring = DeliveryRing::new(0..9, 0..9, 3, 3, TerminalMode::ZeroTerminalDrop);
+        let ring = DeliveryRing::new(0..9, 0..9, 3, 3);
         // lane 1, lag 1 -> slot 0 -> flat index 0 * 3 + 1.
         assert_eq!(ring.slot_target(1, 1), 1);
         // lane 2, lag 3 -> slot 2 -> flat index 2 * 3 + 2.
         assert_eq!(ring.slot_target(2, 3), 8);
-    }
-
-    #[test]
-    fn assert_density_sums_to_one_accepts_a_conserved_density() {
-        DeliveryRing::assert_density_sums_to_one(&[0.5, 0.3, 0.2]);
-        DeliveryRing::assert_density_sums_to_one(&[1.0]);
-    }
-
-    #[test]
-    #[should_panic(expected = "delivery density must sum to 1.0")]
-    fn assert_density_sums_to_one_rejects_a_non_conserved_density() {
-        DeliveryRing::assert_density_sums_to_one(&[0.5, 0.2]);
     }
 }

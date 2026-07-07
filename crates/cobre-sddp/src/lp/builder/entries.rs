@@ -5,7 +5,7 @@ use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
 use crate::indexer::StateLayout;
 
 use super::M3S_TO_HM3;
-use super::delivery_ring::{DeliveryRing, DeliverySemantics, TerminalMode};
+use super::delivery_ring::DeliveryRing;
 use super::fpha_cursor::for_each_fpha_plane;
 use super::layout::{StageLayout, TemplateBuildCtx};
 
@@ -23,7 +23,6 @@ pub(super) fn anticipated_ring(layout: &StageLayout) -> DeliveryRing {
         state.anticipated_state.clone(),
         layout.n_anticipated,
         layout.k_max,
-        TerminalMode::BoundaryFcfRetain,
     )
 }
 
@@ -111,14 +110,7 @@ pub(super) fn fill_anticipated_state_out_def_entries(
             layout.k_max
         );
         let col_decision = layout.anticipated.col_anticipated_decision_start + local_idx;
-        ring.emit_deposit(
-            slot,
-            local_idx,
-            row,
-            col_decision,
-            DeliverySemantics::EqualityPin,
-            col_entries,
-        );
+        ring.emit_deposit(slot, local_idx, row, col_decision, col_entries);
         n_active += 1;
     }
     debug_assert_eq!(
@@ -412,7 +404,6 @@ pub(super) fn transit_bucket_ring(
         state.transit_buckets_in.start + range.start..state.transit_buckets_in.start + range.end,
         1,
         depth,
-        TerminalMode::ZeroTerminalDrop,
     )
 }
 
@@ -482,7 +473,6 @@ fn fill_arc_release_block_entries(
         "arc {u_idx} -> {h_idx} stage {stage_idx}: stage-clock weights must sum to 1.0, got \
          {stage_weights:?}"
     );
-    DeliveryRing::assert_density_sums_to_one(stage_weights);
 
     if stage_weights[0] != 0.0 {
         col_entries[col_turbine].push((row_balance, -stage_weights[0] * tau_h));
@@ -725,7 +715,6 @@ fn fill_arc_release_chrono_block_entries(
             "arc {u_idx} stage {stage_idx}: stage-clock weights must sum to 1.0, got {:?}",
             resolution.stage_weights
         );
-        DeliveryRing::assert_density_sums_to_one(&resolution.stage_weights);
         for (d, &stage_weight) in resolution.stage_weights.iter().enumerate() {
             let aggregated: f64 = resolution
                 .block_deposits
@@ -3010,6 +2999,13 @@ mod zero_cost_tests {
             assert_eq!(
                 layout.anticipated.n_anticipated_slot_definition_rows, 0,
                 "stage {stage_idx}: K=0 must exclude every interior-shift row"
+            );
+            assert_eq!(
+                layout.anticipated_decision().len(),
+                ctx.n_anticipated,
+                "stage {stage_idx}: the decision-column block stays uniformly \
+                 n_anticipated wide even when every plant is K=0 (all rows excluded, \
+                 the columns are not)"
             );
 
             let mut row_lower = vec![f64::NAN; layout.num_rows];
