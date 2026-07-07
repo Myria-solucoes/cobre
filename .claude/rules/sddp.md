@@ -63,10 +63,12 @@ Read: `stochastic/noise.rs` (`transform_ncs_noise`, `compute_effective_eta`).
 ## Lower-bound evaluation must patch NCS
 
 `evaluate_lower_bound` patches NCS column bounds per opening via
-`transform_ncs_noise`, exactly as the forward and backward passes do. Skipping
-the patch understates the bound (a real bug caught during D15). The patch inputs
-ride on `LbEvalSpec` (`ncs_max_gen`, `ncs_allow_curtailment`).
-Read: `training/lower_bound.rs`.
+`StageSolvePrep::run`'s internal `transform_ncs_noise` call, exactly as the
+forward and backward passes do. Skipping the patch understates the bound (a
+real bug caught during D15). The patch inputs ride on `StageContext`
+(`ncs_max_gen`, `ncs_allow_curtailment`), the same struct every other solve
+site reads.
+Read: `training/lower_bound.rs`, `training/stage_solve_prep.rs`.
 
 ## Per-stage exchange in the backward pass
 
@@ -563,9 +565,9 @@ set, D34 included, is byte-identical) and never a slack; the `1e-9`-relative
 headroom is physically meaningless and only absorbs the round-trip.
 Read: `lp/builder/patch.rs`
 (`fill_anticipated_delivery_gen_widen`, `apply_anticipated_delivery_gen_widen`,
-`AnticipatedGenWidenCtx`), `training/forward/stage_solve.rs`,
-`training/backward/lp_setup.rs`, `training/lower_bound.rs` (`lb_evaluate_stage_0`,
-`LbEvalSpec::anticipated_widen`), `simulation/pipeline.rs`. Pinned by
+`AnticipatedGenWidenCtx`), `training/stage_solve_prep.rs` (`StageSolvePrep::run`,
+the single owner every pin site — forward, backward, lower-bound
+(`lower_bound.rs`'s `lb_evaluate_stage_0`), simulation — now calls). Pinned by
 `anticipated_commitment_at_cap_survives_ring_carry` (a K=2 commitment seeded a
 sub-ULP over its cap and carried through the ring; infeasible with the widen
 reverted, feasible with it).

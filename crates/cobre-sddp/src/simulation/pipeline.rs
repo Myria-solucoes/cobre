@@ -16,12 +16,7 @@ use crate::{
     FutureCostFunction,
     context::{StageContext, TrainingContext},
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
-    indexer::BlockGrid,
-    lp_builder::COST_SCALE_FACTOR,
-    noise::{
-        NcsNoiseOffsets, apply_ncs_col_bounds, transform_inflow_noise, transform_load_noise,
-        transform_ncs_noise,
-    },
+    lp_builder::{AnticipatedGenWidenCtx, COST_SCALE_FACTOR},
     simulation::{
         config::SimulationConfig,
         error::SimulationError,
@@ -33,6 +28,9 @@ use crate::{
         types::{ScenarioCategoryCosts, SimulationScenarioResult, SimulationStageResult},
     },
     solver_stats::SolverStatsDelta,
+    training::stage_solve_prep::{
+        InflowNoise, LoadNoise, OpeningMode, StageSolvePrep, StageSolvePrepParams, StateSource,
+    },
     workspace::{CapturedBasis, SolverWorkspace},
 };
 
@@ -325,9 +323,8 @@ fn solve_simulation_stage<S: SolverInterface>(
     output: &SimulationOutputSpec<'_>,
     ids: &SimStageIds,
     lookups: &SimLookups,
+    raw_noise: &[f64],
 ) -> Result<(f64, SimulationStageResult), SimulationError> {
-    // Precondition: ws.scratch noise_buf/load_rhs_buf/ncs_col_upper_buf are
-    // populated by the caller via the transform_* functions.
     let TrainingContext {
         state,
         study_dims,
@@ -344,62 +341,10 @@ fn solve_simulation_stage<S: SolverInterface>(
     } else {
         ws.solver.load_model(load_spec.frozen_template);
     }
-    ws.patch_buf
-        .fill_col_state_patches(state, &ws.current_state, &ctx.templates[t].col_scale);
-    ws.patch_buf.fill_forward_patches(
-        state,
-        &ws.current_state,
-        &ws.scratch.noise_buf,
-        ctx.base_rows[t],
-        &ctx.templates[t].row_scale,
-    );
-    // Per-stage geometry: a single global stage-0 geometry would mis-stride any
-    // stage with a differing block count. The empty-table fallback matches the
-    // sibling `ncs_col_starts` / `pumping_col_starts` tables.
-    debug_assert!(
-        output.geometry_per_stage.is_empty()
-            || output.geometry_per_stage.len() == ctx.templates.len(),
-        "geometry_per_stage must carry one entry per study stage when populated",
-    );
-    let geometry_default = crate::lp_builder::StageGeometry::default();
-    let geometry = output
-        .geometry_per_stage
-        .get(t)
-        .unwrap_or(&geometry_default);
-    if ctx.n_load_buses > 0 {
-        // Per-stage grid: this stage's block count, not a global stage-0 count.
-        let grid = BlockGrid::new(
-            ctx.block_counts_per_stage[t],
-            study_dims.max_deficit_segments,
-        );
-        ws.patch_buf.fill_load_patches(
-            ctx.load_balance_row_starts[t],
-            grid,
-            &ws.scratch.load_rhs_buf,
-            ctx.load_bus_indices,
-            &ctx.templates[t].row_scale,
-        );
-    }
-    // z_inflow_row_start is always 0: state pinning uses column bounds, so no
-    // rows precede the z-inflow block.
-    ws.patch_buf.fill_z_inflow_patches(
-        geometry.z_inflow_row_start,
-        &ws.scratch.z_inflow_rhs_buf,
-        &ctx.templates[t].row_scale,
-    );
-    let cp = ws.patch_buf.state_col_patch_count();
-    ws.solver.set_col_bounds(
-        &ws.patch_buf.col_indices[..cp],
-        &ws.patch_buf.col_lower[..cp],
-        &ws.patch_buf.col_upper[..cp],
-    );
-    if state.n_anticipated > 0
-        && let Some(geom) = output.geometry_per_stage.get(t)
-    {
-        let template = &ctx.templates[t];
-        ws.patch_buf.apply_anticipated_delivery_gen_widen(
-            &mut ws.solver,
-            &crate::lp_builder::AnticipatedGenWidenCtx {
+    let widen_ctx = if state.n_anticipated > 0 {
+        ctx.geometry_per_stage.get(t).map(|geom| {
+            let template = &ctx.templates[t];
+            AnticipatedGenWidenCtx {
                 state_layout: state,
                 state: &ws.current_state,
                 anticipated_thermal_indices: &study_dims.anticipated_thermal_indices,
@@ -410,14 +355,27 @@ fn solve_simulation_stage<S: SolverInterface>(
                 n_blks: ctx.block_counts_per_stage[t],
                 stage_idx: t,
                 n_stages: ctx.templates.len(),
-            },
-        );
-    }
-    let pc = ws.patch_buf.forward_patch_count();
-    ws.solver.set_row_bounds(
-        &ws.patch_buf.indices[..pc],
-        &ws.patch_buf.lower[..pc],
-        &ws.patch_buf.upper[..pc],
+            }
+        })
+    } else {
+        None
+    };
+    let prep_params = StageSolvePrepParams {
+        state_source: StateSource(&ws.current_state),
+        opening_mode: OpeningMode::SingleRealized,
+        load_noise: LoadNoise::Present,
+        inflow_noise: InflowNoise::Transform,
+        widen_ctx,
+        raw_noise,
+    };
+    StageSolvePrep::run(
+        &mut ws.solver,
+        &mut ws.patch_buf,
+        &mut ws.scratch,
+        ctx,
+        training_ctx,
+        t,
+        &prep_params,
     );
     // stage_id (the commissioning key the dormancy predicate compares NCS windows
     // against), NOT the stage index `t`: they differ when negative-id placeholder
@@ -428,17 +386,6 @@ fn solve_simulation_stage<S: SolverInterface>(
         .get(t)
         .map_or(t as i32, |stage| stage.id);
     let n_stochastic_ncs = stochastic.n_stochastic_ncs();
-    if n_stochastic_ncs > 0 && study_dims.has_ncs {
-        apply_ncs_col_bounds(
-            &mut ws.solver,
-            &mut ws.scratch,
-            output.ncs_col_starts.get(t).copied().unwrap_or(0),
-            ctx.ncs_stochastic_dense_col,
-            ctx.ncs_stochastic_windows,
-            stage_id,
-            ctx.block_counts_per_stage[t],
-        );
-    }
 
     // mem::take (capacity retained) so these can be filled from `view` slices tied
     // to `ws` while `&mut ws` is live; restored at function end for buffer reuse.
@@ -852,9 +799,7 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
     ids: &mut ScenarioIds<'_>,
     lookups: &SimLookups,
 ) -> Result<(f64, Vec<SimulationStageResult>), SimulationError> {
-    let TrainingContext {
-        state, stochastic, ..
-    } = training_ctx;
+    let TrainingContext { state, .. } = training_ctx;
     reset_scenario_state(
         ws,
         ids.sampler,
@@ -882,44 +827,6 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
         })?;
         let raw_noise = noise.as_slice();
 
-        transform_inflow_noise(
-            raw_noise,
-            t,
-            &ws.current_state,
-            ctx,
-            training_ctx,
-            &mut ws.scratch,
-        );
-        transform_load_noise(
-            raw_noise,
-            ctx.n_hydros,
-            ctx.n_load_buses,
-            stochastic,
-            t,
-            if ctx.n_load_buses > 0 {
-                ctx.block_counts_per_stage[t]
-            } else {
-                0
-            },
-            &mut ws.scratch.load_rhs_buf,
-        );
-        let n_stochastic_ncs = stochastic.n_stochastic_ncs();
-        if n_stochastic_ncs > 0 {
-            transform_ncs_noise(
-                raw_noise,
-                &NcsNoiseOffsets {
-                    n_hydros: ctx.n_hydros,
-                    n_load_buses: ctx.n_load_buses,
-                },
-                stochastic,
-                t,
-                ctx.block_counts_per_stage[t],
-                ctx.ncs_max_gen,
-                ctx.ncs_allow_curtailment,
-                &mut ws.scratch.ncs_col_lower_buf,
-                &mut ws.scratch.ncs_col_upper_buf,
-            );
-        }
         let (cost, result) = solve_simulation_stage(
             ws,
             ctx,
@@ -933,6 +840,7 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
                 scenario_id: ids.scenario_id,
             },
             lookups,
+            raw_noise,
         )?;
         let cum_d = ctx
             .cumulative_discount_factors

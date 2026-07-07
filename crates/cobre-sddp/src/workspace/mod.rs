@@ -26,8 +26,7 @@ pub mod workspace;
 pub use context::{StageContext, TrainingContext};
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use workspace::BackwardAccumulators;
-pub(crate) use workspace::ScratchBuffers;
 pub use workspace::{
-    BASIS_BROADCAST_WIRE_VERSION, BasisStore, BasisStoreSliceMut, CapturedBasis, SolverWorkspace,
-    WorkspacePool, WorkspaceSizing,
+    BASIS_BROADCAST_WIRE_VERSION, BasisStore, BasisStoreSliceMut, CapturedBasis, ScratchBuffers,
+    SolverWorkspace, WorkspacePool, WorkspaceSizing,
 };

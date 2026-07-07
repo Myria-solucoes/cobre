@@ -7,8 +7,12 @@
 use cobre_solver::{RowBatch, StageTemplate};
 
 use crate::{
-    context::StageContext, cut::CutRowMap, lower_bound::LbEvalScratch, lp_builder::PatchBuffer,
+    context::StageContext,
+    cut::CutRowMap,
+    lower_bound::LbEvalScratch,
+    lp_builder::PatchBuffer,
     trajectory::TrajectoryRecord,
+    workspace::{ScratchBuffers, WorkspaceSizing},
 };
 
 /// Per-training-run iteration scratch owned by `TrainingSession`.
@@ -33,6 +37,11 @@ pub(crate) struct IterationScratch {
     pub lb_cut_row_map: CutRowMap,
     /// Per-evaluation scratch buffers for lower-bound evaluation (reused across iterations).
     pub lb_scratch: LbEvalScratch,
+    /// Noise/NCS-transform scratch for the lower-bound path, the same shape
+    /// [`StageSolvePrep::run`] reads on every other solve site.
+    ///
+    /// [`StageSolvePrep::run`]: crate::training::stage_solve_prep::StageSolvePrep::run
+    pub lb_noise_scratch: ScratchBuffers,
     /// Reusable scratch buffers for `freeze_rows_into_template` (count/emit-pass temporaries).
     pub(crate) freeze_scratch: cobre_solver::FreezeScratch,
 }
@@ -132,6 +141,17 @@ impl IterationScratch {
 
         let lb_scratch = LbEvalScratch::new();
 
+        // The LB path never patches load-bus/NCS-column-index reuse across
+        // stages (always stage 0), so `n_load_buses`/`max_blocks`/pool-capacity
+        // sizing hints are irrelevant here; every `ScratchBuffers` field grows
+        // on demand regardless.
+        let lb_noise_scratch = ScratchBuffers::new(WorkspaceSizing {
+            hydro_count,
+            max_par_order,
+            downstream_par_order: stage_ctx.downstream_par_order,
+            ..WorkspaceSizing::default()
+        });
+
         Self {
             patch_buf,
             records,
@@ -141,6 +161,7 @@ impl IterationScratch {
             freeze_row_batches,
             lb_cut_row_map,
             lb_scratch,
+            lb_noise_scratch,
             freeze_scratch,
         }
     }

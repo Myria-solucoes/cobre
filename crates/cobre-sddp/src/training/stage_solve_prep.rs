@@ -14,10 +14,10 @@
 //! layering (`core → io/stochastic/solver → comm → sddp`'s `lp` sits below
 //! `training`), so `training/` is the cycle-free home.
 //!
-//! Called by the forward pass (`training/forward/stage_solve.rs`) and the
-//! backward pass (`training/backward/lp_setup.rs`); the simulation and
-//! lower-bound sites still open-code the block and wire onto
-//! [`StageSolvePrep::run`] in turn.
+//! Called by the forward pass (`training/forward/stage_solve.rs`), the
+//! backward pass (`training/backward/lp_setup.rs`), the simulation pipeline
+//! (`simulation/pipeline.rs`), and the lower-bound evaluation
+//! (`training/lower_bound.rs`).
 
 use cobre_solver::SolverInterface;
 
@@ -59,8 +59,6 @@ pub(crate) enum LoadNoise {
     /// `fill_load_patches` (forward, backward, simulation).
     Present,
     /// Skip both: the lower bound evaluates no load-bus noise dimension.
-    // Rationale: constructed once the lower bound wires onto `StageSolvePrep::run`.
-    #[allow(dead_code)]
     Absent,
 }
 
@@ -73,8 +71,6 @@ pub(crate) enum InflowNoise {
     Transform,
     /// The caller has already filled the buffers (the lower bound's
     /// PAR-batch precompute).
-    // Rationale: constructed once the lower bound wires onto `StageSolvePrep::run`.
-    #[allow(dead_code)]
     PreBuilt,
 }
 

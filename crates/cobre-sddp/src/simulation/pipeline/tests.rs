@@ -1784,7 +1784,7 @@ mod dcs_simulation {
     use crate::horizon_mode::HorizonMode;
 
     use crate::inflow_method::InflowNonNegativityMethod;
-    use crate::lp_builder::PatchBuffer;
+    use crate::lp_builder::{PatchBuffer, StageGeometry};
     use crate::simulation::extraction::EntityCounts;
     use crate::simulation::types::SimulationStageResult;
     use crate::workspace::{SolverWorkspace, WorkspaceSizing};
@@ -1792,22 +1792,24 @@ mod dcs_simulation {
     const X_HAT: f64 = 2.0;
 
     /// Cut-free base: cols `[storage_out=0, z_inflow=1, storage_in=2,
-    /// theta=3]`, one coupling row `storage_out - storage_in = 0`, minimise
-    /// `theta`. `storage_in` is pinned to `x_hat`; cuts constrain `theta`
-    /// against `storage_out` (col 0).
+    /// theta=3]`, row 0 the coupling row `storage_out - storage_in = 0`, row 1
+    /// the z-inflow definition `z_inflow = rhs` (mirrors production's
+    /// `fill_z_inflow_patches` row, keeping `z_inflow` a defined column rather
+    /// than a free one), minimise `theta`. `storage_in` is pinned to `x_hat`;
+    /// cuts constrain `theta` against `storage_out` (col 0).
     fn sim_core_template() -> StageTemplate {
         StageTemplate {
             num_cols: 4,
-            num_rows: 1,
-            num_nz: 2,
-            col_starts: vec![0_i32, 1, 1, 2, 2],
-            row_indices: vec![0_i32, 0],
-            values: vec![1.0, -1.0],
+            num_rows: 2,
+            num_nz: 3,
+            col_starts: vec![0_i32, 1, 2, 3, 3],
+            row_indices: vec![0_i32, 1, 0],
+            values: vec![1.0, 1.0, -1.0],
             col_lower: vec![0.0, 0.0, 0.0, -1.0e6],
             col_upper: vec![f64::INFINITY, f64::INFINITY, f64::INFINITY, 1.0e6],
             objective: vec![0.0, 0.0, 0.0, 1.0],
-            row_lower: vec![0.0],
-            row_upper: vec![0.0],
+            row_lower: vec![0.0, 0.0],
+            row_upper: vec![0.0, 0.0],
             n_state: 1,
             n_transfer: 0,
             n_dual_relevant: 1,
@@ -1819,20 +1821,20 @@ mod dcs_simulation {
     }
 
     /// All-cuts frozen template: cut-free base + the three pool cuts frozen as
-    /// structural rows 1..4 (slot order). `num_rows = 4`.
+    /// structural rows 2..5 (slot order). `num_rows = 5`.
     fn sim_all_cuts_frozen() -> StageTemplate {
         StageTemplate {
             num_cols: 4,
-            num_rows: 4,
-            num_nz: 6,
-            col_starts: vec![0_i32, 2, 2, 3, 6],
-            row_indices: vec![0_i32, 2, 0, 1, 2, 3],
-            values: vec![1.0, -2.0, -1.0, 1.0, 1.0, 1.0],
+            num_rows: 5,
+            num_nz: 7,
+            col_starts: vec![0_i32, 2, 3, 4, 7],
+            row_indices: vec![0_i32, 2, 4, 0, 1, 2, 3],
+            values: vec![1.0, -2.0, 1.0, -1.0, 1.0, 1.0, 1.0],
             col_lower: vec![0.0, 0.0, 0.0, -1.0e6],
             col_upper: vec![f64::INFINITY, f64::INFINITY, f64::INFINITY, 1.0e6],
             objective: vec![0.0, 0.0, 0.0, 1.0],
-            row_lower: vec![0.0, 1.0, 0.0, 3.0],
-            row_upper: vec![0.0, f64::INFINITY, f64::INFINITY, f64::INFINITY],
+            row_lower: vec![0.0, 1.0, 0.0, 3.0, 0.0],
+            row_upper: vec![0.0, f64::INFINITY, f64::INFINITY, f64::INFINITY, 0.0],
             n_state: 1,
             n_transfer: 0,
             n_dual_relevant: 1,
@@ -1844,20 +1846,21 @@ mod dcs_simulation {
     }
 
     /// Frozen template carrying a single DOMINATING spurious cut
-    /// (`-5*col0 + theta >= 0`, floor 10 at `x_hat = 2`, NOT in the pool).
+    /// (`-5*col0 + theta >= 0`, floor 10 at `x_hat = 2`, NOT in the pool), plus
+    /// the same trailing z-inflow definition row as the other fixtures.
     fn sim_frozen_dominating_cut() -> StageTemplate {
         StageTemplate {
             num_cols: 4,
-            num_rows: 2,
-            num_nz: 4,
-            col_starts: vec![0_i32, 2, 2, 3, 4],
-            row_indices: vec![0_i32, 1, 0, 1],
-            values: vec![1.0, -5.0, -1.0, 1.0],
+            num_rows: 3,
+            num_nz: 5,
+            col_starts: vec![0_i32, 2, 3, 4, 5],
+            row_indices: vec![0_i32, 1, 2, 0, 1],
+            values: vec![1.0, -5.0, 1.0, -1.0, 1.0],
             col_lower: vec![0.0, 0.0, 0.0, -1.0e6],
             col_upper: vec![f64::INFINITY, f64::INFINITY, f64::INFINITY, 1.0e6],
             objective: vec![0.0, 0.0, 0.0, 1.0],
-            row_lower: vec![0.0, 0.0],
-            row_upper: vec![0.0, f64::INFINITY],
+            row_lower: vec![0.0, 0.0, 0.0],
+            row_upper: vec![0.0, f64::INFINITY, 0.0],
             n_state: 1,
             n_transfer: 0,
             n_dual_relevant: 1,
@@ -1935,6 +1938,17 @@ mod dcs_simulation {
     ) -> (f64, SimulationStageResult) {
         let state = crate::test_support::state_layout(1, 0);
         let core = sim_core_template();
+        // The DCS branch always loads `core`; the frozen branch loads `frozen` —
+        // each carries its own trailing z-inflow definition row as its last row.
+        let z_inflow_row_start = if dcs.is_some() {
+            core.num_rows - 1
+        } else {
+            frozen.num_rows - 1
+        };
+        let geometry_per_stage = [StageGeometry {
+            z_inflow_row_start,
+            ..StageGeometry::default()
+        }];
         let templates = vec![core.clone()];
         let base_rows = vec![0_usize];
         let stochastic = super::make_stochastic_context(1);
@@ -1961,8 +1975,6 @@ mod dcs_simulation {
         let mut ws = sim_active_workspace();
         ws.current_state.clear();
         ws.current_state.push(X_HAT);
-        // Pre-fill the noise/load/z-inflow scratch the patch reads (empty for
-        // a zero-noise single-hydro fixture, mirroring the caller's setup).
         ws.scratch.noise_buf.clear();
         ws.scratch.load_rhs_buf.clear();
         ws.scratch.z_inflow_rhs_buf.clear();
@@ -1971,7 +1983,7 @@ mod dcs_simulation {
         ws.scratch.inflow_m3s_buf.push(0.0);
 
         let ctx = StageContext {
-            geometry_per_stage: &[],
+            geometry_per_stage: &geometry_per_stage,
             templates: &templates,
             base_rows: &base_rows,
             noise_scale: &[1.0],
@@ -2028,7 +2040,7 @@ mod dcs_simulation {
             n_ncs: 0,
             pumping_col_starts: &[],
             n_pumping: 0,
-            geometry_per_stage: &[],
+            geometry_per_stage: &geometry_per_stage,
             pumping_consumption_mw_per_m3s: &[],
             contract_prices_per_stage: &[],
             contract_is_import: &[],
@@ -2059,6 +2071,7 @@ mod dcs_simulation {
             &output,
             &ids,
             &lookups,
+            &[0.0],
         )
         .expect("simulation stage solve must succeed");
         (immediate, result)
@@ -2485,6 +2498,7 @@ mod anticipated_ring_matches_forward_propagation {
                 &output,
                 &ids,
                 &lookups,
+                &[],
             )
             .expect("simulation stage solve must succeed");
             trajectory.push(ws.current_state.clone());

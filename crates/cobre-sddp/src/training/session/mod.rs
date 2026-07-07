@@ -31,8 +31,8 @@ use crate::{
     cut_sync::CutSyncBuffers,
     forward::sync_forward,
     forward_pass_state::{ForwardPassInputs, ForwardPassState},
+    lower_bound::LbEvalScratchBundle,
     lower_bound::evaluate_lower_bound,
-    lower_bound::{LbEvalScratchBundle, LbEvalSpec},
     solver_stats::{
         SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, SolverStatsLogEntry,
         aggregate_solver_statistics, pack_delta_scalars, unpack_delta_scalars,
@@ -1049,78 +1049,20 @@ where
         let lb_wall_start = Instant::now();
         let lb_stats_before = self.solver.statistics();
 
-        // The NCS column base is the per-stage `StageContext::ncs_col_starts[0]`,
-        // never a global base (`StudyDimensions` has only `has_ncs`). The dense
-        // range spans the full stage-0 NCS block (`n_ncs * block_count[0]`); a
-        // dormant NCS is zeroed inline via the windows. An empty range guards the
-        // patch off via `LbEvalSpec::ncs_generation` emptiness.
-        let block_count_stage0 = self.stage_ctx.block_counts_per_stage[0];
-        let n_ncs = self.stage_ctx.n_ncs;
-        // Stage id of the first study stage — the commissioning key for dormancy.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let stage0_id = self
-            .training_ctx
-            .stages
-            .first()
-            .map_or(0_i32, |stage| stage.id);
-        let ncs_generation = match self.stage_ctx.ncs_col_starts.first() {
-            Some(&start) => start..(start + n_ncs * block_count_stage0),
-            None => 0..0,
-        };
-
-        let lb_spec = LbEvalSpec {
-            template: &self.stage_ctx.templates[0],
-            base_row: self.stage_ctx.base_rows[0],
-            noise_scale: self.stage_ctx.noise_scale,
-            n_hydros: self.stage_ctx.n_hydros,
-            opening_tree: self.training_ctx.stochastic.opening_tree(),
-            risk_measure: &self.config.cut_management.risk_measures[0],
-            stochastic: Some(self.training_ctx.stochastic),
-            n_load_buses: self.stage_ctx.n_load_buses,
-            ncs_max_gen: self.stage_ctx.ncs_max_gen,
-            ncs_allow_curtailment: self.stage_ctx.ncs_allow_curtailment,
-            ncs_stochastic_dense_col: self.stage_ctx.ncs_stochastic_dense_col,
-            ncs_stochastic_windows: self.stage_ctx.ncs_stochastic_windows,
-            stage_id: stage0_id,
-            block_count: block_count_stage0,
-            ncs_generation,
-            // From the stage-0 geometry; falls back to 0 because state pinning
-            // uses column bounds, leaving no rows before the z-inflow block.
-            z_inflow_row_start: self
-                .stage_ctx
-                .geometry_per_stage
-                .first()
-                .map_or(0, |g| g.z_inflow_row_start),
-            inflow_method: self.training_ctx.inflow_method,
-            anticipated_widen: (self.training_ctx.state.n_anticipated > 0).then(|| {
-                crate::training::lower_bound::AnticipatedLbWiden {
-                    anticipated_thermal_indices: &self
-                        .training_ctx
-                        .study_dims
-                        .anticipated_thermal_indices,
-                    thermal_col_start: self
-                        .stage_ctx
-                        .geometry_per_stage
-                        .first()
-                        .map_or(0, |g| g.thermal.start),
-                    n_stages: self.stage_ctx.templates.len(),
-                }
-            }),
-        };
         let mut lb_bundle = LbEvalScratchBundle::from_scratch_fields(
             &mut self.scratch.patch_buf,
             &mut self.scratch.lb_cut_batch,
             Some(&mut self.scratch.lb_cut_row_map),
+            &mut self.scratch.lb_noise_scratch,
             &mut self.scratch.lb_scratch,
         );
         let lb = evaluate_lower_bound(
             self.solver,
             self.fcf,
-            self.training_ctx.initial_state,
-            self.training_ctx.state,
-            &self.training_ctx.cut_state_layouts[0],
+            self.stage_ctx,
+            self.training_ctx,
+            &self.config.cut_management.risk_measures[0],
             &mut lb_bundle,
-            &lb_spec,
             self.comm,
         )?;
 

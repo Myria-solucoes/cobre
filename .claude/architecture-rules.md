@@ -14,29 +14,28 @@ struct** instead of adding a function parameter.
 
 Available context structs:
 
-| Struct                | File                                             | Purpose                                                                                        | Mutability              |
-| --------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------- | ----------------------- |
-| `StageContext`        | `cobre-sddp/src/workspace/context.rs`            | Per-stage templates, base rows, layout                                                         | Immutable (`&`)         |
-| `TrainingContext`     | `cobre-sddp/src/workspace/context.rs`            | Horizon, indexer, stochastic, initial state                                                    | Immutable (`&`)         |
-| `ScratchBuffers`      | `cobre-sddp/src/workspace/workspace.rs`          | Per-worker noise/patch scratch space                                                           | Mutable (`&mut`)        |
-| `SolverWorkspace`     | `cobre-sddp/src/workspace/workspace.rs`          | Solver + scratch + patch buffer                                                                | Mutable (`&mut`)        |
-| `TrainingConfig`      | `cobre-sddp/src/config.rs`                       | Forward passes, iteration limit, seed                                                          | Owned (moved in)        |
-| `SimulationConfig`    | `cobre-sddp/src/simulation/config.rs`            | Scenario count, channel capacity                                                               | Immutable (`&`)         |
-| `ForwardPassBatch`    | `cobre-sddp/src/training/forward/mod.rs`         | Local pass count, iteration, offset                                                            | Immutable (`&`)         |
-| `LbEvalSpec`          | `cobre-sddp/src/training/lower_bound.rs`         | Template, noise scale, opening tree                                                            | Immutable (`&`)         |
-| `TrainingSession`     | `cobre-sddp/src/training/session/mod.rs`         | Owns solver, pools, sub-state structs, scratch                                                 | Owned driver            |
-| `BackwardPassState`   | `cobre-sddp/src/training/backward_pass_state.rs` | Owned scratch for backward-pass helpers                                                        | Mutable (`&mut self`)   |
-| `ForwardPassState`    | `cobre-sddp/src/training/forward_pass_state.rs`  | Owned scratch for forward-pass workers                                                         | Mutable (`&mut self`)   |
-| `SimulationState`     | `cobre-sddp/src/simulation/state.rs`             | Owned scratch for simulation workers                                                           | Mutable (`&mut self`)   |
-| `BackwardPassInputs`  | `cobre-sddp/src/training/backward_pass_state.rs` | Borrowed inputs to `BackwardPassState::run`                                                    | Mutable bundle (`&mut`) |
-| `ForwardPassInputs`   | `cobre-sddp/src/training/forward_pass_state.rs`  | Borrowed inputs to `ForwardPassState::run`                                                     | Mutable bundle (`&mut`) |
-| `SimulationInputs`    | `cobre-sddp/src/simulation/state.rs`             | Borrowed inputs to `SimulationState::run`                                                      | Mutable bundle (`&mut`) |
-| `ForwardWorkerParams` | `cobre-sddp/src/training/forward_pass_state.rs`  | Read-only captures for rayon workers                                                           | Immutable bundle (`&`)  |
-| `ForwardWorkerResult` | `cobre-sddp/src/training/forward_pass_state.rs`  | Return bundle from per-worker forward execution                                                | Owned (moved out)       |
-| `OpeningTreeInputs`   | `cobre-stochastic/src/tree/generate.rs`          | Optional inputs to `generate_opening_tree`                                                     | Immutable bundle (`&`)  |
-| `LbEvalScratch`       | `cobre-sddp/src/training/lower_bound.rs`         | 10 f64/usize scratch vectors reused across `evaluate_lower_bound` phases                       | Mutable (`&mut`)        |
-| `LbEvalScratchBundle` | `cobre-sddp/src/training/lower_bound.rs`         | Bundles `patch_buf`, `lb_cut_batch`, `lb_cut_row_map`, `lb_scratch` for `evaluate_lower_bound` | Mutable bundle (`&mut`) |
-| `RiskMeasureScratch`  | `cobre-sddp/src/risk_measure.rs`                 | CVaR weight-computation scratch (`upper_bounds`, `order`, `mu`)                                | Mutable (`&mut`)        |
+| Struct                | File                                             | Purpose                                                                                                                            | Mutability              |
+| --------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| `StageContext`        | `cobre-sddp/src/workspace/context.rs`            | Per-stage templates, base rows, layout                                                                                             | Immutable (`&`)         |
+| `TrainingContext`     | `cobre-sddp/src/workspace/context.rs`            | Horizon, indexer, stochastic, initial state                                                                                        | Immutable (`&`)         |
+| `ScratchBuffers`      | `cobre-sddp/src/workspace/workspace.rs`          | Per-worker noise/patch scratch space                                                                                               | Mutable (`&mut`)        |
+| `SolverWorkspace`     | `cobre-sddp/src/workspace/workspace.rs`          | Solver + scratch + patch buffer                                                                                                    | Mutable (`&mut`)        |
+| `TrainingConfig`      | `cobre-sddp/src/config.rs`                       | Forward passes, iteration limit, seed                                                                                              | Owned (moved in)        |
+| `SimulationConfig`    | `cobre-sddp/src/simulation/config.rs`            | Scenario count, channel capacity                                                                                                   | Immutable (`&`)         |
+| `ForwardPassBatch`    | `cobre-sddp/src/training/forward/mod.rs`         | Local pass count, iteration, offset                                                                                                | Immutable (`&`)         |
+| `TrainingSession`     | `cobre-sddp/src/training/session/mod.rs`         | Owns solver, pools, sub-state structs, scratch                                                                                     | Owned driver            |
+| `BackwardPassState`   | `cobre-sddp/src/training/backward_pass_state.rs` | Owned scratch for backward-pass helpers                                                                                            | Mutable (`&mut self`)   |
+| `ForwardPassState`    | `cobre-sddp/src/training/forward_pass_state.rs`  | Owned scratch for forward-pass workers                                                                                             | Mutable (`&mut self`)   |
+| `SimulationState`     | `cobre-sddp/src/simulation/state.rs`             | Owned scratch for simulation workers                                                                                               | Mutable (`&mut self`)   |
+| `BackwardPassInputs`  | `cobre-sddp/src/training/backward_pass_state.rs` | Borrowed inputs to `BackwardPassState::run`                                                                                        | Mutable bundle (`&mut`) |
+| `ForwardPassInputs`   | `cobre-sddp/src/training/forward_pass_state.rs`  | Borrowed inputs to `ForwardPassState::run`                                                                                         | Mutable bundle (`&mut`) |
+| `SimulationInputs`    | `cobre-sddp/src/simulation/state.rs`             | Borrowed inputs to `SimulationState::run`                                                                                          | Mutable bundle (`&mut`) |
+| `ForwardWorkerParams` | `cobre-sddp/src/training/forward_pass_state.rs`  | Read-only captures for rayon workers                                                                                               | Immutable bundle (`&`)  |
+| `ForwardWorkerResult` | `cobre-sddp/src/training/forward_pass_state.rs`  | Return bundle from per-worker forward execution                                                                                    | Owned (moved out)       |
+| `OpeningTreeInputs`   | `cobre-stochastic/src/tree/generate.rs`          | Optional inputs to `generate_opening_tree`                                                                                         | Immutable bundle (`&`)  |
+| `LbEvalScratch`       | `cobre-sddp/src/training/lower_bound.rs`         | Rank-0 risk-measure aggregation scratch (`objectives_buf`, `uniform_prob_buf`) with no `ScratchBuffers` counterpart                | Mutable (`&mut`)        |
+| `LbEvalScratchBundle` | `cobre-sddp/src/training/lower_bound.rs`         | Bundles `patch_buf`, `lb_cut_batch`, `lb_cut_row_map`, `noise_scratch` (`ScratchBuffers`), `lb_scratch` for `evaluate_lower_bound` | Mutable bundle (`&mut`) |
+| `RiskMeasureScratch`  | `cobre-sddp/src/risk_measure.rs`                 | CVaR weight-computation scratch (`upper_bounds`, `order`, `mu`)                                                                    | Mutable (`&mut`)        |
 
 **Decision tree when adding new data to the hot path:**
 
@@ -48,7 +47,7 @@ Available context structs:
 6. Forward-pass scratch reused across iterations → field on `ForwardPassState`.
 7. Simulation scratch reused across scenarios → field on `SimulationState`.
 8. Per-call input to backward/forward/simulate → field on the matching `*Inputs` bundle.
-9. Lower-bound-specific → `LbEvalSpec`.
+9. Lower-bound-specific aggregation scratch (no `ScratchBuffers` counterpart) → `LbEvalScratch`.
 10. None of the above → create a new spec or bundle struct. Do NOT add a bare parameter.
 
 ---
@@ -149,17 +148,17 @@ No bare per-call parameters — everything rides on either `self` or `inputs`.
 
 ## Function Signature Budgets
 
-| Function                         | Max args | Location                                | Notes                                          |
-| -------------------------------- | -------- | --------------------------------------- | ---------------------------------------------- |
-| `train`                          | 10       | `training/training.rs`                  | Public entry point; keep at or below target    |
-| `TrainingSession::run_iteration` | 2        | `training/session/mod.rs`               | `&mut self` + iteration counter                |
-| `BackwardPassState::run`         | 2        | `training/backward_pass_state.rs`       | `&mut self` + `&mut BackwardPassInputs`        |
-| `ForwardPassState::run`          | 2        | `training/forward_pass_state.rs`        | `&mut self` + `&mut ForwardPassInputs`         |
-| `SimulationState::run`           | 2        | `simulation/state.rs`                   | `&mut self` + `&mut SimulationInputs`          |
-| `evaluate_lower_bound`           | 9        | `training/lower_bound.rs`               | At the workspace budget ceiling                |
-| `build_row_lower_unscaled`       | 8        | `simulation/pipeline.rs`                |                                                |
-| `run_forward_worker`             | 6        | `training/forward_pass_state.rs`        | Free function; accepts `&ForwardWorkerParams`  |
-| `generate_opening_tree`          | 7        | `cobre-stochastic/src/tree/generate.rs` | Optional inputs go through `OpeningTreeInputs` |
+| Function                         | Max args | Location                                | Notes                                             |
+| -------------------------------- | -------- | --------------------------------------- | ------------------------------------------------- |
+| `train`                          | 10       | `training/training.rs`                  | Public entry point; keep at or below target       |
+| `TrainingSession::run_iteration` | 2        | `training/session/mod.rs`               | `&mut self` + iteration counter                   |
+| `BackwardPassState::run`         | 2        | `training/backward_pass_state.rs`       | `&mut self` + `&mut BackwardPassInputs`           |
+| `ForwardPassState::run`          | 2        | `training/forward_pass_state.rs`        | `&mut self` + `&mut ForwardPassInputs`            |
+| `SimulationState::run`           | 2        | `simulation/state.rs`                   | `&mut self` + `&mut SimulationInputs`             |
+| `evaluate_lower_bound`           | 7        | `training/lower_bound.rs`               | Takes `&StageContext`/`&TrainingContext` directly |
+| `build_row_lower_unscaled`       | 8        | `simulation/pipeline.rs`                |                                                   |
+| `run_forward_worker`             | 6        | `training/forward_pass_state.rs`        | Free function; accepts `&ForwardWorkerParams`     |
+| `generate_opening_tree`          | 7        | `cobre-stochastic/src/tree/generate.rs` | Optional inputs go through `OpeningTreeInputs`    |
 
 All four hot-path drivers (train/backward/forward/simulate) must take exactly
 `&mut self` + `&mut *Inputs` at their public `run` boundary. Any function that

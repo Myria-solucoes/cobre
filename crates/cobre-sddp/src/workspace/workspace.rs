@@ -425,8 +425,12 @@ impl BackwardAccumulators {
 
 /// Pre-allocated scratch buffers for noise transformation and simulation,
 /// passed by `&mut` to the transformation functions in `noise.rs`.
+///
+/// `pub` type with every field kept `pub(crate)`: [`crate::lower_bound::evaluate_lower_bound`]'s
+/// public signature must name the type, but an external caller must still go
+/// through [`ScratchBuffers::new`] rather than construct or mutate one field-by-field.
 #[allow(clippy::struct_field_names)]
-pub(crate) struct ScratchBuffers {
+pub struct ScratchBuffers {
     pub(crate) noise_buf: Vec<f64>,
     pub(crate) inflow_m3s_buf: Vec<f64>,
     pub(crate) lag_matrix_buf: Vec<f64>,
@@ -578,7 +582,8 @@ impl ScratchBuffers {
     /// Allocate scratch buffers sized for the given per-worker parameters;
     /// shared by all three `SolverWorkspace` construction sites to keep them in
     /// sync.
-    pub(crate) fn new(s: WorkspaceSizing) -> Self {
+    #[must_use]
+    pub fn new(s: WorkspaceSizing) -> Self {
         let WorkspaceSizing {
             hydro_count,
             max_par_order,

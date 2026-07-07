@@ -700,3 +700,120 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
     let expected_upper = 100.0_f64 * (0.5 + 0.1 * 0.37_f64).clamp(0.0, 1.0);
     assert!((upper[0] - expected_upper).abs() < 1e-9);
 }
+
+/// `LoadNoise::Absent` + `InflowNoise::PreBuilt` — the lower bound's own
+/// parameterization — must skip both `transform_load_noise` and
+/// `transform_inflow_noise`, reading whatever the caller pre-populated in
+/// `scratch.noise_buf`/`z_inflow_rhs_buf`/`load_rhs_buf` verbatim, even when
+/// the fixture HAS load buses and a real PAR(0) inflow model that `Present`/
+/// `Transform` would otherwise patch.
+#[test]
+fn run_skips_load_and_inflow_transform_under_absent_and_prebuilt() {
+    let state = crate::test_support::state_layout(1, 0);
+    let stochastic = make_stochastic_context();
+    let template = minimal_forward_template();
+    let templates = vec![template];
+    let base_rows = vec![0_usize];
+    let ctx = StageContext {
+        templates: &templates,
+        base_rows: &base_rows,
+        geometry_per_stage: &[],
+        noise_scale: &[1.0],
+        n_hydros: 1,
+        n_load_buses: 1,
+        load_balance_row_starts: &[0],
+        load_bus_indices: &[0],
+        block_counts_per_stage: &[1],
+        ncs_col_starts: &[],
+        n_ncs: 0,
+        ncs_stochastic_dense_col: &[],
+        ncs_stochastic_windows: &[],
+        anticipated_windows: &[],
+        study_stage_ids: &[],
+        ncs_max_gen: &[],
+        ncs_allow_curtailment: &[],
+        discount_factors: &[],
+        cumulative_discount_factors: &[],
+        stage_lag_transitions: &[],
+        noise_group_ids: &[],
+        downstream_par_order: 0,
+    };
+    let horizon = HorizonMode::Finite { num_stages: 1 };
+    let study_dims = crate::test_support::study_dims();
+    let training_ctx = TrainingContext {
+        horizon: &horizon,
+        state: &state,
+        cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(&state, 1),
+        study_dims: &study_dims,
+        inflow_method: &InflowNonNegativityMethod::None,
+        stochastic: &stochastic,
+        initial_state: &[],
+        inflow_scheme: SamplingScheme::InSample,
+        load_scheme: SamplingScheme::InSample,
+        ncs_scheme: SamplingScheme::InSample,
+        stages: &[],
+        historical_library: None,
+        external_inflow_library: None,
+        external_load_library: None,
+        external_ncs_library: None,
+        recent_accum_seed: &[],
+        recent_weight_seed: 0.0,
+        dcs: None,
+    };
+
+    let current_state = vec![42.0_f64];
+    let raw_noise = vec![0.3_f64];
+    let mut scratch = ScratchBuffers::new(minimal_sizing());
+    // Sentinel pre-fill: Absent/PreBuilt must leave every one of these untouched,
+    // since `transform_load_noise`/`transform_inflow_noise` each `.clear()` their
+    // target buffer unconditionally before refilling it.
+    scratch.noise_buf = vec![111.0];
+    scratch.z_inflow_rhs_buf = vec![222.0];
+    scratch.load_rhs_buf = vec![777.0];
+
+    let mut solver = RecordingSolver::default();
+    let mut patch_buf = PatchBuffer::new(1, 0, 0, 0, 0, 0, 0);
+    let params = StageSolvePrepParams {
+        state_source: StateSource(&current_state),
+        opening_mode: OpeningMode::PerOpening,
+        load_noise: LoadNoise::Absent,
+        inflow_noise: InflowNoise::PreBuilt,
+        widen_ctx: None,
+        raw_noise: &raw_noise,
+    };
+    StageSolvePrep::run(
+        &mut solver,
+        &mut patch_buf,
+        &mut scratch,
+        &ctx,
+        &training_ctx,
+        0,
+        &params,
+    );
+
+    assert_eq!(
+        scratch.noise_buf,
+        vec![111.0],
+        "InflowNoise::PreBuilt must not recompute noise_buf"
+    );
+    assert_eq!(
+        scratch.z_inflow_rhs_buf,
+        vec![222.0],
+        "InflowNoise::PreBuilt must not recompute z_inflow_rhs_buf"
+    );
+    assert_eq!(
+        scratch.load_rhs_buf,
+        vec![777.0],
+        "LoadNoise::Absent must not touch load_rhs_buf even when ctx.n_load_buses > 0"
+    );
+    assert_eq!(
+        solver.col_bounds_calls.len(),
+        1,
+        "the state pin still runs under Absent/PreBuilt"
+    );
+    assert_eq!(
+        solver.row_bounds_calls.len(),
+        1,
+        "the forward/z-inflow row patch still runs, reading the pre-built buffers verbatim"
+    );
+}

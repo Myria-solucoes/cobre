@@ -763,14 +763,19 @@ mod convergence_conformance {
 mod lb_conformance {
     //! LB monotonicity conformance: adding cuts can only increase the lower bound.
 
+    use cobre_core::scenario::SamplingScheme;
     use cobre_sddp::{
-        indexer::StateLayout,
+        context::{StageContext, TrainingContext},
+        horizon_mode::HorizonMode,
+        indexer::{StateLayout, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
-        lower_bound::{LbEvalScratch, LbEvalScratchBundle, LbEvalSpec, evaluate_lower_bound},
+        lower_bound::{LbEvalScratch, LbEvalScratchBundle, evaluate_lower_bound},
         lp_builder::PatchBuffer,
         risk_measure::RiskMeasure,
+        workspace::{ScratchBuffers, WorkspaceSizing},
     };
     use cobre_solver::RowBatch;
+    use cobre_stochastic::StochasticContext;
 
     use super::{LocalComm, MockSolver, make_fcf, minimal_template, simple_opening_tree};
 
@@ -791,6 +796,34 @@ mod lb_conformance {
         )
     }
 
+    /// Wrap a pre-built stage-0 `OpeningTree` into a degenerate, entity-free
+    /// `StochasticContext` (`n_stochastic_ncs() == 0`, `par().n_stages() == 0`),
+    /// so this public-API test can supply a real `&StochasticContext` in place
+    /// of the retired `stochastic: None` field. `user_tree` bypasses generation
+    /// entirely, so the injected tree's shape is preserved verbatim.
+    fn wrap_opening_tree(tree: cobre_stochastic::OpeningTree) -> StochasticContext {
+        let system = cobre_core::SystemBuilder::new()
+            .build()
+            .expect("empty system is valid");
+        cobre_stochastic::context::build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            cobre_stochastic::context::OpeningTreeInputs {
+                user_tree: Some(tree),
+                ..Default::default()
+            },
+            cobre_stochastic::context::ClassSchemes {
+                inflow: None,
+                load: None,
+                ncs: None,
+            },
+        )
+        .expect("degenerate stochastic context must build")
+    }
+
     /// Conformance contract: `evaluate_lower_bound` returns a higher (or equal)
     /// value when the mock solver produces higher objectives, simulating the
     /// effect of tighter cuts added to the FCF.
@@ -802,32 +835,66 @@ mod lb_conformance {
         let state = state_layout_for(1, 0);
         let state_layout = state_layout_for(1, 0);
         let template = minimal_template();
+        let templates = vec![template];
+        let base_rows = vec![1_usize];
         let fcf = make_fcf(2, state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
         let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(2);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
+        let stochastic = wrap_opening_tree(opening_tree);
 
-        let spec = LbEvalSpec {
-            template: &template,
-            base_row: 1,
+        let ctx = StageContext {
+            templates: &templates,
+            base_rows: &base_rows,
+            geometry_per_stage: &[],
             noise_scale: &[],
             n_hydros: 0,
-            opening_tree: &opening_tree,
-            risk_measure: &rm,
-            stochastic: None,
             n_load_buses: 0,
-            ncs_max_gen: &[],
-            ncs_allow_curtailment: &[],
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
             ncs_stochastic_dense_col: &[],
             ncs_stochastic_windows: &[],
-            stage_id: 0,
-            block_count: 1,
-            ncs_generation: 0..0,
-            z_inflow_row_start: 0,
-            inflow_method: &InflowNonNegativityMethod::None,
-            anticipated_widen: None,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        };
+        let horizon = HorizonMode::Finite { num_stages: 2 };
+        let study_dims = StudyDimensions::default();
+        let cut_state_layouts = vec![
+            cobre_sddp::test_support::cut_state_projection(&state_layout),
+            cobre_sddp::test_support::cut_state_projection(&state_layout),
+        ];
+        let inflow_method = InflowNonNegativityMethod::None;
+        let training_ctx = TrainingContext {
+            horizon: &horizon,
+            state: &state_layout,
+            cut_state_layouts: &cut_state_layouts,
+            study_dims: &study_dims,
+            inflow_method: &inflow_method,
+            stochastic: &stochastic,
+            initial_state: &initial_state,
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &[],
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            recent_accum_seed: &[],
+            recent_weight_seed: 0.0,
+            dcs: None,
         };
 
         let mut lb_cut_batch = RowBatch {
@@ -839,6 +906,7 @@ mod lb_conformance {
             row_upper: Vec::new(),
         };
         let mut lb_scratch = LbEvalScratch::new();
+        let mut noise_scratch = ScratchBuffers::new(WorkspaceSizing::default());
 
         // First call: solver returns [50, 100] → LB = E[50, 100] = 75 (scaled).
         // After unscaling by COST_SCALE_FACTOR (1_000_000), LB = 75_000_000.
@@ -848,16 +916,16 @@ mod lb_conformance {
                 &mut patch_buf,
                 &mut lb_cut_batch,
                 None,
+                &mut noise_scratch,
                 &mut lb_scratch,
             );
             evaluate_lower_bound(
                 &mut solver1,
                 &fcf,
-                &initial_state,
-                &state_layout,
-                &cobre_sddp::test_support::cut_state_projection(&state_layout),
+                &ctx,
+                &training_ctx,
+                &rm,
                 &mut bundle,
-                &spec,
                 &comm,
             )
         }
@@ -877,16 +945,16 @@ mod lb_conformance {
                 &mut patch_buf,
                 &mut lb_cut_batch,
                 None,
+                &mut noise_scratch,
                 &mut lb_scratch,
             );
             evaluate_lower_bound(
                 &mut solver2,
                 &fcf,
-                &initial_state,
-                &state_layout,
-                &cobre_sddp::test_support::cut_state_projection(&state_layout),
+                &ctx,
+                &training_ctx,
+                &rm,
                 &mut bundle,
-                &spec,
                 &comm,
             )
         }
