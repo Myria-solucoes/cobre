@@ -374,25 +374,20 @@ impl StageGeometry {
     /// `start` accessors (`col_generation_start`, the `col_*_slack` accessors)
     /// resolve the dedicated empty-block cursor rather than a bare `0` when the
     /// family collapses to `0..0`, matching the indexer convention.
+    ///
+    /// Every field is either a direct `StageLayout` field clone or a `StageLayout`
+    /// range accessor (`filling_target`, `filling_target_col`,
+    /// `filled_min_storage_floor`, `filled_min_storage_floor_col`,
+    /// `anticipated_decision`) — no range is hand-derived here, so `StageLayout`
+    /// alone owns each family's start/end arithmetic.
     fn from_layout(layout: &StageLayout<'_>, block_mode: BlockMode) -> Self {
-        // Most ranges are cloned from `StageLayout` own fields (already `0..0` when
-        // empty). The `filling_*` families are built inline as
-        // `start..start + indices.len()`, so an empty family is `start..start` (not
-        // `0..0`) — both are `is_empty()`, and the read-path never dereferences an
-        // empty range.
-        let anticipated_decision = if layout.n_anticipated > 0 {
-            let s = layout.anticipated.col_anticipated_decision_start;
-            s..s + layout.n_anticipated
-        } else {
-            0..0
-        };
         Self {
             theta_col: layout.col_theta(),
             turbine: layout.turbine.clone(),
             spillage: layout.spillage.clone(),
             diversion: layout.diversion.clone(),
             thermal: layout.thermal.clone(),
-            anticipated_decision,
+            anticipated_decision: layout.anticipated_decision(),
             line_fwd: layout.line_fwd.clone(),
             line_rev: layout.line_rev.clone(),
             deficit: layout.deficit.clone(),
@@ -406,22 +401,14 @@ impl StageGeometry {
             outflow_above_slack: layout.outflow_above_slack.clone(),
             turbine_below_slack: layout.turbine_below_slack.clone(),
             generation_below_slack: layout.generation_below_slack.clone(),
-            contract_import: layout.col_contract_import_start
-                ..layout.col_contract_import_start + layout.n_contract_import * layout.n_blks,
-            contract_export: layout.col_contract_export_start
-                ..layout.col_contract_export_start + layout.n_contract_export * layout.n_blks,
+            contract_import: layout.contract_import.clone(),
+            contract_export: layout.contract_export.clone(),
             water_balance: layout.water_balance.clone(),
             load_balance: layout.load_balance.clone(),
-            filling_target: layout.row_filling_target_start
-                ..layout.row_filling_target_start + layout.filling_target_hydro_indices.len(),
-            filling_target_col: layout.col_filling_target_start
-                ..layout.col_filling_target_start + layout.filling_target_hydro_indices.len(),
-            filled_min_storage_floor: layout.row_filled_min_storage_floor_start
-                ..layout.row_filled_min_storage_floor_start
-                    + layout.filled_min_storage_floor_hydro_indices.len(),
-            filled_min_storage_floor_col: layout.col_filled_min_storage_floor_start
-                ..layout.col_filled_min_storage_floor_start
-                    + layout.filled_min_storage_floor_hydro_indices.len(),
+            filling_target: layout.filling_target(),
+            filling_target_col: layout.filling_target_col(),
+            filled_min_storage_floor: layout.filled_min_storage_floor(),
+            filled_min_storage_floor_col: layout.filled_min_storage_floor_col(),
             z_inflow_row_start: layout.z_inflow_row_start,
             n_blks: layout.n_blks,
             storage_internal_start: layout.storage_internal_start,

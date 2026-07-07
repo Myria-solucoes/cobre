@@ -88,21 +88,17 @@ impl CutStateProjection {
     /// Dimensions are walked in storage → lag → buckets → anticipated order —
     /// the same order [`StateLayout::set_nonzero_mask`] builds its global mask
     /// in, which is what makes the all-enabled default projection reproduce it
-    /// exactly. A storage index `[0, N)` is included iff `state_config.storage`;
-    /// an inflow-lag index `[N, N*(1+L))` iff `state_config.inflow_lags`; a
-    /// bucket index `[N*(1+L), N*(1+L) + B)` always (mirroring anticipated:
-    /// neither is governed by `state_config`); an anticipated-state index
-    /// `[N*(1+L) + B, N*(1+L) + B + A*k_max)` always. The render subset keeps
-    /// only indices in `global.nonzero_state_indices` (padding slots dropped),
-    /// so the default projection reproduces the global `nonzero_state_indices`
-    /// render exactly.
+    /// exactly. Each region's bounds come from `StateLayout`'s region
+    /// accessors, the sole owner of the boundary arithmetic:
+    /// `state_dim_storage_range` (included iff `state_config.storage`),
+    /// `state_dim_lag_range` (iff `state_config.inflow_lags`), and
+    /// `state_dim_bucket_range` / `state_dim_anticipated_range` (always —
+    /// mirroring anticipated: neither is governed by `state_config`). The
+    /// render subset keeps only indices in `global.nonzero_state_indices`
+    /// (padding slots dropped), so the default projection reproduces the
+    /// global `nonzero_state_indices` render exactly.
     #[must_use]
     pub fn new(global: &StateLayout, state_config: StageStateConfig) -> Self {
-        let n = global.hydro_count;
-        let lag_end = n * (1 + global.max_par_order);
-        let transit_bucket_end = lag_end + global.n_buckets;
-        let anticipated_end = transit_bucket_end + global.n_anticipated * global.k_max;
-
         let mut incoming_columns = Vec::new();
         let mut outgoing_columns = Vec::new();
         let mut render_coeff_indices = Vec::new();
@@ -128,7 +124,7 @@ impl CutStateProjection {
         };
 
         if state_config.storage {
-            for g in 0..n {
+            for g in global.state_dim_storage_range() {
                 push_dim(
                     global,
                     &mut incoming_columns,
@@ -140,7 +136,7 @@ impl CutStateProjection {
             }
         }
         if state_config.inflow_lags {
-            for g in n..lag_end {
+            for g in global.state_dim_lag_range() {
                 push_dim(
                     global,
                     &mut incoming_columns,
@@ -155,7 +151,7 @@ impl CutStateProjection {
         // per-stage `StageStateConfig` reduction here would shrink pool
         // `state_dimension` and misalign the intercept dot against the global
         // trial state.
-        for g in lag_end..transit_bucket_end {
+        for g in global.state_dim_bucket_range() {
             push_dim(
                 global,
                 &mut incoming_columns,
@@ -165,7 +161,7 @@ impl CutStateProjection {
                 g,
             );
         }
-        for g in transit_bucket_end..anticipated_end {
+        for g in global.state_dim_anticipated_range() {
             push_dim(
                 global,
                 &mut incoming_columns,

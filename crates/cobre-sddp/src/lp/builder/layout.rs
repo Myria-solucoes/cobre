@@ -1888,6 +1888,67 @@ impl<'a> StageLayout<'a> {
     pub(crate) fn col_filled_min_storage_floor_start(&self) -> usize {
         self.col_filled_min_storage_floor_start
     }
+
+    // ── Range accessors mirrored onto `StageGeometry` (own fields) ──────────────
+    // `StageLayout::new` only ever needs each family's *length* (to derive the
+    // next family's start), never its full range, so these are the sole place the
+    // `start..start + len` arithmetic is expressed; `StageGeometry::from_layout` is
+    // the only consumer.
+
+    /// Per-stage `σ_fill`-target row range: empty `start..start` (not `0..0`) at
+    /// every non-Filling stage.
+    #[inline]
+    #[must_use]
+    pub(crate) fn filling_target(&self) -> Range<usize> {
+        self.row_filling_target_start
+            ..self.row_filling_target_start + self.filling_target_hydro_indices.len()
+    }
+
+    /// Per-stage `σ_fill`-target slack column range, parallel to
+    /// [`Self::filling_target`].
+    #[inline]
+    #[must_use]
+    pub(crate) fn filling_target_col(&self) -> Range<usize> {
+        self.col_filling_target_start
+            ..self.col_filling_target_start + self.filling_target_hydro_indices.len()
+    }
+
+    /// Soft `σ^{v-}` operating-floor row range: empty `start..start` (not `0..0`)
+    /// at every non-operating-filling stage.
+    #[inline]
+    #[must_use]
+    pub(crate) fn filled_min_storage_floor(&self) -> Range<usize> {
+        self.row_filled_min_storage_floor_start
+            ..self.row_filled_min_storage_floor_start
+                + self.filled_min_storage_floor_hydro_indices.len()
+    }
+
+    /// Soft `σ^{v-}` operating-floor slack column range, parallel to
+    /// [`Self::filled_min_storage_floor`].
+    #[inline]
+    #[must_use]
+    pub(crate) fn filled_min_storage_floor_col(&self) -> Range<usize> {
+        self.col_filled_min_storage_floor_start
+            ..self.col_filled_min_storage_floor_start
+                + self.filled_min_storage_floor_hydro_indices.len()
+    }
+
+    /// Anticipated-decision column range (one per anticipated thermal,
+    /// stage-level): `col_anticipated_decision_start .. + n_anticipated`. `0..0`
+    /// (not `col_anticipated_decision_start..col_anticipated_decision_start`) when
+    /// `n_anticipated == 0` — the pre-existing empty-case value `from_layout`
+    /// established and a byte-identity oracle test pins; do not align this to the
+    /// `start..start` convention the sibling filling-family accessors use.
+    #[inline]
+    #[must_use]
+    pub(crate) fn anticipated_decision(&self) -> Range<usize> {
+        if self.n_anticipated > 0 {
+            let s = self.anticipated.col_anticipated_decision_start;
+            s..s + self.n_anticipated
+        } else {
+            0..0
+        }
+    }
 }
 
 #[cfg(test)]

@@ -3295,6 +3295,288 @@ fn stage_geometry_block_storage_col_matches_layout() {
     }
 }
 
+/// Four-stage, one-bus system combining an import contract, an export contract,
+/// a `FillingConfig` hydro (`start_stage_id=1`, `entry_stage_id=3`: PreFilling at
+/// stage 0, Filling at stages 1-2, Operating at stage 3), and a `LeadStages(1)`
+/// anticipated thermal — so every rerouted `StageGeometry` range is non-trivial
+/// and the filling families are exercised both populated and empty across stages.
+fn system_with_contracts_filling_and_anticipated() -> cobre_core::System {
+    let n_stages = 4_usize;
+
+    let bus = Bus {
+        id: EntityId(1),
+        name: "B1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        deficit_segments: vec![DeficitSegment {
+            depth_mw: None,
+            cost_per_mwh: 500.0,
+        }],
+        excess_cost: 0.0,
+    };
+
+    let hydro = Hydro {
+        id: EntityId(1),
+        name: "H1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        bus_id: EntityId(1),
+        downstream_id: None,
+        travel_time_hours: None,
+        entry_stage_id: Some(3),
+        exit_stage_id: None,
+        min_storage_hm3: 0.0,
+        max_storage_hm3: 100.0,
+        min_outflow_m3s: 0.0,
+        max_outflow_m3s: None,
+        generation_model: HydroGenerationModel::ConstantProductivity,
+        min_turbined_m3s: 0.0,
+        max_turbined_m3s: 50.0,
+        specific_productivity_mw_per_m3s_per_m: None,
+        min_generation_mw: 0.0,
+        max_generation_mw: 45.0,
+        tailrace: None,
+        hydraulic_losses: None,
+        efficiency: None,
+        evaporation_coefficients_mm: None,
+        evaporation_reference_volumes_hm3: None,
+        diversion: None,
+        filling: Some(FillingConfig {
+            start_stage_id: 1,
+            filling_min_rate_m3s: 0.0,
+        }),
+        penalties: hydro_penalties_zero(),
+    };
+
+    let thermal = Thermal {
+        id: EntityId(2),
+        name: "T1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        bus_id: EntityId(1),
+        entry_stage_id: None,
+        exit_stage_id: None,
+        cost_per_mwh: 50.0,
+        min_generation_mw: 0.0,
+        max_generation_mw: 100.0,
+        anticipated_config: Some(AnticipatedConfig::LeadStages(1)),
+    };
+
+    let contracts = vec![
+        fixture_contract(10, ContractType::Import),
+        fixture_contract(20, ContractType::Export),
+    ];
+
+    let stages: Vec<Stage> = (0..n_stages)
+        .map(|i| Stage {
+            index: i,
+            id: i as i32,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "BLK0".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: false,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        })
+        .collect();
+
+    let load_models: Vec<LoadModel> = (0..n_stages)
+        .map(|s| LoadModel {
+            bus_id: EntityId(1),
+            stage_id: s as i32,
+            mean_mw: 100.0,
+            std_mw: 0.0,
+        })
+        .collect();
+
+    let resolved_bounds = ResolvedBounds::new(
+        &BoundsCountsSpec {
+            n_hydros: 1,
+            n_thermals: 1,
+            n_lines: 0,
+            n_pumping: 0,
+            n_contracts: 2,
+            n_stages,
+            k_max: 1,
+        },
+        &BoundsDefaults {
+            hydro: default_hydro_bounds(),
+            thermal: ThermalStageBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: 100.0,
+                cost_per_mwh: 0.0,
+            },
+            line: LineStageBounds {
+                direct_mw: 0.0,
+                reverse_mw: 0.0,
+            },
+            pumping: PumpingStageBounds {
+                min_flow_m3s: 0.0,
+                max_flow_m3s: 0.0,
+            },
+            contract: ContractStageBounds {
+                min_mw: 0.0,
+                max_mw: 500.0,
+                price_per_mwh: 100.0,
+            },
+        },
+    );
+    let penalties = ResolvedPenalties::new(
+        &PenaltiesCountsSpec {
+            n_hydros: 1,
+            n_buses: 1,
+            n_lines: 0,
+            n_ncs: 0,
+            n_stages,
+        },
+        &PenaltiesDefaults {
+            hydro: default_hydro_penalties(),
+            bus: BusStagePenalties { excess_cost: 0.0 },
+            line: LineStagePenalties { exchange_cost: 0.0 },
+            ncs: NcsStagePenalties {
+                curtailment_cost: 0.0,
+            },
+        },
+    );
+
+    SystemBuilder::new()
+        .buses(vec![bus])
+        .hydros(vec![hydro])
+        .thermals(vec![thermal])
+        .contracts(contracts)
+        .stages(stages)
+        .load_models(load_models)
+        .bounds(resolved_bounds)
+        .penalties(penalties)
+        .build()
+        .expect("system_with_contracts_filling_and_anticipated: valid system")
+}
+
+/// Range-equality regression for the seven rerouted `StageGeometry` fields
+/// (`contract_import`, `contract_export`, `anticipated_decision`,
+/// `filling_target`, `filling_target_col`, `filled_min_storage_floor`,
+/// `filled_min_storage_floor_col`): each must equal its `StageLayout` source
+/// range at every stage of a fixture combining contracts, a filling hydro, and
+/// an anticipated thermal — a future hand-derivation reintroduced into
+/// `from_layout` that silently drifts from the `StageLayout` accessor would
+/// fail this before it fails a parity digest.
+#[test]
+fn stage_geometry_rerouted_ranges_match_layout_source_at_every_stage() {
+    let system = system_with_contracts_filling_and_anticipated();
+    let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+    let par_lp = PrecomputedPar::default();
+    let resolved_params = empty_resolved_params();
+
+    let (anticipated_resolution, anticipated_lead_stages, per_stage_mask) =
+        ctx_anticipated_and_mask_inputs(&system);
+    let (ctx, _, _) = super::build_template_build_ctx(
+        &system,
+        InflowNonNegativityMethod::None,
+        &par_lp,
+        &hydro_result.production,
+        &hydro_result.evaporation,
+        &resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
+    );
+    let state = state_layout_for(&ctx);
+
+    let mut saw_populated_filling_target = false;
+    let mut saw_empty_filling_target = false;
+    let mut saw_populated_filled_floor = false;
+    let mut saw_empty_filled_floor = false;
+
+    for (stage_idx, stage) in system.stages().iter().enumerate() {
+        let layout = super::super::layout::StageLayout::new(&ctx, &state, stage, stage_idx);
+        let geometry = super::StageGeometry::from_layout(&layout, stage.block_mode);
+
+        assert_eq!(
+            geometry.contract_import, layout.contract_import,
+            "stage {stage_idx}: contract_import"
+        );
+        assert_eq!(
+            geometry.contract_export, layout.contract_export,
+            "stage {stage_idx}: contract_export"
+        );
+        assert_eq!(
+            geometry.anticipated_decision,
+            layout.anticipated_decision(),
+            "stage {stage_idx}: anticipated_decision"
+        );
+        assert_eq!(
+            geometry.filling_target,
+            layout.filling_target(),
+            "stage {stage_idx}: filling_target"
+        );
+        assert_eq!(
+            geometry.filling_target_col,
+            layout.filling_target_col(),
+            "stage {stage_idx}: filling_target_col"
+        );
+        assert_eq!(
+            geometry.filled_min_storage_floor,
+            layout.filled_min_storage_floor(),
+            "stage {stage_idx}: filled_min_storage_floor"
+        );
+        assert_eq!(
+            geometry.filled_min_storage_floor_col,
+            layout.filled_min_storage_floor_col(),
+            "stage {stage_idx}: filled_min_storage_floor_col"
+        );
+
+        assert!(
+            !geometry.contract_import.is_empty(),
+            "stage {stage_idx}: import contract range must be non-empty"
+        );
+        assert!(
+            !geometry.contract_export.is_empty(),
+            "stage {stage_idx}: export contract range must be non-empty"
+        );
+        assert!(
+            !geometry.anticipated_decision.is_empty(),
+            "stage {stage_idx}: anticipated_decision range must be non-empty (n_anticipated=1)"
+        );
+
+        if geometry.filling_target.is_empty() {
+            saw_empty_filling_target = true;
+        } else {
+            saw_populated_filling_target = true;
+        }
+        if geometry.filled_min_storage_floor.is_empty() {
+            saw_empty_filled_floor = true;
+        } else {
+            saw_populated_filled_floor = true;
+        }
+    }
+
+    assert!(
+        saw_populated_filling_target,
+        "fixture must exercise a Filling stage"
+    );
+    assert!(
+        saw_empty_filling_target,
+        "fixture must exercise a non-Filling stage"
+    );
+    assert!(
+        saw_populated_filled_floor,
+        "fixture must exercise an Operating filling-hydro stage"
+    );
+    assert!(
+        saw_empty_filled_floor,
+        "fixture must exercise a non-Operating stage"
+    );
+}
+
 /// AC#3: a chronological `K = 1` build's water-balance row is byte-identical to the
 /// parallel build's — the single chained row IS the parallel row (`τ_1 = ζ`, no
 /// interior boundary). The full-template anchor is

@@ -361,6 +361,49 @@ impl StateLayout {
         self.theta + 1
     }
 
+    // ── Canonical state-dimension region boundaries (GLOBAL STATE INDEX
+    // space, not LP columns) ────────────────────────────────────────────────
+    // The canonical storage → lag → bucket → anticipated cumulative boundaries,
+    // mirroring the order [`Self::set_nonzero_mask`] walks in;
+    // `CutStateProjection::new` reads these instead of re-deriving `N`,
+    // `N*(1+L)`, `+ B`, `+ A*k_max` locally, so its walk cannot drift from the
+    // mask. (`state_to_lp_incoming_column` still derives the same boundaries for
+    // its per-arm column mapping — a separate consumer, not yet routed here.)
+
+    /// State-dimension region `[0, N)` — storage.
+    #[inline]
+    #[must_use]
+    pub(crate) fn state_dim_storage_range(&self) -> Range<usize> {
+        0..self.hydro_count
+    }
+
+    /// State-dimension region `[N, N*(1+L))` — AR inflow lags, immediately
+    /// after [`Self::state_dim_storage_range`].
+    #[inline]
+    #[must_use]
+    pub(crate) fn state_dim_lag_range(&self) -> Range<usize> {
+        let n = self.hydro_count;
+        n..n * (1 + self.max_par_order)
+    }
+
+    /// State-dimension region `[N*(1+L), N*(1+L) + B)` — travel-time buckets,
+    /// immediately after [`Self::state_dim_lag_range`].
+    #[inline]
+    #[must_use]
+    pub(crate) fn state_dim_bucket_range(&self) -> Range<usize> {
+        let start = self.state_dim_lag_range().end;
+        start..start + self.n_buckets
+    }
+
+    /// State-dimension region `[N*(1+L) + B, N*(1+L) + B + A*k_max)` —
+    /// anticipated ring slots, immediately after [`Self::state_dim_bucket_range`].
+    #[inline]
+    #[must_use]
+    pub(crate) fn state_dim_anticipated_range(&self) -> Range<usize> {
+        let start = self.state_dim_bucket_range().end;
+        start..start + self.n_anticipated * self.k_max
+    }
+
     /// Map a state-vector index to the LP column it should reference in a cut.
     ///
     /// The outgoing state after `shift_lag_state` stores:
@@ -1587,6 +1630,46 @@ mod tests {
         assert_eq!(
             zero_k_max.state_to_lp_column_map,
             no_plants.state_to_lp_column_map
+        );
+    }
+
+    // ── State-dimension region accessors ────────────────────────────────────
+
+    /// The four `state_dim_*_range` accessors partition `[0, n_state)`
+    /// contiguously with no gap and no overlap — storage, lags, buckets, and
+    /// anticipated ring slots all present — the direct pin for the region
+    /// order `CutStateProjection::new` consumes.
+    #[test]
+    fn state_dim_ranges_partition_n_state_contiguously() {
+        // N=3, L=2, B=2, A=2, k_max=2: every region non-empty.
+        let idx = finalized_with_transit_buckets(3, 2, 2, vec![(0, 1), (0, 2)], 2, 2, vec![1, 2]);
+
+        let storage = idx.state_dim_storage_range();
+        let lag = idx.state_dim_lag_range();
+        let bucket = idx.state_dim_bucket_range();
+        let anticipated = idx.state_dim_anticipated_range();
+
+        assert!(
+            !storage.is_empty() && !lag.is_empty() && !bucket.is_empty() && !anticipated.is_empty(),
+            "fixture must exercise every region non-empty"
+        );
+
+        assert_eq!(storage.start, 0, "storage must start at the state origin");
+        assert_eq!(
+            lag.start, storage.end,
+            "lag region must start exactly where storage ends (no gap/overlap)"
+        );
+        assert_eq!(
+            bucket.start, lag.end,
+            "bucket region must start exactly where lag ends (no gap/overlap)"
+        );
+        assert_eq!(
+            anticipated.start, bucket.end,
+            "anticipated region must start exactly where bucket ends (no gap/overlap)"
+        );
+        assert_eq!(
+            anticipated.end, idx.n_state,
+            "anticipated region must end exactly at n_state (no trailing gap)"
         );
     }
 }
