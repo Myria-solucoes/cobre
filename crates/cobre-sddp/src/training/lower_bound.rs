@@ -32,7 +32,7 @@ use crate::{
 /// noise/NCS-transform scratch every other solve site shares lives on
 /// [`ScratchBuffers`] instead — these two fields have no counterpart there.
 pub struct LbEvalScratch {
-    /// Per-opening objective values from [`lb_evaluate_stage_0`].
+    /// Per-opening objective values from the stage-0 evaluation.
     pub objectives_buf: Vec<f64>,
     /// Uniform per-opening probabilities for risk-measure aggregation.
     pub uniform_prob_buf: Vec<f64>,
