@@ -33,8 +33,7 @@ pub(crate) fn compute_col_scale(num_cols: usize, col_starts: &[i32], values: &[f
             }
         }
         if max_abs > 0.0 && min_abs < f64::INFINITY {
-            let d = 1.0 / (max_abs * min_abs).sqrt();
-            scale[j] = d;
+            scale[j] = 1.0 / (max_abs * min_abs).sqrt();
         }
     }
     scale
@@ -62,7 +61,6 @@ pub(crate) fn apply_col_scale(template: &mut StageTemplate, col_scale: &[f64]) {
         *obj *= d;
     }
 
-    // Inverse-scale column bounds: `x̃ = x / d_j`, so bounds become `[lo/d, hi/d]`.
     for ((lo, hi), &d) in template
         .col_lower
         .iter_mut()

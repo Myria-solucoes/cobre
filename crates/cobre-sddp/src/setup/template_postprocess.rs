@@ -168,10 +168,6 @@ pub(crate) fn postprocess_templates(
 mod tests {
     use super::compute_cumulative_discount_factors;
 
-    /// `compute_cumulative_discount_factors` returns a vec of length `n_stages`
-    /// (one entry per study stage). The strict anticipated-decision predicate
-    /// (`stage_idx + K_i < n_stages`) guarantees every delivery lookup falls
-    /// within `[0, n_stages)`, so no phantom boundary entry is needed.
     #[test]
     fn cumulative_discount_factors_length_matches_n_stages() {
         let n_stages = 4_usize;
@@ -198,7 +194,6 @@ mod tests {
         );
     }
 
-    /// Verify that the zero-rate edge case gives all-ones for any length.
     #[test]
     fn cumulative_discount_factors_all_ones_when_rate_zero() {
         let per_stage = vec![1.0_f64; 3];

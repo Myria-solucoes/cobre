@@ -722,7 +722,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Anticipated col-patch unit tests (col-side path, row-side deleted)
+    // Anticipated col-patch unit tests (col-side path only)
     // -------------------------------------------------------------------------
 
     /// fill_forward_patches with N=0, A=1, K=2 writes zero noise patches
