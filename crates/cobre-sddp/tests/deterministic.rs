@@ -1248,7 +1248,7 @@ fn d11_warm_start_verification() {
     );
 }
 
-/// Checkpoint round-trip for the D02 system: exercises the full FlatBuffers
+/// Checkpoint round-trip for the D02 system: exercises the full `FlatBuffers`
 /// persistence pipeline (train → write → read → simulate from the loaded FCF).
 ///
 /// ## Why the simulation cost should equal the training LB

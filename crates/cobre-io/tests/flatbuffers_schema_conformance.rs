@@ -712,7 +712,7 @@ fn entity_slot_delivery_anchor_round_trips() {
     );
 }
 
-/// §E6 forward-compat (the reject-role for the FlatBuffers `policy/codec.rs`
+/// §E6 forward-compat (the reject-role for the `FlatBuffers` `policy/codec.rs`
 /// row): a buffer written against a pre-`id:4` `EntitySlot` schema (no
 /// `delivery_anchor` field) must deserialize with every slot's anchor at the
 /// sentinel and no error. flatc cannot emit a field the schema lacks, so the
