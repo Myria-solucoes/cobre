@@ -18,7 +18,7 @@ use crate::{
     cut::row::build_cut_row_batch_into,
     error::SddpError,
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::{AnticipatedGenWidenCtx, COST_SCALE_FACTOR, PatchBuffer},
+    lp_builder::{COST_SCALE_FACTOR, PatchBuffer},
     noise::compute_effective_eta,
     risk_measure::RiskMeasure,
     training::stage_solve_prep::{
@@ -198,8 +198,6 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
         );
     }
 
-    let geom0 = ctx.geometry_per_stage.first();
-
     objectives_buf.clear();
 
     for opening_idx in 0..n_openings {
@@ -239,29 +237,11 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             scratch.z_inflow_rhs_buf.push(z_rhs);
         }
 
-        let widen_ctx = if training_ctx.state.n_anticipated > 0 {
-            geom0.map(|geom| AnticipatedGenWidenCtx {
-                state_layout: training_ctx.state,
-                state: initial_state,
-                anticipated_thermal_indices: &training_ctx.study_dims.anticipated_thermal_indices,
-                col_scale: &template0.col_scale,
-                col_lower: &template0.col_lower,
-                col_upper: &template0.col_upper,
-                thermal_col_start: geom.thermal.start,
-                n_blks: ctx.block_counts_per_stage[0],
-                stage_idx: 0,
-                n_stages: ctx.templates.len(),
-            })
-        } else {
-            None
-        };
-
         let prep_params = StageSolvePrepParams {
             state_source: StateSource(initial_state),
             opening_mode: OpeningMode::PerOpening,
             load_noise: LoadNoise::Absent,
             inflow_noise: InflowNoise::PreBuilt,
-            widen_ctx,
             raw_noise,
         };
         StageSolvePrep::run(

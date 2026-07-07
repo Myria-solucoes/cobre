@@ -6,7 +6,6 @@ use cobre_solver::SolverInterface;
 
 use crate::{
     context::{StageContext, TrainingContext},
-    lp_builder::AnticipatedGenWidenCtx,
     training::stage_solve_prep::{
         InflowNoise, LoadNoise, OpeningMode, StageSolvePrep, StageSolvePrepParams, StateSource,
     },
@@ -43,31 +42,11 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
     x_hat: &[f64],
     s: usize,
 ) {
-    let widen_ctx = if training_ctx.state.n_anticipated > 0 {
-        ctx.geometry_per_stage.get(s).map(|geom| {
-            let template = &ctx.templates[s];
-            AnticipatedGenWidenCtx {
-                state_layout: training_ctx.state,
-                state: x_hat,
-                anticipated_thermal_indices: &training_ctx.study_dims.anticipated_thermal_indices,
-                col_scale: &template.col_scale,
-                col_lower: &template.col_lower,
-                col_upper: &template.col_upper,
-                thermal_col_start: geom.thermal.start,
-                n_blks: ctx.block_counts_per_stage[s],
-                stage_idx: s,
-                n_stages: ctx.templates.len(),
-            }
-        })
-    } else {
-        None
-    };
     let prep_params = StageSolvePrepParams {
         state_source: StateSource(x_hat),
         opening_mode: OpeningMode::PerOpening,
         load_noise: LoadNoise::Present,
         inflow_noise: InflowNoise::Transform,
-        widen_ctx,
         raw_noise,
     };
     StageSolvePrep::run(

@@ -16,7 +16,7 @@ use crate::{
     FutureCostFunction,
     context::{StageContext, TrainingContext},
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
-    lp_builder::{AnticipatedGenWidenCtx, COST_SCALE_FACTOR},
+    lp_builder::COST_SCALE_FACTOR,
     simulation::{
         config::SimulationConfig,
         error::SimulationError,
@@ -341,31 +341,11 @@ fn solve_simulation_stage<S: SolverInterface>(
     } else {
         ws.solver.load_model(load_spec.frozen_template);
     }
-    let widen_ctx = if state.n_anticipated > 0 {
-        ctx.geometry_per_stage.get(t).map(|geom| {
-            let template = &ctx.templates[t];
-            AnticipatedGenWidenCtx {
-                state_layout: state,
-                state: &ws.current_state,
-                anticipated_thermal_indices: &study_dims.anticipated_thermal_indices,
-                col_scale: &template.col_scale,
-                col_lower: &template.col_lower,
-                col_upper: &template.col_upper,
-                thermal_col_start: geom.thermal.start,
-                n_blks: ctx.block_counts_per_stage[t],
-                stage_idx: t,
-                n_stages: ctx.templates.len(),
-            }
-        })
-    } else {
-        None
-    };
     let prep_params = StageSolvePrepParams {
         state_source: StateSource(&ws.current_state),
         opening_mode: OpeningMode::SingleRealized,
         load_noise: LoadNoise::Present,
         inflow_noise: InflowNoise::Transform,
-        widen_ctx,
         raw_noise,
     };
     StageSolvePrep::run(

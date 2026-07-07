@@ -542,32 +542,3 @@ training and simulating both `LeadTime` and `LeadStages` configurations of
 the same calendar to bit-identical solutions), and
 `a1c_lead_stages_is_pure_index_shift` (pins the delivery-anchored decider
 `c(m) = m - lead` those bounds are read against).
-
-### Delivery-gen widen: the ring carries the commitment as a scaled state variable
-
-The in-LP ring transports the committed value through scaled state columns
-(pinned incoming slot `÷ col_scale`, the fishing coefficient `× col_scale`), so a
-commitment sitting exactly at the delivery-stage generation cap can arrive a
-sub-ULP ABOVE it — the must-generate fishing (`Σ_b h_b·gen_b = H·commitment`) then
-demands `gen > max_gen` and the LP is infeasible, though delivery-anchoring makes
-the value in-bounds in exact arithmetic. Every state pin therefore also widens the
-delivery-stage anticipated gen bound to `max(max_gen, pinned_commitment)` via
-`PatchBuffer::apply_anticipated_delivery_gen_widen`, co-located with
-`fill_col_state_patches` at all four pin sites (forward, backward, lower-bound,
-simulation) so it re-applies on every reload-per-solve and survives the solver
-retry path. Two forbidden alternatives: a penalized slack on the fishing (the
-value is in-bounds in exact arithmetic — no recourse gap exists); clamping the
-carried commitment DOWN to the cap (the pin's own `÷ col_scale` round-trip
-re-overshoots, so a clamp-to-cap does not survive). The widen fires ONLY when the
-commitment is strictly outside `[min_gen, max_gen]` — a true no-op (no
-`set_col_bounds`) for every in-cap commitment, so it is parity-neutral (the golden
-set, D34 included, is byte-identical) and never a slack; the `1e-9`-relative
-headroom is physically meaningless and only absorbs the round-trip.
-Read: `lp/builder/patch.rs`
-(`fill_anticipated_delivery_gen_widen`, `apply_anticipated_delivery_gen_widen`,
-`AnticipatedGenWidenCtx`), `training/stage_solve_prep.rs` (`StageSolvePrep::run`,
-the single owner every pin site — forward, backward, lower-bound
-(`lower_bound.rs`'s `lb_evaluate_stage_0`), simulation — now calls). Pinned by
-`anticipated_commitment_at_cap_survives_ring_carry` (a K=2 commitment seeded a
-sub-ULP over its cap and carried through the ring; infeasible with the widen
-reverted, feasible with it).

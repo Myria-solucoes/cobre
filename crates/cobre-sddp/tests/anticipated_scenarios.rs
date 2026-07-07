@@ -2634,22 +2634,16 @@ mod d37_anticipated_commissioning_simulation {
 }
 
 mod anticipated_commitment_at_cap {
-    //! Regression: an anticipated commitment sitting at (a sub-ULP over) its
-    //! delivery-stage generation cap, carried through the K=2 in-LP ring, must
-    //! stay feasible. The must-generate fishing equality pins the delivery
-    //! generation to the ring-carried commitment; the ring transports that
-    //! commitment through scaled state columns, so a value at the cap can arrive
-    //! a hair above it and — absent the delivery-gen widen — makes the LP
-    //! infeasible (`gen = commitment > max_gen`). Delivery-anchoring keeps the
-    //! commitment within `[min_gen, max_gen]` in exact arithmetic, so the widen
-    //! only absorbs numerical drift (no slack).
-    //!
-    //! The pre-study seed is set a fixed `1e-12` relative amount over the cap —
-    //! comfortably above the ring's floating-point round-trip (`~1e-16`) so the
-    //! fail-without/pass-with split is deterministic, and comfortably below the
-    //! widen's `1e-9` headroom so the widen admits it. Revert-check: with
-    //! `PatchBuffer::apply_anticipated_delivery_gen_widen` reverted to a no-op,
-    //! `train` returns `SddpError::Infeasible` at the seed's delivery stage.
+    //! Regression: the must-generate fishing equality (`Σ_b h_b·gen_b =
+    //! H·commitment`) pins a delivery-stage anticipated generation column to
+    //! the ring-carried commitment with no slack, so relatively-complete
+    //! recourse requires the commitment lie within the delivery stage's own
+    //! `[min_gen, max_gen]`. A pre-study commitment seeded exactly at the
+    //! delivery cap and carried through a K=2 in-LP ring trains feasible: the
+    //! ring's incoming-state columns are unscaled, so the pin-then-fish
+    //! round-trip reproduces the seed bit-exact. A commitment genuinely above
+    //! the cap is an invalid pre-study seed with no in-LP recourse and trains
+    //! infeasible at its delivery stage.
 
     use cobre_core::entities::{
         bus::DeficitSegment,
@@ -2674,6 +2668,7 @@ mod anticipated_commitment_at_cap {
         RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
         TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
+    use cobre_sddp::SddpError;
     use cobre_solver::ActiveSolver;
 
     use super::common::StubComm;
@@ -2683,11 +2678,13 @@ mod anticipated_commitment_at_cap {
     };
 
     const CAP_MW: f64 = 100.0;
-    /// A commitment `1e-12` (relative) over the cap: the numerical state the ring's
-    /// scaled round-trip produces for a decision placed exactly at the cap.
-    const OVER_CAP_SEED_MW: f64 = CAP_MW * (1.0 + 1e-12);
+    /// A pre-study commitment exactly at the delivery generation cap.
+    const AT_CAP_SEED_MW: f64 = CAP_MW;
+    /// A pre-study commitment `1e-6` (relative) over the cap — comfortably above
+    /// any pin/fish round-trip noise, so the infeasibility is deterministic.
+    const OVER_CAP_SEED_MW: f64 = CAP_MW * (1.0 + 1e-6);
 
-    fn build_system() -> cobre_core::System {
+    fn build_system(seed_mw: f64) -> cobre_core::System {
         use chrono::NaiveDate;
 
         let bus = make_bus(
@@ -2927,12 +2924,12 @@ mod anticipated_commitment_at_cap {
             }],
             filling_storage: vec![],
             past_inflows: vec![],
-            // Both pre-study commitments sit a sub-ULP over the delivery cap: the
-            // stage-0 delivery is pinned directly, the stage-1 delivery is carried
-            // one K=2 ring shift first — both must survive.
+            // Two pre-study commitments at `seed_mw`: the stage-0 delivery is
+            // pinned directly, the stage-1 delivery is carried one K=2 ring
+            // shift first.
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: anticipated_id,
-                values_mw: vec![OVER_CAP_SEED_MW, OVER_CAP_SEED_MW],
+                values_mw: vec![seed_mw, seed_mw],
             }],
             recent_observations: vec![],
             past_defluences: vec![],
@@ -2980,7 +2977,7 @@ mod anticipated_commitment_at_cap {
 
     #[test]
     fn anticipated_commitment_at_cap_survives_ring_carry() {
-        let system = build_system();
+        let system = build_system(AT_CAP_SEED_MW);
         let config = build_config();
         let mut setup = build_setup_in_code(system, &config);
         let comm = StubComm;
@@ -2990,13 +2987,30 @@ mod anticipated_commitment_at_cap {
             .train(&mut solver, &comm, 4, ActiveSolver::new, None, None)
             .expect("train must not return Err");
 
-        // Without the delivery-gen widen the must-generate fishing forces
-        // `gen = OVER_CAP_SEED_MW > max_gen` at the seed's delivery stage and the
-        // forward LP is infeasible; the widen admits the sub-ULP-over commitment.
         assert!(
             outcome.error.is_none(),
             "anticipated commitment at its delivery cap must stay feasible through \
              the ring carry, got training error: {:?}",
+            outcome.error
+        );
+    }
+
+    #[test]
+    fn anticipated_commitment_over_cap_seed_is_infeasible() {
+        let system = build_system(OVER_CAP_SEED_MW);
+        let config = build_config();
+        let mut setup = build_setup_in_code(system, &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+
+        let outcome = setup
+            .train(&mut solver, &comm, 4, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+
+        assert!(
+            matches!(outcome.error, Some(SddpError::Infeasible { stage: 0, .. })),
+            "a pre-study commitment above its delivery cap must be infeasible at \
+             its stage-0 delivery, got: {:?}",
             outcome.error
         );
     }

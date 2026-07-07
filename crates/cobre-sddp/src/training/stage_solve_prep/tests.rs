@@ -270,13 +270,12 @@ impl SolverInterface for RecordingSolver {
 
 /// [`StageSolvePrep::run`], configured the way the forward site would
 /// configure it (`StateSource(current_state)`, `OpeningMode::SingleRealized`,
-/// `LoadNoise::Present`, `InflowNoise::Transform`, no widen, no-op NCS patch —
-/// this fixture has no load buses, no anticipated thermals, and no NCS),
-/// produces the exact same `set_col_bounds`/`set_row_bounds` calls as the
-/// literal open-coded forward block (`fill_col_state_patches →
+/// `LoadNoise::Present`, `InflowNoise::Transform` — this fixture has no load
+/// buses and no NCS), produces the exact same `set_col_bounds`/`set_row_bounds`
+/// calls as the literal open-coded forward block (`fill_col_state_patches →
 /// fill_forward_patches → fill_z_inflow_patches → set_col_bounds →
-/// set_row_bounds`, with `apply_anticipated_delivery_gen_widen` and the NCS
-/// patch both absent) driven independently against a second solver instance.
+/// set_row_bounds`, with the NCS patch absent) driven independently against a
+/// second solver instance.
 #[test]
 fn run_matches_open_coded_forward_block_for_minimal_fixture() {
     let state = crate::test_support::state_layout(1, 0);
@@ -384,7 +383,6 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
         opening_mode: OpeningMode::SingleRealized,
         load_noise: LoadNoise::Present,
         inflow_noise: InflowNoise::Transform,
-        widen_ctx: None,
         raw_noise: &raw_noise,
     };
     StageSolvePrep::run(
@@ -628,7 +626,6 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
         opening_mode: OpeningMode::SingleRealized,
         load_noise: LoadNoise::Absent,
         inflow_noise: InflowNoise::PreBuilt,
-        widen_ctx: None,
         raw_noise: &raw_noise,
     };
 
@@ -778,7 +775,6 @@ fn run_skips_load_and_inflow_transform_under_absent_and_prebuilt() {
         opening_mode: OpeningMode::PerOpening,
         load_noise: LoadNoise::Absent,
         inflow_noise: InflowNoise::PreBuilt,
-        widen_ctx: None,
         raw_noise: &raw_noise,
     };
     StageSolvePrep::run(

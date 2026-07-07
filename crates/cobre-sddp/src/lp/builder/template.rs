@@ -154,6 +154,10 @@ pub struct StageTemplates {
     /// the placeholder window). Read via
     /// [`StageTemplates::cumulative_discount_factors`].
     cumulative_discount_factors: Vec<f64>,
+    /// Role-(a) canonical `StateLayout` (stage-invariant): the same one every
+    /// per-stage `StageLayout` shares, fed to `postprocess_templates`'s
+    /// anticipated-ring `col_scale` override.
+    pub(crate) state_layout: crate::indexer::StateLayout,
 }
 
 impl StageTemplates {
@@ -182,6 +186,16 @@ impl StageTemplates {
             hydro_productivities_per_stage: Vec::new(),
             discount_factors: Vec::new(),
             cumulative_discount_factors: Vec::new(),
+            state_layout: crate::indexer::StateLayout::new(
+                n_hydros,
+                0,
+                0,
+                Vec::new(),
+                0,
+                0,
+                Vec::new(),
+                &vec![0; n_hydros],
+            ),
         }
     }
 
@@ -792,7 +806,7 @@ pub fn build_stage_templates(
         ));
     }
 
-    Ok(assemble_stage_templates_output(
+    let mut output = assemble_stage_templates_output(
         stage_outputs,
         load_bus_indices,
         diversion_upstream_output,
@@ -802,7 +816,9 @@ pub fn build_stage_templates(
         n_hydros,
         n_load_buses,
         n_study,
-    ))
+    );
+    output.state_layout = state_layout;
+    Ok(output)
 }
 
 /// Precompute the per-stage minimum target-storage trajectory `V_target[t]` for
@@ -1221,6 +1237,9 @@ fn assemble_stage_templates_output(
         // 1.0-placeholders until `StageTemplates::set_discount_factors`.
         discount_factors: vec![1.0; n_study],
         cumulative_discount_factors: vec![1.0; n_study],
+        // Placeholder until `build_stage_templates` overwrites it with the role-(a)
+        // `StateLayout` it already built for the per-stage loop above.
+        state_layout: crate::indexer::StateLayout::new(0, 0, 0, Vec::new(), 0, 0, Vec::new(), &[]),
     }
 }
 

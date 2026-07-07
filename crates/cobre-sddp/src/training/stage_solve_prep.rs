@@ -1,9 +1,8 @@
-//! Shared stage-LP solve-preparation pipeline: `pin_state → widen(hook) →
-//! row_patches → ncs_patch → commit` — the verbatim 7-call block
-//! (`fill_col_state_patches → fill_forward_patches → [fill_load_patches] →
-//! fill_z_inflow_patches → set_col_bounds → apply_anticipated_delivery_gen_widen
-//! → set_row_bounds`) plus the NCS availability patch, duplicated today at all
-//! four solve sites (forward, backward, lower bound, simulation).
+//! Shared stage-LP solve-preparation pipeline: `pin → row_patches → ncs_patch →
+//! commit` — the verbatim 6-call block (`fill_col_state_patches →
+//! fill_forward_patches → [fill_load_patches] → fill_z_inflow_patches →
+//! set_col_bounds → set_row_bounds`) plus the NCS availability patch, duplicated
+//! today at all four solve sites (forward, backward, lower bound, simulation).
 //!
 //! Home: `training/`, not `lp/builder/` — this pipeline needs
 //! `crate::context` (`StageContext`/`TrainingContext`), `crate::workspace`
@@ -24,7 +23,7 @@ use cobre_solver::SolverInterface;
 use crate::{
     context::{StageContext, TrainingContext},
     indexer::BlockGrid,
-    lp_builder::{AnticipatedGenWidenCtx, PatchBuffer},
+    lp_builder::PatchBuffer,
     noise::{
         NcsNoiseOffsets, apply_ncs_col_bounds, transform_inflow_noise, transform_load_noise,
         transform_ncs_noise,
@@ -95,11 +94,6 @@ pub(crate) struct StageSolvePrepParams<'a> {
     pub load_noise: LoadNoise,
     /// How the inflow-noise buffers are populated.
     pub inflow_noise: InflowNoise,
-    /// Delivery-stage anticipated-generation widen inputs; `None` when no
-    /// anticipated thermal is active at this stage — the widen is then a
-    /// no-op, matching every current call site's own gate on
-    /// `state_layout.n_anticipated > 0`.
-    pub widen_ctx: Option<AnticipatedGenWidenCtx<'a>>,
     /// This solve's realized noise draw (`[hydro | load-bus | NCS]`), read by
     /// the inflow- and load-noise transforms above.
     pub raw_noise: &'a [f64],
@@ -109,8 +103,8 @@ pub(crate) struct StageSolvePrepParams<'a> {
 pub(crate) struct StageSolvePrep;
 
 impl StageSolvePrep {
-    /// Executes `pin_state → widen(hook) → row_patches → ncs_patch → commit`
-    /// over caller-owned `&mut` scratch: allocates nothing.
+    /// Executes `pin → row_patches → ncs_patch → commit` over caller-owned
+    /// `&mut` scratch: allocates nothing.
     pub(crate) fn run<S>(
         solver: &mut S,
         patch_buf: &mut PatchBuffer,
@@ -190,10 +184,6 @@ impl StageSolvePrep {
             &patch_buf.col_lower[..cp],
             &patch_buf.col_upper[..cp],
         );
-
-        if let Some(widen_ctx) = params.widen_ctx.as_ref() {
-            patch_buf.apply_anticipated_delivery_gen_widen(solver, widen_ctx);
-        }
 
         let pc = patch_buf.forward_patch_count();
         solver.set_row_bounds(

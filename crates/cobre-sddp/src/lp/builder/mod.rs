@@ -44,11 +44,14 @@ mod template;
 mod test_support;
 
 // --- Public re-exports (stable API) ---
-pub use patch::{AnticipatedGenWidenCtx, PatchBuffer};
+pub use patch::PatchBuffer;
 pub use template::{StageGeometry, StageTemplates, build_stage_templates};
 
 // --- Crate-internal re-exports ---
-pub(crate) use scaling::{apply_col_scale, apply_row_scale, compute_col_scale, compute_row_scale};
+pub(crate) use scaling::{
+    apply_anticipated_col_scale_unscale, apply_col_scale, apply_row_scale, compute_col_scale,
+    compute_row_scale,
+};
 
 // ---------------------------------------------------------------------------
 // Commissioning window

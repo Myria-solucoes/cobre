@@ -104,11 +104,13 @@ pub(crate) fn postprocess_templates(
     // the template for unscaling primal/dual solutions in the forward/backward passes.
     let mut stage_scaling_reports = Vec::with_capacity(stage_templates.templates.len());
 
+    let state_layout = &stage_templates.state_layout;
     for (stage_id, tmpl) in stage_templates.templates.iter_mut().enumerate() {
         let pre_scaling = compute_coefficient_range(tmpl);
 
-        let col_scale =
+        let mut col_scale =
             lp_builder::compute_col_scale(tmpl.num_cols, &tmpl.col_starts, &tmpl.values);
+        lp_builder::apply_anticipated_col_scale_unscale(&mut col_scale, state_layout);
         lp_builder::apply_col_scale(tmpl, &col_scale);
         tmpl.col_scale.clone_from(&col_scale);
         let row_scale = lp_builder::compute_row_scale(

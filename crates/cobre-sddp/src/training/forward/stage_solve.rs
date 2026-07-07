@@ -9,7 +9,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     error::SddpError,
-    lp_builder::{AnticipatedGenWidenCtx, COST_SCALE_FACTOR},
+    lp_builder::COST_SCALE_FACTOR,
     training::stage_solve_prep::{
         InflowNoise, LoadNoise, OpeningMode, StageSolvePrep, StageSolvePrepParams, StateSource,
     },
@@ -57,7 +57,6 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         pool,
         dcs,
     } = *key;
-    let study_dims = training_ctx.study_dims;
     let state = training_ctx.state;
     let horizon = training_ctx.horizon;
 
@@ -68,31 +67,11 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         ws.solver.load_model(&ctx.templates[t]);
     }
 
-    let widen_ctx = if state.n_anticipated > 0 {
-        ctx.geometry_per_stage.get(t).map(|geom| {
-            let template = &ctx.templates[t];
-            AnticipatedGenWidenCtx {
-                state_layout: state,
-                state: &ws.current_state,
-                anticipated_thermal_indices: &study_dims.anticipated_thermal_indices,
-                col_scale: &template.col_scale,
-                col_lower: &template.col_lower,
-                col_upper: &template.col_upper,
-                thermal_col_start: geom.thermal.start,
-                n_blks: ctx.block_counts_per_stage[t],
-                stage_idx: t,
-                n_stages: num_stages,
-            }
-        })
-    } else {
-        None
-    };
     let prep_params = StageSolvePrepParams {
         state_source: StateSource(&ws.current_state),
         opening_mode: OpeningMode::SingleRealized,
         load_noise: LoadNoise::Present,
         inflow_noise: InflowNoise::Transform,
-        widen_ctx,
         raw_noise,
     };
     StageSolvePrep::run(
