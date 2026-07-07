@@ -453,7 +453,6 @@ fn solve_simulation_stage<S: SolverInterface>(
         let view = crate::stage_solve::run_stage_solve(ws, &inputs)
             .map_err(|e| map_sim_solver_error(e, ids))?;
 
-        // `view` borrows from `ws`; finish all reads before the borrow ends.
         let objective = view.objective;
         crate::stage_solve::fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
         crate::stage_solve::fill_unscaled_dual(&mut unscaled_dual, view.dual, row_scale);

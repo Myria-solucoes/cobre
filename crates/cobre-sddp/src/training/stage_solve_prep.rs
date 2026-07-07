@@ -111,12 +111,6 @@ pub(crate) struct StageSolvePrep;
 impl StageSolvePrep {
     /// Executes `pin_state → widen(hook) → row_patches → ncs_patch → commit`
     /// over caller-owned `&mut` scratch: allocates nothing.
-    ///
-    /// Reproduces the 7-call block verbatim (`fill_col_state_patches →
-    /// fill_forward_patches → [fill_load_patches] → fill_z_inflow_patches →
-    /// set_col_bounds → apply_anticipated_delivery_gen_widen →
-    /// set_row_bounds`), then patches NCS availability bounds — the same order
-    /// every current solve site executes them in.
     pub(crate) fn run<S>(
         solver: &mut S,
         patch_buf: &mut PatchBuffer,

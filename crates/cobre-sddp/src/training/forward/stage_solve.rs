@@ -252,33 +252,23 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     // would corrupt the warm-start; the DCS path leaves the (m, t) slot untouched.
     if dcs.is_none() {
         let cut_row_count = basis_row_capacity.saturating_sub(ctx.templates[t].num_rows);
-        if let Some(captured) = basis_slice.get_mut(m, t) {
-            ws.solver.get_basis(&mut captured.basis);
-            write_capture_metadata(
-                captured,
-                pool,
-                ctx.templates[t].num_rows,
-                cut_row_count,
-                &ws.current_state[..state.n_state],
-            );
-        } else {
-            let mut captured = CapturedBasis::new(
+        let captured = basis_slice.get_mut(m, t).get_or_insert_with(|| {
+            CapturedBasis::new(
                 ctx.templates[t].num_cols,
                 basis_row_capacity,
                 ctx.templates[t].num_rows,
                 cut_row_count,
                 state.n_state,
-            );
-            ws.solver.get_basis(&mut captured.basis);
-            write_capture_metadata(
-                &mut captured,
-                pool,
-                ctx.templates[t].num_rows,
-                cut_row_count,
-                &ws.current_state[..state.n_state],
-            );
-            *basis_slice.get_mut(m, t) = Some(captured);
-        }
+            )
+        });
+        ws.solver.get_basis(&mut captured.basis);
+        write_capture_metadata(
+            captured,
+            pool,
+            ctx.templates[t].num_rows,
+            cut_row_count,
+            &ws.current_state[..state.n_state],
+        );
     }
     Ok(stage_cost)
 }
