@@ -5,6 +5,7 @@ use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
 use crate::indexer::StateLayout;
 
 use super::M3S_TO_HM3;
+use super::delivery_ring::{DeliveryRing, TerminalMode};
 use super::fpha_cursor::for_each_fpha_plane;
 use super::layout::{StageLayout, TemplateBuildCtx};
 
@@ -275,8 +276,8 @@ fn fill_parallel_water_entries(
         // variable itself, so this is a SINGLE entry regardless of upstream
         // count). Absent when `h_idx` has no declared incoming arc.
         if let Some(range) = plant_transit_bucket_range(layout.state, h_idx) {
-            let col_first_slot_in = layout.state.transit_buckets_in.start + range.start;
-            col_entries[col_first_slot_in].push((row, -1.0));
+            let ring = transit_bucket_ring(layout.state, range);
+            col_entries[ring.in_col(0, 0)].push((row, -1.0));
         }
 
         for blk in 0..n_blks {
@@ -360,35 +361,72 @@ fn fill_parallel_water_entries(
     }
 }
 
-/// Fill the travel-time bucket-definition rows' structural ring-shift terms:
-/// `+1.0` on `b_d^out` and, when a deeper bucket exists for the same plant,
-/// `-1.0` on `b_{d+1}^in` (absent at `d == L_j`: `b_{L+1}^in` does not exist).
-/// Only buckets REACHABLE this stage (`layout.transit_bucket_row_pos`) get a row; a
-/// masked-out bucket's outgoing column is frozen `[0, 0]` instead (see
-/// `columns::fill_transit_bucket_columns`), so no row needs to define it.
-/// Mode-independent (buckets are stage-level, never block-resolved), so this
-/// runs once per stage regardless of upstream releases — the deposit terms
-/// riding those releases are emitted separately by
-/// [`fill_arc_release_block_entries`]. A no-op when `state.n_buckets == 0`.
+/// Each downstream plant's contiguous bucket sub-range (relative to
+/// `transit_buckets_out`/`transit_buckets_in`'s own start), grouped by
+/// `state.transit_bucket_column_order`'s plant-major order. The ragged bucket
+/// layout (`n_buckets = Σ per_plant_depth`) instantiates one [`DeliveryRing`]
+/// per plant at `n_lanes = 1` rather than one dense `n_lanes = n_plants` ring —
+/// [`transit_bucket_ring`] builds the ring for each range this yields.
+pub(super) fn transit_bucket_plant_ranges(state: &StateLayout) -> Vec<std::ops::Range<usize>> {
+    let order = &state.transit_bucket_column_order;
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < order.len() {
+        let plant_idx = order[start].0;
+        let mut end = start + 1;
+        while end < order.len() && order[end].0 == plant_idx {
+            end += 1;
+        }
+        ranges.push(start..end);
+        start = end;
+    }
+    ranges
+}
+
+/// Constructs one plant's [`DeliveryRing`] (`n_lanes = 1`) over its LOCAL
+/// bucket sub-`range` (in [`plant_transit_bucket_range`]/
+/// [`transit_bucket_plant_ranges`]'s convention, relative to
+/// `transit_buckets_out`/`transit_buckets_in`'s own start) — the single owner
+/// of the ragged-to-dense addressing translation every bucket call site
+/// shares.
+pub(super) fn transit_bucket_ring(
+    state: &StateLayout,
+    range: std::ops::Range<usize>,
+) -> DeliveryRing {
+    let depth = range.len();
+    DeliveryRing::new(
+        state.transit_buckets_out.start + range.start..state.transit_buckets_out.start + range.end,
+        state.transit_buckets_in.start + range.start..state.transit_buckets_in.start + range.end,
+        1,
+        depth,
+        TerminalMode::ZeroTerminalDrop,
+    )
+}
+
+/// Fill the travel-time bucket-definition rows' structural ring-shift terms
+/// via [`DeliveryRing::emit_shift_rows`], once per downstream plant
+/// ([`transit_bucket_plant_ranges`]): `+1.0` on `b_d^out` and, when a deeper
+/// bucket exists for the same plant, `-1.0` on `b_{d+1}^in` (absent at
+/// `d == L_j`: `b_{L+1}^in` does not exist). Only buckets REACHABLE this stage
+/// (`layout.transit_bucket_row_pos`) get a row; a masked-out bucket's outgoing
+/// column is frozen `[0, 0]` instead (see `columns::fill_transit_bucket_columns`),
+/// so no row needs to define it. Mode-independent (buckets are stage-level,
+/// never block-resolved), so this runs once per stage regardless of upstream
+/// releases — the deposit terms riding those releases are emitted separately
+/// by [`fill_arc_release_block_entries`]. A no-op when `state.n_buckets == 0`.
 fn fill_transit_bucket_definition_entries(
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
     let state = layout.state;
     let row_start = layout.row_transit_bucket_definition_start();
-    for (slot, pos) in layout.transit_bucket_row_pos.iter().enumerate() {
-        let Some(pos) = *pos else { continue };
-        let row = row_start + pos;
-        col_entries[state.transit_buckets_out.start + slot].push((row, 1.0));
-
-        let (plant_idx, _lag) = state.transit_bucket_column_order[slot];
-        let has_deeper_transit_bucket = state
-            .transit_bucket_column_order
-            .get(slot + 1)
-            .is_some_and(|&(p, _)| p == plant_idx);
-        if has_deeper_transit_bucket {
-            col_entries[state.transit_buckets_in.start + slot + 1].push((row, -1.0));
-        }
+    for range in transit_bucket_plant_ranges(state) {
+        let ring = transit_bucket_ring(state, range.clone());
+        ring.emit_shift_rows(
+            &layout.transit_bucket_row_pos[range],
+            row_start,
+            col_entries,
+        );
     }
 }
 
@@ -431,6 +469,7 @@ fn fill_arc_release_block_entries(
         "arc {u_idx} -> {h_idx} stage {stage_idx}: stage-clock weights must sum to 1.0, got \
          {stage_weights:?}"
     );
+    DeliveryRing::assert_density_sums_to_one(stage_weights);
 
     if stage_weights[0] != 0.0 {
         col_entries[col_turbine].push((row_balance, -stage_weights[0] * tau_h));
@@ -447,17 +486,13 @@ fn fill_arc_release_block_entries(
              bucket range (TransitBucketTopology/arc_stage_weights disagreement)"
         )
     });
+    let ring = transit_bucket_ring(layout.state, range.clone());
     let row_transit_bucket_def_start = layout.row_transit_bucket_definition_start();
     for (d, &stage_weight) in stage_weights.iter().enumerate().skip(1) {
         if stage_weight == 0.0 {
             continue;
         }
-        debug_assert!(
-            d - 1 < range.len(),
-            "lag {d} exceeds plant {h_idx}'s declared bucket depth {}",
-            range.len()
-        );
-        let slot = range.start + (d - 1);
+        let slot = range.start + ring.slot_target(0, d);
         // A lag beyond this stage's reachable cap has no definition row to
         // deposit into — its target stage is outside `[0, n_stages)`, so the
         // share is dropped rather than misdirected onto another lag's row.
@@ -548,7 +583,8 @@ fn fill_chronological_water_entries(
                 (arrival_density.iter().sum::<f64>() - 1.0).abs() < 1e-9,
                 "hydro {h_idx} stage {stage_idx}: arrival_density must sum to 1.0"
             );
-            let col_first_slot_in = layout.state.transit_buckets_in.start + range.start;
+            let ring = transit_bucket_ring(layout.state, range);
+            let col_first_slot_in = ring.in_col(0, 0);
             for (target_slot, &rho_val) in arrival_density.iter().enumerate() {
                 if rho_val == 0.0 {
                     continue;
@@ -676,6 +712,7 @@ fn fill_arc_release_chrono_block_entries(
             "arc {u_idx} stage {stage_idx}: stage-clock weights must sum to 1.0, got {:?}",
             resolution.stage_weights
         );
+        DeliveryRing::assert_density_sums_to_one(&resolution.stage_weights);
         for (d, &stage_weight) in resolution.stage_weights.iter().enumerate() {
             let aggregated: f64 = resolution
                 .block_deposits
@@ -711,17 +748,13 @@ fn fill_arc_release_chrono_block_entries(
              bucket range (TransitBucketTopology/arc_spread_chrono disagreement)"
         )
     });
+    let ring = transit_bucket_ring(layout.state, range.clone());
     let row_transit_bucket_def_start = layout.row_transit_bucket_definition_start();
     for (d, &deposit_d) in block_deposit.iter().enumerate().skip(1) {
         if deposit_d == 0.0 {
             continue;
         }
-        debug_assert!(
-            d - 1 < range.len(),
-            "lag {d} exceeds plant {h_idx}'s declared bucket depth {}",
-            range.len()
-        );
-        let slot = range.start + (d - 1);
+        let slot = range.start + ring.slot_target(0, d);
         // See the parallel-mode fill's identical drop: a lag beyond this
         // stage's reachable cap has no row to deposit into.
         let Some(pos) = layout.transit_bucket_row_pos[slot] else {
@@ -3056,7 +3089,8 @@ mod pumping_water_tests {
     use super::super::test_support::{state_layout_for, two_block_stage, zero_hydro_penalties};
     use super::{
         LpMatrixBuffers, assemble_csc, build_stage_matrix_entries, fill_generic_constraint_entries,
-        fill_load_balance_entries, fill_pumping_water_entries, resolve_chrono_arrival_density,
+        fill_load_balance_entries, fill_pumping_water_entries,
+        fill_transit_bucket_definition_entries, resolve_chrono_arrival_density,
     };
 
     const N_STAGES: usize = 1;
@@ -5072,6 +5106,75 @@ mod pumping_water_tests {
         // A single aggregated bucket for the downstream plant, not one per arc.
         assert_eq!(state.n_buckets, 1);
         assert_eq!(state.transit_buckets_out.len(), 1);
+    }
+
+    /// Migration-equivalence pin: `fill_transit_bucket_definition_entries`'s
+    /// per-plant `DeliveryRing::emit_shift_rows` routing reproduces the
+    /// pre-migration open-coded formula (`+1` on `b_d^out`, `-1` on
+    /// `b_{d+1}^in` only within the SAME plant's own contiguous group) on a
+    /// fixed three-plant fixture: one plant with 3 lags, one with 1 lag, and
+    /// one with no declared arc at all (absent from `column_order`).
+    #[test]
+    fn fill_transit_bucket_definition_entries_matches_pre_migration_formula_across_ragged_plants() {
+        let h_down3 = 10;
+        let h_down1 = 20;
+        let h_none = 30;
+        let fixtures = PumpFixtures::new_full(
+            vec![
+                fixture_hydro_ds(h_down3, None),
+                fixture_hydro_ds(h_down1, None),
+                fixture_hydro_ds(h_none, None),
+            ],
+            Vec::new(),
+            vec![fixture_bus(1)],
+            Vec::new(),
+            Vec::new(),
+        );
+        let down3_idx = fixtures.hydro_pos[&EntityId(h_down3)];
+        let down1_idx = fixtures.hydro_pos[&EntityId(h_down1)];
+
+        let ctx = TemplateBuildCtx {
+            per_stage_mask: vec![vec![3, 1]],
+            ..fixtures.make_ctx()
+        };
+        let stage = two_block_stage(0, [300.0, 444.0]);
+        let state = StateLayout::new(
+            ctx.n_hydros,
+            ctx.max_par_order,
+            4,
+            vec![
+                (down3_idx, 1),
+                (down3_idx, 2),
+                (down3_idx, 3),
+                (down1_idx, 1),
+            ],
+            ctx.n_anticipated,
+            ctx.k_max,
+            ctx.anticipated_lead_stages.clone(),
+            &vec![0; ctx.n_hydros],
+        );
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_transit_bucket_definition_entries(&layout, &mut col_entries);
+
+        let row_start = layout.row_transit_bucket_definition_start();
+        let out = state.transit_buckets_out.start;
+        let inn = state.transit_buckets_in.start;
+
+        // down3 slot 0 (lag 1): a deeper own-plant slot (lag 2) exists.
+        assert_eq!(col_entries[out], vec![(row_start, 1.0)]);
+        assert_eq!(col_entries[inn + 1], vec![(row_start, -1.0)]);
+        // down3 slot 1 (lag 2): a deeper own-plant slot (lag 3) exists.
+        assert_eq!(col_entries[out + 1], vec![(row_start + 1, 1.0)]);
+        assert_eq!(col_entries[inn + 2], vec![(row_start + 1, -1.0)]);
+        // down3 slot 2 (lag 3, its own last lag): the next global slot belongs
+        // to down1, so no shift term crosses the plant boundary.
+        assert_eq!(col_entries[out + 2], vec![(row_start + 2, 1.0)]);
+        assert!(col_entries[inn + 3].is_empty());
+        // down1 slot 3 (lag 1, its only lag, also the last global slot): no
+        // deeper slot exists at all.
+        assert_eq!(col_entries[out + 3], vec![(row_start + 3, 1.0)]);
     }
 
     /// `B == 0` (no declared arc, `state.n_buckets == 0`): the emitted water

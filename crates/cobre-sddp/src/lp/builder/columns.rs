@@ -128,12 +128,15 @@ fn fill_storage_columns(
 /// over every bucket regardless of masking.
 fn fill_transit_bucket_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
     let state = layout.state;
-    for (b, pos) in layout.transit_bucket_row_pos.iter().enumerate() {
-        if pos.is_none() {
-            let col = state.transit_buckets_out.start + b;
-            bufs.col_lower[col] = 0.0;
-            bufs.col_upper[col] = 0.0;
-        }
+    for range in super::entries::transit_bucket_plant_ranges(state) {
+        let col_base = state.transit_buckets_out.start + range.start;
+        let ring = super::entries::transit_bucket_ring(state, range.clone());
+        ring.freeze_masked_columns(
+            &layout.transit_bucket_row_pos[range],
+            col_base,
+            (0.0, f64::INFINITY),
+            bufs,
+        );
     }
 }
 

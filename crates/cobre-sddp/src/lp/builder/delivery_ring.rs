@@ -13,12 +13,6 @@
 //! block-mode-coupled per-lag deposit fill stays at each ring's own call
 //! site; this module owns only the shared skeleton.
 
-// Voice 4: no production call site constructs a `DeliveryRing` yet — the
-// water-bucket ring's shift/mask fill and the anticipated ring's shift/mask
-// fill will each construct one and wire it in. The `#[allow(dead_code)]`
-// refires once either reader lands.
-#![allow(dead_code)]
-
 use std::ops::Range;
 
 use super::columns::ColumnBufs;
@@ -35,12 +29,22 @@ pub(crate) enum TerminalMode {
     /// A masked slot never held a value in the first place — no share is
     /// dropped because none was ever computed (the anticipated ring's
     /// horizon boundary).
+    // Voice 4: only the anticipated ring constructs this variant; it has no
+    // caller yet (water's masking is exclusively `ZeroTerminalDrop`). Refires
+    // once the anticipated ring's shift/mask fill lands.
+    #[allow(dead_code)]
     BoundaryFcfRetain,
 }
 
 /// Delivery semantics a ring deposit follows, matched only at
 /// [`DeliveryRing::emit_deposit`] — the shift/mask skeleton is
 /// δ-independent.
+// Voice 4: no production call site constructs a `DeliverySemantics` value yet
+// — the anticipated ring's deposit will construct `EqualityPin`; water's
+// `AdditiveSource` conservation check goes straight through
+// `DeliveryRing::assert_density_sums_to_one`, never through this enum's
+// dispatch. Refires once the anticipated ring's deposit fill lands.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum DeliverySemantics<'a> {
     /// Deposits a lag-weighted share from a shared release column into
@@ -72,6 +76,10 @@ pub(crate) struct DeliveryRing {
     /// Slots per lane.
     depth: usize,
     /// This ring's terminal-slot semantics; see [`TerminalMode`].
+    // Voice 4: no method reads `self.terminal` yet — both rings' masking is
+    // identical regardless of terminal mode today. Refires once a
+    // differentiated terminal mode reads it.
+    #[allow(dead_code)]
     terminal: TerminalMode,
 }
 
@@ -240,6 +248,10 @@ impl DeliveryRing {
     /// `AdditiveSource` emits no entry here — the block-mode-coupled per-lag
     /// fill stays at the call site — and only re-validates its density's
     /// conservation invariant via [`Self::assert_density_sums_to_one`].
+    // Voice 4: the anticipated ring's deposit fill is this method's planned
+    // `EqualityPin` caller; water calls `assert_density_sums_to_one` directly
+    // rather than through this dispatch. Refires once that caller lands.
+    #[allow(dead_code)]
     pub(crate) fn emit_deposit(
         &self,
         slot: usize,
