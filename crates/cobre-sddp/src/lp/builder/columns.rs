@@ -151,21 +151,13 @@ fn fill_transit_bucket_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) 
 /// whatever this fill wrote there.
 fn fill_anticipated_slot_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
     let base = layout.anticipated.col_anticipated_slots_out_start;
-    for (offset, pos) in layout
-        .anticipated
-        .anticipated_slot_row_pos
-        .iter()
-        .enumerate()
-    {
-        let col = base + offset;
-        if pos.is_some() {
-            bufs.col_lower[col] = f64::NEG_INFINITY;
-            bufs.col_upper[col] = f64::INFINITY;
-        } else {
-            bufs.col_lower[col] = 0.0;
-            bufs.col_upper[col] = 0.0;
-        }
-    }
+    let ring = super::entries::anticipated_ring(layout);
+    ring.freeze_masked_columns(
+        &layout.anticipated.anticipated_slot_row_pos,
+        base,
+        (f64::NEG_INFINITY, f64::INFINITY),
+        bufs,
+    );
 }
 
 /// AR lag columns: unconstrained (signed).
@@ -430,7 +422,7 @@ pub(super) fn fill_anticipated_columns(
     let n_stages = ctx.resolved.bounds.n_stages();
     let n_ant = ctx.n_anticipated;
     let decision_start = layout.anticipated.col_anticipated_decision_start;
-    let slots_out_start = layout.anticipated.col_anticipated_slots_out_start;
+    let ring = super::entries::anticipated_ring(layout);
 
     // Dormant default: every decision column freezes to [0, 0] before the
     // active loop below overwrites a genuinely-active decision — mirrors
@@ -460,7 +452,7 @@ pub(super) fn fill_anticipated_columns(
             "delivery slot {slot} must be within the sized ring depth {}",
             layout.k_max
         );
-        let state_out_col = slots_out_start + slot * n_ant + local_idx;
+        let state_out_col = ring.out_col(slot, local_idx);
 
         if layout.state.is_anticipated_decision_active_for_delivery(
             local_idx,

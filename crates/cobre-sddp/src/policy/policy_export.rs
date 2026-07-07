@@ -14,6 +14,7 @@ use cobre_io::output::policy::{
 
 use crate::cut::FutureCostFunction;
 use crate::indexer::{CutStateProjection, StateLayout};
+use crate::lp_builder::delivery_ring::{DeliveryRing, TerminalMode};
 use crate::lp_builder::{commissioning_active, hydro_operating_active};
 use crate::training::TrainingResult;
 
@@ -64,6 +65,16 @@ pub fn build_stage_entity_manifest(
         .iter()
         .filter(|t| t.anticipated_config.is_some())
         .collect();
+    // Single owner of the anticipated ring's slot-major/plant-minor addressing
+    // (see `lp_builder::delivery_ring`); only `slot_lane_at`'s reverse
+    // decomposition is read here — the manifest never emits ring rows/columns.
+    let anticipated_ring = DeliveryRing::new(
+        global_layout.anticipated_slots_out.clone(),
+        global_layout.anticipated_state.clone(),
+        n_anticipated,
+        global_layout.k_max,
+        TerminalMode::BoundaryFcfRetain,
+    );
 
     // Study stages in canonical index order (the space `AnticipatedResolution`'s
     // decider/depth and the bucket topology both index); `current_stage_idx`
@@ -139,8 +150,7 @@ pub fn build_stage_entity_manifest(
                  anticipated_state"
             );
             let offset = col - global_layout.anticipated_state.start;
-            let plant_pos = offset % n_anticipated;
-            let slot_idx = offset / n_anticipated;
+            let (slot_idx, plant_pos) = anticipated_ring.slot_lane_at(offset);
             let plant = anticipated_thermals[plant_pos];
             // The ring shifts one stage per transition, so slot `slot_idx` observed
             // at stage `t` matures at delivery stage `t + slot_idx` regardless of

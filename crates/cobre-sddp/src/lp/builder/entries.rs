@@ -5,9 +5,27 @@ use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
 use crate::indexer::StateLayout;
 
 use super::M3S_TO_HM3;
-use super::delivery_ring::{DeliveryRing, TerminalMode};
+use super::delivery_ring::{DeliveryRing, DeliverySemantics, TerminalMode};
 use super::fpha_cursor::for_each_fpha_plane;
 use super::layout::{StageLayout, TemplateBuildCtx};
+
+/// Constructs the anticipated-thermal ring: ONE dense ring spanning every
+/// plant (`n_lanes = n_anticipated`) and every slot (`depth = k_max`) — unlike
+/// [`transit_bucket_ring`]'s one-ring-per-plant construction, the anticipated
+/// grid is dense slot-major/plant-minor
+/// (`anticipated_slots_out.start + slot * n_anticipated + plant`), so a single
+/// ring covers every plant's addressing. The single owner of the anticipated
+/// ring's out/in block construction every anticipated call site shares.
+pub(super) fn anticipated_ring(layout: &StageLayout) -> DeliveryRing {
+    let state = layout.state;
+    DeliveryRing::new(
+        state.anticipated_slots_out.clone(),
+        state.anticipated_state.clone(),
+        layout.n_anticipated,
+        layout.k_max,
+        TerminalMode::BoundaryFcfRetain,
+    )
+}
 
 /// Enforce, per GENUINELY anticipated plant this stage, that summed per-block
 /// thermal energy (`MWh`) equals the committed power level in the
@@ -24,6 +42,7 @@ pub(super) fn fill_anticipated_fishing_entries(
 ) {
     let n_blks = layout.n_blks;
     let grid = layout.block_grid();
+    let ring = anticipated_ring(layout);
     let mut n_active = 0_usize;
     for local_idx in 0..ctx.n_anticipated {
         let Some(pos) = layout.anticipated.anticipated_fishing_row_pos[local_idx] else {
@@ -38,7 +57,7 @@ pub(super) fn fill_anticipated_fishing_entries(
             col_entries[col_gen].push((row, block_hours));
             block_hours_total += block_hours;
         }
-        let col_state = layout.col_anticipated_state_start() + local_idx;
+        let col_state = ring.in_col(0, local_idx);
         col_entries[col_state].push((row, -block_hours_total));
         n_active += 1;
     }
@@ -69,6 +88,7 @@ pub(super) fn fill_anticipated_state_out_def_entries(
     let n_stages = ctx.resolved.bounds.n_stages();
     let n_ant = ctx.n_anticipated;
     let row_start = layout.anticipated.row_anticipated_state_out_def_start;
+    let ring = anticipated_ring(layout);
     let mut n_active: usize = 0;
     for local_idx in 0..n_ant {
         let point = layout.state.anticipated_resolution_for(local_idx, n_stages);
@@ -90,11 +110,15 @@ pub(super) fn fill_anticipated_state_out_def_entries(
             "delivery slot {slot} must be within the sized ring depth {}",
             layout.k_max
         );
-        let col_state_out =
-            layout.anticipated.col_anticipated_slots_out_start + slot * n_ant + local_idx;
         let col_decision = layout.anticipated.col_anticipated_decision_start + local_idx;
-        col_entries[col_state_out].push((row, 1.0));
-        col_entries[col_decision].push((row, -1.0));
+        ring.emit_deposit(
+            slot,
+            local_idx,
+            row,
+            col_decision,
+            DeliverySemantics::EqualityPin,
+            col_entries,
+        );
         n_active += 1;
     }
     debug_assert_eq!(
@@ -106,34 +130,23 @@ pub(super) fn fill_anticipated_state_out_def_entries(
 /// Encode the anticipated ring's interior plain-shift definition rows:
 /// `slot_k^out − slot_{k+1}^in = 0` for every plant slot `k` strictly before
 /// that plant's own newest slot (`k < K_i − 1`), reachable within this stage's
-/// horizon (`layout.anticipated.anticipated_slot_row_pos`). Mirrors
+/// horizon (`layout.anticipated.anticipated_slot_row_pos`), via
+/// [`DeliveryRing::emit_shift_rows`]. Mirrors
 /// [`fill_transit_bucket_definition_entries`]'s shift term — the newest slot's
 /// deposit row is [`fill_anticipated_state_out_def_entries`], not this
 /// function. A masked slot's outgoing column is frozen `[0, 0]` by
 /// `columns::fill_anticipated_slot_columns` instead — no row is written for it.
 fn fill_anticipated_slot_definition_entries(
-    ctx: &TemplateBuildCtx<'_>,
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
-    let state = layout.state;
-    let n_ant = ctx.n_anticipated;
     let row_start = layout.anticipated.row_anticipated_slot_definition_start;
-    let mut n_reachable: usize = 0;
-    for (global_slot, pos) in layout
-        .anticipated
-        .anticipated_slot_row_pos
-        .iter()
-        .enumerate()
-    {
-        let Some(pos) = *pos else { continue };
-        let row = row_start + pos;
-        let slot = global_slot / n_ant;
-        let plant = global_slot % n_ant;
-        col_entries[state.anticipated_slots_out.start + global_slot].push((row, 1.0));
-        col_entries[state.anticipated_state.start + (slot + 1) * n_ant + plant].push((row, -1.0));
-        n_reachable += 1;
-    }
+    let ring = anticipated_ring(layout);
+    let n_reachable = ring.emit_shift_rows(
+        &layout.anticipated.anticipated_slot_row_pos,
+        row_start,
+        col_entries,
+    );
     debug_assert_eq!(
         n_reachable, layout.anticipated.n_anticipated_slot_definition_rows,
         "fill_anticipated_slot_definition_entries: reachable-slot count must match \
@@ -1626,7 +1639,7 @@ pub(super) fn build_stage_matrix_entries(
     fill_filled_min_storage_floor_entries(layout, &mut col_entries);
     fill_pumping_water_entries(ctx, stage, layout, &mut col_entries);
     fill_anticipated_state_out_def_entries(ctx, stage_idx, layout, &mut col_entries);
-    fill_anticipated_slot_definition_entries(ctx, layout, &mut col_entries);
+    fill_anticipated_slot_definition_entries(layout, &mut col_entries);
     fill_load_balance_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_ncs_load_balance_entries(ctx, layout, &mut col_entries);
     fill_fpha_entries(ctx, stage, stage_idx, layout, &mut col_entries);
@@ -2242,7 +2255,7 @@ mod zero_cost_tests {
     use super::super::test_support::{state_layout_for, two_block_stage};
     use super::{
         build_stage_matrix_entries, fill_anticipated_fishing_entries,
-        fill_anticipated_state_out_def_entries,
+        fill_anticipated_slot_definition_entries, fill_anticipated_state_out_def_entries,
     };
 
     /// Owns data for a context with anticipated thermals and zero other entities.
@@ -2900,6 +2913,62 @@ mod zero_cost_tests {
             col_entries[col1].is_empty(),
             "masked slot 1 must carry no CSC entries; got {:?}",
             col_entries[col1]
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Migration-equivalence pin: ring-routed entries vs the pre-migration
+    // open-coded formula
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Migration-equivalence pin: `fill_anticipated_slot_definition_entries`'s
+    /// `DeliveryRing::emit_shift_rows` routing reproduces the pre-migration
+    /// open-coded formula (`+1` on `anticipated_slots_out.start + global_slot`,
+    /// `-1` on `anticipated_state.start + (slot + 1) * n_anticipated + plant`,
+    /// for every reachable global slot) on a fixed two-plant,
+    /// heterogeneous-`K` fixture (`K = [3, 2]`) exercising multiple slots
+    /// across both plants.
+    #[test]
+    fn fill_anticipated_slot_definition_entries_matches_pre_migration_formula_across_heterogeneous_plants()
+     {
+        let (fixtures, stage) = build_anticipated_ctx_n_stages_6();
+        let ctx = fixtures.make_ctx(2, 3, vec![3, 2], vec![0, 1], 2);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let mut actual: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_anticipated_slot_definition_entries(&layout, &mut actual);
+
+        let n_ant = ctx.n_anticipated;
+        let row_start = layout.anticipated.row_anticipated_slot_definition_start;
+        let mut expected: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        let mut n_expected_reachable = 0_usize;
+        for (global_slot, pos) in layout
+            .anticipated
+            .anticipated_slot_row_pos
+            .iter()
+            .enumerate()
+        {
+            let Some(pos) = *pos else { continue };
+            let row = row_start + pos;
+            let slot = global_slot / n_ant;
+            let plant = global_slot % n_ant;
+            expected[state.anticipated_slots_out.start + global_slot].push((row, 1.0));
+            expected[state.anticipated_state.start + (slot + 1) * n_ant + plant].push((row, -1.0));
+            n_expected_reachable += 1;
+        }
+
+        assert_eq!(
+            n_expected_reachable, layout.anticipated.n_anticipated_slot_definition_rows,
+            "fixture sanity: reachable count must match the layout's own count"
+        );
+        assert!(
+            n_expected_reachable >= 3,
+            "fixture must exercise multiple slots across both plants; got {n_expected_reachable}"
+        );
+        assert_eq!(
+            actual, expected,
+            "ring-routed entries must match the pre-migration open-coded formula"
         );
     }
 

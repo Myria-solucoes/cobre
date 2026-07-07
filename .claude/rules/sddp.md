@@ -148,27 +148,73 @@ the feature compiled in but no arc declared (`n_buckets == 0`), every path below
 collapses to the pre-bucket layout byte-for-byte; the moment any arc is
 declared, each of the following is a contract.
 
+### Shared lagged-delivery ring skeleton (δ/τ)
+
+The water in-transit bucket ring and the anticipated-thermal ring are one
+lagged-delivery ring construct, owned by `DeliveryRing`: a borrowed outgoing
+block (identity-resolved, contributing to `n_state`) and a separate borrowed
+incoming block (pinned via `state_to_lp_incoming_column`), advanced one
+Markov-1 slot per stage by the same interior shift row
+(`DeliveryRing::emit_shift_rows`) and the same paired row-cap/column-freeze
+masking (`DeliveryRing::freeze_masked_columns`). The two rings differ only in
+two axis parameters, never a second skeleton implementation:
+
+- **δ (`DeliverySemantics`, matched at `DeliveryRing::emit_deposit`).**
+  `AdditiveSource` (water): the block-mode-coupled per-lag deposit share is
+  emitted at the call site (`fill_arc_release_block_entries`), never through
+  `emit_deposit` itself — its arm only re-validates `Σ density == 1.0` via
+  `DeliveryRing::assert_density_sums_to_one`. `EqualityPin` (anticipated):
+  `emit_deposit` itself pins the ring's newest slot to a single decision
+  column, `+1` on `out_col(slot, lane)` and `−1` on `decision_col`.
+- **τ (`TerminalMode`).** `ZeroTerminalDrop` (water): a masked slot discards a
+  genuine share the ring would otherwise deposit — an admitted target-stage
+  imprecision (see Terminal credit deferred below). `BoundaryFcfRetain`
+  (anticipated): a masked slot never held a value in the first place, because
+  no anticipated commitment is ever created past the horizon (see
+  End-of-horizon masking below). Both render the SAME masking output (frozen
+  `[0, 0]`, scale-independent) regardless of τ — only the per-ring subsection
+  below states what the masked slot MEANS.
+
+The masking contract is always two-sided and ships together: a masked
+position (`row_pos[i] == None`) gets NO definition row (the row-cap side) AND
+a frozen `[0, 0]` outgoing column (`freeze_masked_columns`, the column-freeze
+side) in the SAME pass — wiring only one side leaves either a dangling row
+referencing a frozen column or a free column with no defining constraint, both
+wrong-but-compiling. Water instantiates one ring per downstream plant
+(`transit_bucket_ring`, `n_lanes = 1`, over that plant's ragged contiguous
+sub-range); anticipated instantiates ONE dense ring spanning every plant
+(`anticipated_ring`, `n_lanes = n_anticipated`, slot-major/plant-minor) — both
+addressing schemes resolve through the same `out_col`/`in_col` formula
+(`block.start + slot * n_lanes + lane`).
+Read: `lp/builder/delivery_ring.rs` (`DeliveryRing::emit_shift_rows`,
+`freeze_masked_columns`, `emit_deposit`, `out_col`/`in_col`,
+`DeliverySemantics`, `TerminalMode`), `lp/builder/entries.rs`
+(`transit_bucket_ring`, `anticipated_ring`).
+
 ### In-transit bucket dynamics & sign
 
-The bucket-definition row is a ring shift, `b_d^out = b_{d+1}^in + k_d·D_i`:
-`fill_transit_bucket_definition_entries` emits the structural `+1`/`−1` terms and
-`fill_arc_release_block_entries` deposits the arc's `k_d`-weighted release from
-the SAME release column that also carries `k_0` onto the balance row — never a
-separate once-per-stage family. Incoming buckets are pinned via column bounds,
-resolved through `StateLayout::state_to_lp_incoming_column`'s explicit bucket
-arm, never the `anticipated_state` catch-all. Subgradient extraction divides the
-incoming bucket column's reduced cost by `col_scale` (`extract_duals_from_view`,
-the same rc/col_scale contract as storage); the cut row renders the **outgoing**
-bucket column through `StateLayout::lp_column_for_state`'s identity arm and
-multiplies `col_scale` back on via `push_scaled_coefficient` — divided on
-extract, multiplied on render, identical to storage. Swapping which column is
-pinned/read, or dividing on render instead of extract, prices the in-transit
-water in the wrong direction — a wrong bound that still compiles. A fold
-implementation (crossing mass absorbed same-stage, no bucket at all) can reach
-the same total cost as the correct one, so total cost alone cannot discriminate
-— only the dual's sign/magnitude and the per-stage delivery split do.
+`fill_transit_bucket_definition_entries` routes the bucket-definition ring
+shift through `DeliveryRing::emit_shift_rows` (the shared skeleton above,
+`b_d^out = b_{d+1}^in + k_d·D_i`); `fill_arc_release_block_entries` deposits
+the arc's `k_d`-weighted release from the SAME release column that also
+carries `k_0` onto the balance row — never a separate once-per-stage family
+(the `AdditiveSource` δ: the share itself is deposited at the call site, never
+through `emit_deposit`'s dispatch). Incoming buckets are pinned via column
+bounds, resolved through `StateLayout::state_to_lp_incoming_column`'s explicit
+bucket arm, never the `anticipated_state` catch-all. Subgradient extraction
+divides the incoming bucket column's reduced cost by `col_scale`
+(`extract_duals_from_view`, the same rc/col_scale contract as storage); the
+cut row renders the **outgoing** bucket column through
+`StateLayout::lp_column_for_state`'s identity arm and multiplies `col_scale`
+back on via `push_scaled_coefficient` — divided on extract, multiplied on
+render, identical to storage. Swapping which column is pinned/read, or
+dividing on render instead of extract, prices the in-transit water in the
+wrong direction — a wrong bound that still compiles. A fold implementation
+(crossing mass absorbed same-stage, no bucket at all) can reach the same total
+cost as the correct one, so total cost alone cannot discriminate — only the
+dual's sign/magnitude and the per-stage delivery split do.
 Read: `lp/builder/entries.rs` (`fill_transit_bucket_definition_entries`,
-`fill_arc_release_block_entries`), `lp/indexer/state_layout.rs`
+`fill_arc_release_block_entries`, `transit_bucket_ring`), `lp/indexer/state_layout.rs`
 (`StateLayout::state_to_lp_incoming_column`, `StateLayout::lp_column_for_state`),
 `training/backward/duals_extraction.rs` (`extract_duals_from_view`), `cut/row.rs`
 (`push_scaled_coefficient`, `push_cut_row`). Pinned by the bucket-arm
@@ -336,10 +382,10 @@ Pinned by `test_anticipated_lead_time_coverage_pmo_calendar` and
 
 ### In-LP anticipated ring: definition-row sign & two-sided masking
 
-The anticipated ring mirrors the travel-time bucket ring construct-for-
-construct: an outgoing block (`StateLayout::anticipated_slots_out`, identity-
-resolved by `state_to_lp_column`, contributing to `n_state`) and a separate
-incoming block (`StateLayout::anticipated_state`, pinned via
+The anticipated ring is `DeliveryRing`'s other instantiation (the shared
+skeleton above): an outgoing block (`StateLayout::anticipated_slots_out`,
+identity-resolved by `state_to_lp_column`, contributing to `n_state`) and a
+separate incoming block (`StateLayout::anticipated_state`, pinned via
 `state_to_lp_incoming_column`) — never one dual-purpose range shifted
 out-of-LP. There is no Rust-side shift step: the ring transition is resolved
 entirely by the definition rows below, and `current_state`/`state_at_capture`
@@ -347,24 +393,23 @@ read the outgoing block by the same plain copy already used for storage and
 travel-time buckets.
 
 An interior slot's outgoing column is pinned to the next slot's incoming value
-by a ring-shift row, `slot_k^out − slot_{k+1}^in = 0`
-(`fill_anticipated_slot_definition_entries` emits the structural `+1`/`−1`
-terms); the plant's own newest slot (`k = k_i − 1`) is pinned instead to the
-fresh decision column, `slot_{k_i-1}^out = decision_col`
-(`fill_anticipated_state_out_def_entries`, pre-existing and unchanged in logic
-— only its column addressing moved into the relocated ring). Both row
-families render `[0, 0]` (`fill_anticipated_slot_definition_rows` /
-`fill_anticipated_state_out_def_rows`): the `+1`/`−1` structural coefficients
-on each side of the row do the shift, never the bounds.
+by the shared ring-shift row, `slot_k^out − slot_{k+1}^in = 0`
+(`fill_anticipated_slot_definition_entries` routes it through
+`DeliveryRing::emit_shift_rows`); the plant's own newest slot (`k = k_i − 1`)
+is pinned instead to the fresh decision column, `slot_{k_i-1}^out =
+decision_col`, via the shared skeleton's `EqualityPin` δ
+(`fill_anticipated_state_out_def_entries` calls `DeliveryRing::emit_deposit`
+directly). Both row families render `[0, 0]`
+(`fill_anticipated_slot_definition_rows` / `fill_anticipated_state_out_def_rows`):
+the `+1`/`−1` structural coefficients on each side of the row do the shift,
+never the bounds.
 
 A slot beyond the horizon-reachable window (`build_anticipated_slot_row_pos`'s
 per-slot `Option<usize>`, `None` when unreachable) gets BOTH sides of the
-masking contract together: no definition row (the row-cap side) AND a frozen
-`[0, 0]` outgoing column (`fill_anticipated_slot_columns`, the column-freeze
-side — the same commissioning-dormant-column convention as
-NCS/thermal/line/station/contract). Wiring only one side leaves either a
-dangling row referencing a frozen column or a free column with no defining
-constraint — both wrong-but-compiling, never staged as two separate changes.
+shared masking contract together via `DeliveryRing::freeze_masked_columns`: no
+definition row (the row-cap side) AND a frozen `[0, 0]` outgoing column
+(`fill_anticipated_slot_columns`, the column-freeze side — the same
+commissioning-dormant-column convention as NCS/thermal/line/station/contract).
 
 A slot beyond a plant's OWN `StateLayout::anticipated_lead_stages[plant]`
 bound is structural padding even when `t + slot_idx` itself still lands
@@ -374,22 +419,24 @@ widths. `policy::policy_export::build_stage_entity_manifest` applies this
 same bound before populating `EntitySlot::delivery_anchor`, never a depth- or
 decider-only check: `AnticipatedResolution::decision_sets`/`depth` count only
 within-study-decided commitments and silently exclude a still-draining
-pre-study seed, undercounting a ring position that legitimately holds one.
+pre-study seed, undercounting a ring position that legitimately holds one. The
+manifest resolves a ring column back to `(slot, plant)` via
+`DeliveryRing::slot_lane_at` — the exact inverse of `out_col`/`in_col` — never
+a re-derived `offset % n_anticipated`/`offset / n_anticipated` pair.
 
 Read: `lp/indexer/state_layout.rs` (`StateLayout::state_to_lp_column`,
 `state_to_lp_incoming_column`), `lp/builder/layout.rs`
 (`build_anticipated_slot_row_pos`), `lp/builder/entries.rs`
 (`fill_anticipated_slot_definition_entries`,
-`fill_anticipated_state_out_def_entries`), `lp/builder/rows.rs`
+`fill_anticipated_state_out_def_entries`, `anticipated_ring`), `lp/builder/rows.rs`
 (`fill_anticipated_slot_definition_rows`), `lp/builder/columns.rs`
 (`fill_anticipated_slot_columns`), `policy/policy_export.rs`
 (`build_stage_entity_manifest`). Pinned by the `state_to_lp_column`
 `anticipated_slots_out`-identity regressions, the combined row-cap-and-
 column-freeze regression asserting both sides in one test, the backward-cut
-coefficient propagation regressions (K=1, K=2, K=3) confirming the
-definition rows preserve the same subgradient values the prior out-of-LP
-shift produced, and the manifest's padding-vs-reachable delivery-anchor
-regression.
+coefficient propagation regressions (K=1, K=2, K=3) confirming the ring-routed
+definition rows produce the correct subgradient values, and the manifest's
+padding-vs-reachable delivery-anchor regression.
 
 ### End-of-horizon masking is exact, never a dropped commitment
 

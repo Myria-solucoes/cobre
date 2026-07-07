@@ -29,27 +29,21 @@ pub(crate) enum TerminalMode {
     /// A masked slot never held a value in the first place — no share is
     /// dropped because none was ever computed (the anticipated ring's
     /// horizon boundary).
-    // Voice 4: only the anticipated ring constructs this variant; it has no
-    // caller yet (water's masking is exclusively `ZeroTerminalDrop`). Refires
-    // once the anticipated ring's shift/mask fill lands.
-    #[allow(dead_code)]
     BoundaryFcfRetain,
 }
 
 /// Delivery semantics a ring deposit follows, matched only at
 /// [`DeliveryRing::emit_deposit`] — the shift/mask skeleton is
 /// δ-independent.
-// Voice 4: no production call site constructs a `DeliverySemantics` value yet
-// — the anticipated ring's deposit will construct `EqualityPin`; water's
-// `AdditiveSource` conservation check goes straight through
-// `DeliveryRing::assert_density_sums_to_one`, never through this enum's
-// dispatch. Refires once the anticipated ring's deposit fill lands.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum DeliverySemantics<'a> {
     /// Deposits a lag-weighted share from a shared release column into
     /// several ring slots at once (the water ring); `density` is the
     /// per-lag arrival weights, `Σ density == 1.0`.
+    // Voice 4: water's conservation check goes straight through
+    // `DeliveryRing::assert_density_sums_to_one`, never through this
+    // dispatch — no production call site constructs this variant.
+    #[allow(dead_code)]
     AdditiveSource {
         /// Per-lag arrival weight, validated by
         /// [`DeliveryRing::assert_density_sums_to_one`].
@@ -162,6 +156,23 @@ impl DeliveryRing {
         self.in_block.start + slot * self.n_lanes + lane
     }
 
+    /// Decomposes a flat block-relative offset (`col − out_block.start` or
+    /// `col − in_block.start`) into `(slot, lane)` — the exact inverse of
+    /// [`Self::out_col`]/[`Self::in_col`]'s slot-major, lane-minor addressing.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if `offset >= n_lanes * depth`.
+    #[must_use]
+    pub(crate) fn slot_lane_at(&self, offset: usize) -> (usize, usize) {
+        debug_assert!(
+            offset < self.n_lanes * self.depth,
+            "offset {offset} must be < n_lanes*depth {}",
+            self.n_lanes * self.depth
+        );
+        (offset / self.n_lanes, offset % self.n_lanes)
+    }
+
     /// Emits the ring's interior shift-row CSC entries: `out[slot] +1`, and
     /// `in[slot+1] −1` when a deeper ring position exists for the same lane
     /// (`slot + 1 < depth`). `row_pos[slot * n_lanes + lane]` gives this
@@ -217,7 +228,7 @@ impl DeliveryRing {
     /// # Panics (debug builds only)
     ///
     /// Panics if `row_pos.len() != n_lanes * depth`.
-    pub(crate) fn freeze_masked_columns(
+    pub(super) fn freeze_masked_columns(
         &self,
         row_pos: &[Option<usize>],
         col_base: usize,
@@ -248,10 +259,6 @@ impl DeliveryRing {
     /// `AdditiveSource` emits no entry here — the block-mode-coupled per-lag
     /// fill stays at the call site — and only re-validates its density's
     /// conservation invariant via [`Self::assert_density_sums_to_one`].
-    // Voice 4: the anticipated ring's deposit fill is this method's planned
-    // `EqualityPin` caller; water calls `assert_density_sums_to_one` directly
-    // rather than through this dispatch. Refires once that caller lands.
-    #[allow(dead_code)]
     pub(crate) fn emit_deposit(
         &self,
         slot: usize,
@@ -465,6 +472,34 @@ mod tests {
         assert_eq!(ring.out_col(1, 2), 1005);
         assert_eq!(ring.in_col(0, 0), 2000);
         assert_eq!(ring.in_col(1, 2), 2005);
+    }
+
+    /// `slot_lane_at` is the exact inverse of `out_col`/`in_col`: recovering
+    /// `(slot, lane)` from every block-relative offset in a 3-lane, 2-deep
+    /// ring round-trips through `out_col` back to the same offset.
+    #[test]
+    fn slot_lane_at_is_the_inverse_of_out_col_in_col() {
+        let ring = DeliveryRing::new(1000..1006, 2000..2006, 3, 2, TerminalMode::ZeroTerminalDrop);
+        assert_eq!(ring.slot_lane_at(0), (0, 0));
+        assert_eq!(ring.slot_lane_at(1), (0, 1));
+        assert_eq!(ring.slot_lane_at(2), (0, 2));
+        assert_eq!(ring.slot_lane_at(3), (1, 0));
+        assert_eq!(ring.slot_lane_at(4), (1, 1));
+        assert_eq!(ring.slot_lane_at(5), (1, 2));
+
+        for offset in 0..6 {
+            let (slot, lane) = ring.slot_lane_at(offset);
+            assert_eq!(
+                ring.out_col(slot, lane) - 1000,
+                offset,
+                "slot_lane_at({offset}) must round-trip through out_col"
+            );
+            assert_eq!(
+                ring.in_col(slot, lane) - 2000,
+                offset,
+                "slot_lane_at({offset}) must round-trip through in_col"
+            );
+        }
     }
 
     /// `EqualityPin`'s deposit is the ring's only real entry emission: the

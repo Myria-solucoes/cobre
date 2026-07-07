@@ -32,7 +32,7 @@
 use cobre_core::{ConstraintSense, FillingConfig};
 
 mod columns;
-mod delivery_ring;
+pub(crate) mod delivery_ring;
 mod entries;
 mod fpha_cursor;
 mod layout;
