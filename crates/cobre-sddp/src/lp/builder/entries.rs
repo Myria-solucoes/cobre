@@ -1912,7 +1912,7 @@ mod parameter_resolution_tests {
     ) -> Vec<cobre_solver::StageTemplate> {
         let production = PrepareHydroModelsResult::default_from_system(system).production;
         let evaporation = PrepareHydroModelsResult::default_from_system(system).evaporation;
-        crate::lp_builder::build_stage_templates(
+        crate::lp_builder::build_stage_templates_resolving_layout(
             system,
             InflowNonNegativityMethod::None,
             &PrecomputedPar::default(),

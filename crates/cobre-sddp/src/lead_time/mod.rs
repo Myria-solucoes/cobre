@@ -339,7 +339,7 @@ pub enum LeadTime {
 /// Resolved point-commitment lag: the delivery-anchored decider, the
 /// per-decision-stage outgoing commitment sets, and the per-decision-stage
 /// depths.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PointResolution {
     /// Decision stage `c(m)` for each delivery stage `m`; `None` is a
     /// pre-study (initial-conditions) decider.
@@ -455,7 +455,7 @@ pub fn resolve_point(
 /// Threaded from setup onto the state layout as additive data for the in-LP
 /// delivery-anchored ring; the constant-lead machinery still reads the layout's
 /// per-plant `anticipated_lead_stages`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct AnticipatedResolution {
     /// One [`PointResolution`] per anticipated plant, in anticipated-local
     /// (`anticipated_thermal_indices`) order.

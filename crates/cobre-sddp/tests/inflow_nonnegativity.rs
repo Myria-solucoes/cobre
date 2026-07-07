@@ -47,7 +47,7 @@ use cobre_sddp::{
     hydro_models::PrepareHydroModelsResult,
     indexer::StateLayout,
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::{PatchBuffer, build_stage_templates},
+    lp_builder::{PatchBuffer, build_stage_templates_resolving_layout},
     risk_measure::RiskMeasure,
     simulate,
     simulation::{EntityCounts, SimulationConfig, SimulationOutputSpec},
@@ -118,7 +118,7 @@ const N_HYDROS: usize = 2;
 
 /// Build the 2-hydro, 1-bus, 3-stage negative-inflow fixture. `ResolvedBounds`
 /// and `ResolvedPenalties` are built manually from the hydro entity values so
-/// `build_stage_templates` can read them without `cobre-io` case loading.
+/// `build_stage_templates_resolving_layout` can read them without `cobre-io` case loading.
 fn build_system() -> cobre_core::System {
     use cobre_core::entities::hydro::{HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::InflowModel;
@@ -417,7 +417,7 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
     .unwrap();
 
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    let stage_templates = build_stage_templates(
+    let stage_templates = build_stage_templates_resolving_layout(
         &system,
         inflow_method,
         &par_lp,
@@ -906,7 +906,7 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
     )
     .unwrap();
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    let templates = build_stage_templates(
+    let templates = build_stage_templates_resolving_layout(
         &system,
         inflow_method,
         &par_lp,
@@ -915,7 +915,7 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
         &hydro_models.evaporation,
         &cobre_sddp::ResolvedParameters::default(),
     )
-    .expect("build_stage_templates must succeed");
+    .expect("build_stage_templates_resolving_layout must succeed");
 
     let tmpl0 = &templates.templates[0];
     let block_hours = 744.0_f64;

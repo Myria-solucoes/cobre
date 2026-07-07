@@ -314,7 +314,7 @@ pub fn geom(_hydro_count: usize, _max_par_order: usize) -> StageGeometry {
 /// Build a finalized storage+lag [`StateLayout`] (no anticipated thermals) with
 /// the full `max_par_order` lag stride for every hydro.
 ///
-/// This is the dense coverage production `build_wired_indexer` finalizes for a
+/// This is the dense coverage production `resolve_state_layout` finalizes for a
 /// study with no per-hydro AR-order truncation, so the layout's
 /// `nonzero_state_indices` and `state_to_lp_column_map` caches match a production
 /// storage+lag study. The state-fixing patch and cut-path tests read only the

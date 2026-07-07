@@ -1286,11 +1286,11 @@ fn make_min_outflow_system() -> cobre_core::System {
 }
 
 /// A sentinel value injected at the `outflow_below_slack` primal column (via a
-/// `SizedMockSolver` over a real `build_stage_templates` template) must propagate
+/// `SizedMockSolver` over a real `build_stage_templates_resolving_layout` template) must propagate
 /// to `outflow_slack_below_m3s` in the simulation output.
 #[test]
 fn simulation_min_outflow_slack_extracted_from_primal() {
-    use cobre_sddp::build_stage_templates;
+    use cobre_sddp::build_stage_templates_resolving_layout;
 
     let system = make_min_outflow_system();
     let n_stages = 2;
@@ -1299,7 +1299,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
 
     let hydro_models = cobre_sddp::PrepareHydroModelsResult::default_from_system(&system);
 
-    let templates_result = build_stage_templates(
+    let templates_result = build_stage_templates_resolving_layout(
         &system,
         InflowNonNegativityMethod::None,
         stochastic.par(),
@@ -1308,7 +1308,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         &hydro_models.evaporation,
         &cobre_sddp::ResolvedParameters::default(),
     )
-    .expect("build_stage_templates must succeed");
+    .expect("build_stage_templates_resolving_layout must succeed");
 
     let t0 = &templates_result.templates[0];
 

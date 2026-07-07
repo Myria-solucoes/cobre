@@ -2108,7 +2108,7 @@ mod tests {
             id_to_slot: vec![],
         };
 
-        let templates = crate::lp_builder::build_stage_templates(
+        let templates = crate::lp_builder::build_stage_templates_resolving_layout(
             &system,
             InflowNonNegativityMethod::None,
             &par_lp,

@@ -6,7 +6,7 @@ use super::*;
 fn fpha_ac1_dimensions_one_fpha_hydro_five_planes() {
     let (system, production) = one_fpha_hydro_system(5);
 
-    let fpha_result = build_stage_templates(
+    let fpha_result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -17,7 +17,7 @@ fn fpha_ac1_dimensions_one_fpha_hydro_five_planes() {
     )
     .expect("FPHA system ok");
 
-    let const_result = build_stage_templates(
+    let const_result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -50,7 +50,7 @@ fn fpha_ac2_generation_column_entries() {
     let n_planes = 5;
     let (system, production) = one_fpha_hydro_system(n_planes);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -95,7 +95,7 @@ fn fpha_ac3_v_in_column_entries() {
     let n_planes = 5;
     let (system, production) = one_fpha_hydro_system(n_planes);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -129,7 +129,7 @@ fn fpha_ac4_v_out_column_entries() {
     let n_planes = 5;
     let (system, production) = one_fpha_hydro_system(n_planes);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -163,7 +163,7 @@ fn fpha_ac4_v_out_column_entries() {
 fn fpha_ac5_mixed_system_load_balance_uses_generation_col() {
     let (system, production) = four_hydro_mixed_system();
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -233,7 +233,7 @@ fn fpha_solve_one_hydro_optimal() {
     use cobre_solver::{ActiveSolver, RowBatch, SolverInterface};
 
     let (system, production) = fpha_solve_system();
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -282,7 +282,7 @@ fn fpha_solve_hyperplane_constraints_hold() {
 
     let (system, production) = fpha_solve_system();
 
-    // Extract planes before moving production into build_stage_templates.
+    // Extract planes before moving production into build_stage_templates_resolving_layout.
     let planes = match production.model(0, 0) {
         ResolvedProductionModel::Fpha { planes, .. } => planes.clone(),
         ResolvedProductionModel::ConstantProductivity { .. } => {
@@ -290,7 +290,7 @@ fn fpha_solve_hyperplane_constraints_hold() {
         }
     };
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -384,7 +384,7 @@ fn fpha_solve_storage_fixing_dual_differs_from_constant() {
         1,
     );
 
-    let fpha_result = build_stage_templates(
+    let fpha_result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -396,7 +396,7 @@ fn fpha_solve_storage_fixing_dual_differs_from_constant() {
     .expect("FPHA template build must succeed");
 
     let const_production = default_production(&system);
-    let const_result = build_stage_templates(
+    let const_result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -458,7 +458,7 @@ fn fpha_solve_mixed_system_optimal() {
 
     let (system, production) = four_hydro_mixed_system();
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),

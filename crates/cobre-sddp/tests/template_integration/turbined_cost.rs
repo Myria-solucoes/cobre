@@ -7,7 +7,7 @@ fn turbined_cost_applied_to_fpha_turbine_column() {
     // turbined_cost = 0.5 $/MWh over a 720h block → turbine objective 0.5*720 = 360.0
     // (then scaled by 1/COST_SCALE_FACTOR).
     let (system, production) = fpha_system_with_turbined_cost(3, 0.5, &[720.0]);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -32,7 +32,7 @@ fn turbined_cost_multi_block_uses_per_block_hours() {
     // turbined_cost = 1.0 $/MWh; each turbine column carries cost * its own
     // block_hours (block 0 = 300h, block 1 = 420h), not the stage total.
     let (system, production) = fpha_system_with_turbined_cost(3, 1.0, &[300.0, 420.0]);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -110,7 +110,7 @@ fn turbined_cost_mixed_system_all_hydros_carry_cost() {
         .build()
         .expect("mixed system with turbined cost");
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -142,7 +142,7 @@ fn turbined_cost_mixed_system_all_hydros_carry_cost() {
 fn load_balance_rhs_matches_load_model_mean_mw() {
     // Fixture LoadModel mean_mw = 100.0, so the load-balance RHS is 100.0.
     let system = one_bus_system(1);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -168,7 +168,7 @@ fn load_balance_rhs_matches_load_model_mean_mw() {
 #[test]
 fn multiple_stages_produce_same_count_templates_and_base_rows() {
     let system = one_hydro_system(3, 1);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -185,7 +185,7 @@ fn multiple_stages_produce_same_count_templates_and_base_rows() {
 #[test]
 fn stage_templates_clone_and_debug() {
     let system = one_hydro_system(1, 0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),

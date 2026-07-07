@@ -3,17 +3,33 @@
 use chrono::NaiveDate;
 use cobre_core::{
     Block, BlockMode, HydroPenalties, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-    StageStateConfig,
+    StageStateConfig, System,
 };
 
 use crate::indexer::StateLayout;
+use crate::lead_time::AnticipatedResolution;
 
 use super::layout::TemplateBuildCtx;
+
+/// Resolve the `anticipated_resolution`/`anticipated_lead_stages`/
+/// `per_stage_mask` inputs `build_template_build_ctx` requires as parameters,
+/// through the same setup entry points production threads from
+/// (`resolve_anticipated_commitments_core`, `build_transit_bucket_topology`) —
+/// so a builder-module test's `TemplateBuildCtx` matches what setup would
+/// build for the same system.
+pub(super) fn ctx_anticipated_and_mask_inputs(
+    system: &System,
+) -> (AnticipatedResolution, Vec<usize>, Vec<Vec<usize>>) {
+    let (resolution, lead_stages) = crate::setup::resolve_anticipated_commitments_core(system);
+    let per_stage_mask =
+        crate::setup::bucket_topology::build_transit_bucket_topology(system).per_stage_mask;
+    (resolution, lead_stages, per_stage_mask)
+}
 
 /// Build the canonical role-(a) [`StateLayout`] a `StageLayout` borrows, from a
 /// test [`TemplateBuildCtx`].
 ///
-/// Mirrors `template.rs::build_stage_templates` — same state dimensions and
+/// Mirrors `crate::setup::resolve_state_layout` — same state dimensions and
 /// PAR-derived effective lag counts — so the handle a test passes to
 /// `StageLayout::new` is byte-identical to production's.
 pub(super) fn state_layout_for(ctx: &TemplateBuildCtx<'_>) -> StateLayout {

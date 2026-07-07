@@ -6116,7 +6116,7 @@ fn test_anticipated_resolve_point_fanout_calendar() {
 /// The role-(a) concern lives solely on `StateLayout`; the role-(b)
 /// equipment geometry lives per stage on `StageGeometry`, so there is no
 /// state half there to compare against. This checks that
-/// `build_wired_indexer`'s `StateLayout` finalizes both caches and reproduces
+/// `resolve_state_layout`'s `StateLayout` finalizes both caches and reproduces
 /// a fresh `StateLayout::new` over the same `(N, L, A, k_max, leads)`
 /// byte-for-byte — the property the single-owner extraction guarantees.
 fn assert_state_layout_finalized(state: &StateLayout) {
@@ -6172,7 +6172,7 @@ fn assert_state_layout_finalized(state: &StateLayout) {
     );
 }
 
-/// AC#1 (uniform): `StageData.state` finalized by `build_wired_indexer` is
+/// AC#1 (uniform): `StageData.state` finalized by `resolve_state_layout` is
 /// internally consistent and finalized for a storage+lag study.
 #[test]
 fn stage_data_state_matches_indexer_role_a_uniform() {
@@ -6449,11 +6449,10 @@ fn system_with_travel_time_arc(n_stages: usize) -> cobre_core::System {
         .expect("system_with_travel_time_arc: valid")
 }
 
-/// A declared travel-time arc (`n_buckets > 0`) must size `StageData.state` (the
-/// role-(a) `StateLayout` `build_wired_indexer` stores) and the actual LP
-/// template (sized by `build_stage_templates`'s own, independently-recomputed
-/// `StateLayout`) to the SAME `n_state` — the cross-construction agreement the
-/// contained `template.rs` recompute fix keeps intact.
+/// A declared travel-time arc (`n_buckets > 0`) sizes `StageData.state` (the
+/// single role-(a) `StateLayout` `resolve_state_layout` builds) and the actual
+/// LP template's `n_state` to the SAME value — both read the one threaded
+/// instance.
 #[test]
 fn setup_state_and_stage_template_agree_on_n_state_with_declared_arc() {
     let system = system_with_travel_time_arc(6);
@@ -6465,8 +6464,93 @@ fn setup_state_and_stage_template_agree_on_n_state_with_declared_arc() {
     );
     assert_eq!(
         setup.stage_data.stage_templates.templates[0].n_state, setup.stage_data.state.n_state,
-        "template.rs's independently-recomputed StateLayout must agree with \
-         StageData.state on n_state"
+        "the template's n_state must agree with StageData.state.n_state"
+    );
+}
+
+/// Single-owner invariant: `stage_templates.state_layout` (repointed by
+/// `build_stage_templates` at the threaded instance) and `StudySetup`'s own
+/// authoritative `StateLayout` (`stage_data.state`) agree field-for-field —
+/// sibling to [`assert_state_layout_finalized`], but comparing the two
+/// production-held handles directly rather than each against an independent
+/// reference build.
+#[test]
+fn stage_templates_state_layout_matches_authoritative_state_layout() {
+    let system = minimal_system(3);
+    let config = minimal_config(2, 10);
+    let stochastic = build_stochastic_context(
+        &system,
+        42,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("stochastic context");
+
+    let setup = StudySetup::new(
+        &system,
+        &config,
+        stochastic,
+        PrepareHydroModelsResult::default_from_system(&system),
+    )
+    .expect("setup");
+
+    let threaded = &setup.stage_data.stage_templates.state_layout;
+    let authoritative = &setup.stage_data.state;
+
+    assert_eq!(
+        threaded.n_state, authoritative.n_state,
+        "n_state must match"
+    );
+    assert_eq!(
+        threaded.theta, authoritative.theta,
+        "theta column must match"
+    );
+    assert_eq!(
+        threaded.storage, authoritative.storage,
+        "storage range must match"
+    );
+    assert_eq!(
+        threaded.inflow_lags, authoritative.inflow_lags,
+        "inflow_lags range must match"
+    );
+    assert_eq!(
+        threaded.transit_buckets_out, authoritative.transit_buckets_out,
+        "transit_buckets_out range must match"
+    );
+    assert_eq!(
+        threaded.anticipated_state, authoritative.anticipated_state,
+        "anticipated_state range must match"
+    );
+    assert_eq!(
+        threaded.anticipated_slots_out, authoritative.anticipated_slots_out,
+        "anticipated_slots_out range must match"
+    );
+    assert_eq!(
+        threaded.z_inflow, authoritative.z_inflow,
+        "z_inflow range must match"
+    );
+    assert_eq!(
+        threaded.storage_in, authoritative.storage_in,
+        "storage_in range must match"
+    );
+    assert_eq!(
+        threaded.transit_buckets_in, authoritative.transit_buckets_in,
+        "transit_buckets_in range must match"
+    );
+    assert_eq!(
+        threaded.state_to_lp_column_map, authoritative.state_to_lp_column_map,
+        "state_to_lp_column_map must match"
+    );
+    assert_eq!(
+        threaded.nonzero_state_indices, authoritative.nonzero_state_indices,
+        "nonzero_state_indices must match"
     );
 }
 

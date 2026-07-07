@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn test_penalty_columns_added() {
     let system = one_hydro_system(1, 0);
-    let without = build_stage_templates(
+    let without = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -15,7 +15,7 @@ fn test_penalty_columns_added() {
         &ResolvedParameters::default(),
     )
     .expect("constant productivity ok");
-    let with_p = build_stage_templates(
+    let with_p = build_stage_templates_resolving_layout(
         &system,
         penalty_config(1000.0),
         &PrecomputedPar::default(),
@@ -38,7 +38,7 @@ fn test_penalty_columns_added_3_hydros() {
     // num_cols(penalty) = num_cols(none) + n_hydros: zero hydros add zero slacks
     // regardless of config (the N=1 column count is covered above).
     let system = one_bus_system(1);
-    let with_p = build_stage_templates(
+    let with_p = build_stage_templates_resolving_layout(
         &system,
         penalty_config(1000.0),
         &PrecomputedPar::default(),
@@ -48,7 +48,7 @@ fn test_penalty_columns_added_3_hydros() {
         &ResolvedParameters::default(),
     )
     .expect("constant productivity ok");
-    let without = build_stage_templates(
+    let without = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -70,7 +70,7 @@ fn test_penalty_columns_added_3_hydros() {
 fn test_penalty_objective_coefficient() {
     let system = one_hydro_system(1, 0);
     let config = penalty_config(1000.0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         config,
         &PrecomputedPar::default(),
@@ -97,7 +97,7 @@ fn test_penalty_objective_coefficient() {
 #[test]
 fn test_no_penalty_columns_when_none() {
     let system = one_hydro_system(1, 2);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -125,7 +125,7 @@ fn test_no_penalty_columns_when_none() {
 fn test_penalty_slack_in_water_balance() {
     let system = one_hydro_system(1, 0);
     let config = penalty_config(1000.0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         config,
         &PrecomputedPar::default(),
@@ -159,7 +159,7 @@ fn test_penalty_slack_in_water_balance() {
 fn test_penalty_slack_bounds() {
     let system = one_hydro_system(1, 0);
     let config = penalty_config(1000.0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         config,
         &PrecomputedPar::default(),
@@ -187,7 +187,7 @@ fn test_penalty_slack_bounds() {
 fn test_penalty_water_balance_coefficient_value() {
     let system = one_hydro_system(1, 0);
     let config = penalty_config(1000.0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         config,
         &PrecomputedPar::default(),
@@ -228,7 +228,7 @@ fn test_penalty_water_balance_coefficient_value() {
 fn test_penalty_multi_stage_consistent() {
     let system = one_hydro_system(3, 1);
     let config = penalty_config(2000.0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         config,
         &PrecomputedPar::default(),
@@ -260,7 +260,7 @@ fn test_penalty_slack_absorbs_negative_inflow() {
     let system = one_hydro_system(1, 0);
     let config = penalty_config(1000.0);
     let pm = production_set(&[0.9], 1);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         config,
         &PrecomputedPar::default(),

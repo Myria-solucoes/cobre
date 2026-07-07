@@ -260,7 +260,7 @@ mod cut_subgradient_parity {
         },
     };
     use cobre_sddp::{
-        build_stage_templates,
+        build_stage_templates_resolving_layout,
         hydro_models::{
             EvaporationModel, EvaporationModelSet, FphaPlane, LinearizedEvaporation,
             PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel,
@@ -536,7 +536,7 @@ mod cut_subgradient_parity {
         let production = fpha_production();
         let evaporation = fpha_evap_evaporation(&system);
 
-        let result = build_stage_templates(
+        let result = build_stage_templates_resolving_layout(
             &system,
             InflowNonNegativityMethod::None,
             &PrecomputedPar::default(),

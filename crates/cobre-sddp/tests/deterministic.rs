@@ -1012,7 +1012,7 @@ fn d09_multi_deficit() {
 ///
 /// ## Penalty cost unit (verified from `lp::builder::template`)
 ///
-/// From `build_stage_templates` in `lp::builder::template`:
+/// From `build_stage_templates_resolving_layout` in `lp::builder::template`:
 /// ```text
 /// let obj_coeff = penalty_cost * total_stage_hours;
 /// objective[col] = obj_coeff;

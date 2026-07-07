@@ -9,6 +9,7 @@ use cobre_stochastic::par::precompute::PrecomputedPar;
 use crate::error::SddpError;
 use crate::hydro_models::{EvaporationModelSet, ProductionModelSet, ResolvedProductionModel};
 use crate::inflow_method::InflowNonNegativityMethod;
+use crate::lead_time::AnticipatedResolution;
 use crate::resolved_parameters::ResolvedParameters;
 use crate::setup::template_postprocess::{
     compute_cumulative_discount_factors, compute_per_stage_discount_factors,
@@ -694,6 +695,7 @@ fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>
 /// use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
 /// use cobre_sddp::InflowNonNegativityMethod;
 /// use cobre_sddp::hydro_models::PrepareHydroModelsResult;
+/// use cobre_sddp::indexer::StateLayout;
 /// use cobre_sddp::lp_builder::build_stage_templates;
 /// use cobre_sddp::resolved_parameters::ResolvedParameters;
 /// use cobre_stochastic::par::precompute::PrecomputedPar;
@@ -711,10 +713,11 @@ fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>
 /// let normal_lp = cobre_stochastic::normal::precompute::PrecomputedNormal::default();
 /// let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
 /// let resolved_parameters = ResolvedParameters::default();
-/// // No stages → empty result.
+/// // No stages, so the state layout is empty too.
+/// let state_layout = StateLayout::new(0, 0, 0, Vec::new(), 0, 0, Vec::new(), &[]);
 /// let result = build_stage_templates(&system, method, &par_lp, &normal_lp,
 ///                                    &hydro_models.production, &hydro_models.evaporation,
-///                                    &resolved_parameters)
+///                                    &resolved_parameters, &state_layout, &[])
 ///     .expect("empty system ok");
 /// assert!(result.templates.is_empty());
 /// ```
@@ -726,6 +729,8 @@ pub fn build_stage_templates(
     production_models: &ProductionModelSet,
     evaporation_models: &EvaporationModelSet,
     resolved_parameters: &ResolvedParameters,
+    state_layout: &crate::indexer::StateLayout,
+    per_stage_mask: &[Vec<usize>],
 ) -> Result<StageTemplates, SddpError> {
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
     let n_hydros = system.hydros().len();
@@ -741,6 +746,9 @@ pub fn build_stage_templates(
         production_models,
         evaporation_models,
         resolved_parameters,
+        state_layout.anticipated_resolution.clone(),
+        state_layout.anticipated_lead_stages.clone(),
+        per_stage_mask.to_vec(),
     );
     let n_load_buses = load_bus_indices.len();
     debug_assert!(
@@ -749,58 +757,21 @@ pub fn build_stage_templates(
         normal_lp.n_entities(),
         n_load_buses
     );
-
-    // One canonical role-(a) `StateLayout` shared by every `StageLayout`: the
-    // column ranges and `state_to_lp_column_map` it reads are pure functions of the
-    // state dimensions, so they match the `StateLayout` setup stores on
-    // `StageData.state` regardless of the mask.
-    //
-    // `effective_lag_counts` feeds only the `nonzero_state_indices` mask (read off
-    // `StageData.state` by the cut path), never the template build. Sized to
-    // `ctx.n_hydros` per the `StateLayout::new` contract, falling back to the dense
-    // `max_par_order` stride for hydros the PAR model omits — so a hydro-free
-    // `PrecomputedPar` test still satisfies the length contract.
-    let effective_lag_counts: Vec<usize> = if ctx.max_par_order > 0 {
-        (0..ctx.n_hydros)
-            .map(|h| {
-                if h < par_lp.n_hydros() {
-                    par_lp.effective_lag_count(h)
-                } else {
-                    ctx.max_par_order
-                }
-            })
-            .collect()
-    } else {
-        vec![0; ctx.n_hydros]
-    };
-    // Recomputes the bucket topology (pure function of `system`) instead of
-    // threading it in from the caller: keeps this role-(a) `StateLayout` in
-    // agreement with the one `setup` stores on `StageData.state` without
-    // widening this function's signature — the accepted redundant-but-
-    // deterministic cost of a second call.
-    let bucket_topology = crate::setup::bucket_topology::build_transit_bucket_topology(system);
-    let mut state_layout = crate::indexer::StateLayout::new(
-        ctx.n_hydros,
-        ctx.max_par_order,
-        bucket_topology.n_buckets,
-        bucket_topology.column_order,
-        ctx.n_anticipated,
-        ctx.k_max,
-        ctx.anticipated_lead_stages.clone(),
-        &effective_lag_counts,
+    debug_assert_eq!(
+        ctx.anticipated_resolution, state_layout.anticipated_resolution,
+        "ctx's threaded anticipated_resolution must match the state_layout it was built from"
     );
-    // Mirrors setup's own `build_wired_indexer`: attach the same delivery-
-    // anchored resolution onto this role-(a) `StateLayout` so `LeadTime` plants
-    // read the calendar-derived decider here too, not the constant-lead
-    // fallback `anticipated_resolution_for` would otherwise reconstruct.
-    state_layout.set_anticipated_resolution(ctx.anticipated_resolution.clone());
+    debug_assert_eq!(
+        ctx.anticipated_lead_stages, state_layout.anticipated_lead_stages,
+        "ctx's threaded anticipated_lead_stages must match the state_layout it was built from"
+    );
 
     let n_study = study_stages.len();
     let mut stage_outputs = Vec::with_capacity(n_study);
     for (stage_idx, stage) in study_stages.iter().enumerate() {
         stage_outputs.push(build_single_stage_template(
             &ctx,
-            &state_layout,
+            state_layout,
             stage,
             stage_idx,
         ));
@@ -817,8 +788,46 @@ pub fn build_stage_templates(
         n_load_buses,
         n_study,
     );
-    output.state_layout = state_layout;
+    output.state_layout = state_layout.clone();
     Ok(output)
+}
+
+/// Test/integration-only convenience wrapper over [`build_stage_templates`]:
+/// resolves the state layout and bucket topology from `system`/`par_lp`
+/// through the same setup entry point production uses
+/// (`crate::setup::resolve_state_layout`), then delegates. Production
+/// (`StudySetup`) always threads its own already-resolved
+/// `StateLayout`/`per_stage_mask` directly through [`build_stage_templates`]
+/// instead — this wrapper exists so test call sites that build templates from
+/// a bare system do not each need to resolve the layout themselves.
+///
+/// # Errors
+///
+/// Propagates [`build_stage_templates`]'s errors, plus
+/// `crate::setup::resolve_state_layout`'s `LeadTime` fan-out rejection.
+#[cfg(any(test, feature = "test-support"))]
+pub fn build_stage_templates_resolving_layout(
+    system: &System,
+    inflow_method: InflowNonNegativityMethod,
+    par_lp: &PrecomputedPar,
+    normal_lp: &PrecomputedNormal,
+    production_models: &ProductionModelSet,
+    evaporation_models: &EvaporationModelSet,
+    resolved_parameters: &ResolvedParameters,
+) -> Result<StageTemplates, SddpError> {
+    let topology = crate::setup::bucket_topology::build_transit_bucket_topology(system);
+    let (state_layout, _, _) = crate::setup::resolve_state_layout(system, par_lp, &topology)?;
+    build_stage_templates(
+        system,
+        inflow_method,
+        par_lp,
+        normal_lp,
+        production_models,
+        evaporation_models,
+        resolved_parameters,
+        &state_layout,
+        &topology.per_stage_mask,
+    )
 }
 
 /// Precompute the per-stage minimum target-storage trajectory `V_target[t]` for
@@ -910,6 +919,9 @@ fn build_template_build_ctx<'a>(
     production_models: &'a ProductionModelSet,
     evaporation_models: &'a EvaporationModelSet,
     resolved_parameters: &'a ResolvedParameters,
+    anticipated_resolution: AnticipatedResolution,
+    anticipated_lead_stages: Vec<usize>,
+    per_stage_mask: Vec<Vec<usize>>,
 ) -> (
     TemplateBuildCtx<'a>,
     Vec<usize>,
@@ -1007,13 +1019,6 @@ fn build_template_build_ctx<'a>(
     }
     let n_anticipated = anticipated_thermal_indices.len();
 
-    // Recomputes the delivery-anchored resolution (a pure function of `system`)
-    // instead of threading it in from the caller — the same accepted
-    // redundant-but-deterministic cost of a second call this crate already pays
-    // for the bucket topology below. The warn-free core never re-emits the K=0
-    // advisory setup's own call already owns.
-    let (anticipated_resolution, anticipated_lead_stages) =
-        crate::setup::resolve_anticipated_commitments_core(system);
     debug_assert_eq!(anticipated_lead_stages.len(), n_anticipated);
     let k_max: usize = anticipated_resolution
         .k_max
@@ -1081,12 +1086,6 @@ fn build_template_build_ctx<'a>(
     let arc_spread_chrono = crate::setup::bucket_topology::build_arc_spread_chrono(system);
     let arc_arrival_density =
         crate::setup::bucket_topology::build_arc_arrival_density(system, &arc_stage_weights);
-    // Recomputes the bucket topology (pure function of `system`) rather than
-    // threading it in from the caller, mirroring `build_stage_templates`'s own
-    // recomputation for `StateLayout` — the accepted redundant-but-deterministic
-    // cost of a second call.
-    let per_stage_mask =
-        crate::setup::bucket_topology::build_transit_bucket_topology(system).per_stage_mask;
 
     let ctx = TemplateBuildCtx {
         hydros,

@@ -28,7 +28,7 @@ use crate::hydro_models::PrepareHydroModelsResult;
 use crate::inflow_method::InflowNonNegativityMethod;
 use crate::resolved_parameters::ResolvedParameters;
 
-use super::super::test_support::state_layout_for;
+use super::super::test_support::{ctx_anticipated_and_mask_inputs, state_layout_for};
 
 // ── Fixtures ─────────────────────────────────────────────────────────────
 
@@ -403,6 +403,8 @@ fn build_template_build_ctx_pumping_stations_id_sorted_and_pos_mapped() {
     let par_lp = PrecomputedPar::default();
     let resolved_params = empty_resolved_params();
 
+    let (anticipated_resolution, anticipated_lead_stages, per_stage_mask) =
+        ctx_anticipated_and_mask_inputs(&system);
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -410,6 +412,9 @@ fn build_template_build_ctx_pumping_stations_id_sorted_and_pos_mapped() {
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
     );
 
     let ids: Vec<i32> = ctx.pumping_stations.iter().map(|p| p.id.0).collect();
@@ -448,6 +453,8 @@ fn build_template_build_ctx_n_pumping_matches_slice_and_bounds() {
     let par_lp = PrecomputedPar::default();
     let resolved_params = empty_resolved_params();
 
+    let (anticipated_resolution, anticipated_lead_stages, per_stage_mask) =
+        ctx_anticipated_and_mask_inputs(&system);
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -455,6 +462,9 @@ fn build_template_build_ctx_n_pumping_matches_slice_and_bounds() {
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
     );
 
     assert_eq!(
@@ -504,7 +514,7 @@ fn build_stage_templates_records_layout_pumping_col_start_per_stage() {
     let normal_lp = cobre_stochastic::normal::precompute::PrecomputedNormal::default();
     let resolved_params = empty_resolved_params();
 
-    let templates = super::build_stage_templates(
+    let templates = super::build_stage_templates_resolving_layout(
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
@@ -517,6 +527,8 @@ fn build_stage_templates_records_layout_pumping_col_start_per_stage() {
 
     // Rebuild the ctx once so each stage's StageLayout can be reconstructed
     // and compared against the recorded per-stage value.
+    let (anticipated_resolution, anticipated_lead_stages, per_stage_mask) =
+        ctx_anticipated_and_mask_inputs(&system);
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -524,6 +536,9 @@ fn build_stage_templates_records_layout_pumping_col_start_per_stage() {
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
     );
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
 
@@ -698,6 +713,8 @@ fn build_template_build_ctx_contracts_counted_and_pos_mapped() {
     let par_lp = PrecomputedPar::default();
     let resolved_params = empty_resolved_params();
 
+    let (anticipated_resolution, anticipated_lead_stages, per_stage_mask) =
+        ctx_anticipated_and_mask_inputs(&system);
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -705,6 +722,9 @@ fn build_template_build_ctx_contracts_counted_and_pos_mapped() {
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
     );
 
     assert_eq!(ctx.contracts.len(), 2);
@@ -741,6 +761,8 @@ fn stage_geometry_from_layout_populates_contract_ranges() {
     let par_lp = PrecomputedPar::default();
     let resolved_params = empty_resolved_params();
 
+    let (anticipated_resolution, anticipated_lead_stages, per_stage_mask) =
+        ctx_anticipated_and_mask_inputs(&system);
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -748,6 +770,9 @@ fn stage_geometry_from_layout_populates_contract_ranges() {
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
     );
     let stage = system
         .stages()
@@ -780,6 +805,8 @@ fn stage_geometry_from_layout_empty_contracts_are_pumping_end_anchored() {
     let par_lp = PrecomputedPar::default();
     let resolved_params = empty_resolved_params();
 
+    let (anticipated_resolution, anticipated_lead_stages, per_stage_mask) =
+        ctx_anticipated_and_mask_inputs(&system);
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -787,6 +814,9 @@ fn stage_geometry_from_layout_empty_contracts_are_pumping_end_anchored() {
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
     );
     let stage = system
         .stages()
@@ -917,6 +947,8 @@ fn build_template_build_ctx_contract_count_divergence_panics() {
     let par_lp = PrecomputedPar::default();
     let resolved_params = empty_resolved_params();
 
+    let (anticipated_resolution, anticipated_lead_stages, per_stage_mask) =
+        ctx_anticipated_and_mask_inputs(&system);
     let _ = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -924,6 +956,9 @@ fn build_template_build_ctx_contract_count_divergence_panics() {
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
     );
 }
 
@@ -979,6 +1014,8 @@ fn build_template_build_ctx_populates_anticipated_metadata() {
     let par_lp = PrecomputedPar::default();
     let resolved_params = empty_resolved_params();
 
+    let (anticipated_resolution, anticipated_lead_stages, per_stage_mask) =
+        ctx_anticipated_and_mask_inputs(&system);
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -986,6 +1023,9 @@ fn build_template_build_ctx_populates_anticipated_metadata() {
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
     );
 
     assert_eq!(ctx.n_anticipated, 2, "n_anticipated");
@@ -1039,6 +1079,8 @@ fn build_template_build_ctx_zero_anticipated_when_none() {
     let par_lp = PrecomputedPar::default();
     let resolved_params = empty_resolved_params();
 
+    let (anticipated_resolution, anticipated_lead_stages, per_stage_mask) =
+        ctx_anticipated_and_mask_inputs(&system);
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -1046,6 +1088,9 @@ fn build_template_build_ctx_zero_anticipated_when_none() {
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
     );
 
     assert_eq!(ctx.n_anticipated, 0, "n_anticipated");
@@ -1510,6 +1555,8 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         id_to_slot: vec![],
     };
 
+    let (anticipated_resolution, anticipated_lead_stages, per_stage_mask) =
+        ctx_anticipated_and_mask_inputs(&system);
     let (ctx_a, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -1517,6 +1564,9 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
     );
 
     // Sanity: ctx_a uses canonical ordering.
@@ -1877,7 +1927,7 @@ fn postprocessed_stage_templates_carry_discounted_factors() {
     let normal_lp = cobre_stochastic::normal::precompute::PrecomputedNormal::default();
     let resolved_params = empty_resolved_params();
 
-    let mut templates = super::build_stage_templates(
+    let mut templates = super::build_stage_templates_resolving_layout(
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
@@ -2179,6 +2229,8 @@ fn build_active_violations_layout_and_template() -> (StageLayout<'static>, Stage
         id_to_slot: vec![],
     }));
 
+    let (anticipated_resolution, anticipated_lead_stages, per_stage_mask) =
+        ctx_anticipated_and_mask_inputs(system);
     let (ctx, _, _) = super::build_template_build_ctx(
         system,
         InflowNonNegativityMethod::None,
@@ -2186,6 +2238,9 @@ fn build_active_violations_layout_and_template() -> (StageLayout<'static>, Stage
         production,
         &hydro_models.evaporation,
         resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
     );
     let ctx = Box::leak(Box::new(ctx));
     let state = Box::leak(Box::new(state_layout_for(ctx)));
@@ -2952,6 +3007,8 @@ fn block_template(block_mode: BlockMode, n_blks: usize) -> StageTemplate {
         id_to_slot: vec![],
     };
 
+    let (anticipated_resolution, anticipated_lead_stages, per_stage_mask) =
+        ctx_anticipated_and_mask_inputs(&system);
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -2959,6 +3016,9 @@ fn block_template(block_mode: BlockMode, n_blks: usize) -> StageTemplate {
         &production,
         &hydro_models.evaporation,
         &resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
     );
     let state = state_layout_for(&ctx);
     let stage = &system.stages()[0];
@@ -3057,6 +3117,8 @@ fn block_layout_and_template(
         id_to_slot: vec![],
     }));
 
+    let (anticipated_resolution, anticipated_lead_stages, per_stage_mask) =
+        ctx_anticipated_and_mask_inputs(system);
     let (ctx, _, _) = super::build_template_build_ctx(
         system,
         InflowNonNegativityMethod::None,
@@ -3064,6 +3126,9 @@ fn block_layout_and_template(
         production,
         &hydro_models.evaporation,
         resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
     );
     let ctx = Box::leak(Box::new(ctx));
     let state = Box::leak(Box::new(state_layout_for(ctx)));
@@ -3570,6 +3635,8 @@ fn filling_block_layout_and_template(
         id_to_slot: vec![],
     }));
 
+    let (anticipated_resolution, anticipated_lead_stages, per_stage_mask) =
+        ctx_anticipated_and_mask_inputs(system);
     let (ctx, _, _) = super::build_template_build_ctx(
         system,
         InflowNonNegativityMethod::None,
@@ -3577,6 +3644,9 @@ fn filling_block_layout_and_template(
         production,
         &hydro_models.evaporation,
         resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
     );
     let ctx = Box::leak(Box::new(ctx));
     let state = Box::leak(Box::new(state_layout_for(ctx)));
@@ -3738,12 +3808,13 @@ fn chronological_filling_target_on_final_storage() {
     }
 }
 
-// ── Anticipated-resolution threading (build_stage_templates ↔ setup) ─────
+// ── Anticipated-resolution threading (build_template_build_ctx ↔ setup) ──
 //
-// `build_stage_templates`'s own role-(a) `StateLayout` must carry the same
-// delivery-anchored `AnticipatedResolution` setup's `build_wired_indexer`
-// attaches, not the constant-lead fallback `anticipated_resolution_for`
-// would otherwise reconstruct from `anticipated_lead_stages` alone.
+// `build_template_build_ctx`'s threaded `anticipated_resolution` /
+// `anticipated_lead_stages` params must carry the same delivery-anchored
+// `AnticipatedResolution` setup's `resolve_state_layout` resolves, not the
+// constant-lead fallback `anticipated_resolution_for` would otherwise
+// reconstruct from `anticipated_lead_stages` alone.
 
 /// One-bus, no-hydro, `n_stages`-stage system with a single thermal carrying
 /// `anticipated_config`, each stage a single `stage_hours`-hour block.
@@ -3892,6 +3963,8 @@ fn template_anticipated_resolution_matches_setup_lead_time() {
     let par_lp = PrecomputedPar::default();
     let resolved_params = empty_resolved_params();
 
+    let (anticipated_resolution, anticipated_lead_stages, per_stage_mask) =
+        ctx_anticipated_and_mask_inputs(&system);
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -3899,6 +3972,9 @@ fn template_anticipated_resolution_matches_setup_lead_time() {
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
     );
     assert_eq!(ctx.k_max, 1, "ctx.k_max");
     assert_eq!(
@@ -3974,6 +4050,8 @@ fn template_leadstages_byte_identical_to_setup_and_fallback() {
     let par_lp = PrecomputedPar::default();
     let resolved_params = empty_resolved_params();
 
+    let (anticipated_resolution, anticipated_lead_stages, per_stage_mask) =
+        ctx_anticipated_and_mask_inputs(&system);
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -3981,6 +4059,9 @@ fn template_leadstages_byte_identical_to_setup_and_fallback() {
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
     );
     assert_eq!(ctx.anticipated_lead_stages, vec![1]);
 
@@ -4068,23 +4149,26 @@ impl tracing::Subscriber for WarnRecorder {
     fn exit(&self, _span: &tracing::span::Id) {}
 }
 
-/// AC5: setup's `resolve_anticipated_commitments` and
-/// `build_stage_templates`'s own recompute must never both emit the `K = 0`
-/// advisory — `build_stage_templates` calls the warn-free
-/// `resolve_anticipated_commitments_core`, so running both under the same
-/// capture window still yields exactly one advisory per self-delivered stage.
+/// `build_stage_templates` no longer resolves anticipated commitments itself
+/// — that responsibility belongs solely to setup's `resolve_state_layout` —
+/// so, given an already-resolved `state_layout`/`per_stage_mask`, running it
+/// under a WARN-capturing subscriber emits no `K = 0` advisory, even for a
+/// system whose sub-stage-lead deliveries would otherwise trigger one.
 #[test]
-fn build_stage_templates_never_double_emits_k0_advisory() {
+fn build_stage_templates_never_emits_k0_advisory_itself() {
     let system = anticipated_lead_config_system(4, 744.0, AnticipatedConfig::LeadTime(720.0), 0);
 
     let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
     let par_lp = PrecomputedPar::default();
     let normal_lp = cobre_stochastic::normal::precompute::PrecomputedNormal::default();
     let resolved_params = empty_resolved_params();
+    let topology = crate::setup::bucket_topology::build_transit_bucket_topology(&system);
+    let (state_layout, _, _) = crate::setup::resolve_state_layout(&system, &par_lp, &topology)
+        .expect("resolve_state_layout: valid test fixture");
+    let per_stage_mask = topology.per_stage_mask;
 
     let (subscriber, messages) = WarnRecorder::new();
     tracing::subscriber::with_default(subscriber, || {
-        let _ = crate::setup::resolve_anticipated_commitments(&system);
         let _ = super::build_stage_templates(
             &system,
             InflowNonNegativityMethod::None,
@@ -4093,6 +4177,8 @@ fn build_stage_templates_never_double_emits_k0_advisory() {
             &hydro_result.production,
             &hydro_result.evaporation,
             &resolved_params,
+            &state_layout,
+            &per_stage_mask,
         )
         .expect("valid system");
     });
@@ -4103,10 +4189,9 @@ fn build_stage_templates_never_double_emits_k0_advisory() {
         .filter(|msg| msg.contains("lead_stages == 0"))
         .map(std::string::String::as_str)
         .collect();
-    assert_eq!(
-        relevant.len(),
-        4,
-        "one advisory per self-delivered stage from setup's single call; \
-         build_stage_templates's recompute must not add any, got: {recorded:?}"
+    assert!(
+        relevant.is_empty(),
+        "build_stage_templates must not itself emit the K=0 advisory — that \
+         responsibility belongs solely to setup's resolve_state_layout, got: {recorded:?}"
     );
 }

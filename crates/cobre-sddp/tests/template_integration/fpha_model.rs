@@ -4,7 +4,7 @@ use super::*;
 
 /// An `Fpha` entity model paired with a `ConstantProductivity` resolved model
 /// is accepted: model-vs-resolved validation lives in `prepare_hydro_models`,
-/// not in `build_stage_templates`.
+/// not in `build_stage_templates_resolving_layout`.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn test_fpha_model_accepted() {
@@ -184,7 +184,7 @@ fn test_fpha_model_accepted() {
     // { productivity: 0.0 }; the resolved production model, not the entity model,
     // determines the LP layout.
     let production = PrepareHydroModelsResult::default_from_system(&system).production;
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -212,7 +212,7 @@ fn test_fpha_model_accepted() {
 #[test]
 fn test_constant_productivity_accepted() {
     let system = one_hydro_system(1, 0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),

@@ -155,7 +155,7 @@ fn test_multi_segment_deficit_column_count() {
         .build()
         .expect("2-bus 2-block system: valid");
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -217,7 +217,7 @@ fn test_multi_segment_deficit_bounds_and_objective() {
     let block_hours = 730.0_f64;
     let system = multi_segment_system(vec![bus], block_hours);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -282,7 +282,7 @@ fn test_single_segment_backward_compat() {
 
     let system = multi_segment_system(vec![bus], block_hours);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -342,7 +342,7 @@ fn test_multi_segment_deficit_load_balance_coefficients() {
 
     let system = multi_segment_system(vec![bus], 730.0);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -405,7 +405,7 @@ fn test_multi_segment_deficit_load_balance_coefficients() {
 fn withdrawal_rhs_subtracted_from_water_balance() {
     let withdrawal = 10.0_f64;
     let system = one_hydro_system_with_withdrawal(1, 0, withdrawal, 0.0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -443,7 +443,7 @@ fn withdrawal_zero_leaves_rhs_unchanged_from_base() {
     let system_zero = one_hydro_system_with_withdrawal(1, 0, 0.0, 0.0);
     let system_base = one_hydro_system(1, 0);
 
-    let result_zero = build_stage_templates(
+    let result_zero = build_stage_templates_resolving_layout(
         &system_zero,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -454,7 +454,7 @@ fn withdrawal_zero_leaves_rhs_unchanged_from_base() {
     )
     .expect("zero-withdrawal build ok");
 
-    let result_base = build_stage_templates(
+    let result_base = build_stage_templates_resolving_layout(
         &system_base,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -488,7 +488,7 @@ fn withdrawal_zero_leaves_rhs_unchanged_from_base() {
 #[test]
 fn withdrawal_slack_matrix_entry_coefficient_is_minus_zeta() {
     let system = one_hydro_system_with_withdrawal(1, 0, 5.0, 1000.0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -534,7 +534,7 @@ fn withdrawal_slack_objective_equals_cost_times_hours() {
     let violation_cost = 1_000.0_f64;
     let total_hours = 744.0_f64;
     let system = one_hydro_system_with_withdrawal(1, 0, 5.0, violation_cost);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -560,7 +560,7 @@ fn withdrawal_slack_objective_equals_cost_times_hours() {
 #[test]
 fn withdrawal_slack_objective_zero_when_cost_is_zero() {
     let system = one_hydro_system_with_withdrawal(1, 0, 0.0, 0.0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -587,7 +587,7 @@ fn withdrawal_slack_objective_zero_when_cost_is_zero() {
 #[test]
 fn withdrawal_slack_bounds_are_sign_aware_positive_target() {
     let system = one_hydro_system_with_withdrawal(1, 0, 10.0, 5_000.0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -899,7 +899,7 @@ fn two_hydro_withdrawal_slack_entries_per_hydro() {
         .build()
         .expect("two_hydro_with_withdrawal: valid");
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -1257,7 +1257,7 @@ fn three_hydro_num_cols_includes_three_withdrawal_slacks() {
         .build()
         .expect("three_hydro_system: valid");
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),

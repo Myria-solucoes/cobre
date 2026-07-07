@@ -152,7 +152,7 @@ impl ThermalReverseLookup {
 /// calendar-anchored lead on a non-uniform study. Only the single-decider case
 /// is read: at most one genuine decision per plant per stage. A plant fanning
 /// out several deliveries from one decision stage needs a per-delivery-stage
-/// output extraction this helper does not provide, so `build_wired_indexer`
+/// output extraction this helper does not provide, so `resolve_state_layout`
 /// rejects `AnticipatedResolution::max_fanout > 1` at setup — a fanned study
 /// never reaches here, and the `debug_assert` below is defence-in-depth against
 /// that guard regressing, not a reachable panic.
@@ -173,7 +173,7 @@ fn compute_anticipated_decision_mw(
         .anticipated_resolution_for(local_idx, spec.n_stages);
     let mut genuine = resolution.genuine_decisions_at(spec.stage_index);
     let delivery_stage = genuine.next()?;
-    // TODO(anticipated-fanout-output): gated by build_wired_indexer's max_fanout > 1 reject
+    // TODO(anticipated-fanout-output): gated by resolve_state_layout's max_fanout > 1 reject
     debug_assert!(
         genuine.next().is_none(),
         "compute_anticipated_decision_mw reads a single delivery stage per plant \

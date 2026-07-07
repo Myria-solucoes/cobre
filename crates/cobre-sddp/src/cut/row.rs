@@ -388,7 +388,7 @@ mod tests {
 
     /// Build a finalized storage+lag [`StateLayout`] (no anticipated thermals)
     /// with the full `max_par_order` lag stride for every hydro — the dense
-    /// coverage production `build_wired_indexer` finalizes for a study with no
+    /// coverage production `resolve_state_layout` finalizes for a study with no
     /// per-hydro AR-order truncation.
     fn state_layout(hydro_count: usize, max_par_order: usize) -> StateLayout {
         let lag_counts = vec![max_par_order; hydro_count];

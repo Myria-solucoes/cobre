@@ -7,7 +7,7 @@ use super::*;
 fn evap_zero_hydros_layout_unchanged() {
     let system = one_hydro_system(1, 0);
     let no_evap = default_evaporation(&system);
-    let with_evap = build_stage_templates(
+    let with_evap = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -18,7 +18,7 @@ fn evap_zero_hydros_layout_unchanged() {
     )
     .expect("no evaporation ok");
 
-    let baseline = build_stage_templates(
+    let baseline = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -45,7 +45,7 @@ fn evap_zero_hydros_layout_unchanged() {
 fn evap_two_hydros_increases_cols_and_rows() {
     let system1 = one_hydro_system(1, 0);
 
-    let baseline = build_stage_templates(
+    let baseline = build_stage_templates_resolving_layout(
         &system1,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -57,7 +57,7 @@ fn evap_two_hydros_increases_cols_and_rows() {
     .expect("no evaporation baseline ok");
 
     let evap = evap_set_for_system(&system1, &[0], &[1.5]);
-    let with_evap = build_stage_templates(
+    let with_evap = build_stage_templates_resolving_layout(
         &system1,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -92,7 +92,7 @@ fn evap_row_bounds_equality_at_intercept() {
     let intercept_m3s = 1.5_f64;
     let evap = evap_set_for_system(&system, &[0], &[intercept_m3s]);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -126,7 +126,7 @@ fn evap_col_bounds_and_objective() {
     let system = one_hydro_system(1, 0);
     let evap = evap_set_for_system(&system, &[0], &[1.5]);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -195,7 +195,7 @@ fn evap_csc_entries_one_hydro_correct_coefficients() {
     let volume_slope_m3s_per_hm3 = 0.02_f64;
     let evap = evap_set_with_volume_slope(&system, &[0], 1.5, volume_slope_m3s_per_hm3);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -318,7 +318,7 @@ fn evap_csc_entries_coefficient_scaling() {
     let volume_slope_m3s_per_hm3 = 0.04_f64;
     let evap = evap_set_with_volume_slope(&system, &[0], 0.0, volume_slope_m3s_per_hm3);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -363,7 +363,7 @@ fn evap_csc_entries_zero_hydros_no_op() {
     let system = one_hydro_system(1, 0);
     let no_evap = default_evaporation(&system);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -374,7 +374,7 @@ fn evap_csc_entries_zero_hydros_no_op() {
     )
     .expect("no evaporation ok");
 
-    let baseline = build_stage_templates(
+    let baseline = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -423,7 +423,7 @@ fn evap_csc_entries_two_hydros_independent_rows() {
     ];
     let evap = EvaporationModelSet::new(models);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -473,7 +473,7 @@ fn evap_csc_entries_zero_volume_slope_produces_zero_volume_coefficients() {
     let system = one_hydro_system(1, 0);
     let evap = evap_set_with_volume_slope(&system, &[0], 2.0, 0.0);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -518,7 +518,7 @@ fn evap_water_balance_one_hydro_coefficient_is_zeta() {
     let system = one_hydro_system(1, 0);
     let evap = evap_set_with_volume_slope(&system, &[0], 0.0, 0.0);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -760,7 +760,7 @@ fn evap_water_balance_only_second_hydro_has_evap() {
     // Only hydro 1 (h_idx=1) has evaporation.
     let evap = evap_set_with_volume_slope(&system, &[1], 0.0, 0.0);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -812,7 +812,7 @@ fn evap_water_balance_zero_hydros_no_op() {
     let system = one_hydro_system(1, 0);
     let no_evap = EvaporationModelSet::new(vec![EvaporationModel::None]);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -823,7 +823,7 @@ fn evap_water_balance_zero_hydros_no_op() {
     )
     .expect("no evaporation ok");
 
-    let baseline = build_stage_templates(
+    let baseline = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -848,7 +848,7 @@ fn evap_violation_cost_applied_to_slack_columns() {
     let system = evap_hydro_system_with_violation_cost(730.0, 500.0);
     let evap = evap_set_with_volume_slope(&system, &[0], 1.0, 0.02);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -895,7 +895,7 @@ fn evap_outflow_objective_is_zero() {
     let system = evap_hydro_system_with_violation_cost(730.0, 500.0);
     let evap = evap_set_with_volume_slope(&system, &[0], 0.0, 0.0);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -931,7 +931,7 @@ fn evap_lp_solvable_and_outflow_positive_coefficients() {
     let system = evap_hydro_system_with_violation_cost(730.0, 500.0);
     let evap = evap_set_with_volume_slope(&system, &[0], 1.0, 0.02);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -993,7 +993,7 @@ fn evap_violation_slacks_near_zero_feasible_constraint() {
     let system = evap_hydro_system_with_violation_cost(730.0, 500.0);
     let evap = evap_set_with_volume_slope(&system, &[0], 1.0, 0.02);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -1055,7 +1055,7 @@ fn evap_storage_fixing_dual_differs_from_no_evaporation() {
     // System with evaporation violation cost (so slacks are penalised).
     let system_evap = evap_hydro_system_with_violation_cost(730.0, 500.0);
     let evap = evap_set_with_volume_slope(&system_evap, &[0], 1.0, 0.02);
-    let evap_result = build_stage_templates(
+    let evap_result = build_stage_templates_resolving_layout(
         &system_evap,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -1069,7 +1069,7 @@ fn evap_storage_fixing_dual_differs_from_no_evaporation() {
     // Baseline system without evaporation (same structure, EvaporationModel::None).
     let system_base = one_hydro_system(1, 0);
     let no_evap = EvaporationModelSet::new(vec![EvaporationModel::None]);
-    let base_result = build_stage_templates(
+    let base_result = build_stage_templates_resolving_layout(
         &system_base,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -1131,7 +1131,7 @@ fn evap_bound_prevents_dump_valve() {
     let system = evap_hydro_system_with_violation_cost(730.0, 500.0);
     let evap = evap_set_with_volume_slope(&system, &[0], 2.0, 0.0001);
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),

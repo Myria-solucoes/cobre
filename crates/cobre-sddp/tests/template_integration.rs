@@ -1,4 +1,4 @@
-//! Integration tests for [`cobre_sddp::build_stage_templates`].
+//! Integration tests for [`cobre_sddp::build_stage_templates_resolving_layout`].
 //!
 //! Covers structural (column/row counts, CSC validity), objective coefficient
 //! wiring, and constraint-matrix entries for hydro / FPHA / evaporation /
@@ -32,7 +32,7 @@ use cobre_stochastic::normal::precompute::PrecomputedNormal;
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
 use cobre_sddp::{
-    build_stage_templates,
+    build_stage_templates_resolving_layout,
     hydro_models::{
         EvaporationModel, EvaporationModelSet, FphaPlane, LinearizedEvaporation,
         PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel,
@@ -2288,7 +2288,7 @@ fn block_level_excess_expr(bus_id: i32) -> cobre_core::ConstraintExpression {
 fn build_templates_for(system: &cobre_core::System) -> Vec<cobre_solver::StageTemplate> {
     let production = default_production(system);
     let evaporation = default_evaporation(system);
-    build_stage_templates(
+    build_stage_templates_resolving_layout(
         system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -2821,7 +2821,7 @@ fn build_active_violations_template() -> cobre_sddp::StageTemplates {
     // Productivity = 0.5 to match the coefficient expected by
     // `min_generation_constant_productivity_coefficients`.
     let pm = production_set(&[0.5], 1);
-    build_stage_templates(
+    build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),

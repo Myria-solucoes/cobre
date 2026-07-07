@@ -329,13 +329,10 @@ impl StateLayout {
 
     /// Attach the setup-computed [`AnticipatedResolution`].
     ///
-    /// Called from setup's `build_wired_indexer` and from
-    /// [`crate::lp_builder::build_stage_templates`]'s own role-(a) `StateLayout`
-    /// build, each against an independently recomputed but identical
-    /// resolution — the same accepted redundant-but-deterministic recompute
-    /// this crate already applies to the bucket topology, not a second
-    /// `resolve_point` entry point. Every other `StateLayout` construction
-    /// leaves the default-empty resolution.
+    /// Called once in production, from setup's single role-(a) owner
+    /// `crate::setup::resolve_state_layout` — every other call site is a test
+    /// fixture. Every other `StateLayout` construction leaves the
+    /// default-empty resolution.
     ///
     /// # Panics (debug builds only)
     ///
@@ -724,7 +721,7 @@ impl StateLayout {
 mod tests {
     use super::StateLayout;
 
-    /// Build a [`StateLayout`] finalized the way production `build_wired_indexer`
+    /// Build a [`StateLayout`] finalized the way production `resolve_state_layout`
     /// does: full `max_par_order` lag stride for every hydro (the coverage the
     /// dense path emits for test layouts without a PAR model) and the layout's
     /// own `anticipated_lead_stages`.

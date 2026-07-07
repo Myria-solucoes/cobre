@@ -56,6 +56,7 @@ use cobre_core::{
     scenario::{SamplingScheme, ScenarioSource},
 };
 use cobre_io::build_hydro_reference_volumes_resolved;
+use cobre_stochastic::par::precompute::PrecomputedPar;
 use cobre_stochastic::{
     ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext, SweepDirection,
 };
@@ -303,6 +304,18 @@ impl StudySetup {
             .set_solve_order(&solve_order_keys, SweepDirection::Descending)
             .map_err(|e| SddpError::Validation(e.to_string()))?;
 
+        // Computed here (not inside `build_energy_and_templates`) so the one
+        // `TransitBucketTopology` this constructor derives from `system` also seeds the
+        // `StudySetup.transit_bucket_topology` field below, with no second call.
+        let transit_bucket_topology = bucket_topology::build_transit_bucket_topology(system);
+
+        // Resolved before the LP templates: none of the state dimensions depend on
+        // the built LP, and `build_stage_templates` needs the finished `StateLayout`
+        // threaded in as a parameter (the single role-(a) owner — see
+        // `resolve_state_layout`).
+        let (state_layout, hydro_count, anticipated_thermal_indices) =
+            resolve_state_layout(system, stochastic.par(), &transit_bucket_topology)?;
+
         let EnergyAndTemplates {
             energy_conversion,
             stage_templates,
@@ -313,20 +326,17 @@ impl StudySetup {
             &stochastic,
             &hydro_models,
             &scalar_parameters,
+            &state_layout,
+            &transit_bucket_topology.per_stage_mask,
         )?;
 
-        // Computed here (not inside `build_wired_indexer`) so the one
-        // `TransitBucketTopology` this constructor derives from `system` also seeds the
-        // `StudySetup.transit_bucket_topology` field below, with no second call.
-        let transit_bucket_topology = bucket_topology::build_transit_bucket_topology(system);
-
-        let (state_layout, study_dims) = build_wired_indexer(
+        let study_dims = build_study_dimensions(
             system,
             &stage_templates,
             inflow_method,
-            &stochastic,
-            &transit_bucket_topology,
-        )?;
+            hydro_count,
+            anticipated_thermal_indices,
+        );
 
         let mut initial_state = build_initial_state(system, &study_dims, &state_layout);
         splice_transit_bucket_seed(
@@ -589,6 +599,8 @@ fn build_energy_and_templates(
     stochastic: &StochasticContext,
     hydro_models: &PrepareHydroModelsResult,
     scalar_parameters: &[cobre_core::ScalarParameter],
+    state_layout: &StateLayout,
+    per_stage_mask: &[Vec<usize>],
 ) -> Result<EnergyAndTemplates, SddpError> {
     let n_stages_pre = system.stages().iter().filter(|s| s.id >= 0).count();
     let stage_to_season: Vec<i32> = system
@@ -633,6 +645,8 @@ fn build_energy_and_templates(
         &hydro_models.production,
         &hydro_models.evaporation,
         &resolved_parameters,
+        state_layout,
+        per_stage_mask,
     )?;
 
     let scaling_report = template_postprocess::postprocess_templates(&mut stage_templates, system);
@@ -650,33 +664,24 @@ fn build_energy_and_templates(
     })
 }
 
-/// Build the canonical [`StateLayout`] and the [`StudyDimensions`] from the
-/// (representative) stage-0 LP layout, the PAR effective lag counts, and the
-/// bucket topology.
+/// Resolve every anticipated thermal's delivery-anchored commitment and
+/// construct the single role-(a) [`StateLayout`] — before stage templates
+/// exist, since none of the state dimensions depend on the built LP.
+///
+/// The returned `hydro_count` and `anticipated_thermal_indices` are the exact
+/// values the layout was built from; [`build_study_dimensions`] takes them as
+/// parameters instead of re-deriving them from the built templates.
 ///
 /// # Errors
 ///
 /// - [`SddpError::Validation`] — a `LeadTime` anticipated plant's resolution
 ///   fans out (`AnticipatedResolution::max_fanout > 1`); per-delivery-stage
 ///   fan-out simulation output is not yet supported.
-fn build_wired_indexer(
+pub(crate) fn resolve_state_layout(
     system: &System,
-    stage_templates: &crate::lp_builder::StageTemplates,
-    inflow_method: crate::InflowNonNegativityMethod,
-    stochastic: &StochasticContext,
+    par_lp: &PrecomputedPar,
     transit_bucket_topology: &bucket_topology::TransitBucketTopology,
-) -> Result<(StateLayout, StudyDimensions), SddpError> {
-    let stage_templates_ref = &stage_templates.templates;
-    let has_inflow_penalty =
-        inflow_method.has_slack_columns() && stage_templates_ref[0].n_hydro > 0;
-
-    let max_deficit_segments = system
-        .buses()
-        .iter()
-        .map(|b| b.deficit_segments.len())
-        .max()
-        .unwrap_or(0);
-
+) -> Result<(StateLayout, usize, Vec<usize>), SddpError> {
     let mut anticipated_thermal_indices: Vec<usize> = Vec::new();
     for (t_idx, thermal) in system.thermals().iter().enumerate() {
         if thermal.anticipated_config.is_some() {
@@ -720,34 +725,35 @@ fn build_wired_indexer(
     let k_max: usize = anticipated_resolution
         .k_max
         .max(anticipated_lead_stages.iter().copied().max().unwrap_or(0));
-    let hydro_count = stage_templates_ref[0].n_hydro;
-    let max_par_order = stage_templates_ref[0].max_par_order;
 
-    // Single owner of the study-invariant, non-state LP shape. `has_ncs` only flags
-    // presence; the per-(ncs, block) column base is read per stage from
-    // `StageContext::ncs_col_starts`, never a global handle. `n_blks` is deliberately
-    // absent — it is per-stage, owned by the per-stage geometry, never study-global.
-    let study_dims = crate::indexer::StudyDimensions {
-        n_thermals: system.thermals().len(),
-        n_lines: system.lines().len(),
-        n_buses: system.buses().len(),
-        max_deficit_segments,
-        has_ncs: !stage_templates.ncs_col_starts.is_empty(),
-        has_inflow_penalty,
-        has_withdrawal: hydro_count > 0,
-        has_operational_violations: hydro_count != 0,
-        anticipated_thermal_indices,
-        n_pumping: system.n_pumping_stations(),
-    };
+    let hydro_count = system.hydros().len();
+    let max_par_order: usize = system
+        .inflow_models()
+        .iter()
+        .filter(|m| m.stage_id >= 0)
+        .map(|m| m.ar_coefficients.len())
+        .max()
+        .unwrap_or(0)
+        .max(par_lp.max_order());
 
     // Per-hydro lag-state-slot count for the cut sparse mask: `max_par_order` (the
     // widened psi stride) when PAR(p)-A annual is active, else the classical AR
     // order. `par.order(h)` here would silently truncate the cut row's coefficients
-    // on the annual-`ψ̂/12` lag slots and produce over-estimating cuts.
+    // on the annual-`ψ̂/12` lag slots and produce over-estimating cuts. Falls back
+    // to the dense `max_par_order` stride for a hydro `par_lp` omits (`h >=
+    // par_lp.n_hydros()`) — production's `par_lp` always covers every system
+    // hydro, so the fallback is inert there; a hydro-free `PrecomputedPar` test
+    // fixture paired with a hydro-bearing system relies on it to satisfy the
+    // `StateLayout::new` length contract.
     let effective_lag_counts: Vec<usize> = if max_par_order > 0 {
-        let par = stochastic.par();
-        (0..par.n_hydros())
-            .map(|h| par.effective_lag_count(h))
+        (0..hydro_count)
+            .map(|h| {
+                if h < par_lp.n_hydros() {
+                    par_lp.effective_lag_count(h)
+                } else {
+                    max_par_order
+                }
+            })
             .collect()
     } else {
         vec![0; hydro_count]
@@ -768,7 +774,48 @@ fn build_wired_indexer(
     );
     state.set_anticipated_resolution(anticipated_resolution);
 
-    Ok((state, study_dims))
+    Ok((state, hydro_count, anticipated_thermal_indices))
+}
+
+/// Build the study-invariant, non-state [`StudyDimensions`] from the system
+/// and the post-processed stage templates.
+///
+/// `hydro_count` and `anticipated_thermal_indices` are threaded from
+/// [`resolve_state_layout`] — the same values its [`StateLayout`] was built
+/// from — so the only per-stage template field this reads is
+/// `ncs_col_starts`, the one dimension genuinely derived from the built LP.
+fn build_study_dimensions(
+    system: &System,
+    stage_templates: &crate::lp_builder::StageTemplates,
+    inflow_method: crate::InflowNonNegativityMethod,
+    hydro_count: usize,
+    anticipated_thermal_indices: Vec<usize>,
+) -> StudyDimensions {
+    let has_inflow_penalty = inflow_method.has_slack_columns() && hydro_count > 0;
+
+    let max_deficit_segments = system
+        .buses()
+        .iter()
+        .map(|b| b.deficit_segments.len())
+        .max()
+        .unwrap_or(0);
+
+    // Single owner of the study-invariant, non-state LP shape. `has_ncs` only flags
+    // presence; the per-(ncs, block) column base is read per stage from
+    // `StageContext::ncs_col_starts`, never a global handle. `n_blks` is deliberately
+    // absent — it is per-stage, owned by the per-stage geometry, never study-global.
+    crate::indexer::StudyDimensions {
+        n_thermals: system.thermals().len(),
+        n_lines: system.lines().len(),
+        n_buses: system.buses().len(),
+        max_deficit_segments,
+        has_ncs: !stage_templates.ncs_col_starts.is_empty(),
+        has_inflow_penalty,
+        has_withdrawal: hydro_count > 0,
+        has_operational_violations: hydro_count != 0,
+        anticipated_thermal_indices,
+        n_pumping: system.n_pumping_stations(),
+    }
 }
 
 /// The first (canonical-order) anticipated plant whose `LeadTime` resolution

@@ -928,7 +928,7 @@ fn generic_constraint_two_hydros_sum_csc_entries() {
     // Productivities are supplied explicitly (prod_h1=2.5 at index 0, prod_h2=3.0
     // at index 1) so the generic-row LP coefficients equal the productivities.
     let pm = production_set(&[prod_h1, prod_h2], 1);
-    let t = &build_stage_templates(
+    let t = &build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),

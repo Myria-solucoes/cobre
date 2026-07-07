@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn stage_templates_load_balance_row_starts_correct() {
     let system = two_bus_system_with_stochastic_load(2, 2, 3);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -37,7 +37,7 @@ fn stage_templates_load_balance_row_starts_correct() {
 #[test]
 fn stage_templates_n_load_buses_matches_stochastic_buses() {
     let system = two_bus_system_with_stochastic_load(1, 0, 1);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -67,7 +67,7 @@ fn stage_templates_n_load_buses_matches_stochastic_buses() {
 fn stage_templates_no_load_buses_gives_zero() {
     // one_bus_system uses std_mw = 0 for all load models.
     let system = one_bus_system(2);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),

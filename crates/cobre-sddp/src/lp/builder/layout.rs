@@ -115,10 +115,9 @@ pub(crate) struct TemplateBuildCtx<'a> {
     /// DELIVERY stage's operation window
     /// ([`StateLayout::is_anticipated_decision_active_for_delivery`]).
     pub(crate) anticipated_windows: Vec<(Option<i32>, Option<i32>)>,
-    /// Delivery-anchored resolution this build's role-(a) `StateLayout` attaches
-    /// via `StateLayout::set_anticipated_resolution`, from
-    /// `crate::setup::resolve_anticipated_commitments_core` — the same
-    /// resolution setup's own `StateLayout` carries.
+    /// Delivery-anchored resolution, threaded from setup's single owner
+    /// (`crate::setup::resolve_state_layout`) — the same resolution the role-(a)
+    /// `StateLayout` this build receives already carries.
     pub(crate) anticipated_resolution: AnticipatedResolution,
     /// `study_stage_ids[t] = stage.id`, length `n_study_stages`. The decision gate
     /// keys its window clause on the delivery stage's `stage.id`, NOT the stage

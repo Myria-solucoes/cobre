@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn empty_stages_returns_empty() {
     let system = one_bus_system(0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -22,7 +22,7 @@ fn empty_stages_returns_empty() {
 #[test]
 fn one_stage_one_template() {
     let system = one_bus_system(1);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -41,7 +41,7 @@ fn num_cols_formula_no_hydro_no_thermal_no_line() {
     // N=0, T=0, Lines=0, B=1, K=1, L=0
     // num_cols = N*(2+L)+1 + N*K*2 + T*K + Lines*K*2 + B*K*2 = 1 + 1*1*2 = 3
     let system = one_bus_system(1);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -63,7 +63,7 @@ fn num_cols_formula_one_hydro_lag_zero() {
     // Decision: turbine[1] + spillage[1] + deficit[1] + excess[1] = 4
     // Total: 7
     let system = one_hydro_system(1, 0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -88,7 +88,7 @@ fn num_cols_formula_one_hydro_lag_two() {
     // Decision: turbine[1] + spillage[1] + deficit[1] + excess[1] = 4
     // Total: 9
     let system = one_hydro_system(1, 2);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -112,7 +112,7 @@ fn num_rows_formula_no_hydro() {
     // fixing rows: 0, water balance: 0, load balance: 1*1 = 1
     // num_rows = 0 + 0 + 1 = 1
     let system = one_bus_system(1);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -131,7 +131,7 @@ fn num_rows_formula_one_hydro_lag_zero() {
     // N=1, L=0, B=1, K=1; no state-fixing rows (incoming state pinned via column bounds).
     // num_rows = N z_inflow(1) + N water_balance(1) + B*K load_balance(1) + 4 op-violation = 7
     let system = one_hydro_system(1, 0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -150,7 +150,7 @@ fn num_rows_formula_one_hydro_lag_two() {
     // N=1, L=2, B=1, K=1; lags do not add rows, no state-fixing rows. Same 7 as L=0:
     // num_rows = N z_inflow(1) + N water_balance(1) + B*K load_balance(1) + 4 op-violation = 7
     let system = one_hydro_system(1, 2);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -167,7 +167,7 @@ fn num_rows_formula_one_hydro_lag_two() {
 #[test]
 fn n_state_matches_indexer() {
     let system = one_hydro_system(1, 2);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -186,7 +186,7 @@ fn n_state_matches_indexer() {
 fn n_transfer_is_n_times_lag_order() {
     // n_transfer = N*L = 1*2 = 2
     let system = one_hydro_system(1, 2);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -203,7 +203,7 @@ fn n_transfer_is_n_times_lag_order() {
 #[test]
 fn base_row_is_n_dual_relevant_plus_n_hydros() {
     let system = one_hydro_system(2, 2);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -225,7 +225,7 @@ fn base_row_is_n_dual_relevant_plus_n_hydros() {
 #[test]
 fn csc_col_starts_monotone_nondecreasing() {
     let system = one_hydro_system(1, 1);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -246,7 +246,7 @@ fn csc_col_starts_monotone_nondecreasing() {
 #[allow(clippy::cast_sign_loss)]
 fn csc_row_indices_in_range() {
     let system = one_hydro_system(1, 1);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -270,7 +270,7 @@ fn csc_row_indices_in_range() {
 #[allow(clippy::cast_sign_loss)]
 fn csc_nz_count_matches_col_starts() {
     let system = one_hydro_system(1, 1);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -298,7 +298,7 @@ fn csc_nz_count_matches_col_starts() {
 fn theta_column_has_unit_objective() {
     let lag_order = 2;
     let system = one_hydro_system(1, lag_order);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -322,7 +322,7 @@ fn spillage_objective_nonzero_for_nonzero_penalty() {
     // Hydro fixture has spillage_cost = 0.01 over a 744h block, so the spillage
     // objective is strictly positive.
     let system = one_hydro_system(1, 0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),

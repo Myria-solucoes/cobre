@@ -1,7 +1,7 @@
 //! Integration test: lag-12 LP coefficient for PAR(2)-A vs classical PAR.
 //!
 //! Builds two small synthetic fixtures (2 hydros × 24 stages × 12 seasons) and
-//! calls [`cobre_sddp::build_stage_templates`] on each. No HiGHS solve, no
+//! calls [`cobre_sddp::build_stage_templates_resolving_layout`] on each. No HiGHS solve, no
 //! forward/backward pass, no filesystem I/O. Sub-second runtime; not gated
 //! behind `slow-tests`.
 //!
@@ -50,7 +50,7 @@ use cobre_core::{
 };
 use cobre_sddp::{
     InflowNonNegativityMethod, hydro_models::PrepareHydroModelsResult,
-    lp_builder::build_stage_templates,
+    lp_builder::build_stage_templates_resolving_layout,
 };
 use cobre_stochastic::{PrecomputedPar, normal::precompute::PrecomputedNormal};
 
@@ -632,7 +632,7 @@ fn lag_11_lp_coefficient_equals_psi_hat_over_twelve() {
     );
 
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    let templates = build_stage_templates(
+    let templates = build_stage_templates_resolving_layout(
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
@@ -641,7 +641,7 @@ fn lag_11_lp_coefficient_equals_psi_hat_over_twelve() {
         &hydro_models.evaporation,
         &cobre_sddp::ResolvedParameters::default(),
     )
-    .expect("build_stage_templates must succeed for the PAR(2)-A fixture");
+    .expect("build_stage_templates_resolving_layout must succeed for the PAR(2)-A fixture");
 
     let tmpl = &templates.templates[0];
     assert_eq!(
@@ -688,7 +688,7 @@ fn lag_0_lp_coefficient_combines_ar_and_annual() {
     let (system, par_lp) = build_par_a_fixture();
 
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    let templates = build_stage_templates(
+    let templates = build_stage_templates_resolving_layout(
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
@@ -697,7 +697,7 @@ fn lag_0_lp_coefficient_combines_ar_and_annual() {
         &hydro_models.evaporation,
         &cobre_sddp::ResolvedParameters::default(),
     )
-    .expect("build_stage_templates must succeed for the PAR(2)-A fixture");
+    .expect("build_stage_templates_resolving_layout must succeed for the PAR(2)-A fixture");
 
     let tmpl = &templates.templates[0];
 
@@ -743,7 +743,7 @@ fn classical_par_has_no_lag_11_column() {
     );
 
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    let templates = build_stage_templates(
+    let templates = build_stage_templates_resolving_layout(
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
@@ -752,7 +752,7 @@ fn classical_par_has_no_lag_11_column() {
         &hydro_models.evaporation,
         &cobre_sddp::ResolvedParameters::default(),
     )
-    .expect("build_stage_templates must succeed for the classical PAR(2) fixture");
+    .expect("build_stage_templates_resolving_layout must succeed for the classical PAR(2) fixture");
 
     let tmpl = &templates.templates[0];
 

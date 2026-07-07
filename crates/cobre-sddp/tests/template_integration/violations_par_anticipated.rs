@@ -35,7 +35,7 @@ fn max_outflow_active_col_bounds() {
 #[test]
 fn operational_violation_inactive_pinned() {
     let system = one_hydro_system(1, 0); // default: all violation bounds = 0
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -151,7 +151,7 @@ fn max_par_order_uses_par_lp_when_annual_present() {
     let par_lp =
         PrecomputedPar::build(&inflow_models, &stages, &hydro_ids, None).expect("par build ok");
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &par_lp,
@@ -160,7 +160,7 @@ fn max_par_order_uses_par_lp_when_annual_present() {
         &default_evaporation(&system),
         &ResolvedParameters::default(),
     )
-    .expect("build_stage_templates ok");
+    .expect("build_stage_templates_resolving_layout ok");
 
     assert_eq!(
         result.templates[0].max_par_order, 12,
@@ -204,7 +204,7 @@ fn max_par_order_classical_unchanged() {
     let par_lp =
         PrecomputedPar::build(&inflow_models, &stages, &hydro_ids, None).expect("par build ok");
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &par_lp,
@@ -213,7 +213,7 @@ fn max_par_order_classical_unchanged() {
         &default_evaporation(&system),
         &ResolvedParameters::default(),
     )
-    .expect("build_stage_templates ok");
+    .expect("build_stage_templates_resolving_layout ok");
 
     assert_eq!(
         result.templates[0].max_par_order, 3,
@@ -265,7 +265,7 @@ fn max_par_order_z_inflow_row_has_twelve_lag_entries() {
     let par_lp =
         PrecomputedPar::build(&inflow_models, &stages, &hydro_ids, None).expect("par build ok");
 
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &par_lp,
@@ -274,7 +274,7 @@ fn max_par_order_z_inflow_row_has_twelve_lag_entries() {
         &default_evaporation(&system),
         &ResolvedParameters::default(),
     )
-    .expect("build_stage_templates ok");
+    .expect("build_stage_templates_resolving_layout ok");
 
     let t = &result.templates[0];
     assert_eq!(
@@ -392,7 +392,7 @@ fn parameter_coefficient_persists_across_stage_template_uses() {
     // Two builds of the same system must yield bit-identical CSC arrays —
     // the matrix is not mutated by the solver loop (determinism).
     let system = one_hydro_system(2, l);
-    let result_a = build_stage_templates(
+    let result_a = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -402,7 +402,7 @@ fn parameter_coefficient_persists_across_stage_template_uses() {
         &ResolvedParameters::default(),
     )
     .expect("build ok");
-    let result_b = build_stage_templates(
+    let result_b = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -437,7 +437,7 @@ fn parameter_coefficient_persists_across_stage_template_uses() {
 #[test]
 fn test_anticipated_decision_bounds_at_active_stage() {
     let system = one_anticipated_thermal_system(4, 2, 10.0, 100.0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -468,7 +468,7 @@ fn test_anticipated_decision_bounds_at_active_stage() {
 #[test]
 fn test_anticipated_decision_bounds_inactive_when_beyond_horizon() {
     let system = one_anticipated_thermal_system(4, 2, 10.0, 100.0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -506,7 +506,7 @@ fn test_anticipated_decision_bounds_inactive_when_beyond_horizon() {
 #[test]
 fn test_anticipated_decision_inactive_at_horizon_boundary() {
     let system = one_anticipated_thermal_system(4, 2, 10.0, 100.0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -536,7 +536,7 @@ fn test_anticipated_decision_inactive_at_horizon_boundary() {
 #[test]
 fn test_anticipated_decision_inactive_one_past_horizon_boundary() {
     let system = one_anticipated_thermal_system(3, 2, 10.0, 100.0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -571,7 +571,7 @@ fn test_anticipated_decision_objective_uses_delivery_stage_factors() {
     // objective (pre-scale) = 50.0 * 744.0 * 1.0 = 37200.0.
     // After /COST_SCALE_FACTOR: 37200.0 / 1000.0 = 37.2.
     let system = one_anticipated_thermal_system(4, 2, 0.0, 100.0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -605,7 +605,7 @@ fn test_anticipated_decision_objective_uses_delivery_stage_factors() {
 #[test]
 fn test_anticipated_decision_objective_zero_at_horizon_boundary() {
     let system = one_anticipated_thermal_system(4, 2, 0.0, 100.0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -631,7 +631,7 @@ fn test_anticipated_decision_objective_zero_at_horizon_boundary() {
 #[test]
 fn test_anticipated_decision_objective_zero_when_inactive() {
     let system = one_anticipated_thermal_system(4, 2, 0.0, 100.0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -656,7 +656,7 @@ fn test_anticipated_decision_objective_zero_when_inactive() {
 #[test]
 fn test_anticipated_decision_objective_zero_one_past_boundary() {
     let system = one_anticipated_thermal_system(3, 2, 0.0, 100.0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -700,7 +700,7 @@ fn test_anticipated_decision_no_column_at_boundary_stage_strict_predicate() {
             #[allow(clippy::cast_possible_truncation)]
             let k_u32 = k as u32;
             let system = one_anticipated_thermal_system(n_stages, k_u32, 10.0, 100.0);
-            let result = build_stage_templates(
+            let result = build_stage_templates_resolving_layout(
                 &system,
                 no_penalty_config(),
                 &PrecomputedPar::default(),
@@ -739,7 +739,7 @@ fn test_anticipated_decision_no_column_at_boundary_stage_strict_predicate() {
 fn test_anticipated_delivery_thermal_cost_is_zero() {
     let lead_stages = 2_usize;
     let system = two_thermal_one_anticipated_system(4, lead_stages as u32);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -771,7 +771,7 @@ fn test_anticipated_delivery_thermal_cost_is_zero() {
 fn test_anticipated_pre_delivery_thermal_cost_unchanged() {
     let lead_stages = 2_usize;
     let system = two_thermal_one_anticipated_system(4, lead_stages as u32);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -800,7 +800,7 @@ fn test_anticipated_pre_delivery_thermal_cost_unchanged() {
 fn test_non_anticipated_thermal_cost_unchanged_under_anticipated_zero_out() {
     let lead_stages = 2_usize;
     let system = two_thermal_one_anticipated_system(4, lead_stages as u32);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -832,7 +832,7 @@ fn test_zero_out_and_fishing_active_predicate_align() {
     let lead_stages = 2_usize;
     let n_stages = 4_usize;
     let system = two_thermal_one_anticipated_system(n_stages, lead_stages as u32);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -882,7 +882,7 @@ fn test_zero_out_and_fishing_active_predicate_align() {
 #[test]
 fn test_anticipated_fishing_rows_count_by_stage() {
     let system = two_anticipated_thermal_system(4);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -923,7 +923,7 @@ fn test_anticipated_fishing_rows_count_by_stage() {
 #[test]
 fn test_anticipated_fishing_same_count_both_stages() {
     let system = one_anticipated_thermal_system(4, 2, 0.0, 100.0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -960,7 +960,7 @@ fn test_anticipated_fishing_same_count_both_stages() {
 #[test]
 fn test_anticipated_state_columns_unconstrained() {
     let system = two_anticipated_thermal_system(4);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -1008,7 +1008,7 @@ fn test_anticipated_state_columns_unconstrained() {
 #[test]
 fn test_anticipated_decision_write_to_state_out_def_row() {
     let system = one_anticipated_thermal_system(4, 2, 0.0, 100.0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -1042,7 +1042,7 @@ fn test_anticipated_decision_write_to_state_out_def_row() {
 #[test]
 fn test_anticipated_decision_inactive_no_state_write() {
     let system = one_anticipated_thermal_system(4, 2, 0.0, 100.0);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -1075,7 +1075,7 @@ fn test_anticipated_decision_inactive_no_state_write() {
 #[test]
 fn test_n_state_includes_n_ant_state() {
     let system = one_hydro_one_ant_system(4);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -1104,7 +1104,7 @@ fn test_n_state_includes_n_ant_state() {
 #[test]
 fn test_n_transfer_unchanged_by_anticipated() {
     let system = two_anticipated_thermal_system(4);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -1146,7 +1146,7 @@ fn test_anticipated_thermals_lp_roundtrip_k1() {
     let block_hours = 360.0_f64;
     let total_hours = 2.0 * block_hours; // 720.0
     let system = build_k1_system();
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -1311,7 +1311,7 @@ fn test_anticipated_thermals_lp_roundtrip_k2() {
     let block_hours = 360.0_f64;
     let total_hours = 2.0 * block_hours; // 720.0
     let system = build_k2_system();
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -1471,7 +1471,7 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
     let block_hours = 360.0_f64;
     let total_hours = 2.0 * block_hours; // 720.0
     let system = build_k3_system();
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -1633,7 +1633,7 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
 #[test]
 fn test_anticipated_thermals_lp_roundtrip_k0_baseline_parity() {
     let system_baseline = build_k0_baseline_system();
-    let result_baseline = build_stage_templates(
+    let result_baseline = build_stage_templates_resolving_layout(
         &system_baseline,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -1645,7 +1645,7 @@ fn test_anticipated_thermals_lp_roundtrip_k0_baseline_parity() {
     .expect("baseline build ok");
 
     // A second identical build must be bit-identical (determinism).
-    let result_baseline2 = build_stage_templates(
+    let result_baseline2 = build_stage_templates_resolving_layout(
         &system_baseline,
         no_penalty_config(),
         &PrecomputedPar::default(),
@@ -1750,7 +1750,7 @@ fn test_anticipated_thermals_lp_roundtrip_k2_with_discount_rate() {
     let total_hours = 2.0 * block_hours; // 720.0
 
     let system = build_hydro_one_ant_system(4, k as u32, annual_rate);
-    let result = build_stage_templates(
+    let result = build_stage_templates_resolving_layout(
         &system,
         no_penalty_config(),
         &PrecomputedPar::default(),
