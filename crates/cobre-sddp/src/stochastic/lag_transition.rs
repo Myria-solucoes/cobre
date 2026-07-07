@@ -12,6 +12,7 @@ use cobre_core::{
     entities::hydro::Hydro,
     initial_conditions::RecentObservation,
     temporal::{SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageLagTransition},
+    window_period_overlaps,
 };
 
 /// Pre-computed seed values for the lag accumulator, derived from
@@ -168,24 +169,6 @@ pub(crate) fn find_season_year_monthly(
     }
 
     candidate_year + 1
-}
-
-/// Count the number of days in `[stage_start, stage_end)` that fall within
-/// `[period_start, period_end)`. Returns 0 if there is no overlap.
-pub(crate) fn days_in_period(
-    stage_start: NaiveDate,
-    stage_end: NaiveDate,
-    period_start: NaiveDate,
-    period_end: NaiveDate,
-) -> u32 {
-    let overlap_start = stage_start.max(period_start);
-    let overlap_end = stage_end.min(period_end);
-    if overlap_end > overlap_start {
-        u32::try_from((overlap_end - overlap_start).num_days())
-            .unwrap_or_else(|_| unreachable!("overlap days always fit in u32"))
-    } else {
-        0
-    }
 }
 
 /// Concrete `[start, end)` calendar window for one occurrence of a season
@@ -357,6 +340,28 @@ fn next_period_window(
     }
 }
 
+/// Overlap hours between `stage`'s calendar span and a single period of
+/// `period_hours` duration starting at `period_start`, via
+/// [`window_period_overlaps`] framed with the origin at `period_start`.
+///
+/// A negative offset (the stage starts before `period_start`) is the intended
+/// pre-period straddle case — `window_period_overlaps` clamps it, so this
+/// does not guard or reject it.
+fn single_period_overlap_hours(stage: &Stage, period_start: NaiveDate, period_hours: f64) -> f64 {
+    let start_days = i32::try_from((stage.start_date - period_start).num_days())
+        .unwrap_or_else(|_| unreachable!("stage-to-period day offset always fits in i32"));
+    let window_start_hours = f64::from(start_days) * 24.0;
+
+    let width_days = u32::try_from((stage.end_date - stage.start_date).num_days())
+        .unwrap_or_else(|_| unreachable!("stage width in days always fits in u32"));
+    let window_width_hours = f64::from(width_days) * 24.0;
+
+    window_period_overlaps(window_start_hours, window_width_hours, &[period_hours])
+        .first()
+        .copied()
+        .unwrap_or(0.0)
+}
+
 /// The calendar year identifying which occurrence of `season_def` `stage`
 /// belongs to, disambiguating repeated season ids across years.
 ///
@@ -402,17 +407,12 @@ pub(crate) fn compute_period_transition(
 ) -> StageLagTransition {
     let current = period_window(season_map, season_def, stage);
 
-    let days_current = days_in_period(stage.start_date, stage.end_date, current.start, current.end);
-    let accumulate_weight = f64::from(days_current) * 24.0 / current.hours;
+    let accumulate_weight =
+        single_period_overlap_hours(stage, current.start, current.hours) / current.hours;
 
-    let spillover_weight =
-        next_period_window(season_map, season_def, &current).map_or(0.0, |next| {
-            let days_next = days_in_period(stage.start_date, stage.end_date, next.start, next.end);
-            if days_next > 0 {
-                f64::from(days_next) * 24.0 / next.hours
-            } else {
-                0.0
-            }
+    let spillover_weight = next_period_window(season_map, season_def, &current)
+        .map_or(0.0, |next| {
+            single_period_overlap_hours(stage, next.start, next.hours) / next.hours
         });
 
     let year = resolved_year(season_map, season_def, stage);
@@ -527,15 +527,10 @@ fn compute_downstream_transitions(
 
         let quarter_period_start = NaiveDate::from_ymd_opt(year, quarter_start_month, 1)
             .unwrap_or_else(|| unreachable!("quarter start date is always valid"));
-        let last_quarter_month_end = month_exclusive_end(year, quarter_end_month);
 
-        let days_current = days_in_period(
-            stage.start_date,
-            stage.end_date,
-            quarter_period_start,
-            last_quarter_month_end,
-        );
-        let downstream_accumulate_weight = f64::from(days_current) * 24.0 / quarter_total_hours;
+        let downstream_accumulate_weight =
+            single_period_overlap_hours(stage, quarter_period_start, quarter_total_hours)
+                / quarter_total_hours;
 
         let next_quarter_start_month = quarter_end_month + 1; // may be 13 → wrap to next year
         let (next_q_year, next_q_start_month) = if next_quarter_start_month > 12 {
@@ -546,12 +541,6 @@ fn compute_downstream_transitions(
         let next_quarter_end_month = next_q_start_month + 2;
         let next_quarter_start = NaiveDate::from_ymd_opt(next_q_year, next_q_start_month, 1)
             .unwrap_or_else(|| unreachable!("next quarter start date is always valid"));
-        let (next_q_end_year, next_q_end_month_adj) = if next_quarter_end_month > 12 {
-            (next_q_year + 1, next_quarter_end_month - 12)
-        } else {
-            (next_q_year, next_quarter_end_month)
-        };
-        let next_quarter_end = month_exclusive_end(next_q_end_year, next_q_end_month_adj);
         let next_quarter_total_hours: f64 = (next_q_start_month..=next_quarter_end_month)
             .map(|m| {
                 let (y, mo) = if m > 12 {
@@ -562,17 +551,10 @@ fn compute_downstream_transitions(
                 month_total_hours(y, mo)
             })
             .sum();
-        let days_next = days_in_period(
-            stage.start_date,
-            stage.end_date,
-            next_quarter_start,
-            next_quarter_end,
-        );
-        let downstream_spillover_weight = if days_next > 0 {
-            f64::from(days_next) * 24.0 / next_quarter_total_hours
-        } else {
-            0.0
-        };
+
+        let downstream_spillover_weight =
+            single_period_overlap_hours(stage, next_quarter_start, next_quarter_total_hours)
+                / next_quarter_total_hours;
 
         let is_last_of_quarter = stages[stage_idx + 1..transition_idx].iter().all(|later| {
             let later_month = later.season_id.map_or(u32::MAX, |id| {
@@ -1116,6 +1098,167 @@ mod tests {
         assert!(
             (transitions[1].accumulate_weight - flattened_to_july_weight).abs() > 1e-3,
             "Q3 stage must not collapse to a monthly-level weight"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration-equivalence: window_period_overlaps route vs the
+    // pre-migration days_in_period * 24.0 route
+    // -----------------------------------------------------------------------
+
+    /// Private copy of the pre-migration `days_in_period` formula, kept only
+    /// to assert bit-equality against the `window_period_overlaps` route the
+    /// production code now uses exclusively.
+    fn reference_days_in_period(
+        stage_start: NaiveDate,
+        stage_end: NaiveDate,
+        period_start: NaiveDate,
+        period_end: NaiveDate,
+    ) -> u32 {
+        let overlap_start = stage_start.max(period_start);
+        let overlap_end = stage_end.min(period_end);
+        if overlap_end > overlap_start {
+            u32::try_from((overlap_end - overlap_start).num_days())
+                .unwrap_or_else(|_| unreachable!("overlap days always fit in u32"))
+        } else {
+            0
+        }
+    }
+
+    fn reference_weight(
+        stage_start: NaiveDate,
+        stage_end: NaiveDate,
+        period_start: NaiveDate,
+        period_end: NaiveDate,
+        period_hours: f64,
+    ) -> f64 {
+        let days = reference_days_in_period(stage_start, stage_end, period_start, period_end);
+        f64::from(days) * 24.0 / period_hours
+    }
+
+    #[test]
+    fn test_migration_equivalence_window_period_overlaps_bit_identical_to_days_in_period() {
+        // (a) stage straddling a monthly boundary: accumulate + nonzero spillover.
+        let stage_monthly = make_stage(0, d(2026, 1, 28), d(2026, 2, 4), Some(0));
+        let jan_start = d(2026, 1, 1);
+        let jan_end = d(2026, 2, 1);
+        let jan_hours = 31.0 * 24.0;
+        let feb_start = d(2026, 2, 1);
+        let feb_end = d(2026, 3, 1);
+        let feb_hours = 28.0 * 24.0;
+
+        let accumulate_new =
+            single_period_overlap_hours(&stage_monthly, jan_start, jan_hours) / jan_hours;
+        let accumulate_ref = reference_weight(
+            stage_monthly.start_date,
+            stage_monthly.end_date,
+            jan_start,
+            jan_end,
+            jan_hours,
+        );
+        assert_eq!(
+            accumulate_new, accumulate_ref,
+            "monthly accumulate weight must be bit-identical"
+        );
+
+        let spillover_new =
+            single_period_overlap_hours(&stage_monthly, feb_start, feb_hours) / feb_hours;
+        let spillover_ref = reference_weight(
+            stage_monthly.start_date,
+            stage_monthly.end_date,
+            feb_start,
+            feb_end,
+            feb_hours,
+        );
+        assert!(
+            spillover_ref > 0.0,
+            "fixture must exercise nonzero spillover"
+        );
+        assert_eq!(
+            spillover_new, spillover_ref,
+            "monthly spillover weight must be bit-identical"
+        );
+
+        // (b) Weekly full-week stage.
+        let stage_weekly = make_stage(0, d(2024, 1, 1), d(2024, 1, 8), Some(0));
+        let week_start = d(2024, 1, 1);
+        let week_end = d(2024, 1, 8);
+        let week_hours = 7.0 * 24.0;
+        let weekly_new =
+            single_period_overlap_hours(&stage_weekly, week_start, week_hours) / week_hours;
+        let weekly_ref = reference_weight(
+            stage_weekly.start_date,
+            stage_weekly.end_date,
+            week_start,
+            week_end,
+            week_hours,
+        );
+        assert_eq!(
+            weekly_new, weekly_ref,
+            "weekly full-week weight must be bit-identical"
+        );
+
+        // (c) Custom sub-window stage (the D30 shape): a Q3 stage spanning
+        // only the first 30 days of a 92-day quarter.
+        let stage_custom = make_stage(1, d(2024, 7, 1), d(2024, 7, 31), Some(12));
+        let q3_start = d(2024, 7, 1);
+        let q3_end = d(2024, 10, 1);
+        let q3_hours = 92.0 * 24.0;
+        let custom_new = single_period_overlap_hours(&stage_custom, q3_start, q3_hours) / q3_hours;
+        let custom_ref = reference_weight(
+            stage_custom.start_date,
+            stage_custom.end_date,
+            q3_start,
+            q3_end,
+            q3_hours,
+        );
+        assert_eq!(
+            custom_new, custom_ref,
+            "custom sub-window weight must be bit-identical"
+        );
+
+        // (d) quarterly downstream window: a stage straddling the Q3/Q4
+        // boundary, mirroring compute_downstream_transitions's own weighting.
+        let stage_quarterly = make_stage(0, d(2026, 9, 25), d(2026, 10, 4), Some(8));
+        let q3_2026_start = d(2026, 7, 1);
+        let q3_2026_end = d(2026, 10, 1);
+        let q3_2026_hours = 92.0 * 24.0;
+        let q4_2026_start = d(2026, 10, 1);
+        let q4_2026_end = d(2027, 1, 1);
+        let q4_2026_hours = 92.0 * 24.0;
+
+        let downstream_accumulate_new =
+            single_period_overlap_hours(&stage_quarterly, q3_2026_start, q3_2026_hours)
+                / q3_2026_hours;
+        let downstream_accumulate_ref = reference_weight(
+            stage_quarterly.start_date,
+            stage_quarterly.end_date,
+            q3_2026_start,
+            q3_2026_end,
+            q3_2026_hours,
+        );
+        assert_eq!(
+            downstream_accumulate_new, downstream_accumulate_ref,
+            "quarterly downstream accumulate weight must be bit-identical"
+        );
+
+        let downstream_spillover_new =
+            single_period_overlap_hours(&stage_quarterly, q4_2026_start, q4_2026_hours)
+                / q4_2026_hours;
+        let downstream_spillover_ref = reference_weight(
+            stage_quarterly.start_date,
+            stage_quarterly.end_date,
+            q4_2026_start,
+            q4_2026_end,
+            q4_2026_hours,
+        );
+        assert!(
+            downstream_spillover_ref > 0.0,
+            "fixture must exercise nonzero downstream spillover"
+        );
+        assert_eq!(
+            downstream_spillover_new, downstream_spillover_ref,
+            "quarterly downstream spillover weight must be bit-identical"
         );
     }
 
