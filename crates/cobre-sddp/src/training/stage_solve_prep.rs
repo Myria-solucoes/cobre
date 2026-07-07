@@ -14,13 +14,10 @@
 //! layering (`core → io/stochastic/solver → comm → sddp`'s `lp` sits below
 //! `training`), so `training/` is the cycle-free home.
 //!
-//! Not yet called by any solve site: forthcoming migrations wire forward,
-//! backward, simulation, and lower bound onto [`StageSolvePrep::run`] in turn.
-//! Until one lands, this module's only caller is its own unit test.
-
-// The whole module is unreachable from production until a solve site migrates
-// onto this owner; the allow refires the moment one does.
-#![allow(dead_code)]
+//! Called by the forward pass (`training/forward/stage_solve.rs`) and the
+//! backward pass (`training/backward/lp_setup.rs`); the simulation and
+//! lower-bound sites still open-code the block and wire onto
+//! [`StageSolvePrep::run`] in turn.
 
 use cobre_solver::SolverInterface;
 
@@ -62,6 +59,8 @@ pub(crate) enum LoadNoise {
     /// `fill_load_patches` (forward, backward, simulation).
     Present,
     /// Skip both: the lower bound evaluates no load-bus noise dimension.
+    // Rationale: constructed once the lower bound wires onto `StageSolvePrep::run`.
+    #[allow(dead_code)]
     Absent,
 }
 
@@ -74,6 +73,8 @@ pub(crate) enum InflowNoise {
     Transform,
     /// The caller has already filled the buffers (the lower bound's
     /// PAR-batch precompute).
+    // Rationale: constructed once the lower bound wires onto `StageSolvePrep::run`.
+    #[allow(dead_code)]
     PreBuilt,
 }
 
@@ -89,6 +90,10 @@ pub(crate) struct StageSolvePrepParams<'a> {
     /// Which slice this solve pins as incoming state.
     pub state_source: StateSource<'a>,
     /// One realized solve vs. a per-opening loop; see [`OpeningMode`].
+    // Rationale: caller-declared intent only — `run` always prepares exactly
+    // one solve regardless of the caller's loop shape, so the field is never
+    // read internally.
+    #[allow(dead_code)]
     pub opening_mode: OpeningMode,
     /// Whether to patch stochastic load-bus bounds.
     pub load_noise: LoadNoise,

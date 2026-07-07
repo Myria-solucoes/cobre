@@ -9,9 +9,10 @@ use crate::{
     context::{StageContext, TrainingContext},
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     error::SddpError,
-    indexer::BlockGrid,
     lp_builder::{AnticipatedGenWidenCtx, COST_SCALE_FACTOR},
-    noise::{NcsNoiseOffsets, transform_inflow_noise, transform_load_noise, transform_ncs_noise},
+    training::stage_solve_prep::{
+        InflowNoise, LoadNoise, OpeningMode, StageSolvePrep, StageSolvePrepParams, StateSource,
+    },
     trajectory::TrajectoryRecord,
     workspace::{BasisStoreSliceMut, CapturedBasis, SolverWorkspace},
 };
@@ -56,11 +57,8 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         pool,
         dcs,
     } = *key;
-    let n_hydros = ctx.n_hydros;
-    let n_load_buses = ctx.n_load_buses;
     let study_dims = training_ctx.study_dims;
     let state = training_ctx.state;
-    let stochastic = training_ctx.stochastic;
     let horizon = training_ctx.horizon;
 
     // DCS path: load the cut-free base template here (the caller skips its frozen
@@ -70,94 +68,11 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         ws.solver.load_model(&ctx.templates[t]);
     }
 
-    let (state_ref, scratch) = (&ws.current_state[..], &mut ws.scratch);
-    transform_inflow_noise(raw_noise, t, state_ref, ctx, training_ctx, scratch);
-    let blk = if n_load_buses > 0 {
-        ctx.block_counts_per_stage[t]
-    } else {
-        0
-    };
-    transform_load_noise(
-        raw_noise,
-        n_hydros,
-        n_load_buses,
-        stochastic,
-        t,
-        blk,
-        &mut ws.scratch.load_rhs_buf,
-    );
-    let n_stochastic_ncs = stochastic.n_stochastic_ncs();
-    if n_stochastic_ncs > 0 {
-        transform_ncs_noise(
-            raw_noise,
-            &NcsNoiseOffsets {
-                n_hydros,
-                n_load_buses,
-            },
-            stochastic,
-            t,
-            ctx.block_counts_per_stage[t],
-            ctx.ncs_max_gen,
-            ctx.ncs_allow_curtailment,
-            &mut ws.scratch.ncs_col_lower_buf,
-            &mut ws.scratch.ncs_col_upper_buf,
-        );
-    }
-
-    ws.patch_buf.fill_col_state_patches(
-        training_ctx.state,
-        &ws.current_state,
-        &ctx.templates[t].col_scale,
-    );
-    ws.patch_buf.fill_forward_patches(
-        state,
-        &ws.current_state,
-        &ws.scratch.noise_buf,
-        ctx.base_rows[t],
-        &ctx.templates[t].row_scale,
-    );
-    if n_load_buses > 0 {
-        // Per-stage block count, NOT the global `indexer.n_blks` (the
-        // nonuniform-block extraction trap). `max_deficit_segments` is
-        // study-invariant, read from `study_dims`.
-        let grid = BlockGrid::new(
-            ctx.block_counts_per_stage[t],
-            study_dims.max_deficit_segments,
-        );
-        ws.patch_buf.fill_load_patches(
-            ctx.load_balance_row_starts[t],
-            grid,
-            &ws.scratch.load_rhs_buf,
-            ctx.load_bus_indices,
-            &ctx.templates[t].row_scale,
-        );
-    }
-    // Per-stage `geometry.z_inflow_row_start`, always 0: state pinning uses
-    // column bounds, so no rows precede the z-inflow block. Empty
-    // `geometry_per_stage` (synthetic tests) falls back to 0.
-    let z_inflow_row_start = ctx
-        .geometry_per_stage
-        .get(t)
-        .map_or(0, |g| g.z_inflow_row_start);
-    ws.patch_buf.fill_z_inflow_patches(
-        z_inflow_row_start,
-        &ws.scratch.z_inflow_rhs_buf,
-        &ctx.templates[t].row_scale,
-    );
-    let cp = ws.patch_buf.state_col_patch_count();
-    ws.solver.set_col_bounds(
-        &ws.patch_buf.col_indices[..cp],
-        &ws.patch_buf.col_lower[..cp],
-        &ws.patch_buf.col_upper[..cp],
-    );
-    if training_ctx.state.n_anticipated > 0
-        && let Some(geom) = ctx.geometry_per_stage.get(t)
-    {
-        let template = &ctx.templates[t];
-        ws.patch_buf.apply_anticipated_delivery_gen_widen(
-            &mut ws.solver,
-            &AnticipatedGenWidenCtx {
-                state_layout: training_ctx.state,
+    let widen_ctx = if state.n_anticipated > 0 {
+        ctx.geometry_per_stage.get(t).map(|geom| {
+            let template = &ctx.templates[t];
+            AnticipatedGenWidenCtx {
+                state_layout: state,
                 state: &ws.current_state,
                 anticipated_thermal_indices: &study_dims.anticipated_thermal_indices,
                 col_scale: &template.col_scale,
@@ -167,62 +82,28 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
                 n_blks: ctx.block_counts_per_stage[t],
                 stage_idx: t,
                 n_stages: num_stages,
-            },
-        );
-    }
-    let pc = ws.patch_buf.forward_patch_count();
-    ws.solver.set_row_bounds(
-        &ws.patch_buf.indices[..pc],
-        &ws.patch_buf.lower[..pc],
-        &ws.patch_buf.upper[..pc],
+            }
+        })
+    } else {
+        None
+    };
+    let prep_params = StageSolvePrepParams {
+        state_source: StateSource(&ws.current_state),
+        opening_mode: OpeningMode::SingleRealized,
+        load_noise: LoadNoise::Present,
+        inflow_noise: InflowNoise::Transform,
+        widen_ctx,
+        raw_noise,
+    };
+    StageSolvePrep::run(
+        &mut ws.solver,
+        &mut ws.patch_buf,
+        &mut ws.scratch,
+        ctx,
+        training_ctx,
+        t,
+        &prep_params,
     );
-    // Patch NCS availability bounds onto this stage's dense NCS columns. The
-    // gather forces `[0, 0]` for a slot whose `ncs_stochastic_windows[slot]`
-    // excludes this stage's id, so a not-yet-commissioned source dispatches
-    // nothing. The index buffer is constant across openings (rebuilt lazily on a
-    // stage transition); the bounds change every scenario, gathered every solve.
-    if n_stochastic_ncs > 0 && study_dims.has_ncs {
-        let n_blks = ctx.block_counts_per_stage[t];
-        let dense_col = ctx.ncs_stochastic_dense_col;
-        let windows = ctx.ncs_stochastic_windows;
-        // Stage id is the dormancy key (NOT the index `t`; filtered placeholder
-        // stages can shift the id off the index).
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let stage_id = training_ctx
-            .stages
-            .get(t)
-            .map_or(t as i32, |stage| stage.id);
-        let ncs_col_start = ctx.ncs_col_starts[t];
-        let expected_len = dense_col.len() * n_blks;
-        // Rebuild the index buffer when the column **start** changes, not only its
-        // length: two stages can share a length yet address different columns, so
-        // keying on length alone would set bounds on the previous stage's columns.
-        if ws.scratch.last_ncs_col_start != ncs_col_start
-            || ws.scratch.ncs_col_indices_buf.len() != expected_len
-        {
-            crate::noise::build_dense_ncs_col_indices(
-                dense_col,
-                ncs_col_start,
-                n_blks,
-                &mut ws.scratch.ncs_col_indices_buf,
-            );
-            ws.scratch.last_ncs_col_start = ncs_col_start;
-        }
-        crate::noise::gather_dense_ncs_bounds(
-            windows,
-            stage_id,
-            n_blks,
-            &ws.scratch.ncs_col_lower_buf,
-            &ws.scratch.ncs_col_upper_buf,
-            &mut ws.scratch.ncs_col_lower_active_buf,
-            &mut ws.scratch.ncs_col_upper_active_buf,
-        );
-        ws.solver.set_col_bounds(
-            &ws.scratch.ncs_col_indices_buf,
-            &ws.scratch.ncs_col_lower_active_buf,
-            &ws.scratch.ncs_col_upper_active_buf,
-        );
-    }
     // Zero theta at the terminal stage (no successor to penalise), but NOT when
     // boundary cuts are loaded — those constrain theta from below and must stay
     // visible in the objective.
