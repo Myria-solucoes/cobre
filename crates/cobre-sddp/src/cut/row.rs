@@ -85,8 +85,6 @@ pub(crate) fn push_cut_row(
 /// given `stage`. The buffers inside `batch` retain their allocated capacity
 /// across calls, eliminating heap allocation on the hot path.
 ///
-/// This is the allocation-free core used by `build_cut_row_batch`.
-///
 /// # Panics
 ///
 /// Panics if the total number of non-zeros exceeds `i32::MAX` (the `HiGHS`

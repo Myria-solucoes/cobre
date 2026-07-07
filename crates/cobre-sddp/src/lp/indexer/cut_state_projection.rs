@@ -104,12 +104,7 @@ impl CutStateProjection {
         let mut render_coeff_indices = Vec::new();
         let mut render_columns = Vec::new();
 
-        let push_dim = |global: &StateLayout,
-                        incoming_columns: &mut Vec<usize>,
-                        outgoing_columns: &mut Vec<usize>,
-                        render_coeff_indices: &mut Vec<usize>,
-                        render_columns: &mut Vec<usize>,
-                        g: usize| {
+        let mut push_dim = |g: usize| {
             let reduced_j = incoming_columns.len();
             let outgoing = global.lp_column_for_state(g);
             incoming_columns.push(global.state_to_lp_incoming_column(g));
@@ -125,26 +120,12 @@ impl CutStateProjection {
 
         if state_config.storage {
             for g in global.state_dim_storage_range() {
-                push_dim(
-                    global,
-                    &mut incoming_columns,
-                    &mut outgoing_columns,
-                    &mut render_coeff_indices,
-                    &mut render_columns,
-                    g,
-                );
+                push_dim(g);
             }
         }
         if state_config.inflow_lags {
             for g in global.state_dim_lag_range() {
-                push_dim(
-                    global,
-                    &mut incoming_columns,
-                    &mut outgoing_columns,
-                    &mut render_coeff_indices,
-                    &mut render_columns,
-                    g,
-                );
+                push_dim(g);
             }
         }
         // Travel-time buckets: always included, the anticipated pattern — a
@@ -152,24 +133,10 @@ impl CutStateProjection {
         // `state_dimension` and misalign the intercept dot against the global
         // trial state.
         for g in global.state_dim_bucket_range() {
-            push_dim(
-                global,
-                &mut incoming_columns,
-                &mut outgoing_columns,
-                &mut render_coeff_indices,
-                &mut render_columns,
-                g,
-            );
+            push_dim(g);
         }
         for g in global.state_dim_anticipated_range() {
-            push_dim(
-                global,
-                &mut incoming_columns,
-                &mut outgoing_columns,
-                &mut render_coeff_indices,
-                &mut render_columns,
-                g,
-            );
+            push_dim(g);
         }
 
         debug_assert!(
