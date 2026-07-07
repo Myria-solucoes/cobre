@@ -1100,6 +1100,20 @@ where
             // Inert whenever empty: disaggregation_weight_at's own empty-slice
             // fallback already zeroes next_day_weight, so zeta is never read downstream.
             zeta: self.stage_ctx.zeta_s.first().copied().unwrap_or(0.0),
+            anticipated_widen: (self.training_ctx.state.n_anticipated > 0).then(|| {
+                crate::training::lower_bound::AnticipatedLbWiden {
+                    anticipated_thermal_indices: &self
+                        .training_ctx
+                        .study_dims
+                        .anticipated_thermal_indices,
+                    thermal_col_start: self
+                        .stage_ctx
+                        .geometry_per_stage
+                        .first()
+                        .map_or(0, |g| g.thermal.start),
+                    n_stages: self.stage_ctx.templates.len(),
+                }
+            }),
         };
         let mut lb_bundle = LbEvalScratchBundle::from_scratch_fields(
             &mut self.scratch.patch_buf,

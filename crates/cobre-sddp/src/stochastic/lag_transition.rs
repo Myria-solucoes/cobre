@@ -81,8 +81,19 @@ pub(crate) fn compute_recent_observation_seed(
     let mut accum_seed = vec![0.0_f64; hydro_count];
     let mut per_hydro_hours: HashMap<i32, f64> = HashMap::new();
 
+    // `hydros` is System::hydros()'s canonical `(operational_start_date, id)`
+    // order, id-ascending only when every hydro shares one start date; a
+    // staggered-commissioning system breaks that coincidence, so the lookup
+    // resolves through this position map, never `binary_search_by_key` over
+    // `hydros` itself.
+    let hydro_positions: HashMap<i32, usize> = hydros
+        .iter()
+        .enumerate()
+        .map(|(idx, h)| (h.id.0, idx))
+        .collect();
+
     for obs in recent_obs {
-        let Ok(idx) = hydros.binary_search_by_key(&obs.hydro_id.0, |h| h.id.0) else {
+        let Some(&idx) = hydro_positions.get(&obs.hydro_id.0) else {
             continue;
         };
         let obs_days = (obs.end_date - obs.start_date).num_days();
@@ -1605,6 +1616,48 @@ mod tests {
 
         assert_eq!(seed.accum_seed[0], 0.0);
         assert_eq!(seed.weight_seed, 0.0);
+    }
+
+    /// Test 13 (regression): `hydros` in canonical `(operational_start_date,
+    /// id)` order can be id-DESCENDING — here hydro id=1's earlier
+    /// commissioning date sorts it before hydro id=0. Each observation must
+    /// still land in its OWN hydro's accumulator slot, resolved through an
+    /// id->position map rather than `binary_search_by_key` over `hydros`
+    /// (which requires id-ascending order and silently drops the id=1
+    /// observation under this staggered ordering).
+    #[test]
+    fn test_seed_correct_under_staggered_commissioning_dates() {
+        let season_map = monthly_season_map();
+        let stage = make_stage(0, d(2026, 4, 4), d(2026, 5, 2), Some(3));
+
+        let mut hydro_1_earlier = make_hydro(1);
+        hydro_1_earlier.operational_start_date = d(2024, 1, 1);
+        let mut hydro_0_later = make_hydro(0);
+        hydro_0_later.operational_start_date = d(2025, 6, 1);
+        // Canonical order: hydro id=1 (earlier date) at position 0, hydro
+        // id=0 (later date) at position 1 — id-descending, not id-ascending.
+        let hydros = vec![hydro_1_earlier, hydro_0_later];
+
+        let obs = vec![
+            make_observation(0, 2026, 4, 1, 4, 4, 500.0),
+            make_observation(1, 2026, 4, 1, 4, 4, 300.0),
+        ];
+
+        let seed = compute_recent_observation_seed(&obs, &stage, &season_map, &hydros);
+
+        let tol = 1e-10;
+        assert!(
+            (seed.accum_seed[0] - 300.0 * 72.0).abs() < tol,
+            "hydro id=1 (canonical position 0) accum_seed should be {}, got {}",
+            300.0 * 72.0,
+            seed.accum_seed[0]
+        );
+        assert!(
+            (seed.accum_seed[1] - 500.0 * 72.0).abs() < tol,
+            "hydro id=0 (canonical position 1) accum_seed should be {}, got {}",
+            500.0 * 72.0,
+            seed.accum_seed[1]
+        );
     }
 
     #[test]

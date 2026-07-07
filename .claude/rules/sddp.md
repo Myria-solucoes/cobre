@@ -115,6 +115,29 @@ Read: `policy/policy_load.rs` (`validate_policy_load`, `slot_identity`). Pinned
 by the `validate_policy_load_full_fcf_*` and
 `validate_policy_load_boundary_injection_*` tests in that module's test suite.
 
+## Initial-state seeding resolves IDs through a position map, never `binary_search`
+
+`System::hydros()`/`thermals()` sort canonically by `(operational_start_date,
+id)`, which is id-ascending only when every entity shares one operational
+start date. A staggered-commissioning system (filling reservoirs, future-entry
+plants — the entire point of `operational_start_date`) breaks that
+coincidence, so `binary_search_by_key` over the canonical slice — which
+requires id-ascending order — silently returns `Err` (or the wrong index) for
+an out-of-id-order entity, dropping its seed to the default `0.0`. Every
+id-keyed initial-condition lookup (`storage`, `filling_storage`,
+`past_inflows`, thermal `past_anticipated_commitments`, the recent-observation
+lag seed) resolves through an `id -> position` map built once from the
+canonical slice, never a `binary_search_by_key` call. The map is built from
+the canonical order, but every write still iterates the IC record list (not
+the map) — a map iteration order is unspecified and would violate
+declaration-order invariance if used to drive writes.
+Read: `setup/mod.rs` (`id_to_position`, `build_initial_state`),
+`stochastic/lag_transition.rs` (`compute_recent_observation_seed`). Pinned by
+`test_initial_state_seeds_correctly_under_staggered_commissioning_dates`,
+`build_initial_state_anticipated_seed_correct_under_staggered_commissioning_dates`,
+and `test_seed_correct_under_staggered_commissioning_dates`, each using a
+staggered-date fixture where the canonical order is id-descending.
+
 ## Water travel time
 
 A declared upstream→downstream arc introduces in-transit "bucket" state: one
@@ -517,6 +540,35 @@ training and simulating both `LeadTime` and `LeadStages` configurations of
 the same calendar to bit-identical solutions), and
 `a1c_lead_stages_is_pure_index_shift` (pins the delivery-anchored decider
 `c(m) = m - lead` those bounds are read against).
+
+### Delivery-gen widen: the ring carries the commitment as a scaled state variable
+
+The in-LP ring transports the committed value through scaled state columns
+(pinned incoming slot `÷ col_scale`, the fishing coefficient `× col_scale`), so a
+commitment sitting exactly at the delivery-stage generation cap can arrive a
+sub-ULP ABOVE it — the must-generate fishing (`Σ_b h_b·gen_b = H·commitment`) then
+demands `gen > max_gen` and the LP is infeasible, though delivery-anchoring makes
+the value in-bounds in exact arithmetic. Every state pin therefore also widens the
+delivery-stage anticipated gen bound to `max(max_gen, pinned_commitment)` via
+`PatchBuffer::apply_anticipated_delivery_gen_widen`, co-located with
+`fill_col_state_patches` at all four pin sites (forward, backward, lower-bound,
+simulation) so it re-applies on every reload-per-solve and survives the solver
+retry path. Two forbidden alternatives: a penalized slack on the fishing (the
+value is in-bounds in exact arithmetic — no recourse gap exists); clamping the
+carried commitment DOWN to the cap (the pin's own `÷ col_scale` round-trip
+re-overshoots, so a clamp-to-cap does not survive). The widen fires ONLY when the
+commitment is strictly outside `[min_gen, max_gen]` — a true no-op (no
+`set_col_bounds`) for every in-cap commitment, so it is parity-neutral (the golden
+set, D34 included, is byte-identical) and never a slack; the `1e-9`-relative
+headroom is physically meaningless and only absorbs the round-trip.
+Read: `lp/builder/patch.rs`
+(`fill_anticipated_delivery_gen_widen`, `apply_anticipated_delivery_gen_widen`,
+`AnticipatedGenWidenCtx`), `training/forward/stage_solve.rs`,
+`training/backward/lp_setup.rs`, `training/lower_bound.rs` (`lb_evaluate_stage_0`,
+`LbEvalSpec::anticipated_widen`), `simulation/pipeline.rs`. Pinned by
+`anticipated_commitment_at_cap_survives_ring_carry` (a K=2 commitment seeded a
+sub-ULP over its cap and carried through the ring; infeasible with the widen
+reverted, feasible with it).
 
 ## Day-weighted inflow disaggregation: peek-ahead determinism and the forward/backward asymmetry
 

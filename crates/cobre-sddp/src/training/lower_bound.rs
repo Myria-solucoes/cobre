@@ -80,6 +80,25 @@ pub struct LbEvalSpec<'a> {
     pub disagg_weight: DisaggregationWeight,
     /// ζ at stage 0, scaling the disaggregation blend (`StageContext::zeta_s[0]`).
     pub zeta: f64,
+    /// Stage-0 anticipated delivery-gen widen inputs; `None` with no anticipated
+    /// plants (the widen is then a no-op). Present so the lower bound's stage-0
+    /// pin admits a commitment the ring's scaled round-trip drifted a sub-ULP past
+    /// its delivery cap — the same
+    /// [`PatchBuffer::apply_anticipated_delivery_gen_widen`] the forward, backward,
+    /// and simulation pin sites apply.
+    pub anticipated_widen: Option<AnticipatedLbWiden<'a>>,
+}
+
+/// Stage-0 delivery-gen-widen inputs for [`LbEvalSpec::anticipated_widen`]: the
+/// anticipated plants' `system.thermals[]` positions and the stage-0 thermal
+/// column base the widen strides from.
+pub struct AnticipatedLbWiden<'a> {
+    /// Anticipated-local → `system.thermals[]` position.
+    pub anticipated_thermal_indices: &'a [usize],
+    /// Stage-0 first thermal-generation column (`StageGeometry::thermal.start`).
+    pub thermal_col_start: usize,
+    /// Study stage count (the resolution's `is_anticipated_at` domain).
+    pub n_stages: usize,
 }
 
 /// Per-evaluation scratch buffers for [`evaluate_lower_bound`] on rank 0.
@@ -421,6 +440,23 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             &patch_buf.col_lower[..cp],
             &patch_buf.col_upper[..cp],
         );
+        if let Some(ant) = spec.anticipated_widen.as_ref() {
+            patch_buf.apply_anticipated_delivery_gen_widen(
+                solver,
+                &crate::lp_builder::AnticipatedGenWidenCtx {
+                    state_layout,
+                    state: initial_state,
+                    anticipated_thermal_indices: ant.anticipated_thermal_indices,
+                    col_scale: &spec.template.col_scale,
+                    col_lower: &spec.template.col_lower,
+                    col_upper: &spec.template.col_upper,
+                    thermal_col_start: ant.thermal_col_start,
+                    n_blks: spec.block_count,
+                    stage_idx: 0,
+                    n_stages: ant.n_stages,
+                },
+            );
+        }
         let n_patches = patch_buf.forward_patch_count();
         solver.set_row_bounds(
             &patch_buf.indices[..n_patches],
@@ -947,6 +983,7 @@ mod tests {
             inflow_method: &InflowNonNegativityMethod::None,
             disagg_weight: DisaggregationWeight::interior(0),
             zeta: 0.0,
+            anticipated_widen: None,
         };
         let (mut row_batch, mut lb_scratch) = make_lb_locals();
         let mut bundle = LbEvalScratchBundle::from_scratch_fields(
@@ -1007,6 +1044,7 @@ mod tests {
             inflow_method: &InflowNonNegativityMethod::None,
             disagg_weight: DisaggregationWeight::interior(0),
             zeta: 0.0,
+            anticipated_widen: None,
         };
         let (mut row_batch_lb, mut lb_scratch_lb) = make_lb_locals();
         let mut bundle_lb = LbEvalScratchBundle::from_scratch_fields(
@@ -1074,6 +1112,7 @@ mod tests {
             inflow_method: &InflowNonNegativityMethod::None,
             disagg_weight: DisaggregationWeight::interior(0),
             zeta: 0.0,
+            anticipated_widen: None,
         };
         let (mut row_batch_lb, mut lb_scratch_lb) = make_lb_locals();
         let mut bundle_lb = LbEvalScratchBundle::from_scratch_fields(
@@ -1139,6 +1178,7 @@ mod tests {
             inflow_method: &InflowNonNegativityMethod::None,
             disagg_weight: DisaggregationWeight::interior(0),
             zeta: 0.0,
+            anticipated_widen: None,
         };
         let (mut row_batch_lb, mut lb_scratch_lb) = make_lb_locals();
         let mut bundle_lb = LbEvalScratchBundle::from_scratch_fields(
@@ -1200,6 +1240,7 @@ mod tests {
             inflow_method: &InflowNonNegativityMethod::None,
             disagg_weight: DisaggregationWeight::interior(0),
             zeta: 0.0,
+            anticipated_widen: None,
         };
         let (mut row_batch_result, mut lb_scratch_result) = make_lb_locals();
         let mut bundle_result = LbEvalScratchBundle::from_scratch_fields(
@@ -1259,6 +1300,7 @@ mod tests {
             inflow_method: &InflowNonNegativityMethod::None,
             disagg_weight: DisaggregationWeight::interior(0),
             zeta: 0.0,
+            anticipated_widen: None,
         };
         let (mut row_batch_result, mut lb_scratch_result) = make_lb_locals();
         let mut bundle_result = LbEvalScratchBundle::from_scratch_fields(
@@ -1325,6 +1367,7 @@ mod tests {
             inflow_method: &InflowNonNegativityMethod::None,
             disagg_weight: DisaggregationWeight::interior(0),
             zeta: 0.0,
+            anticipated_widen: None,
         };
         let (mut row_batch_lb, mut lb_scratch_lb) = make_lb_locals();
         let mut bundle_lb = LbEvalScratchBundle::from_scratch_fields(
@@ -1388,6 +1431,7 @@ mod tests {
             inflow_method: &InflowNonNegativityMethod::None,
             disagg_weight: DisaggregationWeight::interior(0),
             zeta: 0.0,
+            anticipated_widen: None,
         };
 
         // First call: solver returns [50, 100] → LB = 75.
@@ -1478,6 +1522,7 @@ mod tests {
             inflow_method: &InflowNonNegativityMethod::None,
             disagg_weight: DisaggregationWeight::interior(0),
             zeta: 0.0,
+            anticipated_widen: None,
         };
         let (mut row_batch_lb, mut lb_scratch_lb) = make_lb_locals();
         let mut bundle_lb = LbEvalScratchBundle::from_scratch_fields(
@@ -1543,6 +1588,7 @@ mod tests {
             inflow_method: &InflowNonNegativityMethod::Truncation,
             disagg_weight: DisaggregationWeight::interior(0),
             zeta: 0.0,
+            anticipated_widen: None,
         };
         let (mut row_batch_result, mut lb_scratch_result) = make_lb_locals();
         let mut bundle_result = LbEvalScratchBundle::from_scratch_fields(
@@ -1602,6 +1648,7 @@ mod tests {
             inflow_method: &InflowNonNegativityMethod::TruncationWithPenalty,
             disagg_weight: DisaggregationWeight::interior(0),
             zeta: 0.0,
+            anticipated_widen: None,
         };
         let (mut row_batch_result, mut lb_scratch_result) = make_lb_locals();
         let mut bundle_result = LbEvalScratchBundle::from_scratch_fields(
@@ -1822,6 +1869,7 @@ mod tests {
             inflow_method: &InflowNonNegativityMethod::None,
             disagg_weight: DisaggregationWeight::interior(0),
             zeta: 0.0,
+            anticipated_widen: None,
         };
 
         // This test calls lb_evaluate_stage_0 directly, so it seeds the NCS index
@@ -1907,6 +1955,7 @@ mod tests {
             inflow_method: &InflowNonNegativityMethod::None,
             disagg_weight: DisaggregationWeight::interior(0),
             zeta: 0.0,
+            anticipated_widen: None,
         };
 
         let mut row_batch = empty_row_batch();
@@ -2589,6 +2638,7 @@ mod tests {
             inflow_method: &InflowNonNegativityMethod::None,
             disagg_weight: DisaggregationWeight::interior(0),
             zeta: 0.0,
+            anticipated_widen: None,
         };
         let (mut row_batch, mut lb_scratch) = make_lb_locals();
         let mut bundle = LbEvalScratchBundle::from_scratch_fields(
@@ -2665,6 +2715,7 @@ mod tests {
             inflow_method: &InflowNonNegativityMethod::None,
             disagg_weight: DisaggregationWeight::interior(0),
             zeta: 0.0,
+            anticipated_widen: None,
         };
         let (mut row_batch, mut lb_scratch) = make_lb_locals();
         let mut bundle = LbEvalScratchBundle::from_scratch_fields(
@@ -2938,6 +2989,7 @@ mod tests {
             inflow_method: &InflowNonNegativityMethod::None,
             disagg_weight,
             zeta,
+            anticipated_widen: None,
         };
 
         let mut scratch = LbEvalScratch::new();

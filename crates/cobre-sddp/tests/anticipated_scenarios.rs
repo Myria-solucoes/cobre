@@ -2632,3 +2632,372 @@ mod d37_anticipated_commissioning_simulation {
         );
     }
 }
+
+mod anticipated_commitment_at_cap {
+    //! Regression: an anticipated commitment sitting at (a sub-ULP over) its
+    //! delivery-stage generation cap, carried through the K=2 in-LP ring, must
+    //! stay feasible. The must-generate fishing equality pins the delivery
+    //! generation to the ring-carried commitment; the ring transports that
+    //! commitment through scaled state columns, so a value at the cap can arrive
+    //! a hair above it and — absent the delivery-gen widen — makes the LP
+    //! infeasible (`gen = commitment > max_gen`). Delivery-anchoring keeps the
+    //! commitment within `[min_gen, max_gen]` in exact arithmetic, so the widen
+    //! only absorbs numerical drift (no slack).
+    //!
+    //! The pre-study seed is set a fixed `1e-12` relative amount over the cap —
+    //! comfortably above the ring's floating-point round-trip (`~1e-16`) so the
+    //! fail-without/pass-with split is deterministic, and comfortably below the
+    //! widen's `1e-9` headroom so the widen admits it. Revert-check: with
+    //! `PatchBuffer::apply_anticipated_delivery_gen_widen` reverted to a no-op,
+    //! `train` returns `SddpError::Infeasible` at the seed's delivery stage.
+
+    use cobre_core::entities::{
+        bus::DeficitSegment,
+        hydro::{HydroGenerationModel, HydroPenalties},
+        thermal::AnticipatedConfig,
+    };
+    use cobre_core::scenario::{InflowModel, LoadModel};
+    use cobre_core::temporal::{
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig,
+    };
+    use cobre_core::{
+        AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
+        ContractStageBounds, EntityId, HydroStageBounds, HydroStagePenalties, HydroStorage,
+        InitialConditions, LineStageBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
+        ResolvedPenalties, SystemBuilder, ThermalStageBounds,
+    };
+    use cobre_io::config::{
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
+        TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+    };
+    use cobre_solver::ActiveSolver;
+
+    use super::common::StubComm;
+    use super::common::build_setup_in_code;
+    use super::common::builders::{
+        BusSpec, HydroSpec, StageSpec, ThermalSpec, make_bus, make_hydro, make_stage, make_thermal,
+    };
+
+    const CAP_MW: f64 = 100.0;
+    /// A commitment `1e-12` (relative) over the cap: the numerical state the ring's
+    /// scaled round-trip produces for a decision placed exactly at the cap.
+    const OVER_CAP_SEED_MW: f64 = CAP_MW * (1.0 + 1e-12);
+
+    fn build_system() -> cobre_core::System {
+        use chrono::NaiveDate;
+
+        let bus = make_bus(
+            EntityId(1),
+            BusSpec {
+                name: "B1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 500.0,
+                }],
+                excess_cost: 0.0,
+                ..Default::default()
+            },
+        );
+
+        let anticipated_id = EntityId(2);
+        let thermal_ant = make_thermal(
+            anticipated_id,
+            ThermalSpec {
+                name: "T_ant".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                bus_id: EntityId(1),
+                min_generation_mw: 0.0,
+                max_generation_mw: CAP_MW,
+                cost_per_mwh: 50.0,
+                anticipated_config: Some(AnticipatedConfig::LeadStages(2)),
+                entry_stage_id: None,
+                exit_stage_id: None,
+                ..Default::default()
+            },
+        );
+
+        let thermal_backup = make_thermal(
+            EntityId(4),
+            ThermalSpec {
+                name: "T_backup".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                bus_id: EntityId(1),
+                min_generation_mw: 0.0,
+                max_generation_mw: CAP_MW,
+                cost_per_mwh: 500.0,
+                anticipated_config: None,
+                entry_stage_id: None,
+                exit_stage_id: None,
+                ..Default::default()
+            },
+        );
+
+        let hydro = make_hydro(
+            EntityId(3),
+            HydroSpec {
+                name: "H1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                bus_id: EntityId(1),
+                downstream_id: None,
+                entry_stage_id: None,
+                exit_stage_id: None,
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 200.0,
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: None,
+                generation_model: HydroGenerationModel::ConstantProductivity,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 100.0,
+                specific_productivity_mw_per_m3s_per_m: None,
+                min_generation_mw: 0.0,
+                max_generation_mw: 250.0,
+                tailrace: None,
+                hydraulic_losses: None,
+                efficiency: None,
+                evaporation_coefficients_mm: None,
+                evaporation_reference_volumes_hm3: None,
+                diversion: None,
+                filling: None,
+                penalties: HydroPenalties {
+                    spillage_cost: 0.01,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 0.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 1000.0,
+                },
+                ..Default::default()
+            },
+        );
+
+        let n_stages = 4_usize;
+        let stages: Vec<Stage> = (0..n_stages)
+            .map(|i| {
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        season_id: None,
+                        blocks: vec![Block {
+                            index: 0,
+                            name: "S".to_string(),
+                            duration_hours: 744.0,
+                        }],
+                        block_mode: BlockMode::Parallel,
+                        state_config: StageStateConfig {
+                            storage: true,
+                            inflow_lags: false,
+                        },
+                        risk_config: StageRiskConfig::Expectation,
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor: 1,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+
+        let inflow_models: Vec<InflowModel> = (0..n_stages)
+            .map(|i| InflowModel {
+                hydro_id: EntityId(3),
+                stage_id: i as i32,
+                mean_m3s: 80.0,
+                std_m3s: 0.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..n_stages)
+            .map(|i| LoadModel {
+                bus_id: EntityId(1),
+                stage_id: i as i32,
+                mean_mw: 80.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        fn default_hydro_bounds() -> HydroStageBounds {
+            HydroStageBounds {
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 200.0,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 100.0,
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: None,
+                min_generation_mw: 0.0,
+                max_generation_mw: 250.0,
+                max_diversion_m3s: None,
+                filling_min_rate_m3s: 0.0,
+                water_withdrawal_m3s: 0.0,
+            }
+        }
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 2,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages,
+                k_max: 2,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: CAP_MW,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.01,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 500.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 1000.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        let initial_conditions = InitialConditions {
+            storage: vec![HydroStorage {
+                hydro_id: EntityId(3),
+                value_hm3: 100.0,
+            }],
+            filling_storage: vec![],
+            past_inflows: vec![],
+            // Both pre-study commitments sit a sub-ULP over the delivery cap: the
+            // stage-0 delivery is pinned directly, the stage-1 delivery is carried
+            // one K=2 ring shift first — both must survive.
+            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
+                thermal_id: anticipated_id,
+                values_mw: vec![OVER_CAP_SEED_MW, OVER_CAP_SEED_MW],
+            }],
+            recent_observations: vec![],
+            past_defluences: vec![],
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(vec![thermal_ant, thermal_backup])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .initial_conditions(initial_conditions)
+            .build()
+            .expect("build_system: valid")
+    }
+
+    fn build_config() -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::Penalty,
+                },
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                forward_passes: Some(1),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 4 }]),
+                stopping_mode: "any".to_string(),
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                scenario_source: None,
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    #[test]
+    fn anticipated_commitment_at_cap_survives_ring_carry() {
+        let system = build_system();
+        let config = build_config();
+        let mut setup = build_setup_in_code(system, &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+
+        let outcome = setup
+            .train(&mut solver, &comm, 4, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+
+        // Without the delivery-gen widen the must-generate fishing forces
+        // `gen = OVER_CAP_SEED_MW > max_gen` at the seed's delivery stage and the
+        // forward LP is infeasible; the widen admits the sub-ULP-over commitment.
+        assert!(
+            outcome.error.is_none(),
+            "anticipated commitment at its delivery cap must stay feasible through \
+             the ring carry, got training error: {:?}",
+            outcome.error
+        );
+    }
+}

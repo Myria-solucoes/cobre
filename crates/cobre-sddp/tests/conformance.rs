@@ -836,6 +836,7 @@ mod lb_conformance {
                 next_day_weight: 0.0,
             },
             zeta: 0.0,
+            anticipated_widen: None,
         };
 
         let mut lb_cut_batch = RowBatch {

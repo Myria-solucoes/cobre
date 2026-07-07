@@ -1,3 +1,5 @@
+use cobre_solver::SolverInterface;
+
 use crate::indexer::{BlockGrid, StateLayout};
 
 /// Pre-allocated row-bound and column-bound patch arrays for one SDDP stage LP solve.
@@ -37,6 +39,18 @@ pub struct PatchBuffer {
     /// New upper bounds for each patched column in the column-bound region.
     pub col_upper: Vec<f64>,
 
+    /// Delivery-stage anticipated generation columns whose bound
+    /// [`fill_anticipated_delivery_gen_widen`](Self::fill_anticipated_delivery_gen_widen)
+    /// widens to absorb sub-ULP ring-carry drift; empty (no `set_col_bounds`) for
+    /// every in-bounds commitment, so parity is preserved.
+    pub widen_gen_indices: Vec<usize>,
+
+    /// Widened lower bounds parallel to [`Self::widen_gen_indices`].
+    pub widen_gen_lower: Vec<f64>,
+
+    /// Widened upper bounds parallel to [`Self::widen_gen_indices`].
+    pub widen_gen_upper: Vec<f64>,
+
     /// Number of operating hydro plants (N).
     hydro_count: usize,
 
@@ -71,6 +85,44 @@ pub struct PatchBuffer {
     /// [`fill_z_inflow_patches`]: PatchBuffer::fill_z_inflow_patches
     active_z_inflow_patches: usize,
 }
+
+/// Inputs for [`PatchBuffer::fill_anticipated_delivery_gen_widen`]: the stage's
+/// pinned commitment values and the delivery-stage generation-column geometry
+/// needed to widen a gen bound around a drifted commitment.
+pub struct AnticipatedGenWidenCtx<'a> {
+    /// State layout owning `anticipated_slots_out` (the slot-0 commitment index)
+    /// and the per-plant point-commitment resolution (the fishing-active gate).
+    pub state_layout: &'a StateLayout,
+    /// State vector this solve pins (`current_state` / `x_hat` / `initial_state`);
+    /// its slot-0 entries are the commitments the fishing forces the delivery gen to.
+    pub state: &'a [f64],
+    /// Anticipated-local → `system.thermals[]` position, the delivery gen column's plant.
+    pub anticipated_thermal_indices: &'a [usize],
+    /// This stage's LP column scale (the fishing's slot-0 col and the gen cols each
+    /// carry their own scale); `&[]` when the LP is unscaled.
+    pub col_scale: &'a [f64],
+    /// This stage's template scaled column lower bounds (the gen col's `min_gen / scale`).
+    pub col_lower: &'a [f64],
+    /// This stage's template scaled column upper bounds (the gen col's `max_gen / scale`).
+    pub col_upper: &'a [f64],
+    /// First thermal-generation column (`StageGeometry::thermal.start`).
+    pub thermal_col_start: usize,
+    /// Blocks at this stage (the fishing's block stride).
+    pub n_blks: usize,
+    /// Delivery stage index (the stage being solved).
+    pub stage_idx: usize,
+    /// Study stage count (the resolution's `is_anticipated_at` domain).
+    pub n_stages: usize,
+}
+
+/// Relative + absolute headroom widening a delivery gen bound past a drifted
+/// commitment. The commitment sits within `[min_gen, max_gen]` in exact
+/// arithmetic (delivery-anchoring), so this only ever fires on sub-ULP drift and
+/// is physically meaningless (`1e-9` relative bounded below by `1e-6` MW); the
+/// absolute floor keeps the min-side headroom above the LP feasibility tolerance
+/// after the gen column's own `col_scale` divides it.
+const ANTICIPATED_GEN_WIDEN_REL: f64 = 1e-9;
+const ANTICIPATED_GEN_WIDEN_ABS: f64 = 1e-6;
 
 impl PatchBuffer {
     /// Construct a [`PatchBuffer`] sized to `N + M*B + N` row patches and
@@ -148,6 +200,9 @@ impl PatchBuffer {
             col_indices: vec![0; col_capacity],
             col_lower: vec![0.0; col_capacity],
             col_upper: vec![0.0; col_capacity],
+            widen_gen_indices: Vec::new(),
+            widen_gen_lower: Vec::new(),
+            widen_gen_upper: Vec::new(),
             hydro_count,
             max_par_order,
             load_bus_count: n_load_buses,
@@ -278,6 +333,110 @@ impl PatchBuffer {
                     .contains(&self.col_indices[j])),
             "every travel-time bucket state index must resolve to a transit_buckets_in column"
         );
+    }
+
+    /// Fill [`widen_gen_indices`](Self::widen_gen_indices)/`_lower`/`_upper` with
+    /// the delivery-stage anticipated generation columns whose bound must widen to
+    /// admit a commitment the in-LP ring's scaled round-trip drifted a sub-ULP
+    /// outside `[min_gen, max_gen]`.
+    ///
+    /// The must-generate fishing equality (`Σ_b h_b·gen_b = H·commitment`) pins the
+    /// delivery gen to the pinned slot-0 commitment; delivery-anchoring bounds the
+    /// commitment within the delivery stage's own `[min_gen, max_gen]` **in exact
+    /// arithmetic**, so this is a no-op there — it emits **nothing** unless
+    /// `commitment` is *strictly* outside the gen bound (never for a commitment at
+    /// the cap, so parity holds). The reload-per-solve resets the gen bound, so no
+    /// separate un-widen is needed. Emit-then-apply via `set_col_bounds`; skip the
+    /// call when empty.
+    ///
+    /// Gates each plant on `is_anticipated_at(stage_idx)` — the same fishing gate
+    /// the LP builder uses; a stage with no fishing coupling leaves the plant's gen
+    /// column untouched.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if `ctx.state.len() != ctx.state_layout.n_state`.
+    pub fn fill_anticipated_delivery_gen_widen(&mut self, ctx: &AnticipatedGenWidenCtx<'_>) {
+        self.widen_gen_indices.clear();
+        self.widen_gen_lower.clear();
+        self.widen_gen_upper.clear();
+
+        if ctx.anticipated_thermal_indices.is_empty() {
+            return;
+        }
+        debug_assert_eq!(
+            ctx.state.len(),
+            ctx.state_layout.n_state,
+            "state slice length {got} != n_state {expected}",
+            got = ctx.state.len(),
+            expected = ctx.state_layout.n_state,
+        );
+
+        // Iterate the anticipated-local → `system.thermals[]` map (length equals
+        // `n_anticipated` in production), so the `local` index is the same one
+        // `anticipated_slots_out`, the resolution, and the gen column all use.
+        let slot0_base = ctx.state_layout.anticipated_slots_out.start;
+        for (local, &thermal_idx) in ctx.anticipated_thermal_indices.iter().enumerate() {
+            if !ctx
+                .state_layout
+                .anticipated_resolution_for(local, ctx.n_stages)
+                .is_anticipated_at(ctx.stage_idx)
+            {
+                continue;
+            }
+            let commitment = ctx.state[slot0_base + local];
+            for blk in 0..ctx.n_blks {
+                let gen_col = ctx.thermal_col_start + thermal_idx * ctx.n_blks + blk;
+                let scale = if ctx.col_scale.is_empty() {
+                    1.0
+                } else {
+                    ctx.col_scale[gen_col]
+                };
+                let lower_scaled = ctx.col_lower[gen_col];
+                let upper_scaled = ctx.col_upper[gen_col];
+                let max_gen = upper_scaled * scale;
+                let min_gen = lower_scaled * scale;
+                let over = commitment > max_gen;
+                let under = commitment < min_gen;
+                if !over && !under {
+                    continue;
+                }
+                let margin = commitment
+                    .abs()
+                    .mul_add(ANTICIPATED_GEN_WIDEN_REL, ANTICIPATED_GEN_WIDEN_ABS);
+                self.widen_gen_indices.push(gen_col);
+                self.widen_gen_lower.push(if under {
+                    (commitment - margin) / scale
+                } else {
+                    lower_scaled
+                });
+                self.widen_gen_upper.push(if over {
+                    (commitment + margin) / scale
+                } else {
+                    upper_scaled
+                });
+            }
+        }
+    }
+
+    /// [`fill_anticipated_delivery_gen_widen`](Self::fill_anticipated_delivery_gen_widen)
+    /// then push the widened bounds through `set_col_bounds` — the reload-per-solve
+    /// pin path all four solve sites (forward / backward / lower-bound / simulation)
+    /// share, so the widen re-applies every solve. Skips the solver call when no
+    /// commitment drifted outside its gen bound (the parity-preserving no-op).
+    pub fn apply_anticipated_delivery_gen_widen<S: SolverInterface>(
+        &mut self,
+        solver: &mut S,
+        ctx: &AnticipatedGenWidenCtx<'_>,
+    ) {
+        self.fill_anticipated_delivery_gen_widen(ctx);
+        if !self.widen_gen_indices.is_empty() {
+            solver.set_col_bounds(
+                &self.widen_gen_indices,
+                &self.widen_gen_lower,
+                &self.widen_gen_upper,
+            );
+        }
     }
 
     /// Fill `n_load_buses * n_blocks` load-balance equality patches into

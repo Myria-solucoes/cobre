@@ -10,7 +10,7 @@ use crate::{
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     error::SddpError,
     indexer::BlockGrid,
-    lp_builder::COST_SCALE_FACTOR,
+    lp_builder::{AnticipatedGenWidenCtx, COST_SCALE_FACTOR},
     noise::{NcsNoiseOffsets, transform_inflow_noise, transform_load_noise, transform_ncs_noise},
     trajectory::TrajectoryRecord,
     workspace::{BasisStoreSliceMut, CapturedBasis, SolverWorkspace},
@@ -150,6 +150,26 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         &ws.patch_buf.col_lower[..cp],
         &ws.patch_buf.col_upper[..cp],
     );
+    if training_ctx.state.n_anticipated > 0
+        && let Some(geom) = ctx.geometry_per_stage.get(t)
+    {
+        let template = &ctx.templates[t];
+        ws.patch_buf.apply_anticipated_delivery_gen_widen(
+            &mut ws.solver,
+            &AnticipatedGenWidenCtx {
+                state_layout: training_ctx.state,
+                state: &ws.current_state,
+                anticipated_thermal_indices: &study_dims.anticipated_thermal_indices,
+                col_scale: &template.col_scale,
+                col_lower: &template.col_lower,
+                col_upper: &template.col_upper,
+                thermal_col_start: geom.thermal.start,
+                n_blks: ctx.block_counts_per_stage[t],
+                stage_idx: t,
+                n_stages: num_stages,
+            },
+        );
+    }
     let pc = ws.patch_buf.forward_patch_count();
     ws.solver.set_row_bounds(
         &ws.patch_buf.indices[..pc],

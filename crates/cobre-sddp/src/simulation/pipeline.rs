@@ -448,6 +448,26 @@ fn solve_simulation_stage<S: SolverInterface>(
         &ws.patch_buf.col_lower[..cp],
         &ws.patch_buf.col_upper[..cp],
     );
+    if state.n_anticipated > 0
+        && let Some(geom) = output.geometry_per_stage.get(t)
+    {
+        let template = &ctx.templates[t];
+        ws.patch_buf.apply_anticipated_delivery_gen_widen(
+            &mut ws.solver,
+            &crate::lp_builder::AnticipatedGenWidenCtx {
+                state_layout: state,
+                state: &ws.current_state,
+                anticipated_thermal_indices: &study_dims.anticipated_thermal_indices,
+                col_scale: &template.col_scale,
+                col_lower: &template.col_lower,
+                col_upper: &template.col_upper,
+                thermal_col_start: geom.thermal.start,
+                n_blks: ctx.block_counts_per_stage[t],
+                stage_idx: t,
+                n_stages: ctx.templates.len(),
+            },
+        );
+    }
     let pc = ws.patch_buf.forward_patch_count();
     ws.solver.set_row_bounds(
         &ws.patch_buf.indices[..pc],

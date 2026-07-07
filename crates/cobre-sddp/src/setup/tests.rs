@@ -2366,6 +2366,341 @@ fn build_initial_state_unknown_hydro_in_past_inflows_stays_zero() {
     );
 }
 
+/// Build a 2-hydro system where hydro id=1 (the SMALLER id) has a LATER
+/// `operational_start_date` than hydro id=2 (the LARGER id), so the canonical
+/// `(operational_start_date, id)` order (`System::hydros()`) is
+/// `[id=2, id=1]` — id-DESCENDING, not id-ascending. Accepts a caller-supplied
+/// `InitialConditions` so a test can seed `storage`/`past_inflows` per hydro
+/// and check each lands on its OWN coordinate.
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::items_after_statements
+)]
+fn staggered_dates_system_2_hydros(
+    n_stages: usize,
+    initial_conditions: cobre_core::InitialConditions,
+) -> cobre_core::System {
+    use chrono::NaiveDate;
+
+    let bus = Bus {
+        id: EntityId(1),
+        name: "B1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        deficit_segments: vec![DeficitSegment {
+            depth_mw: None,
+            cost_per_mwh: 500.0,
+        }],
+        excess_cost: 0.0,
+    };
+
+    let make_hydro = |id: i32, name: &str, start: NaiveDate| Hydro {
+        id: EntityId(id),
+        name: name.to_string(),
+        operational_start_date: start,
+        bus_id: EntityId(1),
+        downstream_id: None,
+        travel_time_hours: None,
+        entry_stage_id: None,
+        exit_stage_id: None,
+        min_storage_hm3: 0.0,
+        max_storage_hm3: 200.0,
+        min_outflow_m3s: 0.0,
+        max_outflow_m3s: None,
+        generation_model: HydroGenerationModel::ConstantProductivity,
+        min_turbined_m3s: 0.0,
+        max_turbined_m3s: 100.0,
+        specific_productivity_mw_per_m3s_per_m: None,
+        min_generation_mw: 0.0,
+        max_generation_mw: 250.0,
+        tailrace: None,
+        hydraulic_losses: None,
+        efficiency: None,
+        evaporation_coefficients_mm: None,
+        evaporation_reference_volumes_hm3: None,
+        diversion: None,
+        filling: None,
+        penalties: HydroPenalties {
+            spillage_cost: 0.01,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 1000.0,
+        },
+    };
+
+    let earlier = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+    let later = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
+
+    let n_st = n_stages.max(1);
+    let stages: Vec<Stage> = (0..n_stages)
+        .map(|i| Stage {
+            index: i,
+            id: i as i32,
+            start_date: NaiveDate::from_ymd_opt(2020, (i % 12 + 1) as u32, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(
+                if (i % 12 + 1) == 12 { 2021 } else { 2020 },
+                ((i % 12 + 1) % 12 + 1) as u32,
+                1,
+            )
+            .unwrap(),
+            season_id: Some(i),
+            blocks: vec![Block {
+                index: 0,
+                name: "S".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: true,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        })
+        .collect();
+
+    let inflow_models: Vec<InflowModel> = (0..n_stages)
+        .flat_map(|i| {
+            [1_i32, 2].map(|hid| InflowModel {
+                hydro_id: EntityId(hid),
+                stage_id: i as i32,
+                mean_m3s: 80.0,
+                std_m3s: 20.0,
+                ar_coefficients: vec![0.5, 0.3],
+                residual_std_ratio: 0.8,
+                annual: None,
+            })
+        })
+        .collect();
+
+    let load_models: Vec<LoadModel> = (0..n_stages)
+        .map(|i| LoadModel {
+            bus_id: EntityId(1),
+            stage_id: i as i32,
+            mean_mw: 100.0,
+            std_mw: 0.0,
+        })
+        .collect();
+
+    fn default_hydro_bounds() -> HydroStageBounds {
+        HydroStageBounds {
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            max_diversion_m3s: None,
+            filling_min_rate_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        }
+    }
+
+    fn default_hydro_penalties() -> HydroStagePenalties {
+        HydroStagePenalties {
+            spillage_cost: 0.01,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 500.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 1000.0,
+        }
+    }
+
+    let bounds = ResolvedBounds::new(
+        &BoundsCountsSpec {
+            n_hydros: 2,
+            n_thermals: 0,
+            n_lines: 0,
+            n_pumping: 0,
+            n_contracts: 0,
+            n_stages: n_st,
+            k_max: 0,
+        },
+        &BoundsDefaults {
+            hydro: default_hydro_bounds(),
+            thermal: ThermalStageBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: 0.0,
+                cost_per_mwh: 0.0,
+            },
+            line: LineStageBounds {
+                direct_mw: 0.0,
+                reverse_mw: 0.0,
+            },
+            pumping: PumpingStageBounds {
+                min_flow_m3s: 0.0,
+                max_flow_m3s: 0.0,
+            },
+            contract: ContractStageBounds {
+                min_mw: 0.0,
+                max_mw: 0.0,
+                price_per_mwh: 0.0,
+            },
+        },
+    );
+
+    let penalties = ResolvedPenalties::new(
+        &PenaltiesCountsSpec {
+            n_hydros: 2,
+            n_buses: 1,
+            n_lines: 0,
+            n_ncs: 0,
+            n_stages: n_st,
+        },
+        &PenaltiesDefaults {
+            hydro: default_hydro_penalties(),
+            bus: BusStagePenalties { excess_cost: 0.0 },
+            line: LineStagePenalties { exchange_cost: 0.0 },
+            ncs: NcsStagePenalties {
+                curtailment_cost: 0.0,
+            },
+        },
+    );
+
+    let system = SystemBuilder::new()
+        .buses(vec![bus])
+        .thermals(vec![])
+        .hydros(vec![
+            make_hydro(1, "H1_later", later),
+            make_hydro(2, "H2_earlier", earlier),
+        ])
+        .stages(stages)
+        .inflow_models(inflow_models)
+        .load_models(load_models)
+        .bounds(bounds)
+        .penalties(penalties)
+        .initial_conditions(initial_conditions)
+        .build()
+        .expect("staggered_dates_system_2_hydros: valid");
+
+    // Canonical order sorts by (operational_start_date, id): the earlier-date
+    // hydro (id=2) must land at position 0, the later-date hydro (id=1) at
+    // position 1 — id-descending. A test relying on this fixture to trigger
+    // the staggered-order bug depends on this invariant holding.
+    assert_eq!(system.hydros()[0].id, EntityId(2));
+    assert_eq!(system.hydros()[1].id, EntityId(1));
+
+    system
+}
+
+/// Regression: under a STAGGERED-commissioning system where the canonical
+/// `(operational_start_date, id)` hydro order is id-DESCENDING (hydro id=1's
+/// later commissioning date sorts it after hydro id=2), `build_initial_state`
+/// must seed each hydro's OWN declared storage and past-inflow lag —
+/// `binary_search_by_key` over `hydros()` requires id-ascending order and
+/// silently drops the out-of-order record to the default `0.0`.
+#[test]
+fn test_initial_state_seeds_correctly_under_staggered_commissioning_dates() {
+    use super::build_initial_state;
+
+    let h1_storage = 111.0_f64;
+    let h2_storage = 222.0_f64;
+    let h1_past = [11.0_f64, 12.0_f64];
+    let h2_past = [21.0_f64, 22.0_f64];
+
+    let ic = cobre_core::InitialConditions {
+        storage: vec![
+            cobre_core::HydroStorage {
+                hydro_id: EntityId(1),
+                value_hm3: h1_storage,
+            },
+            cobre_core::HydroStorage {
+                hydro_id: EntityId(2),
+                value_hm3: h2_storage,
+            },
+        ],
+        filling_storage: vec![],
+        past_inflows: vec![
+            cobre_core::HydroPastInflows {
+                hydro_id: EntityId(1),
+                values_m3s: h1_past.to_vec(),
+                season_ids: None,
+            },
+            cobre_core::HydroPastInflows {
+                hydro_id: EntityId(2),
+                values_m3s: h2_past.to_vec(),
+                season_ids: None,
+            },
+        ],
+        past_anticipated_commitments: vec![],
+        recent_observations: vec![],
+        past_defluences: vec![],
+    };
+    let system = staggered_dates_system_2_hydros(1, ic);
+    let layout = layout_for_lag_test(2, 2);
+
+    let state = build_initial_state(&system, &crate::test_support::study_dims(), &layout);
+
+    // Storage: state[0] is hydro id=2's own coordinate (canonical position 0),
+    // state[1] is hydro id=1's own coordinate (canonical position 1).
+    assert!(
+        (state[0] - h2_storage).abs() < 1e-10,
+        "hydro id=2 (canonical position 0) storage should be its own IC value {h2_storage}, got {}",
+        state[0]
+    );
+    assert!(
+        (state[1] - h1_storage).abs() < 1e-10,
+        "hydro id=1 (canonical position 1) storage should be its own IC value {h1_storage}, got {}",
+        state[1]
+    );
+
+    // Past-inflow lags: lag-major layout, slot = lag_start + lag * N + idx.
+    let s = layout.inflow_lags.start;
+    assert!(
+        (state[s] - h2_past[0]).abs() < 1e-10,
+        "hydro id=2 lag0 should be its own IC value {}, got {}",
+        h2_past[0],
+        state[s]
+    );
+    assert!(
+        (state[s + 1] - h1_past[0]).abs() < 1e-10,
+        "hydro id=1 lag0 should be its own IC value {}, got {}",
+        h1_past[0],
+        state[s + 1]
+    );
+    assert!(
+        (state[s + 2] - h2_past[1]).abs() < 1e-10,
+        "hydro id=2 lag1 should be its own IC value {}, got {}",
+        h2_past[1],
+        state[s + 2]
+    );
+    assert!(
+        (state[s + 3] - h1_past[1]).abs() < 1e-10,
+        "hydro id=1 lag1 should be its own IC value {}, got {}",
+        h1_past[1],
+        state[s + 3]
+    );
+}
+
 /// Build a 2-hydro system (IDs 1, 2) where hydro 2 carries a `FillingConfig`
 /// (a filling hydro) and hydro 1 is operating, with caller-supplied
 /// `initial_conditions`.
@@ -3159,6 +3494,345 @@ fn system_with_anticipated_thermals(
         })
         .build()
         .expect("system_with_anticipated_thermals: valid")
+}
+
+/// Build a 1-bus / 1-hydro / 2-thermal system where thermal id=10 (K=2, the
+/// SMALLER id) has a LATER `operational_start_date` than thermal id=11 (K=3,
+/// the LARGER id), so the canonical `(operational_start_date, id)` order
+/// (`System::thermals()`) is `[id=11, id=10]` — id-DESCENDING, not
+/// id-ascending. Mirrors [`system_with_anticipated_thermals`] but with
+/// staggered dates, exercising the thermal id->position lookup under the
+/// same bug trigger as the hydro-side fixtures.
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::items_after_statements
+)]
+fn system_with_two_anticipated_thermals_staggered_dates(
+    past_commits: Vec<cobre_core::AnticipatedCommitmentHistory>,
+) -> cobre_core::System {
+    use chrono::NaiveDate;
+
+    let bus = Bus {
+        id: EntityId(1),
+        name: "B1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        deficit_segments: vec![DeficitSegment {
+            depth_mw: None,
+            cost_per_mwh: 500.0,
+        }],
+        excess_cost: 0.0,
+    };
+
+    let earlier = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+    let later = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
+
+    let thermals = vec![
+        Thermal {
+            id: EntityId(10),
+            name: "AT10_later".to_string(),
+            operational_start_date: later,
+            bus_id: EntityId(1),
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            cost_per_mwh: 50.0,
+            anticipated_config: Some(AnticipatedConfig::LeadStages(2)),
+            entry_stage_id: None,
+            exit_stage_id: None,
+        },
+        Thermal {
+            id: EntityId(11),
+            name: "AT11_earlier".to_string(),
+            operational_start_date: earlier,
+            bus_id: EntityId(1),
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            cost_per_mwh: 50.0,
+            anticipated_config: Some(AnticipatedConfig::LeadStages(3)),
+            entry_stage_id: None,
+            exit_stage_id: None,
+        },
+    ];
+
+    let hydro = Hydro {
+        id: EntityId(3),
+        name: "H1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        bus_id: EntityId(1),
+        downstream_id: None,
+        travel_time_hours: None,
+        entry_stage_id: None,
+        exit_stage_id: None,
+        min_storage_hm3: 0.0,
+        max_storage_hm3: 200.0,
+        min_outflow_m3s: 0.0,
+        max_outflow_m3s: None,
+        generation_model: HydroGenerationModel::ConstantProductivity,
+        min_turbined_m3s: 0.0,
+        max_turbined_m3s: 100.0,
+        specific_productivity_mw_per_m3s_per_m: None,
+        min_generation_mw: 0.0,
+        max_generation_mw: 250.0,
+        tailrace: None,
+        hydraulic_losses: None,
+        efficiency: None,
+        evaporation_coefficients_mm: None,
+        evaporation_reference_volumes_hm3: None,
+        diversion: None,
+        filling: None,
+        penalties: HydroPenalties {
+            spillage_cost: 0.01,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 1000.0,
+        },
+    };
+
+    let n_stages = 2_usize;
+    let stages: Vec<Stage> = (0..n_stages)
+        .map(|i| Stage {
+            index: i,
+            id: i as i32,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: None,
+            blocks: vec![Block {
+                index: 0,
+                name: "S".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        })
+        .collect();
+
+    let inflow_models: Vec<InflowModel> = (0..n_stages)
+        .map(|i| InflowModel {
+            hydro_id: EntityId(3),
+            stage_id: i as i32,
+            mean_m3s: 80.0,
+            std_m3s: 20.0,
+            ar_coefficients: vec![],
+            residual_std_ratio: 1.0,
+            annual: None,
+        })
+        .collect();
+
+    let load_models: Vec<LoadModel> = (0..n_stages)
+        .map(|i| LoadModel {
+            bus_id: EntityId(1),
+            stage_id: i as i32,
+            mean_mw: 100.0,
+            std_mw: 0.0,
+        })
+        .collect();
+
+    fn default_hydro_bounds() -> HydroStageBounds {
+        HydroStageBounds {
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            max_diversion_m3s: None,
+            filling_min_rate_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        }
+    }
+
+    fn default_hydro_penalties() -> HydroStagePenalties {
+        HydroStagePenalties {
+            spillage_cost: 0.01,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 500.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 1000.0,
+        }
+    }
+
+    let bounds = ResolvedBounds::new(
+        &BoundsCountsSpec {
+            n_hydros: 1,
+            n_thermals: 2,
+            n_lines: 0,
+            n_pumping: 0,
+            n_contracts: 0,
+            n_stages,
+            k_max: 3,
+        },
+        &BoundsDefaults {
+            hydro: default_hydro_bounds(),
+            thermal: ThermalStageBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: 100.0,
+                cost_per_mwh: 0.0,
+            },
+            line: LineStageBounds {
+                direct_mw: 0.0,
+                reverse_mw: 0.0,
+            },
+            pumping: PumpingStageBounds {
+                min_flow_m3s: 0.0,
+                max_flow_m3s: 0.0,
+            },
+            contract: ContractStageBounds {
+                min_mw: 0.0,
+                max_mw: 0.0,
+                price_per_mwh: 0.0,
+            },
+        },
+    );
+
+    let penalties = ResolvedPenalties::new(
+        &PenaltiesCountsSpec {
+            n_hydros: 1,
+            n_buses: 1,
+            n_lines: 0,
+            n_ncs: 0,
+            n_stages,
+        },
+        &PenaltiesDefaults {
+            hydro: default_hydro_penalties(),
+            bus: BusStagePenalties { excess_cost: 0.0 },
+            line: LineStagePenalties { exchange_cost: 0.0 },
+            ncs: NcsStagePenalties {
+                curtailment_cost: 0.0,
+            },
+        },
+    );
+
+    let system = SystemBuilder::new()
+        .buses(vec![bus])
+        .thermals(thermals)
+        .hydros(vec![hydro])
+        .stages(stages)
+        .inflow_models(inflow_models)
+        .load_models(load_models)
+        .bounds(bounds)
+        .penalties(penalties)
+        .initial_conditions(cobre_core::InitialConditions {
+            storage: vec![],
+            filling_storage: vec![],
+            past_inflows: vec![],
+            past_anticipated_commitments: past_commits,
+            recent_observations: vec![],
+            past_defluences: vec![],
+        })
+        .build()
+        .expect("system_with_two_anticipated_thermals_staggered_dates: valid");
+
+    // Canonical order sorts by (operational_start_date, id): the earlier-date
+    // thermal (id=11) must land at position 0, the later-date thermal (id=10)
+    // at position 1 — id-descending. A test relying on this fixture to
+    // trigger the staggered-order bug depends on this invariant holding.
+    assert_eq!(system.thermals()[0].id, EntityId(11));
+    assert_eq!(system.thermals()[1].id, EntityId(10));
+
+    system
+}
+
+/// Regression: under a STAGGERED-commissioning system where the canonical
+/// `(operational_start_date, id)` thermal order is id-DESCENDING (thermal
+/// id=10's later commissioning date sorts it after thermal id=11),
+/// `build_initial_state` must seed each anticipated thermal's OWN declared
+/// `past_anticipated_commitments` — `binary_search_by_key` over `thermals()`
+/// requires id-ascending order and silently drops the out-of-order thermal's
+/// entire commitment history.
+#[test]
+fn build_initial_state_anticipated_seed_correct_under_staggered_commissioning_dates() {
+    use super::build_initial_state;
+    use cobre_core::AnticipatedCommitmentHistory;
+
+    let past_commits = vec![
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(10),
+            values_mw: vec![10.0, 20.0],
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(11),
+            values_mw: vec![100.0, 200.0, 300.0],
+        },
+    ];
+    let system = system_with_two_anticipated_thermals_staggered_dates(past_commits);
+
+    // Canonical (global) order is [id=11 (K=3), id=10 (K=2)]: k_values and
+    // thermal_indices follow that order, not declaration order.
+    let layout = layout_with_anticipated(2, &[3, 2]);
+
+    let state = build_initial_state(
+        &system,
+        &crate::test_support::study_dims_for(&counts_with_anticipated(2, &[3, 2], &[0, 1])),
+        &layout,
+    );
+
+    let s = layout.anticipated_slots_out.start;
+    // plant 0 = thermal id=11 (canonical position 0, K=3, own values [100,200,300])
+    // plant 1 = thermal id=10 (canonical position 1, K=2, own values [10,20])
+    assert!(
+        (state[s] - 100.0).abs() < 1e-10,
+        "thermal id=11 slot 0 should be its own IC value 100.0, got {}",
+        state[s]
+    );
+    assert!(
+        (state[s + 1] - 10.0).abs() < 1e-10,
+        "thermal id=10 slot 0 should be its own IC value 10.0, got {}",
+        state[s + 1]
+    );
+    assert!(
+        (state[s + 2] - 200.0).abs() < 1e-10,
+        "thermal id=11 slot 1 should be its own IC value 200.0, got {}",
+        state[s + 2]
+    );
+    assert!(
+        (state[s + 3] - 20.0).abs() < 1e-10,
+        "thermal id=10 slot 1 should be its own IC value 20.0, got {}",
+        state[s + 3]
+    );
+    assert!(
+        (state[s + 4] - 300.0).abs() < 1e-10,
+        "thermal id=11 slot 2 should be its own IC value 300.0, got {}",
+        state[s + 4]
+    );
+    assert!(
+        state[s + 5].abs() < 1e-10,
+        "thermal id=10 slot 2 (K=2 padding) should be 0.0, got {}",
+        state[s + 5]
+    );
 }
 
 /// AC-1: A system with `n_anticipated == 0` produces an unchanged state

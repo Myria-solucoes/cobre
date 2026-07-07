@@ -7,6 +7,7 @@ use cobre_solver::SolverInterface;
 use crate::{
     context::{StageContext, TrainingContext},
     indexer::BlockGrid,
+    lp_builder::AnticipatedGenWidenCtx,
     noise::{NcsNoiseOffsets, transform_inflow_noise, transform_load_noise, transform_ncs_noise},
     workspace::{BasisStoreSliceMut, CapturedBasis, SolverWorkspace},
 };
@@ -33,6 +34,11 @@ pub(crate) fn load_backward_lp<S: SolverInterface + Send>(
 ///
 /// The LP structure is already loaded by [`load_backward_lp`]; this only updates
 /// noise-dependent row and column bounds via `set_row_bounds` / `set_col_bounds`.
+// RATIONALE: a single linear patch pipeline (inflow/load/NCS noise → state pin →
+// anticipated gen widen → row/z-inflow bounds) whose steps share disjoint partial
+// borrows of one `&mut SolverWorkspace`; extracting a step passes either the whole
+// workspace (no gain) or many borrowed fields (reintroducing too_many_arguments).
+#[allow(clippy::too_many_lines)]
 pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
     ctx: &StageContext<'_>,
@@ -157,6 +163,26 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
         &ws.patch_buf.col_lower[..cp],
         &ws.patch_buf.col_upper[..cp],
     );
+    if training_ctx.state.n_anticipated > 0
+        && let Some(geom) = ctx.geometry_per_stage.get(s)
+    {
+        let template = &ctx.templates[s];
+        ws.patch_buf.apply_anticipated_delivery_gen_widen(
+            &mut ws.solver,
+            &AnticipatedGenWidenCtx {
+                state_layout: training_ctx.state,
+                state: x_hat,
+                anticipated_thermal_indices: &training_ctx.study_dims.anticipated_thermal_indices,
+                col_scale: &template.col_scale,
+                col_lower: &template.col_lower,
+                col_upper: &template.col_upper,
+                thermal_col_start: geom.thermal.start,
+                n_blks: ctx.block_counts_per_stage[s],
+                stage_idx: s,
+                n_stages: ctx.templates.len(),
+            },
+        );
+    }
     let pc = ws.patch_buf.forward_patch_count();
     ws.solver.set_row_bounds(
         &ws.patch_buf.indices[..pc],

@@ -48,10 +48,11 @@ pub use stochastic_pipeline::{
     prepare_stochastic,
 };
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use cobre_core::{
-    AnticipatedConfig, EntityId, Stage, System, Thermal,
+    AnticipatedConfig, EntityId, Hydro, Stage, System, Thermal,
     scenario::{SamplingScheme, ScenarioSource},
 };
 use cobre_io::build_hydro_reference_volumes_resolved;
@@ -1308,12 +1309,32 @@ fn build_anticipated_windows(system: &System) -> Vec<(Option<i32>, Option<i32>)>
         .collect()
 }
 
+/// Map each entity's declared numeric ID to its position in a canonically
+/// ordered slice (`System::hydros()` / `System::thermals()`).
+///
+/// Canonical order sorts by `(operational_start_date, id)`
+/// (`cobre_core::system::builder::sort_canonical`), which is id-ascending only
+/// when every entity shares one operational start date. A staggered-
+/// commissioning system (filling reservoirs, future-entry plants) breaks that
+/// coincidence, so any id-keyed initial-condition lookup MUST resolve through
+/// this map — `binary_search_by_key` over the canonical slice itself silently
+/// returns `Err` (or the wrong index) for an out-of-id-order entry, dropping
+/// its seed to the default `0.0`.
+fn id_to_position<T>(entities: &[T], id_of: impl Fn(&T) -> i32) -> HashMap<i32, usize> {
+    entities
+        .iter()
+        .enumerate()
+        .map(|(idx, e)| (id_of(e), idx))
+        .collect()
+}
+
 /// Build the initial state vector from the system's initial conditions.
 ///
 /// Layout `[storage(0..N), lags(N..N*(1+L))]` (N hydros, L = max PAR order),
-/// storage in canonical ID order. Lag slots come from
-/// `initial_conditions.past_inflows`: `values_m3s[l]` with index 0 = lag 1 (most
-/// recent), index L-1 = lag L (oldest). Storage-only when `max_par_order == 0`.
+/// storage indexed by each hydro's position in `system.hydros()`'s canonical
+/// order. Lag slots come from `initial_conditions.past_inflows`:
+/// `values_m3s[l]` with index 0 = lag 1 (most recent), index L-1 = lag L
+/// (oldest). Storage-only when `max_par_order == 0`.
 fn build_initial_state(
     system: &System,
     study_dims: &StudyDimensions,
@@ -1321,22 +1342,21 @@ fn build_initial_state(
 ) -> Vec<f64> {
     let mut state = vec![0.0_f64; layout.n_state];
     let hydros = system.hydros();
+    let hydro_positions = id_to_position(hydros, |h: &Hydro| h.id.0);
     let ic = system.initial_conditions();
 
     for hs in &ic.storage {
-        // Both hydros() and ic.storage are sorted by hydro_id.
-        if let Ok(idx) = hydros.binary_search_by_key(&hs.hydro_id.0, |h| h.id.0) {
+        if let Some(&idx) = hydro_positions.get(&hs.hydro_id.0) {
             state[idx] = hs.value_hm3;
         }
     }
 
     for hs in &ic.filling_storage {
-        // ic.filling_storage is sorted by hydro_id (binary_search requires it). The
-        // seed writes the same coordinate the PreFilling pin
+        // The seed writes the same coordinate the PreFilling pin
         // (`fill_prefilling_shortcircuit`) freezes to `[seed, seed]`; do not merge
         // the two collections or re-index the column — a separate index would
         // silently desync from that pin.
-        if let Ok(idx) = hydros.binary_search_by_key(&hs.hydro_id.0, |h| h.id.0) {
+        if let Some(&idx) = hydro_positions.get(&hs.hydro_id.0) {
             state[idx] = hs.value_hm3;
         }
     }
@@ -1344,7 +1364,7 @@ fn build_initial_state(
     if layout.max_par_order > 0 {
         let n_h = layout.hydro_count;
         for pi in &ic.past_inflows {
-            if let Ok(idx) = hydros.binary_search_by_key(&pi.hydro_id.0, |h| h.id.0) {
+            if let Some(&idx) = hydro_positions.get(&pi.hydro_id.0) {
                 let n_lags = pi.values_m3s.len().min(layout.max_par_order);
                 for lag in 0..n_lags {
                     let slot = layout.inflow_lags.start + lag * n_h + idx;
@@ -1368,13 +1388,11 @@ fn build_initial_state(
             "anticipated_thermal_indices length must equal n_anticipated",
         );
         let thermals = system.thermals();
+        let thermal_positions = id_to_position(thermals, |t: &Thermal| t.id.0);
         let n_ant = layout.n_anticipated;
         let ant_start = layout.anticipated_slots_out.start;
         for history in &ic.past_anticipated_commitments {
-            // thermals() and past_anticipated_commitments are both sorted by
-            // thermal_id (binary_search requires it).
-            let Ok(global_idx) = thermals.binary_search_by_key(&history.thermal_id.0, |t| t.id.0)
-            else {
+            let Some(&global_idx) = thermal_positions.get(&history.thermal_id.0) else {
                 // Defense-in-depth — the cobre-io validator rejects an unknown ID in
                 // production; matches the existing `past_inflows` skip behavior.
                 continue;

@@ -44,7 +44,7 @@ mod template;
 mod test_support;
 
 // --- Public re-exports (stable API) ---
-pub use patch::PatchBuffer;
+pub use patch::{AnticipatedGenWidenCtx, PatchBuffer};
 pub use template::{StageGeometry, StageTemplates, build_stage_templates};
 
 // --- Crate-internal re-exports ---
