@@ -389,7 +389,6 @@ fn resolve_downstream_level(
     let geo_rows: Vec<HydroGeometryRow> = geo_refs.iter().map(|r| (*r).clone()).collect();
     let forebay = ForebayTable::new(&geo_rows, &downstream.name).ok()?;
 
-    // Already absolute hm³; do NOT re-apply the `v_min + fraction·(..)` span here.
     let v_ref = reference_volume_fractions.get(downstream_id, stage_pos);
 
     Some(forebay.height(v_ref))

@@ -620,8 +620,7 @@ mod tests {
 
     /// `StageId(0)..StageId(n_stages - 1)`: the 0-based domain ids every test
     /// fixture in this module uses (no pre-study-stage offset), so study
-    /// position and domain id coincide — matching production behavior on the
-    /// existing 0-based studies this ticket must leave unchanged.
+    /// position and domain id coincide.
     fn stage_ids_0_based(n_stages: usize) -> Vec<StageId> {
         (0..n_stages)
             .map(|s| StageId(i32::try_from(s).expect("test stage count fits in i32")))

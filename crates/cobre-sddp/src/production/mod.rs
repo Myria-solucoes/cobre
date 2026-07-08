@@ -26,10 +26,8 @@
 //! - `conversion` — field-for-field conversions from `Simulation*Result` to the
 //!   `cobre-io` write-payload record types.
 
+pub(crate) mod conversion;
 pub mod energy_conversion;
 pub(crate) mod fpha_fitting;
 pub mod hydro_models;
 pub mod stage_key;
-
-// Intra-crate internal, never named from outside the crate: keep `pub(crate)`.
-pub(crate) mod conversion;
