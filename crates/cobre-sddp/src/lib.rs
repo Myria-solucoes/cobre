@@ -90,7 +90,8 @@ pub(crate) use stochastic::{noise, stochastic_summary};
 // the internal `crate::`-prefixed references the curated re-exports below do not
 // cover. `forward` and `lower_bound` stay `pub`; the rest are `pub(crate)`.
 pub(crate) use training::{
-    backward, backward_pass_state, forward_pass_state, state_exchange, trajectory, visited_states,
+    backward, backward_pass_state, forward_pass_state, rank_reconcile, state_exchange, trajectory,
+    visited_states,
 };
 pub use training::{forward, lower_bound};
 

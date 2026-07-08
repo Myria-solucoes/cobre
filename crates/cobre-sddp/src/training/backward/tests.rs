@@ -994,8 +994,8 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
     .unwrap();
 
     // Trial point m=1: slot = 0 + 2*3 + 1 = 7
-    // Verify that pool[0].metadata[7] has the correct iteration and fpi.
-    let meta = &fcf.pools[0].metadata[7];
+    // Verify that pool[0].metadata(7) has the correct iteration and fpi.
+    let meta = fcf.pools[0].metadata(7);
     assert_eq!(meta.iteration_generated, 2);
     assert_eq!(meta.forward_pass_index, 1);
 }
@@ -1925,7 +1925,7 @@ fn forward_pass_index_matches_global_scenario_index() {
 
     // m=5: slot = warm_start(0) + 2*6 + 5 = 17
     // The critical check: forward_pass_index in metadata equals global m=5.
-    let meta = &fcf.pools[0].metadata[17];
+    let meta = fcf.pools[0].metadata(17);
     assert_eq!(meta.iteration_generated, 2, "iteration_generated must be 2");
     assert_eq!(
         meta.forward_pass_index, 5,
@@ -3550,7 +3550,7 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
     // Pool[1] received 3 cuts from t=1 backward pass.
     // Slot formula: warm_start(0) + iteration(1) * fwd_passes(3) + fpi
     // → slots 3, 4, 5. Populated count = 6 (high-water mark).
-    assert_eq!(fcf.pools[1].populated_count, 6);
+    assert_eq!(fcf.pools[1].populated(), 6);
 
     // At t=0, the 3 cuts in pool[1] (slots 3,4,5) were evaluated for
     // binding. The mock solver returns positive duals (cut_dual_padding
@@ -3559,22 +3559,24 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
     // gets 3 trial points × 2 openings = 6 increments.
     for slot in 3..6 {
         assert!(
-            fcf.pools[1].metadata[slot].active_count > 0,
+            fcf.pools[1].metadata(slot).active_count > 0,
             "slot {slot} active_count should be > 0 (cuts were binding)"
         );
         assert_eq!(
-            fcf.pools[1].metadata[slot].active_count, 6,
+            fcf.pools[1].metadata(slot).active_count,
+            6,
             "slot {slot} active_count should be 6 (3 trial points × 2 openings)"
         );
         assert_eq!(
-            fcf.pools[1].metadata[slot].last_active_iter, 1,
+            fcf.pools[1].metadata(slot).last_active_iter,
+            1,
             "slot {slot} last_active_iter should be 1 (current iteration)"
         );
     }
 
     // Pool[2] (terminal successor) received no cuts and no binding
     // was checked against it — metadata should be at defaults.
-    assert_eq!(fcf.pools[2].populated_count, 0);
+    assert_eq!(fcf.pools[2].populated(), 0);
 }
 
 /// Build N identical `SolverWorkspace<MockSolver>` instances and run a
@@ -4491,7 +4493,7 @@ fn run_one_trial_point_with_stores(
         frozen_template: &frozen_template,
         successor_active_slots: &successor_active_slots,
         cut_activity_tolerance: 0.0,
-        successor_populated_count: fcf.pools[1].populated_count,
+        successor_populated_count: fcf.pools[1].populated(),
         successor_pool: &fcf.pools[1],
         cut_state: &cut_state_projection,
     };
@@ -5211,9 +5213,9 @@ fn dcs_two_stage_fcf() -> FutureCostFunction {
         active_count: 0,
         last_active_iter: last,
     };
-    fcf.pools[1].metadata[0] = meta(1, 5);
-    fcf.pools[1].metadata[1] = meta(1, 1); // stale → outside k2=2 window at iter 5
-    fcf.pools[1].metadata[2] = meta(1, 5);
+    fcf.pools[1].set_metadata_for_test(0, meta(1, 5));
+    fcf.pools[1].set_metadata_for_test(1, meta(1, 1)); // stale → outside k2=2 window at iter 5
+    fcf.pools[1].set_metadata_for_test(2, meta(1, 5));
     fcf
 }
 
@@ -5287,7 +5289,7 @@ fn run_dcs_backward_trial_point_at(
         &crate::test_support::cut_state_projection(&state),
         &[],
     );
-    let successor_active_slots: Vec<usize> = (0..fcf.pools[1].populated_count).collect();
+    let successor_active_slots: Vec<usize> = (0..fcf.pools[1].populated()).collect();
     let num_cuts = successor_active_slots.len();
 
     let mut exchange = exchange_with_states(n_state, vec![vec![x_hat]]);
@@ -5359,7 +5361,7 @@ fn run_dcs_backward_trial_point_at(
         frozen_template: &core,
         successor_active_slots: &successor_active_slots,
         cut_activity_tolerance: 0.0,
-        successor_populated_count: fcf.pools[1].populated_count,
+        successor_populated_count: fcf.pools[1].populated(),
         successor_pool: &fcf.pools[1],
         cut_state: &cut_state_projection,
     };
@@ -5798,7 +5800,7 @@ fn backward_dcs_frozen_cuts_present_no_duplicate_rows() {
         &crate::test_support::cut_state_projection(&state),
         &[],
     );
-    let successor_active_slots: Vec<usize> = (0..fcf.pools[1].populated_count).collect();
+    let successor_active_slots: Vec<usize> = (0..fcf.pools[1].populated()).collect();
     let num_cuts = successor_active_slots.len();
 
     let mut exchange = exchange_with_states(n_state, vec![vec![2.0]]);
@@ -5873,7 +5875,7 @@ fn backward_dcs_frozen_cuts_present_no_duplicate_rows() {
         frozen_template: &frozen,
         successor_active_slots: &successor_active_slots,
         cut_activity_tolerance: 0.0,
-        successor_populated_count: fcf.pools[1].populated_count,
+        successor_populated_count: fcf.pools[1].populated(),
         successor_pool: &fcf.pools[1],
         cut_state: &cut_state_projection,
     };

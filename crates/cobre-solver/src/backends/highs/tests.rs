@@ -1,6 +1,6 @@
 use super::HighsSolver;
 use crate::{
-    SolverInterface,
+    BasisStatus, SolverInterface,
     types::{Basis, RowBatch, SolverStatistics, StageTemplate},
 };
 
@@ -429,8 +429,8 @@ fn test_highs_statistics_into_equals_statistics() {
     assert_eq!(buf.retry_level_histogram, owned.retry_level_histogram);
 }
 
-/// After `load_model` + `solve()`, `get_basis` must return i32 codes
-/// that are all valid `HiGHS` basis status values (0..=4).
+/// After `load_model` + `solve()`, `get_basis` must return statuses that are
+/// all HiGHS-representable (`from_highs_code` never yields `Superbasic`/`Fixed`).
 #[test]
 fn test_get_basis_valid_status_codes() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -443,16 +443,26 @@ fn test_get_basis_valid_status_codes() {
     let mut basis = Basis::new(0, 0);
     solver.get_basis(&mut basis);
 
-    for &code in &basis.col_status {
+    let is_highs_representable = |status: BasisStatus| {
+        matches!(
+            status,
+            BasisStatus::Lower
+                | BasisStatus::Basic
+                | BasisStatus::Upper
+                | BasisStatus::Zero
+                | BasisStatus::Nonbasic
+        )
+    };
+    for &status in &basis.col_status {
         assert!(
-            (0..=4).contains(&code),
-            "col_status code {code} is outside valid HiGHS range 0..=4"
+            is_highs_representable(status),
+            "col_status {status:?} is not HiGHS-representable"
         );
     }
-    for &code in &basis.row_status {
+    for &status in &basis.row_status {
         assert!(
-            (0..=4).contains(&code),
-            "row_status code {code} is outside valid HiGHS range 0..=4"
+            is_highs_representable(status),
+            "row_status {status:?} is not HiGHS-representable"
         );
     }
 }
@@ -653,7 +663,6 @@ fn test_solve_warm_start_non_alien_success() {
 ///   total_basic: 5, col_basic: 3, row_basic: 2 })`.
 #[test]
 fn test_solve_warm_start_rejects_inconsistent_basis() {
-    use crate::ffi;
     use crate::types::SolverError;
 
     // Arrange: non-alien setter is now the only warm-start path.
@@ -667,11 +676,11 @@ fn test_solve_warm_start_rejects_inconsistent_basis() {
     bad_basis
         .col_status
         .iter_mut()
-        .for_each(|v| *v = ffi::HIGHS_BASIS_STATUS_BASIC);
+        .for_each(|v| *v = BasisStatus::Basic);
     bad_basis
         .row_status
         .iter_mut()
-        .for_each(|v| *v = ffi::HIGHS_BASIS_STATUS_BASIC);
+        .for_each(|v| *v = BasisStatus::Basic);
 
     let before = solver.statistics();
 

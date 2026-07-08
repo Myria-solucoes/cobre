@@ -1084,13 +1084,13 @@ mod decomp_integration {
         let n_pools = fcf.pools.len();
         for (t, pool) in fcf.pools[..n_pools - 1].iter().enumerate() {
             assert!(
-                pool.populated_count >= 1,
+                pool.populated() >= 1,
                 "stage {t} (non-terminal) cut pool must have at least 1 cut after training; got {}",
-                pool.populated_count
+                pool.populated()
             );
         }
         assert_eq!(
-            fcf.pools[n_pools - 1].populated_count,
+            fcf.pools[n_pools - 1].populated(),
             0,
             "terminal pool must have 0 backward-pass cuts (boundary-cut injection is a separate test)"
         );
@@ -1198,9 +1198,9 @@ mod decomp_integration {
             "terminal pool must have boundary cuts after injection; warm_start_count == 0"
         );
         assert!(
-            terminal_pool.populated_count >= terminal_pool.warm_start_count as usize,
+            terminal_pool.populated() >= terminal_pool.warm_start_count as usize,
             "populated_count ({}) must include boundary cuts (warm_start_count = {})",
-            terminal_pool.populated_count,
+            terminal_pool.populated(),
             terminal_pool.warm_start_count
         );
 

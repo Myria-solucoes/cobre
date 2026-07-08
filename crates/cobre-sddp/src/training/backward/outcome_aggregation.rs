@@ -66,7 +66,7 @@ pub(crate) fn accumulate_dcs_binding_counts(
     for (slot, increment) in slot_increments
         .iter_mut()
         .enumerate()
-        .take(pool.populated_count)
+        .take(pool.populated())
     {
         let Some(lp_row) = row_map.lp_row_for_slot(slot) else {
             continue;

@@ -336,9 +336,11 @@ impl CutSyncBuffers {
     /// Pack the current iteration's local cuts into the send buffer, returning
     /// the number of cut records packed.
     ///
-    /// Reads coefficients directly from the pool's `coefficients` slice to
-    /// avoid per-cut `Vec<f64>` clones. Only cuts generated at the given
-    /// `iteration` and currently active are included.
+    /// Reads coefficients via [`CutPool::coefficient_row`] to avoid per-cut
+    /// `Vec<f64>` clones. Only cuts generated at the given `iteration` and
+    /// currently active are included.
+    ///
+    /// [`CutPool::coefficient_row`]: crate::cut::CutPool::coefficient_row
     ///
     /// # Panics
     ///
@@ -365,11 +367,11 @@ impl CutSyncBuffers {
         );
 
         let mut n_cuts = 0usize;
-        for slot in 0..pool.populated_count {
-            if !pool.active[slot] {
+        for slot in 0..pool.populated() {
+            if !pool.is_active(slot) {
                 continue;
             }
-            let meta = &pool.metadata[slot];
+            let meta = pool.metadata(slot);
             if meta.iteration_generated != iteration {
                 continue;
             }
@@ -382,14 +384,13 @@ impl CutSyncBuffers {
             );
 
             let start = n_cuts * record_size;
-            let coeffs =
-                &pool.coefficients[slot * pool.state_dimension..(slot + 1) * pool.state_dimension];
+            let coeffs = pool.coefficient_row(slot);
             serialize_cut(
                 &mut self.send_buf[start..start + record_size],
                 slot as u32,
                 iteration as u32,
                 meta.forward_pass_index,
-                pool.intercepts[slot],
+                pool.intercept(slot),
                 coeffs,
             );
             n_cuts += 1;

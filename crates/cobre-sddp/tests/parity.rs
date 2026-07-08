@@ -1279,18 +1279,13 @@ mod determinism {
         for t in 0..fcf_1.pools.len() {
             let pool_1 = &fcf_1.pools[t];
             let pool_4 = &fcf_4.pools[t];
-            assert_eq!(pool_1.populated_count, pool_4.populated_count);
+            assert_eq!(pool_1.populated(), pool_4.populated());
 
-            for s in 0..pool_1.populated_count {
-                assert_eq!(pool_1.active[s], pool_4.active[s]);
-                assert_eq!(
-                    pool_1.intercepts[s].to_bits(),
-                    pool_4.intercepts[s].to_bits()
-                );
-                let sd = pool_1.state_dimension;
-                let start = s * sd;
-                let c1 = &pool_1.coefficients[start..start + sd];
-                let c4 = &pool_4.coefficients[start..start + sd];
+            for s in 0..pool_1.populated() {
+                assert_eq!(pool_1.is_active(s), pool_4.is_active(s));
+                assert_eq!(pool_1.intercept(s).to_bits(), pool_4.intercept(s).to_bits());
+                let c1 = pool_1.coefficient_row(s);
+                let c4 = pool_4.coefficient_row(s);
                 assert_eq!(c1.len(), c4.len());
                 for (&coeff_1, &coeff_4) in c1.iter().zip(c4.iter()) {
                     assert_eq!(coeff_1.to_bits(), coeff_4.to_bits());
@@ -1355,18 +1350,13 @@ mod determinism {
         for t in 0..fcf_1.pools.len() {
             let pool_1 = &fcf_1.pools[t];
             let pool_4 = &fcf_4.pools[t];
-            assert_eq!(pool_1.populated_count, pool_4.populated_count);
+            assert_eq!(pool_1.populated(), pool_4.populated());
 
-            for s in 0..pool_1.populated_count {
-                assert_eq!(pool_1.active[s], pool_4.active[s]);
-                assert_eq!(
-                    pool_1.intercepts[s].to_bits(),
-                    pool_4.intercepts[s].to_bits()
-                );
-                let sd = pool_1.state_dimension;
-                let start = s * sd;
-                let c1 = &pool_1.coefficients[start..start + sd];
-                let c4 = &pool_4.coefficients[start..start + sd];
+            for s in 0..pool_1.populated() {
+                assert_eq!(pool_1.is_active(s), pool_4.is_active(s));
+                assert_eq!(pool_1.intercept(s).to_bits(), pool_4.intercept(s).to_bits());
+                let c1 = pool_1.coefficient_row(s);
+                let c4 = pool_4.coefficient_row(s);
                 assert_eq!(c1.len(), c4.len());
                 for (&coeff_1, &coeff_4) in c1.iter().zip(c4.iter()) {
                     assert_eq!(coeff_1.to_bits(), coeff_4.to_bits());

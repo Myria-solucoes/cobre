@@ -197,7 +197,7 @@ impl DcsScoringScratch {
 ///
 /// Applied first. A cut at slot `s` is eligible only when `params.k1` is `None`
 /// (∞, the exactness path) or its age
-/// `current_iteration.saturating_sub(pool.metadata[s].iteration_generated)` is
+/// `current_iteration.saturating_sub(pool.metadata(s).iteration_generated)` is
 /// `< k1`. Warm-start cuts (`iteration_generated == u64::MAX`) saturate to age 0
 /// and stay inside any finite window. Out-of-window cuts are never scored.
 ///
@@ -282,7 +282,7 @@ pub fn score_violated_candidates(
 
     for (slot, _intercept, coefficients) in pool.active_cuts() {
         if let Some(k1) = params.k1 {
-            let age = current_iteration.saturating_sub(pool.metadata[slot].iteration_generated);
+            let age = current_iteration.saturating_sub(pool.metadata(slot).iteration_generated);
             if age >= u64::from(k1) {
                 continue;
             }
@@ -311,7 +311,7 @@ pub fn score_violated_candidates(
     );
 
     for (i, &slot) in scratch.cand_slots.iter().enumerate() {
-        let alpha = pool.intercepts[slot as usize] + scratch.alpha[i];
+        let alpha = pool.intercept(slot as usize) + scratch.alpha[i];
         let v = alpha - theta_raw;
         if v > params.epsilon_viol {
             scratch.violations.push((v, slot));
@@ -593,7 +593,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
         // FRESH: reset the carried row map, append the seed, run the initial
         // solve. Must NOT reload the model — that would discard the caller's
         // bounds patch.
-        scratch.row_map.reset(pool.populated_count, core.num_rows);
+        scratch.row_map.reset(pool.populated(), core.num_rows);
         append_slots_to_lp(
             solver,
             pool,
@@ -713,7 +713,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
 /// (D5). It reads only `last_active_iter` and `iteration_generated`, both
 /// maintained deterministically, and emits slots in ascending order.
 ///
-/// A populated slot `s` is included iff `pool.active[s]` AND it was active within
+/// A populated slot `s` is included iff `pool.is_active(s)` AND it was active within
 /// the last `k2` iterations OR generated in the current iteration (current-iter
 /// cuts are untested, always seeded — mirroring `cut_selection`'s protection).
 /// `saturating_sub` guards the underflow when `last_active_iter` exceeds
@@ -725,20 +725,20 @@ pub fn build_initial_resident_set(
     out: &mut Vec<u32>,
 ) {
     debug_assert!(
-        pool.metadata.len() >= pool.populated_count,
-        "build_initial_resident_set: metadata.len() {} < populated_count {}",
-        pool.metadata.len(),
-        pool.populated_count,
+        pool.capacity >= pool.populated(),
+        "build_initial_resident_set: capacity {} < populated_count {}",
+        pool.capacity,
+        pool.populated(),
     );
 
     out.clear();
     let window = u64::from(k2);
     #[allow(clippy::cast_possible_truncation)]
-    for s in 0..pool.populated_count {
-        if !pool.active[s] {
+    for s in 0..pool.populated() {
+        if !pool.is_active(s) {
             continue;
         }
-        let meta = &pool.metadata[s];
+        let meta = pool.metadata(s);
         let within_window = current_iteration.saturating_sub(meta.last_active_iter) <= window;
         let is_current_iter = meta.iteration_generated == current_iteration;
         if within_window || is_current_iter {
@@ -893,7 +893,7 @@ mod tests {
     /// `iteration_generated`. Returns nothing; mutates `pool`.
     fn add(pool: &mut CutPool, slot: u32, intercept: f64, coeffs: &[f64], iter_generated: u64) {
         pool.add_cut(0, slot, intercept, coeffs);
-        pool.metadata[slot as usize].iteration_generated = iter_generated;
+        pool.set_iteration_generated_for_test(slot as usize, iter_generated);
     }
 
     /// An empty resident map (no slot is in the LP). base_row_offset is
@@ -1296,7 +1296,7 @@ mod tests {
         let mut violations: Vec<(f64, u32)> = Vec::new();
         for (slot, intercept, coefficients) in pool.active_cuts() {
             if let Some(k1) = p.k1 {
-                let age = current_iteration.saturating_sub(pool.metadata[slot].iteration_generated);
+                let age = current_iteration.saturating_sub(pool.metadata(slot).iteration_generated);
                 if age >= u64::from(k1) {
                     continue;
                 }
@@ -1334,7 +1334,7 @@ mod tests {
             pool.add_cut(0, slot as u32, intercept, &coeffs);
             // iteration_generated in [1, 12].
             let gen_iter = 1 + (splitmix64(&mut state) % 12);
-            pool.metadata[slot].iteration_generated = gen_iter;
+            pool.set_iteration_generated_for_test(slot, gen_iter);
         }
         pool
     }
@@ -1700,7 +1700,7 @@ mod tests {
         pool.add_cut(0, 1, 0.0, &[1.0]);
         pool.add_cut(0, 2, 5.0, &[0.0]);
         for slot in 0..3 {
-            pool.metadata[slot].iteration_generated = 1;
+            pool.set_iteration_generated_for_test(slot, 1);
         }
         pool
     }
@@ -1719,7 +1719,7 @@ mod tests {
         pool.add_cut(0, 2, 5.0, &[0.0]);
         pool.add_cut(0, 3, 0.0, &[2.0]);
         for slot in 0..4 {
-            pool.metadata[slot].iteration_generated = 1;
+            pool.set_iteration_generated_for_test(slot, 1);
         }
         pool
     }
@@ -1751,7 +1751,7 @@ mod tests {
         let mut solver = active_profiled();
         let core = core_template();
         solver.load_model(&core);
-        let mut row_map = CutRowMap::new(pool.populated_count, core.num_rows);
+        let mut row_map = CutRowMap::new(pool.populated(), core.num_rows);
         let mut batch = RowBatch {
             num_rows: 0,
             row_starts: Vec::new(),
@@ -1760,7 +1760,7 @@ mod tests {
             row_lower: Vec::new(),
             row_upper: Vec::new(),
         };
-        let all_slots: Vec<u32> = (0..pool.populated_count as u32).collect();
+        let all_slots: Vec<u32> = (0..pool.populated() as u32).collect();
         let cs = cut_state(state);
         crate::cut::row::append_slots_to_lp(
             &mut solver,
@@ -2417,7 +2417,7 @@ mod tests {
         // One cut: intercept 5, coeff [0] → floor 5.0 at x0 = 2.
         let mut pool = CutPool::new(16, 1, 16, 0);
         pool.add_cut(0, 0, 5.0, &[0.0]);
-        pool.metadata[0].iteration_generated = 1;
+        pool.set_iteration_generated_for_test(0, 1);
 
         // Primal layout: [x0, c1, c2, theta]. First solve reports theta = 0
         // (cut 0 floor 5 > 0 → violated). After adding cut 0, the mock reports
@@ -2463,17 +2463,19 @@ mod tests {
     fn seed_pool(specs: &[(bool, u64, u64)]) -> CutPool {
         let n = specs.len();
         let mut pool = CutPool::new(n.max(1), 1, n.max(1) as u32, 0);
-        for (i, &(active, iteration_generated, last_active_iter)) in specs.iter().enumerate() {
+        let mut metadata = Vec::with_capacity(n);
+        let mut active = Vec::with_capacity(n);
+        for (i, &(is_active, iteration_generated, last_active_iter)) in specs.iter().enumerate() {
             pool.add_cut(0, i as u32, 0.0, &[0.0]);
-            pool.metadata[i] = CutMetadata {
+            metadata.push(CutMetadata {
                 iteration_generated,
                 forward_pass_index: i as u32,
                 active_count: 0,
                 last_active_iter,
-            };
-            pool.active[i] = active;
+            });
+            active.push(is_active);
         }
-        pool.cached_active_count = specs.iter().filter(|&&(a, _, _)| a).count();
+        pool.replace_selection(&metadata, &active);
         pool
     }
 

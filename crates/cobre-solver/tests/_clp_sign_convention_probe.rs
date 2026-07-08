@@ -6,7 +6,7 @@
 //! the equality-row fixture, the SAME sign as `HiGHS`; therefore `ClpSolver::solve`
 //! MUST not negate `cobre_clp_get_row_price`.
 
-#![cfg(feature = "clp")]
+#![cfg(all(feature = "clp", feature = "test-support"))]
 #![cfg_attr(
     test,
     allow(
@@ -17,7 +17,7 @@
     )
 )]
 
-use cobre_solver::clp_ffi::{
+use cobre_solver::test_support::{
     CLP_STATUS_OPTIMAL, cobre_clp_create, cobre_clp_destroy, cobre_clp_dual,
     cobre_clp_get_row_price, cobre_clp_load_problem, cobre_clp_objective_value,
     cobre_clp_set_log_level, cobre_clp_status,

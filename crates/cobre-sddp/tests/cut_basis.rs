@@ -160,7 +160,7 @@ mod boundary_cuts {
             "terminal pool must have boundary cuts"
         );
         assert!(
-            terminal_pool.populated_count >= terminal_pool.warm_start_count as usize,
+            terminal_pool.populated() >= terminal_pool.warm_start_count as usize,
             "populated_count must include boundary cuts"
         );
 
@@ -647,7 +647,7 @@ mod cut_selection_determinism_realistic {
     //! compare bitmaps across whatever thread counts rayon actually instantiates.
 
     use cobre_sddp::cut::CutPool;
-    use cobre_sddp::cut_selection::{CutActivityUpdates, CutSelectionStrategy};
+    use cobre_sddp::cut_selection::{CutActivityUpdates, CutMetadata, CutSelectionStrategy};
 
     /// Splitmix64 PRNG, inlined so no external crate is needed.
     fn splitmix64(state: &mut u64) -> u64 {
@@ -680,9 +680,15 @@ mod cut_selection_determinism_realistic {
         }
         // Force all cuts eligible: iteration_generated < the current_iteration (5)
         // the tests below pass to select.
-        for slot in 0..k {
-            pool.metadata[slot].iteration_generated = 1;
-        }
+        let metadata: Vec<CutMetadata> = (0..k)
+            .map(|slot| {
+                let mut meta = pool.metadata(slot).clone();
+                meta.iteration_generated = 1;
+                meta
+            })
+            .collect();
+        let active: Vec<bool> = (0..k).map(|slot| pool.is_active(slot)).collect();
+        pool.replace_selection(&metadata, &active);
         pool
     }
 
@@ -1113,8 +1119,8 @@ mod basis_reconstruct_churn {
         {
             let fcf = &mut setup.fcf;
             for (stage, pool) in fcf.pools.iter_mut().enumerate() {
-                let active_indices: Vec<u32> = (0..pool.populated_count)
-                    .filter(|&i| pool.active[i])
+                let active_indices: Vec<u32> = (0..pool.populated())
+                    .filter(|&i| pool.is_active(i))
                     .map(|i| i as u32)
                     .collect();
                 if !active_indices.is_empty() {
@@ -1326,18 +1332,18 @@ mod hybrid_reconstruction {
     //! Integration smoke for the slot-identity basis-reconstruction path.
 
     use cobre_sddp::basis_reconstruct::{
-        HIGHS_BASIS_STATUS_BASIC as B, HIGHS_BASIS_STATUS_LOWER as L, ReconstructionStats,
-        ReconstructionTarget, reconstruct_basis,
+        ReconstructionStats, ReconstructionTarget, reconstruct_basis,
     };
     use cobre_sddp::workspace::CapturedBasis;
     use cobre_solver::Basis;
+    use cobre_solver::BasisStatus::{Basic as B, Lower as L};
 
     /// All columns are `BASIC` so the column block does not perturb the test focus.
     fn make_stored(
         base_rows: usize,
         num_cols: usize,
         slots: &[u32],
-        cut_statuses: &[i32],
+        cut_statuses: &[cobre_solver::BasisStatus],
         state_at_capture: &[f64],
     ) -> CapturedBasis {
         assert_eq!(slots.len(), cut_statuses.len());

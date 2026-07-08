@@ -29,9 +29,9 @@ pub(crate) fn write_capture_metadata(
     captured.base_row_count = base_row_count;
     let expected_len = base_row_count + cut_row_count;
     if captured.basis.row_status.len() != expected_len {
-        captured.basis.row_status.resize(
-            expected_len,
-            crate::basis_reconstruct::HIGHS_BASIS_STATUS_BASIC,
-        );
+        captured
+            .basis
+            .row_status
+            .resize(expected_len, cobre_solver::BasisStatus::Basic);
     }
 }

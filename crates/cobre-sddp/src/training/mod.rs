@@ -32,6 +32,7 @@ pub mod lower_bound;
 pub(crate) mod backward;
 pub(crate) mod backward_pass_state;
 pub(crate) mod forward_pass_state;
+pub(crate) mod rank_reconcile;
 pub(crate) mod session;
 pub(crate) mod stage_solve_prep;
 pub(crate) mod state_exchange;

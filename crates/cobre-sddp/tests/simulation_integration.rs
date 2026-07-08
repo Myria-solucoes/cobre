@@ -665,18 +665,17 @@ fn train_simulate_write_cycle() {
         .pools
         .iter()
         .map(|pool| {
-            (0..pool.populated_count)
+            (0..pool.populated())
                 .map(|slot| {
-                    let meta = &pool.metadata[slot];
+                    let meta = pool.metadata(slot);
                     PolicyCutRecord {
                         cut_id: slot as u64,
                         slot_index: slot as u32,
                         iteration: meta.iteration_generated as u32,
                         forward_pass_index: meta.forward_pass_index,
-                        intercept: pool.intercepts[slot],
-                        coefficients: &pool.coefficients
-                            [slot * pool.state_dimension..(slot + 1) * pool.state_dimension],
-                        is_active: pool.active[slot],
+                        intercept: pool.intercept(slot),
+                        coefficients: pool.coefficient_row(slot),
+                        is_active: pool.is_active(slot),
                     }
                 })
                 .collect()
@@ -687,8 +686,8 @@ fn train_simulate_write_cycle() {
         .pools
         .iter()
         .map(|pool| {
-            (0..pool.populated_count)
-                .filter(|&slot| pool.active[slot])
+            (0..pool.populated())
+                .filter(|&slot| pool.is_active(slot))
                 .map(|slot| slot as u32)
                 .collect()
         })
@@ -705,7 +704,7 @@ fn train_simulate_write_cycle() {
             warm_start_count: pool.warm_start_count,
             cuts: &cut_records_per_stage[stage_idx],
             active_cut_indices: &active_indices_per_stage[stage_idx],
-            populated_count: pool.populated_count as u32,
+            populated_count: pool.populated() as u32,
             entity_manifest: &[],
         })
         .collect();

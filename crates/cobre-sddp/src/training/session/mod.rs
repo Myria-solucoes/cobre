@@ -33,6 +33,7 @@ use crate::{
     forward_pass_state::{ForwardPassInputs, ForwardPassState},
     lower_bound::LbEvalScratchBundle,
     lower_bound::evaluate_lower_bound,
+    rank_reconcile::{reconcile_error_flag, reconcile_result},
     solver_stats::{
         SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, SolverStatsLogEntry,
         aggregate_solver_statistics, pack_delta_scalars, unpack_delta_scalars,
@@ -449,7 +450,17 @@ where
     /// # Errors
     ///
     /// Returns `SddpError::Communication` if `broadcast_basis_cache` fails.
-    pub(crate) fn finalize(self) -> Result<TrainingOutcome, SddpError> {
+    pub(crate) fn finalize(mut self) -> Result<TrainingOutcome, SddpError> {
+        // Reconcile finalize arrival before the basis-cache broadcast so
+        // broadcast_basis_cache is entered by all ranks or none: a peer that failed
+        // makes this clean rank take the same no-broadcast exit in lockstep, rather
+        // than block alone in the broadcast.
+        if let Err(peer_err) =
+            reconcile_error_flag(Ok(()), self.comm, &mut self.fwd_state.reconcile_scratch)
+        {
+            return Ok(self.finalize_without_broadcast(peer_err, "error"));
+        }
+
         #[allow(clippy::cast_possible_truncation)]
         let total_time_ms = (self.results.start_time.elapsed().as_millis() as u64).max(1);
 
@@ -501,12 +512,31 @@ where
     }
 
     /// Emit `TrainingFinished` with `reason = "error"` and return a partial
-    /// `TrainingOutcome` carrying the original error.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err(comm_err)` if `broadcast_basis_cache` itself fails.
-    pub(crate) fn finalize_with_error(self, err: SddpError) -> Result<TrainingOutcome, SddpError> {
+    /// `TrainingOutcome` carrying the original error, taking the coordinated
+    /// no-broadcast exit so no rank blocks in `broadcast_basis_cache`.
+    pub(crate) fn finalize_with_error(mut self, err: SddpError) -> TrainingOutcome {
+        // Announce this rank's failure to peers still in the clean `finalize` so they
+        // skip their basis-cache broadcast in lockstep; reconcile over a local Err
+        // hands this rank's own error back (single-rank: the same error unchanged).
+        let err = reconcile_error_flag(Err(err), self.comm, &mut self.fwd_state.reconcile_scratch)
+            .err()
+            .unwrap_or_else(|| {
+                SddpError::Communication(cobre_comm::CommError::CollectiveFailed {
+                    operation: "reconcile_error_flag",
+                    mpi_error_code: 0,
+                    message: "reconcile over a local failure unexpectedly reported agreement"
+                        .to_string(),
+                })
+            });
+        self.finalize_without_broadcast(err, "error")
+    }
+
+    /// Build the error-exit `TrainingOutcome` WITHOUT entering
+    /// `broadcast_basis_cache`. Used once the ranks did not all agree to broadcast
+    /// (a rank-local or peer failure), so the basis cache is empty — no collective
+    /// is safe on this path. The caller must have already reconciled the failure
+    /// across ranks so every rank takes this exit in lockstep.
+    fn finalize_without_broadcast(self, err: SddpError, reason: &str) -> TrainingOutcome {
         let frozen_templates = self.scratch.frozen_templates;
         let visited_archive = self.visited_archive;
         let TrainingResults {
@@ -527,7 +557,7 @@ where
         emit(
             self.runtime.event_sender(),
             TrainingEvent::TrainingFinished {
-                reason: "error".to_string(),
+                reason: reason.to_string(),
                 iterations: completed_iterations,
                 final_lb,
                 final_ub,
@@ -536,25 +566,22 @@ where
             },
         );
 
-        let basis_cache =
-            broadcast_basis_cache(&self.basis_store, self.ranks.num_stages, self.comm)?;
-
-        Ok(TrainingOutcome {
+        TrainingOutcome {
             result: TrainingResult::new(
                 final_lb,
                 final_ub,
                 final_ub_std,
                 final_gap,
                 completed_iterations,
-                "error".to_string(),
+                reason.to_string(),
                 total_time_ms,
-                basis_cache,
+                Vec::new(),
                 solver_stats_log,
                 visited_archive,
                 Some(frozen_templates),
             ),
             error: Some(err),
-        })
+        }
     }
 
     // ── Private phase helpers ──────────────────────────────────────────────
@@ -592,7 +619,14 @@ where
             &self.runtime,
             iteration,
         );
-        let forward_result = fwd.run(&mut inputs)?;
+        // Reconcile the rank-local forward result before the forward phase's first
+        // collective (the stage-stats allreduce and sync_forward's allgatherv): a
+        // solve failure on any rank makes every rank return Err here and break
+        // toward a coordinated finalize, so no rank enters those collectives while a
+        // peer has skipped them.
+        let forward_local = fwd.run(&mut inputs);
+        let forward_result =
+            reconcile_result(forward_local, self.comm, &mut fwd.reconcile_scratch)?;
 
         let fwd_solve_time_ms = {
             let fwd_stats_after = aggregate_solver_statistics(
@@ -810,7 +844,7 @@ where
                 let active_0 = pool0.active_count() as u32;
                 per_stage.push(StageRowSelectionRecord {
                     stage: 0,
-                    rows_populated: pool0.populated_count as u32,
+                    rows_populated: pool0.populated() as u32,
                     rows_active_before: active_0,
                     rows_deactivated: 0,
                     rows_reactivated: 0,
@@ -841,7 +875,7 @@ where
             #[allow(clippy::cast_possible_truncation)]
             for (stage, deact, stage_sel_time_ms) in deactivations {
                 let pool = &self.fcf.pools[stage];
-                let populated = pool.populated_count as u32;
+                let populated = pool.populated() as u32;
                 let active_before = pool.active_count() as u32;
                 let n_deact = deact.updates.len() as u32;
                 let n_reactivated = deact.reactivations.len() as u32;
@@ -1740,9 +1774,7 @@ mod tests {
         )
         .unwrap();
 
-        let outcome = session
-            .finalize_with_error(SddpError::Validation("test error".to_string()))
-            .unwrap();
+        let outcome = session.finalize_with_error(SddpError::Validation("test error".to_string()));
 
         assert!(outcome.error.is_some(), "expected error in outcome");
         assert_eq!(outcome.result.reason, "error");

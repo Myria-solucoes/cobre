@@ -16,6 +16,7 @@
 )]
 
 use cobre_sddp::cut::{CutPool, CutRowMap};
+use cobre_sddp::cut_selection::CutMetadata;
 use cobre_sddp::dcs::{DcsParams, DcsScoringScratch, score_violated_candidates};
 use cobre_sddp::indexer::{CutStateProjection, StateLayout};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -126,7 +127,7 @@ fn score_per_candidate_baseline(
 
     for (slot, intercept, coefficients) in pool.active_cuts() {
         if let Some(k1) = params.k1 {
-            let age = current_iteration.saturating_sub(pool.metadata[slot].iteration_generated);
+            let age = current_iteration.saturating_sub(pool.metadata(slot).iteration_generated);
             if age >= u64::from(k1) {
                 continue;
             }
@@ -162,8 +163,16 @@ fn make_candidate_pool(k: usize, n_state: usize, seed: u64) -> CutPool {
         let intercept = draw_f64(&mut state);
         fill_f64(&mut coeffs, state.wrapping_add(0xABCD_0000 + slot as u64));
         pool.add_cut(0, slot as u32, intercept, &coeffs);
-        pool.metadata[slot].iteration_generated = 1;
     }
+    let metadata: Vec<CutMetadata> = (0..k)
+        .map(|slot| {
+            let mut meta = pool.metadata(slot).clone();
+            meta.iteration_generated = 1;
+            meta
+        })
+        .collect();
+    let active: Vec<bool> = (0..k).map(|slot| pool.is_active(slot)).collect();
+    pool.replace_selection(&metadata, &active);
     pool
 }
 

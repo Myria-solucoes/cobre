@@ -7,7 +7,7 @@
 //! [`FutureCostFunction`]: crate::FutureCostFunction
 
 use cobre_io::PolicyCheckpointMetadata;
-use cobre_solver::Basis;
+use cobre_solver::{Basis, BasisStatus};
 
 use crate::SddpError;
 use crate::cut::pool::CutPool;
@@ -127,7 +127,8 @@ pub fn validate_policy_load(
 /// Build a basis cache from deserialized checkpoint basis records.
 ///
 /// Returns a `Vec<Option<CapturedBasis>>`, one entry per stage; stages without a
-/// matching record get `None` (`u8` status codes widen to `i32`).
+/// matching record get `None`. `u8` status codes decode via `from_highs_code`,
+/// the mirror of `convert_basis_cache`'s export-side `to_highs_code`.
 ///
 /// # Cut-slot reconstruction
 ///
@@ -156,8 +157,16 @@ pub fn build_basis_cache_from_checkpoint(
         if stage >= num_stages {
             continue;
         }
-        let col_status: Vec<i32> = record.column_status.iter().map(|&c| i32::from(c)).collect();
-        let row_status: Vec<i32> = record.row_status.iter().map(|&r| i32::from(r)).collect();
+        let col_status: Vec<BasisStatus> = record
+            .column_status
+            .iter()
+            .map(|&c| BasisStatus::from_highs_code(i32::from(c)))
+            .collect();
+        let row_status: Vec<BasisStatus> = record
+            .row_status
+            .iter()
+            .map(|&r| BasisStatus::from_highs_code(i32::from(r)))
+            .collect();
 
         let num_cut = record.num_cut_rows as usize;
         let active_slots: Option<Vec<u32>> = stage_cuts

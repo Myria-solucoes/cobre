@@ -165,7 +165,7 @@ pub trait SolverInterface: Send {
     /// from the trait's `Send` bound.
     fn solve(&mut self, basis: Option<&Basis>) -> Result<SolutionView<'_>, SolverError>;
 
-    /// Writes solver-native `i32` status codes into a caller-owned [`Basis`] buffer.
+    /// Writes canonical [`BasisStatus`](crate::BasisStatus) values into a caller-owned [`Basis`] buffer.
     ///
     /// The buffer (from [`Basis::new`], reused across iterations) is **not** resized;
     /// writes go into the first `num_cols` entries of `out.col_status` and the first
@@ -328,15 +328,20 @@ mod tests {
 
     #[test]
     fn test_noop_solver_get_basis_noop() {
+        use crate::BasisStatus;
         use crate::types::Basis;
 
         let mut solver = NoopSolver;
         let mut raw = Basis::new(3, 2);
-        raw.col_status.iter_mut().for_each(|v| *v = 99_i32);
-        raw.row_status.iter_mut().for_each(|v| *v = 99_i32);
+        raw.col_status
+            .iter_mut()
+            .for_each(|v| *v = BasisStatus::Upper);
+        raw.row_status
+            .iter_mut()
+            .for_each(|v| *v = BasisStatus::Upper);
         solver.get_basis(&mut raw);
-        assert!(raw.col_status.iter().all(|&v| v == 99_i32));
-        assert!(raw.row_status.iter().all(|&v| v == 99_i32));
+        assert!(raw.col_status.iter().all(|&v| v == BasisStatus::Upper));
+        assert!(raw.row_status.iter().all(|&v| v == BasisStatus::Upper));
     }
 
     #[test]

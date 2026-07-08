@@ -27,7 +27,8 @@ use cobre_core::{
     },
 };
 use cobre_solver::{
-    Basis, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
+    Basis, BasisStatus, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics,
+    StageTemplate,
 };
 use cobre_stochastic::{
     ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
@@ -2256,17 +2257,27 @@ fn ac_broadcast_basis_cache_uses_scenario_0_not_last() {
     use super::broadcast_basis_cache;
     use crate::workspace::BasisStore;
 
+    const VARIANTS: [BasisStatus; 7] = [
+        BasisStatus::Lower,
+        BasisStatus::Basic,
+        BasisStatus::Upper,
+        BasisStatus::Zero,
+        BasisStatus::Nonbasic,
+        BasisStatus::Superbasic,
+        BasisStatus::Fixed,
+    ];
+
     let num_scenarios = 4; // simulates total_forward_passes=4, num_ranks=1
     let num_stages = 3;
     let mut store = BasisStore::new(num_scenarios, num_stages);
 
-    // Populate scenario 0 with col_status=[10,20], row_status=[30].
+    // Populate scenario 0 with a per-stage-distinct status sequence.
     for t in 0..num_stages {
         // test shim: zero metadata is acceptable for tests exercising broadcast path
         *store.get_mut(0, t) = Some(crate::workspace::CapturedBasis {
             basis: Basis {
-                col_status: vec![10_i32 + t as i32, 20_i32 + t as i32],
-                row_status: vec![30_i32 + t as i32],
+                col_status: vec![VARIANTS[t], VARIANTS[t + 1]],
+                row_status: vec![VARIANTS[t + 2]],
             },
             base_row_count: 0,
             cut_row_slots: Vec::new(),
@@ -2279,8 +2290,8 @@ fn ac_broadcast_basis_cache_uses_scenario_0_not_last() {
         // test shim: zero metadata is acceptable for tests exercising broadcast path
         *store.get_mut(3, t) = Some(crate::workspace::CapturedBasis {
             basis: Basis {
-                col_status: vec![99_i32, 88_i32],
-                row_status: vec![77_i32],
+                col_status: vec![BasisStatus::Superbasic, BasisStatus::Fixed],
+                row_status: vec![BasisStatus::Nonbasic],
             },
             base_row_count: 0,
             cut_row_slots: Vec::new(),
@@ -2298,12 +2309,12 @@ fn ac_broadcast_basis_cache_uses_scenario_0_not_last() {
             .expect("stage {t} must have a captured basis");
         assert_eq!(
             captured.basis.col_status,
-            vec![10_i32 + t as i32, 20_i32 + t as i32],
+            vec![VARIANTS[t], VARIANTS[t + 1]],
             "stage {t} col_status must come from scenario 0, not scenario 3"
         );
         assert_eq!(
             captured.basis.row_status,
-            vec![30_i32 + t as i32],
+            vec![VARIANTS[t + 2]],
             "stage {t} row_status must come from scenario 0, not scenario 3"
         );
     }
@@ -2349,8 +2360,8 @@ fn broadcast_basis_cache_single_rank_preserves_metadata() {
     // Populate stage 0 with non-empty metadata.
     *store.get_mut(0, 0) = Some(CapturedBasis {
         basis: Basis {
-            col_status: vec![1_i32, 2_i32],
-            row_status: vec![3_i32, 4_i32, 5_i32],
+            col_status: vec![BasisStatus::Lower, BasisStatus::Basic],
+            row_status: vec![BasisStatus::Upper, BasisStatus::Zero, BasisStatus::Nonbasic],
         },
         base_row_count: 2,
         cut_row_slots: vec![10_u32, 11_u32, 12_u32],
@@ -2584,8 +2595,8 @@ fn broadcast_basis_cache_multi_rank_round_trips_full_metadata() {
     let mut store = BasisStore::new(1, 2);
     *store.get_mut(0, 0) = Some(CapturedBasis {
         basis: Basis {
-            col_status: vec![1_i32, 2_i32, 3_i32],
-            row_status: vec![10_i32, 20_i32],
+            col_status: vec![BasisStatus::Lower, BasisStatus::Basic, BasisStatus::Upper],
+            row_status: vec![BasisStatus::Zero, BasisStatus::Nonbasic],
         },
         base_row_count: 4,
         cut_row_slots: vec![10_u32, 11_u32, 12_u32],
@@ -2610,12 +2621,12 @@ fn broadcast_basis_cache_multi_rank_round_trips_full_metadata() {
         .expect("stage 0 must deserialise into CapturedBasis on rank 1");
     assert_eq!(
         cb0.basis.col_status,
-        vec![1_i32, 2_i32, 3_i32],
+        vec![BasisStatus::Lower, BasisStatus::Basic, BasisStatus::Upper],
         "col_status must round-trip"
     );
     assert_eq!(
         cb0.basis.row_status,
-        vec![10_i32, 20_i32],
+        vec![BasisStatus::Zero, BasisStatus::Nonbasic],
         "row_status must round-trip"
     );
     assert_eq!(
@@ -2646,8 +2657,8 @@ fn broadcast_basis_cache_empty_cut_slots_round_trips_ok() {
     let mut store = BasisStore::new(1, 1);
     *store.get_mut(0, 0) = Some(CapturedBasis {
         basis: Basis {
-            col_status: vec![5_i32, 6_i32],
-            row_status: vec![7_i32],
+            col_status: vec![BasisStatus::Nonbasic, BasisStatus::Superbasic],
+            row_status: vec![BasisStatus::Fixed],
         },
         base_row_count: 1,
         cut_row_slots: vec![], // deliberately empty
@@ -2701,8 +2712,8 @@ fn broadcast_basis_cache_truncated_cut_slots_returns_validation() {
     let mut store = BasisStore::new(1, 1);
     *store.get_mut(0, 0) = Some(CapturedBasis {
         basis: Basis {
-            col_status: vec![1_i32],
-            row_status: vec![2_i32],
+            col_status: vec![BasisStatus::Lower],
+            row_status: vec![BasisStatus::Basic],
         },
         base_row_count: 1,
         cut_row_slots: vec![10_u32, 11_u32, 12_u32],
@@ -2768,8 +2779,8 @@ fn broadcast_basis_cache_truncated_state_returns_validation() {
     let mut store = BasisStore::new(1, 1);
     *store.get_mut(0, 0) = Some(CapturedBasis {
         basis: Basis {
-            col_status: vec![1_i32],
-            row_status: vec![2_i32],
+            col_status: vec![BasisStatus::Lower],
+            row_status: vec![BasisStatus::Basic],
         },
         base_row_count: 1,
         cut_row_slots: vec![],
@@ -3025,8 +3036,8 @@ fn ac_training_result_new_assigns_all_fields() {
 
     let basis_cache = vec![Some(CapturedBasis {
         basis: Basis {
-            col_status: vec![1_i32],
-            row_status: vec![2_i32],
+            col_status: vec![BasisStatus::Lower],
+            row_status: vec![BasisStatus::Basic],
         },
         base_row_count: 3,
         cut_row_slots: vec![4_u32],

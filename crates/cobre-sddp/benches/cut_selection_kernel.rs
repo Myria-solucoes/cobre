@@ -10,7 +10,7 @@
 #![allow(missing_docs, clippy::expect_used, clippy::cast_possible_truncation)]
 
 use cobre_sddp::cut::CutPool;
-use cobre_sddp::cut_selection::CutSelectionStrategy;
+use cobre_sddp::cut_selection::{CutMetadata, CutSelectionStrategy};
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
@@ -42,9 +42,15 @@ fn make_pool(k: usize, d: usize, seed: u64) -> CutPool {
         fill_f64(&mut coeffs, state.wrapping_add(slot as u64));
         pool.add_cut(0, slot as u32, intercept, &coeffs);
     }
-    for slot in 0..k {
-        pool.metadata[slot].iteration_generated = 1;
-    }
+    let metadata: Vec<CutMetadata> = (0..k)
+        .map(|slot| {
+            let mut meta = pool.metadata(slot).clone();
+            meta.iteration_generated = 1;
+            meta
+        })
+        .collect();
+    let active: Vec<bool> = (0..k).map(|slot| pool.is_active(slot)).collect();
+    pool.replace_selection(&metadata, &active);
     pool
 }
 

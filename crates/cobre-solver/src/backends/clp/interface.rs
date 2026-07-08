@@ -6,7 +6,7 @@ use super::config::{ClpAlgorithm, ClpProfile};
 use super::retry::LADDER_RUNGS;
 use super::solver::{ClpSolver, clp_version, i32_from_usize};
 use crate::{
-    SolverInterface, clp_ffi,
+    BasisStatus, SolverInterface, clp_ffi,
     types::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate},
 };
 
@@ -615,8 +615,8 @@ impl SolverInterface for ClpSolver {
     /// Extracts the current simplex basis into `out`, element-by-element.
     ///
     /// CLP reports basis status one element at a time (no bulk array in the
-    /// wrapper). The raw `CLP_BASIS_*` `i32` codes are stored verbatim for a
-    /// later round-trip into `install_basis`.
+    /// wrapper). Each native `CLP_BASIS_*` code is mapped via `from_clp_code`
+    /// into the canonical status stored in `out`.
     ///
     /// # Panics
     ///
@@ -627,8 +627,8 @@ impl SolverInterface for ClpSolver {
             "get_basis called without a loaded model — call load_model first"
         );
 
-        out.col_status.resize(self.num_cols, 0);
-        out.row_status.resize(self.num_rows, 0);
+        out.col_status.resize(self.num_cols, BasisStatus::Lower);
+        out.row_status.resize(self.num_rows, BasisStatus::Lower);
 
         // Loop indices are bounded by `num_cols`/`num_rows`, both asserted to
         // fit in i32 by `load_model`; the casts cannot truncate or wrap.
@@ -638,15 +638,16 @@ impl SolverInterface for ClpSolver {
             // loaded (asserted via `has_model`); `c` is in `0..num_cols`, a valid
             // column sequence index, and fits in i32. The getter reads a single
             // status byte and returns it widened to i32.
-            out.col_status[c] =
-                unsafe { clp_ffi::cobre_clp_get_column_status(self.handle, c as i32) };
+            let code = unsafe { clp_ffi::cobre_clp_get_column_status(self.handle, c as i32) };
+            out.col_status[c] = BasisStatus::from_clp_code(code);
         }
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         for r in 0..self.num_rows {
             // SAFETY: `self.handle` is a valid, non-null CLP pointer with a model
             // loaded; `r` is in `0..num_rows`, a valid row sequence index, and fits
             // in i32. The getter reads a single status byte and returns it widened.
-            out.row_status[r] = unsafe { clp_ffi::cobre_clp_get_row_status(self.handle, r as i32) };
+            let code = unsafe { clp_ffi::cobre_clp_get_row_status(self.handle, r as i32) };
+            out.row_status[r] = BasisStatus::from_clp_code(code);
         }
     }
 

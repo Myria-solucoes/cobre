@@ -430,7 +430,7 @@ impl BackwardPassState {
         fcf: &mut FutureCostFunction,
         comm: &C,
     ) -> Result<(), SddpError> {
-        let populated_count = fcf.pools[successor].populated_count;
+        let populated_count = fcf.pools[successor].populated();
         if populated_count == 0 {
             return Ok(());
         }
@@ -457,8 +457,7 @@ impl BackwardPassState {
         .map_err(SddpError::from)?;
         for (slot, &inc) in self.global_increments_buf.iter().enumerate() {
             if inc > 0 {
-                fcf.pools[successor].metadata[slot].active_count += inc;
-                fcf.pools[successor].metadata[slot].last_active_iter = iteration;
+                fcf.pools[successor].record_binding(slot, inc, iteration);
             }
         }
         Ok(())
@@ -739,7 +738,7 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
         frozen_template: frozen_tmpl,
         successor_active_slots: &state.successor_active_slots_buf,
         cut_activity_tolerance: inputs.cut_activity_tolerance,
-        successor_populated_count: inputs.fcf.pools[successor].populated_count,
+        successor_populated_count: inputs.fcf.pools[successor].populated(),
         successor_pool: &inputs.fcf.pools[successor],
         cut_state: cut_state_projection,
     };
@@ -1731,13 +1730,13 @@ mod tests {
             active_count: 0,
             last_active_iter: last,
         };
-        fcf.pools[successor].metadata[0] = meta(g, g);
-        fcf.pools[successor].metadata[1] = meta(g, g);
-        let pop = fcf.pools[successor].populated_count;
+        fcf.pools[successor].set_metadata_for_test(0, meta(g, g));
+        fcf.pools[successor].set_metadata_for_test(1, meta(g, g));
+        let pop = fcf.pools[successor].populated();
 
         // Pre-state: both slots frozen at generation iteration `g`.
-        assert_eq!(fcf.pools[successor].metadata[0].last_active_iter, g);
-        assert_eq!(fcf.pools[successor].metadata[1].last_active_iter, g);
+        assert_eq!(fcf.pools[successor].metadata(0).last_active_iter, g);
+        assert_eq!(fcf.pools[successor].metadata(1).last_active_iter, g);
 
         // One worker whose DCS binding-count contribution bumps only slot 1 (the
         // resident binding cut), matching what the DCS path emits at iteration i.
@@ -1758,14 +1757,16 @@ mod tests {
         // Slot 1 bound at `i`: last_active_iter advances from g to i; active_count
         // accrues the increment. Slot 0 did not bind: it stays frozen at g.
         assert_eq!(
-            fcf.pools[successor].metadata[1].last_active_iter, i,
+            fcf.pools[successor].metadata(1).last_active_iter,
+            i,
             "binding slot 1 must advance to iteration {i}"
         );
-        assert_eq!(fcf.pools[successor].metadata[1].active_count, 1);
+        assert_eq!(fcf.pools[successor].metadata(1).active_count, 1);
         assert_eq!(
-            fcf.pools[successor].metadata[0].last_active_iter, g,
+            fcf.pools[successor].metadata(0).last_active_iter,
+            g,
             "non-binding slot 0 must stay frozen at its generation iteration {g}"
         );
-        assert_eq!(fcf.pools[successor].metadata[0].active_count, 0);
+        assert_eq!(fcf.pools[successor].metadata(0).active_count, 0);
     }
 }

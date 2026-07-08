@@ -6,10 +6,16 @@
 //! `HiGHS` symbols are re-exported flat so `crate::ffi::cobre_highs_*` resolves
 //! without qualifying through [`highs`]. Use the safe wrappers in the backend
 //! modules rather than calling these bindings directly.
+//!
+//! `pub(crate)` throughout: not nameable from outside `cobre-solver`. The
+//! `test_support` module (`lib.rs`, `test-support` feature) is the sole
+//! sanctioned external escape hatch, bridging a named subset as thin
+//! pass-throughs for integration tests.
 
-pub mod highs;
+pub(crate) mod highs;
 
 #[cfg(feature = "clp")]
-pub mod clp;
+pub(crate) mod clp;
 
-pub use highs::*;
+#[cfg(feature = "highs")]
+pub(crate) use highs::*;

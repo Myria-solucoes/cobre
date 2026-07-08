@@ -3610,9 +3610,9 @@ mod dcs_forward {
             active_count: 0,
             last_active_iter: last,
         };
-        fcf.pools[0].metadata[0] = meta(1, 5);
-        fcf.pools[0].metadata[1] = meta(1, 1); // stale → outside k2=2 window at iter 5
-        fcf.pools[0].metadata[2] = meta(1, 5);
+        fcf.pools[0].set_metadata_for_test(0, meta(1, 5));
+        fcf.pools[0].set_metadata_for_test(1, meta(1, 1)); // stale → outside k2=2 window at iter 5
+        fcf.pools[0].set_metadata_for_test(2, meta(1, 5));
         fcf
     }
 

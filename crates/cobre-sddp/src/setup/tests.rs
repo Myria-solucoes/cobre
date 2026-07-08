@@ -1023,7 +1023,7 @@ fn train_generates_cuts_in_fcf() {
         .expect("train");
 
     assert!(
-        setup.fcf.pools[0].populated_count > 0,
+        setup.fcf.pools[0].populated() > 0,
         "expected at least one cut in FCF pool[0] after training"
     );
 }

@@ -639,7 +639,7 @@ mod tests {
         // stage 1: one cut at iteration 1 -> slot 2.
         fcf.add_cut(1, 1, 0, 3.0, &[1.0]);
 
-        let populated: u64 = fcf.pools.iter().map(|p| p.populated_count as u64).sum();
+        let populated: u64 = fcf.pools.iter().map(|p| p.populated() as u64).sum();
         assert_eq!(
             populated, 7,
             "high-water mark includes the empty leading block"

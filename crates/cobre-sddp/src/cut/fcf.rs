@@ -333,7 +333,7 @@ impl FutureCostFunction {
     ///
     /// # Panics (debug builds only)
     ///
-    /// Panics if `stage >= pools.len()` or if `slot >= pools[stage].populated_count`.
+    /// Panics if `stage >= pools.len()` or if `slot >= pools[stage].populated()`.
     ///
     /// [`CutPool::set_active`]: super::pool::CutPool::set_active
     pub fn set_active(&mut self, stage: usize, slot: u32, active: bool) {
@@ -536,7 +536,7 @@ mod tests {
         // (base 0 would place these at slots 2,3 with populated_count 4).
         fcf.add_cut(0, 1, 0, 1.0, &[1.0]);
         fcf.add_cut(0, 1, 1, 2.0, &[1.0]);
-        assert_eq!(fcf.pools[0].populated_count, 2);
+        assert_eq!(fcf.pools[0].populated(), 2);
         assert_eq!(fcf.pools[0].generated_count, 2);
     }
 
@@ -674,7 +674,7 @@ mod tests {
         let fcf = FutureCostFunction::from_deserialized(&stages).unwrap();
         assert_eq!(fcf.pools.len(), 1);
         assert_eq!(fcf.total_active_cuts(), 2);
-        assert_eq!(fcf.pools[0].populated_count, 3);
+        assert_eq!(fcf.pools[0].populated(), 3);
     }
 
     #[test]
@@ -755,7 +755,7 @@ mod tests {
         assert_eq!(fcf.pools[0].capacity, 42);
         assert_eq!(fcf.pools[0].warm_start_count, 2);
         assert_eq!(fcf.pools[0].forward_passes, 4);
-        assert_eq!(fcf.pools[0].populated_count, 2);
+        assert_eq!(fcf.pools[0].populated(), 2);
         assert_eq!(fcf.total_active_cuts(), 2);
     }
 
@@ -771,12 +771,12 @@ mod tests {
         fcf.add_cut(0, 0, 1, 30.0, &[3.0]);
 
         assert_eq!(fcf.total_active_cuts(), 3);
-        assert_eq!(fcf.pools[0].populated_count, 3);
+        assert_eq!(fcf.pools[0].populated(), 3);
         // Warm-start cut at slot 0
-        assert_eq!(fcf.pools[0].intercepts[0], 10.0);
+        assert_eq!(fcf.pools[0].intercept(0), 10.0);
         // Training cuts at slots 1 and 2
-        assert_eq!(fcf.pools[0].intercepts[1], 20.0);
-        assert_eq!(fcf.pools[0].intercepts[2], 30.0);
+        assert_eq!(fcf.pools[0].intercept(1), 20.0);
+        assert_eq!(fcf.pools[0].intercept(2), 30.0);
     }
 
     #[test]
@@ -824,7 +824,7 @@ mod tests {
 
         fcf.set_active(1, 0, false);
 
-        assert!(!fcf.pools[1].active[0]);
+        assert!(!fcf.pools[1].is_active(0));
         assert_eq!(fcf.total_active_cuts(), prior - 1);
     }
 }

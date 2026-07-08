@@ -1380,7 +1380,7 @@ fn d17_level1_cut_selection_convergence() {
          (populated={})",
         result.result.iterations,
         fcf.pools[0].active_count(),
-        fcf.pools[0].populated_count,
+        fcf.pools[0].populated(),
     );
 
     // Informational only: the mock never tracks basis ops, so this never fires.
@@ -1646,7 +1646,7 @@ fn d18_lml1_cut_selection_convergence() {
          (populated={})",
         result.result.iterations,
         fcf.pools[0].active_count(),
-        fcf.pools[0].populated_count,
+        fcf.pools[0].populated(),
     );
 }
 

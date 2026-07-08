@@ -26,7 +26,8 @@ use std::sync::mpsc;
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::scenario::SamplingScheme;
 use cobre_solver::{
-    Basis, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
+    Basis, BasisStatus, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics,
+    StageTemplate,
 };
 use cobre_stochastic::StochasticContext;
 
@@ -2781,12 +2782,12 @@ fn simulate_frozen_length_mismatch_returns_error() {
 /// reproduces the stored cut statuses verbatim.
 #[test]
 fn simulate_with_captured_basis_preserves_row_statuses() {
-    // Arbitrary non-zero sentinels; the test only checks they pass through unchanged.
-    const CUT_STATUS_0: i32 = 7;
-    const CUT_STATUS_1: i32 = 11;
-    const CUT_STATUS_2: i32 = 13;
-    // Base rows use HIGHS_BASIS_STATUS_BASIC = 1.
-    const BASE_STATUS: i32 = 1;
+    // Arbitrary distinct statuses; the test only checks they pass through unchanged.
+    const CUT_STATUS_0: BasisStatus = BasisStatus::Superbasic;
+    const CUT_STATUS_1: BasisStatus = BasisStatus::Zero;
+    const CUT_STATUS_2: BasisStatus = BasisStatus::Fixed;
+    // Base rows use BasisStatus::Basic.
+    const BASE_STATUS: BasisStatus = BasisStatus::Basic;
 
     let n_stages = 1;
     let n_scenarios = 1u32;
@@ -2810,7 +2811,8 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         "pool must have exactly 3 active cuts at slots 10, 11, 12"
     );
     assert_eq!(
-        fcf.pools[0].populated_count, 13,
+        fcf.pools[0].populated(),
+        13,
         "populated_count must be 13 (slot 12 + 1)"
     );
 
@@ -2822,7 +2824,7 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         CUT_STATUS_1,
         CUT_STATUS_2,
     ];
-    cb.basis.col_status = vec![1_i32; 4];
+    cb.basis.col_status = vec![BasisStatus::Basic; 4];
     cb.cut_row_slots.extend_from_slice(&[10u32, 11, 12]);
     cb.state_at_capture.push(1.0);
 

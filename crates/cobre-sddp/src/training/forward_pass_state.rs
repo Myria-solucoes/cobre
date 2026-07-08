@@ -177,7 +177,7 @@ struct PostProcessContext {
 /// Pre-sized from the study dimensions and reused across every iteration; every
 /// field is cleared and repopulated each `run()`, so no allocation occurs on the
 /// hot path. Per-iteration inputs are passed via [`ForwardPassInputs`].
-// The `worker_` prefix is intentional: all fields are per-worker scratch buffers.
+// The `worker_` prefix on the per-worker scratch fields is what struct_field_names flags.
 #[allow(clippy::struct_field_names)]
 pub(crate) struct ForwardPassState {
     /// Per-worker, per-stage solver-stats accumulators (`n_workers × num_stages`).
@@ -204,6 +204,10 @@ pub(crate) struct ForwardPassState {
     /// out via `std::mem::replace` into the [`ForwardResult`] each run, leaving a
     /// pre-sized empty vec so the next iteration's resize does not allocate.
     stage_stats: Vec<SolverStatsDelta>,
+
+    /// Cross-rank error-reconciliation scratch, reused each iteration by the
+    /// pre-`sync_forward` reconcile so that reconciliation never allocates.
+    pub(crate) reconcile_scratch: [i32; 1],
 }
 
 impl ForwardPassState {
@@ -234,6 +238,7 @@ impl ForwardPassState {
             worker_totals: Vec::with_capacity(n_workers),
             scenario_costs: Vec::with_capacity(max_local_fwd),
             stage_stats,
+            reconcile_scratch: [0_i32; 1],
         }
     }
 

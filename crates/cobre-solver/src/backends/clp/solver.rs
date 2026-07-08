@@ -192,10 +192,11 @@ impl ClpSolver {
 
     /// Reinstalls an offered warm-start basis into the CLP model element-by-element.
     ///
-    /// CLP exposes basis status **per element**, not as a bulk array. The raw
-    /// `CLP_BASIS_*` codes carried in `b` are written back verbatim. An oversized
-    /// row basis is tolerated (reinstalled up to `min(len, num_rows)`); an
-    /// undersized one cannot be padded soundly and is rejected.
+    /// CLP exposes basis status **per element**, not as a bulk array. Each
+    /// canonical status in `b` is mapped via `to_clp_code` before the per-element
+    /// write. An oversized row basis is tolerated (reinstalled up to
+    /// `min(len, num_rows)`); an undersized one cannot be padded soundly and is
+    /// rejected.
     ///
     /// # Errors
     ///
@@ -242,7 +243,11 @@ impl ClpSolver {
             // loaded; `c` is in `0..num_cols`, a valid column sequence index, and
             // fits in i32. The setter writes a single status byte; no aliasing.
             unsafe {
-                clp_ffi::cobre_clp_set_column_status(self.handle, c as i32, b.col_status[c]);
+                clp_ffi::cobre_clp_set_column_status(
+                    self.handle,
+                    c as i32,
+                    b.col_status[c].to_clp_code(),
+                );
             }
         }
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -252,7 +257,11 @@ impl ClpSolver {
             // sequence index, and fits in i32. The setter writes a single status
             // byte; no aliasing.
             unsafe {
-                clp_ffi::cobre_clp_set_row_status(self.handle, r as i32, b.row_status[r]);
+                clp_ffi::cobre_clp_set_row_status(
+                    self.handle,
+                    r as i32,
+                    b.row_status[r].to_clp_code(),
+                );
             }
         }
         self.stats.total_basis_set_time_seconds += basis_set_start.elapsed().as_secs_f64();

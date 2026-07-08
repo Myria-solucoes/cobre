@@ -49,12 +49,12 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
     ws: &'ws mut SolverWorkspace<S>,
     inputs: &StageInputs<'_>,
 ) -> Result<SolutionView<'ws>, SddpError> {
-    // `pool.populated_count` only grows, so this resize is a no-op after the
+    // `pool.populated()` only grows, so this resize is a no-op after the
     // first few iterations.
-    if ws.scratch.recon_slot_lookup.len() < inputs.pool.populated_count {
+    if ws.scratch.recon_slot_lookup.len() < inputs.pool.populated() {
         ws.scratch
             .recon_slot_lookup
-            .resize(inputs.pool.populated_count, None);
+            .resize(inputs.pool.populated(), None);
     }
 
     let view = if let Some(captured) = inputs.stored_basis {
@@ -219,6 +219,7 @@ pub(crate) fn debug_assert_bucket_copy_gap_intact(
 
 #[cfg(test)]
 mod tests {
+    use cobre_solver::BasisStatus::{Basic as B, Lower as L};
     use cobre_solver::{ActiveSolver, SolverInterface, StageTemplate};
     // `SolverError` is only referenced by the `highs`-gated
     // `basis_inconsistent_propagates_as_sddp_solver_error` test below.
@@ -228,7 +229,6 @@ mod tests {
     use super::{StageInputs, run_stage_solve};
     use crate::{
         SddpError,
-        basis_reconstruct::{HIGHS_BASIS_STATUS_BASIC as B, HIGHS_BASIS_STATUS_LOWER as L},
         context::StageContext,
         cut::pool::CutPool,
         lp_builder::PatchBuffer,

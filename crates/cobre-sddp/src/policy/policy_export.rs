@@ -217,19 +217,18 @@ pub fn build_stage_cut_records(fcf: &FutureCostFunction) -> Vec<Vec<PolicyCutRec
     fcf.pools
         .iter()
         .map(|pool| {
-            (0..pool.populated_count)
+            (0..pool.populated())
                 .map(|i| {
-                    let meta = &pool.metadata[i];
+                    let meta = pool.metadata(i);
                     PolicyCutRecord {
                         cut_id: meta.iteration_generated * u64::from(pool.forward_passes)
                             + u64::from(meta.forward_pass_index),
                         slot_index: i as u32,
                         iteration: meta.iteration_generated as u32,
                         forward_pass_index: meta.forward_pass_index,
-                        intercept: pool.intercepts[i],
-                        coefficients: &pool.coefficients
-                            [i * pool.state_dimension..(i + 1) * pool.state_dimension],
-                        is_active: pool.active[i],
+                        intercept: pool.intercept(i),
+                        coefficients: pool.coefficient_row(i),
+                        is_active: pool.is_active(i),
                     }
                 })
                 .collect()
@@ -277,15 +276,20 @@ pub fn build_stage_cuts_payloads<'a>(
             warm_start_count: pool.warm_start_count,
             cuts: &stage_records[stage_idx],
             active_cut_indices: &stage_active_indices[stage_idx],
-            populated_count: pool.populated_count as u32,
+            populated_count: pool.populated() as u32,
             entity_manifest: &stage_manifests[stage_idx],
         })
         .collect()
 }
 
-/// Convert the solver basis cache from i32 status codes to u8 byte vectors.
+/// Convert the solver basis cache to u8 byte vectors via `to_highs_code`
+/// (range 0..=4, so the truncation is safe).
 ///
-/// `HiGHS` status codes are in the range 0..=4, so the truncation is safe.
+/// Deliberately NOT the injective discriminant `CapturedBasis::to_broadcast_payload`
+/// uses for the MPI wire: this checkpoint format keeps its existing HiGHS-code
+/// byte semantics for on-disk compatibility, at the cost of folding CLP-only
+/// `Superbasic`/`Fixed` on export (pre-existing, unchanged by this conversion).
+///
 /// Returns `(col_status_bytes, row_status_bytes)`.
 #[must_use]
 pub fn convert_basis_cache(training_result: &TrainingResult) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
@@ -294,7 +298,13 @@ pub fn convert_basis_cache(training_result: &TrainingResult) -> (Vec<Vec<u8>>, V
         .iter()
         .map(|opt| {
             opt.as_ref()
-                .map(|cb| cb.basis.col_status.iter().map(|&v| v as u8).collect())
+                .map(|cb| {
+                    cb.basis
+                        .col_status
+                        .iter()
+                        .map(|status| status.to_highs_code() as u8)
+                        .collect()
+                })
                 .unwrap_or_default()
         })
         .collect();
@@ -303,7 +313,13 @@ pub fn convert_basis_cache(training_result: &TrainingResult) -> (Vec<Vec<u8>>, V
         .iter()
         .map(|opt| {
             opt.as_ref()
-                .map(|cb| cb.basis.row_status.iter().map(|&v| v as u8).collect())
+                .map(|cb| {
+                    cb.basis
+                        .row_status
+                        .iter()
+                        .map(|status| status.to_highs_code() as u8)
+                        .collect()
+                })
                 .unwrap_or_default()
         })
         .collect();
@@ -327,7 +343,7 @@ pub fn build_stage_basis_records<'a>(
                 let num_cut_rows = fcf
                     .pools
                     .get(stage_idx)
-                    .map_or(0, |pool| pool.populated_count.min(pool.capacity) as u32);
+                    .map_or(0, |pool| pool.populated().min(pool.capacity) as u32);
                 PolicyBasisRecord {
                     stage_id: stage_idx as u32,
                     iteration: training_result.iterations as u32,

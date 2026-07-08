@@ -1307,10 +1307,12 @@ fn solve_statistics_updated() {
 // --- Basis conformance tests ---
 
 /// `get_basis` must write exactly `num_cols` col statuses and `num_rows` row
-/// statuses, each in the valid `HiGHS` range [0, 4].
+/// statuses, each HiGHS-representable (never `Superbasic`/`Fixed`).
 #[cfg(feature = "highs")]
 #[test]
 fn basis_dimensions_after_solve() {
+    use cobre_solver::BasisStatus;
+
     let mut solver = HighsSolver::new().expect("solver");
     let template = make_fixture_stage_template();
     solver.load_model(&template);
@@ -1322,16 +1324,18 @@ fn basis_dimensions_after_solve() {
     assert_eq!(basis.col_status.len(), 3, "expected 3 col statuses");
     assert_eq!(basis.row_status.len(), 2, "expected 2 row statuses");
 
-    for (i, &code) in basis.col_status.iter().enumerate() {
+    let is_highs_representable =
+        |status: BasisStatus| !matches!(status, BasisStatus::Superbasic | BasisStatus::Fixed);
+    for (i, &status) in basis.col_status.iter().enumerate() {
         assert!(
-            (0..=4).contains(&code),
-            "col_status[{i}] = {code} is not a valid HiGHS basis status (0..=4)"
+            is_highs_representable(status),
+            "col_status[{i}] = {status:?} is not HiGHS-representable"
         );
     }
-    for (i, &code) in basis.row_status.iter().enumerate() {
+    for (i, &status) in basis.row_status.iter().enumerate() {
         assert!(
-            (0..=4).contains(&code),
-            "row_status[{i}] = {code} is not a valid HiGHS basis status (0..=4)"
+            is_highs_representable(status),
+            "row_status[{i}] = {status:?} is not HiGHS-representable"
         );
     }
 }

@@ -149,6 +149,7 @@ mod test_mpi_wire_format_version {
         cut::wire::{CUT_WIRE_VERSION, cut_wire_size, deserialize_cut, serialize_cut},
         workspace::{BASIS_BROADCAST_WIRE_VERSION, CapturedBasis},
     };
+    use cobre_solver::BasisStatus;
 
     // ---------------------------------------------------------------------------
     // basis wire-format version guard
@@ -170,11 +171,15 @@ mod test_mpi_wire_format_version {
             n_state,
         );
         // Minimal valid data so the Some-path sentinel (i32_buf[0] == 1) is written.
-        original.basis.col_status.extend_from_slice(&[0_i32, 1_i32]);
         original
             .basis
-            .row_status
-            .extend_from_slice(&[0_i32, 1_i32, 0_i32]);
+            .col_status
+            .extend_from_slice(&[BasisStatus::Lower, BasisStatus::Basic]);
+        original.basis.row_status.extend_from_slice(&[
+            BasisStatus::Lower,
+            BasisStatus::Basic,
+            BasisStatus::Lower,
+        ]);
         original.cut_row_slots.push(0_u32);
         original.cut_row_slots.push(1_u32);
         original.state_at_capture.push(42.0_f64);
@@ -265,6 +270,19 @@ mod test_mpi_4rank_basis_broadcast_round_trip {
     //! `CapturedBasis` values across four ranks reading from the same shared buffers.
 
     use cobre_sddp::workspace::{BASIS_BROADCAST_WIRE_VERSION, CapturedBasis};
+    use cobre_solver::BasisStatus;
+
+    /// The seven canonical statuses, indexed by `(seed + i) % 7` in
+    /// `make_captured_basis` to derive a deterministic, seed-varying sequence.
+    const BASIS_VARIANTS: [BasisStatus; 7] = [
+        BasisStatus::Lower,
+        BasisStatus::Basic,
+        BasisStatus::Upper,
+        BasisStatus::Zero,
+        BasisStatus::Nonbasic,
+        BasisStatus::Superbasic,
+        BasisStatus::Fixed,
+    ];
 
     fn make_captured_basis(seed: u32) -> CapturedBasis {
         let num_cols = 4_usize;
@@ -282,10 +300,12 @@ mod test_mpi_4rank_basis_broadcast_round_trip {
         );
 
         for i in 0..num_cols {
-            cb.basis.col_status.push(seed as i32 + i as i32);
+            let idx = (seed as usize + i) % BASIS_VARIANTS.len();
+            cb.basis.col_status.push(BASIS_VARIANTS[idx]);
         }
         for i in 0..num_rows {
-            cb.basis.row_status.push(seed as i32 * 2 + i as i32);
+            let idx = (seed as usize * 2 + i) % BASIS_VARIANTS.len();
+            cb.basis.row_status.push(BASIS_VARIANTS[idx]);
         }
         for i in 0..cut_slot_capacity {
             cb.cut_row_slots.push(seed + i as u32);

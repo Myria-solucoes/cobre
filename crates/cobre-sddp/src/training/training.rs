@@ -347,7 +347,7 @@ where
         match session.run_iteration(iteration) {
             Ok(IterationOutcome::Continue) => {}
             Ok(IterationOutcome::Converged | IterationOutcome::Shutdown) => break,
-            Err(e) => return session.finalize_with_error(e),
+            Err(e) => return Ok(session.finalize_with_error(e)),
         }
     }
     session.finalize()

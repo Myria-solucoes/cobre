@@ -322,7 +322,6 @@ pub fn append_slots_to_lp<S: SolverInterface>(
         pool.state_dimension,
         cut_state.n_state(),
     );
-    let n_cut_state = pool.state_dimension;
     let theta_col = state.theta;
     let nnz_per_cut = cut_state.render_len() + 1;
 
@@ -332,16 +331,15 @@ pub fn append_slots_to_lp<S: SolverInterface>(
     for &slot in slots {
         let slot_usize = slot as usize;
 
-        if slot_usize >= pool.populated_count
-            || !pool.active[slot_usize]
+        if slot_usize >= pool.populated()
+            || !pool.is_active(slot_usize)
             || row_map.lp_row_for_slot(slot_usize).is_some()
         {
             continue;
         }
 
-        let intercept = pool.intercepts[slot_usize];
-        let start = slot_usize * n_cut_state;
-        let coefficients = &pool.coefficients[start..start + n_cut_state];
+        let intercept = pool.intercept(slot_usize);
+        let coefficients = pool.coefficient_row(slot_usize);
 
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         batch_buf.row_starts.push(nz_offset as i32);

@@ -4,7 +4,7 @@
 //! [`WorkspacePool`] allocates one workspace per worker thread.
 //! [`BasisStore`] provides per-scenario, per-stage basis storage for warm-starting LP solves.
 
-use cobre_solver::{Basis, ProfiledSolver, SolverInterface};
+use cobre_solver::{Basis, BasisStatus, ProfiledSolver, SolverInterface};
 
 use crate::backward::StagedCut;
 use crate::dcs::DcsSolveScratch;
@@ -56,6 +56,38 @@ pub struct CapturedBasis {
 /// consumed warm-start.
 pub const BASIS_BROADCAST_WIRE_VERSION: i32 = 1;
 
+/// Wire-format discriminant for [`BasisStatus`], explicit and independent of the
+/// enum's declaration order. Owned exclusively by this function and
+/// [`basis_status_from_wire_code`] — the pair [`CapturedBasis::to_broadcast_payload`]
+/// and [`CapturedBasis::try_from_broadcast_payload`] call; change all four
+/// together. Injective (unlike `to_highs_code`, which folds `Superbasic`/`Fixed`),
+/// so a CLP-captured basis round-trips without loss.
+fn basis_status_to_wire_code(status: BasisStatus) -> i32 {
+    match status {
+        BasisStatus::Lower => 0,
+        BasisStatus::Basic => 1,
+        BasisStatus::Upper => 2,
+        BasisStatus::Zero => 3,
+        BasisStatus::Nonbasic => 4,
+        BasisStatus::Superbasic => 5,
+        BasisStatus::Fixed => 6,
+    }
+}
+
+/// Inverse of [`basis_status_to_wire_code`]; code `4` and any code outside
+/// `0..=6` both fall back to [`BasisStatus::Nonbasic`] (non-panicking decode).
+fn basis_status_from_wire_code(code: i32) -> BasisStatus {
+    match code {
+        0 => BasisStatus::Lower,
+        1 => BasisStatus::Basic,
+        2 => BasisStatus::Upper,
+        3 => BasisStatus::Zero,
+        5 => BasisStatus::Superbasic,
+        6 => BasisStatus::Fixed,
+        _ => BasisStatus::Nonbasic,
+    }
+}
+
 impl CapturedBasis {
     /// Construct an empty `CapturedBasis` with the given capacities.
     ///
@@ -101,8 +133,8 @@ impl CapturedBasis {
     /// - `base_row_count` as `i32`
     /// - `cut_row_slots.len()` as `i32`
     /// - `state_at_capture.len()` as `i32`
-    /// - `col_status[..]`
-    /// - `row_status[..]`
+    /// - `col_status[..]` mapped through `basis_status_to_wire_code`
+    /// - `row_status[..]` mapped through `basis_status_to_wire_code`
     /// - `cut_row_slots[..]` cast to `i32`
     ///
     /// Pushes `state_at_capture[..]` into `f64_buf`.
@@ -119,8 +151,12 @@ impl CapturedBasis {
         i32_buf.push(self.base_row_count as i32);
         i32_buf.push(self.cut_row_slots.len() as i32);
         i32_buf.push(self.state_at_capture.len() as i32);
-        i32_buf.extend_from_slice(&self.basis.col_status);
-        i32_buf.extend_from_slice(&self.basis.row_status);
+        for &status in &self.basis.col_status {
+            i32_buf.push(basis_status_to_wire_code(status));
+        }
+        for &status in &self.basis.row_status {
+            i32_buf.push(basis_status_to_wire_code(status));
+        }
         // u32 -> i32: slot values are LP pool indices (always
         // non-negative) that fit comfortably in i32.
         for &slot in &self.cut_row_slots {
@@ -147,8 +183,8 @@ impl CapturedBasis {
     /// - `base_row_count` as `i32`
     /// - `cut_row_slots.len()` as `i32`
     /// - `state_at_capture.len()` as `i32`
-    /// - `col_status[..]`
-    /// - `row_status[..]`
+    /// - `col_status[..]` decoded through `basis_status_from_wire_code`
+    /// - `row_status[..]` decoded through `basis_status_from_wire_code`
     /// - `cut_row_slots[..]` (stored as `i32`, cast back to `u32`)
     ///
     /// Reads `state_at_capture[..]` from `f64_buf`.
@@ -226,7 +262,10 @@ impl CapturedBasis {
                 i32_buf.len() - *i32_cursor
             )));
         }
-        let col_status = i32_buf[*i32_cursor..*i32_cursor + col_len].to_vec();
+        let col_status: Vec<BasisStatus> = i32_buf[*i32_cursor..*i32_cursor + col_len]
+            .iter()
+            .map(|&code| basis_status_from_wire_code(code))
+            .collect();
         *i32_cursor += col_len;
 
         if *i32_cursor + row_len > i32_buf.len() {
@@ -236,7 +275,10 @@ impl CapturedBasis {
                 i32_buf.len() - *i32_cursor
             )));
         }
-        let row_status = i32_buf[*i32_cursor..*i32_cursor + row_len].to_vec();
+        let row_status: Vec<BasisStatus> = i32_buf[*i32_cursor..*i32_cursor + row_len]
+            .iter()
+            .map(|&code| basis_status_from_wire_code(code))
+            .collect();
         *i32_cursor += row_len;
 
         if *i32_cursor + cut_slot_count > i32_buf.len() {
@@ -931,7 +973,7 @@ mod tests {
         BasisStore, CapturedBasis, ScratchBuffers, SolverWorkspace, WorkspacePool, WorkspaceSizing,
     };
     use cobre_solver::{
-        Basis, SolutionView, SolverError, SolverInterface, SolverStatistics,
+        Basis, BasisStatus, SolutionView, SolverError, SolverInterface, SolverStatistics,
         types::{RowBatch, StageTemplate},
     };
 
@@ -1368,8 +1410,8 @@ mod tests {
     fn test_captured_basis_round_trip_populated() {
         let original = CapturedBasis {
             basis: Basis {
-                col_status: vec![1_i32, 2, 3],
-                row_status: vec![4_i32, 5],
+                col_status: vec![BasisStatus::Lower, BasisStatus::Basic, BasisStatus::Upper],
+                row_status: vec![BasisStatus::Zero, BasisStatus::Nonbasic],
             },
             base_row_count: 1,
             cut_row_slots: vec![10_u32, 20],
@@ -1423,8 +1465,8 @@ mod tests {
     fn test_captured_basis_round_trip_empty_metadata() {
         let original = CapturedBasis {
             basis: Basis {
-                col_status: vec![7_i32, 8],
-                row_status: vec![9_i32],
+                col_status: vec![BasisStatus::Superbasic, BasisStatus::Fixed],
+                row_status: vec![BasisStatus::Lower],
             },
             base_row_count: 1,
             cut_row_slots: vec![],
@@ -1471,8 +1513,12 @@ mod tests {
     fn test_captured_basis_round_trip_multi_stage() {
         let populated = CapturedBasis {
             basis: Basis {
-                col_status: vec![11_i32, 22, 33],
-                row_status: vec![44_i32, 55, 66],
+                col_status: vec![BasisStatus::Basic, BasisStatus::Upper, BasisStatus::Zero],
+                row_status: vec![
+                    BasisStatus::Nonbasic,
+                    BasisStatus::Superbasic,
+                    BasisStatus::Fixed,
+                ],
             },
             base_row_count: 2,
             cut_row_slots: vec![100_u32, 200, 300],
@@ -1539,8 +1585,8 @@ mod tests {
 
         let cb = CapturedBasis {
             basis: Basis {
-                col_status: vec![1_i32, 2],
-                row_status: vec![3_i32],
+                col_status: vec![BasisStatus::Lower, BasisStatus::Basic],
+                row_status: vec![BasisStatus::Upper],
             },
             base_row_count: 1,
             cut_row_slots: vec![5_u32],
@@ -1589,8 +1635,8 @@ mod tests {
 
         let cb = CapturedBasis {
             basis: Basis {
-                col_status: vec![1_i32],
-                row_status: vec![2_i32],
+                col_status: vec![BasisStatus::Lower],
+                row_status: vec![BasisStatus::Basic],
             },
             base_row_count: 1,
             cut_row_slots: vec![],
@@ -1646,8 +1692,18 @@ mod tests {
 
         let original = CapturedBasis {
             basis: Basis {
-                col_status: vec![1_i32, 2, 3, 4],
-                row_status: vec![5_i32, 6, 7, 8],
+                col_status: vec![
+                    BasisStatus::Lower,
+                    BasisStatus::Basic,
+                    BasisStatus::Upper,
+                    BasisStatus::Zero,
+                ],
+                row_status: vec![
+                    BasisStatus::Nonbasic,
+                    BasisStatus::Superbasic,
+                    BasisStatus::Fixed,
+                    BasisStatus::Lower,
+                ],
             },
             base_row_count: 2,
             cut_row_slots: vec![10_u32, 20],
@@ -1699,8 +1755,18 @@ mod tests {
 
         let cb = CapturedBasis {
             basis: Basis {
-                col_status: vec![1_i32, 2, 3, 4],
-                row_status: vec![5_i32, 6, 7, 8],
+                col_status: vec![
+                    BasisStatus::Lower,
+                    BasisStatus::Basic,
+                    BasisStatus::Upper,
+                    BasisStatus::Zero,
+                ],
+                row_status: vec![
+                    BasisStatus::Nonbasic,
+                    BasisStatus::Superbasic,
+                    BasisStatus::Fixed,
+                    BasisStatus::Lower,
+                ],
             },
             base_row_count: 2,
             cut_row_slots: vec![10_u32, 20],
@@ -1747,8 +1813,8 @@ mod tests {
         // sit at offset 1 (i.e. the 0 sentinel was the only consumed element).
         let populated = CapturedBasis {
             basis: Basis {
-                col_status: vec![7_i32],
-                row_status: vec![8_i32],
+                col_status: vec![BasisStatus::Superbasic],
+                row_status: vec![BasisStatus::Fixed],
             },
             base_row_count: 1,
             cut_row_slots: vec![],
@@ -1820,8 +1886,17 @@ mod tests {
 
         let original = CapturedBasis {
             basis: Basis {
-                col_status: vec![1_i32, 2, 3, 4],
-                row_status: vec![5_i32, 6, 7],
+                col_status: vec![
+                    BasisStatus::Lower,
+                    BasisStatus::Basic,
+                    BasisStatus::Upper,
+                    BasisStatus::Zero,
+                ],
+                row_status: vec![
+                    BasisStatus::Nonbasic,
+                    BasisStatus::Superbasic,
+                    BasisStatus::Fixed,
+                ],
             },
             base_row_count: 2,
             cut_row_slots: vec![10_u32, 20],
@@ -1880,8 +1955,8 @@ mod tests {
         // n_state = 2 * (1+1) + 1 * 2 = 6.
         let small = CapturedBasis {
             basis: Basis {
-                col_status: vec![1_i32; 4],
-                row_status: vec![1_i32; 3],
+                col_status: vec![BasisStatus::Basic; 4],
+                row_status: vec![BasisStatus::Basic; 3],
             },
             base_row_count: 2,
             cut_row_slots: vec![],
@@ -1906,8 +1981,8 @@ mod tests {
         // Layout 2: n_state == 0 boundary case (AC-4).
         let empty_state = CapturedBasis {
             basis: Basis {
-                col_status: vec![1_i32],
-                row_status: vec![1_i32],
+                col_status: vec![BasisStatus::Basic],
+                row_status: vec![BasisStatus::Basic],
             },
             base_row_count: 1,
             cut_row_slots: vec![],
@@ -1926,8 +2001,8 @@ mod tests {
         let large_state: Vec<f64> = (0..15).map(|i| f64::from(i) * 10.0).collect();
         let large = CapturedBasis {
             basis: Basis {
-                col_status: vec![1_i32; 5],
-                row_status: vec![1_i32; 5],
+                col_status: vec![BasisStatus::Basic; 5],
+                row_status: vec![BasisStatus::Basic; 5],
             },
             base_row_count: 3,
             cut_row_slots: vec![1_u32, 2],
@@ -1965,8 +2040,18 @@ mod tests {
         let state_at_capture = vec![1.0_f64, 2.0, 100.0, 200.0, 12345.5, 0.0];
         let original = CapturedBasis {
             basis: Basis {
-                col_status: vec![1_i32, 2, 3, 4],
-                row_status: vec![5_i32, 6, 7, 8],
+                col_status: vec![
+                    BasisStatus::Lower,
+                    BasisStatus::Basic,
+                    BasisStatus::Upper,
+                    BasisStatus::Zero,
+                ],
+                row_status: vec![
+                    BasisStatus::Nonbasic,
+                    BasisStatus::Superbasic,
+                    BasisStatus::Fixed,
+                    BasisStatus::Lower,
+                ],
             },
             base_row_count: 3,
             cut_row_slots: vec![10_u32, 20],
@@ -2016,8 +2101,8 @@ mod tests {
             basis: Basis {
                 // col_status length includes the anticipated-ring columns.
                 // 12 is a representative LP num_cols.
-                col_status: vec![1_i32; 12],
-                row_status: vec![5_i32; 8],
+                col_status: vec![BasisStatus::Basic; 12],
+                row_status: vec![BasisStatus::Nonbasic; 8],
             },
             base_row_count: 6,
             cut_row_slots: vec![10_u32, 20],
@@ -2070,8 +2155,8 @@ mod tests {
         // anticipated-ring columns.
         let original = CapturedBasis {
             basis: Basis {
-                col_status: vec![1_i32; 16], // includes the anticipated-ring block
-                row_status: vec![1_i32; 10],
+                col_status: vec![BasisStatus::Basic; 16], // includes the anticipated-ring block
+                row_status: vec![BasisStatus::Basic; 10],
             },
             base_row_count: 8,
             cut_row_slots: vec![],
@@ -2134,12 +2219,35 @@ mod tests {
         //   n_state             = N*(1+L) + A*k_max = 2*2 + 2*2 = 8.
         //   col_status models a relocated-layout LP whose column count grew by
         //   A=2 relative to the no-anticipated layout (z_inflow onward shifted).
-        // Numerically distinct status bytes per region so a positional mix-up
-        // (e.g. cut row written onto a state column) would show as a diff.
-        let col_status: Vec<i32> = (0..14_i32).collect(); // wider by A vs baseline
-        // Status bytes are opaque to the wire format; 1 = BASIC, 4 = LOWER per
-        // the HiGHS basis-status encoding. 6 template rows then 2 cut rows.
-        let row_status: Vec<i32> = vec![5_i32, 5, 5, 5, 5, 5, 1, 4];
+        // Two full BasisStatus cycles (7 variants each) so a within-cycle
+        // positional mix-up (e.g. cut row written onto a state column) shows as
+        // a diff; a shift by exactly 7 is the one class this fixture cannot
+        // discriminate.
+        let col_status: Vec<BasisStatus> = [
+            BasisStatus::Lower,
+            BasisStatus::Basic,
+            BasisStatus::Upper,
+            BasisStatus::Zero,
+            BasisStatus::Nonbasic,
+            BasisStatus::Superbasic,
+            BasisStatus::Fixed,
+        ]
+        .iter()
+        .copied()
+        .cycle()
+        .take(14)
+        .collect();
+        // 6 template rows (uniform) then 2 distinct cut rows.
+        let row_status: Vec<BasisStatus> = vec![
+            BasisStatus::Superbasic,
+            BasisStatus::Superbasic,
+            BasisStatus::Superbasic,
+            BasisStatus::Superbasic,
+            BasisStatus::Superbasic,
+            BasisStatus::Superbasic,
+            BasisStatus::Basic,
+            BasisStatus::Zero,
+        ];
         let state_at_capture = vec![1.0_f64, 2.0, 100.0, 200.0, 1000.0, 2000.0, 3000.0, 4000.0];
 
         let original = CapturedBasis {

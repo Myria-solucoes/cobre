@@ -5,7 +5,7 @@ use std::time::Instant;
 use super::config::HighsProfile;
 use super::solver::{HighsSolver, highs_version};
 use crate::{
-    SolverInterface, ffi,
+    BasisStatus, SolverInterface, ffi,
     types::{RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate},
 };
 
@@ -398,7 +398,12 @@ impl SolverInterface for HighsSolver {
 
             self.stats.basis_offered += 1;
 
-            self.basis_col_i32[..self.num_cols].copy_from_slice(&basis.col_status);
+            for (dst, status) in self.basis_col_i32[..self.num_cols]
+                .iter_mut()
+                .zip(&basis.col_status)
+            {
+                *dst = status.to_highs_code();
+            }
 
             // Undersized is rejected above, so `basis_rows >= lp_rows`: copy the
             // exact rows and truncate any oversized tail (the solver ignores
@@ -406,7 +411,12 @@ impl SolverInterface for HighsSolver {
             let basis_rows = basis.row_status.len();
             let lp_rows = self.num_rows;
             let copy_len = basis_rows.min(lp_rows);
-            self.basis_row_i32[..copy_len].copy_from_slice(&basis.row_status[..copy_len]);
+            for (dst, status) in self.basis_row_i32[..copy_len]
+                .iter_mut()
+                .zip(&basis.row_status[..copy_len])
+            {
+                *dst = status.to_highs_code();
+            }
 
             // SAFETY:
             // - `self.handle` is a valid, non-null HiGHS pointer obtained from
@@ -461,19 +471,16 @@ impl SolverInterface for HighsSolver {
             "get_basis called without a loaded model — call load_model first"
         );
 
-        out.col_status.resize(self.num_cols, 0);
-        out.row_status.resize(self.num_rows, 0);
-
         // SAFETY:
         // - `self.handle` is a valid, non-null HiGHS pointer.
-        // - `out.col_status` has been resized to `num_cols` entries above.
-        // - `out.row_status` has been resized to `num_rows` entries above.
+        // - `basis_col_i32`/`basis_row_i32` are sized to `num_cols`/`num_rows` by
+        //   `load_model`/`add_rows`.
         // - HiGHS writes exactly `num_cols` col values and `num_rows` row values.
         let get_status = unsafe {
             ffi::cobre_highs_get_basis(
                 self.handle,
-                out.col_status.as_mut_ptr(),
-                out.row_status.as_mut_ptr(),
+                self.basis_col_i32.as_mut_ptr(),
+                self.basis_row_i32.as_mut_ptr(),
             )
         };
 
@@ -482,6 +489,15 @@ impl SolverInterface for HighsSolver {
             ffi::HIGHS_STATUS_ERROR,
             "cobre_highs_get_basis failed: basis must exist after a successful solve (programming error)"
         );
+
+        out.col_status.resize(self.num_cols, BasisStatus::Lower);
+        for (dst, &code) in out.col_status.iter_mut().zip(&self.basis_col_i32) {
+            *dst = BasisStatus::from_highs_code(code);
+        }
+        out.row_status.resize(self.num_rows, BasisStatus::Lower);
+        for (dst, &code) in out.row_status.iter_mut().zip(&self.basis_row_i32) {
+            *dst = BasisStatus::from_highs_code(code);
+        }
     }
 
     fn statistics(&self) -> SolverStatistics {
