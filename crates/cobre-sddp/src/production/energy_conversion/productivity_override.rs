@@ -8,6 +8,8 @@ use std::collections::{HashMap, HashSet};
 use cobre_core::EntityId;
 use cobre_io::{HydroEnergyProductivityRow, LoadError};
 
+use crate::stage_key::StageId;
+
 /// Per-`(hydro, stage)` override table loaded from
 /// `system/hydro_energy_productivity.parquet`.
 ///
@@ -29,12 +31,9 @@ pub struct HydroEnergyProductivityOverride {
 
 impl HydroEnergyProductivityOverride {
     /// Returns the user-supplied `ρ_eq` for `(hydro, stage)` if any.
-    ///
-    /// A `stage` larger than `i32::MAX` always returns `None`.
     #[must_use]
-    pub fn equivalent_productivity(&self, hydro: EntityId, stage: usize) -> Option<f64> {
-        let s = i32::try_from(stage).ok()?;
-        if let Some(&v) = self.rho_eq_per_hydro_stage.get(&(hydro, s)) {
+    pub fn equivalent_productivity(&self, hydro: EntityId, stage: StageId) -> Option<f64> {
+        if let Some(&v) = self.rho_eq_per_hydro_stage.get(&(hydro, stage.0)) {
             return Some(v);
         }
         self.rho_eq_per_hydro_default.get(&hydro).copied()
@@ -42,9 +41,8 @@ impl HydroEnergyProductivityOverride {
 
     /// Returns the user-supplied `Q_ref` \[m³/s\] for `(hydro, stage)` if any.
     #[must_use]
-    pub fn reference_outflow(&self, hydro: EntityId, stage: usize) -> Option<f64> {
-        let s = i32::try_from(stage).ok()?;
-        if let Some(&v) = self.q_ref_per_hydro_stage.get(&(hydro, s)) {
+    pub fn reference_outflow(&self, hydro: EntityId, stage: StageId) -> Option<f64> {
+        if let Some(&v) = self.q_ref_per_hydro_stage.get(&(hydro, stage.0)) {
             return Some(v);
         }
         self.q_ref_per_hydro_default.get(&hydro).copied()
@@ -52,9 +50,8 @@ impl HydroEnergyProductivityOverride {
 
     /// Returns the user-supplied `ρ_esp` \[MW/(m³/s)/m\] for `(hydro, stage)` if any.
     #[must_use]
-    pub fn specific_productivity(&self, hydro: EntityId, stage: usize) -> Option<f64> {
-        let s = i32::try_from(stage).ok()?;
-        if let Some(&v) = self.rho_esp_per_hydro_stage.get(&(hydro, s)) {
+    pub fn specific_productivity(&self, hydro: EntityId, stage: StageId) -> Option<f64> {
+        if let Some(&v) = self.rho_esp_per_hydro_stage.get(&(hydro, stage.0)) {
             return Some(v);
         }
         self.rho_esp_per_hydro_default.get(&hydro).copied()
@@ -159,15 +156,30 @@ mod tests {
             },
         ];
         let o = build_hydro_energy_productivity_override(&rows).expect("override builds");
-        assert_eq!(o.equivalent_productivity(EntityId(1), 0), Some(3.6));
-        assert_eq!(o.equivalent_productivity(EntityId(1), 1), Some(4.0));
-        assert_eq!(o.equivalent_productivity(EntityId(2), 0), Some(5.0));
-        assert_eq!(o.equivalent_productivity(EntityId(3), 0), None);
-        assert_eq!(o.reference_outflow(EntityId(2), 0), Some(200.0));
-        assert_eq!(o.reference_outflow(EntityId(1), 0), None);
-        assert_eq!(o.specific_productivity(EntityId(1), 0), Some(0.009));
-        assert_eq!(o.specific_productivity(EntityId(1), 1), Some(0.009));
-        assert_eq!(o.specific_productivity(EntityId(2), 0), None);
+        assert_eq!(
+            o.equivalent_productivity(EntityId(1), StageId(0)),
+            Some(3.6)
+        );
+        assert_eq!(
+            o.equivalent_productivity(EntityId(1), StageId(1)),
+            Some(4.0)
+        );
+        assert_eq!(
+            o.equivalent_productivity(EntityId(2), StageId(0)),
+            Some(5.0)
+        );
+        assert_eq!(o.equivalent_productivity(EntityId(3), StageId(0)), None);
+        assert_eq!(o.reference_outflow(EntityId(2), StageId(0)), Some(200.0));
+        assert_eq!(o.reference_outflow(EntityId(1), StageId(0)), None);
+        assert_eq!(
+            o.specific_productivity(EntityId(1), StageId(0)),
+            Some(0.009)
+        );
+        assert_eq!(
+            o.specific_productivity(EntityId(1), StageId(1)),
+            Some(0.009)
+        );
+        assert_eq!(o.specific_productivity(EntityId(2), StageId(0)), None);
     }
 
     #[test]
@@ -216,15 +228,42 @@ mod tests {
             },
         ];
         let o = build_hydro_energy_productivity_override(&rows).expect("override builds");
-        assert_eq!(o.equivalent_productivity(EntityId(1), 0), Some(3.0));
-        assert_eq!(o.equivalent_productivity(EntityId(1), 1), Some(2.0));
+        assert_eq!(
+            o.equivalent_productivity(EntityId(1), StageId(0)),
+            Some(3.0)
+        );
+        assert_eq!(
+            o.equivalent_productivity(EntityId(1), StageId(1)),
+            Some(2.0)
+        );
     }
 
     #[test]
     fn test_default_override_returns_none_for_every_accessor() {
         let o = HydroEnergyProductivityOverride::default();
-        assert_eq!(o.equivalent_productivity(EntityId(1), 0), None);
-        assert_eq!(o.reference_outflow(EntityId(1), 0), None);
-        assert_eq!(o.specific_productivity(EntityId(1), 0), None);
+        assert_eq!(o.equivalent_productivity(EntityId(1), StageId(0)), None);
+        assert_eq!(o.reference_outflow(EntityId(1), StageId(0)), None);
+        assert_eq!(o.specific_productivity(EntityId(1), StageId(0)), None);
+    }
+
+    /// A stage-specific row keyed at a non-0-based domain `stage_id` (e.g. a
+    /// study whose stages start at id 60) resolves at `StageId(60)`, never at
+    /// study position 0 — the accessor takes a domain id, so there is no
+    /// position to accidentally key on.
+    #[test]
+    fn test_non_zero_based_stage_id_resolves_by_domain_id_not_position() {
+        let rows = vec![HydroEnergyProductivityRow {
+            hydro_id: EntityId(1),
+            stage_id: Some(60),
+            equivalent_productivity_mw_per_m3s: Some(7.2),
+            reference_outflow_m3s: None,
+            specific_productivity_mw_per_m3s_per_m: None,
+        }];
+        let o = build_hydro_energy_productivity_override(&rows).expect("override builds");
+        assert_eq!(
+            o.equivalent_productivity(EntityId(1), StageId(60)),
+            Some(7.2)
+        );
+        assert_eq!(o.equivalent_productivity(EntityId(1), StageId(0)), None);
     }
 }

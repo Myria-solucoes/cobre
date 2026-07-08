@@ -6147,3 +6147,422 @@ mod chronological_attribution {
         );
     }
 }
+
+/// End-to-end regression: an FPHA hydro's stage-specific `equivalent_productivity`
+/// (`rho_eq`) override must resolve by the study's DOMAIN `Stage::id`, never by the
+/// 0-based study position. The two coincide on every other deterministic fixture (all
+/// declare 0-based, contiguous-from-zero stage ids), so only a fixture whose domain
+/// ids are offset from position — here: 10, 11, 12 at positions 0, 1, 2 — can surface
+/// a position-keyed read. The fixture also carries VHA geometry + `rho_esp` for the
+/// FPHA hydro, so a mis-keyed lookup falls through to a silently WRONG derived
+/// coefficient rather than the loud `FphaMissingEquivalentProductivity` error — the
+/// hazard this module pins.
+mod nonzero_stage_fpha_override_regression {
+    use std::path::{Path, PathBuf};
+
+    use cobre_core::EntityId;
+    use cobre_core::scenario::ScenarioSource;
+    use cobre_io::HydroEnergyProductivityRow;
+    use cobre_sddp::energy_conversion::build_hydro_energy_productivity_override;
+    use cobre_sddp::hydro_models::prepare_hydro_models;
+    use cobre_sddp::setup::prepare_stochastic;
+    use cobre_sddp::stage_key::StageId;
+    use cobre_sddp::{SimulationHydroResult, SimulationScenarioResult, StudySetup};
+
+    use super::common::parity_hash::compute_parity_hash;
+    use super::common::{build_setup_for_case, run_simulation};
+
+    /// Domain stage id (`Stage::id`) carrying the override row, and the corresponding
+    /// 0-based study position — see `stages.json` / `hydro_energy_productivity.parquet`
+    /// under [`case_dir`]. Position 1 is deliberately NOT equal to domain id 11: that
+    /// gap is what a position-keyed lookup would miss.
+    const OVERRIDE_DOMAIN_STAGE_ID: i32 = 11;
+    const OVERRIDE_STAGE_POSITION: u32 = 1;
+    const OVERRIDE_RHO_EQ: f64 = 4.2;
+    const FPHA_HYDRO_ID: i32 = 0;
+
+    fn case_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nonzero_stage_fpha_override")
+    }
+
+    /// Return hydro `hydro_id`'s result at study position `position`. The fixture
+    /// trains and simulates exactly one scenario, so exactly one match is expected.
+    fn hydro_result_at(
+        scenario_results: &[SimulationScenarioResult],
+        position: u32,
+        hydro_id: i32,
+    ) -> &SimulationHydroResult {
+        scenario_results
+            .iter()
+            .flat_map(|s| &s.stages)
+            .find(|s| s.stage_id == position)
+            .unwrap_or_else(|| panic!("no stage at position {position}"))
+            .hydros
+            .iter()
+            .find(|h| h.hydro_id == hydro_id)
+            .unwrap_or_else(|| panic!("no hydro {hydro_id} result at stage position {position}"))
+    }
+
+    /// The override's domain stage resolves the override value; its un-overridden
+    /// neighbors resolve the SAME VHA+`rho_esp`-derived value, which differs from the
+    /// override — the distinguishing-value pattern the fixture is built to produce
+    /// (`[derived, OVERRIDE_RHO_EQ, derived]` across positions 0, 1, 2).
+    ///
+    /// Negative control (documented here per the discrimination requirement, not
+    /// executed): reverting the domain-`StageId`-keyed accessors to a position-keyed
+    /// `usize` makes `equivalent_productivity(hydro, stage)` search the override table
+    /// for `stage_id == Some(1)` (the study position) instead of `Some(11)` (the domain
+    /// id). No row matches position 1, so the lookup would fall through to the
+    /// VHA+`rho_esp` derivation exactly like positions 0 and 2 — the `assert_ne`-style
+    /// distinctness check below would then compare two equal `derived` values and fail.
+    /// [`position_keyed_lookup_misses_the_domain_keyed_override_row`] demonstrates that
+    /// exact miss directly, through the same public accessor, without reverting any
+    /// production code.
+    #[test]
+    fn fpha_override_resolves_by_domain_stage_id_end_to_end() {
+        let dir = case_dir();
+        let (_result, scenario_results, _summary) = super::run_with_simulation(&dir);
+
+        let at_override =
+            hydro_result_at(&scenario_results, OVERRIDE_STAGE_POSITION, FPHA_HYDRO_ID);
+        assert_eq!(
+            at_override.equivalent_productivity_mw_per_m3s.to_bits(),
+            OVERRIDE_RHO_EQ.to_bits(),
+            "domain stage_id={OVERRIDE_DOMAIN_STAGE_ID} (position {OVERRIDE_STAGE_POSITION}) \
+             must read the override value exactly"
+        );
+
+        let before =
+            hydro_result_at(&scenario_results, 0, FPHA_HYDRO_ID).equivalent_productivity_mw_per_m3s;
+        let after =
+            hydro_result_at(&scenario_results, 2, FPHA_HYDRO_ID).equivalent_productivity_mw_per_m3s;
+        assert_eq!(
+            before.to_bits(),
+            after.to_bits(),
+            "both un-overridden neighbors must read the SAME VHA+rho_esp-derived value"
+        );
+        assert!(
+            (before - OVERRIDE_RHO_EQ).abs() > 0.5,
+            "the derived neighbor value ({before}) must be clearly distinct from the \
+             override ({OVERRIDE_RHO_EQ}) — otherwise a position-keyed miss would be \
+             indistinguishable from a correct domain-keyed hit"
+        );
+    }
+
+    /// Direct discrimination through the public accessor
+    /// `HydroEnergyProductivityOverride::equivalent_productivity` (never reverting the
+    /// production fix): the SAME override row resolves when keyed by its domain
+    /// `StageId(11)` and misses when keyed by the study POSITION `StageId(1)` — the read
+    /// a position-keyed accessor would have performed pre-fix. This is the negative
+    /// control: a `StageId(1)` key returning `Some(_)` here would mean the accessor no
+    /// longer discriminates domain id from position, and
+    /// [`fpha_override_resolves_by_domain_stage_id_end_to_end`] would then be unable to
+    /// fail under a position-keyed regression.
+    #[test]
+    fn position_keyed_lookup_misses_the_domain_keyed_override_row() {
+        let row = HydroEnergyProductivityRow {
+            hydro_id: EntityId(FPHA_HYDRO_ID),
+            stage_id: Some(OVERRIDE_DOMAIN_STAGE_ID),
+            equivalent_productivity_mw_per_m3s: Some(OVERRIDE_RHO_EQ),
+            reference_outflow_m3s: None,
+            specific_productivity_mw_per_m3s_per_m: None,
+        };
+        let table = build_hydro_energy_productivity_override(&[row]).expect("override builds");
+
+        let position_as_stage_id =
+            StageId(i32::try_from(OVERRIDE_STAGE_POSITION).expect("position fits i32"));
+        assert_eq!(
+            table.equivalent_productivity(EntityId(FPHA_HYDRO_ID), position_as_stage_id),
+            None,
+            "a position-keyed lookup (StageId(1)) must miss the row declared at domain id 11"
+        );
+        assert_eq!(
+            table.equivalent_productivity(
+                EntityId(FPHA_HYDRO_ID),
+                StageId(OVERRIDE_DOMAIN_STAGE_ID)
+            ),
+            Some(OVERRIDE_RHO_EQ),
+            "a domain-id-keyed lookup (StageId(11)) must hit the declared row"
+        );
+    }
+
+    /// Declaration-order invariance: reversing the array order of `hydros.json`'s hydro
+    /// list, `hydro_production_models.json`'s per-hydro entries, and `stages.json`'s
+    /// stage list must not change the parity hash — the override fix must not depend on
+    /// how the study's entities were declared.
+    #[test]
+    fn declaration_order_permutation_parity_hash_is_identical() {
+        let base_dir = case_dir();
+        let permuted_dir = build_declaration_order_permuted_case(&base_dir);
+
+        let (setup_a, results_a) = train_and_simulate_setup(&base_dir);
+        let (setup_b, results_b) = train_and_simulate_setup(permuted_dir.path());
+
+        let hash_a = compute_parity_hash(&setup_a, results_a);
+        let hash_b = compute_parity_hash(&setup_b, results_b);
+
+        assert_eq!(
+            hash_a, hash_b,
+            "declaration-order invariance violated: base hash={hash_a}, permuted hash={hash_b}"
+        );
+    }
+
+    /// Train + one-scenario-simulate `dir` and return the finished [`StudySetup`]
+    /// alongside the drained per-scenario results, so [`compute_parity_hash`] (which
+    /// needs both the FCF and the simulation trajectory) has both in scope.
+    fn train_and_simulate_setup(dir: &Path) -> (StudySetup, Vec<SimulationScenarioResult>) {
+        let config_path = dir.join("config.json");
+        let config = cobre_io::parse_config(&config_path).expect("config must parse");
+        let system = cobre_io::load_case(dir).expect("load_case must succeed");
+
+        let pr = prepare_stochastic(system, dir, &config, 42, &ScenarioSource::default())
+            .expect("prepare_stochastic must succeed");
+        let system = pr.system;
+        let stochastic = pr.stochastic;
+
+        let hydro_models =
+            prepare_hydro_models(&system, dir, false).expect("prepare_hydro_models must succeed");
+
+        let mut config_with_sim = config.clone();
+        config_with_sim.simulation.enabled = true;
+        config_with_sim.simulation.num_scenarios = 1;
+
+        let mut setup =
+            build_setup_for_case(dir, &config_with_sim, &system, stochastic, hydro_models);
+        let scenario_results = run_simulation(&mut setup, 1);
+        (setup, scenario_results)
+    }
+
+    /// Copy `base_dir` into a fresh `TempDir`, reversing the declared array order of
+    /// `stages.json`'s `stages`, `system/hydros.json`'s `hydros`, and
+    /// `system/hydro_production_models.json`'s `production_models`. Every other file is
+    /// copied byte-for-byte, so the two case directories are identical except for the
+    /// declaration order of hydro and stage entities.
+    fn build_declaration_order_permuted_case(base_dir: &Path) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir must succeed");
+        let dst = tmp.path();
+
+        std::fs::create_dir_all(dst.join("scenarios")).expect("create scenarios dir");
+        std::fs::create_dir_all(dst.join("system")).expect("create system dir");
+
+        for rel in [
+            "config.json",
+            "initial_conditions.json",
+            "penalties.json",
+            "scenarios/inflow_seasonal_stats.parquet",
+            "scenarios/load_seasonal_stats.parquet",
+            "system/buses.json",
+            "system/hydro_energy_productivity.parquet",
+            "system/hydro_geometry.parquet",
+            "system/lines.json",
+            "system/thermals.json",
+        ] {
+            std::fs::copy(base_dir.join(rel), dst.join(rel))
+                .unwrap_or_else(|e| panic!("copy {rel}: {e}"));
+        }
+
+        reverse_json_array(
+            &base_dir.join("stages.json"),
+            &dst.join("stages.json"),
+            "stages",
+        );
+        reverse_json_array(
+            &base_dir.join("system/hydros.json"),
+            &dst.join("system/hydros.json"),
+            "hydros",
+        );
+        reverse_json_array(
+            &base_dir.join("system/hydro_production_models.json"),
+            &dst.join("system/hydro_production_models.json"),
+            "production_models",
+        );
+
+        tmp
+    }
+
+    /// Parse `src` as JSON, reverse the top-level array at `array_key`, and write the
+    /// result to `dst` — the declaration-order-permutation primitive every JSON file in
+    /// [`build_declaration_order_permuted_case`] shares.
+    fn reverse_json_array(src: &Path, dst: &Path, array_key: &str) {
+        let text =
+            std::fs::read_to_string(src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
+        let mut value: serde_json::Value =
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", src.display()));
+        value[array_key]
+            .as_array_mut()
+            .unwrap_or_else(|| panic!("{array_key} must be a JSON array in {}", src.display()))
+            .reverse();
+        std::fs::write(
+            dst,
+            serde_json::to_string_pretty(&value).expect("serialize"),
+        )
+        .unwrap_or_else(|e| panic!("write {}: {e}", dst.display()));
+    }
+}
+
+/// End-to-end regression for ticket-010's `CalendarMonth` fix: a `Custom`-cycle
+/// stage whose `season_id` deliberately differs from its calendar month must
+/// still resolve evaporation by the TRUE calendar month derived from
+/// `start_date`, and a `Weekly`-cycle evaporating stage (`season_id >= 12`) must
+/// no longer hard-error at setup. Both fixtures route through the full
+/// `cobre_io::load_case` -> `prepare_stochastic` -> `prepare_hydro_models`
+/// pipeline every other deterministic case uses — the season-parsing path
+/// ticket-010's own unit tests (`production/stage_key.rs`,
+/// `hydro_models/evaporation.rs`) construct `Stage` values directly and never
+/// exercise.
+mod custom_weekly_evaporation_regression {
+    use std::path::{Path, PathBuf};
+
+    use cobre_core::scenario::ScenarioSource;
+    use cobre_sddp::hydro_models::{EvaporationModel, EvaporationModelSet, prepare_hydro_models};
+    use cobre_sddp::setup::prepare_stochastic;
+
+    fn custom_case_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/custom_cycle_evaporation_month_mismatch")
+    }
+
+    fn weekly_case_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/weekly_cycle_evaporation")
+    }
+
+    /// Run `dir` through the same `load_case` -> `prepare_stochastic` ->
+    /// `prepare_hydro_models` pipeline `run_deterministic` uses internally, and
+    /// return the resolved evaporation models. A pre-ticket-010 checkout panics
+    /// here on the Weekly fixture (`season_id >= 12` -> `SddpError::Validation`
+    /// surfaces through the `.expect` below).
+    fn resolve_evaporation(dir: &Path) -> EvaporationModelSet {
+        let config = cobre_io::parse_config(&dir.join("config.json")).expect("config must parse");
+        let system = cobre_io::load_case(dir).expect("load_case must succeed");
+        let pr = prepare_stochastic(system, dir, &config, 42, &ScenarioSource::default())
+            .expect("prepare_stochastic must succeed");
+        let hydro_models = prepare_hydro_models(&pr.system, dir, false)
+            .expect("prepare_hydro_models must succeed (season_id >= 12 must no longer error)");
+        hydro_models.evaporation
+    }
+
+    /// Both fixtures' hydro shares the VHA curve
+    /// `resolve_evaporation_known_geometry_produces_correct_coefficients`
+    /// (`hydro_models/evaporation.rs`) already pins: volumes `[100, 200, 300, 400,
+    /// 500]` hm3, areas `[1.0, 1.5, 2.0, 2.5, 3.0]` km2, giving an already-verified
+    /// constant slope — so the reference-volume area (`A_REF`) and its derivative
+    /// (`DA_DV`) at the reservoir's midpoint volume (`REFERENCE_VOLUME_HM3`) are
+    /// known constants here rather than recomputed from geometry.
+    const A_REF: f64 = 2.0;
+    const DA_DV: f64 = 0.005;
+    const REFERENCE_VOLUME_HM3: f64 = 300.0;
+    const STAGE_HOURS: f64 = 730.0;
+
+    /// Independent replication (not a call into production code) of the Taylor
+    /// linearization `resolve_evaporation_core` computes for a given
+    /// `monthly_evaporation_mm`, at this fixture's known geometry constants — the
+    /// Tier-4 analytical-derivation pattern.
+    fn expected_coefficients(monthly_evaporation_mm: f64) -> (f64, f64) {
+        let mm_km2_to_m3s = 1.0 / (3.6 * STAGE_HOURS);
+        let slope = mm_km2_to_m3s * monthly_evaporation_mm * DA_DV;
+        let intercept =
+            mm_km2_to_m3s * monthly_evaporation_mm * A_REF - slope * REFERENCE_VOLUME_HM3;
+        (slope, intercept)
+    }
+
+    fn linearized_at(models: &EvaporationModelSet, stage_position: usize) -> (f64, f64) {
+        match models.model(0) {
+            EvaporationModel::Linearized { coefficients, .. } => {
+                let c = &coefficients[stage_position];
+                (c.volume_slope_m3s_per_hm3, c.intercept_m3s)
+            }
+            none @ EvaporationModel::None => {
+                panic!("expected Linearized evaporation, got {none:?}")
+            }
+        }
+    }
+
+    /// `custom_cycle_evaporation_month_mismatch/system/hydros.json`'s
+    /// `evaporation.coefficients_mm`, duplicated here so the expected values
+    /// below are self-contained.
+    const COEFFICIENTS_MM: [f64; 12] = [
+        10.0, 20.0, 1.0, 40.0, 50.0, 60.0, 70.0, 1.0, 90.0, 100.0, 110.0, 120.0,
+    ];
+
+    /// AC1 + AC3 (negative control, documented per the ticket's sanctioned
+    /// analytical-discrimination approach — ticket-010 is never reverted): stage
+    /// 0 (`start_date` 2024-06-01, `season_id = 2`) and stage 1 (`start_date`
+    /// 2024-11-01, `season_id = 7`) each resolve evaporation from
+    /// `coefficients_mm[month_of(stage)]` (index 5 = June = 60.0, index 10 =
+    /// November = 110.0), never `coefficients_mm[season_id]` (index 2 = 1.0,
+    /// index 7 = 1.0 — the value a `season_id`-keyed lookup would read instead).
+    /// A checkout with `month_of` reverted to `stage.season_id` directly would
+    /// make the first two assertions below fail: the resolved intercepts would
+    /// equal `wrong_intercept0`/`wrong_intercept1` instead of
+    /// `expected_intercept0`/`expected_intercept1`.
+    #[test]
+    fn custom_cycle_evaporation_indexes_by_calendar_month_not_season_id() {
+        let dir = custom_case_dir();
+        let models = resolve_evaporation(&dir);
+
+        let (slope0, intercept0) = linearized_at(&models, 0);
+        let (slope1, intercept1) = linearized_at(&models, 1);
+
+        let (expected_slope0, expected_intercept0) = expected_coefficients(COEFFICIENTS_MM[5]);
+        let (expected_slope1, expected_intercept1) = expected_coefficients(COEFFICIENTS_MM[10]);
+        let (_, wrong_intercept0) = expected_coefficients(COEFFICIENTS_MM[2]);
+        let (_, wrong_intercept1) = expected_coefficients(COEFFICIENTS_MM[7]);
+
+        assert!(
+            (slope0 - expected_slope0).abs() < 1e-12
+                && (intercept0 - expected_intercept0).abs() < 1e-9,
+            "stage 0 (June, season_id=2) must use coefficients_mm[5]=60.0: expected \
+             (slope={expected_slope0}, intercept={expected_intercept0}), got \
+             (slope={slope0}, intercept={intercept0})"
+        );
+        assert!(
+            (slope1 - expected_slope1).abs() < 1e-12
+                && (intercept1 - expected_intercept1).abs() < 1e-9,
+            "stage 1 (November, season_id=7) must use coefficients_mm[10]=110.0: expected \
+             (slope={expected_slope1}, intercept={expected_intercept1}), got \
+             (slope={slope1}, intercept={intercept1})"
+        );
+
+        assert!(
+            (intercept0 - wrong_intercept0).abs() > 0.005,
+            "stage 0's resolved intercept ({intercept0}) must be far from the season_id=2-keyed \
+             value ({wrong_intercept0}) — otherwise a season_id-keyed regression would be \
+             indistinguishable from the fix"
+        );
+        assert!(
+            (intercept1 - wrong_intercept1).abs() > 0.005,
+            "stage 1's resolved intercept ({intercept1}) must be far from the season_id=7-keyed \
+             value ({wrong_intercept1}) — otherwise a season_id-keyed regression would be \
+             indistinguishable from the fix"
+        );
+    }
+
+    /// AC2: a Weekly-cycle evaporating study (`season_id` 21 and 26, both `>= 12`)
+    /// no longer returns `SddpError::Validation` at setup, and training
+    /// completes and converges. Pre-ticket-010, [`super::run_deterministic`]
+    /// would panic on this fixture inside `prepare_hydro_models`'s
+    /// `.expect("prepare_hydro_models must succeed")`.
+    #[test]
+    fn weekly_cycle_evaporation_no_longer_errors_and_setup_completes() {
+        let dir = weekly_case_dir();
+
+        let models = resolve_evaporation(&dir);
+        assert!(
+            matches!(models.model(0), EvaporationModel::Linearized { .. }),
+            "hydro 0 must resolve a Linearized evaporation model, got {:?}",
+            models.model(0)
+        );
+
+        let result = super::run_deterministic(&dir);
+        assert!(
+            result.iterations <= 10,
+            "weekly evaporation case must converge quickly: iterations={}",
+            result.iterations
+        );
+        assert!(
+            result.final_gap.abs() < 1e-6,
+            "weekly evaporation case must still converge: gap={:.2e}",
+            result.final_gap
+        );
+    }
+}

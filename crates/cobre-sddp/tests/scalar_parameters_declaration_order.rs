@@ -16,6 +16,7 @@
 use cobre_core::{EntityId, ParameterKind, ScalarParameter};
 use cobre_sddp::build_resolved_parameters;
 use cobre_sddp::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
+use cobre_sddp::stage_key::StageId;
 
 /// Return the three fixed [`ScalarParameter`] entries permuted by `order`.
 fn make_params(order: &[usize]) -> Vec<ScalarParameter> {
@@ -45,6 +46,7 @@ fn make_params(order: &[usize]) -> Vec<ScalarParameter> {
 #[test]
 fn scalar_parameters_resolution_is_declaration_order_invariant() {
     let stage_to_season: [i32; 4] = [0, 1, 0, 1];
+    let stage_ids = [StageId(0), StageId(1), StageId(2), StageId(3)];
     let n_stages = 4;
     let ec = EnergyConversionSet::new(vec![], vec![], 0, n_stages);
     let overrides = HydroEnergyProductivityOverride::default();
@@ -59,6 +61,7 @@ fn scalar_parameters_resolution_is_declaration_order_invariant() {
         &overrides,
         &hydros,
         &stage_to_season,
+        &stage_ids,
         n_stages,
     )
     .expect("ResolvedParameters builds for order_a");
@@ -68,6 +71,7 @@ fn scalar_parameters_resolution_is_declaration_order_invariant() {
         &overrides,
         &hydros,
         &stage_to_season,
+        &stage_ids,
         n_stages,
     )
     .expect("ResolvedParameters builds for order_b");

@@ -17,6 +17,7 @@ use super::types::{
     LinearizedEvaporation,
 };
 use crate::SddpError;
+use crate::stage_key::month_of;
 // ── Evaporation model resolution ──────────────────────────────────────────────
 
 /// Resolve per-hydro linearized evaporation models from reservoir geometry.
@@ -40,14 +41,16 @@ use crate::SddpError;
 ///
 /// `reference_volume = (v_min + v_max) / 2` is the linearization reference volume.
 /// `stage_hours` is the sum of all block durations in the stage.
-/// `month` is the 0-based calendar month from `stage.season_id` (0 = January).
+/// `month` is the 0-based calendar month [`month_of`](crate::stage_key::month_of)
+/// derives from `stage.start_date` — not `stage.season_id`, whose meaning is
+/// cycle-dependent (`Monthly`, `Weekly`, `Custom`) and only equals the calendar
+/// month under the `Monthly` convention.
 ///
 /// # Errors
 ///
 /// | Condition                                                        | Error variant             |
 /// | ---------------------------------------------------------------- | ------------------------- |
 /// | Computed slope or intercept is NaN or infinite                   | [`SddpError::Validation`] |
-/// | Stage has no `season_id` (cannot map to a month)                 | [`SddpError::Validation`] |
 /// | I/O failure loading geometry Parquet                             | [`SddpError::Io`]         |
 ///
 /// A hydro with evaporation coefficients but no usable surface-area data — no
@@ -232,23 +235,7 @@ fn resolve_evaporation_core(
         let mut stage_ref_volumes: Vec<f64> = Vec::with_capacity(n_stages);
 
         for stage in study_stages {
-            let month_index = stage.season_id.ok_or_else(|| {
-                SddpError::Validation(format!(
-                    "stage {} has no season_id and cannot be mapped to a calendar month \
-                     for evaporation coefficient lookup (hydro {} id={}). \
-                     All study stages must have a season_id for evaporation modeling.",
-                    stage.id, hydro.name, hydro.id.0
-                ))
-            })?;
-
-            if month_index >= 12 {
-                return Err(SddpError::Validation(format!(
-                    "stage {} has season_id={month_index} which is outside [0, 11]. \
-                     Evaporation coefficient arrays have 12 entries (one per calendar month). \
-                     (hydro {} id={})",
-                    stage.id, hydro.name, hydro.id.0
-                )));
-            }
+            let month_index = month_of(stage).index();
 
             let monthly_evaporation_mm = coefficients_mm[month_index];
 
@@ -459,14 +446,33 @@ mod tests {
             .collect()
     }
 
-    /// Helper: build a Stage with the given id and season_id (month index).
+    /// Helper: build a Monthly-cycle Stage whose `start_date` falls in the
+    /// given 0-based calendar month, with `season_id` set equal to it (the
+    /// `Monthly` convention `season_id == month0(start_date)`).
     fn make_stage_with_month(id: i32, month: usize) -> Stage {
+        make_stage_with_date_and_season(
+            id,
+            NaiveDate::from_ymd_opt(2024, u32::try_from(month).unwrap_or(0) + 1, 1)
+                .unwrap_or_default(),
+            Some(month),
+        )
+    }
+
+    /// Helper: build a Stage anchored at an explicit `start_date` and
+    /// `season_id`, for fixtures where the two diverge (`Custom`, `Weekly`).
+    fn make_stage_with_date_and_season(
+        id: i32,
+        start_date: NaiveDate,
+        season_id: Option<usize>,
+    ) -> Stage {
         Stage {
             index: usize::try_from(id.max(0)).unwrap_or(0),
             id,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap_or_default(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap_or_default(),
-            season_id: Some(month),
+            start_date,
+            end_date: start_date
+                .checked_add_months(chrono::Months::new(1))
+                .unwrap_or(start_date),
+            season_id,
             blocks: vec![Block {
                 index: 0,
                 name: "SINGLE".to_string(),
@@ -1223,5 +1229,93 @@ mod tests {
             EvaporationReferenceSource::DefaultMidpoint,
             "hydro without ref vols must be DefaultMidpoint"
         );
+    }
+
+    // ── Derive-correct month resolution (season_id decoupled from month) ──────
+
+    /// resolve_evaporation_core: a Custom-cycle stage's `season_id` is a
+    /// non-monthly bucket; evaporation must index `coefficients_mm` by the
+    /// month `month_of` derives from `start_date`, not by `season_id`.
+    #[test]
+    fn resolve_evaporation_custom_cycle_indexes_by_derived_month_not_season_id() {
+        let mut evap_mm = [0.0f64; 12];
+        evap_mm[3] = 99.0; // April: season_id's month, must NOT be used
+        evap_mm[5] = 7.0; // June: start_date's month, must be used
+        let hydro = make_hydro_with_evaporation(0, 100.0, 500.0, Some(evap_mm));
+
+        let geo_rows = make_geo_rows(&[
+            (100.0, 1.0),
+            (200.0, 1.5),
+            (300.0, 2.0),
+            (400.0, 2.5),
+            (500.0, 3.0),
+        ]);
+        let geo_refs: Vec<_> = geo_rows.iter().collect();
+        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
+            HashMap::new();
+        geometry_map.insert(EntityId::from(0), geo_refs);
+
+        // Custom cycle: season_id=3 (April, a non-monthly bucket) but start_date is in June.
+        let june = NaiveDate::from_ymd_opt(2024, 6, 10).expect("valid date");
+        let stage = make_stage_with_date_and_season(0, june, Some(3));
+        let stage_refs = vec![&stage];
+
+        let (models, _, _) = super::resolve_evaporation_core(&[hydro], &geometry_map, &stage_refs)
+            .expect("should succeed");
+
+        let reference_volume = 300.0_f64;
+        let a_ref = 2.0_f64;
+        let da_dv = 0.005_f64;
+        let mm_km2_to_m3s = 1.0 / (3.6 * 744.0_f64);
+        let expected_slope = mm_km2_to_m3s * 7.0 * da_dv;
+        let expected_intercept = mm_km2_to_m3s * 7.0 * a_ref - expected_slope * reference_volume;
+
+        match models.model(0) {
+            EvaporationModel::Linearized { coefficients, .. } => {
+                assert!(
+                    (coefficients[0].volume_slope_m3s_per_hm3 - expected_slope).abs() < 1e-10,
+                    "must use June's coefficient (7.0), not April's (99.0): expected slope \
+                     {expected_slope}, got {}",
+                    coefficients[0].volume_slope_m3s_per_hm3
+                );
+                assert!(
+                    (coefficients[0].intercept_m3s - expected_intercept).abs() < 1e-10,
+                    "must use June's coefficient (7.0), not April's (99.0): expected intercept \
+                     {expected_intercept}, got {}",
+                    coefficients[0].intercept_m3s
+                );
+            }
+            other => panic!("expected Linearized, got {other:?}"),
+        }
+    }
+
+    /// resolve_evaporation_core: a Weekly-cycle evaporating stage
+    /// (`season_id >= 12`) no longer hard-errors — the month is derived from
+    /// `start_date` regardless of `season_id`'s range.
+    #[test]
+    fn resolve_evaporation_weekly_cycle_no_longer_errors_on_season_id_ge_12() {
+        let evap_mm = [5.0f64; 12];
+        let hydro = make_hydro_with_evaporation(0, 100.0, 500.0, Some(evap_mm));
+
+        let geo_rows = make_geo_rows(&[(100.0, 1.0), (300.0, 2.0), (500.0, 3.0)]);
+        let geo_refs: Vec<_> = geo_rows.iter().collect();
+        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
+            HashMap::new();
+        geometry_map.insert(EntityId::from(0), geo_refs);
+
+        // Weekly cycle: season_id=48 (>= 12), a week in late December.
+        let late_december = NaiveDate::from_ymd_opt(2024, 12, 23).expect("valid date");
+        let stage = make_stage_with_date_and_season(0, late_december, Some(48));
+        let stage_refs = vec![&stage];
+
+        let (models, provenance, _) =
+            super::resolve_evaporation_core(&[hydro], &geometry_map, &stage_refs)
+                .expect("season_id >= 12 (Weekly) must no longer error");
+
+        assert_eq!(provenance[0].1, EvaporationSource::LinearizedFromGeometry);
+        assert!(matches!(
+            models.model(0),
+            EvaporationModel::Linearized { .. }
+        ));
     }
 }

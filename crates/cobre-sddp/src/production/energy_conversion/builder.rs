@@ -8,6 +8,7 @@ use cobre_io::{HydroGeometryRow, HydroReferenceVolumeFractions};
 use super::productivity_override::HydroEnergyProductivityOverride;
 use super::types::{EnergyConversion, EnergyConversionError, EnergyConversionSet};
 use crate::fpha_fitting::{ForebayTable, evaluate_losses, evaluate_tailrace};
+use crate::stage_key::StageId;
 
 /// Build the [`EnergyConversionSet`] for the case.
 ///
@@ -34,7 +35,7 @@ use crate::fpha_fitting::{ForebayTable, evaluate_losses, evaluate_tailrace};
 #[allow(clippy::missing_errors_doc)]
 pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
     hydros: &[Hydro],
-    n_stages: usize,
+    stage_ids: &[StageId],
     cascade: &CascadeTopology,
     reference_volume_fractions: &HydroReferenceVolumeFractions,
     vha_rows_by_hydro: &HashMap<EntityId, Vec<HydroGeometryRow>, S>,
@@ -42,6 +43,7 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
     production_models: Option<&crate::hydro_models::ProductionModelSet>,
 ) -> Result<EnergyConversionSet, EnergyConversionError> {
     let n_hydros = hydros.len();
+    let n_stages = stage_ids.len();
 
     let mut per_hydro_stage: Vec<Vec<EnergyConversion>> = Vec::with_capacity(n_hydros);
 
@@ -85,13 +87,13 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
         };
 
         let mut row: Vec<EnergyConversion> = Vec::with_capacity(n_stages);
-        for stage in 0..n_stages {
-            let reference_volume_hm3 = reference_volume_fractions.get(hydro.id, stage);
+        for (stage_pos, &stage_id) in stage_ids.iter().enumerate() {
+            let reference_volume_hm3 = reference_volume_fractions.get(hydro.id, stage_pos);
 
             let productivity = if matches!(hydro.generation_model, HydroGenerationModel::Fpha) {
                 0.0
             } else {
-                production_models.map_or(0.0, |pm| match pm.model(h_idx, stage) {
+                production_models.map_or(0.0, |pm| match pm.model(h_idx, stage_pos) {
                     crate::hydro_models::ResolvedProductionModel::ConstantProductivity {
                         productivity,
                     } => *productivity,
@@ -103,8 +105,10 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
 
             if matches!(hydro.generation_model, HydroGenerationModel::Fpha) {
                 // FPHA ρ_eq: parquet override wins over the VHA + ρ_esp derivation.
+                // Keyed by the domain StageId (matches how the table is built and
+                // how cobre_io's validator keys it) — never the study position.
                 let parquet_rho_eq =
-                    override_table.and_then(|o| o.equivalent_productivity(hydro.id, stage));
+                    override_table.and_then(|o| o.equivalent_productivity(hydro.id, stage_id));
                 let rho_eq = if let Some(value) = parquet_rho_eq {
                     value
                 } else if let Some((ref table, rho_esp)) = fpha_derivation {
@@ -119,7 +123,7 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
                     return Err(EnergyConversionError::FphaMissingEquivalentProductivity {
                         hydro_id: hydro.id,
                         hydro_name: hydro.name.clone(),
-                        stage,
+                        stage: stage_pos,
                     });
                 };
                 conversion.equivalent_productivity_mw_per_m3s = rho_eq;
@@ -346,6 +350,16 @@ mod tests {
         build_hydro_reference_volumes_resolved(&resolved, 0.0)
     }
 
+    /// `StageId(0)..StageId(n_stages - 1)`: the 0-based domain ids every test
+    /// fixture in this module uses (no pre-study-stage offset), so study
+    /// position and domain id coincide — matching production behavior on the
+    /// existing 0-based studies this ticket must leave unchanged.
+    fn stage_ids_0_based(n_stages: usize) -> Vec<StageId> {
+        (0..n_stages)
+            .map(|s| StageId(i32::try_from(s).expect("test stage count fits in i32")))
+            .collect()
+    }
+
     #[test]
     fn builder_returns_grid_with_expected_dimensions() {
         // hydro id=1 (downstream=2) and hydro id=2 (terminal), both ρ_eq=1.0.
@@ -360,7 +374,7 @@ mod tests {
 
         let set = build_energy_conversion_set(
             &hydros,
-            n_stages,
+            &stage_ids_0_based(n_stages),
             &cascade,
             &resolver,
             &HashMap::new(),
@@ -435,7 +449,7 @@ mod tests {
 
         let set = build_energy_conversion_set(
             &hydros,
-            n_stages,
+            &stage_ids_0_based(n_stages),
             &cascade,
             &resolver,
             &HashMap::new(),
@@ -467,7 +481,7 @@ mod tests {
 
         let set = build_energy_conversion_set(
             &hydros,
-            n_stages,
+            &stage_ids_0_based(n_stages),
             &cascade,
             &resolver,
             &HashMap::new(),
@@ -495,7 +509,7 @@ mod tests {
             let resolver = constant_resolver(&hydros, f, 1);
             let set = build_energy_conversion_set(
                 &hydros,
-                1,
+                &stage_ids_0_based(1),
                 &cascade,
                 &resolver,
                 &HashMap::new(),
@@ -537,7 +551,7 @@ mod tests {
         let pm = production_set(&[0.9], n_stages);
         let set = build_energy_conversion_set(
             &hydros,
-            n_stages,
+            &stage_ids_0_based(n_stages),
             &cascade,
             &resolver,
             &HashMap::new(),
@@ -572,7 +586,7 @@ mod tests {
 
         let err = build_energy_conversion_set(
             &hydros,
-            1,
+            &stage_ids_0_based(1),
             &cascade,
             &resolver,
             &HashMap::new(),
@@ -603,7 +617,7 @@ mod tests {
 
         let err = build_energy_conversion_set(
             &hydros,
-            1,
+            &stage_ids_0_based(1),
             &cascade,
             &resolver,
             &HashMap::new(),
@@ -637,7 +651,7 @@ mod tests {
         let resolver = constant_resolver(&hydros, 0.5, 1);
         let err = build_energy_conversion_set(
             &hydros,
-            1,
+            &stage_ids_0_based(1),
             &cascade,
             &resolver,
             &HashMap::new(),
@@ -708,8 +722,16 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(id, rows);
 
-        let set = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map, None, None)
-            .expect("builder succeeds");
+        let set = build_energy_conversion_set(
+            &hydros,
+            &stage_ids_0_based(1),
+            &cascade,
+            &resolver,
+            &map,
+            None,
+            None,
+        )
+        .expect("builder succeeds");
 
         let got = set.conversion(0, 0).equivalent_productivity_mw_per_m3s;
         let expected = 0.0090 * 400.0;
@@ -731,8 +753,16 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(id, rows);
 
-        let set = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map, None, None)
-            .expect("builder succeeds");
+        let set = build_energy_conversion_set(
+            &hydros,
+            &stage_ids_0_based(1),
+            &cascade,
+            &resolver,
+            &map,
+            None,
+            None,
+        )
+        .expect("builder succeeds");
 
         // h_eq = 400 - 0 - 0.05 * 400 = 380; rho_eq = 0.009 * 380 = 3.42
         let got = set.conversion(0, 0).equivalent_productivity_mw_per_m3s;
@@ -755,8 +785,16 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(id, rows);
 
-        let set = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map, None, None)
-            .expect("builder succeeds");
+        let set = build_energy_conversion_set(
+            &hydros,
+            &stage_ids_0_based(1),
+            &cascade,
+            &resolver,
+            &map,
+            None,
+            None,
+        )
+        .expect("builder succeeds");
 
         // h_eq = 400 - 0 - 5 = 395; rho_eq = 0.009 * 395 = 3.555
         let got = set.conversion(0, 0).equivalent_productivity_mw_per_m3s;
@@ -782,8 +820,16 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(id, rows);
 
-        let err = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map, None, None)
-            .unwrap_err();
+        let err = build_energy_conversion_set(
+            &hydros,
+            &stage_ids_0_based(1),
+            &cascade,
+            &resolver,
+            &map,
+            None,
+            None,
+        )
+        .unwrap_err();
         match err {
             EnergyConversionError::FphaMissingEquivalentProductivity {
                 hydro_id,
@@ -811,7 +857,7 @@ mod tests {
 
         let err = build_energy_conversion_set(
             &hydros,
-            1,
+            &stage_ids_0_based(1),
             &cascade,
             &resolver,
             &HashMap::new(),
@@ -848,8 +894,16 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(id, rows);
 
-        let err = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map, None, None)
-            .unwrap_err();
+        let err = build_energy_conversion_set(
+            &hydros,
+            &stage_ids_0_based(1),
+            &cascade,
+            &resolver,
+            &map,
+            None,
+            None,
+        )
+        .unwrap_err();
         match err {
             EnergyConversionError::NonPositiveEquivalentHead { hydro_id, h_eq } => {
                 assert_eq!(hydro_id, hydros[0].id);
@@ -871,8 +925,16 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(hydros[0].id, Vec::<HydroGeometryRow>::new());
 
-        let err = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map, None, None)
-            .unwrap_err();
+        let err = build_energy_conversion_set(
+            &hydros,
+            &stage_ids_0_based(1),
+            &cascade,
+            &resolver,
+            &map,
+            None,
+            None,
+        )
+        .unwrap_err();
         match err {
             EnergyConversionError::ForebayTableInvalid { hydro_id, .. } => {
                 assert_eq!(hydro_id, hydros[0].id);
@@ -901,7 +963,7 @@ mod tests {
 
         let set = build_energy_conversion_set(
             &hydros,
-            1,
+            &stage_ids_0_based(1),
             &cascade,
             &resolver,
             &HashMap::new(),
@@ -934,7 +996,7 @@ mod tests {
 
         let set = build_energy_conversion_set(
             &hydros,
-            1,
+            &stage_ids_0_based(1),
             &cascade,
             &resolver,
             &HashMap::new(),
@@ -981,7 +1043,7 @@ mod tests {
 
         let set_abc = build_energy_conversion_set(
             &hydros_abc,
-            1,
+            &stage_ids_0_based(1),
             &cascade_abc,
             &resolver_abc,
             &HashMap::new(),
@@ -991,7 +1053,7 @@ mod tests {
         .expect("abc order");
         let set_cab = build_energy_conversion_set(
             &hydros_cab,
-            1,
+            &stage_ids_0_based(1),
             &cascade_cab,
             &resolver_cab,
             &HashMap::new(),
@@ -1039,7 +1101,7 @@ mod tests {
 
         let err = build_energy_conversion_set(
             &hydros,
-            1,
+            &stage_ids_0_based(1),
             &cascade,
             &resolver,
             &HashMap::new(),
@@ -1074,7 +1136,7 @@ mod tests {
 
         let err = build_energy_conversion_set(
             &hydros_three,
-            1,
+            &stage_ids_0_based(1),
             &short_cascade,
             &resolver,
             &HashMap::new(),
@@ -1115,7 +1177,7 @@ mod tests {
 
         let set = build_energy_conversion_set(
             &hydros,
-            3,
+            &stage_ids_0_based(3),
             &cascade,
             &resolver,
             &HashMap::new(),
@@ -1132,6 +1194,48 @@ mod tests {
                 cell.equivalent_productivity_mw_per_m3s
             );
         }
+    }
+
+    /// A stage-specific override keyed at domain `stage_id = 60` resolves at
+    /// the study's ONLY stage, whose position is 0 but whose domain id is 60
+    /// (a non-0-based study). Keying by position instead of `StageId` would
+    /// find nothing at this key and fall through to `FphaMissingEquivalentProductivity`.
+    #[test]
+    fn fpha_override_resolves_by_non_zero_based_domain_stage_id() {
+        let mut hydro = fpha_hydro_for_tests(7);
+        hydro.specific_productivity_mw_per_m3s_per_m = None;
+        hydro.tailrace = None;
+        hydro.hydraulic_losses = None;
+        let hydros = vec![hydro];
+        let cascade = CascadeTopology::build(&hydros);
+        let resolver = constant_resolver(&hydros, 0.65, 1);
+        let override_table =
+            build_hydro_energy_productivity_override(&[HydroEnergyProductivityRow {
+                hydro_id: hydros[0].id,
+                stage_id: Some(60),
+                equivalent_productivity_mw_per_m3s: Some(9.1),
+                reference_outflow_m3s: None,
+                specific_productivity_mw_per_m3s_per_m: None,
+            }])
+            .expect("override builds");
+
+        let set = build_energy_conversion_set(
+            &hydros,
+            &[StageId(60)],
+            &cascade,
+            &resolver,
+            &HashMap::new(),
+            Some(&override_table),
+            None,
+        )
+        .expect("builder resolves the override at the stage's domain id");
+
+        let cell = set.conversion(0, 0);
+        assert!(
+            (cell.equivalent_productivity_mw_per_m3s - 9.1).abs() < 1e-12,
+            "position 0 (domain id 60) must read the StageId(60) override, got {}",
+            cell.equivalent_productivity_mw_per_m3s
+        );
     }
 
     /// A ConstantProductivity hydro with no VHA, no rho_esp, and no override
@@ -1152,7 +1256,7 @@ mod tests {
 
         let set = build_energy_conversion_set(
             &hydros,
-            1,
+            &stage_ids_0_based(1),
             &cascade,
             &resolver,
             &HashMap::new(),
@@ -1190,7 +1294,7 @@ mod tests {
 
         let set = build_energy_conversion_set(
             &hydros,
-            n_stages,
+            &stage_ids_0_based(n_stages),
             &cascade,
             &resolver,
             &HashMap::new(),
@@ -1245,7 +1349,7 @@ mod tests {
 
         let set = build_energy_conversion_set(
             &hydros,
-            n_stages,
+            &stage_ids_0_based(n_stages),
             &cascade,
             &resolver,
             &HashMap::new(),
@@ -1282,7 +1386,7 @@ mod tests {
 
         let set = build_energy_conversion_set(
             &hydros,
-            n_stages,
+            &stage_ids_0_based(n_stages),
             &cascade,
             &resolver,
             &HashMap::new(),

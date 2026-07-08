@@ -1748,6 +1748,15 @@ mod parameter_resolution_tests {
     use crate::hydro_models::PrepareHydroModelsResult;
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::resolved_parameters::build_resolved_parameters;
+    use crate::stage_key::StageId;
+
+    /// `StageId(0)..StageId(n_stages - 1)`: the 0-based domain ids these
+    /// fixtures use (no `Computed` parameter reads the override table here).
+    fn stage_ids_0_based(n_stages: usize) -> Vec<StageId> {
+        (0..n_stages)
+            .map(|s| StageId(i32::try_from(s).expect("test stage count fits in i32")))
+            .collect()
+    }
 
     /// Return all CSC values stored at `(col, row)` in the template.
     fn csc_entries_at(t: &cobre_solver::StageTemplate, col: usize, row: usize) -> Vec<f64> {
@@ -1959,11 +1968,20 @@ mod parameter_resolution_tests {
     /// stage-to-season mapping.
     fn empty_resolved_params(n_stages: usize) -> crate::resolved_parameters::ResolvedParameters {
         let stage_to_season: Vec<i32> = vec![0; n_stages];
+        let stage_ids = stage_ids_0_based(n_stages);
         let ec = EnergyConversionSet::new(vec![], vec![], 0, n_stages);
         let override_table =
             build_hydro_energy_productivity_override(&[]).expect("empty override table");
-        build_resolved_parameters(&[], &ec, &override_table, &[], &stage_to_season, n_stages)
-            .expect("empty_resolved_params: valid")
+        build_resolved_parameters(
+            &[],
+            &ec,
+            &override_table,
+            &[],
+            &stage_to_season,
+            &stage_ids,
+            n_stages,
+        )
+        .expect("empty_resolved_params: valid")
     }
 
     /// Build a `ResolvedParameters` table containing a single `Constant` parameter.
@@ -1973,6 +1991,7 @@ mod parameter_resolution_tests {
         n_stages: usize,
     ) -> crate::resolved_parameters::ResolvedParameters {
         let stage_to_season: Vec<i32> = vec![0; n_stages];
+        let stage_ids = stage_ids_0_based(n_stages);
         let ec = EnergyConversionSet::new(vec![], vec![], 0, n_stages);
         let override_table =
             build_hydro_energy_productivity_override(&[]).expect("empty override table");
@@ -1987,6 +2006,7 @@ mod parameter_resolution_tests {
             &override_table,
             &[],
             &stage_to_season,
+            &stage_ids,
             n_stages,
         )
         .expect("constant_param_resolved: valid")
@@ -1999,6 +2019,7 @@ mod parameter_resolution_tests {
     ) -> crate::resolved_parameters::ResolvedParameters {
         let n_stages = values.len();
         let stage_to_season: Vec<i32> = vec![0; n_stages];
+        let stage_ids = stage_ids_0_based(n_stages);
         let ec = EnergyConversionSet::new(vec![], vec![], 0, n_stages);
         let override_table =
             build_hydro_energy_productivity_override(&[]).expect("empty override table");
@@ -2013,6 +2034,7 @@ mod parameter_resolution_tests {
             &override_table,
             &[],
             &stage_to_season,
+            &stage_ids,
             n_stages,
         )
         .expect("per_stage_param_resolved: valid")

@@ -29,6 +29,7 @@ use crate::fpha_fitting::{
     ForebayTable, FphaDeviationPoint, FphaFitDeviation, FphaFitResult, TailraceFamilies,
     TailraceSource, build_tailrace_families_map, fit_fpha_planes,
 };
+use crate::stage_key::StageId;
 // ── FPHA production model resolution ─────────────────────────────────────────
 
 /// Return type for [`resolve_production_models`]. Export rows are non-empty only
@@ -881,9 +882,8 @@ fn resolve_stage_model(
 ) -> Result<ResolvedProductionModel, SddpError> {
     // `cobre_io::validation::productivity_resolution` rejects both-JSON-and-parquet
     // at load time, so this override lookup never silently masks a JSON value.
-    let stage_idx = usize::try_from(stage.id.max(0)).unwrap_or(0);
     let parquet_productivity =
-        productivity_override.and_then(|o| o.equivalent_productivity(hydro.id, stage_idx));
+        productivity_override.and_then(|o| o.equivalent_productivity(hydro.id, StageId(stage.id)));
 
     if let Some(config) = config_entry {
         let model_info = find_model_for_stage(config, stage);

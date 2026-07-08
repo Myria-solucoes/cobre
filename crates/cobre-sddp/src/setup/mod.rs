@@ -73,6 +73,7 @@ use crate::{
     lp_builder::build_stage_templates,
     risk_measure::RiskMeasure,
     simulation::EntityCounts,
+    stage_key::StageId,
     stopping_rule::{StoppingRule, StoppingRuleSet},
     workspace::CapturedBasis,
 };
@@ -602,7 +603,13 @@ fn build_energy_and_templates(
     state_layout: &StateLayout,
     per_stage_mask: &[Vec<usize>],
 ) -> Result<EnergyAndTemplates, SddpError> {
-    let n_stages_pre = system.stages().iter().filter(|s| s.id >= 0).count();
+    let study_stage_ids: Vec<StageId> = system
+        .stages()
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| StageId(s.id))
+        .collect();
+    let n_stages_pre = study_stage_ids.len();
     let stage_to_season: Vec<i32> = system
         .stages()
         .iter()
@@ -616,7 +623,7 @@ fn build_energy_and_templates(
         build_hydro_reference_volumes_resolved(&hydro_models.reference_volumes_hm3, 0.0);
     let energy_conversion = build_energy_conversion_set(
         system.hydros(),
-        n_stages_pre,
+        &study_stage_ids,
         system.cascade(),
         &reference_volume_fractions,
         // Feeds the FPHA ρ_eq derivation only for plants with no parquet override
@@ -633,6 +640,7 @@ fn build_energy_and_templates(
         &hydro_models.productivity_override,
         system.hydros(),
         &stage_to_season,
+        &study_stage_ids,
         n_stages_pre,
     )
     .map_err(|e| SddpError::Validation(e.to_string()))?;
