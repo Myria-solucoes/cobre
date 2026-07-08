@@ -365,10 +365,9 @@ impl StateLayout {
     // space, not LP columns) ────────────────────────────────────────────────
     // The canonical storage → lag → bucket → anticipated cumulative boundaries,
     // mirroring the order [`Self::set_nonzero_mask`] walks in;
-    // `CutStateProjection::new` reads these instead of re-deriving `N`,
-    // `N*(1+L)`, `+ B`, `+ A*k_max` locally, so its walk cannot drift from the
-    // mask. (`state_to_lp_incoming_column` still derives the same boundaries for
-    // its per-arm column mapping — a separate consumer, not yet routed here.)
+    // `CutStateProjection::new` and `state_to_lp_incoming_column` read these
+    // instead of re-deriving `N`, `N*(1+L)`, `+ B`, `+ A*k_max` locally, so
+    // neither can drift from the mask.
 
     /// State-dimension region `[0, N)` — storage.
     #[inline]
@@ -517,13 +516,13 @@ impl StateLayout {
     #[inline]
     #[must_use]
     pub fn state_to_lp_incoming_column(&self, j: usize) -> usize {
-        let n = self.hydro_count;
-        let lag_end = n * (1 + self.max_par_order);
-        let transit_bucket_end = lag_end + self.n_buckets;
-        if j < n {
+        let storage_end = self.state_dim_storage_range().end;
+        let lag_end = self.state_dim_lag_range().end;
+        let transit_bucket_end = self.state_dim_bucket_range().end;
+        if j < storage_end {
             self.storage_in.start + j
         } else if j < lag_end {
-            self.inflow_lags.start + (j - n)
+            self.inflow_lags.start + (j - storage_end)
         } else if j < transit_bucket_end {
             self.transit_buckets_in.start + (j - lag_end)
         } else {
