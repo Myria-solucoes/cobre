@@ -299,7 +299,6 @@ pub fn score_violated_candidates(
 
     let k_rows = scratch.cand_slots.len();
 
-    scratch.alpha.clear();
     scratch.alpha.resize(k_rows, 0.0);
     gemm_block(
         &scratch.cand_coef_block,

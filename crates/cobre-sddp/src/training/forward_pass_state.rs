@@ -993,29 +993,7 @@ mod tests {
                 inflow_nonnegativity_cost: 1000.0,
             },
         };
-        let make_stage = |idx: usize| Stage {
-            index: idx,
-            id: idx as i32,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: Some(0),
-            blocks: vec![Block {
-                index: 0,
-                name: "S".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 2,
-                noise_method: NoiseMethod::Saa,
-            },
-        };
-        let stages: Vec<Stage> = (0..2).map(make_stage).collect();
+        let stages: Vec<Stage> = make_stages_2();
         let inflow_models: Vec<InflowModel> = (0_i32..2)
             .map(|idx| InflowModel {
                 hydro_id: EntityId(1),

@@ -199,7 +199,6 @@ pub(crate) fn broadcast_basis_cache<C: Communicator>(
         }
     }
 
-    // Step 1: broadcast the i32 buffer length so all ranks can allocate.
     let mut len_buf = [checked_broadcast_len(
         buf.len(),
         "broadcast_basis_cache_i32",
@@ -212,11 +211,9 @@ pub(crate) fn broadcast_basis_cache<C: Communicator>(
         ))
     })?;
 
-    // Step 2: resize non-root i32 buffers and broadcast the i32 payload.
     buf.resize(total_len, 0_i32);
     comm.broadcast(&mut buf, 0).map_err(SddpError::from)?;
 
-    // Step 3: broadcast the f64 buffer length so all ranks can allocate.
     let mut f64_len_buf = [checked_broadcast_len(
         f64_buf.len(),
         "broadcast_basis_cache_f64",
@@ -230,11 +227,9 @@ pub(crate) fn broadcast_basis_cache<C: Communicator>(
         ))
     })?;
 
-    // Step 4: resize non-root f64 buffers and broadcast the f64 payload.
     f64_buf.resize(f64_total_len, 0.0_f64);
     comm.broadcast(&mut f64_buf, 0).map_err(SddpError::from)?;
 
-    // Step 5: deserialize back into Vec<Option<CapturedBasis>>.
     let mut cache: Vec<Option<CapturedBasis>> = Vec::with_capacity(num_stages);
     let mut pos = 0_usize;
     let mut f64_pos = 0_usize;

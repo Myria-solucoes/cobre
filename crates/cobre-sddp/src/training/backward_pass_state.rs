@@ -576,7 +576,6 @@ impl BackwardPassState {
             n_ranks * n_workers_local,
             bwd_max_openings,
         );
-        // Upper bound on push count: one entry per (rank, worker, opening) tuple.
         let mut entries: Vec<StageWorkerOpeningDelta> =
             Vec::with_capacity(n_ranks * n_workers_local * n_openings);
         for r in 0..n_ranks {

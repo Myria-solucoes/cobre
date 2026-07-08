@@ -157,22 +157,8 @@ impl FutureCostFunction {
     pub fn from_deserialized(
         stage_results: &[cobre_io::StageCutsReadResult],
     ) -> Result<Self, crate::SddpError> {
-        if stage_results.is_empty() {
-            return Err(crate::SddpError::Validation(
-                "from_deserialized: stage_results is empty".to_string(),
-            ));
-        }
-
-        let state_dimension = stage_results[0].state_dimension as usize;
-        for sr in &stage_results[1..] {
-            if sr.state_dimension as usize != state_dimension {
-                return Err(crate::SddpError::Validation(format!(
-                    "from_deserialized: inconsistent state_dimension: stage {} has {}, \
-                     expected {} (from stage {})",
-                    sr.stage_id, sr.state_dimension, state_dimension, stage_results[0].stage_id
-                )));
-            }
-        }
+        let state_dimension =
+            validate_consistent_state_dimension("from_deserialized", stage_results)?;
 
         let pools = stage_results
             .iter()
@@ -200,22 +186,8 @@ impl FutureCostFunction {
         forward_passes: u32,
         max_iterations: u64,
     ) -> Result<Self, crate::SddpError> {
-        if stage_results.is_empty() {
-            return Err(crate::SddpError::Validation(
-                "new_with_warm_start: stage_results is empty".to_string(),
-            ));
-        }
-
-        let state_dimension = stage_results[0].state_dimension as usize;
-        for sr in &stage_results[1..] {
-            if sr.state_dimension as usize != state_dimension {
-                return Err(crate::SddpError::Validation(format!(
-                    "new_with_warm_start: inconsistent state_dimension: stage {} has {}, \
-                     expected {} (from stage {})",
-                    sr.stage_id, sr.state_dimension, state_dimension, stage_results[0].stage_id
-                )));
-            }
-        }
+        let state_dimension =
+            validate_consistent_state_dimension("new_with_warm_start", stage_results)?;
 
         let pools = stage_results
             .iter()
@@ -370,6 +342,30 @@ impl FutureCostFunction {
     pub fn sparsity_reports(&self) -> Vec<super::pool::SparsityReport> {
         self.pools.iter().map(CutPool::sparsity_report).collect()
     }
+}
+
+fn validate_consistent_state_dimension(
+    context: &str,
+    stage_results: &[cobre_io::StageCutsReadResult],
+) -> Result<usize, crate::SddpError> {
+    if stage_results.is_empty() {
+        return Err(crate::SddpError::Validation(format!(
+            "{context}: stage_results is empty"
+        )));
+    }
+
+    let state_dimension = stage_results[0].state_dimension as usize;
+    for sr in &stage_results[1..] {
+        if sr.state_dimension as usize != state_dimension {
+            return Err(crate::SddpError::Validation(format!(
+                "{context}: inconsistent state_dimension: stage {} has {}, \
+                 expected {} (from stage {})",
+                sr.stage_id, sr.state_dimension, state_dimension, stage_results[0].stage_id
+            )));
+        }
+    }
+
+    Ok(state_dimension)
 }
 
 #[cfg(test)]

@@ -22,11 +22,6 @@ impl SolverInterface for HighsSolver {
                 c"primal_feasibility_tolerance".as_ptr(),
                 profile.primal_feasibility_tolerance,
             );
-        }
-        // SAFETY: `self.handle` is a valid, non-null HiGHS pointer obtained
-        // from `cobre_highs_create()`. The option name is a static C string
-        // literal with no retained pointer after the call returns.
-        unsafe {
             ffi::cobre_highs_set_double_option(
                 self.handle,
                 c"dual_feasibility_tolerance".as_ptr(),

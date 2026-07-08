@@ -328,13 +328,7 @@ impl CutSelectionStrategy {
         let is_selected: Vec<bool> = m_block_starts
             .par_iter()
             .fold(
-                || {
-                    (
-                        // populated × M_BLOCK row-major value-block scratch.
-                        vec![0.0_f64; populated * M_BLOCK],
-                        vec![false; populated],
-                    )
-                },
+                || (vec![0.0_f64; populated * M_BLOCK], vec![false; populated]),
                 |(mut v_block_local, mut bitmap_local), &m_start| {
                     let m_end = (m_start + M_BLOCK).min(n_states);
                     let m_len = m_end - m_start;

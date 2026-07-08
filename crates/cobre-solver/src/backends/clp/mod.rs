@@ -1,5 +1,5 @@
 //! CLP LP solver backend: [`ClpSolver`] wrapping the CLP C API through the FFI
-//! layer in [`crate::ffi::clp`].
+//! layer in `crate::ffi::clp`.
 //!
 //! # Thread Safety
 //!

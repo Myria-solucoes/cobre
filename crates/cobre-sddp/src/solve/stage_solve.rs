@@ -172,11 +172,7 @@ pub(crate) fn fill_unscaled_dual(out: &mut Vec<f64>, scaled: &[f64], row_scale: 
         out.extend_from_slice(scaled);
     } else {
         out.extend(scaled.iter().enumerate().map(|(i, &d)| {
-            let scale = if i < row_scale.len() {
-                row_scale[i]
-            } else {
-                1.0
-            };
+            let scale = row_scale.get(i).copied().unwrap_or(1.0);
             d * scale
         }));
     }

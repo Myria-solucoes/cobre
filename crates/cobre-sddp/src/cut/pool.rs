@@ -97,11 +97,10 @@ pub struct CutPool {
     /// [`active_count`]: CutPool::active_count
     cached_active_count: usize,
 
-    /// Cuts ever inserted (including warm-start cuts). Unlike [`populated_count`]
-    /// — a slot high-water mark that includes reserved-but-unwritten leading slots
-    /// — this counts only real insertions: the true policy-row count.
-    ///
-    /// [`populated_count`]: CutPool::populated_count
+    /// Cuts ever inserted (including warm-start cuts). Unlike
+    /// [`populated`](CutPool::populated) — a slot high-water mark that includes
+    /// reserved-but-unwritten leading slots — this counts only real insertions:
+    /// the true policy-row count.
     pub generated_count: usize,
 
     /// Scratch buffer for [`enforce_budget`] candidate collection, reused across
@@ -649,11 +648,10 @@ impl CutPool {
         if self.active[i] == active {
             return;
         }
+        self.active[i] = active;
         if active {
-            self.active[i] = true;
             self.cached_active_count += 1;
         } else {
-            self.active[i] = false;
             self.cached_active_count -= 1;
         }
     }

@@ -227,7 +227,6 @@ mod tests {
     use super::SolverInterface;
     use crate::profile::MockProfile;
 
-    // Verify trait is usable as a generic bound (compile-time monomorphization).
     fn accepts_solver<S: SolverInterface>(_: &S) {}
 
     struct NoopSolver;

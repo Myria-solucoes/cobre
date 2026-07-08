@@ -104,9 +104,6 @@ pub struct SolutionView<'a> {
 
 impl SolutionView<'_> {
     /// Clones the borrowed slices into owned [`Vec`]s, producing an [`LpSolution`].
-    ///
-    /// Use this when the solution data must outlive the current solver borrow,
-    /// or when the same solution will be read after a subsequent solver call.
     #[must_use]
     pub fn to_owned(&self) -> LpSolution {
         LpSolution {
@@ -403,9 +400,6 @@ impl StageTemplate {
 
 impl RowBatch {
     /// Reset all buffers to empty without deallocating.
-    ///
-    /// After `clear()`, `num_rows` is 0 and all `Vec` fields have length 0
-    /// but retain their allocated capacity for reuse.
     pub fn clear(&mut self) {
         self.num_rows = 0;
         self.row_starts.clear();

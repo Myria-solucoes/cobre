@@ -32,8 +32,7 @@ pub(crate) fn reconcile_error_flag<C: Communicator>(
     scratch[0] = i32::from(local_ok.is_err());
 
     let mut reduced = [0_i32];
-    comm.allreduce(&scratch[..], &mut reduced, ReduceOp::Max)
-        .map_err(SddpError::from)?;
+    comm.allreduce(&scratch[..], &mut reduced, ReduceOp::Max)?;
 
     if reduced[0] == 0 {
         Ok(())

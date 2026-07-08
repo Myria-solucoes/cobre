@@ -352,16 +352,13 @@ mod tests {
             state_at_capture.len(),
         );
 
-        // Fill basis row_status: template rows = BASIC, then cut statuses.
         cb.basis.row_status.clear();
         cb.basis.row_status.resize(base_rows, B);
         cb.basis.row_status.extend_from_slice(cut_statuses);
 
-        // Fill col_status: all BASIC.
         cb.basis.col_status.clear();
         cb.basis.col_status.resize(num_cols, B);
 
-        // Slot and state metadata.
         cb.cut_row_slots.extend_from_slice(slots);
         cb.state_at_capture.extend_from_slice(state_at_capture);
 
@@ -578,7 +575,6 @@ mod tests {
         let mut out = Basis::new(0, 0);
 
         reconstruct_basis_uniform_basic(&stored, target, 4, &mut out);
-        // Pre-repair: col_status = [B, B, B], row_status = [L, L, B, B, B, B].
         assert_eq!(out.col_status, vec![B, B, B]);
         assert_eq!(out.row_status, vec![L, L, B, B, B, B]);
 
